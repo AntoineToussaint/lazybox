@@ -33,6 +33,10 @@ pub enum SettingsAction {
     EditAgents,
     /// Bail out and run the full splash → providers → agents → … wizard.
     FullSetup,
+    /// Admin: wipe every worktree whose session has no live
+    /// terminal. Inbox rows stay. Dispatches `Command::CleanWorktrees`
+    /// after a confirm prompt.
+    CleanWorktrees,
 }
 
 impl SettingsAction {
@@ -43,6 +47,7 @@ impl SettingsAction {
             Self::EditProviders => "Edit providers (github / linear / …)".into(),
             Self::EditAgents => "Edit agents (claude / codex / cursor / …)".into(),
             Self::FullSetup => "Run the full setup wizard".into(),
+            Self::CleanWorktrees => "Clean worktrees (free disk, keep inbox)".into(),
         }
     }
 }

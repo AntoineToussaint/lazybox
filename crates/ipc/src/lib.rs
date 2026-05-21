@@ -404,6 +404,19 @@ pub enum Command {
         workspace_key: pilot_core::WorkspaceKey,
         logins: Vec<String>,
     },
+    /// Admin command: walk every persisted workspace, drop sessions
+    /// whose terminals aren't currently live, and remove the
+    /// corresponding worktrees from disk. Used to reclaim disk
+    /// space without losing the inbox (the PR / issue rows stay —
+    /// only the working-tree directories + session records are
+    /// torn down). Live terminals are skipped so a running claude
+    /// agent isn't pulled out from under itself.
+    ///
+    /// Daemon broadcasts a `WorkspaceUpserted` for every workspace
+    /// it touched so the sidebar shows the now-empty session list.
+    /// A final `CleanWorktreesCompleted` lets the TUI surface
+    /// "cleaned N worktrees, freed N GB" in the footer.
+    CleanWorktrees,
     /// Lazy-fetch the workspace's PR-detail activity (review-thread
     /// comments). The inbox-scan query intentionally skips
     /// `reviewThreads` for cost reasons; this command back-fills
@@ -634,6 +647,16 @@ pub enum Event {
     Notification {
         title: String,
         body: String,
+    },
+    /// `Command::CleanWorktrees` finished. `removed` is the number of
+    /// worktrees actually torn down (skipping ones with live
+    /// terminals); `skipped` is the count of sessions that were left
+    /// alone because their terminal was still attached. The TUI uses
+    /// this to surface a `cleaned N worktrees · M kept (active)`
+    /// footer notice.
+    CleanWorktreesCompleted {
+        removed: usize,
+        skipped: usize,
     },
     /// Structured telemetry from the LLM proxy: one record per
     /// request/response the agent made through the daemon-injected

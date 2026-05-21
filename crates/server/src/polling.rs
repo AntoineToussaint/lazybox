@@ -2243,3 +2243,94 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
     // path uses — keeps the store + bus consistent.
     commit_upsert(config, &workspace_key, ws);
 }
+
+/// Admin: walk every persisted workspace, drop sessions whose
+/// terminals aren't currently live, and tear down the matching
+/// worktree on disk. Inbox rows stay because we only touch
+/// `workspace.sessions` (and the on-disk dir) — `workspace.pr` /
+/// `gh_issues` aren't modified, so the sidebar keeps the row.
+///
+/// Live sessions (the user has an attached claude / shell) are
+/// silently skipped so a long-running agent isn't pulled out from
+/// under itself. Counts are emitted on `Event::CleanWorktreesCompleted`
+/// so the TUI can surface "cleaned N · kept M (active)".
+pub async fn handle_clean_worktrees(config: &ServerConfig) {
+    let records = match config.store.list_workspaces() {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!("clean_worktrees: list_workspaces failed: {e}");
+            return;
+        }
+    };
+
+    // Snapshot live session ids — anything in `terminal_sessions`
+    // (the per-terminal owning-session map) is a session we must
+    // not touch. Lock dropped before any async fs work.
+    let live_sessions: std::collections::HashSet<pilot_core::SessionId> = {
+        let map = config.terminal_sessions.lock().await;
+        map.values().copied().collect()
+    };
+
+    let mgr = pilot_git_ops::WorktreeManager::default_base();
+    let mut removed: usize = 0;
+    let mut skipped: usize = 0;
+
+    for record in records {
+        let Some(json) = record.workspace_json else {
+            continue;
+        };
+        let Ok(mut workspace) = serde_json::from_str::<pilot_core::Workspace>(&json) else {
+            continue;
+        };
+        let workspace_key = workspace.key.clone();
+
+        // Resolve the bare-repo path once per workspace (every
+        // session shares the same upstream).
+        let bare_path = workspace
+            .primary_task()
+            .and_then(|t| t.repo.as_deref())
+            .and_then(|repo| repo.split_once('/'))
+            .map(|(owner, name)| mgr.bare_path(owner, name));
+
+        // Walk highest-index-first so removals don't shift indices
+        // out from under the loop.
+        let session_count = workspace.sessions.len();
+        let mut wrote = false;
+        for idx in (0..session_count).rev() {
+            let session = workspace.sessions[idx].clone();
+            if live_sessions.contains(&session.id) {
+                skipped += 1;
+                continue;
+            }
+            tracing::info!(
+                workspace = %workspace_key,
+                session = %session.id,
+                worktree = %session.worktree_path.display(),
+                "clean_worktrees: removing",
+            );
+            if let Some(bare) = bare_path.as_ref() {
+                let _ = mgr.remove_by_path(bare, &session.worktree_path).await;
+            } else {
+                // No upstream repo metadata (rare — pre-PR / scratch
+                // workspaces) → just `rm -rf` the dir, no git
+                // bookkeeping to update.
+                let _ = tokio::fs::remove_dir_all(&session.worktree_path).await;
+            }
+            workspace.sessions.remove(idx);
+            removed += 1;
+            wrote = true;
+        }
+        if wrote {
+            commit_upsert(config, &workspace_key, workspace);
+        }
+    }
+
+    tracing::info!(
+        removed,
+        skipped,
+        "clean_worktrees: done",
+    );
+    let _ = config
+        .bus
+        .send(Event::CleanWorktreesCompleted { removed, skipped });
+}

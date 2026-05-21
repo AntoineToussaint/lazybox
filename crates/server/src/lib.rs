@@ -403,6 +403,7 @@ impl Server {
                         pilot_ipc::Command::UpsertProviderCredential { .. } => "UpsertProviderCredential",
                         pilot_ipc::Command::RemoveProviderCredential { .. } => "RemoveProviderCredential",
                         pilot_ipc::Command::ListProviderCredentials { .. } => "ListProviderCredentials",
+                        pilot_ipc::Command::CleanWorktrees => "CleanWorktrees",
                         pilot_ipc::Command::Shutdown => "Shutdown",
                     };
                     tracing::info!("daemon ← {label}");
@@ -765,6 +766,16 @@ impl Server {
                             let cfg = self.config.clone();
                             tokio::spawn(async move {
                                 polling::handle_add_assignees(&cfg, workspace_key, logins).await;
+                            });
+                        }
+                        pilot_ipc::Command::CleanWorktrees => {
+                            // Detach — the walk does N filesystem
+                            // ops (one `git worktree remove` per
+                            // session) and the user shouldn't wait
+                            // on the serve loop while it runs.
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_clean_worktrees(&cfg).await;
                             });
                         }
                     }

@@ -103,6 +103,9 @@ pub enum Id {
     /// index back to an action and dispatches the same IPC the
     /// keyboard shortcut would.
     SidebarContext,
+    /// Confirm dialog before firing `Command::CleanWorktrees`.
+    /// Picked from the Settings palette; Yes → dispatch.
+    CleanWorktreesConfirm,
 }
 
 /// App-level message vocabulary for modals + globals.
@@ -893,6 +896,7 @@ impl<T: TerminalAdapter> Model<T> {
         }
         actions.push(SettingsAction::EditProviders);
         actions.push(SettingsAction::EditAgents);
+        actions.push(SettingsAction::CleanWorktrees);
         actions.push(SettingsAction::FullSetup);
         actions
     }
@@ -916,6 +920,10 @@ impl<T: TerminalAdapter> Model<T> {
             SettingsAction::EditScopes { provider_id, .. } => PartialEntry::EditScopes(provider_id),
             SettingsAction::FullSetup => {
                 self.start_setup_wizard(report, sources);
+                return;
+            }
+            SettingsAction::CleanWorktrees => {
+                self.mount_clean_worktrees_confirm();
                 return;
             }
         };
@@ -1517,6 +1525,23 @@ impl<T: TerminalAdapter> Model<T> {
                 let target = self.active_merge_pr_prompt.take();
                 if yes && let Some(workspace_key) = target {
                     cmds.push(IpcCommand::MergePr { workspace_key });
+                }
+            }
+            Some(Id::CleanWorktreesConfirm) => {
+                if yes {
+                    use crate::realm::components::footer::{Notice, NoticeSeverity};
+                    cmds.push(IpcCommand::CleanWorktrees);
+                    // The work happens asynchronously on the daemon
+                    // (filesystem walk + git worktree remove per
+                    // session) — surface a placeholder notice so the
+                    // user knows the click registered. The final
+                    // count comes back via
+                    // `Event::CleanWorktreesCompleted`.
+                    self.status.notice = Some(Notice::new(
+                        "cleaning worktrees…",
+                        NoticeSeverity::Info,
+                    ));
+                    self.redraw = true;
                 }
             }
             _ => {}
@@ -2955,6 +2980,29 @@ impl<T: TerminalAdapter> Model<T> {
     /// workspace the user could move sessions into. No-op when there
     /// are no other workspaces — show a hint instead since there's
     /// nothing to pick.
+    /// Confirm prompt before dispatching `Command::CleanWorktrees`.
+    /// The destructive bit is on disk — sessions + their worktrees
+    /// are gone after this. PR/issue rows stay because we only
+    /// touch session records. `Msg::Confirmed(true)` fires the IPC;
+    /// `(false)` / dismiss drops the prompt silently.
+    fn mount_clean_worktrees_confirm(&mut self) {
+        use crate::realm::components::confirm::Confirm;
+        use tuirealm::subscription::{EventClause, Sub, SubClause};
+        let modal = Confirm::new(
+            "Wipe every worktree whose session has no live terminal? \
+             PR / issue rows stay; active sessions are skipped.",
+        )
+        .default_no();
+        let _ = self.app.mount(
+            Id::CleanWorktreesConfirm,
+            Box::new(modal),
+            vec![Sub::new(EventClause::Any, SubClause::Always)],
+        );
+        self.modal_stack.push(Id::CleanWorktreesConfirm);
+        let _ = self.app.active(&Id::CleanWorktreesConfirm);
+        self.redraw = true;
+    }
+
     /// Build the action list for a right-click on a sidebar
     /// workspace row, then mount a Choice modal to pick one. The
     /// menu only offers actions that *make sense* for this row —
@@ -3344,6 +3392,18 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 _ => {}
             }
+        }
+        // CleanWorktrees finished — replace the "cleaning…" notice
+        // with the final count so the user sees how much was done.
+        if let IpcEvent::CleanWorktreesCompleted { removed, skipped } = &event {
+            use crate::realm::components::footer::{Notice, NoticeSeverity};
+            let msg = if *skipped == 0 {
+                format!("cleaned {removed} worktree(s)")
+            } else {
+                format!("cleaned {removed} worktree(s) · kept {skipped} (active)")
+            };
+            self.status.notice = Some(Notice::new(msg, NoticeSeverity::Hint));
+            self.redraw = true;
         }
         if is_snapshot && self.preselect.is_some() {
             self.apply_preselect();

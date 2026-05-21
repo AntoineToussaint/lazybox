@@ -503,6 +503,48 @@ impl WorktreeManager {
         }
         Ok(())
     }
+
+    /// Remove a worktree by its absolute path. Used when the
+    /// caller knows the path but not the branch name (e.g. the
+    /// `CleanWorktrees` admin op, which iterates session records
+    /// where the `worktree_path` is authoritative). Falls back to
+    /// `rm -rf` + `git worktree prune` when `git worktree remove`
+    /// refuses — older git versions, or worktrees whose metadata
+    /// got desynced from disk, can hit "is not a working tree"
+    /// errors that we'd rather just power through than surface to
+    /// the user.
+    pub async fn remove_by_path(
+        &self,
+        bare_path: &Path,
+        worktree_path: &Path,
+    ) -> Result<(), GitError> {
+        if worktree_path.exists() {
+            let result = run_git_in(
+                bare_path,
+                &[
+                    "worktree",
+                    "remove",
+                    &worktree_path.to_string_lossy(),
+                    "--force",
+                ],
+            )
+            .await;
+            if result.is_err() {
+                // Best-effort: nuke the dir, then prune so the
+                // bare repo's `worktrees/` index drops the stale
+                // entry. Errors here are swallowed — if `rm -rf`
+                // fails (permissions, FS in use), there's nothing
+                // the caller can do that pilot can't.
+                let _ = tokio::fs::remove_dir_all(worktree_path).await;
+                let _ = run_git_in(bare_path, &["worktree", "prune"]).await;
+            }
+        } else {
+            // Directory's already gone — just prune so git's
+            // metadata catches up.
+            let _ = run_git_in(bare_path, &["worktree", "prune"]).await;
+        }
+        Ok(())
+    }
 }
 
 /// Cheap existence check for a git ref. Uses `show-ref --verify --quiet`;

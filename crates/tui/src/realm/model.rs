@@ -1744,10 +1744,18 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::MergePr => {
-                if let Some(sk) = session_key {
-                    cmds.push(IpcCommand::MergePr {
-                        workspace_key: pilot_core::WorkspaceKey::new(sk.as_str().to_string()),
-                    });
+                // Resolver re-checks the precondition (CI green +
+                // approved + not behind base) so a misdirected key
+                // can't bypass the merge gate. On success: mount
+                // the Confirm modal — the destructive action lands
+                // on `Msg::Confirmed(true)`. Catalog dispatch
+                // doesn't push the IPC directly; the Confirm
+                // handler does that.
+                let workspace = self.sidebar.selected_workspace().cloned();
+                if let crate::intent::Intent::MergePr { workspace_key } =
+                    crate::intent::resolve_merge(workspace.as_ref())
+                {
+                    self.mount_merge_pr_confirm(workspace_key);
                 }
             }
             Action::Refresh => {
@@ -2198,6 +2206,7 @@ impl<T: TerminalAdapter> Model<T> {
                 pilot_tui_core::action::ActionKind::OpenEditor => Some(Action::OpenEditor),
                 pilot_tui_core::action::ActionKind::NewWorkspace => Some(Action::NewWorkspace),
                 pilot_tui_core::action::ActionKind::OpenSandbox => Some(Action::OpenSandbox),
+                pilot_tui_core::action::ActionKind::MergePr => Some(Action::MergePr),
                 _ => None,
             };
             if let Some(action) = action {
@@ -2291,13 +2300,10 @@ impl<T: TerminalAdapter> Model<T> {
             };
             self.send_cmd(rewritten);
         }
-        // Drain any Confirm-modal requests the sidebar queued during
-        // this dispatch (currently just Shift-M "Merge PR #N?").
-        // Mounts one modal per drained entry; in practice only one
-        // will be in the queue per keypress.
-        for workspace_key in self.sidebar.drain_pending_merge_requests() {
-            self.mount_merge_pr_confirm(workspace_key);
-        }
+        // (Shift+M "Merge PR #N?" used to queue a pending request
+        // here that the orchestrator drained; that's gone — the
+        // catalog path in `dispatch_action` mounts the confirm
+        // directly when the key fires.)
         // Sidebar j/k changes selection — propagate to right + terminals.
         self.sync_panes();
         self.redraw = true;

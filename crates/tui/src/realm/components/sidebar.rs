@@ -91,9 +91,6 @@ impl Sidebar {
 
     /// Drain Shift-M "Merge PR #N?" requests. The orchestrator mounts
     /// a Confirm modal per entry.
-    pub fn drain_pending_merge_requests(&mut self) -> Vec<pilot_core::WorkspaceKey> {
-        self.inner.drain_pending_merge_requests()
-    }
 
     /// Optimistic local update: mark the workspace's PR as `Merged`
     /// so the status pill flips immediately on `Event::PrMerged`,

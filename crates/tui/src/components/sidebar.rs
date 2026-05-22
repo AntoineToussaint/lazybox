@@ -140,12 +140,6 @@ pub struct Sidebar {
     /// j/k handlers maintain that invariant.
     cursor: usize,
     mailbox: Mailbox,
-    /// Workspace keys queued for a Confirm-modal "Merge PR #N?"
-    /// prompt. Sidebar appends on `Shift-M`; orchestrator drains in
-    /// `dispatch_key` and mounts the modal. Replaces the previous
-    /// inline `[merge?]` latch — the modal is clearer and doesn't
-    /// leave the sidebar row in a half-armed state across redraws.
-    pending_merge_requests: Vec<pilot_core::WorkspaceKey>,
     /// Two-press confirm latches keyed by trigger. Registers
     /// entries for `Shift-X` (kill) + `Shift-Z` (long snooze).
     /// Disarms every non-matching entry on each keypress, so
@@ -232,7 +226,6 @@ impl Sidebar {
             repo_summaries: BTreeMap::new(),
             cursor: 0,
             mailbox: Mailbox::Inbox,
-            pending_merge_requests: Vec::new(),
             latches: {
                 let mut s: crate::latch_set::LatchSet<SessionKey> =
                     crate::latch_set::LatchSet::new();
@@ -273,13 +266,6 @@ impl Sidebar {
     /// ready to be set as a `NoticeSeverity::Hint`.
     pub fn drain_pending_asking_notices(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_asking_notices)
-    }
-
-    /// Drain queued "Merge PR #N?" requests. The orchestrator
-    /// mounts one Confirm modal per entry (typically only one will
-    /// be queued before the next render).
-    pub fn drain_pending_merge_requests(&mut self) -> Vec<pilot_core::WorkspaceKey> {
-        std::mem::take(&mut self.pending_merge_requests)
     }
 
     /// Find the FIRST running agent terminal for `workspace_key`
@@ -1342,29 +1328,13 @@ impl Sidebar {
                 PaneOutcome::Consumed
             }
 
-            // ── Merge PR (two-press confirmation) ─────────────────────
-            // Match guard reads `resolve_merge` so the contextual
-            // footer hint + this handler share one predicate. The
-            // latch turns the irreversible action into a deliberate
-            // two-press confirm.
-            (KeyCode::Char('M'), m)
-                if m.contains(KeyModifiers::SHIFT)
-                    && matches!(
-                        crate::intent::resolve_merge(self.selected_workspace()),
-                        crate::intent::Intent::MergePr { .. }
-                    ) =>
-            {
-                let intent = crate::intent::resolve_merge(self.selected_workspace());
-                if let crate::intent::Intent::MergePr { workspace_key } = intent {
-                    // Queue a Confirm-modal request; the orchestrator
-                    // drains this after dispatch_key and mounts the
-                    // dialog. On Yes the modal handler dispatches
-                    // `Command::MergePr`; No just dismisses. Replaces
-                    // the previous inline `[merge?]` latch.
-                    self.pending_merge_requests.push(workspace_key);
-                }
-                PaneOutcome::Consumed
-            }
+            // Shift+M MergePr is now handled by the catalog
+            // dispatch path in `Model::dispatch_action` — it does
+            // the same `resolve_merge` precondition check, then
+            // mounts the Confirm modal. The match arm here used to
+            // queue a `pending_merge_requests` entry that the
+            // orchestrator drained post-dispatch; that queue is
+            // gone now (one fewer indirection).
 
             // Anything else: bubble up. Tab / Help / `?` / overlays /
             // quit are handled by parent components.

@@ -19,10 +19,23 @@
 
 pub mod graphql;
 
+use pilot_auth::{CredentialChain, EnvProvider};
 use pilot_core::{ProviderError, Task, TaskProvider};
 use serde::Serialize;
 
 const LINEAR_GRAPHQL: &str = "https://api.linear.app/graphql";
+
+/// Workspace-key prefix and credential scope this provider owns.
+/// Linear workspaces are keyed `"linear-<team>-<id>"`; the mutation
+/// router splits on `'-'` and matches the first segment.
+pub const SOURCE: &str = "linear";
+
+/// Credential chain Linear uses. Today: just `LINEAR_API_KEY`.
+/// Wrapped in a chain so future Keychain / Vault providers slot in
+/// transparently — same shape as the GitHub provider.
+pub fn credential_chain() -> CredentialChain {
+    CredentialChain::new().with(EnvProvider::new("LINEAR_API_KEY"))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum LinearError {

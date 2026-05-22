@@ -19,7 +19,6 @@
 //! and they're joined together, so a slow `claude --version` doesn't
 //! delay `gh auth status`.
 
-use pilot_auth::{CommandProvider, CredentialChain, EnvProvider};
 use std::time::Duration;
 
 /// One row on the setup screen: a tool we tried to detect plus what we
@@ -223,12 +222,12 @@ async fn detect_github() -> ToolStatus {
     .await
     .unwrap_or(false);
 
-    let chain = CredentialChain::new()
-        .with(EnvProvider::new("GH_TOKEN"))
-        .with(EnvProvider::new("GITHUB_TOKEN"))
-        .with(CommandProvider::new("gh", &["auth", "token"]));
-
-    let cred = match tokio::time::timeout(Duration::from_secs(3), chain.resolve("github")).await {
+    let cred = match tokio::time::timeout(
+        Duration::from_secs(3),
+        pilot_gh::credential_chain().resolve(pilot_gh::SOURCE),
+    )
+    .await
+    {
         Ok(Ok(c)) => c,
         _ => {
             // No token. Distinguish "no CLI" from "CLI but not auth'd".

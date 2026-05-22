@@ -79,10 +79,11 @@ fn remapped_reply_binding_mounts_reply_modal() {
         )],
         terminals: vec![],
     });
-    m.apply_keybindings(pilot_config::Keybindings {
-        reply: "Ctrl-r".into(),
-        ..pilot_config::Keybindings::default()
-    });
+    // Reply moved into the catalog (Section::Workspace) so its
+    // remap now lives in `ui.action_keys`, not `Keybindings.reply`.
+    let mut overrides = std::collections::BTreeMap::new();
+    overrides.insert("reply".to_string(), "Ctrl-r".to_string());
+    m.apply_action_key_overrides(overrides);
     m.dispatch_key(key_with(Key::Char('r'), KeyModifiers::CONTROL));
     assert_eq!(m.top_modal(), Some(&Id::Reply));
 }

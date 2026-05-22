@@ -589,17 +589,6 @@ fn space_toggles_collapse() {
 }
 
 #[test]
-fn o_toggles_collapse() {
-    let mut rp = RightPane::new(PaneId::new(1));
-    rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 3)));
-    rp.handle_key(
-        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
-        &mut Vec::new(),
-    );
-    assert!(rp.activity_collapsed());
-}
-
-#[test]
 fn switching_workspaces_re_applies_auto_collapse() {
     // The user toggled empty→open on workspace A. Switching to a
     // different empty workspace shouldn't carry that override over —

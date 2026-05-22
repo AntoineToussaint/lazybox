@@ -381,13 +381,10 @@ async fn run_embedded_realm(
 /// Build the scope sources used by the setup wizard. GitHub today;
 /// Linear ships without a scope-discovery API so the wizard skips it.
 async fn build_scope_sources() -> Vec<Box<dyn pilot_core::ScopeSource>> {
-    use pilot_auth::{CommandProvider, CredentialChain, EnvProvider};
     let mut sources: Vec<Box<dyn pilot_core::ScopeSource>> = Vec::new();
-    let chain = CredentialChain::new()
-        .with(EnvProvider::new("GH_TOKEN"))
-        .with(EnvProvider::new("GITHUB_TOKEN"))
-        .with(CommandProvider::new("gh", &["auth", "token"]));
-    if let Ok(cred) = chain.resolve("github").await
+    if let Ok(cred) = pilot_gh::credential_chain()
+        .resolve(pilot_gh::SOURCE)
+        .await
         && let Ok(client) = pilot_gh::GhClient::from_credential(cred).await
     {
         sources.push(Box::new(pilot_gh::GhScopes::new(std::sync::Arc::new(

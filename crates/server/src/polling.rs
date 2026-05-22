@@ -24,7 +24,6 @@
 
 use crate::ServerConfig;
 use chrono::Utc;
-use pilot_auth::{CommandProvider, CredentialChain, EnvProvider};
 use pilot_core::{ProviderConfig, Task, Workspace, WorkspaceKey};
 use pilot_gh::GhClient;
 use pilot_ipc::Event;
@@ -388,12 +387,8 @@ pub async fn sources_for(
 ) -> Vec<Box<dyn TaskSource>> {
     let mut sources: Vec<Box<dyn TaskSource>> = Vec::new();
 
-    if setup.enabled_providers.contains("github") {
-        let chain = CredentialChain::new()
-            .with(EnvProvider::new("GH_TOKEN"))
-            .with(EnvProvider::new("GITHUB_TOKEN"))
-            .with(CommandProvider::new("gh", &["auth", "token"]));
-        match chain.resolve("github").await {
+    if setup.enabled_providers.contains(pilot_gh::SOURCE) {
+        match pilot_gh::credential_chain().resolve(pilot_gh::SOURCE).await {
             Ok(cred) => {
                 // Reuse the cached client when the credential source
                 // is unchanged. `with_filters` consumes Self and
@@ -1998,13 +1993,9 @@ async fn build_provider_for_workspace(
         .map(|(p, _)| p)
         .unwrap_or("");
     match source {
-        "github" => {
-            let chain = CredentialChain::new()
-                .with(EnvProvider::new("GH_TOKEN"))
-                .with(EnvProvider::new("GITHUB_TOKEN"))
-                .with(CommandProvider::new("gh", &["auth", "token"]));
-            let cred = chain
-                .resolve("github")
+        s if s == pilot_gh::SOURCE => {
+            let cred = pilot_gh::credential_chain()
+                .resolve(pilot_gh::SOURCE)
                 .await
                 .map_err(|e| format!("github credentials: {e}"))?;
             let client = GhClient::from_credential(cred)
@@ -2012,13 +2003,9 @@ async fn build_provider_for_workspace(
                 .map_err(|e| format!("github client init: {e}"))?;
             Ok(ProviderHandle::Github(client))
         }
-        "linear" => {
-            // Linear uses a single API key. Wrap in a credential
-            // chain so future Keychain / Vault integrations slot
-            // in transparently.
-            let chain = CredentialChain::new().with(EnvProvider::new("LINEAR_API_KEY"));
-            let cred = chain
-                .resolve("linear")
+        s if s == pilot_linear::SOURCE => {
+            let cred = pilot_linear::credential_chain()
+                .resolve(pilot_linear::SOURCE)
                 .await
                 .map_err(|e| format!("linear credentials: {e}"))?;
             Ok(ProviderHandle::Linear(LinearClient::from_credential(cred)))
@@ -2209,11 +2196,7 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
         match state.gh_client.clone() {
             Some(c) => c,
             None => {
-                let chain = CredentialChain::new()
-                    .with(EnvProvider::new("GH_TOKEN"))
-                    .with(EnvProvider::new("GITHUB_TOKEN"))
-                    .with(CommandProvider::new("gh", &["auth", "token"]));
-                let cred = match chain.resolve("github").await {
+                let cred = match pilot_gh::credential_chain().resolve(pilot_gh::SOURCE).await {
                     Ok(c) => c,
                     Err(e) => {
                         tracing::warn!("fetch_pr_details credentials: {e}");

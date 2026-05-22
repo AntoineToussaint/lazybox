@@ -463,52 +463,11 @@ fn m_emits_mark_read() {
     }
 }
 
-#[test]
-fn g_emits_refresh_without_selection() {
-    let mut s = Sidebar::new(PaneId::new(1));
-    let mut cmds = Vec::new();
-    s.handle_key(key_code(KeyCode::Char('g')), &mut cmds);
-    assert!(matches!(cmds.as_slice(), [Command::Refresh]));
-}
-
 // ── Snooze semantics ───────────────────────────────────────────────────
-
-#[test]
-fn z_snoozes_unsnoozed_for_4h() {
-    let mut s = populated_sidebar();
-    let mut cmds = Vec::new();
-    let before = Utc::now();
-    s.handle_key(key_code(KeyCode::Char('z')), &mut cmds);
-    let after = Utc::now();
-    assert_eq!(cmds.len(), 1);
-    match &cmds[0] {
-        Command::Snooze { until, .. } => {
-            let min = before + Duration::hours(4) - Duration::seconds(2);
-            let max = after + Duration::hours(4) + Duration::seconds(2);
-            assert!(*until >= min && *until <= max);
-        }
-        other => panic!("expected Snooze, got {other:?}"),
-    }
-}
-
-#[test]
-fn z_unsnoozes_already_snoozed() {
-    let mut s = Sidebar::new(PaneId::new(1));
-    let now = Utc::now();
-    let mut snoozed = make_workspace("owner/repo", "o/r#1", now);
-    snoozed.snoozed_until = Some(now + Duration::hours(4));
-    s.on_event(&Event::Snapshot {
-        workspaces: vec![snoozed],
-        terminals: vec![],
-    });
-    // Inbox → Inactive → Snoozed (3-state cycle).
-    s.handle_key(shift_char('S'), &mut Vec::new());
-    s.handle_key(shift_char('S'), &mut Vec::new());
-
-    let mut cmds = Vec::new();
-    s.handle_key(key_code(KeyCode::Char('z')), &mut cmds);
-    assert!(matches!(cmds.as_slice(), [Command::Unsnooze { .. }]));
-}
+// (lowercase `z` snooze/unsnooze migrated to `Action::ToggleSnooze`
+// in the catalog — exercised via `Model::dispatch_action` in
+// tests/model_orchestrator.rs. `Shift-Z` long-snooze is still inline
+// here pending its own catalog migration.)
 
 #[test]
 fn shift_z_archives_a_year_out() {
@@ -531,58 +490,13 @@ fn shift_z_archives_a_year_out() {
     }
 }
 
-// ── Kill / double-press ────────────────────────────────────────────────
-
-#[test]
-fn shift_x_requires_two_presses() {
-    let mut s = populated_sidebar();
-    let mut cmds = Vec::new();
-
-    s.handle_key(shift_char('X'), &mut cmds);
-    assert!(cmds.is_empty());
-    assert_eq!(
-        s.kill_armed().map(|k| k.to_string()),
-        Some(expected_session_key("o/r#1"))
-    );
-
-    s.handle_key(shift_char('X'), &mut cmds);
-    assert!(matches!(cmds.as_slice(), [Command::Kill { .. }]));
-    assert!(s.kill_armed().is_none());
-}
-
-#[test]
-fn shift_x_disarmed_by_unrelated_key() {
-    let mut s = populated_sidebar();
-    let mut cmds = Vec::new();
-    s.handle_key(shift_char('X'), &mut cmds);
-    assert!(s.kill_armed().is_some());
-    s.handle_key(key_code(KeyCode::Down), &mut cmds);
-    assert!(s.kill_armed().is_none());
-    s.handle_key(shift_char('X'), &mut cmds);
-    assert_eq!(
-        cmds.iter()
-            .filter(|c| matches!(c, Command::Kill { .. }))
-            .count(),
-        0,
-        "Kill must not have fired"
-    );
-}
-
-#[test]
-fn shift_x_disarmed_when_moved_to_different_workspace() {
-    let mut s = populated_sidebar();
-    let mut cmds = Vec::new();
-    s.handle_key(shift_char('X'), &mut cmds);
-    s.handle_key(key_code(KeyCode::Down), &mut cmds);
-    assert!(s.kill_armed().is_none());
-    s.handle_key(shift_char('X'), &mut cmds);
-    assert_eq!(
-        s.kill_armed().map(|k| k.to_string()),
-        Some(expected_session_key("o/r#2"))
-    );
-}
-
 // ── Navigation bounds ─────────────────────────────────────────────────
+//
+// (Shift-X / Shift-M no longer have sidebar-level tests — both are
+// catalog actions now, dispatched by `Model::dispatch_action` and
+// gated by the `ActionConfirm` modal. The sidebar's inline handlers
+// for those keys were deleted; the equivalent behavior is exercised
+// at the model layer in `tests/model_orchestrator.rs`.)
 
 #[test]
 fn j_stops_at_last_workspace() {
@@ -686,14 +600,6 @@ fn render_mailbox_toggles_title() {
     s.handle_key(shift_char('S'), &mut Vec::new());
     let rendered = render_to_string(&mut s, 40, 12, true);
     assert!(rendered.contains("SNOOZED"));
-}
-
-#[test]
-fn render_shows_kill_marker_when_armed() {
-    let mut s = populated_sidebar();
-    s.handle_key(shift_char('X'), &mut Vec::new());
-    let rendered = render_to_string(&mut s, 40, 10, true);
-    assert!(rendered.contains("[kill?]"));
 }
 
 // ── Hierarchy invariant: WorkspaceKey ↔ SessionKey conversions ────────
@@ -1144,7 +1050,7 @@ fn contextual_bindings_surface_merge_on_ready_pr() {
     });
     let labels: Vec<&str> = s.contextual_bindings().iter().map(|b| b.label).collect();
     assert!(
-        labels.contains(&"merge"),
+        labels.contains(&"merge PR"),
         "READY PR must surface the merge binding, got {labels:?}",
     );
 }
@@ -1209,35 +1115,6 @@ fn merge_target_is_hidden_when_ci_failing() {
         terminals: vec![],
     });
     assert!(s.merge_target_for_cursor().is_none());
-}
-
-#[test]
-fn shift_m_queues_merge_request_for_modal() {
-    // Updated contract: the inline two-press latch was retired in
-    // favor of a Confirm modal mounted by the orchestrator. The
-    // sidebar's job is now just to queue the workspace key; the
-    // orchestrator drains `pending_merge_requests` and pushes the
-    // modal. So Shift-M emits ZERO IpcCommands directly and one
-    // entry on the merge-request queue.
-    use pilot_ipc::Command as IpcCommand;
-    let mut s = Sidebar::new(PaneId::new(1));
-    let mut pr = make_task("o/r", "o/r#1", Utc::now());
-    pr.review = ReviewStatus::Approved;
-    pr.ci = CiStatus::Success;
-    s.on_event(&Event::Snapshot {
-        workspaces: vec![Workspace::from_task(pr, Utc::now())],
-        terminals: vec![],
-    });
-
-    let mut cmds: Vec<IpcCommand> = Vec::new();
-    s.handle_key(shift_char('M'), &mut cmds);
-    assert!(
-        cmds.is_empty(),
-        "Shift-M no longer emits MergePr directly; orchestrator owns the confirm",
-    );
-    let queued = s.drain_pending_merge_requests();
-    assert_eq!(queued.len(), 1);
-    assert_eq!(queued[0].as_str(), "github-o-r-1");
 }
 
 #[test]

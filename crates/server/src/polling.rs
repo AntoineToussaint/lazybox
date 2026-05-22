@@ -1341,30 +1341,17 @@ pub async fn handle_confirm_merge(
             "delete_workspace during ConfirmMerge failed: {e}"
         );
     }
-    if let Ok(json) = serde_json::to_string(&pr_ws) {
-        let record = WorkspaceRecord {
-            key: pr_ws.key.as_str().to_string(),
-            created_at: pr_ws.created_at,
-            workspace_json: Some(json),
-        };
-        if let Err(e) = config.store.save_workspace(&record) {
-            tracing::error!(
-                workspace_key = %record.key,
-                "save_workspace during ConfirmMerge failed: {e}"
-            );
-        }
-    }
-
+    let pr_key = pr_ws.key.clone();
     let _ = config
         .bus
         .send(Event::WorkspaceRemoved(issue_workspace_key.clone()));
     let _ = config.bus.send(Event::WorkspaceMerged {
         issue_workspace_key,
-        pr_workspace_key: pr_ws.key.clone(),
+        pr_workspace_key: pr_key.clone(),
         issue_label,
         pr_label,
     });
-    let _ = config.bus.send(Event::WorkspaceUpserted(Box::new(pr_ws)));
+    commit_upsert(config, &pr_key, pr_ws);
 }
 
 /// Manual "adopt": move every session out of `source_key`'s
@@ -1421,16 +1408,6 @@ pub async fn handle_adopt_sessions(
 
     crate::spawn_handler::migrate_session_paths_if_needed(config, &mut target_ws).await;
 
-    for ws in [&source_ws, &target_ws] {
-        if let Ok(json) = serde_json::to_string(ws) {
-            let _ = config.store.save_workspace(&WorkspaceRecord {
-                key: ws.key.as_str().to_string(),
-                created_at: ws.created_at,
-                workspace_json: Some(json),
-            });
-        }
-    }
-
     tracing::info!(
         source_workspace = %source_key,
         target_workspace = %target_key,
@@ -1438,12 +1415,10 @@ pub async fn handle_adopt_sessions(
         "adopted sessions across workspaces"
     );
 
-    let _ = config
-        .bus
-        .send(Event::WorkspaceUpserted(Box::new(source_ws)));
-    let _ = config
-        .bus
-        .send(Event::WorkspaceUpserted(Box::new(target_ws)));
+    let source_key_owned = source_ws.key.clone();
+    let target_key_owned = target_ws.key.clone();
+    commit_upsert(config, &source_key_owned, source_ws);
+    commit_upsert(config, &target_key_owned, target_ws);
 }
 
 /// Move `issue_ws`'s sessions, gh/linear-issue tasks, and any
@@ -1573,24 +1548,7 @@ pub fn create_empty_workspace(
         workspace.name = name.trim().to_string();
     }
     workspace.project_key = Some(project_key);
-
-    let record = WorkspaceRecord {
-        key: key.as_str().to_string(),
-        created_at: workspace.created_at,
-        workspace_json: serde_json::to_string(&workspace).ok(),
-    };
-    if let Err(e) = config.store.save_workspace(&record) {
-        // Bumped to error: a store write failure means the workspace
-        // we just broadcast won't survive a restart. Caller side
-        // can't currently see this, but at least the log is loud.
-        tracing::error!(
-            workspace_key = %record.key,
-            "save_workspace failed: {e}"
-        );
-    }
-    let _ = config
-        .bus
-        .send(Event::WorkspaceUpserted(Box::new(workspace)));
+    commit_upsert(config, &key, workspace);
     key
 }
 
@@ -1684,20 +1642,8 @@ pub fn migrate_legacy_sandbox(config: &ServerConfig) {
     }
     let project_key = create_local_project(config, "Sandbox");
     workspace.project_key = Some(project_key);
-    let updated = WorkspaceRecord {
-        key: workspace.key.as_str().to_string(),
-        created_at: workspace.created_at,
-        workspace_json: serde_json::to_string(&workspace).ok(),
-    };
-    if let Err(e) = config.store.save_workspace(&updated) {
-        tracing::error!(
-            workspace_key = %updated.key,
-            "migrate_legacy_sandbox: save_workspace failed: {e}",
-        );
-    }
-    let _ = config
-        .bus
-        .send(Event::WorkspaceUpserted(Box::new(workspace)));
+    let ws_key = workspace.key.clone();
+    commit_upsert(config, &ws_key, workspace);
     tracing::info!("migrate_legacy_sandbox: moved `sandbox` workspace under `local-sandbox` project");
 }
 
@@ -1705,40 +1651,11 @@ pub fn migrate_legacy_sandbox(config: &ServerConfig) {
 /// un-snoozes. Persists + broadcasts so the sidebar's mailbox-aware
 /// rendering re-categorises the row.
 pub fn set_snooze(config: &ServerConfig, key: &WorkspaceKey, until: Option<chrono::DateTime<Utc>>) {
-    let Some(json) = config
-        .store
-        .get_workspace(key)
-        .ok()
-        .flatten()
-        .and_then(|r| r.workspace_json)
-    else {
+    let Some(mut workspace) = load_workspace(config, key) else {
         return;
     };
-    let mut workspace = match serde_json::from_str::<Workspace>(&json) {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!("set_snooze: bad JSON for {key}: {e}");
-            return;
-        }
-    };
     workspace.snoozed_until = until;
-    let record = WorkspaceRecord {
-        key: key.as_str().to_string(),
-        created_at: workspace.created_at,
-        workspace_json: serde_json::to_string(&workspace).ok(),
-    };
-    if let Err(e) = config.store.save_workspace(&record) {
-        // Bumped to error: a store write failure means the workspace
-        // we just broadcast won't survive a restart. Caller side
-        // can't currently see this, but at least the log is loud.
-        tracing::error!(
-            workspace_key = %record.key,
-            "save_workspace failed: {e}"
-        );
-    }
-    let _ = config
-        .bus
-        .send(Event::WorkspaceUpserted(Box::new(workspace)));
+    commit_upsert(config, key, workspace);
 }
 
 /// Delete a workspace + all its sessions from the store. Broadcasts
@@ -1826,45 +1743,15 @@ pub fn set_session_layout(
     session_id: pilot_core::SessionId,
     layout: pilot_core::SessionLayout,
 ) {
-    let Some(json) = config
-        .store
-        .get_workspace(key)
-        .ok()
-        .flatten()
-        .and_then(|r| r.workspace_json)
-    else {
+    let Some(mut workspace) = load_workspace(config, key) else {
         return;
-    };
-    let mut workspace = match serde_json::from_str::<Workspace>(&json) {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!("set_session_layout: bad JSON for {key}: {e}");
-            return;
-        }
     };
     let Some(session) = workspace.sessions.iter_mut().find(|s| s.id == session_id) else {
         tracing::debug!("set_session_layout: no session {session_id} in {key}");
         return;
     };
     session.layout = layout;
-
-    let record = WorkspaceRecord {
-        key: key.as_str().to_string(),
-        created_at: workspace.created_at,
-        workspace_json: serde_json::to_string(&workspace).ok(),
-    };
-    if let Err(e) = config.store.save_workspace(&record) {
-        // Bumped to error: a store write failure means the workspace
-        // we just broadcast won't survive a restart. Caller side
-        // can't currently see this, but at least the log is loud.
-        tracing::error!(
-            workspace_key = %record.key,
-            "save_workspace failed: {e}"
-        );
-    }
-    let _ = config
-        .bus
-        .send(Event::WorkspaceUpserted(Box::new(workspace)));
+    commit_upsert(config, key, workspace);
 }
 
 /// Apply a partial-mark to one activity row. Used by the TUI's
@@ -1886,45 +1773,16 @@ pub fn unmark_activity_read(config: &ServerConfig, key: &WorkspaceKey, index: us
 }
 
 fn apply_activity_mark(config: &ServerConfig, key: &WorkspaceKey, index: usize, read: bool) {
-    let Some(json) = config
-        .store
-        .get_workspace(key)
-        .ok()
-        .flatten()
-        .and_then(|r| r.workspace_json)
-    else {
+    let Some(mut workspace) = load_workspace(config, key) else {
         tracing::debug!("apply_activity_mark: no record for {key}");
         return;
-    };
-    let mut workspace = match serde_json::from_str::<Workspace>(&json) {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!("apply_activity_mark: bad JSON for {key}: {e}");
-            return;
-        }
     };
     if read {
         workspace.mark_activity_read(index);
     } else {
         workspace.unmark_activity_read(index);
     }
-    let record = WorkspaceRecord {
-        key: key.as_str().to_string(),
-        created_at: workspace.created_at,
-        workspace_json: serde_json::to_string(&workspace).ok(),
-    };
-    if let Err(e) = config.store.save_workspace(&record) {
-        // Bumped to error: a store write failure means the workspace
-        // we just broadcast won't survive a restart. Caller side
-        // can't currently see this, but at least the log is loud.
-        tracing::error!(
-            workspace_key = %record.key,
-            "save_workspace failed: {e}"
-        );
-    }
-    let _ = config
-        .bus
-        .send(Event::WorkspaceUpserted(Box::new(workspace)));
+    commit_upsert(config, key, workspace);
 }
 
 /// Apply the user's "mark every activity item read" gesture to a
@@ -1936,43 +1794,13 @@ fn apply_activity_mark(config: &ServerConfig, key: &WorkspaceKey, index: usize, 
 ///
 /// No-op if the workspace isn't in the store.
 pub fn mark_workspace_read(config: &ServerConfig, key: &WorkspaceKey) {
-    let Some(json) = config
-        .store
-        .get_workspace(key)
-        .ok()
-        .flatten()
-        .and_then(|r| r.workspace_json)
-    else {
+    let Some(mut workspace) = load_workspace(config, key) else {
         tracing::debug!("mark_workspace_read: no record for {key}");
         return;
     };
-    let mut workspace = match serde_json::from_str::<Workspace>(&json) {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!("mark_workspace_read: bad JSON for {key}: {e}");
-            return;
-        }
-    };
     workspace.mark_read_all();
     workspace.last_viewed_at = Some(Utc::now());
-
-    let record = WorkspaceRecord {
-        key: key.as_str().to_string(),
-        created_at: workspace.created_at,
-        workspace_json: serde_json::to_string(&workspace).ok(),
-    };
-    if let Err(e) = config.store.save_workspace(&record) {
-        // Bumped to error: a store write failure means the workspace
-        // we just broadcast won't survive a restart. Caller side
-        // can't currently see this, but at least the log is loud.
-        tracing::error!(
-            workspace_key = %record.key,
-            "save_workspace failed: {e}"
-        );
-    }
-    let _ = config
-        .bus
-        .send(Event::WorkspaceUpserted(Box::new(workspace)));
+    commit_upsert(config, key, workspace);
 }
 
 /// Post a top-level reply to the workspace's primary task. Today this

@@ -628,10 +628,7 @@ async fn create_empty_workspace_broadcasts_upserted() {
         .unwrap();
 
     polling::create_empty_workspace(&config, "side experiment", pilot_core::ProjectKey::local("test"));
-    let evt = tokio::time::timeout(Duration::from_secs(2), client.recv())
-        .await
-        .expect("upsert event")
-        .expect("event");
+    let evt = recv_workspace_upsert(&mut client).await;
     match evt {
         Event::WorkspaceUpserted(w) => {
             assert_eq!(w.name, "side experiment");

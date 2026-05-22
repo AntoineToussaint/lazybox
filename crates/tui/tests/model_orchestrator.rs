@@ -53,15 +53,13 @@ fn tab_cycles_focus_through_panes() {
 
 #[test]
 fn remapped_quit_binding_fires_on_single_key_chord() {
-    // User puts `keybindings.quit: "Ctrl-q"` in YAML. A single
+    // User puts `ui.action_keys.quit: "Ctrl-q"` in YAML. A single
     // Ctrl-q must quit immediately — no double-tap latch since the
-    // chord is one key. Pins that `apply_keybindings` actually
-    // takes effect and the runtime matcher honors it.
+    // chord is one key.
     let mut m = build_model();
-    m.apply_keybindings(pilot_config::Keybindings {
-        quit: "Ctrl-q".into(),
-        ..pilot_config::Keybindings::default()
-    });
+    let mut overrides = std::collections::BTreeMap::new();
+    overrides.insert("quit".to_string(), "Ctrl-q".to_string());
+    m.apply_action_key_overrides(overrides);
     m.dispatch_key(key_with(Key::Char('q'), KeyModifiers::CONTROL));
     assert!(m.quit, "single-key remap must fire on first press");
 }
@@ -114,10 +112,9 @@ fn remapped_new_workspace_binding_mounts_input() {
         terminals: vec![],
         projects: vec![project],
     });
-    m.apply_keybindings(pilot_config::Keybindings {
-        new_workspace: "Ctrl-n".into(),
-        ..pilot_config::Keybindings::default()
-    });
+    let mut overrides = std::collections::BTreeMap::new();
+    overrides.insert("new_workspace".to_string(), "Ctrl-n".to_string());
+    m.apply_action_key_overrides(overrides);
     m.dispatch_key(key_with(Key::Char('n'), KeyModifiers::CONTROL));
     assert_eq!(m.top_modal(), Some(&Id::NewWorkspace));
 }
@@ -126,10 +123,9 @@ fn remapped_new_workspace_binding_mounts_input() {
 fn remapped_help_binding_mounts_help_modal() {
     // Remap help to lowercase `h` and verify the modal opens.
     let mut m = build_model();
-    m.apply_keybindings(pilot_config::Keybindings {
-        help: "h".into(),
-        ..pilot_config::Keybindings::default()
-    });
+    let mut overrides = std::collections::BTreeMap::new();
+    overrides.insert("open_help".to_string(), "h".to_string());
+    m.apply_action_key_overrides(overrides);
     m.dispatch_key(key(Key::Char('h')));
     assert_eq!(m.top_modal(), Some(&Id::Help));
 }

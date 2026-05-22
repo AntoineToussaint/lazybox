@@ -324,11 +324,6 @@ pub struct Model<T: TerminalAdapter> {
     /// module-level `const`s — read from `~/.pilot/config.yaml::ui`,
     /// or `UiDefaults::default()` when unset / not loaded.
     ui_defaults: pilot_config::UiDefaults,
-    /// User-remappable key bindings. Today wires `quit` (`q q`),
-    /// `help` (`?`), and `settings` (`,`); the rest of the giant
-    /// `handle_pane_key` match is still hardcoded and migrates here
-    /// in follow-up commits. Read from `~/.pilot/config.yaml::ui.keybindings`.
-    keybindings: pilot_config::Keybindings,
     /// Workspace keys for which we've already fired
     /// `Command::FetchPrDetails` this session — the lazy-fetch path
     /// that back-fills review-thread activity. Used to dedupe the
@@ -473,7 +468,6 @@ impl<T: TerminalAdapter> Model<T> {
             action_key_overrides: std::collections::BTreeMap::new(),
             pending_action_confirm: None,
             pending_new_workspace_project: None,
-            keybindings: pilot_config::Keybindings::default(),
         }
     }
 }
@@ -647,13 +641,6 @@ impl<T: TerminalAdapter> Model<T> {
         self.right.apply_ui_defaults(ui);
     }
 
-    /// Apply user-supplied key remaps (`~/.pilot/config.yaml::ui.keybindings`).
-    /// Today wires `quit` / `help` / `settings`; more bindings move
-    /// in as the hardcoded `match` arms in `handle_pane_key` migrate
-    /// to the table.
-    pub fn apply_keybindings(&mut self, kb: pilot_config::Keybindings) {
-        self.keybindings = kb;
-    }
 
     /// Apply catalog-driven action key overrides (`ui.action_keys`).
     /// Map of snake_case `ActionKind` names → key-spec strings;
@@ -1936,6 +1923,13 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenSettings => {
                 self.open_settings();
             }
+            Action::JumpToAsking => {
+                if self.sidebar.focus_next_asking_workspace() {
+                    self.focus = PaneFocus::Sidebar;
+                    self.set_focus_attr();
+                    self.redraw = true;
+                }
+            }
             Action::Reply => {
                 // Reply targets the focused workspace. Resolver
                 // returns `Intent::MountReply` when a workspace is
@@ -2015,12 +2009,12 @@ impl<T: TerminalAdapter> Model<T> {
                 return;
             }
             _ if self.focus != PaneFocus::Terminals && self.matches_quit_chord(&key) => {
-                // Quit chord (default `q q`): first key arms the
-                // latch; second key within `ui.quit_double_tap_window`
-                // fires. Single-key bindings (e.g., a user remap to
-                // `Ctrl-q`) fire on the first press.
-                let quit_chord = self.keybindings.chord(pilot_config::Action::Quit);
-                if quit_chord.len() <= 1 {
+                // Quit chord (catalog `ActionKind::Quit`, default `q q`,
+                // overridable via `ui.action_keys.quit`). `Double(inner)`
+                // is the two-press latch; `Single` fires on first press.
+                let chord = self.resolve_quit_chord();
+                use pilot_tui_core::action::KeyChord;
+                if matches!(chord, Some(KeyChord::Single { .. })) {
                     self.quit = true;
                     return;
                 }
@@ -2031,36 +2025,16 @@ impl<T: TerminalAdapter> Model<T> {
                 self.redraw = true;
                 return;
             }
-            _ if self.focus != PaneFocus::Terminals
-                && self.matches_action(&key, pilot_config::Action::Help) =>
-            {
-                self.q_latch.disarm();
-                self.mount_help();
-                return;
-            }
-            // `!` — jump to the next workspace whose agent is
-            // waiting on the user. Globally available outside the
-            // terminal pane (where `!` belongs to the shell for
-            // history expansion). Sets focus to the sidebar so the
-            // user lands on the row, ready to act.
-            _ if self.focus != PaneFocus::Terminals
-                && self.matches_action(&key, pilot_config::Action::JumpToAsking) =>
-            {
-                self.q_latch.disarm();
-                if self.sidebar.focus_next_asking_workspace() {
-                    self.focus = PaneFocus::Sidebar;
-                    self.set_focus_attr();
-                    self.redraw = true;
-                }
-                return;
-            }
+            // `?` Help, `!` JumpToAsking — both go through the
+            // catalog dispatch above (Section::Global).
             // `Enter` on the sidebar = "open this row" → focus the
             // Activity pane so the user can read comments / reply.
             // Used to be a dead binding before this migration; right
             // pane keeps its own Enter meaning (toggle section);
             // terminals forward Enter as `\r` to the PTY.
             _ if self.focus == PaneFocus::Sidebar
-                && self.matches_action(&key, pilot_config::Action::FocusActivity) =>
+                && key.code == Key::Enter
+                && key.modifiers.is_empty() =>
             {
                 self.q_latch.disarm();
                 self.focus = PaneFocus::Right;
@@ -2140,61 +2114,8 @@ impl<T: TerminalAdapter> Model<T> {
             // Workspace, accepted from both Sidebar and Right focus).
             // See `find_action_for_chord` + the whitelist in
             // `dispatch_focused_key`.
-            // `e` from the sidebar: open the focused workspace's
-            // worktree in an editor (Zed / VS Code / Cursor / …).
-            _ if self.focus == PaneFocus::Sidebar
-                && self.matches_action(&key, pilot_config::Action::OpenEditor) =>
-            {
-                self.q_latch.disarm();
-                if matches!(
-                    crate::intent::resolve_open_editor(self.sidebar.selected_workspace()),
-                    crate::intent::Intent::OpenEditor
-                ) {
-                    self.open_editor();
-                }
-                return;
-            }
-            // `n` from the sidebar: prompt for a workspace name under
-            // the focused Project. No focused project → footer notice
-            // (the user pressed `n` from an empty inbox view; the
-            // notice points them at Shift-N to create one first).
-            _ if self.focus == PaneFocus::Sidebar
-                && self.matches_action(&key, pilot_config::Action::NewWorkspace) =>
-            {
-                self.q_latch.disarm();
-                let focused = self.sidebar.focused_project_key();
-                match crate::intent::resolve_new_workspace(focused) {
-                    crate::intent::Intent::MountNewWorkspaceInput { project_key } => {
-                        self.mount_new_workspace_input(project_key);
-                    }
-                    crate::intent::Intent::Notice(msg) => {
-                        use crate::realm::components::footer::{Notice, NoticeSeverity};
-                        self.status.notice =
-                            Some(Notice::new(msg, NoticeSeverity::Info));
-                        self.redraw = true;
-                    }
-                    _ => {}
-                }
-                return;
-            }
-            // `Shift-N` from the sidebar: create a new Project. The
-            // catalog-dispatch path (`Action::NewProject`) handles
-            // this above when `find_action_for_chord` matches the
-            // chord; this legacy arm is intentionally absent —
-            // OpenSandbox is retired (Stage 4 of the Project
-            // refactor) and Shift-N belongs to NewProject.
-            // `,` opens the Settings palette — small picker with
-            // "Add a repo (github)" / "Edit agents" / etc. Familiar
-            // mnemonic from VS Code / Sublime ("Cmd-," for
-            // settings). Disabled inside a terminal so the shell
-            // can still bind it.
-            _ if self.focus != PaneFocus::Terminals
-                && self.matches_action(&key, pilot_config::Action::Settings) =>
-            {
-                self.q_latch.disarm();
-                self.open_settings();
-                return;
-            }
+            // `e` OpenEditor, `n` NewWorkspace, `Shift-N` NewProject,
+            // `,` Settings — all go through catalog dispatch above.
             // Shift-R refresh is handled by the catalog dispatch
             // path — `Action::Refresh`'s `dispatch_action` arm
             // pushes `IpcCommand::Refresh` and pre-arms the
@@ -2308,6 +2229,9 @@ impl<T: TerminalAdapter> Model<T> {
                     Some(Action::RequestReviewers)
                 }
                 pilot_tui_core::action::ActionKind::AddAssignees => Some(Action::AddAssignees),
+                pilot_tui_core::action::ActionKind::OpenHelp => Some(Action::OpenHelp),
+                pilot_tui_core::action::ActionKind::OpenSettings => Some(Action::OpenSettings),
+                pilot_tui_core::action::ActionKind::JumpToAsking => Some(Action::JumpToAsking),
                 _ => None,
             };
             if let Some(action) = action {
@@ -2487,21 +2411,34 @@ impl<T: TerminalAdapter> Model<T> {
         &self.sidebar
     }
 
-    /// Compare an incoming `RealmKey` against the chord for `action`.
-    /// Single-key chords (`?`, `,`) match on the first key. The
-    /// `quit` chord is handled separately because it requires the
-    /// arm/fire double-tap.
-    fn matches_action(&self, key: &RealmKey, action: pilot_config::Action) -> bool {
-        let chord = self.keybindings.chord(action);
-        chord.first().is_some_and(|spec| key_matches(key, spec))
+    /// Look up the Quit chord — catalog default OR
+    /// `ui.action_keys.quit` override. Returns the parsed `KeyChord`
+    /// (`Double` for `q q`, `Single` for a single-letter remap).
+    /// Cached at call sites; cheap to re-parse.
+    fn resolve_quit_chord(&self) -> Option<pilot_tui_core::action::KeyChord> {
+        use pilot_tui_core::action::{ActionDef, ActionKind, KeyChord};
+        let def = ActionDef::for_kind(ActionKind::Quit);
+        def.effective_chord(&self.action_key_overrides)
+            .or_else(|| KeyChord::parse(def.default_keys))
     }
 
-    /// Quit-specific predicate: matches the FIRST key of the quit
-    /// chord. The caller is responsible for handling the latch /
-    /// second-key timing (or firing immediately when the chord is
-    /// a single key).
+    /// Matches the FIRST key of the Quit chord (the entry-point for
+    /// the latch). For `Double` chords this is the inner single
+    /// chord's first press; for `Single` chords this is the chord
+    /// itself.
     fn matches_quit_chord(&self, key: &RealmKey) -> bool {
-        self.matches_action(key, pilot_config::Action::Quit)
+        use pilot_tui_core::action::KeyChord;
+        let Some(chord) = self.resolve_quit_chord() else {
+            return false;
+        };
+        let first = match &chord {
+            KeyChord::Single { .. } => chord,
+            KeyChord::Double(inner) => (**inner).clone(),
+        };
+        let Some(input) = key_event_to_chord(realm_key_to_crossterm(key)) else {
+            return false;
+        };
+        input == first
     }
 
     /// DetachSpec for the focused pane, or None if it can't detach
@@ -4305,37 +4242,6 @@ fn dispatch_event<T: TerminalAdapter>(model: &mut Model<T>, event: crossterm::ev
             }
         }
         _ => {}
-    }
-}
-
-/// Does this tuirealm `KeyEvent` match the config-supplied
-/// `KeySpec`? Bridges crates/config (which doesn't depend on
-/// tuirealm or crossterm — by design) and the runtime key event.
-/// Returns false on key codes we don't currently advertise as
-/// remappable (function keys, mouse-encoded, …) so a YAML typo
-/// silently does nothing instead of triggering the wrong action.
-fn key_matches(key: &RealmKey, spec: &pilot_config::KeySpec) -> bool {
-    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    match key.code {
-        Key::Char(c) => spec.matches_char(c, shift, ctrl, alt),
-        Key::Enter => spec.matches_named("enter", shift, ctrl, alt),
-        Key::Esc => spec.matches_named("esc", shift, ctrl, alt),
-        Key::Tab => spec.matches_named("tab", shift, ctrl, alt),
-        Key::BackTab => spec.matches_named("backtab", shift, ctrl, alt),
-        Key::Backspace => spec.matches_named("backspace", shift, ctrl, alt),
-        Key::Up => spec.matches_named("up", shift, ctrl, alt),
-        Key::Down => spec.matches_named("down", shift, ctrl, alt),
-        Key::Left => spec.matches_named("left", shift, ctrl, alt),
-        Key::Right => spec.matches_named("right", shift, ctrl, alt),
-        Key::Home => spec.matches_named("home", shift, ctrl, alt),
-        Key::End => spec.matches_named("end", shift, ctrl, alt),
-        Key::PageUp => spec.matches_named("pageup", shift, ctrl, alt),
-        Key::PageDown => spec.matches_named("pagedown", shift, ctrl, alt),
-        Key::Delete => spec.matches_named("delete", shift, ctrl, alt),
-        Key::Insert => spec.matches_named("insert", shift, ctrl, alt),
-        _ => false,
     }
 }
 

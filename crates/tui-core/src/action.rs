@@ -107,6 +107,9 @@ pub enum Action {
     OpenHelp,
     /// Open the `,` Settings palette.
     OpenSettings,
+    /// Jump the sidebar cursor to the next workspace whose agent
+    /// is in `Asking` state (`!`). Wraps around.
+    JumpToAsking,
     /// Begin the two-press quit chord. Single-press from a remap
     /// just fires.
     Quit,
@@ -191,6 +194,7 @@ pub enum ActionKind {
     Refresh,
     OpenHelp,
     OpenSettings,
+    JumpToAsking,
     Quit,
     DetachPane,
     ResizeSplitter,
@@ -234,6 +238,7 @@ impl Action {
             Action::Refresh => ActionKind::Refresh,
             Action::OpenHelp => ActionKind::OpenHelp,
             Action::OpenSettings => ActionKind::OpenSettings,
+            Action::JumpToAsking => ActionKind::JumpToAsking,
             Action::Quit => ActionKind::Quit,
             Action::DetachPane => ActionKind::DetachPane,
             Action::ResizeSplitter(_) => ActionKind::ResizeSplitter,
@@ -288,6 +293,13 @@ impl ActionDef {
                 default_keys: ",",
                 label: "settings",
                 describe: "Open the Settings palette.",
+                section: Section::Global,
+            },
+            ActionKind::JumpToAsking => &Self {
+                kind: ActionKind::JumpToAsking,
+                default_keys: "!",
+                label: "next asking",
+                describe: "Jump the sidebar cursor to the next workspace whose agent is waiting on input.",
                 section: Section::Global,
             },
             ActionKind::Quit => &Self {
@@ -495,6 +507,7 @@ impl ActionDef {
             ActionKind::Refresh,
             ActionKind::OpenSettings,
             ActionKind::OpenHelp,
+            ActionKind::JumpToAsking,
             ActionKind::DetachPane,
             ActionKind::ResizeSplitter,
             ActionKind::Quit,
@@ -766,6 +779,7 @@ impl ActionKind {
             ActionKind::Refresh => "refresh",
             ActionKind::OpenHelp => "open_help",
             ActionKind::OpenSettings => "open_settings",
+            ActionKind::JumpToAsking => "jump_to_asking",
             ActionKind::Quit => "quit",
             ActionKind::DetachPane => "detach_pane",
             ActionKind::ResizeSplitter => "resize_splitter",
@@ -877,6 +891,7 @@ pub fn availability(
         | ActionKind::Refresh
         | ActionKind::OpenHelp
         | ActionKind::OpenSettings
+        | ActionKind::JumpToAsking
         | ActionKind::Quit
         | ActionKind::DetachPane
         | ActionKind::ResizeSplitter

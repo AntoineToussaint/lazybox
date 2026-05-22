@@ -8,6 +8,7 @@
 //! lives here so edits to those modules don't trigger a full
 //! pilot-tui rebuild.
 
+pub mod action;
 pub mod agent_attention;
 pub mod confirm_latch;
 pub mod editors;

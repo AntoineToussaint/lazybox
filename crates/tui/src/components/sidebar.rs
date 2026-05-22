@@ -334,6 +334,14 @@ impl Sidebar {
 
     /// Override the agent the `f` (fix) shortcut spawns. Defaults to
     /// `claude` when not configured; AppRoot wires this from YAML.
+    /// Read the currently-configured default agent id (the one `w`
+    /// spawns when the resolver picks "work on this"). Exposed so
+    /// the orchestrator's `dispatch_action` can drive the same
+    /// `resolve_work` call without duplicating the storage.
+    pub fn default_agent(&self) -> &str {
+        &self.default_agent
+    }
+
     pub fn with_default_agent(mut self, agent: impl Into<String>) -> Self {
         self.default_agent = agent.into();
         self

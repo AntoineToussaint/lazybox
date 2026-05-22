@@ -139,6 +139,23 @@ impl Sidebar {
         self.inner.selected_session_key()
     }
 
+    /// Currently configured default agent (drives `w` work-on-this
+    /// spawn). Used by the orchestrator's `dispatch_action` so the
+    /// catalog path makes the same `resolve_work` call as the
+    /// sidebar's inline handler.
+    pub fn default_agent(&self) -> &str {
+        self.inner.default_agent()
+    }
+
+    /// Selected session id, if the cursor is on a session sub-row of
+    /// a workspace. `None` when the cursor is on a top-level
+    /// workspace row OR when the workspace has no sessions yet.
+    /// Used by `dispatch_action` to honor "spawn into this specific
+    /// session" semantics when the user has a session focused.
+    pub fn selected_session_id(&self) -> Option<pilot_core::SessionId> {
+        self.inner.selected_session_id()
+    }
+
     /// Read the full Workspace under the cursor (for projection into
     /// `Right::set_workspace`).
     pub fn selected_workspace(&self) -> Option<&pilot_core::Workspace> {

@@ -1653,16 +1653,20 @@ impl<T: TerminalAdapter> Model<T> {
         // sidebar's selection. Mismatch (no selection) silently
         // drops the action; the catalog's `availability` gates the
         // surface from offering it in that state.
-        let session_key = self
-            .sidebar
-            .selected_workspace_key()
-            .cloned();
+        let session_key = self.sidebar.selected_workspace_key().cloned();
+        // `session_id` is non-None when the cursor sits on a
+        // session sub-row of a workspace; passing it makes the
+        // daemon target that specific session instead of picking
+        // / creating one. Matches the sidebar's existing spawn
+        // handlers — without this, `c` / `s` on a focused session
+        // would silently spawn into the wrong session.
+        let session_id = self.sidebar.selected_session_id();
         match action {
             Action::SpawnShell => {
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
                         session_key: sk,
-                        session_id: None,
+                        session_id,
                         kind: pilot_ipc::TerminalKind::Shell,
                         cwd: None,
                         initial_prompt: None,
@@ -1673,12 +1677,61 @@ impl<T: TerminalAdapter> Model<T> {
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
                         session_key: sk,
-                        session_id: None,
+                        session_id,
                         kind: pilot_ipc::TerminalKind::Agent(agent_id.clone()),
                         cwd: None,
                         initial_prompt: None,
                     });
                 }
+            }
+            Action::Work => {
+                // Polymorphic spawn driven by `classify_work`:
+                // PR-with-failing-CI gets "fix CI", issue gets
+                // "implement issue", PR with open review threads
+                // gets "address review", … Resolver returns
+                // SpawnAgent with the right prompt, the dispatcher
+                // just translates to IpcCommand.
+                let default_agent = self.sidebar.default_agent().to_string();
+                let workspace = self.sidebar.selected_workspace().cloned();
+                let intent = crate::intent::resolve_work(workspace.as_ref(), &[], &default_agent);
+                if let crate::intent::Intent::SpawnAgent {
+                    workspace_key,
+                    agent_id,
+                    prompt,
+                } = intent
+                {
+                    cmds.push(IpcCommand::Spawn {
+                        session_key: (&workspace_key).into(),
+                        session_id,
+                        kind: pilot_ipc::TerminalKind::Agent(agent_id),
+                        cwd: None,
+                        initial_prompt: prompt,
+                    });
+                }
+            }
+            Action::OpenEditor => {
+                // `open_editor` is the orchestrator's existing
+                // helper — it picks the right template (single
+                // editor → launch directly; multiple → mount
+                // picker; none → footer notice).
+                self.open_editor();
+            }
+            Action::NewWorkspace => {
+                if matches!(
+                    crate::intent::resolve_new_workspace(),
+                    crate::intent::Intent::MountNewWorkspaceInput
+                ) {
+                    self.mount_new_workspace_input();
+                }
+            }
+            Action::OpenSandbox => {
+                cmds.push(IpcCommand::CreateSandbox {
+                    name: String::new(),
+                });
+                self.preselect = Some(Preselect {
+                    workspace_key: pilot_core::SessionKey::from("sandbox"),
+                    session_id_raw: None,
+                });
             }
             Action::MarkAllRead => {
                 if let Some(sk) = session_key {
@@ -2129,13 +2182,22 @@ impl<T: TerminalAdapter> Model<T> {
             // uses a two-press latch). Adding those here would
             // bypass the safety affordance — they migrate when
             // dispatch_action grows the confirm / latch wrappers.
-            // OpenHelp / OpenSettings / Refresh are also catalog
-            // actions but the global match arms above already
-            // catch them before this point, so their entries here
-            // are functionally dead (kept for future cleanup).
+            //
+            // `OpenEditor`, `NewWorkspace`, `OpenSandbox`,
+            // `OpenHelp`, `OpenSettings`, `Refresh` already have
+            // global match arms in `handle_pane_key` that fire
+            // before this point — the whitelist entries here cover
+            // the case where focus is Sidebar and the user remaps
+            // those keys via `ui.action_keys`. The legacy arms
+            // still win when the user hasn't overridden, so
+            // behavior is unchanged.
             let action: Option<Action> = match def.kind {
                 pilot_tui_core::action::ActionKind::SpawnShell => Some(Action::SpawnShell),
                 pilot_tui_core::action::ActionKind::MarkAllRead => Some(Action::MarkAllRead),
+                pilot_tui_core::action::ActionKind::Work => Some(Action::Work),
+                pilot_tui_core::action::ActionKind::OpenEditor => Some(Action::OpenEditor),
+                pilot_tui_core::action::ActionKind::NewWorkspace => Some(Action::NewWorkspace),
+                pilot_tui_core::action::ActionKind::OpenSandbox => Some(Action::OpenSandbox),
                 _ => None,
             };
             if let Some(action) = action {

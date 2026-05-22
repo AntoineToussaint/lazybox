@@ -1855,6 +1855,7 @@ pub fn mark_workspace_read(config: &ServerConfig, key: &WorkspaceKey) {
 /// feed inline — the next poll picks up the new comment, which keeps
 /// the "what the upstream provider says" invariant intact.
 pub async fn post_reply(config: &ServerConfig, session_key: pilot_core::SessionKey, body: String) {
+    use pilot_core::TaskProvider;
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return;
@@ -1880,66 +1881,25 @@ pub async fn post_reply(config: &ServerConfig, session_key: pilot_core::SessionK
             return;
         }
     };
-    let Some(task) = workspace.primary_task() else {
-        emit_reply_error(config, "workspace has no task to reply to");
-        return;
-    };
-    let Some(repo) = task.repo.as_deref() else {
-        emit_reply_error(config, "task has no repo");
-        return;
-    };
-    // GitHub's PR-comment API takes the issue number; the task id's
-    // `key` field is `repo#NNN` for github tasks.
-    let pr_number = match extract_pr_number(&task.id.key) {
-        Some(n) => n,
-        None => {
-            emit_reply_error(
-                config,
-                &format!("can't parse PR number from {}", task.id.key),
-            );
-            return;
-        }
-    };
-
-    let chain = CredentialChain::new()
-        .with(EnvProvider::new("GH_TOKEN"))
-        .with(EnvProvider::new("GITHUB_TOKEN"))
-        .with(CommandProvider::new("gh", &["auth", "token"]));
-    let cred = match chain.resolve("github").await {
-        Ok(c) => c,
+    let provider = match build_github_provider().await {
+        Ok(p) => p,
         Err(e) => {
-            emit_reply_error(config, &format!("github credentials: {e}"));
+            emit_reply_error(config, &e);
             return;
         }
     };
-    let client = match GhClient::from_credential(cred).await {
-        Ok(c) => c,
-        Err(e) => {
-            emit_reply_error(config, &format!("github client init: {e}"));
-            return;
-        }
-    };
-    if let Err(e) = client.post_issue_comment(repo, pr_number, trimmed).await {
-        tracing::warn!("post_issue_comment {repo}#{pr_number}: {e}");
+    if let Err(e) = provider.post_reply(&workspace, trimmed).await {
+        tracing::warn!("post_reply {workspace_key}: {e:?}");
         emit_reply_error(config, &format!("post failed: {e}"));
         return;
     }
     tracing::info!(
-        "posted reply to {repo}#{pr_number} ({} chars)",
+        "posted reply to {} ({} chars)",
+        workspace_key,
         trimmed.len()
     );
     // The poller picks up the comment on its next tick and broadcasts
     // a workspace upsert; nothing else to do here.
-}
-
-/// Recover the PR/issue number from a `Task.id` string. Pilot ids
-/// follow `github:owner/name#1234` for the wire form; we accept both
-/// `#NNN` and trailing-`NNN` so legacy encodings keep working.
-fn extract_pr_number(task_id: &str) -> Option<u64> {
-    if let Some((_, n)) = task_id.rsplit_once('#') {
-        return n.parse().ok();
-    }
-    task_id.rsplit_once('-').and_then(|(_, n)| n.parse().ok())
 }
 
 fn emit_reply_error(config: &ServerConfig, msg: &str) {
@@ -1951,6 +1911,32 @@ fn emit_reply_error(config: &ServerConfig, msg: &str) {
     });
 }
 
+/// Build a github `GhClient` ready to issue mutation calls.
+/// Shared helper for the four mutation handlers
+/// (`handle_merge_pr`, `handle_request_reviewers`,
+/// `handle_add_assignees`, `post_reply`) — each one used to
+/// duplicate the credential-chain + client-init logic. The
+/// returned `GhClient` implements `pilot_core::TaskProvider`, so
+/// callers route the actual mutation through the trait rather
+/// than the concrete method.
+///
+/// Errors come back as `String` ready for the handler's
+/// `emit_err` callback — keeps the auth/init failure surface
+/// uniform across handlers.
+async fn build_github_provider() -> Result<GhClient, String> {
+    let chain = CredentialChain::new()
+        .with(EnvProvider::new("GH_TOKEN"))
+        .with(EnvProvider::new("GITHUB_TOKEN"))
+        .with(CommandProvider::new("gh", &["auth", "token"]));
+    let cred = chain
+        .resolve("github")
+        .await
+        .map_err(|e| format!("github credentials: {e}"))?;
+    GhClient::from_credential(cred)
+        .await
+        .map_err(|e| format!("github client init: {e}"))
+}
+
 /// Handle `Command::MergePr`: load the workspace, recover the PR's
 /// GraphQL node id from its primary task, and ship a `mergePullRequest`
 /// mutation. On success the next poll cycle picks up the new MERGED
@@ -1960,6 +1946,7 @@ fn emit_reply_error(config: &ServerConfig, msg: &str) {
 /// Errors surface as `Event::ProviderError` so the TUI can flash the
 /// reason without us inventing a bespoke event variant.
 pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    use pilot_core::TaskProvider;
     let emit_err = |msg: &str| {
         let _ = config.bus.send(Event::ProviderError {
             source: "merge".into(),
@@ -1973,35 +1960,21 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
         emit_err(&format!("merge: workspace {workspace_key} not found"));
         return;
     };
-    let Some(pr) = ws.pr.as_ref() else {
-        emit_err(&format!("merge: workspace {workspace_key} has no PR"));
-        return;
-    };
-    let Some(node_id) = pr.node_id.as_deref() else {
-        emit_err("merge: PR has no node_id (need to repoll first)");
-        return;
-    };
+    let pr_label = ws.pr.as_ref().map(|p| p.id.key.clone());
 
-    let chain = CredentialChain::new()
-        .with(EnvProvider::new("GH_TOKEN"))
-        .with(EnvProvider::new("GITHUB_TOKEN"))
-        .with(CommandProvider::new("gh", &["auth", "token"]));
-    let cred = match chain.resolve("github").await {
-        Ok(c) => c,
+    // Route through the `TaskProvider` trait — provider does the
+    // workspace-shape validation (no PR, no node_id, …) and
+    // returns a clean `ProviderError`. Server just relays the
+    // outcome and broadcasts the high-level event.
+    let provider = match build_github_provider().await {
+        Ok(p) => p,
         Err(e) => {
-            emit_err(&format!("github credentials: {e}"));
+            emit_err(&e);
             return;
         }
     };
-    let client = match GhClient::from_credential(cred).await {
-        Ok(c) => c,
-        Err(e) => {
-            emit_err(&format!("github client init: {e}"));
-            return;
-        }
-    };
-    if let Err(e) = client.merge_pr(node_id).await {
-        tracing::warn!("merge_pr {workspace_key}: {e}");
+    if let Err(e) = provider.merge(&ws).await {
+        tracing::warn!("merge {workspace_key}: {e:?}");
         emit_err(&format!("merge failed: {e}"));
         return;
     }
@@ -2011,11 +1984,12 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
     // but our stored copy won't reflect MERGED until the next poll.
     // Broadcast `PrMerged` so the TUI can flash a footer notice and
     // the user doesn't think the keypress did nothing.
-    let pr_label = pr.id.key.clone();
-    let _ = config.bus.send(Event::PrMerged {
-        workspace_key: workspace_key.clone(),
-        pr_label,
-    });
+    if let Some(pr_label) = pr_label {
+        let _ = config.bus.send(Event::PrMerged {
+            workspace_key: workspace_key.clone(),
+            pr_label,
+        });
+    }
 }
 
 /// Handle `Command::RequestReviewers`: add the given GitHub logins
@@ -2049,37 +2023,21 @@ pub async fn handle_request_reviewers(
         ));
         return;
     };
-    let Some(pr) = ws.pr.as_ref() else {
-        emit_err(&format!(
-            "request_reviewers: workspace {workspace_key} has no PR"
-        ));
-        return;
-    };
-    let Some(node_id) = pr.node_id.as_deref() else {
-        emit_err("request_reviewers: PR has no node_id (need to repoll first)");
-        return;
-    };
-
-    let chain = CredentialChain::new()
-        .with(EnvProvider::new("GH_TOKEN"))
-        .with(EnvProvider::new("GITHUB_TOKEN"))
-        .with(CommandProvider::new("gh", &["auth", "token"]));
-    let cred = match chain.resolve("github").await {
-        Ok(c) => c,
+    let provider = match build_github_provider().await {
+        Ok(p) => p,
         Err(e) => {
-            emit_err(&format!("github credentials: {e}"));
+            emit_err(&e);
             return;
         }
     };
-    let client = match GhClient::from_credential(cred).await {
-        Ok(c) => c,
-        Err(e) => {
-            emit_err(&format!("github client init: {e}"));
-            return;
-        }
-    };
-    if let Err(e) = client.request_reviewers(node_id, &logins).await {
-        tracing::warn!("request_reviewers {workspace_key} {logins:?}: {e}");
+    // UFCS — the inherent `GhClient::request_reviewers(node_id,
+    // logins)` shadows the trait method that takes `&Workspace`.
+    // Calling through the trait keeps the server's mutation
+    // pipeline provider-agnostic.
+    if let Err(e) =
+        <GhClient as pilot_core::TaskProvider>::request_reviewers(&provider, &ws, &logins).await
+    {
+        tracing::warn!("request_reviewers {workspace_key} {logins:?}: {e:?}");
         emit_err(&format!("request reviewers failed: {e}"));
     } else {
         tracing::info!("requested reviewers {logins:?} on workspace {workspace_key}");
@@ -2113,38 +2071,17 @@ pub async fn handle_add_assignees(
         ));
         return;
     };
-    // Prefer the PR's node_id; fall back to the first issue. Both
-    // are `Assignable`s.
-    let node_id = ws
-        .pr
-        .as_ref()
-        .and_then(|p| p.node_id.as_deref())
-        .or_else(|| ws.gh_issues.first().and_then(|t| t.node_id.as_deref()));
-    let Some(node_id) = node_id else {
-        emit_err("add_assignees: workspace has no PR / issue with a node_id");
-        return;
-    };
-
-    let chain = CredentialChain::new()
-        .with(EnvProvider::new("GH_TOKEN"))
-        .with(EnvProvider::new("GITHUB_TOKEN"))
-        .with(CommandProvider::new("gh", &["auth", "token"]));
-    let cred = match chain.resolve("github").await {
-        Ok(c) => c,
+    let provider = match build_github_provider().await {
+        Ok(p) => p,
         Err(e) => {
-            emit_err(&format!("github credentials: {e}"));
+            emit_err(&e);
             return;
         }
     };
-    let client = match GhClient::from_credential(cred).await {
-        Ok(c) => c,
-        Err(e) => {
-            emit_err(&format!("github client init: {e}"));
-            return;
-        }
-    };
-    if let Err(e) = client.add_assignees(node_id, &logins).await {
-        tracing::warn!("add_assignees {workspace_key} {logins:?}: {e}");
+    if let Err(e) =
+        <GhClient as pilot_core::TaskProvider>::add_assignees(&provider, &ws, &logins).await
+    {
+        tracing::warn!("add_assignees {workspace_key} {logins:?}: {e:?}");
         emit_err(&format!("add assignees failed: {e}"));
     } else {
         tracing::info!("added assignees {logins:?} on workspace {workspace_key}");

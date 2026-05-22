@@ -1739,7 +1739,11 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::Archive => {
-                if let Some(sk) = session_key {
+                // Two-press latch — sidebar owns the latch state
+                // (paints "[Shift+X again to confirm]" chrome) and
+                // returns the session key only on the second
+                // consecutive press. First press just arms.
+                if let Some(sk) = self.sidebar.arm_or_fire_archive() {
                     cmds.push(IpcCommand::Kill { session_key: sk });
                 }
             }
@@ -2207,6 +2211,7 @@ impl<T: TerminalAdapter> Model<T> {
                 pilot_tui_core::action::ActionKind::NewWorkspace => Some(Action::NewWorkspace),
                 pilot_tui_core::action::ActionKind::OpenSandbox => Some(Action::OpenSandbox),
                 pilot_tui_core::action::ActionKind::MergePr => Some(Action::MergePr),
+                pilot_tui_core::action::ActionKind::Archive => Some(Action::Archive),
                 _ => None,
             };
             if let Some(action) = action {

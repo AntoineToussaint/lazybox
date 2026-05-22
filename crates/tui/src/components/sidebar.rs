@@ -643,6 +643,24 @@ impl Sidebar {
         self.latches.armed(TRIGGER_KILL)
     }
 
+    /// Two-press archive latch. First call returns `None` (arms the
+    /// latch + paints the warning chrome); second call inside the
+    /// latch window returns `Some(session_key)` and the caller fires
+    /// the destructive `Kill`. Sessions other than the one armed
+    /// reset the latch.
+    ///
+    /// Used by `Model::dispatch_action(Archive)` so the catalog
+    /// path drives the same latch the inline Shift+X handler used
+    /// to. Returns None when there's no workspace selected.
+    pub fn arm_or_fire_archive(&mut self) -> Option<SessionKey> {
+        let key = self.selected_session_key().cloned()?;
+        if self.latches.arm_or_fire(TRIGGER_KILL, key.clone()) {
+            Some(key)
+        } else {
+            None
+        }
+    }
+
     /// Total unread activity items across all VISIBLE workspaces. Used
     /// by the top header's `N new` badge — only the current mailbox's
     /// unread is counted, so cycling Inbox→Snoozed shows different
@@ -1310,23 +1328,12 @@ impl Sidebar {
                 PaneOutcome::Consumed
             }
 
-            // ── Kill session (two-press confirmation) ─────────────────
-            // `resolve_kill` produces the Intent unconditionally
-            // when a workspace is focused; the `ConfirmLatch` here
-            // gates the actual fire on the second consecutive press.
-            (KeyCode::Char('X'), m) if m.contains(KeyModifiers::SHIFT) => {
-                let Some(session_key) = self.selected_session_key().cloned() else {
-                    return PaneOutcome::Consumed;
-                };
-                if !self.latches.arm_or_fire(TRIGGER_KILL, session_key.clone()) {
-                    return PaneOutcome::Consumed;
-                }
-                let intent = crate::intent::resolve_kill(self.selected_workspace());
-                if let crate::intent::Intent::KillWorkspace { session_key } = intent {
-                    cmds.push(Command::Kill { session_key });
-                }
-                PaneOutcome::Consumed
-            }
+            // Shift+X Archive is now handled by the catalog
+            // dispatch path in `Model::dispatch_action` — it calls
+            // `Sidebar::arm_or_fire_archive` which drives the same
+            // two-press latch this match arm used to. First press
+            // arms (sidebar chrome shows "press again to confirm");
+            // second within the latch window fires `Kill`.
 
             // Shift+M MergePr is now handled by the catalog
             // dispatch path in `Model::dispatch_action` — it does

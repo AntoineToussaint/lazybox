@@ -527,6 +527,86 @@ impl ActionDef {
     }
 }
 
+/// Workspace-scoped availability lookup for an `ActionKind`.
+///
+/// Defers to the existing `intent::*` resolvers for the actions
+/// that already have one — i.e. we don't reinvent the merge-ready
+/// or work-classifier predicates; the catalog reuses them. Actions
+/// without a resolver (Refresh, OpenHelp, OpenSettings, Quit, …)
+/// return `true` unconditionally — they're always usable when the
+/// pane that owns them has focus.
+///
+/// Returns `false` when `workspace` is `None` and the action needs
+/// one (most Workspace-section actions). Use the section info to
+/// avoid passing `None` to actions that can't sensibly act on it.
+pub fn availability(
+    kind: ActionKind,
+    workspace: Option<&pilot_core::Workspace>,
+) -> bool {
+    use crate::intent;
+    let has_ws = workspace.is_some();
+    match kind {
+        // Workspace actions that DO have a resolver — reuse it so
+        // the catalog and the keyboard path never disagree on
+        // whether a thing is doable.
+        ActionKind::MergePr => matches!(
+            intent::resolve_merge(workspace),
+            intent::Intent::MergePr { .. },
+        ),
+        ActionKind::Work => intent::classify_work(workspace, &[]).is_some(),
+        ActionKind::OpenEditor => matches!(
+            intent::resolve_open_editor(workspace),
+            intent::Intent::OpenEditor,
+        ),
+        ActionKind::AdoptSessions => matches!(
+            intent::resolve_adopt(workspace),
+            intent::Intent::MountAdoptPicker { .. },
+        ),
+        ActionKind::Archive => matches!(
+            intent::resolve_kill(workspace),
+            intent::Intent::KillWorkspace { .. },
+        ),
+        ActionKind::SpawnShell => matches!(
+            intent::resolve_spawn_shell(workspace),
+            intent::Intent::SpawnShell { .. },
+        ),
+        ActionKind::Reply => matches!(
+            intent::resolve_reply(workspace),
+            intent::Intent::MountReply { .. },
+        ),
+        // Workspace actions without a resolver yet — gate purely on
+        // the workspace's existence. These all need a target.
+        ActionKind::OpenWorkspace
+        | ActionKind::SpawnAgent
+        | ActionKind::MarkAllRead
+        | ActionKind::ToggleSnooze
+        | ActionKind::RequestReviewers
+        | ActionKind::AddAssignees => has_ws,
+        // Activity actions need a workspace AND that workspace
+        // having some activity to act on. The pane that owns this
+        // section already enforces "has activity"; the catalog
+        // returns `has_ws` for the looser check + lets the surface
+        // tighten further if it wants.
+        ActionKind::ToggleActivity
+        | ActionKind::ToggleRow
+        | ActionKind::SelectRow
+        | ActionKind::ToggleDescription
+        | ActionKind::UndoMarkRead => has_ws,
+        // Global / no-workspace-needed actions.
+        ActionKind::NewWorkspace
+        | ActionKind::OpenSandbox
+        | ActionKind::CyclePane
+        | ActionKind::Refresh
+        | ActionKind::OpenHelp
+        | ActionKind::OpenSettings
+        | ActionKind::Quit
+        | ActionKind::DetachPane
+        | ActionKind::ResizeSplitter
+        | ActionKind::TerminalScroll
+        | ActionKind::LeaveTerminal => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,6 +631,18 @@ mod tests {
         let a = Action::SpawnAgent("claude".into());
         let def = ActionDef::for_action(&a);
         assert_eq!(def.kind, ActionKind::SpawnAgent);
+    }
+
+    #[test]
+    fn availability_without_workspace_blocks_workspace_actions() {
+        // Sanity: Workspace-scoped actions can't fire without a
+        // target. Global ones still can.
+        assert!(!availability(ActionKind::Work, None));
+        assert!(!availability(ActionKind::MergePr, None));
+        assert!(!availability(ActionKind::Archive, None));
+        assert!(availability(ActionKind::Refresh, None));
+        assert!(availability(ActionKind::OpenHelp, None));
+        assert!(availability(ActionKind::NewWorkspace, None));
     }
 
     #[test]

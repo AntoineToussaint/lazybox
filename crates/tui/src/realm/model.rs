@@ -174,47 +174,6 @@ impl PaneFocus {
     }
 }
 
-/// Actions offered by the sidebar right-click context menu.
-///
-/// Each variant is a thin alias for "the IpcCommand a particular
-/// keyboard shortcut would have dispatched." The menu is a parallel
-/// surface for discoverability — the actions themselves go through
-/// the same code paths the keybindings hit, so no separate
-/// behavior shows up here.
-///
-/// New actions should resolve to an existing `intent` or a single
-/// `IpcCommand`; if you find yourself adding a branch with bespoke
-/// state mutation, route through `intent::resolve_*` first so the
-/// keyboard path and the menu path stay in lockstep.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SidebarCtxAction {
-    SpawnClaude,
-    SpawnShell,
-    OpenEditor,
-    MarkAllRead,
-    /// Shift+M equivalent — only offered for PR workspaces in a
-    /// merge-ready state.
-    MergePr,
-    /// Shift+X equivalent — kills sessions + drops the workspace.
-    Archive,
-}
-
-impl SidebarCtxAction {
-    /// Footer-friendly label shown in the picker. Includes the
-    /// matching keystroke so the menu trains the user on the
-    /// keyboard equivalent for next time.
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::SpawnClaude => "spawn claude  (c)",
-            Self::SpawnShell => "spawn shell  (s)",
-            Self::OpenEditor => "open editor  (e)",
-            Self::MarkAllRead => "mark all read  (m)",
-            Self::MergePr => "merge PR  (Shift+M)",
-            Self::Archive => "archive  (Shift+X)",
-        }
-    }
-}
-
 /// Top-level application state.
 pub struct Model<T: TerminalAdapter> {
     pub app: Application<Id, Msg, UserEvent>,
@@ -367,11 +326,12 @@ pub struct Model<T: TerminalAdapter> {
     /// so a re-added workspace gets a fresh fetch.
     pr_details_fetched: std::collections::HashSet<pilot_core::WorkspaceKey>,
     /// Active sidebar right-click context menu state: the workspace
-    /// row the menu was raised over plus the ordered list of actions
-    /// the picker is offering. `Msg::ChoicePicked` indexes back into
-    /// `1` and dispatches the same IpcCommand the matching keyboard
-    /// shortcut would have. None when no menu is open.
-    pending_sidebar_context: Option<(pilot_core::SessionKey, Vec<SidebarCtxAction>)>,
+    /// row the menu was raised over plus the ordered list of catalog
+    /// `Action`s the picker is offering. `Msg::ChoicePicked` indexes
+    /// back into the Vec and dispatches the same IpcCommand the
+    /// matching keyboard shortcut would have. None when no menu is
+    /// open.
+    pending_sidebar_context: Option<(pilot_core::SessionKey, Vec<pilot_tui_core::action::Action>)>,
 }
 
 /// Custom Port that drains events from an `mpsc::Receiver`. Pilot
@@ -1250,6 +1210,7 @@ impl<T: TerminalAdapter> Model<T> {
         // same IpcCommand the matching keyboard shortcut would.
         // Empty pick (Esc) clears the stash silently.
         if matches!(self.modal_stack.last(), Some(Id::SidebarContext)) {
+            use pilot_tui_core::action::Action;
             let stash = self.pending_sidebar_context.take();
             self.pop_modal();
             if let (Some((session_key, actions)), Some(&idx)) =
@@ -1258,16 +1219,16 @@ impl<T: TerminalAdapter> Model<T> {
             {
                 let workspace_key = pilot_core::WorkspaceKey::new(session_key.as_str().to_string());
                 match action {
-                    SidebarCtxAction::SpawnClaude => {
+                    Action::SpawnAgent(agent_id) => {
                         cmds.push(IpcCommand::Spawn {
                             session_key: session_key.clone(),
                             session_id: None,
-                            kind: pilot_ipc::TerminalKind::Agent("claude".into()),
+                            kind: pilot_ipc::TerminalKind::Agent(agent_id.clone()),
                             cwd: None,
                             initial_prompt: None,
                         });
                     }
-                    SidebarCtxAction::SpawnShell => {
+                    Action::SpawnShell => {
                         cmds.push(IpcCommand::Spawn {
                             session_key: session_key.clone(),
                             session_id: None,
@@ -1276,26 +1237,34 @@ impl<T: TerminalAdapter> Model<T> {
                             initial_prompt: None,
                         });
                     }
-                    SidebarCtxAction::OpenEditor => {
+                    Action::OpenEditor => {
                         // Same path as the `e` keyboard shortcut.
                         // Selection already moved on to this row
                         // via the right-click hit-test; `open_editor`
                         // operates on whatever's selected.
                         self.open_editor();
                     }
-                    SidebarCtxAction::MarkAllRead => {
+                    Action::MarkAllRead => {
                         cmds.push(IpcCommand::MarkRead {
                             session_key: session_key.clone(),
                         });
                     }
-                    SidebarCtxAction::MergePr => {
+                    Action::MergePr => {
                         cmds.push(IpcCommand::MergePr { workspace_key });
                     }
-                    SidebarCtxAction::Archive => {
+                    Action::Archive => {
                         cmds.push(IpcCommand::Kill {
                             session_key: session_key.clone(),
                         });
                     }
+                    // The menu only offers the six variants above
+                    // (see `mount_sidebar_context_menu`'s candidate
+                    // list). Anything else is a bug — fail loud so
+                    // it surfaces in tests rather than silently
+                    // doing nothing.
+                    other => tracing::warn!(
+                        "sidebar context menu: unhandled action {other:?}",
+                    ),
                 }
                 self.redraw = true;
             }
@@ -2959,40 +2928,62 @@ impl<T: TerminalAdapter> Model<T> {
     /// so the user never sees a no-op entry.
     fn mount_sidebar_context_menu(&mut self, session_key: pilot_core::SessionKey) {
         use crate::realm::components::choice::Choice;
+        use pilot_tui_core::action::{Action, ActionDef, ActionKind, availability};
         use tuirealm::subscription::{EventClause, Sub, SubClause};
 
-        // Snapshot the workspace state so we can vary the action
-        // list per-row. Default to a baseline list if we can't find
-        // the workspace (rare — the click hit-test already had to
-        // resolve to a row to call this).
-        let workspace = self
-            .sidebar
-            .workspace_by_key(&session_key)
-            .cloned();
+        // Snapshot the workspace state — the catalog's `availability`
+        // resolver takes `Option<&Workspace>` and decides whether each
+        // action makes sense for this row. No bespoke gating logic
+        // duplicated here — `availability` defers to the same
+        // `intent::*` resolvers the keyboard path uses.
+        let workspace = self.sidebar.workspace_by_key(&session_key).cloned();
 
-        let mut actions: Vec<SidebarCtxAction> = Vec::with_capacity(6);
-        actions.push(SidebarCtxAction::SpawnClaude);
-        actions.push(SidebarCtxAction::SpawnShell);
-        // OpenEditor only when at least one editor was detected at
-        // startup — otherwise the menu offers an action that
-        // immediately falls through to a "no editor found" notice.
-        if !self.setup.editors.is_empty() {
-            actions.push(SidebarCtxAction::OpenEditor);
-        }
-        actions.push(SidebarCtxAction::MarkAllRead);
-        // Merge PR only when the workspace has a PR in a merge-ready
-        // state — mirrors the resolver used by `Shift+M`.
-        if let Some(ws) = workspace.as_ref()
-            && matches!(
-                crate::intent::resolve_merge(Some(ws)),
-                crate::intent::Intent::MergePr { .. }
-            )
-        {
-            actions.push(SidebarCtxAction::MergePr);
-        }
-        actions.push(SidebarCtxAction::Archive);
+        // Catalog-driven menu: list every workspace-scoped action,
+        // then filter by `availability`. Adding a new action to
+        // the catalog automatically surfaces it here (gated by its
+        // resolver) — no more "remembered to wire menu but forgot
+        // help."
+        let candidates: Vec<Action> = vec![
+            Action::SpawnAgent("claude".into()),
+            Action::SpawnShell,
+            Action::OpenEditor,
+            Action::MarkAllRead,
+            Action::MergePr,
+            Action::Archive,
+        ];
+        let actions: Vec<Action> = candidates
+            .into_iter()
+            .filter(|a| {
+                if !availability(a.kind(), workspace.as_ref()) {
+                    return false;
+                }
+                // Surface-specific extra gate: don't offer "open
+                // editor" when no editor was detected at startup.
+                // The catalog can't know about pilot's setup state,
+                // so the menu enforces this one.
+                if a.kind() == ActionKind::OpenEditor && self.setup.editors.is_empty() {
+                    return false;
+                }
+                true
+            })
+            .collect();
 
-        let labels: Vec<String> = actions.iter().map(|a| a.label().to_string()).collect();
+        // Labels format: `<verb>  (<key>)` — same as before, just
+        // sourced from the catalog so a default_keys remap flows
+        // through automatically. `SpawnAgent("claude")` overrides
+        // the static "spawn agent" label with the actual agent id.
+        let labels: Vec<String> = actions
+            .iter()
+            .map(|a| {
+                let def = ActionDef::for_action(a);
+                let verb = match a {
+                    Action::SpawnAgent(id) => format!("spawn {id}"),
+                    _ => def.label.to_string(),
+                };
+                format!("{verb}  ({})", def.default_keys)
+            })
+            .collect();
+
         self.pending_sidebar_context = Some((session_key, actions));
         let modal = Choice::single("Actions", labels)
             .title("Workspace actions")

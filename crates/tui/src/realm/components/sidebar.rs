@@ -136,13 +136,6 @@ impl Sidebar {
         self.inner.selected_session_key()
     }
 
-    /// Two-press archive latch — see the inner method's docs.
-    /// `Model::dispatch_action(Archive)` calls this to fire the
-    /// destructive Kill on the second consecutive `Shift+X`.
-    pub fn arm_or_fire_archive(&mut self) -> Option<pilot_core::SessionKey> {
-        self.inner.arm_or_fire_archive()
-    }
-
     /// Currently configured default agent (drives `w` work-on-this
     /// spawn). Used by the orchestrator's `dispatch_action` so the
     /// catalog path makes the same `resolve_work` call as the

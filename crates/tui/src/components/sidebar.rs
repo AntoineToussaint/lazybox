@@ -33,10 +33,6 @@
 use crate::{PaneId, PaneOutcome};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-/// Trigger for the kill-workspace confirm latch (`Shift-X`).
-/// First press arms, second press fires — see `LatchSet`.
-const TRIGGER_KILL: crate::latch_set::KeyTrigger =
-    crate::latch_set::KeyTrigger::new(KeyCode::Char('X'), KeyModifiers::SHIFT);
 /// Trigger for the long-snooze confirm latch (`Shift-Z`).
 const TRIGGER_LONG_SNOOZE: crate::latch_set::KeyTrigger =
     crate::latch_set::KeyTrigger::new(KeyCode::Char('Z'), KeyModifiers::SHIFT);
@@ -229,7 +225,6 @@ impl Sidebar {
             latches: {
                 let mut s: crate::latch_set::LatchSet<SessionKey> =
                     crate::latch_set::LatchSet::new();
-                s.register(TRIGGER_KILL);
                 s.register(TRIGGER_LONG_SNOOZE);
                 s
             },
@@ -639,27 +634,6 @@ impl Sidebar {
         self.cursor = selectable[target];
     }
 
-    pub fn kill_armed(&self) -> Option<&SessionKey> {
-        self.latches.armed(TRIGGER_KILL)
-    }
-
-    /// Two-press archive latch. First call returns `None` (arms the
-    /// latch + paints the warning chrome); second call inside the
-    /// latch window returns `Some(session_key)` and the caller fires
-    /// the destructive `Kill`. Sessions other than the one armed
-    /// reset the latch.
-    ///
-    /// Used by `Model::dispatch_action(Archive)` so the catalog
-    /// path drives the same latch the inline Shift+X handler used
-    /// to. Returns None when there's no workspace selected.
-    pub fn arm_or_fire_archive(&mut self) -> Option<SessionKey> {
-        let key = self.selected_session_key().cloned()?;
-        if self.latches.arm_or_fire(TRIGGER_KILL, key.clone()) {
-            Some(key)
-        } else {
-            None
-        }
-    }
 
     /// Total unread activity items across all VISIBLE workspaces. Used
     /// by the top header's `N new` badge — only the current mailbox's
@@ -1677,7 +1651,6 @@ impl Sidebar {
                         focused,
                         is_cursor: i == self.cursor,
                         max_pr_num_width,
-                        kill_armed: self.latches.armed(TRIGGER_KILL) == Some(key),
                         long_snooze_armed: self.latches.armed(TRIGGER_LONG_SNOOZE) == Some(key),
                         asking: workspace.is_some_and(|w| {
                             crate::agent_attention::workspace_is_asking(w, &self.agents_asking)

@@ -36,10 +36,10 @@ pub struct WorkspaceRowCtx<'a> {
     /// render pass. Every row's pr-number cell pads to this width
     /// so the role / asking columns line up across rows.
     pub max_pr_num_width: usize,
-    /// `LatchSet::armed(...) == Some(this_key)` for each trigger,
-    /// precomputed by the sidebar's render fn so the row builder
-    /// doesn't need to know about which keys arm which latches.
-    pub kill_armed: bool,
+    /// `LatchSet::armed(...) == Some(this_key)` for the long-snooze
+    /// latch — paints the `[snooze 1y?]` chrome. The kill latch
+    /// retired when Archive moved to a Confirm modal (every
+    /// destructive action goes through `ActionConfirm` now).
     pub long_snooze_armed: bool,
     /// Any agent in this workspace is in `AgentState::Asking`.
     pub asking: bool,
@@ -250,9 +250,7 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 }
 
 fn cell_kill_mark(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let text = if ctx.kill_armed {
-        " [kill?]"
-    } else if ctx.long_snooze_armed {
+    let text = if ctx.long_snooze_armed {
         " [snooze 1y?]"
     } else {
         return Cell::empty();
@@ -411,7 +409,6 @@ mod tests {
             focused: true,
             is_cursor: false,
             max_pr_num_width: 4,
-            kill_armed: false,
             long_snooze_armed: false,
             asking: false,
             badges: vec![],
@@ -532,18 +529,6 @@ mod tests {
         assert_eq!(row.fill_style, Some(theme.row_unfocused()));
     }
 
-    /// Kill latch armed: kill mark cell renders ` [kill?]`.
-    #[test]
-    fn cell_kill_mark_renders_when_kill_armed() {
-        let task = make_task("owner/repo#1", "x");
-        let ws = Workspace::from_task(task.clone(), fixed_time());
-        let theme = theme();
-        let mut ctx = ctx_for(&ws, &task, &theme);
-        ctx.kill_armed = true;
-        let cell = cell_kill_mark(&ctx);
-        assert_eq!(cell.spans[0].content.as_ref(), " [kill?]");
-    }
-
     /// Long-snooze armed wins over no-latch (and trumps kill in the
     /// "neither armed" case via empty return).
     #[test]
@@ -607,7 +592,6 @@ mod tests {
             focused: false,
             is_cursor: false,
             max_pr_num_width: 3,
-            kill_armed: false,
             long_snooze_armed: false,
             asking: false,
             badges: vec![],

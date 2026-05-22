@@ -1607,6 +1607,109 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
+    /// Single fan-out from a catalog `Action` to its effect (IPC
+    /// command, modal mount, focus shift, …). Surfaces (keyboard,
+    /// right-click menu, future remap UI) all call this so behavior
+    /// stays consistent across them.
+    ///
+    /// **Returns** the IPC commands the action produces, if any.
+    /// UI-only effects (modal mounts, focus moves) happen via
+    /// `&mut self` and aren't reflected in the return.
+    ///
+    /// **Coverage**: today this handles the *simple* workspace
+    /// actions whose effect is one IpcCommand against the focused
+    /// row. The complex ones (Work / Snooze / AdoptSessions / Reply
+    /// / etc.) still live in `handle_pane_key`'s match arms — they
+    /// either need extra resolver / modal logic or already route
+    /// cleanly through the existing `Intent` resolvers. As panes'
+    /// key handlers migrate to use this dispatcher, more cases
+    /// move in.
+    pub fn dispatch_action(
+        &mut self,
+        action: &pilot_tui_core::action::Action,
+    ) -> Vec<IpcCommand> {
+        use pilot_tui_core::action::Action;
+        let mut cmds = Vec::new();
+        // Workspace-scoped actions need a target — grab the
+        // sidebar's selection. Mismatch (no selection) silently
+        // drops the action; the catalog's `availability` gates the
+        // surface from offering it in that state.
+        let session_key = self
+            .sidebar
+            .selected_workspace_key()
+            .cloned();
+        match action {
+            Action::SpawnShell => {
+                if let Some(sk) = session_key {
+                    cmds.push(IpcCommand::Spawn {
+                        session_key: sk,
+                        session_id: None,
+                        kind: pilot_ipc::TerminalKind::Shell,
+                        cwd: None,
+                        initial_prompt: None,
+                    });
+                }
+            }
+            Action::SpawnAgent(agent_id) => {
+                if let Some(sk) = session_key {
+                    cmds.push(IpcCommand::Spawn {
+                        session_key: sk,
+                        session_id: None,
+                        kind: pilot_ipc::TerminalKind::Agent(agent_id.clone()),
+                        cwd: None,
+                        initial_prompt: None,
+                    });
+                }
+            }
+            Action::MarkAllRead => {
+                if let Some(sk) = session_key {
+                    cmds.push(IpcCommand::MarkRead { session_key: sk });
+                }
+            }
+            Action::Archive => {
+                if let Some(sk) = session_key {
+                    cmds.push(IpcCommand::Kill { session_key: sk });
+                }
+            }
+            Action::MergePr => {
+                if let Some(sk) = session_key {
+                    cmds.push(IpcCommand::MergePr {
+                        workspace_key: pilot_core::WorkspaceKey::new(sk.as_str().to_string()),
+                    });
+                }
+            }
+            Action::Refresh => {
+                use crate::realm::components::footer::{Notice, NoticeSeverity};
+                cmds.push(IpcCommand::Refresh);
+                // Pre-arm the bg_poll indicator so the user gets
+                // feedback on the keystroke — same as the
+                // `Shift+R` handler did inline before.
+                self.status.note_poll_progress("github", "manual refresh requested");
+                self.status.notice = Some(Notice::new(
+                    "refreshing…".to_string(),
+                    NoticeSeverity::Hint,
+                ));
+                self.redraw = true;
+            }
+            Action::OpenHelp => {
+                self.mount_help();
+            }
+            Action::OpenSettings => {
+                self.open_settings();
+            }
+            // Actions not yet handled here stay in the existing
+            // handlers. As we migrate, the per-key match arms in
+            // `handle_pane_key` and the pane wrappers get deleted
+            // and the case lands here.
+            other => {
+                tracing::debug!(
+                    "dispatch_action: {other:?} not yet migrated; falling back to legacy handler",
+                );
+            }
+        }
+        cmds
+    }
+
     /// Top-level key handler when no modal is active. Routes Tab,
     /// global escapes, and forwards everything else to the focused
     /// pane wrapper.
@@ -1981,6 +2084,54 @@ impl<T: TerminalAdapter> Model<T> {
         // round-trip and call the pane wrappers' direct entry points.
         let ct = realm_key_to_crossterm(&key);
         let mut cmds: Vec<IpcCommand> = Vec::new();
+
+        // Catalog lookup first. If the keystroke matches a catalog
+        // `Action` AND `dispatch_action` knows how to handle it
+        // (returns a non-empty Vec or mutates state), the pane's
+        // direct handler is skipped. Per-key match arms in the
+        // panes still cover what `dispatch_action` doesn't yet —
+        // see that function's coverage comment.
+        if self.focus != PaneFocus::Terminals
+            && let Some(chord) = key_event_to_chord(ct)
+            && let Some(def) = find_action_for_chord(&chord, self.focus)
+        {
+            use pilot_tui_core::action::Action;
+            // Reconstruct a runtime Action from the static ActionDef.
+            // `SpawnAgent` is the only variant with runtime data
+            // (the agent id) — we don't yet have per-agent catalog
+            // entries (`c` → claude, `x` → codex, …), so we let
+            // those keys fall through to the pane handler. Once
+            // the catalog grows per-agent entries (driven by the
+            // user's enabled agents list), this map widens.
+            // Whitelist of catalog actions whose `dispatch_action`
+            // path is fully equivalent to the existing per-pane
+            // handler. Excluded: `MergePr` (sidebar mounts a
+            // Confirm modal before firing) + `Archive` (sidebar
+            // uses a two-press latch). Adding those here would
+            // bypass the safety affordance — they migrate when
+            // dispatch_action grows the confirm / latch wrappers.
+            // OpenHelp / OpenSettings / Refresh are also catalog
+            // actions but the global match arms above already
+            // catch them before this point, so their entries here
+            // are functionally dead (kept for future cleanup).
+            let action: Option<Action> = match def.kind {
+                pilot_tui_core::action::ActionKind::SpawnShell => Some(Action::SpawnShell),
+                pilot_tui_core::action::ActionKind::MarkAllRead => Some(Action::MarkAllRead),
+                _ => None,
+            };
+            if let Some(action) = action {
+                cmds.extend(self.dispatch_action(&action));
+                // Drain queued cmds + early return — the catalog
+                // handled the key, the pane shouldn't see it.
+                self.sync_panes();
+                for cmd in cmds {
+                    self.send_cmd(cmd);
+                }
+                self.redraw = true;
+                return;
+            }
+        }
+
         match self.focus {
             PaneFocus::Sidebar => self.sidebar.handle_key_direct(ct, &mut cmds),
             PaneFocus::Right => self.right.handle_key_direct(ct, &mut cmds),
@@ -3567,6 +3718,86 @@ fn paint_selection(buf: &mut ratatui::buffer::Buffer, rect: Rect, start: (u16, u
         }
         y = y.saturating_add(1);
     }
+}
+
+/// Convert a crossterm `KeyEvent` to a typed `KeyChord` for catalog
+/// lookup. Uppercase letters auto-shift so `KeyEvent { Char('M'),
+/// no_mods }` produces the same chord as `KeyEvent { Char('m'),
+/// SHIFT }` — matches the catalog's parser convention. Returns
+/// `None` for codes the catalog doesn't model (function keys,
+/// release events).
+fn key_event_to_chord(
+    key: crossterm::event::KeyEvent,
+) -> Option<pilot_tui_core::action::KeyChord> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use pilot_tui_core::action::{ChordCode, KeyChord, NamedKey};
+
+    let mut ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let _ = &mut ctrl;
+    let mut shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let code = match key.code {
+        KeyCode::Char(c) => {
+            if c.is_ascii_uppercase() {
+                shift = true;
+            }
+            ChordCode::Char(c.to_ascii_lowercase())
+        }
+        KeyCode::Tab => ChordCode::Named(NamedKey::Tab),
+        KeyCode::Enter => ChordCode::Named(NamedKey::Enter),
+        KeyCode::Esc => ChordCode::Named(NamedKey::Esc),
+        KeyCode::Backspace => ChordCode::Named(NamedKey::Backspace),
+        KeyCode::Up => ChordCode::Named(NamedKey::Up),
+        KeyCode::Down => ChordCode::Named(NamedKey::Down),
+        KeyCode::Left => ChordCode::Named(NamedKey::Left),
+        KeyCode::Right => ChordCode::Named(NamedKey::Right),
+        KeyCode::Home => ChordCode::Named(NamedKey::Home),
+        KeyCode::End => ChordCode::Named(NamedKey::End),
+        KeyCode::PageUp => ChordCode::Named(NamedKey::PageUp),
+        KeyCode::PageDown => ChordCode::Named(NamedKey::PageDown),
+        KeyCode::Delete => ChordCode::Named(NamedKey::Delete),
+        KeyCode::Insert => ChordCode::Named(NamedKey::Insert),
+        // Space is reported as Char(' ') by crossterm — covered by
+        // the Char arm above. Function keys / unknown variants fall
+        // through to None.
+        _ => return None,
+    };
+    let _ = ctrl;
+    Some(KeyChord::Single {
+        ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
+        shift,
+        alt,
+        code,
+    })
+}
+
+/// Look up the catalog `Action` matching `chord` in the sections
+/// the focused pane should resolve. Globals always match; pane-
+/// scoped sections only match when their pane is focused.
+///
+/// Returns `None` when no catalog entry has a matching default
+/// chord — the caller falls back to the legacy match arms (used
+/// today for navigation keys, latches, and any action whose
+/// `default_keys` is a presentation form like `g/G`).
+fn find_action_for_chord(
+    chord: &pilot_tui_core::action::KeyChord,
+    focus: PaneFocus,
+) -> Option<&'static pilot_tui_core::action::ActionDef> {
+    use pilot_tui_core::action::{ActionDef, Section};
+    let allowed = |s: Section| -> bool {
+        match (s, focus) {
+            (Section::Global, _) => true,
+            (Section::Workspace, PaneFocus::Sidebar) => true,
+            (Section::Activity, PaneFocus::Right) => true,
+            // Terminal section binds to actual PTY keys; we don't
+            // route them through the catalog yet — the terminal
+            // pane forwards `all keys` to the PTY and the escape
+            // sequence (`]]`) has its own latch logic.
+            _ => false,
+        }
+    };
+    ActionDef::all()
+        .find(|d| allowed(d.section) && d.default_chord().as_ref() == Some(chord))
 }
 
 /// Spawn a new `pilot` process pinned to the focused pane's

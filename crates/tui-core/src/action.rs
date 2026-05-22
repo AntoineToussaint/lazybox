@@ -527,6 +527,36 @@ impl ActionDef {
     }
 }
 
+/// State-aware label for the footer / context menu, defaulting to
+/// the catalog's static `label` when no override applies. The
+/// override exists because a handful of actions want a workspace-
+/// dependent verb in the footer — e.g. `Work` says "fix CI" when CI
+/// failed vs "implement issue" for an open issue (the `classify_work`
+/// resolver already knows this), and `Archive` reads as "archive
+/// (kills sessions)" when there are running sessions. Centralized
+/// here so every surface (footer, menu, future remap UI) reads the
+/// same label.
+pub fn contextual_label(
+    action: &Action,
+    workspace: Option<&pilot_core::Workspace>,
+) -> &'static str {
+    use crate::intent;
+    let default = ActionDef::for_action(action).label;
+    match action {
+        Action::Work => intent::classify_work(workspace, &[])
+            .map(|p| p.label())
+            .unwrap_or(default),
+        Action::Archive => {
+            if workspace.is_some_and(|w| !w.sessions.is_empty()) {
+                "archive (kills sessions)"
+            } else {
+                default
+            }
+        }
+        _ => default,
+    }
+}
+
 /// Workspace-scoped availability lookup for an `ActionKind`.
 ///
 /// Defers to the existing `intent::*` resolvers for the actions

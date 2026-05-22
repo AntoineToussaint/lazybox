@@ -1217,20 +1217,18 @@ impl RightPane {
         "Activity"
     }
 
-    /// Bindings shown in the hint bar.
-    /// State-aware short list for the footer hint bar. Surfaces the
-    /// keys most useful given what the user is currently looking at:
-    /// `w address comments` only when comments are selected, `b` only
-    /// when there's a body to toggle, etc. Full alphabet stays in
-    /// `keymap()` (consumed by the `?` help modal).
+    /// State-aware short list for the footer hint bar.
+    ///
+    /// Catalog-driven: build the relevant `Action`s, then map to
+    /// `Binding`s via `ActionDef::for_action`. The `v select row` /
+    /// `toggle row` flip is the one pane-local label override —
+    /// it depends on selection state (a value the catalog doesn't
+    /// see), so we override after the catalog lookup.
     pub fn contextual_bindings(&self) -> Vec<crate::Binding> {
         use crate::Binding;
-        // Footer is for ACTIONABLE keys only — j/k / g / G scroll
-        // is alphabet the user learns once. Full keymap behind `?`.
-        let mut out: Vec<Binding> = Vec::with_capacity(6);
+        use pilot_tui_core::action::{Action, ActionDef, contextual_label};
 
         let workspace = self.workspace.as_ref();
-        let has_workspace = workspace.is_some();
         let has_activity = workspace.map(|w| !w.activity.is_empty()).unwrap_or(false);
         let selected: Vec<usize> = self.feed.selected().iter().copied().collect();
         let has_selection = !selected.is_empty();
@@ -1240,47 +1238,37 @@ impl RightPane {
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
 
-        // `w` label comes from the SAME classifier the keypress
-        // dispatcher uses. No parallel hardcoded match to drift —
-        // see `intent::classify_work` + `WorkPriority::label`.
-        let work_label = crate::intent::classify_work(workspace, &selected).map(|p| p.label());
-
-        // `r` only when there's an activity row under the cursor —
-        // reply is always relative to the focused message, so it
-        // makes no sense to advertise it on an empty activity feed.
-        // The handler itself opens the PR-thread textarea (no
-        // per-comment threading yet), but the hint follows the
-        // user's mental model: "I'm looking at a message, r replies."
-        let _ = has_workspace;
+        let mut actions: Vec<Action> = Vec::with_capacity(6);
         if has_activity {
-            out.push(Binding {
-                keys: "r",
-                label: "reply",
-            });
+            actions.push(Action::Reply);
         }
-        if let Some(label) = work_label {
-            out.push(Binding { keys: "w", label });
+        if crate::intent::classify_work(workspace, &selected).is_some() {
+            actions.push(Action::Work);
         }
-        // Always advertise `v` when there's activity — even with
-        // existing selections, the user can press `v` to toggle
-        // more rows in or out. The label flips so the footer hints
-        // the next action ("select" → start a selection, "toggle"
-        // → there's a selection in progress).
         if has_activity {
-            let label = if has_selection {
-                "toggle row"
-            } else {
-                "select row"
-            };
-            out.push(Binding { keys: "v", label });
+            actions.push(Action::SelectRow);
         }
         if has_body {
-            out.push(Binding {
-                keys: "d",
-                label: "description",
-            });
+            actions.push(Action::ToggleDescription);
         }
-        out
+
+        actions
+            .into_iter()
+            .map(|a| {
+                let def = ActionDef::for_action(&a);
+                // Selection state isn't in `workspace`; override
+                // `v select row` ↔ `v toggle row` here. Every other
+                // label flows through `contextual_label`.
+                let label = match &a {
+                    Action::SelectRow if has_selection => "toggle row",
+                    _ => contextual_label(&a, workspace),
+                };
+                Binding {
+                    keys: def.default_keys,
+                    label,
+                }
+            })
+            .collect()
     }
 
     pub fn keymap(&self) -> &'static [crate::Binding] {

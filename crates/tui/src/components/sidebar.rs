@@ -922,107 +922,69 @@ impl Sidebar {
     }
 
     /// Bindings advertised in the hint bar.
-    /// State-aware short list for the footer hint bar. Reads the
-    /// focused row's task + session state and surfaces the 3–5 keys
-    /// most useful right now — Shift-M when the PR is READY, `w`
-    /// when there's CI to fix or an issue to start, `Shift-X` when
-    /// there are sessions to kill, etc. The full alphabet lives in
-    /// `keymap()` (used by the `?` help modal).
+    /// State-aware short list for the footer hint bar.
+    ///
+    /// Catalog-driven: the actions worth surfacing right now are
+    /// pushed as `pilot_tui_core::action::Action`s, then converted
+    /// to `Binding`s through `ActionDef::for_action` + the centralized
+    /// `contextual_label` helper. Adding a new sidebar action means
+    /// landing it in the catalog and pushing it here — the footer,
+    /// `?` help, and right-click menu all pick it up automatically.
     pub fn contextual_bindings(&self) -> Vec<crate::Binding> {
         use crate::Binding;
-        // Footer is for ACTIONABLE keys only — `j/k`, `Tab`, etc.
-        // are navigation alphabet the user learns once and doesn't
-        // need echoed on every row. Full alphabet is one `?` away.
-        let mut out: Vec<Binding> = Vec::with_capacity(6);
+        use pilot_tui_core::action::{Action, ActionDef, contextual_label};
 
         let workspace = self.selected_workspace();
-        let has_sessions = workspace.map(|w| !w.sessions.is_empty()).unwrap_or(false);
         let is_ready = self.merge_target_for_cursor().is_some();
-        let primary = workspace.and_then(|w| w.primary_task());
+        let mut actions: Vec<Action> = Vec::with_capacity(6);
 
-        // Primary state-specific action first — what the user most
-        // likely wants to do on THIS row. The `w` label comes
-        // straight from the same `classify_work` the keypress
-        // dispatcher uses, so the hint can't drift from what `w`
-        // actually fires.
+        // Primary action: what's most likely useful on THIS row.
+        // Merge takes precedence over Work when the PR is ready.
         if is_ready {
-            out.push(Binding {
-                keys: "Shift-M",
-                label: "merge",
-            });
-        } else if let Some(priority) = crate::intent::classify_work(workspace, &[]) {
-            out.push(Binding {
-                keys: "w",
-                label: priority.label(),
-            });
+            actions.push(Action::MergePr);
+        } else if crate::intent::classify_work(workspace, &[]).is_some() {
+            actions.push(Action::Work);
         }
 
-        // `r` reply belongs to Activity, not the sidebar — you reply
-        // to the message you're focused on, and the sidebar doesn't
-        // have an activity cursor. Footer hint stays scoped to the
-        // right pane to match the action's actual context.
-        let _ = primary;
-
-        // Read-all shortcut surfaces when the focused workspace has
-        // unread activity — the user asked for it back on the
-        // sidebar after we trimmed contextual hints. Cheap signal,
-        // matches the email-client "I" / "mark all as read" muscle
-        // memory.
+        // Mark-all-read surfaces when there's unread activity.
         if workspace.is_some_and(|w| w.unread_count() > 0) {
-            out.push(Binding {
-                keys: "m",
-                label: "read all",
-            });
+            actions.push(Action::MarkAllRead);
         }
 
-        // Session lifecycle. Whenever a workspace is selected we
-        // advertise the spawn shortcuts AND `e` editor — those are
-        // always relevant regardless of whether a session is already
-        // running (the user might want a second shell, an editor on
-        // the same worktree, etc.). `Shift-X` kill only makes sense
-        // when there's something to kill. `n new workspace` is
-        // always available — creating a fresh pre-PR workspace is
-        // independent of whichever row is selected, and hiding the
-        // shortcut on populated rows made it impossible to discover
-        // unless the inbox happened to be empty.
+        // Session lifecycle. Spawn shortcuts + editor + archive
+        // surface whenever a workspace is selected. `Shift-X`
+        // archive's "(kills sessions)" suffix flips automatically
+        // via `contextual_label`.
         if workspace.is_some() {
-            out.push(Binding {
-                keys: "c",
-                label: "claude",
-            });
-            out.push(Binding {
-                keys: "s",
-                label: "shell",
-            });
-            out.push(Binding {
-                keys: "e",
-                label: "editor",
-            });
-            // `Shift-X` archives the focused workspace (removes from
-            // inbox + kills any sessions). Always available when a
-            // workspace is selected — gating on has_sessions hid the
-            // shortcut for the most common case (read-only review
-            // workspace the user wants to dismiss).
-            let kill_label = if has_sessions {
-                "archive (kills sessions)"
-            } else {
-                "archive"
-            };
-            out.push(Binding {
-                keys: "Shift-X",
-                label: kill_label,
-            });
+            actions.push(Action::SpawnAgent("claude".into()));
+            actions.push(Action::SpawnShell);
+            actions.push(Action::OpenEditor);
+            actions.push(Action::Archive);
         }
-        out.push(Binding {
-            keys: "n",
-            label: "new workspace",
-        });
-        out.push(Binding {
-            keys: "Shift-N",
-            label: "new sandbox",
-        });
+        actions.push(Action::NewWorkspace);
+        actions.push(Action::OpenSandbox);
 
-        out
+        // Convert to Binding rows. `default_keys` flows through
+        // unchanged today; user rebinding will override here once
+        // the config layer lands.
+        actions
+            .into_iter()
+            .map(|a| {
+                let def = ActionDef::for_action(&a);
+                // SpawnAgent's runtime id needs surface-specific
+                // labeling — the catalog's static "spawn agent"
+                // would be too generic.
+                let label = match &a {
+                    Action::SpawnAgent(id) if id == "claude" => "claude",
+                    Action::SpawnAgent(_) => def.label,
+                    _ => contextual_label(&a, workspace),
+                };
+                Binding {
+                    keys: def.default_keys,
+                    label,
+                }
+            })
+            .collect()
     }
 
     pub fn keymap(&self) -> &'static [crate::Binding] {

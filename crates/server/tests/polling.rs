@@ -639,6 +639,91 @@ async fn create_empty_workspace_broadcasts_upserted() {
         other => panic!("expected WorkspaceUpserted, got {other:?}"),
     }
 }
+// ── Legacy sandbox migration ─────────────────────────────────────────
+
+#[tokio::test]
+async fn migrate_legacy_sandbox_stamps_project_key() {
+    let config = ServerConfig::in_memory();
+    // Seed the pre-Stage-1 state: a workspace at key `sandbox`
+    // with no `project_key` field.
+    let key = pilot_core::WorkspaceKey::new("sandbox");
+    let workspace = pilot_core::Workspace::empty(key.clone(), "main", Utc::now());
+    assert!(workspace.project_key.is_none());
+    let record = pilot_store::WorkspaceRecord {
+        key: key.as_str().to_string(),
+        created_at: workspace.created_at,
+        workspace_json: serde_json::to_string(&workspace).ok(),
+    };
+    config.store.save_workspace(&record).unwrap();
+
+    polling::migrate_legacy_sandbox(&config);
+
+    // Workspace now carries the local-sandbox project key.
+    let migrated: pilot_core::Workspace = serde_json::from_str(
+        &config
+            .store
+            .get_workspace(&key)
+            .unwrap()
+            .unwrap()
+            .workspace_json
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        migrated.project_key,
+        Some(pilot_core::ProjectKey::local("sandbox"))
+    );
+    // And the project record was registered.
+    let project_key = pilot_core::ProjectKey::local("sandbox");
+    assert!(config.store.get_project(&project_key).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn migrate_legacy_sandbox_is_idempotent() {
+    let config = ServerConfig::in_memory();
+    // No legacy workspace at all → first call is a no-op, second
+    // call is also a no-op. Daemon startup runs unconditionally, so
+    // we exercise the empty-store path explicitly.
+    polling::migrate_legacy_sandbox(&config);
+    polling::migrate_legacy_sandbox(&config);
+    assert!(config.store.list_projects().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn migrate_legacy_sandbox_skips_already_migrated_workspaces() {
+    let config = ServerConfig::in_memory();
+    // A sandbox workspace that ALREADY has a project_key — must not
+    // be touched by the migration (its project_key stays, no new
+    // project is created).
+    let key = pilot_core::WorkspaceKey::new("sandbox");
+    let mut workspace = pilot_core::Workspace::empty(key.clone(), "main", Utc::now());
+    workspace.project_key = Some(pilot_core::ProjectKey::local("custom"));
+    let record = pilot_store::WorkspaceRecord {
+        key: key.as_str().to_string(),
+        created_at: workspace.created_at,
+        workspace_json: serde_json::to_string(&workspace).ok(),
+    };
+    config.store.save_workspace(&record).unwrap();
+
+    polling::migrate_legacy_sandbox(&config);
+
+    let after: pilot_core::Workspace = serde_json::from_str(
+        &config
+            .store
+            .get_workspace(&key)
+            .unwrap()
+            .unwrap()
+            .workspace_json
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        after.project_key,
+        Some(pilot_core::ProjectKey::local("custom")),
+        "migration must not overwrite an existing project_key"
+    );
+}
+
 // ── Session layout persistence ───────────────────────────────────────
 
 #[tokio::test]

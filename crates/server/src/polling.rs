@@ -1652,6 +1652,55 @@ pub fn create_local_project(config: &ServerConfig, name: &str) -> pilot_core::Pr
     key
 }
 
+/// One-shot post-Stage-4 migration: if a pre-refactor `sandbox`
+/// workspace exists in the store with no `project_key`, create a
+/// "Sandbox" local Project and stamp the workspace with it so the
+/// row reappears under a real Project header instead of landing in
+/// `(no repo)`. Idempotent — already-migrated workspaces (project_key
+/// set) are left alone; a missing sandbox workspace is a no-op.
+///
+/// Called once at daemon startup from both `run_embedded_realm` and
+/// `server_start` so each pilot launch self-heals legacy state.
+pub fn migrate_legacy_sandbox(config: &ServerConfig) {
+    let key = WorkspaceKey::new("sandbox".to_string());
+    let Some(record) = config.store.get_workspace(&key).ok().flatten() else {
+        return;
+    };
+    let Some(json) = record.workspace_json else {
+        return;
+    };
+    let mut workspace: Workspace = match serde_json::from_str(&json) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(
+                "migrate_legacy_sandbox: failed to parse stored workspace: {e}"
+            );
+            return;
+        }
+    };
+    if workspace.project_key.is_some() {
+        // Already migrated — skip.
+        return;
+    }
+    let project_key = create_local_project(config, "Sandbox");
+    workspace.project_key = Some(project_key);
+    let updated = WorkspaceRecord {
+        key: workspace.key.as_str().to_string(),
+        created_at: workspace.created_at,
+        workspace_json: serde_json::to_string(&workspace).ok(),
+    };
+    if let Err(e) = config.store.save_workspace(&updated) {
+        tracing::error!(
+            workspace_key = %updated.key,
+            "migrate_legacy_sandbox: save_workspace failed: {e}",
+        );
+    }
+    let _ = config
+        .bus
+        .send(Event::WorkspaceUpserted(Box::new(workspace)));
+    tracing::info!("migrate_legacy_sandbox: moved `sandbox` workspace under `local-sandbox` project");
+}
+
 /// Set or clear the workspace's `snoozed_until` timestamp. `None`
 /// un-snoozes. Persists + broadcasts so the sidebar's mailbox-aware
 /// rendering re-categorises the row.

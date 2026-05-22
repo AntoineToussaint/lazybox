@@ -261,6 +261,7 @@ async fn run_embedded_realm(
 
     pilot_server::spawn_handler::recover_sessions(&config).await;
     pilot_server::spawn_handler::restore_persisted_sessions(&config).await;
+    pilot_server::polling::migrate_legacy_sandbox(&config);
 
     let serve_config = config.clone();
     tokio::spawn(async move {
@@ -442,6 +443,7 @@ async fn server_start() -> anyhow::Result<()> {
 
     let config = ServerConfig::from_user_config();
     pilot_server::spawn_handler::recover_sessions(&config).await;
+    polling::migrate_legacy_sandbox(&config);
     polling::spawn(config.clone(), resolve_poll_interval());
 
     let factory_config = config.clone();

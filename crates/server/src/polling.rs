@@ -1026,7 +1026,16 @@ async fn prepare_upsert(config: &ServerConfig, key: &WorkspaceKey, task: Task) -
 /// Pulled out so the failure modes are isolated — a store-write
 /// error doesn't suppress the bus broadcast, and a bus-send error
 /// doesn't take down the daemon.
+///
+/// Also ensures the Project this workspace belongs to is registered.
+/// `Workspace::from_task` populates `project_key` from the task's
+/// repo string; we use that here to upsert a Project record so the
+/// sidebar can render a header for it even before the user explicitly
+/// creates the project. Idempotent — re-broadcasting an existing
+/// record on every workspace upsert costs a bus send but keeps the
+/// data model consistent with no extra bookkeeping.
 fn commit_upsert(config: &ServerConfig, key: &WorkspaceKey, workspace: Workspace) {
+    ensure_project_for_workspace(config, &workspace);
     // Serialization failure here means the workspace exists in memory
     // but won't survive a restart — and the silent `.ok()` previously
     // stored `None`, so the next process would read back an empty
@@ -1062,6 +1071,64 @@ fn commit_upsert(config: &ServerConfig, key: &WorkspaceKey, workspace: Workspace
     let _ = config
         .bus
         .send(Event::WorkspaceUpserted(Box::new(workspace)));
+}
+
+/// Ensure a Project record exists for the workspace's parent project,
+/// upserting + broadcasting on first sight. Driven from `commit_upsert`,
+/// so every workspace that flows through polling auto-registers its
+/// containing project. Idempotent — calling repeatedly with the same
+/// workspace re-saves and re-broadcasts the same Project record (cheap).
+///
+/// `Workspace::project_key` is populated by `Workspace::from_task` via
+/// `pilot_core::project_key_for_task`. When it's `None` (back-compat
+/// reads of pre-Project records, or a workspace with no upstream task),
+/// we skip — Stage 1 doesn't try to back-fill projects for orphan
+/// workspaces.
+fn ensure_project_for_workspace(config: &ServerConfig, workspace: &Workspace) {
+    let Some(project_key) = workspace.project_key.clone() else {
+        return;
+    };
+    // Skip the write + broadcast if we've already registered this
+    // project. Keeps bus traffic to one event per project per process
+    // — without this, every workspace upsert would re-fire the project
+    // event and consumers that drain "one event per upsert" would
+    // desync (mark_workspace_read in particular).
+    if matches!(config.store.get_project(&project_key), Ok(Some(_))) {
+        return;
+    }
+    // Display name for the project. Prefer the workspace's
+    // `primary_task().repo` (the "owner/repo" string) when present —
+    // that's what the sidebar header has always shown. Fall back to
+    // the project key's string form.
+    let name = workspace
+        .primary_task()
+        .and_then(|t| t.repo.clone())
+        .unwrap_or_else(|| project_key.as_str().to_string());
+    let project = pilot_core::Project::new(project_key.clone(), name, Utc::now());
+    let json = match serde_json::to_string(&project) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!(
+                project_key = %project_key,
+                "ensure_project: serde_json::to_string(project) failed: {e}",
+            );
+            None
+        }
+    };
+    let record = pilot_store::ProjectRecord {
+        key: project_key.as_str().to_string(),
+        created_at: project.created_at,
+        project_json: json,
+    };
+    if let Err(e) = config.store.save_project(&record) {
+        tracing::error!(
+            project_key = %record.key,
+            "save_project failed: {e}",
+        );
+    }
+    let _ = config
+        .bus
+        .send(Event::ProjectUpserted(Box::new(project)));
 }
 
 /// Heuristic for "is this Task the PR side of a PR/issue pair?".

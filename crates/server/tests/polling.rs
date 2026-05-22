@@ -32,6 +32,23 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+/// Wait for the next `WorkspaceUpserted` event, ignoring any
+/// `ProjectUpserted` (registered the first time polling sees a new
+/// repo). Tests that drain "one event per workspace upsert" can use
+/// this instead of `client.recv()` to stay robust to the Project
+/// auto-register firing alongside the workspace.
+async fn recv_workspace_upsert(client: &mut pilot_ipc::Client) -> Event {
+    loop {
+        let evt = tokio::time::timeout(Duration::from_secs(2), client.recv())
+            .await
+            .expect("client recv timeout")
+            .expect("event");
+        if !matches!(evt, Event::ProjectUpserted(_)) {
+            return evt;
+        }
+    }
+}
+
 fn make_task(key: &str) -> Task {
     // The URL must contain `/pull/` for `Workspace::classify` to put
     // this task in the workspace's PR slot — otherwise it lands as
@@ -376,18 +393,14 @@ async fn mark_workspace_read_broadcasts_upsert() {
     let mut task = make_task("o/r#22");
     task.recent_activity = vec![make_activity("alice", "hi-broadcast")];
     polling::upsert(&config, task).await;
-    // Drain the upsert event from the initial seed.
-    let _seed = tokio::time::timeout(Duration::from_secs(2), client.recv())
-        .await
-        .unwrap();
+    // Drain the workspace upsert from the initial seed. Skips any
+    // ProjectUpserted event the first-sight registration fires.
+    let _seed = recv_workspace_upsert(&mut client).await;
 
     let key = pilot_core::WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#22")));
     polling::mark_workspace_read(&config, &key);
 
-    let evt = tokio::time::timeout(Duration::from_secs(2), client.recv())
-        .await
-        .expect("client receives mark-read upsert")
-        .expect("event");
+    let evt = recv_workspace_upsert(&mut client).await;
     match evt {
         Event::WorkspaceUpserted(w) => {
             assert_eq!(w.unread_count(), 0, "broadcast workspace is read");
@@ -714,10 +727,7 @@ async fn upserts_reach_subscribed_client_through_bus() {
     // Now produce an upsert. The bus should fan it out to the client.
     polling::upsert(&config, make_task("o/r#777")).await;
 
-    let evt = tokio::time::timeout(Duration::from_secs(2), client.recv())
-        .await
-        .expect("client receives upsert")
-        .expect("event");
+    let evt = recv_workspace_upsert(&mut client).await;
     match evt {
         Event::WorkspaceUpserted(w) => {
             assert_eq!(w.pr.as_ref().unwrap().id.key, "o/r#777");

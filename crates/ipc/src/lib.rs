@@ -511,6 +511,14 @@ pub enum Event {
     /// async-channel overhead.
     WorkspaceUpserted(Box<pilot_core::Workspace>),
     WorkspaceRemoved(pilot_core::WorkspaceKey),
+    /// A project (top-level container — github repo, linear team,
+    /// or local) was registered or updated. Sidebar headers render
+    /// from these. Emitted both on initial snapshot replay AND when
+    /// polling discovers a new repo/team.
+    ProjectUpserted(Box<pilot_core::Project>),
+    /// A project was removed (user deleted a local project, or all
+    /// scope/filter rules that pointed at it were dropped).
+    ProjectRemoved(pilot_core::ProjectKey),
     /// Daemon detected that this workspace fell out of scope (the
     /// user removed its repo, narrowed the filter so its task no
     /// longer matches, etc.) AND it has running terminals. The

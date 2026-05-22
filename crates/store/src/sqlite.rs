@@ -104,6 +104,35 @@ impl Store for SqliteStore {
         }
         Ok(out)
     }
+
+    /// Same shape as `list_workspaces` but for the `project:*` prefix.
+    /// The snapshot path uses this to fan out every known Project at
+    /// startup so the sidebar can render headers even before polling
+    /// catches up.
+    fn list_projects(&self) -> Result<Vec<crate::ProjectRecord>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT key, value FROM kv WHERE key LIKE 'project:%'")
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let key: String = row.get(0)?;
+                let value: String = row.get(1)?;
+                Ok((key, value))
+            })
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (key, value) = row.map_err(|e| StoreError::Backend(e.to_string()))?;
+            let key = key.trim_start_matches("project:").to_string();
+            out.push(crate::ProjectRecord {
+                key,
+                created_at: chrono::Utc::now(),
+                project_json: Some(value),
+            });
+        }
+        Ok(out)
+    }
 }
 
 trait OptionalExt<T> {

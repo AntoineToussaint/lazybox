@@ -87,6 +87,13 @@ impl std::fmt::Display for SessionId {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
     pub key: WorkspaceKey,
+    /// The Project this workspace lives under (sidebar grouping
+    /// header). `None` only during back-compat reads of pre-Project
+    /// records; the daemon back-fills via `project_key_from_task`
+    /// before broadcasting. Treat absence as "infer from
+    /// `primary_task().repo`" everywhere else.
+    #[serde(default)]
+    pub project_key: Option<crate::ProjectKey>,
     /// Display name. Defaults to the PR title or the first issue's
     /// title when first created; user can rename.
     pub name: String,
@@ -122,6 +129,7 @@ impl Workspace {
         Self {
             name: key.as_str().to_string(),
             key,
+            project_key: None,
             branch,
             sessions: Vec::new(),
             pr: None,
@@ -185,9 +193,11 @@ impl Workspace {
             .branch
             .clone()
             .unwrap_or_else(|| key.as_str().to_string());
+        let project_key = project_key_for_task(&task);
         let mut ws = Self::empty(key, branch, now);
         ws.name = task.title.clone();
         ws.activity = task.recent_activity.clone();
+        ws.project_key = project_key;
         ws.attach_task(task);
         ws
     }
@@ -425,6 +435,37 @@ fn upsert_by_id(list: &mut Vec<Task>, task: Task) {
 /// before the user gives the workspace a custom name.
 pub fn workspace_key_for(task: &Task) -> String {
     sanitize_key(&format!("{}-{}", task.id.source, task.id.key))
+}
+
+/// Derive the Project key a task should live under. GitHub tasks
+/// with a `owner/repo` string become `ProjectKey::github(owner,
+/// repo)`. Linear tasks with a repo (used as team-id) become
+/// `ProjectKey::linear(team)`. Tasks without an upstream repo
+/// return `None`; the daemon's polling loop is responsible for
+/// not registering a project in that case.
+pub fn project_key_for_task(task: &Task) -> Option<crate::ProjectKey> {
+    let repo = task.repo.as_deref()?.trim();
+    if repo.is_empty() {
+        return None;
+    }
+    match task.id.source.as_str() {
+        "github" => {
+            // `owner/repo` → ProjectKey::github(owner, repo). Repos
+            // without a slash (defensive) are stored as a single-
+            // segment github key — better than dropping them.
+            if let Some((owner, name)) = repo.split_once('/') {
+                Some(crate::ProjectKey::github(owner, name))
+            } else {
+                Some(crate::ProjectKey::new(format!("github-{repo}")))
+            }
+        }
+        "linear" => Some(crate::ProjectKey::linear(repo)),
+        _ => Some(crate::ProjectKey::new(format!(
+            "{}-{}",
+            task.id.source,
+            sanitize_key(repo)
+        ))),
+    }
 }
 
 fn sanitize_key(raw: &str) -> String {

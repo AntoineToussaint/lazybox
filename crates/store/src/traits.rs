@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use pilot_core::WorkspaceKey;
+use pilot_core::{ProjectKey, WorkspaceKey};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -18,6 +18,18 @@ pub struct WorkspaceRecord {
     pub created_at: DateTime<Utc>,
     /// JSON of `pilot_core::Workspace`.
     pub workspace_json: Option<String>,
+}
+
+/// A persisted project record — the parent container that holds
+/// workspaces. JSON-serialized `pilot_core::Project`, keyed by
+/// `ProjectKey`. See the trait methods below for default kv-piggyback
+/// behavior (`project:<key>` prefix) — the same shape `WorkspaceRecord`
+/// uses, so simple kv stores don't need a per-method override.
+#[derive(Debug, Clone)]
+pub struct ProjectRecord {
+    pub key: String,
+    pub created_at: DateTime<Utc>,
+    pub project_json: Option<String>,
 }
 
 /// Abstract storage trait. Implement for SQLite, Postgres, file, etc.
@@ -77,6 +89,41 @@ pub trait Store: Send + Sync {
     /// returns empty — concrete stores should override and scan the
     /// kv table for `workspace:*` prefixes.
     fn list_workspaces(&self) -> Result<Vec<WorkspaceRecord>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    // ── Projects ────────────────────────────────────────────────────
+    //
+    // Top-level containers that hold workspaces. Same kv-piggyback
+    // shape as workspaces (`project:<key>` → JSON) so simple kv
+    // stores get the four methods for free.
+
+    fn get_project(&self, key: &ProjectKey) -> Result<Option<ProjectRecord>, StoreError> {
+        let kv_key = format!("project:{}", key.as_str());
+        let Some(json) = self.get_kv(&kv_key)? else {
+            return Ok(None);
+        };
+        Ok(Some(ProjectRecord {
+            key: key.as_str().to_string(),
+            created_at: Utc::now(),
+            project_json: Some(json),
+        }))
+    }
+
+    fn save_project(&self, record: &ProjectRecord) -> Result<(), StoreError> {
+        let kv_key = format!("project:{}", record.key);
+        let json = record.project_json.clone().unwrap_or_default();
+        self.set_kv(&kv_key, &json)
+    }
+
+    fn delete_project(&self, key: &ProjectKey) -> Result<(), StoreError> {
+        self.delete_kv(&format!("project:{}", key.as_str()))
+    }
+
+    /// List every project the store knows about. Default impl returns
+    /// empty — concrete stores should override and scan the kv table
+    /// for `project:*` prefixes.
+    fn list_projects(&self) -> Result<Vec<ProjectRecord>, StoreError> {
         Ok(Vec::new())
     }
 }

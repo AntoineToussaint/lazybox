@@ -6,6 +6,7 @@
 use crate::pane::Binding;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
+use pilot_tui_core::action::{ActionDef, Section};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::Event;
@@ -31,8 +32,62 @@ pub struct Help {
 }
 
 impl Help {
-    /// Build from a list of sections.
+    /// Build from a list of sections. Legacy entry point — kept for
+    /// the splash / setup flows that want a curated help list. The
+    /// regular `?` modal uses `from_catalog` so it reads from the
+    /// single source of truth.
     pub fn new(sections: Vec<HelpSection>) -> Self {
+        Self { sections }
+    }
+
+    /// Build the help panel from `ActionDef::all()` — the canonical
+    /// catalog. Every action surfaces; the user sees a complete
+    /// reference instead of the pane-stitched subset the legacy
+    /// constructor produced. Sections collapse to one flat list
+    /// today (the renderer doesn't yet section-header), so we drop
+    /// the section labels — the catalog's ordering already groups
+    /// by `Section` so the visual grouping survives.
+    pub fn from_catalog() -> Self {
+        // Build a stable per-section static buffer so the public
+        // `bindings: &'static [Binding]` shape on `HelpSection`
+        // stays untouched. The catalog itself isn't `&[Binding]` —
+        // it's `impl Iterator<Item = &ActionDef>` — so we adapt by
+        // leaking a Vec into a `Box<[_]>` cast back to a static
+        // slice. One-shot, leak is fine: the help modal is mounted
+        // and unmounted but the static slice persists for the
+        // process lifetime, which costs ~30 bytes per action.
+        fn leak<T>(v: Vec<T>) -> &'static [T] {
+            Box::leak(v.into_boxed_slice())
+        }
+        let mut by_section: std::collections::BTreeMap<u8, Vec<Binding>> =
+            std::collections::BTreeMap::new();
+        for def in ActionDef::all() {
+            let order = match def.section {
+                Section::Global => 0,
+                Section::Workspace => 1,
+                Section::Activity => 2,
+                Section::Terminal => 3,
+            };
+            by_section.entry(order).or_default().push(Binding {
+                keys: def.default_keys,
+                label: def.label,
+            });
+        }
+        let sections: Vec<HelpSection> = by_section
+            .into_iter()
+            .map(|(order, bindings)| {
+                let title = match order {
+                    0 => "Global",
+                    1 => "Workspace",
+                    2 => "Activity",
+                    _ => "Terminal",
+                };
+                HelpSection {
+                    title,
+                    bindings: leak(bindings),
+                }
+            })
+            .collect();
         Self { sections }
     }
 

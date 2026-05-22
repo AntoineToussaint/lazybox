@@ -2852,72 +2852,21 @@ impl<T: TerminalAdapter> Model<T> {
     /// plus the global section. Idempotent: re-pressing `?` while
     /// help is up is a no-op (the existing modal stays).
     fn mount_help(&mut self) {
-        use crate::pane::Binding;
-        use crate::realm::components::help::{Help, HelpSection};
+        use crate::realm::components::help::Help;
         use tuirealm::subscription::{EventClause, Sub, SubClause};
 
         if self.modal_stack.last() == Some(&Id::Help) {
             return;
         }
-
-        // Global bindings — the keys that work regardless of which
-        // pane has focus (except inside a live terminal, where most
-        // of these are forwarded to the PTY instead). Each pane's
-        // local keymap is built from its own `keymap()` and doesn't
-        // duplicate these.
-        const GLOBAL: &[Binding] = &[
-            Binding {
-                keys: "Tab",
-                label: "cycle panes",
-            },
-            Binding {
-                keys: "Shift-Arrows",
-                label: "resize splitters",
-            },
-            Binding {
-                keys: "Ctrl-Shift-D",
-                label: "detach pane",
-            },
-            Binding {
-                keys: ",",
-                label: "settings",
-            },
-            Binding {
-                keys: "Shift-R",
-                label: "refresh from sources",
-            },
-            Binding {
-                keys: "?",
-                label: "this help",
-            },
-            Binding {
-                keys: "q q",
-                label: "quit",
-            },
-        ];
-
-        let sections = vec![
-            HelpSection {
-                title: "Global",
-                bindings: GLOBAL,
-            },
-            HelpSection {
-                title: "Sidebar",
-                bindings: self.sidebar.keymap(),
-            },
-            HelpSection {
-                title: "Activity",
-                bindings: self.right.keymap(),
-            },
-            HelpSection {
-                title: "Terminals",
-                bindings: self.terminals.keymap(),
-            },
-        ];
-
+        // Help reads from `ActionDef::all()` — the single source of
+        // truth. Every action surfaces, grouped by section. Previously
+        // each pane's `keymap()` was stitched in here with a separate
+        // hand-curated GLOBAL block, which is how `g` (sidebar refresh)
+        // shipped without ever appearing in the help. Now adding an
+        // entry to the catalog automatically surfaces it.
         let _ = self.app.mount(
             Id::Help,
-            Box::new(Help::new(sections)),
+            Box::new(Help::from_catalog()),
             vec![Sub::new(EventClause::Any, SubClause::Always)],
         );
         self.modal_stack.push(Id::Help);

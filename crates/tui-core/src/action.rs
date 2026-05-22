@@ -65,8 +65,6 @@ pub enum Action {
     /// sidebar groups workspaces under. Asks for a name. Idempotent
     /// on collision (re-opens the existing local project).
     NewProject,
-    /// Create-or-focus the shared local Sandbox project.
-    OpenSandbox,
     /// Mark every activity row on the focused workspace read.
     MarkAllRead,
     /// Toggle snooze on the focused workspace (short snooze, ~4h).
@@ -174,7 +172,6 @@ pub enum ActionKind {
     OpenEditor,
     NewWorkspace,
     NewProject,
-    OpenSandbox,
     MarkAllRead,
     ToggleSnooze,
     Archive,
@@ -220,7 +217,6 @@ impl Action {
             Action::OpenEditor => ActionKind::OpenEditor,
             Action::NewWorkspace => ActionKind::NewWorkspace,
             Action::NewProject => ActionKind::NewProject,
-            Action::OpenSandbox => ActionKind::OpenSandbox,
             Action::MarkAllRead => ActionKind::MarkAllRead,
             Action::ToggleSnooze => ActionKind::ToggleSnooze,
             Action::Archive => ActionKind::Archive,
@@ -369,17 +365,6 @@ impl ActionDef {
                 describe: "Create a local project (a top-level container, asks for a name).",
                 section: Section::Workspace,
             },
-            ActionKind::OpenSandbox => &Self {
-                kind: ActionKind::OpenSandbox,
-                // Stage 2 of the Project refactor moves the Shift-N
-                // binding to `NewProject`. OpenSandbox stays in the
-                // catalog (reachable via the right-click menu / palette)
-                // until Stage 3 retires it entirely.
-                default_keys: "",
-                label: "sandbox",
-                describe: "Focus the shared local sandbox project (non-provider).",
-                section: Section::Workspace,
-            },
             ActionKind::MarkAllRead => &Self {
                 kind: ActionKind::MarkAllRead,
                 default_keys: "m",
@@ -523,7 +508,6 @@ impl ActionDef {
             ActionKind::ToggleSnooze,
             ActionKind::NewWorkspace,
             ActionKind::NewProject,
-            ActionKind::OpenSandbox,
             ActionKind::MergePr,
             ActionKind::RequestReviewers,
             ActionKind::AddAssignees,
@@ -765,7 +749,6 @@ impl ActionKind {
             ActionKind::OpenEditor => "open_editor",
             ActionKind::NewWorkspace => "new_workspace",
             ActionKind::NewProject => "new_project",
-            ActionKind::OpenSandbox => "open_sandbox",
             ActionKind::MarkAllRead => "mark_all_read",
             ActionKind::ToggleSnooze => "toggle_snooze",
             ActionKind::Archive => "archive",
@@ -890,7 +873,6 @@ pub fn availability(
         // Global / no-workspace-needed actions.
         ActionKind::NewWorkspace
         | ActionKind::NewProject
-        | ActionKind::OpenSandbox
         | ActionKind::CyclePane
         | ActionKind::Refresh
         | ActionKind::OpenHelp
@@ -1112,8 +1094,8 @@ mod tests {
             }
             // Empty `default_keys` is a catalog entry that has no
             // default chord (still reachable via menus / palette,
-            // not via a key). Stage 2's OpenSandbox is the first
-            // such entry; Stage 3 removes the variant entirely.
+            // not via a key). No current entries use this — kept
+            // for future "menu-only" actions.
             if def.default_keys.is_empty() {
                 continue;
             }

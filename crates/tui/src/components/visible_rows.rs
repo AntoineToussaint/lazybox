@@ -1,18 +1,17 @@
 //! Pure builder for the sidebar's `Vec<VisibleRow>`.
 //!
 //! What "visible" means: the workspaces in the focused mailbox,
-//! grouped by repo, with synthetic groups for sandboxes and
-//! task-less workspaces. Each group emits a `RepoHeader`; if not
-//! collapsed, the workspace rows follow (and their session
-//! sub-rows when a workspace has 2+ sessions).
+//! grouped by their parent Project, with a `(no repo)` bucket for
+//! task-less / project-less workspaces. Each group emits a
+//! `RepoHeader`; if not collapsed, the workspace rows follow (and
+//! their session sub-rows when a workspace has 2+ sessions).
 //!
 //! Extracted from `Sidebar::recompute_visible_inner` so the
-//! classification matrix — which repo a workspace lands under,
-//! whether an empty subscribed repo emits a header, when the
-//! `(sandbox)` synthetic group appears — is testable as a free
-//! function with no `Sidebar` instance. Cursor preservation
-//! stays on `Sidebar` (it reads/writes `self.cursor`); this
-//! function is purely the rebuild half.
+//! classification matrix — which project a workspace lands under,
+//! whether an empty subscribed repo emits a header — is testable
+//! as a free function with no `Sidebar` instance. Cursor
+//! preservation stays on `Sidebar` (it reads/writes `self.cursor`);
+//! this function is purely the rebuild half.
 
 use crate::components::sidebar::{Mailbox, RepoSummary, VisibleRow, mailbox_membership};
 use pilot_core::{Project, ProjectKey, SessionKey, Workspace};
@@ -45,7 +44,6 @@ pub struct ComputeInputs<'a> {
 }
 
 const NO_REPO: &str = "(no repo)";
-const SANDBOX: &str = "(sandbox)";
 
 /// Pure function: build the sidebar's visible-row list + per-repo
 /// summaries from the workspace map, mailbox filter, and
@@ -62,12 +60,18 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         })
         .collect();
 
-    // Step 2: bucket by repo. Sandbox workspaces (key prefix
-    // `sandbox-`) get their own synthetic group; workspaces with
-    // no repo land under `(no repo)`.
+    // Step 2: bucket by project. A workspace's parent project is
+    // looked up via `pilot_core::workspace_project_key` → resolved
+    // through the daemon's project table to get the display name.
+    // Workspaces with no project_key (back-compat reads of pre-
+    // Stage-1 records OR orphans whose task.repo failed to derive)
+    // land under `(no repo)`.
     let mut by_repo: BTreeMap<String, Vec<(&SessionKey, &Workspace)>> = BTreeMap::new();
     for (k, w) in &filtered {
-        by_repo.entry(repo_of(k, w)).or_default().push((k, w));
+        by_repo
+            .entry(group_label(w, input.projects))
+            .or_default()
+            .push((k, w));
     }
 
     // Step 3: sort each bucket by primary task's updated_at desc.
@@ -148,13 +152,31 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     ComputeOutcome { visible, summaries }
 }
 
-fn repo_of(k: &SessionKey, w: &Workspace) -> String {
-    if k.as_str().starts_with("sandbox-") {
-        return SANDBOX.to_string();
+fn group_label(w: &Workspace, projects: &BTreeMap<ProjectKey, Project>) -> String {
+    // Prefer the project_key → project record path: the display
+    // name matches the standalone Project header so they collapse
+    // into one bucket.
+    if let Some(pk) = pilot_core::workspace_project_key(w)
+        && let Some(p) = projects.get(&pk)
+    {
+        return p.name.clone();
     }
-    w.primary_task()
-        .and_then(|t| t.repo.clone())
-        .unwrap_or_else(|| NO_REPO.to_string())
+    // Workspace knows its project but we haven't seen the record
+    // yet (startup race, or polling hasn't completed). Fall back
+    // to the workspace's primary task's repo — for github
+    // workspaces this is the same `"owner/repo"` string the
+    // project record carries, so once polling registers the
+    // project the bucket label is identical and no row jumps.
+    if let Some(repo) = w.primary_task().and_then(|t| t.repo.clone())
+        && !repo.is_empty()
+    {
+        return repo;
+    }
+    // Orphan: no project_key AND no upstream task. The old
+    // "(sandbox)" bucket retired in Stage 4 — those workspaces
+    // land here too. A future migration can lift them into a
+    // local Project by name.
+    NO_REPO.to_string()
 }
 
 #[cfg(test)]
@@ -309,21 +331,30 @@ mod tests {
         assert_eq!(out.summaries.get("owner/r").unwrap().active, 1);
     }
 
-    /// Sandbox-keyed workspace lands under the `(sandbox)` group,
-    /// not under its task's repo.
+    /// Workspace with project_key set lands under its project's
+    /// display-name header, NOT the legacy `task.repo`-derived one.
+    /// Drives the post-Stage-4 grouping invariant.
     #[test]
-    fn sandbox_workspaces_grouped_under_sandbox_header() {
+    fn workspaces_group_under_project_display_name() {
         let mut ws = HashMap::new();
         let mut w = workspace_with_task("k1", Some("owner/r"), 10);
-        w.key = WorkspaceKey("sandbox-foo".into());
+        let pk = ProjectKey::github("acme", "tool");
+        w.project_key = Some(pk.clone());
         ws.insert(SessionKey::from(&w.key), w);
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = pilot_config::AttentionConfig::default();
         let asking = HashSet::new();
-        let projects = BTreeMap::new();
+        let mut projects = BTreeMap::new();
+        projects.insert(
+            pk.clone(),
+            Project::new(pk, "acme/tool", chrono::Utc::now()),
+        );
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
-        assert!(out.summaries.contains_key("(sandbox)"));
+        assert!(
+            out.summaries.contains_key("acme/tool"),
+            "header should be the project's display name"
+        );
         assert!(!out.summaries.contains_key("owner/r"));
     }
 

@@ -333,18 +333,6 @@ pub enum Command {
     CreateProject {
         name: String,
     },
-    /// Create a repo-less "sandbox" workspace for ad-hoc work that
-    /// isn't tied to a PR / issue / repo. Daemon mkdirs
-    /// `~/.pilot/v2/sandboxes/<slug>/` and saves a Workspace with
-    /// key `sandbox-<slug>`. Sessions spawned against the sandbox
-    /// use that directory as their worktree.
-    ///
-    /// Deprecated in favor of `CreateProject` (Stage 2 of the
-    /// Project refactor) — kept on the wire so Stage 3's `n`-flow
-    /// migration can land cleanly without an IPC break.
-    CreateSandbox {
-        name: String,
-    },
     /// Update the per-session tile/tab layout (`SessionLayout`).
     /// Persisted so the user's split arrangement survives restart.
     /// `layout_json` carries the serialized `pilot_core::SessionLayout`

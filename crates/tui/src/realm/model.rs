@@ -1809,15 +1809,6 @@ impl<T: TerminalAdapter> Model<T> {
             Action::NewProject => {
                 self.mount_new_project_input();
             }
-            Action::OpenSandbox => {
-                cmds.push(IpcCommand::CreateSandbox {
-                    name: String::new(),
-                });
-                self.preselect = Some(Preselect {
-                    workspace_key: pilot_core::SessionKey::from("sandbox"),
-                    session_id_raw: None,
-                });
-            }
             Action::MarkAllRead => {
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::MarkRead { session_key: sk });
@@ -2155,26 +2146,12 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 return;
             }
-            // `Shift-N` from the sidebar: create-or-focus the
-            // shared Sandbox workspace. Idempotent — the daemon's
-            // handler just re-broadcasts when the sandbox already
-            // exists. No name prompt (single sandbox per profile);
-            // future named sub-sandboxes would surface as sessions
-            // inside the shared workspace.
-            Key::Char('N')
-                if key.modifiers.contains(KeyModifiers::SHIFT)
-                    && self.focus == PaneFocus::Sidebar =>
-            {
-                self.q_latch.disarm();
-                let _ = self.client.send(IpcCommand::CreateSandbox {
-                    name: String::new(),
-                });
-                self.preselect = Some(Preselect {
-                    workspace_key: pilot_core::SessionKey::from("sandbox"),
-                    session_id_raw: None,
-                });
-                return;
-            }
+            // `Shift-N` from the sidebar: create a new Project. The
+            // catalog-dispatch path (`Action::NewProject`) handles
+            // this above when `find_action_for_chord` matches the
+            // chord; this legacy arm is intentionally absent —
+            // OpenSandbox is retired (Stage 4 of the Project
+            // refactor) and Shift-N belongs to NewProject.
             // `,` opens the Settings palette — small picker with
             // "Add a repo (github)" / "Edit agents" / etc. Familiar
             // mnemonic from VS Code / Sublime ("Cmd-," for
@@ -2275,7 +2252,7 @@ impl<T: TerminalAdapter> Model<T> {
             // bypass the safety affordance — they migrate when
             // dispatch_action grows the confirm / latch wrappers.
             //
-            // `OpenEditor`, `NewWorkspace`, `OpenSandbox`,
+            // `OpenEditor`, `NewWorkspace`, `NewProject`,
             // `OpenHelp`, `OpenSettings`, `Refresh` already have
             // global match arms in `handle_pane_key` that fire
             // before this point — the whitelist entries here cover
@@ -2290,7 +2267,6 @@ impl<T: TerminalAdapter> Model<T> {
                 pilot_tui_core::action::ActionKind::OpenEditor => Some(Action::OpenEditor),
                 pilot_tui_core::action::ActionKind::NewWorkspace => Some(Action::NewWorkspace),
                 pilot_tui_core::action::ActionKind::NewProject => Some(Action::NewProject),
-                pilot_tui_core::action::ActionKind::OpenSandbox => Some(Action::OpenSandbox),
                 pilot_tui_core::action::ActionKind::MergePr => Some(Action::MergePr),
                 pilot_tui_core::action::ActionKind::Archive => Some(Action::Archive),
                 pilot_tui_core::action::ActionKind::ToggleSnooze => Some(Action::ToggleSnooze),

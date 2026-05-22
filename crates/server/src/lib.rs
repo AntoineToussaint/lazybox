@@ -391,7 +391,6 @@ impl Server {
                         pilot_ipc::Command::Kill { .. } => "Kill",
                         pilot_ipc::Command::CreateWorkspace { .. } => "CreateWorkspace",
                         pilot_ipc::Command::CreateProject { .. } => "CreateProject",
-                        pilot_ipc::Command::CreateSandbox { .. } => "CreateSandbox",
                         pilot_ipc::Command::AdoptSessions { .. } => "AdoptSessions",
                         pilot_ipc::Command::RequestReviewers { .. } => "RequestReviewers",
                         pilot_ipc::Command::AddAssignees { .. } => "AddAssignees",
@@ -583,15 +582,6 @@ impl Server {
                         }
                         pilot_ipc::Command::CreateProject { name } => {
                             polling::create_local_project(&self.config, &name);
-                        }
-                        pilot_ipc::Command::CreateSandbox { name } => {
-                            // Single shared sandbox per profile. The
-                            // wire-side `name` is currently ignored —
-                            // the workspace always lands at key
-                            // `sandbox`. Future: support named
-                            // sub-sandboxes under the same root.
-                            let _ = name;
-                            polling::ensure_sandbox_workspace(&self.config);
                         }
                         pilot_ipc::Command::Snooze { session_key, until } => {
                             let key = pilot_core::WorkspaceKey::new(

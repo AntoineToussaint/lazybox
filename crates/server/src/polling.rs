@@ -1652,54 +1652,6 @@ pub fn create_local_project(config: &ServerConfig, name: &str) -> pilot_core::Pr
     key
 }
 
-/// Ensure the single shared "sandbox" workspace exists, mkdir its
-/// directory, and broadcast. Idempotent — calling repeatedly just
-/// re-broadcasts the existing record. One sandbox per profile is
-/// the design: it's the ad-hoc scratch space, and multiple named
-/// sandboxes was UX overkill for "I want to play with code without
-/// a repo." Sessions spawned against it land in
-/// `~/.pilot/v2/sandbox/` so the dir is stable across restarts.
-pub fn ensure_sandbox_workspace(config: &ServerConfig) -> WorkspaceKey {
-    let key = WorkspaceKey::new("sandbox".to_string());
-    let path = pilot_core::paths::sandbox_dir(key.as_str());
-    if let Err(e) = std::fs::create_dir_all(&path) {
-        tracing::error!(
-            sandbox = %path.display(),
-            "sandbox dir create failed: {e}",
-        );
-    }
-    // Load existing record if present so we don't clobber any
-    // sessions / state already attached. Only create fresh on the
-    // first invocation per profile.
-    let existing = config
-        .store
-        .get_workspace(&key)
-        .ok()
-        .flatten()
-        .and_then(|r| r.workspace_json)
-        .and_then(|j| serde_json::from_str::<Workspace>(&j).ok());
-    let workspace = existing.unwrap_or_else(|| {
-        let mut w = Workspace::empty(key.clone(), "main", Utc::now());
-        w.name = "Sandbox".to_string();
-        w
-    });
-    let record = WorkspaceRecord {
-        key: key.as_str().to_string(),
-        created_at: workspace.created_at,
-        workspace_json: serde_json::to_string(&workspace).ok(),
-    };
-    if let Err(e) = config.store.save_workspace(&record) {
-        tracing::error!(
-            workspace_key = %record.key,
-            "save_workspace (sandbox) failed: {e}",
-        );
-    }
-    let _ = config
-        .bus
-        .send(Event::WorkspaceUpserted(Box::new(workspace)));
-    key
-}
-
 /// Set or clear the workspace's `snoozed_until` timestamp. `None`
 /// un-snoozes. Persists + broadcasts so the sidebar's mailbox-aware
 /// rendering re-categorises the row.

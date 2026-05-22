@@ -999,7 +999,7 @@ impl Sidebar {
             actions.push(Action::Archive);
         }
         actions.push(Action::NewWorkspace);
-        actions.push(Action::OpenSandbox);
+        actions.push(Action::NewProject);
 
         // Convert to Binding rows. `default_keys` flows through
         // unchanged today; user rebinding will override here once

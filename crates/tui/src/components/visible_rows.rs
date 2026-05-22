@@ -15,7 +15,7 @@
 //! function is purely the rebuild half.
 
 use crate::components::sidebar::{Mailbox, RepoSummary, VisibleRow, mailbox_membership};
-use pilot_core::{SessionKey, Workspace};
+use pilot_core::{Project, ProjectKey, SessionKey, Workspace};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Output of `compute_visible`. Held together because the
@@ -33,6 +33,11 @@ pub struct ComputeInputs<'a> {
     pub mailbox: Mailbox,
     pub show_inactive_in_inbox: bool,
     pub subscribed_repos: &'a BTreeSet<String>,
+    /// Projects mirrored from the daemon's project table. Each one
+    /// emits a sidebar header so a freshly-created project (no
+    /// workspaces yet) is still visible — `subscribed_repos` only
+    /// covered the github-scope case, projects generalize it.
+    pub projects: &'a BTreeMap<ProjectKey, Project>,
     pub collapsed_repos: &'a BTreeSet<String>,
     pub attention: &'a pilot_config::AttentionConfig,
     pub agents_asking: &'a HashSet<SessionKey>,
@@ -82,13 +87,21 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     }
 
     // Step 4: collect the repo header set. Empty subscribed repos
-    // get a header in the Inbox mailbox (so the user sees "yes,
-    // I'm watching this one — nothing actionable yet"); they're
-    // omitted from Inactive / Snoozed (alternate views, not
-    // subscriptions).
+    // AND every project from the daemon's project table get a header
+    // in the Inbox mailbox (so the user sees "yes, I'm watching this
+    // one — nothing actionable yet"); both are omitted from
+    // Inactive / Snoozed (alternate views, not subscriptions).
+    //
+    // Project display names land in the same `all_repos` BTreeSet as
+    // legacy repo strings — for github projects they match exactly
+    // (`"owner/repo"`), so a project + a workspace under that repo
+    // collapse to a single header. Local projects (no upstream task)
+    // get a standalone header until Stage 3b routes workspaces under
+    // them via `project_key`.
     let mut all_repos: BTreeSet<String> = by_repo.keys().cloned().collect();
     if input.mailbox == Mailbox::Inbox {
         all_repos.extend(input.subscribed_repos.iter().cloned());
+        all_repos.extend(input.projects.values().map(|p| p.name.clone()));
     }
 
     // Step 5: emit headers + workspace rows + session sub-rows.
@@ -201,12 +214,14 @@ mod tests {
         collapsed: &'a BTreeSet<String>,
         attention: &'a pilot_config::AttentionConfig,
         asking: &'a HashSet<SessionKey>,
+        projects: &'a BTreeMap<ProjectKey, Project>,
     ) -> ComputeInputs<'a> {
         ComputeInputs {
             workspaces,
             mailbox: Mailbox::Inbox,
             show_inactive_in_inbox: false,
             subscribed_repos: subscribed,
+            projects,
             collapsed_repos: collapsed,
             attention,
             agents_asking: asking,
@@ -222,7 +237,8 @@ mod tests {
         let col = BTreeSet::new();
         let att = pilot_config::AttentionConfig::default();
         let asking = HashSet::new();
-        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking));
+        let projects = BTreeMap::new();
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert!(out.visible.is_empty());
         assert!(out.summaries.is_empty());
     }
@@ -237,7 +253,8 @@ mod tests {
         let col = BTreeSet::new();
         let att = pilot_config::AttentionConfig::default();
         let asking = HashSet::new();
-        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking));
+        let projects = BTreeMap::new();
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert_eq!(out.visible.len(), 2);
         assert!(matches!(out.visible[0], VisibleRow::RepoHeader(_)));
         assert!(matches!(out.visible[1], VisibleRow::Workspace(_)));
@@ -256,7 +273,8 @@ mod tests {
         let col = BTreeSet::new();
         let att = pilot_config::AttentionConfig::default();
         let asking = HashSet::new();
-        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking));
+        let projects = BTreeMap::new();
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         // header(a) + ws + header(b) + ws.
         assert_eq!(out.visible.len(), 4);
         if let VisibleRow::RepoHeader(name) = &out.visible[0] {
@@ -283,7 +301,8 @@ mod tests {
         col.insert("owner/r".to_string());
         let att = pilot_config::AttentionConfig::default();
         let asking = HashSet::new();
-        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking));
+        let projects = BTreeMap::new();
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert_eq!(out.visible.len(), 1);
         assert!(matches!(out.visible[0], VisibleRow::RepoHeader(_)));
         // Summary still counts the active workspace.
@@ -302,7 +321,8 @@ mod tests {
         let col = BTreeSet::new();
         let att = pilot_config::AttentionConfig::default();
         let asking = HashSet::new();
-        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking));
+        let projects = BTreeMap::new();
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert!(out.summaries.contains_key("(sandbox)"));
         assert!(!out.summaries.contains_key("owner/r"));
     }
@@ -317,7 +337,8 @@ mod tests {
         let col = BTreeSet::new();
         let att = pilot_config::AttentionConfig::default();
         let asking = HashSet::new();
-        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking));
+        let projects = BTreeMap::new();
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert_eq!(out.visible.len(), 1);
         assert!(matches!(&out.visible[0], VisibleRow::RepoHeader(name) if name == "owner/empty"));
     }
@@ -332,7 +353,8 @@ mod tests {
         let col = BTreeSet::new();
         let att = pilot_config::AttentionConfig::default();
         let asking = HashSet::new();
-        let mut i = inputs(&ws, &sub, &col, &att, &asking);
+        let projects = BTreeMap::new();
+        let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
         i.mailbox = Mailbox::Inactive;
         let out = compute_visible(i);
         assert!(out.visible.is_empty());
@@ -351,7 +373,8 @@ mod tests {
         let col = BTreeSet::new();
         let att = pilot_config::AttentionConfig::default();
         let asking = HashSet::new();
-        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking));
+        let projects = BTreeMap::new();
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         // [header, newer, older].
         let keys: Vec<&str> = out
             .visible
@@ -375,7 +398,8 @@ mod tests {
         let col = BTreeSet::new();
         let att = pilot_config::AttentionConfig::default();
         let asking = HashSet::new();
-        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking));
+        let projects = BTreeMap::new();
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert!(out.summaries.contains_key("(no repo)"));
     }
 
@@ -394,7 +418,8 @@ mod tests {
         col.insert("owner/r".to_string());
         let att = pilot_config::AttentionConfig::default();
         let asking = HashSet::new();
-        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking));
+        let projects = BTreeMap::new();
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert_eq!(out.summaries.get("owner/r").unwrap().active, 3);
     }
 }

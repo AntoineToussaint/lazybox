@@ -200,6 +200,14 @@ impl Sidebar {
         self.inner.apply_subscribed_scopes(scopes);
     }
 
+    /// See `Sidebar::apply_projects`.
+    pub fn apply_projects(
+        &mut self,
+        projects: std::collections::BTreeMap<pilot_core::ProjectKey, pilot_core::Project>,
+    ) {
+        self.inner.apply_projects(projects);
+    }
+
     /// Move the cursor onto the workspace whose key matches.
     /// Returns true if found.
     pub fn focus_workspace_key(&mut self, key: &pilot_core::SessionKey) -> bool {

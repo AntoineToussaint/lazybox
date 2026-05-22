@@ -3483,25 +3483,30 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
-        // Project lifecycle events. Stage 2 just mirrors the daemon's
-        // project table into `self.projects` so future stages can
-        // drive sidebar headers off this map. Returning early because
-        // the panes don't need to see these — only the model does.
+        // Project lifecycle events. Mirror into `self.projects` so
+        // the sidebar can render headers from it, then push the
+        // updated map to the sidebar component.
         if let IpcEvent::ProjectUpserted(p) = &event {
             self.projects.insert(p.key.clone(), (**p).clone());
+            self.sidebar.apply_projects(self.projects.clone());
             self.redraw = true;
             return;
         }
         if let IpcEvent::ProjectRemoved(key) = &event {
             self.projects.remove(key);
+            self.sidebar.apply_projects(self.projects.clone());
             self.redraw = true;
             return;
         }
         // Snapshot's project list seeds the same map on reconnect.
+        // Push to the sidebar AFTER the snapshot's WorkspaceUpserted-
+        // equivalent rows are processed below, so the first render
+        // already has both layers.
         if let IpcEvent::Snapshot { projects, .. } = &event {
             for p in projects {
                 self.projects.insert(p.key.clone(), p.clone());
             }
+            self.sidebar.apply_projects(self.projects.clone());
         }
 
         let is_snapshot = matches!(&event, IpcEvent::Snapshot { .. });

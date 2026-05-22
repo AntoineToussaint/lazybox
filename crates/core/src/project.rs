@@ -75,7 +75,7 @@ impl std::fmt::Display for ProjectKey {
 }
 
 /// A top-level Project — a container that holds Workspaces.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
     pub key: ProjectKey,
     /// Display name (e.g. `"owner/repo"` for github,

@@ -167,6 +167,12 @@ pub struct Sidebar {
     /// Used so a freshly-added repo gets a header in the sidebar
     /// even before polling finds any open PRs/issues under it.
     subscribed_repos: BTreeSet<String>,
+    /// Projects mirrored from the daemon's project table. Each entry
+    /// emits a sidebar header so a project with zero workspaces
+    /// still appears. Populated by `apply_projects` (called from the
+    /// model when `Snapshot` / `ProjectUpserted` / `ProjectRemoved`
+    /// fires).
+    projects: BTreeMap<pilot_core::ProjectKey, pilot_core::Project>,
     /// Agent the `f` (fix) shortcut spawns. Defaults to `claude`; the
     /// AppRoot can override from YAML (`setup.default_agent`).
     default_agent: String,
@@ -234,6 +240,7 @@ impl Sidebar {
             running_terminals: HashMap::new(),
             attention: pilot_config::AttentionConfig::default(),
             subscribed_repos: BTreeSet::new(),
+            projects: BTreeMap::new(),
             default_agent: "claude".to_string(),
             show_inactive_in_inbox: false,
             pending_notifications: Vec::new(),
@@ -347,6 +354,21 @@ impl Sidebar {
         }
         if out != self.subscribed_repos {
             self.subscribed_repos = out;
+            self.recompute_visible();
+        }
+    }
+
+    /// Replace the mirrored project table. Driven from the model's
+    /// `Snapshot::projects` + `ProjectUpserted` / `ProjectRemoved`
+    /// handlers; the sidebar's headers render from this on the next
+    /// `recompute_visible`. Cheap to call on every snapshot — the
+    /// map clones the daemon's view, no diffing required.
+    pub fn apply_projects(
+        &mut self,
+        projects: BTreeMap<pilot_core::ProjectKey, pilot_core::Project>,
+    ) {
+        if projects != self.projects {
+            self.projects = projects;
             self.recompute_visible();
         }
     }
@@ -832,6 +854,7 @@ impl Sidebar {
                 mailbox: self.mailbox,
                 show_inactive_in_inbox: self.show_inactive_in_inbox,
                 subscribed_repos: &self.subscribed_repos,
+                projects: &self.projects,
                 collapsed_repos: &self.collapsed_repos,
                 attention: &self.attention,
                 agents_asking: &self.agents_asking,

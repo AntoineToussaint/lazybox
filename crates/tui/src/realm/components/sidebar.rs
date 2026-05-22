@@ -208,6 +208,11 @@ impl Sidebar {
         self.inner.apply_projects(projects);
     }
 
+    /// See `Sidebar::focused_project_key`.
+    pub fn focused_project_key(&self) -> Option<pilot_core::ProjectKey> {
+        self.inner.focused_project_key()
+    }
+
     /// Move the cursor onto the workspace whose key matches.
     /// Returns true if found.
     pub fn focus_workspace_key(&mut self, key: &pilot_core::SessionKey) -> bool {

@@ -578,8 +578,8 @@ impl Server {
                             );
                             polling::unmark_activity_read(&self.config, &key, index);
                         }
-                        pilot_ipc::Command::CreateWorkspace { name } => {
-                            polling::create_empty_workspace(&self.config, &name);
+                        pilot_ipc::Command::CreateWorkspace { name, project_key } => {
+                            polling::create_empty_workspace(&self.config, &name, project_key);
                         }
                         pilot_ipc::Command::CreateProject { name } => {
                             polling::create_local_project(&self.config, &name);

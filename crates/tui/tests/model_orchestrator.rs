@@ -92,6 +92,28 @@ fn remapped_reply_binding_mounts_reply_modal() {
 #[test]
 fn remapped_new_workspace_binding_mounts_input() {
     let mut m = build_model();
+    // `n` requires a focused project (Stage 3 of the Project
+    // refactor). Seed one + a workspace under it so the sidebar's
+    // cursor has a project_key to resolve.
+    let project = pilot_core::Project::new(
+        pilot_core::ProjectKey::github("owner", "repo"),
+        "owner/repo",
+        Utc::now(),
+    );
+    let workspace = {
+        let mut w = Workspace::empty(
+            WorkspaceKey::new("github:owner/repo#1"),
+            "main",
+            Utc::now(),
+        );
+        w.project_key = Some(project.key.clone());
+        w
+    };
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![workspace],
+        terminals: vec![],
+        projects: vec![project],
+    });
     m.apply_keybindings(pilot_config::Keybindings {
         new_workspace: "Ctrl-n".into(),
         ..pilot_config::Keybindings::default()

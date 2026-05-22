@@ -437,6 +437,20 @@ pub fn workspace_key_for(task: &Task) -> String {
     sanitize_key(&format!("{}-{}", task.id.source, task.id.key))
 }
 
+/// The Project a workspace belongs to. Prefers the stored
+/// `project_key` field (populated by `from_task` and by the
+/// `n` create flow); falls back to deriving from the primary
+/// task's repo so pre-Stage-1 records still group correctly.
+/// Returns `None` only for orphaned workspaces with no
+/// project_key AND no upstream task — those land under the
+/// legacy "(no repo)" header.
+pub fn workspace_project_key(w: &Workspace) -> Option<crate::ProjectKey> {
+    if let Some(pk) = &w.project_key {
+        return Some(pk.clone());
+    }
+    project_key_for_task(w.primary_task()?)
+}
+
 /// Derive the Project key a task should live under. GitHub tasks
 /// with a `owner/repo` string become `ProjectKey::github(owner,
 /// repo)`. Linear tasks with a repo (used as team-id) become

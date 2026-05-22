@@ -353,6 +353,11 @@ pub struct Model<T: TerminalAdapter> {
     /// the `Msg::Confirmed` handler. None when no destructive
     /// confirm is currently up.
     pending_action_confirm: Option<pilot_tui_core::action::Action>,
+    /// Project the next `Id::NewWorkspace` submit should land the
+    /// new workspace under. Set by `mount_new_workspace_input(pk)`
+    /// from the focused-project resolver, consumed by
+    /// `handle_input_submitted`'s `Id::NewWorkspace` arm.
+    pending_new_workspace_project: Option<pilot_core::ProjectKey>,
 }
 
 /// Custom Port that drains events from an `mpsc::Receiver`. Pilot
@@ -467,6 +472,7 @@ impl<T: TerminalAdapter> Model<T> {
             pending_sidebar_context: None,
             action_key_overrides: std::collections::BTreeMap::new(),
             pending_action_confirm: None,
+            pending_new_workspace_project: None,
             keybindings: pilot_config::Keybindings::default(),
         }
     }
@@ -1206,12 +1212,23 @@ impl<T: TerminalAdapter> Model<T> {
         match top {
             Some(Id::NewWorkspace) => {
                 let name = text.trim().to_string();
-                if !name.is_empty() {
-                    tracing::info!(
-                        workspace_name = %name,
-                        "creating new pre-PR workspace"
-                    );
-                    cmds.push(IpcCommand::CreateWorkspace { name });
+                let project_key = self.pending_new_workspace_project.take();
+                match (name.is_empty(), project_key) {
+                    (false, Some(project_key)) => {
+                        tracing::info!(
+                            workspace_name = %name,
+                            project_key = %project_key,
+                            "creating new pre-PR workspace under project",
+                        );
+                        cmds.push(IpcCommand::CreateWorkspace { name, project_key });
+                    }
+                    (false, None) => {
+                        tracing::warn!(
+                            workspace_name = %name,
+                            "new-workspace submit without a stashed project_key — dropped",
+                        );
+                    }
+                    _ => {}
                 }
             }
             Some(Id::NewProject) => {
@@ -1775,11 +1792,18 @@ impl<T: TerminalAdapter> Model<T> {
                 self.open_editor();
             }
             Action::NewWorkspace => {
-                if matches!(
-                    crate::intent::resolve_new_workspace(),
-                    crate::intent::Intent::MountNewWorkspaceInput
-                ) {
-                    self.mount_new_workspace_input();
+                let focused = self.sidebar.focused_project_key();
+                match crate::intent::resolve_new_workspace(focused) {
+                    crate::intent::Intent::MountNewWorkspaceInput { project_key } => {
+                        self.mount_new_workspace_input(project_key);
+                    }
+                    crate::intent::Intent::Notice(msg) => {
+                        use crate::realm::components::footer::{Notice, NoticeSeverity};
+                        self.status.notice =
+                            Some(Notice::new(msg, NoticeSeverity::Info));
+                        self.redraw = true;
+                    }
+                    _ => {}
                 }
             }
             Action::NewProject => {
@@ -2108,17 +2132,26 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 return;
             }
-            // `n` from the sidebar: prompt for a workspace name and
-            // create a brand-new pre-PR workspace.
+            // `n` from the sidebar: prompt for a workspace name under
+            // the focused Project. No focused project → footer notice
+            // (the user pressed `n` from an empty inbox view; the
+            // notice points them at Shift-N to create one first).
             _ if self.focus == PaneFocus::Sidebar
                 && self.matches_action(&key, pilot_config::Action::NewWorkspace) =>
             {
                 self.q_latch.disarm();
-                if matches!(
-                    crate::intent::resolve_new_workspace(),
-                    crate::intent::Intent::MountNewWorkspaceInput
-                ) {
-                    self.mount_new_workspace_input();
+                let focused = self.sidebar.focused_project_key();
+                match crate::intent::resolve_new_workspace(focused) {
+                    crate::intent::Intent::MountNewWorkspaceInput { project_key } => {
+                        self.mount_new_workspace_input(project_key);
+                    }
+                    crate::intent::Intent::Notice(msg) => {
+                        use crate::realm::components::footer::{Notice, NoticeSeverity};
+                        self.status.notice =
+                            Some(Notice::new(msg, NoticeSeverity::Info));
+                        self.redraw = true;
+                    }
+                    _ => {}
                 }
                 return;
             }
@@ -2926,17 +2959,19 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
-    /// Mount the "New workspace" name prompt. Submit →
-    /// `Msg::InputSubmitted(name)` while `Id::NewWorkspace` is on
-    /// top → `Command::CreateWorkspace { name }`. The daemon
-    /// allocates a slug-based key and persists the empty workspace.
-    fn mount_new_workspace_input(&mut self) {
+    /// Mount the "New workspace" name prompt under a specific
+    /// Project. Submit → `Msg::InputSubmitted(name)` while
+    /// `Id::NewWorkspace` is on top → `Command::CreateWorkspace
+    /// { name, project_key }`. The project_key is stashed on self
+    /// here and consumed by `handle_input_submitted`.
+    fn mount_new_workspace_input(&mut self, project_key: pilot_core::ProjectKey) {
         use crate::realm::components::input::Input;
         use tuirealm::subscription::{EventClause, Sub, SubClause};
 
         if matches!(self.modal_stack.last(), Some(Id::NewWorkspace)) {
             return;
         }
+        self.pending_new_workspace_project = Some(project_key);
 
         let modal = Input::new("Name this workspace")
             .title("New workspace")
@@ -4450,16 +4485,24 @@ mod effects_tests {
         assert!(cmds.is_empty());
     }
 
-    /// NewWorkspace input with a non-empty trimmed name produces
-    /// `CreateWorkspace { name }`.
+    /// NewWorkspace input with a non-empty trimmed name AND a
+    /// pre-stashed project_key produces `CreateWorkspace { name,
+    /// project_key }`. Without a stashed project_key the submit
+    /// drops (see `mount_new_workspace_input` — the catalog `n`
+    /// flow only mounts when a project is focused).
     #[test]
     fn input_submitted_for_new_workspace_returns_create_workspace() {
         let mut m = build_model();
+        let pk = pilot_core::ProjectKey::local("my-project");
         m.modal_stack.push(Id::NewWorkspace);
+        m.pending_new_workspace_project = Some(pk.clone());
         let cmds = m.handle_input_submitted("  my-feature  ".into());
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            IpcCommand::CreateWorkspace { name } => assert_eq!(name, "my-feature"),
+            IpcCommand::CreateWorkspace { name, project_key } => {
+                assert_eq!(name, "my-feature");
+                assert_eq!(project_key, &pk);
+            }
             other => panic!("expected CreateWorkspace, got {other:?}"),
         }
     }

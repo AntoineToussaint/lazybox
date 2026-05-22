@@ -625,6 +625,34 @@ impl Sidebar {
         self.workspaces.iter()
     }
 
+    /// The Project the cursor is currently "in" — drives the `n` (new
+    /// workspace) flow. Resolution:
+    ///
+    /// - Cursor on a `Workspace` row → the workspace's project_key
+    ///   (with the standard `workspace_project_key` fallback so
+    ///   pre-Stage-1 records still resolve).
+    /// - Cursor on a `RepoHeader` → look up the project whose
+    ///   display name matches the header string.
+    /// - Anything else → `None`. The model surfaces a footer notice
+    ///   ("select a project first") instead of mounting the prompt.
+    pub fn focused_project_key(&self) -> Option<pilot_core::ProjectKey> {
+        match self.visible.get(self.cursor)? {
+            VisibleRow::Workspace(k) => {
+                let w = self.workspaces.get(k)?;
+                pilot_core::workspace_project_key(w)
+            }
+            VisibleRow::Session { workspace, .. } => {
+                let w = self.workspaces.get(workspace)?;
+                pilot_core::workspace_project_key(w)
+            }
+            VisibleRow::RepoHeader(name) => self
+                .projects
+                .values()
+                .find(|p| &p.name == name)
+                .map(|p| p.key.clone()),
+        }
+    }
+
     /// Step the cursor `delta` selectable rows from its current
     /// position, skipping repo headers. Workspace rows AND session
     /// sub-rows are selectable; only headers are not. Clamps at the

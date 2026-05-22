@@ -1536,7 +1536,11 @@ fn workspace_label_for(workspace: &Workspace, key: &WorkspaceKey) -> String {
 ///
 /// Returns the new key so the caller (sidebar, tests) can land the
 /// cursor on the freshly-created row.
-pub fn create_empty_workspace(config: &ServerConfig, name: &str) -> WorkspaceKey {
+pub fn create_empty_workspace(
+    config: &ServerConfig,
+    name: &str,
+    project_key: pilot_core::ProjectKey,
+) -> WorkspaceKey {
     let base = pilot_core::slug::slugify(name);
     let base = if base.is_empty() {
         "workspace".to_string()
@@ -1568,6 +1572,7 @@ pub fn create_empty_workspace(config: &ServerConfig, name: &str) -> WorkspaceKey
     if !name.trim().is_empty() {
         workspace.name = name.trim().to_string();
     }
+    workspace.project_key = Some(project_key);
 
     let record = WorkspaceRecord {
         key: key.as_str().to_string(),

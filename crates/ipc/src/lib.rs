@@ -308,13 +308,21 @@ pub enum Command {
         session_key: SessionKey,
         index: usize,
     },
-    /// Create a brand-new pre-PR workspace with a user-chosen name.
-    /// The daemon allocates a fresh `WorkspaceKey` (slug-based, with
-    /// a numeric suffix on collision) and persists it. Used by the
-    /// sidebar's `n` key — "I'm starting a new piece of work and a
-    /// PR doesn't exist yet."
+    /// Create a brand-new pre-PR workspace with a user-chosen name
+    /// inside a specific Project. The daemon allocates a fresh
+    /// `WorkspaceKey` (slug-based, with a numeric suffix on
+    /// collision), stamps the workspace with `project_key`, persists,
+    /// and broadcasts. Used by the sidebar's `n` key — which requires
+    /// the cursor to be on a Project header (or a workspace under one)
+    /// so `project_key` is always resolvable.
     CreateWorkspace {
         name: String,
+        /// The Project this workspace lives under. The TUI resolves
+        /// it from the sidebar cursor before sending; the daemon
+        /// trusts the value (no project-exists check today — the
+        /// `n` flow can't fire without a focused project, and a
+        /// stale key just produces an orphan workspace).
+        project_key: pilot_core::ProjectKey,
     },
     /// Create a brand-new local Project — a top-level container the
     /// sidebar groups workspaces under, like a github repo but with

@@ -50,8 +50,10 @@ pub enum Intent {
     SpawnShell { workspace_key: SessionKey },
     /// Mount the reply textarea targeted at the workspace.
     MountReply { workspace_key: WorkspaceKey },
-    /// Mount the new-workspace name input.
-    MountNewWorkspaceInput,
+    /// Mount the new-workspace name input under the given Project.
+    /// The model stashes `project_key`, mounts the prompt, and on
+    /// submit ships `Command::CreateWorkspace { name, project_key }`.
+    MountNewWorkspaceInput { project_key: pilot_core::ProjectKey },
     /// Mount the adopt-target picker for moving sessions out of
     /// the named source workspace.
     MountAdoptPicker { source_key: WorkspaceKey },
@@ -223,9 +225,17 @@ pub fn resolve_open_editor(workspace: Option<&Workspace>) -> Intent {
     }
 }
 
-/// Resolve `n` (new workspace). Available regardless of focused row.
-pub fn resolve_new_workspace() -> Intent {
-    Intent::MountNewWorkspaceInput
+/// Resolve `n` (new workspace). Requires a focused Project — if the
+/// cursor isn't on a Project header or on a workspace under one, the
+/// resolver returns a `Notice` and the model surfaces a hint instead
+/// of mounting the prompt.
+pub fn resolve_new_workspace(focused_project_key: Option<pilot_core::ProjectKey>) -> Intent {
+    match focused_project_key {
+        Some(project_key) => Intent::MountNewWorkspaceInput { project_key },
+        None => Intent::Notice(
+            "Select a project first (Shift-N creates one).".to_string(),
+        ),
+    }
 }
 
 /// Resolve `Shift-A` (adopt sessions). Workspace must have at least
@@ -787,8 +797,20 @@ mod tests {
     // ── New workspace ────────────────────────────────────────────
 
     #[test]
-    fn new_workspace_is_always_available() {
-        assert_eq!(resolve_new_workspace(), Intent::MountNewWorkspaceInput);
+    fn new_workspace_with_project_mounts_input() {
+        let pk = pilot_core::ProjectKey::local("my-project");
+        assert_eq!(
+            resolve_new_workspace(Some(pk.clone())),
+            Intent::MountNewWorkspaceInput { project_key: pk }
+        );
+    }
+
+    #[test]
+    fn new_workspace_without_project_returns_notice() {
+        match resolve_new_workspace(None) {
+            Intent::Notice(msg) => assert!(msg.to_lowercase().contains("project")),
+            other => panic!("expected Notice, got {other:?}"),
+        }
     }
 
     // ── Adopt sessions ───────────────────────────────────────────

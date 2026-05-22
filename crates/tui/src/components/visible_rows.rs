@@ -31,11 +31,11 @@ pub struct ComputeInputs<'a> {
     pub workspaces: &'a HashMap<SessionKey, Workspace>,
     pub mailbox: Mailbox,
     pub show_inactive_in_inbox: bool,
-    pub subscribed_repos: &'a BTreeSet<String>,
-    /// Projects mirrored from the daemon's project table. Each one
-    /// emits a sidebar header so a freshly-created project (no
-    /// workspaces yet) is still visible — `subscribed_repos` only
-    /// covered the github-scope case, projects generalize it.
+    /// Projects mirrored from the daemon's project table — plus
+    /// synthetic entries for the user's subscribed scopes (the model
+    /// merges them in via `refresh_subscribed_projects`). Each entry
+    /// emits a sidebar header so a freshly-subscribed repo with no
+    /// workspaces still shows up.
     pub projects: &'a BTreeMap<ProjectKey, Project>,
     pub collapsed_repos: &'a BTreeSet<String>,
     pub attention: &'a pilot_config::AttentionConfig,
@@ -90,21 +90,13 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         });
     }
 
-    // Step 4: collect the repo header set. Empty subscribed repos
-    // AND every project from the daemon's project table get a header
-    // in the Inbox mailbox (so the user sees "yes, I'm watching this
-    // one — nothing actionable yet"); both are omitted from
-    // Inactive / Snoozed (alternate views, not subscriptions).
-    //
-    // Project display names land in the same `all_repos` BTreeSet as
-    // legacy repo strings — for github projects they match exactly
-    // (`"owner/repo"`), so a project + a workspace under that repo
-    // collapse to a single header. Local projects (no upstream task)
-    // get a standalone header until Stage 3b routes workspaces under
-    // them via `project_key`.
+    // Step 4: collect the header set. Every project from the
+    // (daemon-mirrored + scope-synthesized) projects map gets a
+    // header in the Inbox mailbox, so an empty project still shows
+    // up. Omitted from Inactive / Snoozed (alternate views, not
+    // subscriptions).
     let mut all_repos: BTreeSet<String> = by_repo.keys().cloned().collect();
     if input.mailbox == Mailbox::Inbox {
-        all_repos.extend(input.subscribed_repos.iter().cloned());
         all_repos.extend(input.projects.values().map(|p| p.name.clone()));
     }
 
@@ -232,7 +224,7 @@ mod tests {
 
     fn inputs<'a>(
         workspaces: &'a HashMap<SessionKey, Workspace>,
-        subscribed: &'a BTreeSet<String>,
+        _subscribed: &'a BTreeSet<String>,
         collapsed: &'a BTreeSet<String>,
         attention: &'a pilot_config::AttentionConfig,
         asking: &'a HashSet<SessionKey>,
@@ -242,7 +234,6 @@ mod tests {
             workspaces,
             mailbox: Mailbox::Inbox,
             show_inactive_in_inbox: false,
-            subscribed_repos: subscribed,
             projects,
             collapsed_repos: collapsed,
             attention,
@@ -358,33 +349,41 @@ mod tests {
         assert!(!out.summaries.contains_key("owner/r"));
     }
 
-    /// Subscribed repo with no workspace yields a header in Inbox
+    /// Project with no workspace yields a header in Inbox
     /// (so the user can see "I'm subscribed but nothing's in flight").
     #[test]
-    fn subscribed_empty_repo_emits_header_in_inbox() {
+    fn empty_project_emits_header_in_inbox() {
         let ws = HashMap::new();
-        let mut sub = BTreeSet::new();
-        sub.insert("owner/empty".to_string());
+        let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = pilot_config::AttentionConfig::default();
         let asking = HashSet::new();
-        let projects = BTreeMap::new();
+        let mut projects = BTreeMap::new();
+        let pk = ProjectKey::github("owner", "empty");
+        projects.insert(
+            pk.clone(),
+            Project::new(pk, "owner/empty", chrono::Utc::now()),
+        );
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert_eq!(out.visible.len(), 1);
         assert!(matches!(&out.visible[0], VisibleRow::RepoHeader(name) if name == "owner/empty"));
     }
 
-    /// Same setup, but Inactive mailbox: the subscribed empty repo
+    /// Same setup, but Inactive mailbox: the empty project header
     /// is NOT shown (alternate view, not a subscription).
     #[test]
-    fn subscribed_empty_repo_skipped_in_inactive() {
+    fn empty_project_skipped_in_inactive() {
         let ws = HashMap::new();
-        let mut sub = BTreeSet::new();
-        sub.insert("owner/empty".to_string());
+        let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = pilot_config::AttentionConfig::default();
         let asking = HashSet::new();
-        let projects = BTreeMap::new();
+        let mut projects = BTreeMap::new();
+        let pk = ProjectKey::github("owner", "empty");
+        projects.insert(
+            pk.clone(),
+            Project::new(pk, "owner/empty", chrono::Utc::now()),
+        );
         let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
         i.mailbox = Mailbox::Inactive;
         let out = compute_visible(i);

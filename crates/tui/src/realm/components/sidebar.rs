@@ -195,11 +195,6 @@ impl Sidebar {
 
     /// Replace the set of subscribed-repo names that should show up
     /// as headers even before polling finds anything under them.
-    /// See `Sidebar::apply_subscribed_scopes`.
-    pub fn apply_subscribed_scopes(&mut self, scopes: &std::collections::BTreeSet<String>) {
-        self.inner.apply_subscribed_scopes(scopes);
-    }
-
     /// See `Sidebar::apply_projects`.
     pub fn apply_projects(
         &mut self,

@@ -604,7 +604,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.setup.persisted = Some(persisted);
         // Mirror narrowed-repo scopes into the sidebar so headers
         // appear at startup, before the first poll completes.
-        self.refresh_subscribed_repos();
+        self.refresh_subscribed_projects();
     }
 
     /// Hand in the editors detected at startup. The `E` shortcut
@@ -668,19 +668,50 @@ impl<T: TerminalAdapter> Model<T> {
         self.action_key_overrides = overrides;
     }
 
-    /// Push the GitHub-style scope ids (e.g. `github:owner/repo`) the
-    /// user is subscribed to into the sidebar so a freshly-added
-    /// repo gets a header even before polling finds workspaces.
-    /// Called at startup with the persisted state and again on
-    /// every wizard Finish.
-    fn refresh_subscribed_repos(&mut self) {
-        let mut scopes = std::collections::BTreeSet::new();
-        if let Some(p) = &self.setup.persisted {
-            for set in p.selected_scopes.values() {
-                scopes.extend(set.iter().cloned());
+    /// Synthesize Project records for every scope the user is
+    /// subscribed to (e.g. `github:owner/repo`) and merge them into
+    /// the TUI's project table — so a freshly-added repo gets a
+    /// sidebar header even before polling finds workspaces under it.
+    ///
+    /// Called at startup with the persisted state and again on every
+    /// wizard Finish. The synthesized records are CACHE entries; if
+    /// the daemon later broadcasts a `ProjectUpserted` for the same
+    /// key (which happens on first workspace from that repo), the
+    /// authoritative daemon-side record overwrites the synthetic one
+    /// — identical shape, no visible change.
+    fn refresh_subscribed_projects(&mut self) {
+        let Some(p) = &self.setup.persisted else { return };
+        let mut changed = false;
+        for set in p.selected_scopes.values() {
+            for scope in set {
+                // `provider:owner/repo` → ProjectKey::github(owner,
+                // repo). Skip org-level entries (`provider:owner`
+                // with no `/`) — those mean "whole org" and the per-
+                // repo projects materialize as polling finds them.
+                let Some((source, rest)) = scope.split_once(':') else { continue };
+                if !rest.contains('/') {
+                    continue;
+                }
+                let pk = match source {
+                    "github" => {
+                        let (owner, name) = rest.split_once('/').expect("contains '/' verified");
+                        pilot_core::ProjectKey::github(owner, name)
+                    }
+                    "linear" => pilot_core::ProjectKey::linear(rest),
+                    _ => continue,
+                };
+                if !self.projects.contains_key(&pk) {
+                    self.projects.insert(
+                        pk.clone(),
+                        pilot_core::Project::new(pk, rest, chrono::Utc::now()),
+                    );
+                    changed = true;
+                }
             }
         }
-        self.sidebar.apply_subscribed_scopes(&scopes);
+        if changed {
+            self.sidebar.apply_projects(self.projects.clone());
+        }
     }
 
     /// Send a command to the daemon, logging failures. Wraps the raw
@@ -1609,7 +1640,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // Push the new repo subscriptions into the sidebar so
                 // the user sees a header for the freshly-added repo
                 // even before polling finds workspaces under it.
-                self.refresh_subscribed_repos();
+                self.refresh_subscribed_projects();
                 if let Some(hook) = self.setup.on_complete.as_ref() {
                     hook(outcome);
                 }

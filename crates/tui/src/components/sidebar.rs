@@ -161,17 +161,12 @@ pub struct Sidebar {
     /// Loaded from `~/.pilot/config.yaml::attention` at startup;
     /// toggle individual signals there to customize.
     attention: pilot_config::AttentionConfig,
-    /// Repos the user has subscribed to in narrowed form (e.g.
-    /// `tensorzero/tensorzero`) — fed from `selected_scopes` after
-    /// trimming the `github:` prefix and dropping org-level entries.
-    /// Used so a freshly-added repo gets a header in the sidebar
-    /// even before polling finds any open PRs/issues under it.
-    subscribed_repos: BTreeSet<String>,
     /// Projects mirrored from the daemon's project table. Each entry
     /// emits a sidebar header so a project with zero workspaces
     /// still appears. Populated by `apply_projects` (called from the
     /// model when `Snapshot` / `ProjectUpserted` / `ProjectRemoved`
-    /// fires).
+    /// fires, and when the wizard's selected scopes are synthesized
+    /// into Project entries — the model layer owns that merge).
     projects: BTreeMap<pilot_core::ProjectKey, pilot_core::Project>,
     /// Agent the `f` (fix) shortcut spawns. Defaults to `claude`; the
     /// AppRoot can override from YAML (`setup.default_agent`).
@@ -239,7 +234,6 @@ impl Sidebar {
             agent_shortcuts,
             running_terminals: HashMap::new(),
             attention: pilot_config::AttentionConfig::default(),
-            subscribed_repos: BTreeSet::new(),
             projects: BTreeMap::new(),
             default_agent: "claude".to_string(),
             show_inactive_in_inbox: false,
@@ -333,29 +327,6 @@ impl Sidebar {
     pub fn with_default_agent(mut self, agent: impl Into<String>) -> Self {
         self.default_agent = agent.into();
         self
-    }
-
-    /// Replace the set of "subscribed repo names" the sidebar should
-    /// render as empty headers when no workspaces exist under them.
-    /// Inputs are scope ids like `github:owner/repo`; the prefix is
-    /// stripped, and org-level entries (`github:owner` with no `/`)
-    /// are skipped — those mean "whole org subscription" and the
-    /// repo headers will materialize as polling finds them.
-    pub fn apply_subscribed_scopes(&mut self, scopes: &BTreeSet<String>) {
-        let mut out = BTreeSet::new();
-        for id in scopes {
-            // `provider:owner/repo` → "owner/repo". Skip if there's
-            // no `/` after the prefix (org-level subscription).
-            if let Some((_, rest)) = id.split_once(':')
-                && rest.contains('/')
-            {
-                out.insert(rest.to_string());
-            }
-        }
-        if out != self.subscribed_repos {
-            self.subscribed_repos = out;
-            self.recompute_visible();
-        }
     }
 
     /// Replace the mirrored project table. Driven from the model's
@@ -881,7 +852,6 @@ impl Sidebar {
                 workspaces: &self.workspaces,
                 mailbox: self.mailbox,
                 show_inactive_in_inbox: self.show_inactive_in_inbox,
-                subscribed_repos: &self.subscribed_repos,
                 projects: &self.projects,
                 collapsed_repos: &self.collapsed_repos,
                 attention: &self.attention,

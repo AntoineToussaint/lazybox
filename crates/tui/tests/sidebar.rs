@@ -786,11 +786,11 @@ fn session_ended_event_collapses_back_below_two() {
 }
 
 #[test]
-fn subscribed_repo_with_no_workspace_still_renders_a_header() {
+fn empty_project_still_renders_a_header() {
     // The "I added a repo but the sidebar is empty" UX bug: until
     // polling finds open PRs/issues, no workspace exists for the
-    // new repo, so the old render code emitted no row at all.
-    // After apply_subscribed_scopes, an empty header should appear.
+    // new project, so the old render code emitted no row at all.
+    // After `apply_projects`, an empty header should appear.
     let mut s = Sidebar::new(PaneId::new(1));
 
     // Empty snapshot — no workspaces at all.
@@ -799,13 +799,16 @@ fn subscribed_repo_with_no_workspace_still_renders_a_header() {
         terminals: vec![],
         projects: vec![],
     });
-    let scopes: std::collections::BTreeSet<String> = ["github:fresh-org/new-repo".to_string()]
-        .into_iter()
-        .collect();
-    s.apply_subscribed_scopes(&scopes);
+    let mut projects = std::collections::BTreeMap::new();
+    let pk = pilot_core::ProjectKey::github("fresh-org", "new-repo");
+    projects.insert(
+        pk.clone(),
+        pilot_core::Project::new(pk, "fresh-org/new-repo", Utc::now()),
+    );
+    s.apply_projects(projects);
 
-    // The visible list should contain a RepoHeader for the new
-    // repo even though there's no workspace under it.
+    // The visible list should contain a RepoHeader for the project
+    // even though there's no workspace under it.
     let names: Vec<&str> = s
         .visible_rows()
         .iter()
@@ -816,32 +819,8 @@ fn subscribed_repo_with_no_workspace_still_renders_a_header() {
         .collect();
     assert!(
         names.contains(&"fresh-org/new-repo"),
-        "expected an empty header for the subscribed repo, got: {names:?}"
+        "expected an empty header for the project, got: {names:?}"
     );
-}
-
-#[test]
-fn subscribed_org_level_scope_does_not_render_a_header() {
-    // Subscribing to a whole org (no slash in the scope id after
-    // the provider prefix) means "all repos under this org" — we
-    // can't render a repo header for it because we don't know the
-    // repo names. Headers materialize as polling discovers them.
-    let mut s = Sidebar::new(PaneId::new(1));
-    s.on_event(&Event::Snapshot {
-        workspaces: vec![],
-        terminals: vec![],
-        projects: vec![],
-    });
-    let scopes: std::collections::BTreeSet<String> =
-        ["github:some-org".to_string()].into_iter().collect();
-    s.apply_subscribed_scopes(&scopes);
-
-    let headers = s
-        .visible_rows()
-        .iter()
-        .filter(|r| matches!(r, pilot_tui::components::sidebar::VisibleRow::RepoHeader(_)))
-        .count();
-    assert_eq!(headers, 0, "org-level scope should NOT produce a header");
 }
 
 // ── `f` / `w` agent-spawn targeting ──────────────────────────────────

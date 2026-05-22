@@ -332,6 +332,11 @@ pub struct Model<T: TerminalAdapter> {
     /// matching keyboard shortcut would have. None when no menu is
     /// open.
     pending_sidebar_context: Option<(pilot_core::SessionKey, Vec<pilot_tui_core::action::Action>)>,
+    /// User-supplied key overrides for catalog actions. Keys are
+    /// snake_case `ActionKind` names (see `ActionKind::name`); values
+    /// are key-spec strings. Empty when the user hasn't configured
+    /// `ui.action_keys` — catalog defaults apply.
+    action_key_overrides: std::collections::BTreeMap<String, String>,
 }
 
 /// Custom Port that drains events from an `mpsc::Receiver`. Pilot
@@ -444,6 +449,7 @@ impl<T: TerminalAdapter> Model<T> {
             ui_defaults: pilot_config::UiDefaults::default(),
             pr_details_fetched: std::collections::HashSet::new(),
             pending_sidebar_context: None,
+            action_key_overrides: std::collections::BTreeMap::new(),
             keybindings: pilot_config::Keybindings::default(),
         }
     }
@@ -624,6 +630,19 @@ impl<T: TerminalAdapter> Model<T> {
     /// to the table.
     pub fn apply_keybindings(&mut self, kb: pilot_config::Keybindings) {
         self.keybindings = kb;
+    }
+
+    /// Apply catalog-driven action key overrides (`ui.action_keys`).
+    /// Map of snake_case `ActionKind` names → key-spec strings;
+    /// catalog lookups in `find_action_for_chord` consult this map
+    /// first and fall back to the catalog default. See
+    /// `pilot_tui_core::action::ActionKind::name` for the key
+    /// vocabulary.
+    pub fn apply_action_key_overrides(
+        &mut self,
+        overrides: std::collections::BTreeMap<String, String>,
+    ) {
+        self.action_key_overrides = overrides;
     }
 
     /// Push the GitHub-style scope ids (e.g. `github:owner/repo`) the
@@ -2093,7 +2112,7 @@ impl<T: TerminalAdapter> Model<T> {
         // see that function's coverage comment.
         if self.focus != PaneFocus::Terminals
             && let Some(chord) = key_event_to_chord(ct)
-            && let Some(def) = find_action_for_chord(&chord, self.focus)
+            && let Some(def) = find_action_for_chord(&chord, self.focus, &self.action_key_overrides)
         {
             use pilot_tui_core::action::Action;
             // Reconstruct a runtime Action from the static ActionDef.
@@ -3775,13 +3794,19 @@ fn key_event_to_chord(
 /// the focused pane should resolve. Globals always match; pane-
 /// scoped sections only match when their pane is focused.
 ///
-/// Returns `None` when no catalog entry has a matching default
-/// chord — the caller falls back to the legacy match arms (used
-/// today for navigation keys, latches, and any action whose
-/// `default_keys` is a presentation form like `g/G`).
+/// Honors user keybinding overrides from `~/.pilot/config.yaml::ui
+/// .action_keys`: each catalog entry's effective chord falls back
+/// to its default only when the user hasn't set an override for
+/// that `ActionKind::name()`.
+///
+/// Returns `None` when no catalog entry has a matching chord —
+/// the caller falls back to the legacy match arms (used today for
+/// navigation keys, latches, and any action whose `default_keys`
+/// is a presentation form like `g/G`).
 fn find_action_for_chord(
     chord: &pilot_tui_core::action::KeyChord,
     focus: PaneFocus,
+    overrides: &std::collections::BTreeMap<String, String>,
 ) -> Option<&'static pilot_tui_core::action::ActionDef> {
     use pilot_tui_core::action::{ActionDef, Section};
     let allowed = |s: Section| -> bool {
@@ -3797,7 +3822,7 @@ fn find_action_for_chord(
         }
     };
     ActionDef::all()
-        .find(|d| allowed(d.section) && d.default_chord().as_ref() == Some(chord))
+        .find(|d| allowed(d.section) && d.effective_chord(overrides).as_ref() == Some(chord))
 }
 
 /// Spawn a new `pilot` process pinned to the focused pane's

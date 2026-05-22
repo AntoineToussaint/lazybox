@@ -367,6 +367,7 @@ async fn run_embedded_realm(
             &ui_defaults,
         );
         model.apply_keybindings(keybindings);
+        model.apply_action_key_overrides(user_config.ui.action_keys.clone());
         model = model.with_splits(user_config.ui.sidebar_pct, user_config.ui.right_top_pct);
         if let Some((report, sources)) = wizard_seed {
             model.start_setup_wizard(report, sources);

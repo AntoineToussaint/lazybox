@@ -160,12 +160,29 @@ pub struct UiSection {
     /// `/tmp/pilot.log`. Future: respect `$XDG_STATE_HOME` /
     /// `~/.pilot/logs/pilot.log` as a smarter default.
     pub log_path: Option<std::path::PathBuf>,
-    /// Per-action keybindings. Lets users remap `q` (quit), `?` (help),
-    /// and friends without recompiling. Action ids are kebab-case (see
-    /// [`crate::Action`]); values are key-spec strings like `"q q"`,
-    /// `"Shift-M"`, `"Ctrl-Enter"`. Unset entries fall back to the
-    /// built-in defaults in `Keybindings::default()`.
+    /// Per-action keybindings (legacy typed schema). Lets users
+    /// remap `q` (quit), `?` (help), and friends without recompiling.
+    /// Action ids are kebab-case (see [`crate::Action`]); values are
+    /// key-spec strings like `"q q"`, `"Shift-M"`, `"Ctrl-Enter"`.
+    /// Unset entries fall back to the built-in defaults in
+    /// `Keybindings::default()`.
     pub keybindings: Keybindings,
+    /// Catalog-driven keybinding overrides. Open schema: keys are
+    /// snake_case `ActionKind` names (`"merge_pr"`, `"spawn_shell"`,
+    /// `"refresh"`, …); values are key-spec strings (`"Shift-M"`,
+    /// `"Ctrl-Enter"`). Pilot consults this map before falling back
+    /// to the catalog default (`ActionDef::default_keys`). Unset
+    /// keys use the default.
+    ///
+    /// Why this exists alongside `keybindings`: the legacy struct
+    /// has nine typed fields covering ~30% of the actions today.
+    /// Adding a new field for every action is annoying. The map is
+    /// open-ended — adding a binding takes one YAML line, the
+    /// catalog knows the rest. Once every consumer of
+    /// `Keybindings` reads via the catalog, we can deprecate the
+    /// typed fields.
+    #[serde(default)]
+    pub action_keys: std::collections::BTreeMap<String, String>,
 }
 
 /// Identifiers for the actions a keybinding can target. Adding a

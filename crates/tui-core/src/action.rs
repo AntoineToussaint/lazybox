@@ -674,6 +674,66 @@ impl ActionDef {
     pub fn default_chord(&self) -> Option<KeyChord> {
         KeyChord::parse(self.default_keys)
     }
+
+    /// Resolve the effective key chord: user override from the
+    /// config map if present, otherwise the catalog default.
+    ///
+    /// `overrides` keys are the snake_case `ActionKind` names
+    /// (`"merge_pr"`, `"spawn_shell"`, etc.) — see [`ActionKind::name`].
+    /// A user-supplied string that fails to parse falls back to the
+    /// default rather than erroring out: a typo in YAML shouldn't
+    /// break the keyboard.
+    pub fn effective_chord(
+        &self,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Option<KeyChord> {
+        if let Some(raw) = overrides.get(self.kind.name())
+            && let Some(c) = KeyChord::parse(raw)
+        {
+            return Some(c);
+        }
+        self.default_chord()
+    }
+}
+
+impl ActionKind {
+    /// Stable snake_case identifier used as the key in the user's
+    /// `action_keys` config map. Keep this in sync with the
+    /// variant name — a rename here is a config-file breaking
+    /// change for the user.
+    pub fn name(self) -> &'static str {
+        match self {
+            ActionKind::OpenWorkspace => "open_workspace",
+            ActionKind::Work => "work",
+            ActionKind::SpawnAgent => "spawn_agent",
+            ActionKind::SpawnShell => "spawn_shell",
+            ActionKind::OpenEditor => "open_editor",
+            ActionKind::NewWorkspace => "new_workspace",
+            ActionKind::OpenSandbox => "open_sandbox",
+            ActionKind::MarkAllRead => "mark_all_read",
+            ActionKind::ToggleSnooze => "toggle_snooze",
+            ActionKind::Archive => "archive",
+            ActionKind::MergePr => "merge_pr",
+            ActionKind::AdoptSessions => "adopt_sessions",
+            ActionKind::RequestReviewers => "request_reviewers",
+            ActionKind::AddAssignees => "add_assignees",
+            ActionKind::ToggleActivity => "toggle_activity",
+            ActionKind::ToggleRow => "toggle_row",
+            ActionKind::Reply => "reply",
+            ActionKind::SelectRow => "select_row",
+            ActionKind::ToggleDescription => "toggle_description",
+            ActionKind::UndoMarkRead => "undo_mark_read",
+            ActionKind::CyclePane => "cycle_pane",
+            ActionKind::Refresh => "refresh",
+            ActionKind::OpenHelp => "open_help",
+            ActionKind::OpenSettings => "open_settings",
+            ActionKind::Quit => "quit",
+            ActionKind::DetachPane => "detach_pane",
+            ActionKind::ResizeSplitter => "resize_splitter",
+            ActionKind::TerminalScroll => "terminal_scroll",
+            ActionKind::LeaveTerminal => "leave_terminal",
+        }
+    }
 }
 
 /// State-aware label for the footer / context menu, defaulting to
@@ -810,6 +870,48 @@ mod tests {
         let a = Action::SpawnAgent("claude".into());
         let def = ActionDef::for_action(&a);
         assert_eq!(def.kind, ActionKind::SpawnAgent);
+    }
+
+    #[test]
+    fn effective_chord_uses_override_when_present() {
+        use std::collections::BTreeMap;
+        let mut overrides = BTreeMap::new();
+        // Lowercase 'm' so the parser doesn't auto-shift on the
+        // uppercase letter convention. Uppercase Ctrl-M would parse
+        // to Ctrl+Shift+m which is also valid but tests the
+        // override mechanism, not the auto-shift rule.
+        overrides.insert("merge_pr".into(), "Ctrl-m".into());
+        let def = ActionDef::for_kind(ActionKind::MergePr);
+        let chord = def.effective_chord(&overrides).unwrap();
+        assert_eq!(
+            chord,
+            KeyChord::Single {
+                ctrl: true,
+                shift: false,
+                alt: false,
+                code: ChordCode::Char('m'),
+            }
+        );
+    }
+
+    #[test]
+    fn effective_chord_falls_back_when_override_unparseable() {
+        // Typo in YAML shouldn't break the keyboard — return the
+        // default chord instead.
+        use std::collections::BTreeMap;
+        let mut overrides = BTreeMap::new();
+        overrides.insert("merge_pr".into(), "garbage-key-spec".into());
+        let def = ActionDef::for_kind(ActionKind::MergePr);
+        let chord = def.effective_chord(&overrides).unwrap();
+        assert_eq!(chord, def.default_chord().unwrap());
+    }
+
+    #[test]
+    fn effective_chord_falls_back_when_no_override() {
+        use std::collections::BTreeMap;
+        let overrides = BTreeMap::new();
+        let def = ActionDef::for_kind(ActionKind::Refresh);
+        assert_eq!(def.effective_chord(&overrides), def.default_chord());
     }
 
     #[test]

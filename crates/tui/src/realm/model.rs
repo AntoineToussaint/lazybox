@@ -1747,6 +1747,23 @@ impl<T: TerminalAdapter> Model<T> {
                     cmds.push(IpcCommand::Kill { session_key: sk });
                 }
             }
+            Action::AdoptSessions => {
+                // Resolver decides "has sessions to adopt?": yes
+                // → mount the target picker; no → footer notice.
+                // Same shape as the inline handler had.
+                let workspace = self.sidebar.selected_workspace().cloned();
+                match crate::intent::resolve_adopt(workspace.as_ref()) {
+                    crate::intent::Intent::MountAdoptPicker { source_key } => {
+                        self.mount_adopt_picker(source_key);
+                    }
+                    crate::intent::Intent::Notice(msg) => {
+                        use crate::realm::components::footer::{Notice, NoticeSeverity};
+                        self.status.notice = Some(Notice::new(msg, NoticeSeverity::Info));
+                        self.redraw = true;
+                    }
+                    _ => {}
+                }
+            }
             Action::ToggleSnooze => {
                 // Resolver decides Snooze (when not snoozed) vs
                 // Unsnooze (when snoozed) based on the workspace
@@ -2097,33 +2114,10 @@ impl<T: TerminalAdapter> Model<T> {
             // footer's bg-poll spinner so the user gets keystroke
             // feedback before the first PollProgress lands.
             // Shift-A from the sidebar: open the "adopt sessions"
-            // picker. Lets the user move every session from the
-            // focused workspace into another — useful when they
-            // started agent work on the wrong row, or when the
-            // auto-merge prompt got rejected and they want to do it
-            // manually later. Only fires when the focused workspace
-            // actually has sessions to move.
-            _ if self.focus == PaneFocus::Sidebar
-                && self.matches_action(&key, pilot_config::Action::AdoptSessions) =>
-            {
-                self.q_latch.disarm();
-                // `resolve_adopt` makes the "do I have sessions to
-                // adopt?" decision and returns either MountAdoptPicker
-                // or a Notice. Handler just executes whichever Intent
-                // it gets back.
-                match crate::intent::resolve_adopt(self.sidebar.selected_workspace()) {
-                    crate::intent::Intent::MountAdoptPicker { source_key } => {
-                        self.mount_adopt_picker(source_key);
-                    }
-                    crate::intent::Intent::Notice(msg) => {
-                        use crate::realm::components::footer::{Notice, NoticeSeverity};
-                        self.status.notice = Some(Notice::new(msg, NoticeSeverity::Info));
-                        self.redraw = true;
-                    }
-                    _ => {}
-                }
-                return;
-            }
+            // Shift+A AdoptSessions is handled by the catalog
+            // dispatch (`Action::AdoptSessions`) — same resolver,
+            // same modal mount, same Notice fallback when no
+            // sessions to adopt.
             _ => {
                 // Any other key disarms.
                 self.q_latch.disarm();
@@ -2221,6 +2215,7 @@ impl<T: TerminalAdapter> Model<T> {
                 pilot_tui_core::action::ActionKind::Archive => Some(Action::Archive),
                 pilot_tui_core::action::ActionKind::ToggleSnooze => Some(Action::ToggleSnooze),
                 pilot_tui_core::action::ActionKind::Refresh => Some(Action::Refresh),
+                pilot_tui_core::action::ActionKind::AdoptSessions => Some(Action::AdoptSessions),
                 _ => None,
             };
             if let Some(action) = action {

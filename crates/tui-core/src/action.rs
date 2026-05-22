@@ -432,7 +432,7 @@ impl ActionDef {
                 default_keys: "r",
                 label: "reply",
                 describe: "Open the reply textarea targeted at this workspace.",
-                section: Section::Activity,
+                section: Section::Workspace,
             },
             ActionKind::SelectRow => &Self {
                 kind: ActionKind::SelectRow,
@@ -509,13 +509,13 @@ impl ActionDef {
             ActionKind::MergePr,
             ActionKind::RequestReviewers,
             ActionKind::AddAssignees,
+            ActionKind::Reply,
             ActionKind::AdoptSessions,
             ActionKind::Archive,
             // Activity
             ActionKind::ToggleActivity,
             ActionKind::ToggleRow,
             ActionKind::ToggleDescription,
-            ActionKind::Reply,
             ActionKind::SelectRow,
             ActionKind::UndoMarkRead,
             // Terminal

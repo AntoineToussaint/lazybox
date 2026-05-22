@@ -1869,6 +1869,43 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenSettings => {
                 self.open_settings();
             }
+            Action::Reply => {
+                // Reply targets the focused workspace. Resolver
+                // returns `Intent::MountReply` when a workspace is
+                // selected; we mount the textarea modal. Fires from
+                // both Sidebar and Right (catalog Section::Workspace
+                // covers both focuses).
+                let intent = crate::intent::resolve_reply(self.sidebar.selected_workspace());
+                if let crate::intent::Intent::MountReply { workspace_key } = intent {
+                    let session_key: pilot_core::SessionKey = (&workspace_key).into();
+                    self.mount_reply(session_key);
+                }
+            }
+            Action::RequestReviewers => {
+                if let Some(ws) = self.sidebar.selected_workspace()
+                    && ws.pr.is_some()
+                {
+                    let ws_key = ws.key.clone();
+                    self.mount_request_reviewers(ws_key);
+                }
+            }
+            Action::AddAssignees => {
+                if let Some(ws) = self.sidebar.selected_workspace() {
+                    // Assignment requires a GraphQL Assignable id —
+                    // PR or gh issue with a node_id. Empty pre-PR
+                    // workspaces don't qualify.
+                    let has_target = ws.pr.as_ref().map(|p| p.node_id.is_some()).unwrap_or(false)
+                        || ws
+                            .gh_issues
+                            .first()
+                            .map(|i| i.node_id.is_some())
+                            .unwrap_or(false);
+                    if has_target {
+                        let ws_key = ws.key.clone();
+                        self.mount_add_assignees(ws_key);
+                    }
+                }
+            }
             // Actions not yet handled here stay in the existing
             // handlers. As we migrate, the per-key match arms in
             // `handle_pane_key` and the pane wrappers get deleted
@@ -2031,65 +2068,11 @@ impl<T: TerminalAdapter> Model<T> {
                 self.toggle_mouse_capture();
                 return;
             }
-            // `r` opens the reply textarea targeted at the selected
-            // workspace. Available from Sidebar AND Right (Activity)
-            // — replying is more naturally "an action on the thing
-            // I'm reading" than "an action on the row". Disabled in
-            // Terminals where `r` belongs to the PTY.
-            _ if self.focus != PaneFocus::Terminals
-                && self.matches_action(&key, pilot_config::Action::Reply) =>
-            {
-                self.q_latch.disarm();
-                let intent = crate::intent::resolve_reply(self.sidebar.selected_workspace());
-                if let crate::intent::Intent::MountReply { workspace_key } = intent {
-                    let session_key: pilot_core::SessionKey = (&workspace_key).into();
-                    self.mount_reply(session_key);
-                }
-                return;
-            }
-            // `Shift-V` on the sidebar / right pane: request more
-            // reviewers on the focused workspace's PR. Sidebar-
-            // initiated because the workspace cursor is what scopes
-            // the action; the request modal accepts a free-form
-            // login list (comma- or whitespace-separated).
-            _ if self.focus != PaneFocus::Terminals
-                && key.code == Key::Char('V')
-                && key.modifiers.contains(KeyModifiers::SHIFT) =>
-            {
-                self.q_latch.disarm();
-                if let Some(ws) = self.sidebar.selected_workspace()
-                    && ws.pr.is_some()
-                {
-                    let ws_key = ws.key.clone();
-                    self.mount_request_reviewers(ws_key);
-                }
-                return;
-            }
-            // `Shift-G` (G for assiGnee) on the sidebar / right pane:
-            // add assignees to the focused workspace's PR or issue.
-            // Works on issues too (GraphQL `Assignable` covers both).
-            _ if self.focus != PaneFocus::Terminals
-                && key.code == Key::Char('G')
-                && key.modifiers.contains(KeyModifiers::SHIFT) =>
-            {
-                self.q_latch.disarm();
-                if let Some(ws) = self.sidebar.selected_workspace() {
-                    // Need a PR or a gh issue with a node_id —
-                    // assignment requires the Assignable's GraphQL
-                    // id. Empty workspaces don't have one yet.
-                    let has_target = ws.pr.as_ref().map(|p| p.node_id.is_some()).unwrap_or(false)
-                        || ws
-                            .gh_issues
-                            .first()
-                            .map(|i| i.node_id.is_some())
-                            .unwrap_or(false);
-                    if has_target {
-                        let ws_key = ws.key.clone();
-                        self.mount_add_assignees(ws_key);
-                    }
-                }
-                return;
-            }
+            // Reply (`r`), RequestReviewers (`Shift-V`), AddAssignees
+            // (`Shift-G`) all dispatch via the catalog (Section::
+            // Workspace, accepted from both Sidebar and Right focus).
+            // See `find_action_for_chord` + the whitelist in
+            // `dispatch_focused_key`.
             // `e` from the sidebar: open the focused workspace's
             // worktree in an editor (Zed / VS Code / Cursor / …).
             _ if self.focus == PaneFocus::Sidebar
@@ -2258,6 +2241,11 @@ impl<T: TerminalAdapter> Model<T> {
                 pilot_tui_core::action::ActionKind::ToggleSnooze => Some(Action::ToggleSnooze),
                 pilot_tui_core::action::ActionKind::Refresh => Some(Action::Refresh),
                 pilot_tui_core::action::ActionKind::AdoptSessions => Some(Action::AdoptSessions),
+                pilot_tui_core::action::ActionKind::Reply => Some(Action::Reply),
+                pilot_tui_core::action::ActionKind::RequestReviewers => {
+                    Some(Action::RequestReviewers)
+                }
+                pilot_tui_core::action::ActionKind::AddAssignees => Some(Action::AddAssignees),
                 _ => None,
             };
             if let Some(action) = action {
@@ -3935,7 +3923,15 @@ fn find_action_for_chord(
     let allowed = |s: Section| -> bool {
         match (s, focus) {
             (Section::Global, _) => true,
-            (Section::Workspace, PaneFocus::Sidebar) => true,
+            // Workspace = "operates on the focused workspace". The
+            // workspace cursor lives in the sidebar, but it's still
+            // the active reference frame when the user is reading
+            // the right pane — so accept both. Reply / Shift-V /
+            // Shift-G all dual-fire today, and this widening lets
+            // their inline match arms retire.
+            (Section::Workspace, PaneFocus::Sidebar | PaneFocus::Right) => true,
+            // Activity = "operates on the focused activity row" —
+            // the row cursor only exists on the right pane.
             (Section::Activity, PaneFocus::Right) => true,
             // Terminal section binds to actual PTY keys; we don't
             // route them through the catalog yet — the terminal

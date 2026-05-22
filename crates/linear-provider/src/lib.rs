@@ -208,6 +208,37 @@ impl LinearClient {
     }
 }
 
+impl LinearClient {
+    /// Post a comment on a Linear issue. `issue_id` is the issue's
+    /// UUID node id (stored in `task.node_id` after a poll). Wraps
+    /// the `commentCreate` GraphQL mutation; returns on success or
+    /// surfaces the upstream error message.
+    pub async fn post_comment(
+        &self,
+        issue_id: &str,
+        body: &str,
+    ) -> Result<(), LinearError> {
+        let req = serde_json::json!({
+            "query": "mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }",
+            "variables": { "input": { "issueId": issue_id, "body": body } },
+        });
+        // The response shape is `{ data: { commentCreate: { success } } }`
+        // — we only need to confirm we got a 2xx + no GraphQL errors.
+        let resp: serde_json::Value = self.graphql(&req).await?;
+        if let Some(errors) = resp.get("errors").and_then(|v| v.as_array())
+            && !errors.is_empty()
+        {
+            let joined = errors
+                .iter()
+                .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(LinearError::Graphql(joined));
+        }
+        Ok(())
+    }
+}
+
 impl TaskProvider for LinearClient {
     fn name(&self) -> &str {
         "linear"
@@ -219,5 +250,31 @@ impl TaskProvider for LinearClient {
 
     fn username(&self) -> Option<&str> {
         None
+    }
+
+    /// Post a reply on the workspace's Linear issue. The issue's
+    /// UUID lives in `primary_task().node_id` — set by the
+    /// fetch-side `issue_to_task` mapper. No reply if the workspace
+    /// has no primary task or no node_id (pre-poll state).
+    async fn post_reply(
+        &self,
+        workspace: &pilot_core::Workspace,
+        body: &str,
+    ) -> Result<(), ProviderError> {
+        let task = workspace.primary_task().ok_or_else(|| {
+            ProviderError::permanent(
+                "linear",
+                format!("workspace {} has no primary task", workspace.key),
+            )
+        })?;
+        let issue_id = task.node_id.as_deref().ok_or_else(|| {
+            ProviderError::permanent(
+                "linear",
+                "task has no node_id (poll first)",
+            )
+        })?;
+        self.post_comment(issue_id, body)
+            .await
+            .map_err(|e| ProviderError::permanent("linear", e.to_string()))
     }
 }

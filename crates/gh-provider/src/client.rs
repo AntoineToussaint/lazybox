@@ -1248,4 +1248,137 @@ impl pilot_core::TaskProvider for GhClient {
     fn username(&self) -> Option<&str> {
         Some(&self.user)
     }
+
+    /// Merge the workspace's PR. Requires `workspace.pr.node_id`
+    /// (the GraphQL node id) — the polling cycle fills it in;
+    /// hitting this on a fresh-from-cache workspace surfaces as
+    /// `Permanent("PR has no node_id")` which the caller can
+    /// translate to "repoll first".
+    async fn merge(
+        &self,
+        workspace: &pilot_core::Workspace,
+    ) -> Result<(), pilot_core::ProviderError> {
+        let Some(pr) = workspace.pr.as_ref() else {
+            return Err(pilot_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no PR", workspace.key),
+            ));
+        };
+        let Some(node_id) = pr.node_id.as_deref() else {
+            return Err(pilot_core::ProviderError::permanent(
+                "github",
+                "PR has no node_id (poll first)",
+            ));
+        };
+        self.merge_pr(node_id)
+            .await
+            .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))
+    }
+
+    /// Request reviewer(s) on the workspace's PR. Logins are
+    /// github usernames (no `@` prefix). Daemon resolves logins →
+    /// node ids inside `request_reviewers`.
+    async fn request_reviewers(
+        &self,
+        workspace: &pilot_core::Workspace,
+        logins: &[String],
+    ) -> Result<(), pilot_core::ProviderError> {
+        let Some(pr) = workspace.pr.as_ref() else {
+            return Err(pilot_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no PR", workspace.key),
+            ));
+        };
+        let Some(node_id) = pr.node_id.as_deref() else {
+            return Err(pilot_core::ProviderError::permanent(
+                "github",
+                "PR has no node_id (poll first)",
+            ));
+        };
+        self.request_reviewers(node_id, logins)
+            .await
+            .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))
+    }
+
+    /// Add assignee(s) to the workspace's PR or issue. Both are
+    /// GraphQL `Assignable` so a single mutation covers them.
+    async fn add_assignees(
+        &self,
+        workspace: &pilot_core::Workspace,
+        logins: &[String],
+    ) -> Result<(), pilot_core::ProviderError> {
+        // Prefer the PR's node_id; fall back to the first issue's
+        // node_id for issue-only workspaces.
+        let node_id = workspace
+            .pr
+            .as_ref()
+            .and_then(|p| p.node_id.as_deref())
+            .or_else(|| {
+                workspace
+                    .gh_issues
+                    .first()
+                    .and_then(|i| i.node_id.as_deref())
+            });
+        let Some(node_id) = node_id else {
+            return Err(pilot_core::ProviderError::permanent(
+                "github",
+                format!(
+                    "workspace {} has neither a PR nor an issue with a node_id",
+                    workspace.key
+                ),
+            ));
+        };
+        self.add_assignees(node_id, logins)
+            .await
+            .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))
+    }
+
+    /// Post a reply (comment) on the workspace's PR or issue.
+    /// Uses `post_issue_comment` because github's REST API exposes
+    /// the same endpoint for both (PRs are issues at the REST
+    /// layer) — `pr.number` doubles as the issue number.
+    async fn post_reply(
+        &self,
+        workspace: &pilot_core::Workspace,
+        body: &str,
+    ) -> Result<(), pilot_core::ProviderError> {
+        let primary = workspace.primary_task().ok_or_else(|| {
+            pilot_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no primary task", workspace.key),
+            )
+        })?;
+        let Some(repo) = primary.repo.as_deref() else {
+            return Err(pilot_core::ProviderError::permanent(
+                "github",
+                "primary task has no repo",
+            ));
+        };
+        // PR / issue number is encoded in the TaskId key as
+        // `owner/repo#NNN` (or a `-NNN` suffix for legacy keys).
+        // GitHub's REST API treats both as "issue numbers" so the
+        // same value works for `post_issue_comment` regardless of
+        // whether the workspace is PR-shaped or issue-shaped.
+        let number = primary
+            .id
+            .key
+            .rsplit_once('#')
+            .and_then(|(_, n)| n.parse::<u64>().ok())
+            .or_else(|| {
+                primary
+                    .id
+                    .key
+                    .rsplit_once('-')
+                    .and_then(|(_, n)| n.parse::<u64>().ok())
+            });
+        let Some(number) = number else {
+            return Err(pilot_core::ProviderError::permanent(
+                "github",
+                format!("can't parse number from task key `{}`", primary.id.key),
+            ));
+        };
+        self.post_issue_comment(repo, number, body)
+            .await
+            .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))
+    }
 }

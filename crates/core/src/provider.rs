@@ -21,7 +21,7 @@
 //! Display defaults to the *terse* user-facing message; call
 //! `diagnostic()` for the full text in dev tooling.
 
-use crate::Task;
+use crate::{Task, Workspace};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderError {
@@ -40,6 +40,13 @@ pub enum ProviderError {
     Auth { source: String, detail: String },
     /// Permanent failure. Surface, don't retry.
     Permanent { source: String, detail: String },
+    /// This provider doesn't implement the requested mutation —
+    /// e.g. asking a Linear-backed workspace to merge a PR, or any
+    /// sandbox workspace to do anything. Action-catalog
+    /// `availability()` gating SHOULD have caught this upstream;
+    /// hitting this variant means a surface offered the action
+    /// without checking.
+    Unsupported { source: String, op: String },
 }
 
 impl ProviderError {
@@ -80,11 +87,19 @@ impl ProviderError {
         }
     }
 
+    pub fn unsupported(source: impl Into<String>, op: impl Into<String>) -> Self {
+        Self::Unsupported {
+            source: source.into(),
+            op: op.into(),
+        }
+    }
+
     pub fn source(&self) -> &str {
         match self {
             Self::Retryable { source, .. }
             | Self::Auth { source, .. }
-            | Self::Permanent { source, .. } => source,
+            | Self::Permanent { source, .. }
+            | Self::Unsupported { source, .. } => source,
         }
     }
 
@@ -129,6 +144,9 @@ impl ProviderError {
             Self::Permanent { source, detail } => {
                 format!("[{source}] permanent: {detail}")
             }
+            Self::Unsupported { source, op } => {
+                format!("[{source}] unsupported operation: {op}")
+            }
         }
     }
 
@@ -151,6 +169,9 @@ impl ProviderError {
                 let summary = detail.lines().next().unwrap_or(detail);
                 format!("{source}: {summary}")
             }
+            Self::Unsupported { source, op } => {
+                format!("{source} doesn't support {op}")
+            }
         }
     }
 }
@@ -165,13 +186,24 @@ impl std::fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
-/// A source of tasks (PRs, issues, tickets).
+/// A source of tasks (PRs, issues, tickets) — and the place where
+/// the user's mutations (merge, request reviewers, …) land.
 ///
 /// Providers fetch tasks from external systems and convert them to
-/// the generic `Task` type. The app polls providers periodically.
+/// the generic `Task` type. The server polls providers periodically;
+/// user actions in the TUI route to the matching provider's mutation
+/// methods.
+///
+/// **Capability model**: mutations are optional. The default impl
+/// of each returns `ProviderError::Unsupported` — providers
+/// implement only the operations their backend supports. The action
+/// catalog's `availability()` predicate is the upstream gate; if it
+/// drifts the call still fails gracefully here.
 #[allow(async_fn_in_trait)]
 pub trait TaskProvider: Send + Sync {
-    /// Provider name (e.g., "github", "linear").
+    /// Provider name (e.g., "github", "linear"). Matches the
+    /// workspace-key prefix so the server can route a workspace's
+    /// mutation request to the right provider.
     fn name(&self) -> &str;
 
     /// Fetch all current tasks. Called once per poll cycle.
@@ -181,6 +213,70 @@ pub trait TaskProvider: Send + Sync {
     fn username(&self) -> Option<&str> {
         None
     }
+
+    /// Merge the workspace's underlying task. Most provider impls
+    /// will check `workspace.pr` (or equivalent) is ready and
+    /// dispatch to the backend's merge mutation.
+    ///
+    /// Idempotency: if the task is already merged, return `Ok(())`
+    /// rather than `Permanent` — the polling cycle will reconcile
+    /// the local copy regardless.
+    async fn merge(&self, workspace: &Workspace) -> Result<(), ProviderError> {
+        let _ = workspace;
+        Err(ProviderError::unsupported(self.name(), "merge"))
+    }
+
+    /// Request reviewer(s) on the workspace's task. `logins` are
+    /// provider-native account identifiers (github logins, linear
+    /// user ids, …).
+    async fn request_reviewers(
+        &self,
+        workspace: &Workspace,
+        logins: &[String],
+    ) -> Result<(), ProviderError> {
+        let _ = (workspace, logins);
+        Err(ProviderError::unsupported(self.name(), "request_reviewers"))
+    }
+
+    /// Add assignee(s) to the workspace's task. Works on issues
+    /// AND PR-shaped tasks where the provider supports it.
+    async fn add_assignees(
+        &self,
+        workspace: &Workspace,
+        logins: &[String],
+    ) -> Result<(), ProviderError> {
+        let _ = (workspace, logins);
+        Err(ProviderError::unsupported(self.name(), "add_assignees"))
+    }
+
+    /// Post a reply (comment) on the workspace's task. PR
+    /// workspaces target the PR's main thread; issue workspaces
+    /// target the issue. Per-comment threading is not yet modeled.
+    async fn post_reply(
+        &self,
+        workspace: &Workspace,
+        body: &str,
+    ) -> Result<(), ProviderError> {
+        let _ = (workspace, body);
+        Err(ProviderError::unsupported(self.name(), "post_reply"))
+    }
+}
+
+/// Pick the provider whose [`name`](TaskProvider::name) matches a
+/// workspace key's source prefix. Returns `None` when no provider
+/// claims it (scratch sandbox workspaces with no upstream source).
+///
+/// Workspace keys follow `<source>-<rest>` — e.g.
+/// `"github-tensorzero-nanogateway-186"` matches a provider with
+/// `name() == "github"`. The `"sandbox"` prefix has no provider
+/// today and gracefully returns `None`; callers should fall back to
+/// "no upstream, local-only" semantics.
+pub fn provider_for_workspace<'a, P: TaskProvider + ?Sized>(
+    providers: &'a [std::sync::Arc<P>],
+    workspace_key: &str,
+) -> Option<&'a std::sync::Arc<P>> {
+    let prefix = workspace_key.split_once('-').map(|(p, _)| p)?;
+    providers.iter().find(|p| p.name() == prefix)
 }
 
 #[cfg(test)]

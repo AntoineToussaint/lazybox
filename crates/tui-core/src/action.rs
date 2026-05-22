@@ -527,6 +527,155 @@ impl ActionDef {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────
+// KeyChord — typed representation of a keystroke, with parser
+// ──────────────────────────────────────────────────────────────────
+
+/// A single keystroke (or two-press chord) matched against a
+/// `KeyEvent` at dispatch time. Parsed from the catalog's
+/// `default_keys` string so the catalog stays human-readable
+/// (`"Shift-M"`, `"Ctrl-Shift-D"`, `"q q"`) but the matcher can
+/// compare strictly typed.
+///
+/// Not every catalog `default_keys` parses into a chord:
+/// - `"g/G"`, `"↑/↓"`, `"→/←"`, `"PgUp/Dn"` are *presentation*
+///   strings meaning "multiple keys, multiple actions" — they don't
+///   round-trip to a single chord and `parse` returns `None`.
+/// - `"all keys"` is the terminal pane's "forward everything"
+///   marker and likewise doesn't parse.
+///
+/// Callers that need to migrate the matcher should add explicit
+/// catalog entries for the secondary keys (e.g. `NavTop` /
+/// `NavBottom` for `g` / `G`) so the parser stays simple.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum KeyChord {
+    /// Single keystroke. Modifiers + code.
+    Single {
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        code: ChordCode,
+    },
+    /// Two-key chord (e.g. `q q` for quit). Both keys are single
+    /// presses of the same chord; runtime tracks the latch.
+    Double(Box<KeyChord>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ChordCode {
+    Char(char),
+    Named(NamedKey),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NamedKey {
+    Tab,
+    Enter,
+    Esc,
+    Space,
+    Backspace,
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Delete,
+    Insert,
+}
+
+impl KeyChord {
+    /// Parse a `default_keys` string into a typed chord. Returns
+    /// `None` for the presentation-only forms (`g/G`, `↑/↓`,
+    /// `all keys`, etc.) — those need explicit catalog entries
+    /// rather than a runtime parse.
+    pub fn parse(s: &str) -> Option<Self> {
+        let trimmed = s.trim();
+        // Two-key chord: "q q" → Double(single 'q').
+        if let Some((a, b)) = trimmed.split_once(' ')
+            && a == b
+            && let Some(inner) = Self::parse_single(a)
+        {
+            return Some(KeyChord::Double(Box::new(inner)));
+        }
+        Self::parse_single(trimmed)
+    }
+
+    fn parse_single(s: &str) -> Option<Self> {
+        // Presentation strings — explicitly not single chords.
+        if s.contains('/') || s == "all keys" || s.is_empty() {
+            return None;
+        }
+        // Strip modifier prefixes one at a time. Order matters:
+        // "Ctrl-Shift-X" peels Ctrl first, then Shift.
+        let mut ctrl = false;
+        let mut shift = false;
+        let mut alt = false;
+        let mut rest = s.to_string();
+        loop {
+            if let Some(r) = rest.strip_prefix("Ctrl-") {
+                ctrl = true;
+                rest = r.to_string();
+            } else if let Some(r) = rest.strip_prefix("Shift-") {
+                shift = true;
+                rest = r.to_string();
+            } else if let Some(r) = rest.strip_prefix("Alt-") {
+                alt = true;
+                rest = r.to_string();
+            } else {
+                break;
+            }
+        }
+        let code = match rest.as_str() {
+            "Tab" => ChordCode::Named(NamedKey::Tab),
+            "Enter" => ChordCode::Named(NamedKey::Enter),
+            "Esc" => ChordCode::Named(NamedKey::Esc),
+            "Space" => ChordCode::Named(NamedKey::Space),
+            "Backspace" => ChordCode::Named(NamedKey::Backspace),
+            "Up" => ChordCode::Named(NamedKey::Up),
+            "Down" => ChordCode::Named(NamedKey::Down),
+            "Left" => ChordCode::Named(NamedKey::Left),
+            "Right" => ChordCode::Named(NamedKey::Right),
+            "Home" => ChordCode::Named(NamedKey::Home),
+            "End" => ChordCode::Named(NamedKey::End),
+            "PageUp" | "PgUp" => ChordCode::Named(NamedKey::PageUp),
+            "PageDown" | "PgDn" => ChordCode::Named(NamedKey::PageDown),
+            "Delete" | "Del" => ChordCode::Named(NamedKey::Delete),
+            "Insert" => ChordCode::Named(NamedKey::Insert),
+            // Single ASCII letter / symbol — uppercase letters
+            // mean Shift-letter; lowercase stays as-is. The Shift
+            // prefix takes precedence (`"Shift-M"` parses to
+            // `shift=true, code=Char('M')` either way).
+            other if other.chars().count() == 1 => {
+                let c = other.chars().next().unwrap();
+                if c.is_ascii_uppercase() {
+                    shift = true;
+                }
+                ChordCode::Char(c.to_ascii_lowercase())
+            }
+            _ => return None,
+        };
+        Some(KeyChord::Single {
+            ctrl,
+            shift,
+            alt,
+            code,
+        })
+    }
+}
+
+impl ActionDef {
+    /// Typed chord for this action's default keystroke. `None` for
+    /// presentation-only `default_keys` like `g/G` or `↑/↓` (see
+    /// `KeyChord` docs). Cheap; parses each call. Re-parse cost is
+    /// negligible vs. caching given how rarely we look up.
+    pub fn default_chord(&self) -> Option<KeyChord> {
+        KeyChord::parse(self.default_keys)
+    }
+}
+
 /// State-aware label for the footer / context menu, defaulting to
 /// the catalog's static `label` when no override applies. The
 /// override exists because a handful of actions want a workspace-
@@ -661,6 +810,117 @@ mod tests {
         let a = Action::SpawnAgent("claude".into());
         let def = ActionDef::for_action(&a);
         assert_eq!(def.kind, ActionKind::SpawnAgent);
+    }
+
+    #[test]
+    fn key_chord_parses_simple_letter() {
+        let c = KeyChord::parse("s").unwrap();
+        assert_eq!(
+            c,
+            KeyChord::Single {
+                ctrl: false,
+                shift: false,
+                alt: false,
+                code: ChordCode::Char('s'),
+            }
+        );
+    }
+
+    #[test]
+    fn key_chord_parses_uppercase_as_shift() {
+        // `Shift-M` and `M` should yield the same chord; the
+        // catalog uses either form interchangeably.
+        let explicit = KeyChord::parse("Shift-M").unwrap();
+        let implicit = KeyChord::parse("M").unwrap();
+        assert_eq!(explicit, implicit);
+        assert_eq!(
+            explicit,
+            KeyChord::Single {
+                ctrl: false,
+                shift: true,
+                alt: false,
+                code: ChordCode::Char('m'),
+            }
+        );
+    }
+
+    #[test]
+    fn key_chord_parses_modifier_stack() {
+        let c = KeyChord::parse("Ctrl-Shift-D").unwrap();
+        assert_eq!(
+            c,
+            KeyChord::Single {
+                ctrl: true,
+                shift: true,
+                alt: false,
+                code: ChordCode::Char('d'),
+            }
+        );
+    }
+
+    #[test]
+    fn key_chord_parses_named_keys() {
+        for (s, expected) in [
+            ("Tab", NamedKey::Tab),
+            ("Enter", NamedKey::Enter),
+            ("PgUp", NamedKey::PageUp),
+            ("PgDn", NamedKey::PageDown),
+            ("Space", NamedKey::Space),
+        ] {
+            let c = KeyChord::parse(s).unwrap();
+            match c {
+                KeyChord::Single { code, .. } => assert_eq!(code, ChordCode::Named(expected)),
+                _ => panic!("{s} should parse to a Single chord"),
+            }
+        }
+    }
+
+    #[test]
+    fn key_chord_parses_double() {
+        let c = KeyChord::parse("q q").unwrap();
+        assert!(matches!(c, KeyChord::Double(_)));
+    }
+
+    #[test]
+    fn presentation_forms_are_not_parsed() {
+        // `g/G` etc. are display-only — we don't try to fabricate
+        // a chord. Callers needing the secondary key add an
+        // explicit catalog entry.
+        assert!(KeyChord::parse("g/G").is_none());
+        assert!(KeyChord::parse("↑/↓").is_none());
+        assert!(KeyChord::parse("Shift-PgUp/Dn").is_none());
+        assert!(KeyChord::parse("all keys").is_none());
+    }
+
+    #[test]
+    fn every_parseable_default_round_trips_to_chord() {
+        // Smoke: every catalog entry whose default_keys is a
+        // single chord (not a presentation form) must parse. Catches
+        // a typo in `default_keys` that would silently break the
+        // matcher.
+        // Presentation-only `default_keys` — not a single chord.
+        let presentation = [
+            "c / x / u",
+            "g/G",
+            "↑/↓",
+            "→/←",
+            "Shift-PgUp/Dn",
+            "Shift-Arrows",
+            "all keys",
+            "]]",
+            "q q",
+        ];
+        for def in ActionDef::all() {
+            if presentation.contains(&def.default_keys) {
+                continue;
+            }
+            assert!(
+                def.default_chord().is_some(),
+                "{:?} default_keys `{}` failed to parse",
+                def.kind,
+                def.default_keys,
+            );
+        }
     }
 
     #[test]

@@ -675,6 +675,43 @@ impl ActionDef {
         KeyChord::parse(self.default_keys)
     }
 
+    /// True when this action is *destructive* — invoking it commits
+    /// state the user can't trivially undo (merging a PR, archiving
+    /// a workspace, killing a session). The dispatch path
+    /// (`Model::dispatch_action`) routes destructive actions
+    /// through a unified Confirm modal BEFORE firing; non-
+    /// destructive actions fire immediately.
+    ///
+    /// Adding a new destructive action: mark it here AND add the
+    /// matching `confirm_prompt` arm. Forgetting one half is a
+    /// catalog bug — the type system can't catch it directly, but
+    /// the test `destructive_actions_have_prompts` does.
+    pub fn is_destructive(&self) -> bool {
+        matches!(
+            self.kind,
+            ActionKind::Archive | ActionKind::MergePr,
+        )
+    }
+
+    /// Confirm-modal prompt text for a destructive action. Returns
+    /// `None` for non-destructive actions — those shouldn't be
+    /// routed through the confirm path. The catalog default is
+    /// static; specific surfaces (e.g. the merge-PR flow knows the
+    /// PR number) can override at mount time.
+    pub fn confirm_prompt(&self) -> Option<&'static str> {
+        match self.kind {
+            ActionKind::Archive => Some(
+                "Archive the focused workspace? Active sessions \
+                 are killed and the row drops from the inbox.",
+            ),
+            ActionKind::MergePr => Some(
+                "Merge the focused PR? Mainline branch updates \
+                 immediately and the PR closes.",
+            ),
+            _ => None,
+        }
+    }
+
     /// Resolve the effective key chord: user override from the
     /// config map if present, otherwise the catalog default.
     ///
@@ -870,6 +907,39 @@ mod tests {
         let a = Action::SpawnAgent("claude".into());
         let def = ActionDef::for_action(&a);
         assert_eq!(def.kind, ActionKind::SpawnAgent);
+    }
+
+    #[test]
+    fn destructive_actions_have_prompts() {
+        // Catalog invariant: every action flagged destructive must
+        // have a confirm-modal prompt declared. Forgetting the
+        // prompt would let the dispatcher fire a destructive
+        // action with no Confirm body to render — UB-ish for UX.
+        for def in ActionDef::all() {
+            if def.is_destructive() {
+                assert!(
+                    def.confirm_prompt().is_some(),
+                    "{:?} is destructive but has no confirm_prompt",
+                    def.kind,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nondestructive_actions_have_no_prompt() {
+        // The inverse — if `confirm_prompt` returns Some for a
+        // non-destructive action, the dispatcher would route it
+        // through the modal path needlessly.
+        for def in ActionDef::all() {
+            if !def.is_destructive() {
+                assert!(
+                    def.confirm_prompt().is_none(),
+                    "{:?} isn't destructive but has a prompt",
+                    def.kind,
+                );
+            }
+        }
     }
 
     #[test]

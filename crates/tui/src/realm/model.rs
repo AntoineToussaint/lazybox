@@ -73,12 +73,6 @@ pub enum Id {
     /// (issue, PR) keys live in `active_merge_prompt`; `Msg::Confirmed`
     /// dispatches `Command::ConfirmMerge` back to the daemon.
     MergeConfirm,
-    /// Confirm dialog for `Shift-M` on a READY PR — "Merge PR #N?".
-    /// Workspace key lives in `active_merge_pr_prompt`; `Msg::Confirmed`
-    /// dispatches `Command::MergePr`. Distinct from `MergeConfirm`
-    /// (which is the issue→PR collapse flow); both share the same
-    /// `Confirm` component but the post-confirmed action differs.
-    MergePrConfirm,
     /// Picker for the `Shift-A` ("adopt") flow — pick the target
     /// workspace the source's sessions should move into. Source is
     /// stashed in `pending_adopt_source`; `Msg::ChoicePicked` reads
@@ -106,6 +100,14 @@ pub enum Id {
     /// Confirm dialog before firing `Command::CleanWorktrees`.
     /// Picked from the Settings palette; Yes → dispatch.
     CleanWorktreesConfirm,
+    /// Unified confirm modal for any destructive catalog action.
+    /// `Model::dispatch_action` routes here when
+    /// `ActionDef::is_destructive()` is true; the pending `Action`
+    /// lives in `pending_action_confirm` and fires on
+    /// `Msg::Confirmed(true)`. Replaces the per-action confirm
+    /// modals (MergePrConfirm, the kill latch, …) — one modal id,
+    /// one Yes-handler, one place to remember.
+    ActionConfirm,
 }
 
 /// App-level message vocabulary for modals + globals.
@@ -297,7 +299,6 @@ pub struct Model<T: TerminalAdapter> {
     /// Workspace key whose PR is being confirmed for merge by the
     /// `Shift-M` Confirm modal. Set when the modal mounts, taken on
     /// `Msg::Confirmed` / `Msg::ModalDismissed`.
-    active_merge_pr_prompt: Option<pilot_core::WorkspaceKey>,
     /// Source workspace key the `Shift-A` adopt picker is gathering
     /// a target for. Set when the picker mounts; consumed when the
     /// user picks (or dismisses).
@@ -337,6 +338,11 @@ pub struct Model<T: TerminalAdapter> {
     /// are key-spec strings. Empty when the user hasn't configured
     /// `ui.action_keys` — catalog defaults apply.
     action_key_overrides: std::collections::BTreeMap<String, String>,
+    /// Action queued behind an `ActionConfirm` modal. Set by
+    /// `mount_action_confirm`, taken (and dispatched if Yes) by
+    /// the `Msg::Confirmed` handler. None when no destructive
+    /// confirm is currently up.
+    pending_action_confirm: Option<pilot_tui_core::action::Action>,
 }
 
 /// Custom Port that drains events from an `mpsc::Receiver`. Pilot
@@ -442,7 +448,6 @@ impl<T: TerminalAdapter> Model<T> {
             active_removal_prompt: None,
             pending_merge_prompts: std::collections::VecDeque::new(),
             active_merge_prompt: None,
-            active_merge_pr_prompt: None,
             pending_adopt_source: None,
             adopt_choices: Vec::new(),
             status: StatusCtx::new(),
@@ -450,6 +455,7 @@ impl<T: TerminalAdapter> Model<T> {
             pr_details_fetched: std::collections::HashSet::new(),
             pending_sidebar_context: None,
             action_key_overrides: std::collections::BTreeMap::new(),
+            pending_action_confirm: None,
             keybindings: pilot_config::Keybindings::default(),
         }
     }
@@ -1465,10 +1471,10 @@ impl<T: TerminalAdapter> Model<T> {
                     });
                 }
             }
-            Some(Id::MergePrConfirm) => {
-                // Esc = cancel; just discard the pending target.
-                // No command goes to the daemon.
-                self.active_merge_pr_prompt = None;
+            Some(Id::ActionConfirm) => {
+                // Esc = cancel destructive action; drop the
+                // queued Action without firing.
+                self.pending_action_confirm = None;
             }
             _ => {}
         }
@@ -1509,10 +1515,15 @@ impl<T: TerminalAdapter> Model<T> {
                     });
                 }
             }
-            Some(Id::MergePrConfirm) => {
-                let target = self.active_merge_pr_prompt.take();
-                if yes && let Some(workspace_key) = target {
-                    cmds.push(IpcCommand::MergePr { workspace_key });
+            Some(Id::ActionConfirm) => {
+                // Unified destructive-action confirm. Yes →
+                // dispatch the queued action via the unchecked
+                // path (the gate already fired). No / Esc → drop
+                // the stash silently.
+                let pending = self.pending_action_confirm.take();
+                if yes && let Some(action) = pending {
+                    cmds.extend(self.dispatch_action_unchecked(&action));
+                    self.redraw = true;
                 }
             }
             Some(Id::CleanWorktreesConfirm) => {
@@ -1647,6 +1658,35 @@ impl<T: TerminalAdapter> Model<T> {
         &mut self,
         action: &pilot_tui_core::action::Action,
     ) -> Vec<IpcCommand> {
+        use pilot_tui_core::action::ActionDef;
+        // Destructive gate, type-system enforced via the catalog.
+        // Every destructive action is routed through the unified
+        // Confirm modal first; the pending action lives in
+        // `pending_action_confirm` and fires on `Msg::Confirmed(true)`.
+        // This is the *only* path through `dispatch_action` for
+        // destructive variants — there's no way to fire one
+        // without the user confirming.
+        if ActionDef::for_action(action).is_destructive() {
+            self.mount_action_confirm(action.clone());
+            return Vec::new();
+        }
+        self.dispatch_action_unchecked(action)
+    }
+
+    /// Internal: actually carry out an action without checking the
+    /// destructive flag. Public `dispatch_action` gates on
+    /// `is_destructive` and routes through the Confirm modal for
+    /// the destructive ones — this method is what the modal's
+    /// `Msg::Confirmed(true)` handler calls AFTER the user
+    /// approved.
+    ///
+    /// Callers OTHER than `dispatch_action` and the
+    /// `ActionConfirm` Yes-handler must not exist. Keeping it
+    /// `pub(crate)` so the type system makes that hard to break.
+    pub(crate) fn dispatch_action_unchecked(
+        &mut self,
+        action: &pilot_tui_core::action::Action,
+    ) -> Vec<IpcCommand> {
         use pilot_tui_core::action::Action;
         let mut cmds = Vec::new();
         // Workspace-scoped actions need a target — grab the
@@ -1739,11 +1779,11 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::Archive => {
-                // Two-press latch — sidebar owns the latch state
-                // (paints "[Shift+X again to confirm]" chrome) and
-                // returns the session key only on the second
-                // consecutive press. First press just arms.
-                if let Some(sk) = self.sidebar.arm_or_fire_archive() {
+                // Destructive — only reachable from
+                // `dispatch_action_unchecked` after the user said
+                // Yes on the unified ActionConfirm modal. Just
+                // fire the Kill.
+                if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Kill { session_key: sk });
                 }
             }
@@ -1794,18 +1834,20 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::MergePr => {
-                // Resolver re-checks the precondition (CI green +
-                // approved + not behind base) so a misdirected key
-                // can't bypass the merge gate. On success: mount
-                // the Confirm modal — the destructive action lands
-                // on `Msg::Confirmed(true)`. Catalog dispatch
-                // doesn't push the IPC directly; the Confirm
-                // handler does that.
+                // Destructive — only reachable from
+                // `dispatch_action_unchecked` after the user said
+                // Yes on the unified ActionConfirm. Re-check the
+                // merge preconditions defensively, then fire the
+                // IPC. (Catalog availability gates the surface
+                // from offering the action when CI / review /
+                // conflict state isn't ready, so this re-check
+                // mostly catches the rare race where state
+                // changed while the modal was open.)
                 let workspace = self.sidebar.selected_workspace().cloned();
                 if let crate::intent::Intent::MergePr { workspace_key } =
                     crate::intent::resolve_merge(workspace.as_ref())
                 {
-                    self.mount_merge_pr_confirm(workspace_key);
+                    cmds.push(IpcCommand::MergePr { workspace_key });
                 }
             }
             Action::Refresh => {
@@ -2320,37 +2362,6 @@ impl<T: TerminalAdapter> Model<T> {
         // directly when the key fires.)
         // Sidebar j/k changes selection — propagate to right + terminals.
         self.sync_panes();
-        self.redraw = true;
-    }
-
-    /// Mount the `Shift-M` merge confirm dialog for a specific PR
-    /// workspace. Stashes the key in `active_merge_pr_prompt` so the
-    /// `Msg::Confirmed(true)` handler can dispatch `Command::MergePr`.
-    fn mount_merge_pr_confirm(&mut self, workspace_key: pilot_core::WorkspaceKey) {
-        use crate::realm::components::confirm::Confirm;
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
-        // Build a helpful question using the task title when known —
-        // "Merge PR #204?" reads better than "Merge github:owner/repo#204?".
-        let session_key: pilot_core::SessionKey = (&workspace_key).into();
-        let label = self
-            .sidebar
-            .workspace_by_key(&session_key)
-            .and_then(|w| w.primary_task())
-            .map(|t| {
-                let id = &t.id.key;
-                let title = t.title.as_str();
-                format!("Merge {id} \"{title}\"?")
-            })
-            .unwrap_or_else(|| format!("Merge {}?", session_key.as_str()));
-        let modal = Confirm::new(label).default_no();
-        self.active_merge_pr_prompt = Some(workspace_key);
-        let _ = self.app.mount(
-            Id::MergePrConfirm,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::MergePrConfirm);
-        let _ = self.app.active(&Id::MergePrConfirm);
         self.redraw = true;
     }
 
@@ -3150,6 +3161,36 @@ impl<T: TerminalAdapter> Model<T> {
     /// workspace the user could move sessions into. No-op when there
     /// are no other workspaces — show a hint instead since there's
     /// nothing to pick.
+    /// Unified Confirm-modal mount for any destructive catalog
+    /// action. Stashes the action in `pending_action_confirm`;
+    /// `Msg::Confirmed(true)` reads it back, dispatches via
+    /// `dispatch_action_unchecked`, and drains IPC commands.
+    /// `Msg::Confirmed(false)` (or Esc) drops the stash silently.
+    ///
+    /// The body text comes from the catalog
+    /// (`ActionDef::confirm_prompt`) — keeps prompt copy in the
+    /// same place as the destructive flag, so adding a new
+    /// destructive action is one catalog entry, not "remember to
+    /// add a prompt".
+    fn mount_action_confirm(&mut self, action: pilot_tui_core::action::Action) {
+        use crate::realm::components::confirm::Confirm;
+        use pilot_tui_core::action::ActionDef;
+        use tuirealm::subscription::{EventClause, Sub, SubClause};
+        let prompt = ActionDef::for_action(&action)
+            .confirm_prompt()
+            .unwrap_or("Confirm action?");
+        self.pending_action_confirm = Some(action);
+        let modal = Confirm::new(prompt).default_no();
+        let _ = self.app.mount(
+            Id::ActionConfirm,
+            Box::new(modal),
+            vec![Sub::new(EventClause::Any, SubClause::Always)],
+        );
+        self.modal_stack.push(Id::ActionConfirm);
+        let _ = self.app.active(&Id::ActionConfirm);
+        self.redraw = true;
+    }
+
     /// Confirm prompt before dispatching `Command::CleanWorktrees`.
     /// The destructive bit is on disk — sessions + their worktrees
     /// are gone after this. PR/issue rows stay because we only

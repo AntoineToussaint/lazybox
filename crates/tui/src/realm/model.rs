@@ -56,6 +56,9 @@ pub enum Id {
     /// Single-line input prompt for naming a brand-new pre-PR
     /// workspace. Submit → `Command::CreateWorkspace { name }`.
     NewWorkspace,
+    /// Single-line input prompt for naming a brand-new local
+    /// Project. Submit → `Command::CreateProject { name }`.
+    NewProject,
     /// Picker for selecting an editor when 2+ are detected.
     /// Submit → `editors::launch(template, worktree)`.
     Editor,
@@ -195,6 +198,13 @@ pub struct Model<T: TerminalAdapter> {
     sidebar: Sidebar,
     right: Right,
     terminals: Terminals,
+    /// Project records mirrored from the daemon. Keyed by
+    /// `ProjectKey` so lookups during sidebar grouping are O(1).
+    /// Populated by `Event::Snapshot` (initial) and
+    /// `Event::ProjectUpserted` (new project or first-sight repo);
+    /// `Event::ProjectRemoved` drops entries. Stage 2 stores them
+    /// here; stages 3+ render headers from this map.
+    pub projects: std::collections::BTreeMap<pilot_core::ProjectKey, pilot_core::Project>,
     /// IPC client for forwarding pane-emitted commands to the daemon.
     pub client: Client,
     pub redraw: bool,
@@ -426,6 +436,7 @@ impl<T: TerminalAdapter> Model<T> {
             sidebar: Sidebar::new(SIDEBAR_PID),
             right: Right::new(RIGHT_PID),
             terminals: Terminals::new(TERMINALS_PID),
+            projects: std::collections::BTreeMap::new(),
             client,
             redraw: true,
             quit: false,
@@ -1203,6 +1214,13 @@ impl<T: TerminalAdapter> Model<T> {
                     cmds.push(IpcCommand::CreateWorkspace { name });
                 }
             }
+            Some(Id::NewProject) => {
+                let name = text.trim().to_string();
+                if !name.is_empty() {
+                    tracing::info!(project_name = %name, "creating new local project");
+                    cmds.push(IpcCommand::CreateProject { name });
+                }
+            }
             // RequestReviewers / AddAssignees used to go through an
             // Input modal but were migrated to a `Choice::multi`
             // picker — see `mount_request_reviewers` /
@@ -1764,6 +1782,9 @@ impl<T: TerminalAdapter> Model<T> {
                     self.mount_new_workspace_input();
                 }
             }
+            Action::NewProject => {
+                self.mount_new_project_input();
+            }
             Action::OpenSandbox => {
                 cmds.push(IpcCommand::CreateSandbox {
                     name: String::new(),
@@ -2235,6 +2256,7 @@ impl<T: TerminalAdapter> Model<T> {
                 pilot_tui_core::action::ActionKind::Work => Some(Action::Work),
                 pilot_tui_core::action::ActionKind::OpenEditor => Some(Action::OpenEditor),
                 pilot_tui_core::action::ActionKind::NewWorkspace => Some(Action::NewWorkspace),
+                pilot_tui_core::action::ActionKind::NewProject => Some(Action::NewProject),
                 pilot_tui_core::action::ActionKind::OpenSandbox => Some(Action::OpenSandbox),
                 pilot_tui_core::action::ActionKind::MergePr => Some(Action::MergePr),
                 pilot_tui_core::action::ActionKind::Archive => Some(Action::Archive),
@@ -2930,6 +2952,32 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
+    /// Mount the "New project" name prompt. Submit →
+    /// `Msg::InputSubmitted(name)` while `Id::NewProject` is on top
+    /// → `Command::CreateProject { name }`. Daemon creates a local
+    /// project keyed `local-<slug>` (idempotent on collision).
+    fn mount_new_project_input(&mut self) {
+        use crate::realm::components::input::Input;
+        use tuirealm::subscription::{EventClause, Sub, SubClause};
+
+        if matches!(self.modal_stack.last(), Some(Id::NewProject)) {
+            return;
+        }
+
+        let modal = Input::new("Name this project")
+            .title("New project")
+            .placeholder("e.g. my-experiments, side-quests, scratch, …")
+            .with_validator(|s: &str| !s.trim().is_empty());
+        let _ = self.app.mount(
+            Id::NewProject,
+            Box::new(modal),
+            vec![Sub::new(EventClause::Any, SubClause::Always)],
+        );
+        self.modal_stack.push(Id::NewProject);
+        let _ = self.app.active(&Id::NewProject);
+        self.redraw = true;
+    }
+
     /// Mount the "request reviewers" multi-select picker for the
     /// given workspace's PR. Candidates are gathered from the
     /// workspace's known people; Space toggles, Enter submits →
@@ -3434,6 +3482,26 @@ impl<T: TerminalAdapter> Model<T> {
             self.right.set_viewer_logins(self.viewer_logins.clone());
             self.redraw = true;
             return;
+        }
+        // Project lifecycle events. Stage 2 just mirrors the daemon's
+        // project table into `self.projects` so future stages can
+        // drive sidebar headers off this map. Returning early because
+        // the panes don't need to see these — only the model does.
+        if let IpcEvent::ProjectUpserted(p) = &event {
+            self.projects.insert(p.key.clone(), (**p).clone());
+            self.redraw = true;
+            return;
+        }
+        if let IpcEvent::ProjectRemoved(key) = &event {
+            self.projects.remove(key);
+            self.redraw = true;
+            return;
+        }
+        // Snapshot's project list seeds the same map on reconnect.
+        if let IpcEvent::Snapshot { projects, .. } = &event {
+            for p in projects {
+                self.projects.insert(p.key.clone(), p.clone());
+            }
         }
 
         let is_snapshot = matches!(&event, IpcEvent::Snapshot { .. });

@@ -316,12 +316,24 @@ pub enum Command {
     CreateWorkspace {
         name: String,
     },
+    /// Create a brand-new local Project — a top-level container the
+    /// sidebar groups workspaces under, like a github repo but with
+    /// no upstream provider. Slugified to `local-<slug>`; idempotent
+    /// on collision (re-opens the existing project, same shape as
+    /// `polling::ensure_project_for_workspace` for provider
+    /// projects). Bound to `Shift-N` in the default keymap.
+    CreateProject {
+        name: String,
+    },
     /// Create a repo-less "sandbox" workspace for ad-hoc work that
     /// isn't tied to a PR / issue / repo. Daemon mkdirs
     /// `~/.pilot/v2/sandboxes/<slug>/` and saves a Workspace with
     /// key `sandbox-<slug>`. Sessions spawned against the sandbox
-    /// use that directory as their worktree. Bound to `Shift-N`
-    /// in the default keymap.
+    /// use that directory as their worktree.
+    ///
+    /// Deprecated in favor of `CreateProject` (Stage 2 of the
+    /// Project refactor) — kept on the wire so Stage 3's `n`-flow
+    /// migration can land cleanly without an IPC break.
     CreateSandbox {
         name: String,
     },
@@ -495,6 +507,13 @@ pub enum Event {
     Snapshot {
         workspaces: Vec<pilot_core::Workspace>,
         terminals: Vec<TerminalSnapshot>,
+        /// Top-level Projects the daemon knows about. Sidebar
+        /// headers render from here so empty projects (no workspaces
+        /// yet) still appear. `#[serde(default)]` so older daemons
+        /// without the Project entity still wire-compat with newer
+        /// clients.
+        #[serde(default)]
+        projects: Vec<pilot_core::Project>,
     },
     /// Authenticated user's login per provider source ("github" →
     /// "AntoineToussaint", etc.). Emitted once after the daemon's

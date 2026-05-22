@@ -105,6 +105,7 @@ fn snapshot_populates_workspaces() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![w1.clone(), w2],
         terminals: vec![],
+        projects: vec![],
     });
     assert_eq!(s.workspace_count(), 2);
     assert_eq!(s.selected_session_key(), Some(&ws_key(&w1)));
@@ -138,6 +139,7 @@ fn workspace_removed_prunes_and_clamps_cursor() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![w1, w2.clone()],
         terminals: vec![],
+        projects: vec![],
     });
     // Move cursor to second workspace row.
     s.handle_key(key_code(KeyCode::Down), &mut Vec::new());
@@ -162,6 +164,7 @@ fn cursor_follows_workspace_key_across_resort() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![w1, w2.clone(), w3.clone()],
         terminals: vec![],
+        projects: vec![],
     });
     // Cursor on #2.
     s.handle_key(key_code(KeyCode::Down), &mut Vec::new());
@@ -197,6 +200,7 @@ fn merged_workspace_hidden() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![merged, live.clone()],
         terminals: vec![],
+        projects: vec![],
     });
     assert_eq!(s.workspace_count(), 1);
     assert_eq!(s.selected_session_key(), Some(&ws_key(&live)));
@@ -215,6 +219,7 @@ fn rows_are_grouped_by_repo_with_headers() {
             make_workspace("owner/alpha", "alpha#2", now - Duration::hours(1)),
         ],
         terminals: vec![],
+        projects: vec![],
     });
     let rows = s.visible_rows();
     // Hierarchy: alpha header → its 2 workspaces → beta header → its 1.
@@ -247,6 +252,7 @@ fn cursor_walks_through_repo_headers() {
             make_workspace("owner/beta", "beta#1", now),
         ],
         terminals: vec![],
+        projects: vec![],
     });
     // Layout: [alpha header, alpha#1, beta header, beta#1]. Cursor
     // starts on alpha#1. j → beta header → beta#1.
@@ -274,6 +280,7 @@ fn snoozed_workspace_hidden_from_inbox() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![snoozed, make_workspace("owner/repo", "o/r#2", now)],
         terminals: vec![],
+        projects: vec![],
     });
     assert_eq!(s.workspace_count(), 1);
     assert_eq!(s.mailbox(), Mailbox::Inbox);
@@ -288,6 +295,7 @@ fn toggle_mailbox_cycles_inbox_inactive_snoozed() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![snoozed, make_workspace("owner/repo", "o/r#2", now)],
         terminals: vec![],
+        projects: vec![],
     });
     // Cycle: Inbox → Inactive → Snoozed → Inbox.
     assert_eq!(s.mailbox(), Mailbox::Inbox);
@@ -330,6 +338,7 @@ fn inactive_mailbox_shows_merged_and_closed_workspaces() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![merged, closed, live],
         terminals: vec![],
+        projects: vec![],
     });
     // Inbox has only the live workspace.
     assert_eq!(s.workspace_count(), 1);
@@ -351,6 +360,7 @@ fn populated_sidebar() -> Sidebar {
             make_workspace("owner/repo", "o/r#2", now - Duration::hours(1)),
         ],
         terminals: vec![],
+        projects: vec![],
     });
     s
 }
@@ -641,6 +651,7 @@ fn workspace_with_one_session_does_not_show_a_subrow() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![w],
         terminals: vec![],
+        projects: vec![],
     });
     let session_rows = s
         .visible_rows()
@@ -662,6 +673,7 @@ fn workspace_with_two_sessions_expands_into_subrows() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![w],
         terminals: vec![],
+        projects: vec![],
     });
     let session_rows: Vec<_> = s
         .visible_rows()
@@ -682,6 +694,7 @@ fn cursor_can_land_on_a_session_subrow() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![w],
         terminals: vec![],
+        projects: vec![],
     });
     // Cursor starts on the workspace row. Down once → session 0.
     s.handle_key(key_code(KeyCode::Down), &mut Vec::new());
@@ -707,6 +720,7 @@ fn session_created_event_expands_into_subrows_at_two() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![w.clone()],
         terminals: vec![],
+        projects: vec![],
     });
     assert_eq!(
         s.visible_rows()
@@ -747,6 +761,7 @@ fn session_ended_event_collapses_back_below_two() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![w.clone()],
         terminals: vec![],
+        projects: vec![],
     });
     assert_eq!(
         s.visible_rows()
@@ -782,6 +797,7 @@ fn subscribed_repo_with_no_workspace_still_renders_a_header() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![],
         terminals: vec![],
+        projects: vec![],
     });
     let scopes: std::collections::BTreeSet<String> = ["github:fresh-org/new-repo".to_string()]
         .into_iter()
@@ -814,6 +830,7 @@ fn subscribed_org_level_scope_does_not_render_a_header() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![],
         terminals: vec![],
+        projects: vec![],
     });
     let scopes: std::collections::BTreeSet<String> =
         ["github:some-org".to_string()].into_iter().collect();
@@ -863,6 +880,7 @@ fn sidebar_with_pr<F: FnOnce(&mut Task)>(mutate: F) -> Sidebar {
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(task, now)],
         terminals: vec![],
+        projects: vec![],
     });
     s
 }
@@ -935,6 +953,7 @@ fn action_keys_on_repo_header_are_silent_noops() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![make_workspace("owner/repo", "o/r#1", now)],
         terminals: vec![],
+        projects: vec![],
     });
     // Move up onto the repo header (row 0).
     s.handle_key(key_code(KeyCode::Up), &mut Vec::new());
@@ -1047,6 +1066,7 @@ fn contextual_bindings_surface_merge_on_ready_pr() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
+        projects: vec![],
     });
     let labels: Vec<&str> = s.contextual_bindings().iter().map(|b| b.label).collect();
     assert!(
@@ -1063,6 +1083,7 @@ fn contextual_bindings_surface_fix_ci_when_red() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
+        projects: vec![],
     });
     let labels: Vec<&str> = s.contextual_bindings().iter().map(|b| b.label).collect();
     assert!(
@@ -1087,6 +1108,7 @@ fn merge_target_fires_when_pr_is_ready() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
+        projects: vec![],
     });
     assert!(s.merge_target_for_cursor().is_some());
 }
@@ -1100,6 +1122,7 @@ fn merge_target_is_hidden_without_approval() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
+        projects: vec![],
     });
     assert!(s.merge_target_for_cursor().is_none());
 }
@@ -1113,6 +1136,7 @@ fn merge_target_is_hidden_when_ci_failing() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
+        projects: vec![],
     });
     assert!(s.merge_target_for_cursor().is_none());
 }
@@ -1127,6 +1151,7 @@ fn fix_target_fires_only_when_ci_is_failing() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
+        projects: vec![],
     });
     assert!(s.fix_target_for_cursor().is_none());
 
@@ -1135,6 +1160,7 @@ fn fix_target_fires_only_when_ci_is_failing() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
+        projects: vec![],
     });
     let (_, prompt) = s.fix_target_for_cursor().expect("Failure CI must fire");
     assert!(prompt.contains("CI is failing"), "prompt: {prompt}");
@@ -1149,6 +1175,7 @@ fn work_target_fires_for_ci_failure_same_as_fix() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
+        projects: vec![],
     });
     let fix = s.fix_target_for_cursor();
     let work = s.work_target_for_cursor();
@@ -1167,6 +1194,7 @@ fn work_target_fires_for_issue_with_implement_prompt() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(issue, Utc::now())],
         terminals: vec![],
+        projects: vec![],
     });
     let (_, prompt) = s
         .work_target_for_cursor()
@@ -1194,6 +1222,7 @@ fn work_target_skips_passing_pr_with_no_action() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
         terminals: vec![],
+        projects: vec![],
     });
     assert!(s.work_target_for_cursor().is_none());
 }
@@ -1220,6 +1249,7 @@ fn merged_closed_hidden_from_inbox_by_default() {
             Workspace::from_task(open, now),
         ],
         terminals: vec![],
+        projects: vec![],
     });
 
     let visible_keys: Vec<String> = s
@@ -1271,6 +1301,7 @@ fn show_inactive_in_inbox_surfaces_merged_and_closed() {
             Workspace::from_task(open, now),
         ],
         terminals: vec![],
+        projects: vec![],
     });
 
     let visible_count = s
@@ -1293,6 +1324,7 @@ fn work_key_emits_spawn_command_on_issue() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(issue, Utc::now())],
         terminals: vec![],
+        projects: vec![],
     });
 
     let mut cmds: Vec<Command> = Vec::new();
@@ -1366,6 +1398,7 @@ fn agent_state_asking_makes_workspace_findable_by_bang() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![w],
         terminals: vec![],
+        projects: vec![],
     });
 
     // Before the AgentState event: `!` finds nothing.
@@ -1402,6 +1435,7 @@ fn workspace_upserted_does_not_clobber_asking_state() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![w.clone()],
         terminals: vec![],
+        projects: vec![],
     });
 
     // 1. Agent goes Asking.
@@ -1442,6 +1476,7 @@ fn agent_state_asking_queues_a_desktop_notification() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![w],
         terminals: vec![],
+        projects: vec![],
     });
     // Drain any setup-time notifications so the assertion is clean.
     let _ = s.drain_pending_notifications();
@@ -1484,6 +1519,7 @@ fn bang_jumps_to_next_asking_workspace() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![w1, w2, w3],
         terminals: vec![],
+        projects: vec![],
     });
 
     s.on_event(&Event::AgentState {
@@ -1508,6 +1544,7 @@ fn bang_is_a_noop_when_nothing_is_asking() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![w],
         terminals: vec![],
+        projects: vec![],
     });
     let before = s.selected_session_key().cloned();
     assert_eq!(before.as_ref(), Some(&starting_key));

@@ -61,6 +61,10 @@ pub enum Action {
     OpenEditor,
     /// Create a brand-new pre-PR workspace (asks for a name).
     NewWorkspace,
+    /// Create a brand-new local Project — a top-level container the
+    /// sidebar groups workspaces under. Asks for a name. Idempotent
+    /// on collision (re-opens the existing local project).
+    NewProject,
     /// Create-or-focus the shared local Sandbox project.
     OpenSandbox,
     /// Mark every activity row on the focused workspace read.
@@ -169,6 +173,7 @@ pub enum ActionKind {
     SpawnShell,
     OpenEditor,
     NewWorkspace,
+    NewProject,
     OpenSandbox,
     MarkAllRead,
     ToggleSnooze,
@@ -214,6 +219,7 @@ impl Action {
             Action::SpawnShell => ActionKind::SpawnShell,
             Action::OpenEditor => ActionKind::OpenEditor,
             Action::NewWorkspace => ActionKind::NewWorkspace,
+            Action::NewProject => ActionKind::NewProject,
             Action::OpenSandbox => ActionKind::OpenSandbox,
             Action::MarkAllRead => ActionKind::MarkAllRead,
             Action::ToggleSnooze => ActionKind::ToggleSnooze,
@@ -356,9 +362,20 @@ impl ActionDef {
                 describe: "Create a pre-PR workspace (asks for a name).",
                 section: Section::Workspace,
             },
+            ActionKind::NewProject => &Self {
+                kind: ActionKind::NewProject,
+                default_keys: "Shift-N",
+                label: "new project",
+                describe: "Create a local project (a top-level container, asks for a name).",
+                section: Section::Workspace,
+            },
             ActionKind::OpenSandbox => &Self {
                 kind: ActionKind::OpenSandbox,
-                default_keys: "Shift-N",
+                // Stage 2 of the Project refactor moves the Shift-N
+                // binding to `NewProject`. OpenSandbox stays in the
+                // catalog (reachable via the right-click menu / palette)
+                // until Stage 3 retires it entirely.
+                default_keys: "",
                 label: "sandbox",
                 describe: "Focus the shared local sandbox project (non-provider).",
                 section: Section::Workspace,
@@ -505,6 +522,7 @@ impl ActionDef {
             ActionKind::MarkAllRead,
             ActionKind::ToggleSnooze,
             ActionKind::NewWorkspace,
+            ActionKind::NewProject,
             ActionKind::OpenSandbox,
             ActionKind::MergePr,
             ActionKind::RequestReviewers,
@@ -746,6 +764,7 @@ impl ActionKind {
             ActionKind::SpawnShell => "spawn_shell",
             ActionKind::OpenEditor => "open_editor",
             ActionKind::NewWorkspace => "new_workspace",
+            ActionKind::NewProject => "new_project",
             ActionKind::OpenSandbox => "open_sandbox",
             ActionKind::MarkAllRead => "mark_all_read",
             ActionKind::ToggleSnooze => "toggle_snooze",
@@ -870,6 +889,7 @@ pub fn availability(
         | ActionKind::UndoMarkRead => has_ws,
         // Global / no-workspace-needed actions.
         ActionKind::NewWorkspace
+        | ActionKind::NewProject
         | ActionKind::OpenSandbox
         | ActionKind::CyclePane
         | ActionKind::Refresh
@@ -893,8 +913,12 @@ mod tests {
         // would panic at compile time on an unmatched variant. This
         // test additionally guards against `for_kind` shadowing a
         // variant with a stale label by accident.
+        //
+        // `default_keys` is allowed to be empty for actions that
+        // exist in the catalog but aren't bound to a key (still
+        // reachable via menus / palette). `label` must always be
+        // present — every catalog row renders somewhere.
         for def in ActionDef::all() {
-            assert!(!def.default_keys.is_empty(), "{:?} missing default key", def.kind);
             assert!(!def.label.is_empty(), "{:?} missing label", def.kind);
         }
     }
@@ -1084,6 +1108,13 @@ mod tests {
         ];
         for def in ActionDef::all() {
             if presentation.contains(&def.default_keys) {
+                continue;
+            }
+            // Empty `default_keys` is a catalog entry that has no
+            // default chord (still reachable via menus / palette,
+            // not via a key). Stage 2's OpenSandbox is the first
+            // such entry; Stage 3 removes the variant entirely.
+            if def.default_keys.is_empty() {
                 continue;
             }
             assert!(

@@ -93,6 +93,7 @@ fn sidebar_golden_render_focused() {
             Workspace::from_task(make_task("o/r#3", 120), fixed_time()),
         ],
         terminals: vec![],
+        projects: vec![],
     });
     let rendered = render_to_string(&mut s, 40, 10, true);
     insta::assert_snapshot!("sidebar_focused_3_sessions", rendered);
@@ -104,6 +105,7 @@ fn sidebar_golden_render_unfocused() {
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(make_task("o/r#1", 10), fixed_time())],
         terminals: vec![],
+        projects: vec![],
     });
     let rendered = render_to_string(&mut s, 40, 6, false);
     insta::assert_snapshot!("sidebar_unfocused_1_session", rendered);

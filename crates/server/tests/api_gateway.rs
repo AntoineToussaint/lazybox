@@ -264,6 +264,7 @@ async fn events_route_streams_initial_snapshot_as_ndjson() {
         JsonServerFrame::Event(Event::Snapshot {
             workspaces,
             terminals,
+            ..
         }) => {
             assert!(workspaces.is_empty());
             assert!(terminals.is_empty());

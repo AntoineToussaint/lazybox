@@ -390,6 +390,7 @@ impl Server {
                         pilot_ipc::Command::Unsnooze { .. } => "Unsnooze",
                         pilot_ipc::Command::Kill { .. } => "Kill",
                         pilot_ipc::Command::CreateWorkspace { .. } => "CreateWorkspace",
+                        pilot_ipc::Command::CreateProject { .. } => "CreateProject",
                         pilot_ipc::Command::CreateSandbox { .. } => "CreateSandbox",
                         pilot_ipc::Command::AdoptSessions { .. } => "AdoptSessions",
                         pilot_ipc::Command::RequestReviewers { .. } => "RequestReviewers",
@@ -410,10 +411,12 @@ impl Server {
                     match cmd {
                         pilot_ipc::Command::Subscribe => {
                             let workspaces = load_workspaces(&*self.config.store);
+                            let projects = load_projects(&*self.config.store);
                             let terminals = spawn_handler::snapshot_terminals(&self.config).await;
                             let _ = conn.tx.send(Event::Snapshot {
                                 workspaces,
                                 terminals,
+                                projects,
                             });
                             // Replay cached viewer identities so a
                             // reconnecting TUI can render `@me` for
@@ -577,6 +580,9 @@ impl Server {
                         }
                         pilot_ipc::Command::CreateWorkspace { name } => {
                             polling::create_empty_workspace(&self.config, &name);
+                        }
+                        pilot_ipc::Command::CreateProject { name } => {
+                            polling::create_local_project(&self.config, &name);
                         }
                         pilot_ipc::Command::CreateSandbox { name } => {
                             // Single shared sandbox per profile. The
@@ -844,6 +850,31 @@ fn load_workspaces(store: &dyn Store) -> Vec<pilot_core::Workspace> {
                 Ok(w) => Some(w),
                 Err(e) => {
                     tracing::warn!("skipping unreadable workspace {}: {e}", r.key);
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// Same shape as `load_workspaces` for the project table. Used by
+/// `Snapshot` to seed the sidebar's project headers on reconnect.
+fn load_projects(store: &dyn Store) -> Vec<pilot_core::Project> {
+    let records = match store.list_projects() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("list_projects failed: {e}");
+            return vec![];
+        }
+    };
+    records
+        .into_iter()
+        .filter_map(|r| {
+            let json = r.project_json?;
+            match serde_json::from_str::<pilot_core::Project>(&json) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    tracing::warn!("skipping unreadable project {}: {e}", r.key);
                     None
                 }
             }

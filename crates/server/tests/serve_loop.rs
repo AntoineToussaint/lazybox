@@ -24,6 +24,7 @@ async fn subscribe_yields_snapshot() {
         Event::Snapshot {
             workspaces,
             terminals,
+            ..
         } => {
             // Contract under test: Subscribe ALWAYS replies with a
             // Snapshot before any live events. With no workspaces

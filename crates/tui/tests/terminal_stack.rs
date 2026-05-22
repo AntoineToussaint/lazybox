@@ -174,6 +174,7 @@ fn snapshot_replaces_all_terminals() {
             replay: b"\x1b[0mhi\n".to_vec(),
             last_seq: 42,
         }],
+        projects: vec![],
     });
     assert_eq!(t.terminal_count(), 1);
     t.set_active_session(Some(sk("o/r#3")));

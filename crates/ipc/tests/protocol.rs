@@ -199,6 +199,7 @@ fn all_events() -> Vec<Event> {
                 replay: b"replay-bytes".to_vec(),
                 last_seq: 42,
             }],
+            projects: vec![],
         },
         Event::WorkspaceUpserted(Box::new(sample_workspace())),
         Event::WorkspaceRemoved(pilot_core::WorkspaceKey::new(key.as_str())),

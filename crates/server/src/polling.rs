@@ -1589,6 +1589,64 @@ pub fn create_empty_workspace(config: &ServerConfig, name: &str) -> WorkspaceKey
     key
 }
 
+/// Create (or re-open) a local Project by name. Slugifies the name,
+/// builds a `local-<slug>` ProjectKey, persists a Project record,
+/// and broadcasts `ProjectUpserted` so the sidebar can render the
+/// new header immediately. Idempotent: calling with the same name
+/// twice opens the existing project — projects are named
+/// containers, like directories, so this matches user expectation.
+///
+/// Returns the project key so the caller (TUI) can land focus on
+/// the new header.
+pub fn create_local_project(config: &ServerConfig, name: &str) -> pilot_core::ProjectKey {
+    let base = pilot_core::slug::slugify(name);
+    let slug = if base.is_empty() {
+        "project".to_string()
+    } else {
+        base
+    };
+    let key = pilot_core::ProjectKey::local(&slug);
+    // Idempotent: re-broadcast the existing record on collision.
+    let display_name = if name.trim().is_empty() {
+        slug.clone()
+    } else {
+        name.trim().to_string()
+    };
+    let project = match config.store.get_project(&key) {
+        Ok(Some(record)) => record
+            .project_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<pilot_core::Project>(j).ok())
+            .unwrap_or_else(|| pilot_core::Project::new(key.clone(), &display_name, Utc::now())),
+        _ => pilot_core::Project::new(key.clone(), &display_name, Utc::now()),
+    };
+    let json = match serde_json::to_string(&project) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!(
+                project_key = %key,
+                "create_local_project: serde_json::to_string(project) failed: {e}",
+            );
+            None
+        }
+    };
+    let record = pilot_store::ProjectRecord {
+        key: key.as_str().to_string(),
+        created_at: project.created_at,
+        project_json: json,
+    };
+    if let Err(e) = config.store.save_project(&record) {
+        tracing::error!(
+            project_key = %record.key,
+            "save_project failed: {e}",
+        );
+    }
+    let _ = config
+        .bus
+        .send(Event::ProjectUpserted(Box::new(project)));
+    key
+}
+
 /// Ensure the single shared "sandbox" workspace exists, mkdir its
 /// directory, and broadcast. Idempotent — calling repeatedly just
 /// re-broadcasts the existing record. One sandbox per profile is

@@ -30,7 +30,7 @@ use std::path::PathBuf;
 ///
 /// The prefix is purely advisory — the daemon routes by it in the
 /// same way it routes workspace keys in `build_provider_for_workspace`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ProjectKey(pub String);
 
 impl ProjectKey {

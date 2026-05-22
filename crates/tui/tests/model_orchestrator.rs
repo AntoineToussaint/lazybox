@@ -78,6 +78,7 @@ fn remapped_reply_binding_mounts_reply_modal() {
             Utc::now(),
         )],
         terminals: vec![],
+        projects: vec![],
     });
     // Reply moved into the catalog (Section::Workspace) so its
     // remap now lives in `ui.action_keys`, not `Keybindings.reply`.
@@ -233,6 +234,7 @@ fn handle_daemon_event_applies_preselect_on_first_snapshot() {
     let snapshot = IpcEvent::Snapshot {
         workspaces: vec![workspace],
         terminals: Vec::new(),
+        projects: vec![],
     };
     m.handle_daemon_event(snapshot);
     // Sidebar should now have the target workspace selected.
@@ -344,6 +346,7 @@ fn r_mounts_reply_modal_from_sidebar() {
     m.handle_daemon_event(IpcEvent::Snapshot {
         workspaces: vec![workspace],
         terminals: Vec::new(),
+        projects: vec![],
     });
     assert_eq!(m.focus(), PaneFocus::Sidebar);
     m.dispatch_key(key(Key::Char('r')));
@@ -362,6 +365,7 @@ fn r_mounts_reply_modal_from_right_pane() {
     m.handle_daemon_event(IpcEvent::Snapshot {
         workspaces: vec![workspace],
         terminals: Vec::new(),
+        projects: vec![],
     });
     // Tab to the Right pane (Activity).
     m.dispatch_key(key(Key::Tab));
@@ -620,6 +624,7 @@ fn shift_a_with_no_sessions_does_not_mount_picker() {
     m.handle_daemon_event(IpcEvent::Snapshot {
         workspaces: vec![ws],
         terminals: vec![],
+        projects: vec![],
     });
     // Shift-A should be a no-op (no sessions to adopt).
     m.dispatch_key(key_with(Key::Char('A'), KeyModifiers::SHIFT));
@@ -657,6 +662,7 @@ fn shift_a_with_sessions_mounts_adopt_picker() {
     m.handle_daemon_event(IpcEvent::Snapshot {
         workspaces: vec![source, target],
         terminals: vec![],
+        projects: vec![],
     });
     // Sanity: the cursor must be on a workspace with sessions for
     // Shift-A to fire. If this fails, the picker test diagnoses the
@@ -726,6 +732,7 @@ fn tick_right_drives_auto_mark_and_emits_command() {
     m.handle_daemon_event(IpcEvent::Snapshot {
         workspaces: vec![ws],
         terminals: vec![],
+        projects: vec![],
     });
     // Auto-mark-read fires after `ui.auto_mark_delay` (default 1s).
     std::thread::sleep(std::time::Duration::from_millis(1100));

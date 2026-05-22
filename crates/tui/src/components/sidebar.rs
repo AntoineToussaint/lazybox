@@ -1256,34 +1256,11 @@ impl Sidebar {
             // help) and collided with the vim `g`/`G` "go to
             // top/bottom" convention the right pane already uses.
             // One refresh binding, accessible from every pane.
-            (KeyCode::Char('z'), KeyModifiers::NONE) => {
-                // Toggle: snooze if not snoozed, otherwise unsnooze.
-                // The resolver makes the decision based on
-                // `workspace.snoozed_until`; this handler just
-                // executes whichever Intent it returns.
-                let now = chrono::Utc::now();
-                let intent = crate::intent::resolve_short_snooze(
-                    self.selected_workspace(),
-                    now,
-                    self.short_snooze,
-                );
-                match intent {
-                    crate::intent::Intent::Snooze {
-                        session_key,
-                        duration,
-                    } => {
-                        let until = now
-                            + chrono::Duration::from_std(duration)
-                                .unwrap_or(chrono::Duration::hours(4));
-                        cmds.push(Command::Snooze { session_key, until });
-                    }
-                    crate::intent::Intent::Unsnooze { session_key } => {
-                        cmds.push(Command::Unsnooze { session_key });
-                    }
-                    _ => {}
-                }
-                PaneOutcome::Consumed
-            }
+            // `z` toggle-snooze is now handled by the catalog
+            // dispatch in `Model::dispatch_action(ToggleSnooze)` —
+            // same resolver, same effect, reads
+            // `ui_defaults.short_snooze` instead of the sidebar's
+            // local copy (one fewer place to keep in sync).
             (KeyCode::Char('Z'), m) if m.contains(KeyModifiers::SHIFT) => {
                 // Two-press confirm — 1-year snooze is effectively
                 // "hide forever" with no obvious undo. The

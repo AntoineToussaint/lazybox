@@ -1747,6 +1747,35 @@ impl<T: TerminalAdapter> Model<T> {
                     cmds.push(IpcCommand::Kill { session_key: sk });
                 }
             }
+            Action::ToggleSnooze => {
+                // Resolver decides Snooze (when not snoozed) vs
+                // Unsnooze (when snoozed) based on the workspace
+                // state. The catalog dispatch reads
+                // `ui_defaults.short_snooze` so the user's YAML
+                // override (`ui.short_snooze`) drives the duration.
+                let now = chrono::Utc::now();
+                let workspace = self.sidebar.selected_workspace().cloned();
+                let intent = crate::intent::resolve_short_snooze(
+                    workspace.as_ref(),
+                    now,
+                    self.ui_defaults.short_snooze,
+                );
+                match intent {
+                    crate::intent::Intent::Snooze {
+                        session_key,
+                        duration,
+                    } => {
+                        let until = now
+                            + chrono::Duration::from_std(duration)
+                                .unwrap_or(chrono::Duration::hours(4));
+                        cmds.push(IpcCommand::Snooze { session_key, until });
+                    }
+                    crate::intent::Intent::Unsnooze { session_key } => {
+                        cmds.push(IpcCommand::Unsnooze { session_key });
+                    }
+                    _ => {}
+                }
+            }
             Action::MergePr => {
                 // Resolver re-checks the precondition (CI green +
                 // approved + not behind base) so a misdirected key
@@ -2062,33 +2091,11 @@ impl<T: TerminalAdapter> Model<T> {
                 self.open_settings();
                 return;
             }
-            // Shift-R from any non-Terminal pane: force a fresh
-            // poll cycle. Same `Command::Refresh` the sidebar's `g`
-            // fires, but global so the user can hit it from the
-            // activity / settings views too. Discoverable because
-            // it's just "R" — and we already use `r` (lowercase)
-            // for Reply, so the modifier disambiguates.
-            //
-            // Disabled inside a terminal so shells can still bind
-            // Shift-R (e.g. `R` in vim's command mode).
-            _ if self.focus != PaneFocus::Terminals
-                && key.code == Key::Char('R')
-                && key.modifiers.contains(KeyModifiers::SHIFT) =>
-            {
-                self.q_latch.disarm();
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
-                self.send_cmd(IpcCommand::Refresh);
-                // Don't wait for the daemon's first PollProgress to
-                // surface feedback — pre-arm the footer so the user
-                // sees something happen on the keystroke itself.
-                self.status.note_poll_progress("github", "manual refresh requested");
-                self.status.notice = Some(Notice::new(
-                    "refreshing…".to_string(),
-                    NoticeSeverity::Hint,
-                ));
-                self.redraw = true;
-                return;
-            }
+            // Shift-R refresh is handled by the catalog dispatch
+            // path — `Action::Refresh`'s `dispatch_action` arm
+            // pushes `IpcCommand::Refresh` and pre-arms the
+            // footer's bg-poll spinner so the user gets keystroke
+            // feedback before the first PollProgress lands.
             // Shift-A from the sidebar: open the "adopt sessions"
             // picker. Lets the user move every session from the
             // focused workspace into another — useful when they
@@ -2212,9 +2219,16 @@ impl<T: TerminalAdapter> Model<T> {
                 pilot_tui_core::action::ActionKind::OpenSandbox => Some(Action::OpenSandbox),
                 pilot_tui_core::action::ActionKind::MergePr => Some(Action::MergePr),
                 pilot_tui_core::action::ActionKind::Archive => Some(Action::Archive),
+                pilot_tui_core::action::ActionKind::ToggleSnooze => Some(Action::ToggleSnooze),
+                pilot_tui_core::action::ActionKind::Refresh => Some(Action::Refresh),
                 _ => None,
             };
             if let Some(action) = action {
+                // Any catalog dispatch counts as "non-quit key" so
+                // the q q chord resets. Matches every legacy match
+                // arm in handle_pane_key — every one of those
+                // disarms before doing work.
+                self.q_latch.disarm();
                 cmds.extend(self.dispatch_action(&action));
                 // Drain queued cmds + early return — the catalog
                 // handled the key, the pane shouldn't see it.

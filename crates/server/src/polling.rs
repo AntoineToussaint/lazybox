@@ -1855,7 +1855,6 @@ pub fn mark_workspace_read(config: &ServerConfig, key: &WorkspaceKey) {
 /// feed inline — the next poll picks up the new comment, which keeps
 /// the "what the upstream provider says" invariant intact.
 pub async fn post_reply(config: &ServerConfig, session_key: pilot_core::SessionKey, body: String) {
-    use pilot_core::TaskProvider;
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return;
@@ -1881,7 +1880,7 @@ pub async fn post_reply(config: &ServerConfig, session_key: pilot_core::SessionK
             return;
         }
     };
-    let provider = match build_github_provider().await {
+    let provider = match build_provider_for_workspace(&workspace_key).await {
         Ok(p) => p,
         Err(e) => {
             emit_reply_error(config, &e);
@@ -1911,30 +1910,123 @@ fn emit_reply_error(config: &ServerConfig, msg: &str) {
     });
 }
 
-/// Build a github `GhClient` ready to issue mutation calls.
-/// Shared helper for the four mutation handlers
-/// (`handle_merge_pr`, `handle_request_reviewers`,
-/// `handle_add_assignees`, `post_reply`) — each one used to
-/// duplicate the credential-chain + client-init logic. The
-/// returned `GhClient` implements `pilot_core::TaskProvider`, so
-/// callers route the actual mutation through the trait rather
-/// than the concrete method.
+/// Runtime-polymorphic wrapper around the workspace's
+/// `TaskProvider`. Using an enum (vs `Arc<dyn TaskProvider>`) is
+/// deliberate: the trait uses `async fn` which isn't dyn-compatible
+/// without the `async_trait` crate. The enum dispatches manually
+/// in O(n_providers) — fine for the 2-3 providers pilot will
+/// ever have at once.
+///
+/// Adding a new provider: add a variant + the four `match` arms
+/// below. Each arm delegates to the provider's `TaskProvider`
+/// impl, so the GitHub/Linear/etc. backend logic stays where it
+/// belongs.
+pub enum ProviderHandle {
+    Github(GhClient),
+    Linear(LinearClient),
+}
+
+impl ProviderHandle {
+    pub async fn merge(
+        &self,
+        ws: &pilot_core::Workspace,
+    ) -> Result<(), pilot_core::ProviderError> {
+        match self {
+            Self::Github(c) => pilot_core::TaskProvider::merge(c, ws).await,
+            Self::Linear(c) => pilot_core::TaskProvider::merge(c, ws).await,
+        }
+    }
+    pub async fn request_reviewers(
+        &self,
+        ws: &pilot_core::Workspace,
+        logins: &[String],
+    ) -> Result<(), pilot_core::ProviderError> {
+        match self {
+            Self::Github(c) => {
+                pilot_core::TaskProvider::request_reviewers(c, ws, logins).await
+            }
+            Self::Linear(c) => {
+                pilot_core::TaskProvider::request_reviewers(c, ws, logins).await
+            }
+        }
+    }
+    pub async fn add_assignees(
+        &self,
+        ws: &pilot_core::Workspace,
+        logins: &[String],
+    ) -> Result<(), pilot_core::ProviderError> {
+        match self {
+            Self::Github(c) => {
+                pilot_core::TaskProvider::add_assignees(c, ws, logins).await
+            }
+            Self::Linear(c) => {
+                pilot_core::TaskProvider::add_assignees(c, ws, logins).await
+            }
+        }
+    }
+    pub async fn post_reply(
+        &self,
+        ws: &pilot_core::Workspace,
+        body: &str,
+    ) -> Result<(), pilot_core::ProviderError> {
+        match self {
+            Self::Github(c) => pilot_core::TaskProvider::post_reply(c, ws, body).await,
+            Self::Linear(c) => pilot_core::TaskProvider::post_reply(c, ws, body).await,
+        }
+    }
+}
+
+/// Build a provider handle for the workspace that owns this
+/// mutation. Routes on the workspace key's `<source>-<rest>`
+/// prefix — `"github-tensorzero-nanogateway-186"` → github,
+/// `"linear-team-xyz"` → linear, `"sandbox"` → no upstream
+/// (returns `Err`).
+///
+/// Each branch builds its own credential chain — github goes
+/// through `gh auth token` + `GH_TOKEN` envs, linear goes through
+/// `LINEAR_API_KEY`. Future providers add their own chain in a
+/// new branch.
 ///
 /// Errors come back as `String` ready for the handler's
-/// `emit_err` callback — keeps the auth/init failure surface
-/// uniform across handlers.
-async fn build_github_provider() -> Result<GhClient, String> {
-    let chain = CredentialChain::new()
-        .with(EnvProvider::new("GH_TOKEN"))
-        .with(EnvProvider::new("GITHUB_TOKEN"))
-        .with(CommandProvider::new("gh", &["auth", "token"]));
-    let cred = chain
-        .resolve("github")
-        .await
-        .map_err(|e| format!("github credentials: {e}"))?;
-    GhClient::from_credential(cred)
-        .await
-        .map_err(|e| format!("github client init: {e}"))
+/// `emit_err` callback.
+async fn build_provider_for_workspace(
+    workspace_key: &WorkspaceKey,
+) -> Result<ProviderHandle, String> {
+    let source = workspace_key
+        .as_str()
+        .split_once('-')
+        .map(|(p, _)| p)
+        .unwrap_or("");
+    match source {
+        "github" => {
+            let chain = CredentialChain::new()
+                .with(EnvProvider::new("GH_TOKEN"))
+                .with(EnvProvider::new("GITHUB_TOKEN"))
+                .with(CommandProvider::new("gh", &["auth", "token"]));
+            let cred = chain
+                .resolve("github")
+                .await
+                .map_err(|e| format!("github credentials: {e}"))?;
+            let client = GhClient::from_credential(cred)
+                .await
+                .map_err(|e| format!("github client init: {e}"))?;
+            Ok(ProviderHandle::Github(client))
+        }
+        "linear" => {
+            // Linear uses a single API key. Wrap in a credential
+            // chain so future Keychain / Vault integrations slot
+            // in transparently.
+            let chain = CredentialChain::new().with(EnvProvider::new("LINEAR_API_KEY"));
+            let cred = chain
+                .resolve("linear")
+                .await
+                .map_err(|e| format!("linear credentials: {e}"))?;
+            Ok(ProviderHandle::Linear(LinearClient::from_credential(cred)))
+        }
+        other => Err(format!(
+            "no provider registered for workspace prefix `{other}`",
+        )),
+    }
 }
 
 /// Handle `Command::MergePr`: load the workspace, recover the PR's
@@ -1946,7 +2038,6 @@ async fn build_github_provider() -> Result<GhClient, String> {
 /// Errors surface as `Event::ProviderError` so the TUI can flash the
 /// reason without us inventing a bespoke event variant.
 pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey) {
-    use pilot_core::TaskProvider;
     let emit_err = |msg: &str| {
         let _ = config.bus.send(Event::ProviderError {
             source: "merge".into(),
@@ -1962,11 +2053,11 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
     };
     let pr_label = ws.pr.as_ref().map(|p| p.id.key.clone());
 
-    // Route through the `TaskProvider` trait — provider does the
-    // workspace-shape validation (no PR, no node_id, …) and
-    // returns a clean `ProviderError`. Server just relays the
-    // outcome and broadcasts the high-level event.
-    let provider = match build_github_provider().await {
+    // Route through the workspace's matching provider. The handle
+    // dispatches `merge` to github / linear / future-provider based
+    // on the workspace key's prefix — the server stays provider-
+    // agnostic.
+    let provider = match build_provider_for_workspace(&workspace_key).await {
         Ok(p) => p,
         Err(e) => {
             emit_err(&e);
@@ -2023,20 +2114,14 @@ pub async fn handle_request_reviewers(
         ));
         return;
     };
-    let provider = match build_github_provider().await {
+    let provider = match build_provider_for_workspace(&workspace_key).await {
         Ok(p) => p,
         Err(e) => {
             emit_err(&e);
             return;
         }
     };
-    // UFCS — the inherent `GhClient::request_reviewers(node_id,
-    // logins)` shadows the trait method that takes `&Workspace`.
-    // Calling through the trait keeps the server's mutation
-    // pipeline provider-agnostic.
-    if let Err(e) =
-        <GhClient as pilot_core::TaskProvider>::request_reviewers(&provider, &ws, &logins).await
-    {
+    if let Err(e) = provider.request_reviewers(&ws, &logins).await {
         tracing::warn!("request_reviewers {workspace_key} {logins:?}: {e:?}");
         emit_err(&format!("request reviewers failed: {e}"));
     } else {
@@ -2071,16 +2156,14 @@ pub async fn handle_add_assignees(
         ));
         return;
     };
-    let provider = match build_github_provider().await {
+    let provider = match build_provider_for_workspace(&workspace_key).await {
         Ok(p) => p,
         Err(e) => {
             emit_err(&e);
             return;
         }
     };
-    if let Err(e) =
-        <GhClient as pilot_core::TaskProvider>::add_assignees(&provider, &ws, &logins).await
-    {
+    if let Err(e) = provider.add_assignees(&ws, &logins).await {
         tracing::warn!("add_assignees {workspace_key} {logins:?}: {e:?}");
         emit_err(&format!("add assignees failed: {e}"));
     } else {

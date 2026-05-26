@@ -54,12 +54,22 @@ pub struct RightPane {
     /// `IpcEvent::ViewerIdentities`. Activity bylines authored by
     /// the local user render as `@me` instead of their bare login.
     viewer_logins: std::collections::HashMap<String, String>,
-    /// How many activity cards rendered in the last frame. Updated
-    /// during `render`; consumed by `clamp_scroll_to_cursor` to
-    /// keep the focused row on-screen as j/k walk through long
-    /// PR threads. 1 is a conservative default before the first
-    /// render so the cursor never gets stranded.
+    /// Visible *lines* in the activity viewport (not cards — render
+    /// builds a virtual line buffer so an expanded card may span
+    /// many lines). Updated during `render`; consumed by
+    /// `clamp_scroll_to_cursor` (as a conservative lower bound on
+    /// cards) and `scroll_activity` (as the line denominator). 1 is
+    /// a conservative default before the first render so the cursor
+    /// never gets stranded.
     last_visible_cards: usize,
+    /// Total *lines* the virtual buffer rendered last frame —
+    /// i.e. `cards.len()` after every card (collapsed + expanded)
+    /// was laid out. `last_visible_cards` is the slice we drew;
+    /// this is the whole strip. `scroll_activity` needs both to
+    /// compute the line-offset scroll cap; without it, an expanded
+    /// card meant `activity.len() − visible_lines` underflowed to 0
+    /// and the wheel did nothing.
+    last_total_lines: usize,
     /// Whether the activity section is collapsed to its header row.
     /// Defaults to expanded; auto-collapses when the workspace has no
     /// activity (the empty pane is just visual noise — keeping the
@@ -192,6 +202,7 @@ impl RightPane {
             feed: crate::components::activity_feed::ActivityFeed::new(),
             viewer_logins: std::collections::HashMap::new(),
             last_visible_cards: 1,
+            last_total_lines: 0,
             // Empty workspace → collapsed; cleared on first non-empty
             // workspace landing in `set_workspace`.
             activity_collapsed: true,
@@ -517,16 +528,22 @@ impl RightPane {
     /// handler. Returns `true` when the scroll actually moved so the
     /// caller can flag a redraw.
     pub fn scroll_activity(&mut self, delta: isize) -> bool {
-        let total = self
-            .workspace
-            .as_ref()
-            .map(|w| w.activity.len())
-            .unwrap_or(0);
-        if total == 0 || self.activity_collapsed {
+        if self.activity_collapsed {
             return false;
         }
+        // `comment_scroll` is a *line* offset into the virtual card
+        // buffer — the same units as `last_total_lines` and
+        // `last_visible_cards` (which actually holds line counts;
+        // see field doc). Computing `max_scroll` in activity-count
+        // units (the previous shape) underflowed to 0 whenever any
+        // card was expanded, which is exactly when wheel-scroll
+        // matters most.
+        let total_lines = self.last_total_lines;
         let visible = self.last_visible_cards.max(1);
-        let max_scroll = total.saturating_sub(visible);
+        let max_scroll = total_lines.saturating_sub(visible);
+        if max_scroll == 0 {
+            return false;
+        }
         let before = self.comment_scroll;
         let new = if delta < 0 {
             before.saturating_sub((-delta) as usize)
@@ -537,13 +554,6 @@ impl RightPane {
             return false;
         }
         self.comment_scroll = new;
-        // Keep the cursor inside the visible window so j/k feel
-        // continuous from where the user just scrolled to.
-        if self.feed.cursor < self.comment_scroll {
-            self.feed.cursor = self.comment_scroll;
-        } else if self.feed.cursor >= self.comment_scroll + visible {
-            self.feed.cursor = self.comment_scroll + visible - 1;
-        }
         self.rearm_mark_timer(true);
         true
     }
@@ -910,6 +920,7 @@ impl RightPane {
 
         frame.render_widget(Paragraph::new(visible), inner);
         self.last_visible_cards = window.max(1);
+        self.last_total_lines = total_lines;
         area.height
     }
 }

@@ -874,6 +874,67 @@ fn cursor_walks_long_thread_with_scroll_following() {
 }
 
 #[test]
+fn mouse_wheel_scrolls_activity_when_buffer_exceeds_viewport() {
+    // Regression: `scroll_activity` was computing `max_scroll` in
+    // activity-count units while `comment_scroll` is a line offset.
+    // Any height shorter than `activity.len()` lines is enough to
+    // demonstrate scroll is actually needed; with 40 activities and
+    // a height of 12 (~9 content lines) the viewport must scroll
+    // down or the wheel does nothing.
+    let mut rp = RightPane::new(PaneId::new(1));
+    rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 40)));
+    let _ = render_to_string(&mut rp, 80, 12, true);
+    assert_eq!(rp.comment_scroll(), 0, "starts at top");
+    let moved = rp.scroll_activity(8);
+    assert!(moved, "wheel-down should report movement");
+    assert!(
+        rp.comment_scroll() > 0,
+        "wheel-down advances comment_scroll; got {}",
+        rp.comment_scroll()
+    );
+    let mid = rp.comment_scroll();
+    let moved_up = rp.scroll_activity(-8);
+    assert!(moved_up, "wheel-up should report movement");
+    assert!(
+        rp.comment_scroll() < mid,
+        "wheel-up reduces comment_scroll; got {} (was {})",
+        rp.comment_scroll(),
+        mid
+    );
+}
+
+#[test]
+fn mouse_wheel_clamps_to_total_lines() {
+    // Wheel can't scroll past the last line of the virtual buffer.
+    let mut rp = RightPane::new(PaneId::new(1));
+    rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 40)));
+    let _ = render_to_string(&mut rp, 80, 12, true);
+    // Slam the wheel down a lot — should saturate, not panic.
+    for _ in 0..200 {
+        rp.scroll_activity(8);
+    }
+    let saturated = rp.comment_scroll();
+    let no_op = rp.scroll_activity(8);
+    assert!(!no_op, "saturated wheel returns false (no redraw needed)");
+    assert_eq!(
+        rp.comment_scroll(),
+        saturated,
+        "scroll cap holds at saturation"
+    );
+}
+
+#[test]
+fn mouse_wheel_does_nothing_when_everything_fits() {
+    // Small list rendered at huge height — every card fits, wheel
+    // should report no movement (and not panic on underflow).
+    let mut rp = RightPane::new(PaneId::new(1));
+    rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 3)));
+    let _ = render_to_string(&mut rp, 80, 80, true);
+    assert!(!rp.scroll_activity(8), "nothing to scroll → false");
+    assert_eq!(rp.comment_scroll(), 0);
+}
+
+#[test]
 fn page_down_jumps_by_visible_window() {
     let mut rp = RightPane::new(PaneId::new(1));
     rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 40)));

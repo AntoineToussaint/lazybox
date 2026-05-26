@@ -1084,7 +1084,6 @@ impl Sidebar {
             VisibleRow::RepoHeader(_) => None,
         }
     }
-
 }
 
 mod handlers;

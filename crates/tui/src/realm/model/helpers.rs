@@ -102,7 +102,9 @@ pub(crate) fn paint_selection(
 /// SHIFT }` — matches the catalog's parser convention. Returns
 /// `None` for codes the catalog doesn't model (function keys,
 /// release events).
-pub(crate) fn key_event_to_chord(key: crossterm::event::KeyEvent) -> Option<pilot_tui_core::action::KeyChord> {
+pub(crate) fn key_event_to_chord(
+    key: crossterm::event::KeyEvent,
+) -> Option<pilot_tui_core::action::KeyChord> {
     use crossterm::event::{KeyCode, KeyModifiers};
     use pilot_tui_core::action::{ChordCode, KeyChord, NamedKey};
 

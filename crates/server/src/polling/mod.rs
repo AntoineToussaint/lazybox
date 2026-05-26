@@ -1481,7 +1481,7 @@ fn issue_id_to_workspace_key(issue_id: &pilot_core::TaskId) -> WorkspaceKey {
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        has_conflicts: false,
+        mergeable: pilot_core::Mergeable::Mergeable,
         is_behind_base: false,
         node_id: None,
         needs_reply: false,

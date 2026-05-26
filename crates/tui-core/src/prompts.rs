@@ -40,7 +40,7 @@ pub fn build_work_prompt(workspace: &Workspace) -> Option<(SessionKey, String)> 
 /// uniformly.
 pub fn build_fix_conflict_prompt(workspace: &Workspace) -> Option<(SessionKey, String)> {
     let pr = workspace.pr.as_ref()?;
-    if !pr.has_conflicts {
+    if !pr.mergeable.is_conflicting() {
         return None;
     }
     let session_key = SessionKey::from(&workspace.key);

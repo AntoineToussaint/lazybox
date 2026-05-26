@@ -37,8 +37,8 @@ pub use helpers::{run_loop_with_model, run_with_client};
 // (`keys.rs`, etc.) can keep their `super::foo` import shape after
 // the helpers moved out of mod.rs.
 pub(crate) use helpers::{
-    emit_clipboard_copy, find_action_for_chord, key_event_to_chord, paint_selection,
-    rect_contains, spawn_detached_pilot, split_for_footer,
+    emit_clipboard_copy, find_action_for_chord, key_event_to_chord, paint_selection, rect_contains,
+    spawn_detached_pilot, split_for_footer,
 };
 
 use crate::PaneId;
@@ -1204,4 +1204,3 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 }
-

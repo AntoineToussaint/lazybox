@@ -943,7 +943,7 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         });
     }
 
-    activities.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    activities.sort_by_key(|a| std::cmp::Reverse(a.created_at));
 
     // Needs reply: check three signals.
     let needs_reply = needs_reply_check(pr, my_username);
@@ -991,7 +991,13 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         assignees: pr.assignees.nodes.iter().map(|a| a.login.clone()).collect(),
         auto_merge_enabled: pr.auto_merge_request.is_some(),
         is_in_merge_queue: pr.is_in_merge_queue,
-        has_conflicts: pr.mergeable.as_deref() == Some("CONFLICTING"),
+        mergeable: match pr.mergeable.as_deref() {
+            Some("CONFLICTING") => pilot_core::Mergeable::Conflicting,
+            Some("MERGEABLE") => pilot_core::Mergeable::Mergeable,
+            // GitHub returns "UNKNOWN" while it lazily computes
+            // mergeability — surface as Unknown rather than guess.
+            _ => pilot_core::Mergeable::Unknown,
+        },
         is_behind_base: pr.merge_state_status.as_deref() == Some("BEHIND"),
         node_id: pr.id.clone(),
         needs_reply,
@@ -1540,7 +1546,7 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
             .collect(),
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        has_conflicts: false,
+        mergeable: pilot_core::Mergeable::Mergeable,
         is_behind_base: false,
         node_id: issue.id.clone(),
         needs_reply,

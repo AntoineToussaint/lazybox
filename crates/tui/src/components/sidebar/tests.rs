@@ -58,7 +58,7 @@ mod status_pill_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            has_conflicts: false,
+            mergeable: pilot_core::Mergeable::Mergeable,
             is_behind_base: false,
             node_id: None,
             needs_reply: false,
@@ -161,7 +161,7 @@ mod status_pill_tests {
     #[test]
     fn conflicts_trump_ci_status() {
         let mut t = base_task();
-        t.has_conflicts = true;
+        t.mergeable = pilot_core::Mergeable::Conflicting;
         t.ci = CiStatus::Success;
         assert_eq!(status_pill(&t).unwrap().label, " CONFLICT ");
     }
@@ -274,8 +274,8 @@ mod status_pill_consistency_tests {
     //! arm is a compile error; adding a new arm without these
     //! tests catching it is the gap this module closes.
 
-    use super::status_pill_tests::base_task;
     use super::super::{pill_for_tag, status_pill};
+    use super::status_pill_tests::base_task;
     use pilot_core::{CiStatus, ReviewStatus, StatusTag, TaskState};
 
     /// Every variant of `StatusTag` the contract sweeps over. Keep
@@ -413,7 +413,7 @@ mod status_pill_consistency_tests {
         let mut cases: Vec<pilot_core::Task> = Vec::new();
         cases.push({
             let mut t = base_task();
-            t.has_conflicts = true;
+            t.mergeable = pilot_core::Mergeable::Conflicting;
             t
         });
         cases.push({
@@ -704,8 +704,8 @@ mod attention_signal_tests {
     //! header counter but NOT the repo attention dot. Now both
     //! read the same signals.
 
-    use super::status_pill_tests::base_task;
     use super::super::*;
+    use super::status_pill_tests::base_task;
     use pilot_core::{ReviewStatus, TaskRole, Workspace};
 
     fn ws_from_pr(mut task: pilot_core::Task) -> Workspace {

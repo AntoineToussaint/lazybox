@@ -158,7 +158,7 @@ pub fn classify_work(
         return Some(WorkPriority::AddressComments);
     }
     if let Some(pr) = ws.pr.as_ref() {
-        if pr.has_conflicts {
+        if pr.mergeable.is_conflicting() {
             return Some(WorkPriority::FixConflict);
         }
         if pr.ci == pilot_core::CiStatus::Failure {
@@ -217,7 +217,7 @@ pub fn resolve_work(
             build_address_comments_prompt(ws, &indices)
         }
         WorkPriority::FixConflict => {
-            // classify_work already confirmed `pr.has_conflicts`,
+            // classify_work already confirmed `pr.mergeable.is_conflicting()`,
             // so the inner Option always unwraps. `expect` over
             // `unwrap` so a future refactor that breaks the
             // invariant fails loud instead of silently.
@@ -361,7 +361,7 @@ pub fn resolve_merge(workspace: Option<&Workspace>) -> Intent {
     ) {
         return Intent::NoOp;
     }
-    if pr.has_conflicts {
+    if pr.mergeable.is_conflicting() {
         return Intent::NoOp;
     }
     Intent::MergePr {
@@ -574,7 +574,7 @@ mod tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            has_conflicts: false,
+            mergeable: pilot_core::Mergeable::Mergeable,
             is_behind_base: false,
             node_id: None,
             needs_reply: false,
@@ -624,11 +624,11 @@ mod tests {
 
     #[test]
     fn work_on_conflict_pr_returns_resolve_conflict_agent() {
-        // Merge conflict surfaces as `has_conflicts=true`. `w` must
+        // Merge conflict surfaces as `mergeable=Conflicting`. `w` must
         // fire — without this, the user sits on a CONFLICT-pill row
         // and the hint bar shows nothing under `w`.
         let mut ws = pr("o/r#7", CiStatus::None, ReviewStatus::None);
-        ws.pr.as_mut().unwrap().has_conflicts = true;
+        ws.pr.as_mut().unwrap().mergeable = pilot_core::Mergeable::Conflicting;
         let intent = resolve_work(Some(&ws), &[], "claude");
         match intent {
             Intent::SpawnAgent { prompt, .. } => {
@@ -652,7 +652,7 @@ mod tests {
         // conflict first. Pin the priority so a future refactor
         // doesn't accidentally swap the order.
         let mut ws = pr("o/r#7", CiStatus::Failure, ReviewStatus::None);
-        ws.pr.as_mut().unwrap().has_conflicts = true;
+        ws.pr.as_mut().unwrap().mergeable = pilot_core::Mergeable::Conflicting;
         let intent = resolve_work(Some(&ws), &[], "claude");
         match intent {
             Intent::SpawnAgent { prompt, .. } => {
@@ -680,9 +680,9 @@ mod tests {
             let healthy_pr = pr("o/r#1", CiStatus::Success, ReviewStatus::Pending);
             let ci_fail = pr("o/r#1", CiStatus::Failure, ReviewStatus::Pending);
             let mut conflict_pr = pr("o/r#7", CiStatus::None, ReviewStatus::None);
-            conflict_pr.pr.as_mut().unwrap().has_conflicts = true;
+            conflict_pr.pr.as_mut().unwrap().mergeable = pilot_core::Mergeable::Conflicting;
             let mut conflict_plus_ci = pr("o/r#8", CiStatus::Failure, ReviewStatus::None);
-            conflict_plus_ci.pr.as_mut().unwrap().has_conflicts = true;
+            conflict_plus_ci.pr.as_mut().unwrap().mergeable = pilot_core::Mergeable::Conflicting;
             let issue = issue("o/r#42");
             let mut commented = pr("o/r#9", CiStatus::Success, ReviewStatus::Pending);
             commented.activity.push(pilot_core::Activity {
@@ -764,7 +764,7 @@ mod tests {
         // The comments path is most-explicit user intent: they
         // selected what to address. Conflict / CI fall behind.
         let mut ws = pr("o/r#7", CiStatus::None, ReviewStatus::None);
-        ws.pr.as_mut().unwrap().has_conflicts = true;
+        ws.pr.as_mut().unwrap().mergeable = pilot_core::Mergeable::Conflicting;
         ws.activity.push(pilot_core::Activity {
             author: "alice".into(),
             body: "fix the lint please".into(),

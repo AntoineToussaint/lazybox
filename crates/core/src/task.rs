@@ -63,6 +63,32 @@ pub enum ReviewStatus {
     ChangesRequested,
 }
 
+/// Whether a PR's branch can merge cleanly into its base. Tristate
+/// because GitHub computes the field lazily — `Unknown` means
+/// "GitHub hasn't computed yet" and is observably different from
+/// `Mergeable` (no conflict). The sidebar surfaces `Unknown` as a
+/// `?` pill so the user can tell pilot doesn't actually know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum Mergeable {
+    /// GitHub hasn't computed mergeability yet. Re-query nudges
+    /// computation; usually resolves within a poll cycle or two.
+    #[default]
+    Unknown,
+    /// Branch merges cleanly.
+    Mergeable,
+    /// Branch has conflicts with the base.
+    Conflicting,
+}
+
+impl Mergeable {
+    /// Did we positively confirm a conflict? `Unknown` returns
+    /// false — caller should treat ambiguity separately rather
+    /// than collapsing it into "no conflict".
+    pub fn is_conflicting(self) -> bool {
+        matches!(self, Self::Conflicting)
+    }
+}
+
 /// An individual CI check run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckRun {
@@ -141,9 +167,14 @@ pub struct Task {
     /// (separate from auto-merge; this is the real queued-to-merge state).
     #[serde(default)]
     pub is_in_merge_queue: bool,
-    /// Whether this PR has merge conflicts.
+    /// Merge-conflict state of this PR. Tristate because GitHub
+    /// computes the field lazily — a stale PR or one we just
+    /// asked about returns `Unknown` until GitHub finishes the
+    /// background mergeability check. Surfacing `Unknown` as
+    /// "definitely no conflict" misleads the user; the sidebar
+    /// shows a `?` pill instead so the actual state is visible.
     #[serde(default)]
-    pub has_conflicts: bool,
+    pub mergeable: Mergeable,
     /// Whether the PR branch is behind its base (needs "Update branch").
     /// Derived from GitHub's `mergeStateStatus == BEHIND`.
     #[serde(default)]
@@ -307,7 +338,7 @@ impl StatusTag {
             TaskState::Closed => return Self::Closed,
             _ => {}
         }
-        if task.has_conflicts {
+        if task.mergeable.is_conflicting() {
             return Self::Conflict;
         }
         match task.ci {
@@ -397,7 +428,7 @@ mod status_tag_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            has_conflicts: false,
+            mergeable: crate::Mergeable::Mergeable,
             is_behind_base: false,
             node_id: None,
             needs_reply: false,
@@ -440,7 +471,7 @@ mod status_tag_tests {
     #[test]
     fn conflict_trumps_everything() {
         let mut t = base();
-        t.has_conflicts = true;
+        t.mergeable = crate::Mergeable::Conflicting;
         t.ci = CiStatus::Failure;
         t.review = ReviewStatus::ChangesRequested;
         t.is_in_merge_queue = true;
@@ -495,7 +526,7 @@ mod status_tag_tests {
     fn merged_trumps_everything() {
         let mut t = base();
         t.state = TaskState::Merged;
-        t.has_conflicts = true; // ignored
+        t.mergeable = crate::Mergeable::Conflicting; // ignored
         t.ci = CiStatus::Failure; // ignored
         assert_eq!(StatusTag::for_task(&t), StatusTag::Merged);
     }

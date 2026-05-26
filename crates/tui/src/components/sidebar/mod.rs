@@ -36,9 +36,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// Trigger for the long-snooze confirm latch (`Shift-Z`).
 const TRIGGER_LONG_SNOOZE: crate::latch_set::KeyTrigger =
     crate::latch_set::KeyTrigger::new(KeyCode::Char('Z'), KeyModifiers::SHIFT);
+use pills::visual_width;
 use pilot_core::{SessionId, SessionKey, Workspace};
 use pilot_ipc::{Command, Event, TerminalId, TerminalKind};
-use pills::visual_width;
 use ratatui::Frame;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -449,7 +449,7 @@ impl Sidebar {
         ) {
             return None;
         }
-        if pr.has_conflicts {
+        if pr.mergeable.is_conflicting() {
             return None;
         }
         Some(pilot_core::WorkspaceKey::new(workspace.key.as_str()))
@@ -1723,7 +1723,6 @@ impl Sidebar {
         frame.render_widget(para, inner);
     }
 }
-
 
 mod pills;
 

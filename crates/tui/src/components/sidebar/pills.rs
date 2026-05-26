@@ -16,7 +16,6 @@ use super::Mailbox;
 use pilot_core::{SessionKey, Workspace};
 use ratatui::style::{Color, Modifier, Style};
 
-
 /// Visible width of the status column — now TWO side-by-side pills:
 /// review (9 cells) + a 1-cell gutter + CI (9 cells) = 19 cells.
 /// Lifecycle / blocker pills (`MERGED`, `CONFLICT`, `READY`, …)
@@ -395,7 +394,7 @@ fn lifecycle_pill(task: &pilot_core::Task) -> Option<StatusPill> {
         }
         _ => {}
     }
-    if task.has_conflicts {
+    if task.mergeable.is_conflicting() {
         return Some(StatusPill {
             label: " CONFLICT",
             style: pill_red,

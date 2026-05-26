@@ -643,12 +643,45 @@ pub enum SortMode {
 
 // ─── Slack config ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Slack integration. Bidirectional: pilot mirrors PR/agent events to
+/// per-workspace channels (outbound), and `@pilot`-mentions /
+/// channel messages route back to claude sessions (inbound, via
+/// Socket Mode WebSocket). See `docs/slack-setup.md` for the
+/// Slack-side app setup.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
-#[derive(Default)]
 pub struct SlackConfig {
-    /// Slack incoming webhook URL for sending messages.
-    pub webhook_url: Option<String>,
+    /// Bot User OAuth Token (`xoxb-...`). Required for HTTP API.
+    /// Loaded here OR via `$SLACK_BOT_TOKEN` env (env wins on
+    /// conflict so credentials don't have to live in YAML).
+    pub bot_token: Option<String>,
+    /// App-Level Token (`xapp-...`) for Socket Mode WebSocket.
+    /// Required for inbound. Same env-wins-over-YAML rule as
+    /// `bot_token`; env var is `SLACK_APP_TOKEN`.
+    pub app_token: Option<String>,
+    /// Anchor channel name (no `#` prefix). Pilot posts bootstrap
+    /// / error messages here, and routes everything when
+    /// `per_workspace_channels: false`. Default `"pilot"`.
+    #[serde(default = "default_anchor_channel")]
+    pub anchor_channel: String,
+    /// Per-workspace channel name prefix. Default `""` → channel
+    /// names are just the slugified workspace key (`github-acme-
+    /// widget-186`). A value like `"pr-"` produces `pr-github-...`.
+    #[serde(default)]
+    pub channel_prefix: String,
+    /// If true, pilot auto-creates a channel for every workspace
+    /// the inbox sees. If false, everything routes through the
+    /// anchor channel with thread-per-workspace. Default true.
+    #[serde(default = "default_per_workspace_channels")]
+    pub per_workspace_channels: bool,
+}
+
+fn default_anchor_channel() -> String {
+    "pilot".into()
+}
+
+fn default_per_workspace_channels() -> bool {
+    true
 }
 
 // ─── Serde helper for Duration as seconds ──────────────────────────────────

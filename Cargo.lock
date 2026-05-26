@@ -1968,6 +1968,7 @@ dependencies = [
  "pilot-ipc",
  "pilot-linear",
  "pilot-llm-proxy",
+ "pilot-slack",
  "pilot-store",
  "pilot-tui-term",
  "portable-pty",

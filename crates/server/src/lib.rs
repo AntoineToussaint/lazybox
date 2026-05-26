@@ -35,6 +35,7 @@ pub mod backend;
 pub mod lifecycle;
 pub mod polling;
 pub mod pty;
+pub mod slack;
 pub mod socket_service;
 pub mod spawn_handler;
 

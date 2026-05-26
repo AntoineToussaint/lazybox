@@ -291,6 +291,13 @@ async fn run_embedded_realm(
         polling::spawn(config.clone(), resolve_poll_interval());
     }
 
+    // Slack mirror — opt-in via `~/.pilot/config.yaml::slack.{bot_token,
+    // app_token}` (or `$SLACK_BOT_TOKEN` / `$SLACK_APP_TOKEN`). No-op
+    // when neither token is set.
+    if let Ok(yaml) = pilot_config::Config::load() {
+        let _ = pilot_server::slack::spawn(config.clone(), yaml.slack);
+    }
+
     // Always pre-run detection + scope sources. Two reasons: (1)
     // first-run users need them to seed the wizard; (2) returning
     // users may press `,` mid-session to reopen the wizard for
@@ -441,6 +448,9 @@ async fn server_start() -> anyhow::Result<()> {
     pilot_server::spawn_handler::recover_sessions(&config).await;
     polling::migrate_legacy_sandbox(&config);
     polling::spawn(config.clone(), resolve_poll_interval());
+    if let Ok(yaml) = pilot_config::Config::load() {
+        let _ = pilot_server::slack::spawn(config.clone(), yaml.slack);
+    }
 
     let factory_config = config.clone();
     let service = SocketService::new(socket.clone(), pid_file, move || factory_config.clone());

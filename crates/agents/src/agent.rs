@@ -231,6 +231,28 @@ pub mod builtins {
                 return Some(AgentState::Asking);
             }
 
+            // Standalone high-confidence prompts. These exact phrases
+            // appear only when claude is blocking on user input —
+            // there's no realistic chat context that produces them.
+            // Lowercase comparison so phrasing variants ("Do you
+            // want to proceed?" vs "Do you want to Proceed?") both
+            // match without expanding the table. Without this the
+            // bash-permission prompt was missed entirely on long
+            // outputs where the `❯` glyph got pushed off the
+            // detection window's tail.
+            let lower = s.to_lowercase();
+            const STANDALONE: &[&str] = &[
+                "do you want to proceed?",
+                "do you want to continue?",
+                "do you want to apply",
+                "do you want to allow",
+                "do you want to enable",
+                "do you want to retry",
+            ];
+            if STANDALONE.iter().any(|p| lower.contains(p)) {
+                return Some(AgentState::Asking);
+            }
+
             // Paired fallback for bare yes/no prompts (no arrow UI) +
             // older prompt shapes. Question phrases ANY-ed with choice
             // markers — both must be present in the buffer.

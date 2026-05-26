@@ -370,3 +370,47 @@ fn yn_pattern_constant_matches_every_published_variant() {
         );
     }
 }
+
+#[test]
+fn claude_detects_standalone_proceed_prompt_lowercase() {
+    // Regression: the user reported a real `Do you want to proceed?`
+    // bash-permission prompt going undetected. The paired matcher
+    // had `Proceed?` (capital P) but claude renders the actual
+    // phrase lowercase. Standalone path matches on lowercase.
+    let agent = Claude;
+    let buf = b"some long bash output\nDo you want to proceed?\n";
+    assert_eq!(agent.detect_state(buf), Some(AgentState::Asking));
+}
+
+#[test]
+fn claude_detects_other_lowercase_standalone_prompts() {
+    let agent = Claude;
+    for prompt in [
+        "Do you want to continue?",
+        "do you want to allow this?",
+        "do you want to apply these changes?",
+        "do you want to retry?",
+    ] {
+        assert_eq!(
+            agent.detect_state(prompt.as_bytes()),
+            Some(AgentState::Asking),
+            "standalone prompt should fire: {prompt:?}",
+        );
+    }
+}
+
+#[test]
+fn claude_standalone_does_not_fire_on_chat_context() {
+    // The standalone phrases are tight enough to not fire on
+    // arbitrary chat output. Belt-and-braces sanity: prose that
+    // mentions "proceed" but isn't the exact prompt stays Active.
+    let agent = Claude;
+    assert_eq!(
+        agent.detect_state(b"I'll proceed with the change once you say so."),
+        Some(AgentState::Active),
+    );
+    assert_eq!(
+        agent.detect_state(b"Reading the manual to figure out how to continue."),
+        Some(AgentState::Active),
+    );
+}

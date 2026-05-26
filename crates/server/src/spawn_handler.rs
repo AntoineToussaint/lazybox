@@ -369,13 +369,17 @@ pub async fn handle_spawn(
             // the "needs input" label sticks. 4 KiB is enough to
             // capture a single prompt's render + a screen of context,
             // small enough that next-screen content evicts the old.
-            // 8 KiB (was 4 KiB) — Claude renders long bash commands
-            // (multi-pipeline `git diff … | comm -12 …` style) that
-            // can push the `Do you want to proceed?` prompt past
-            // 4 KiB of tail, missing the detection on those screens.
-            // 8 KiB still evicts old prompts within ~1 screen of
-            // follow-up output.
-            const DETECT_WINDOW: usize = 8 * 1024;
+            // 16 KiB (was 8 KiB) — Claude's bash-permission prompts
+            // can sit BELOW 8+ KiB of preview output (long heredocs,
+            // `cat <<EOF | gh api ...` patches, multi-file `cat`
+            // outputs, etc.). The user reported a real
+            // `Do you want to proceed?` prompt going undetected
+            // because the prompt + arrow + choice markers were
+            // pushed past the old 8 KiB tail. 16 KiB still evicts
+            // stale prompts within ~half a screen of follow-up
+            // output, while comfortably covering claude's largest
+            // tool-preview screens.
+            const DETECT_WINDOW: usize = 16 * 1024;
             let tail_start = buf.len().saturating_sub(DETECT_WINDOW);
             let detect_window = &buf[tail_start..];
             let Some(new_state) = agent.detect_state(detect_window) else {

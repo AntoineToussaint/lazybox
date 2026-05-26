@@ -108,9 +108,7 @@ pub fn render(
             ),
             Span::styled(
                 format!("{label} "),
-                Style::default()
-                    .bg(theme.surface)
-                    .fg(theme.text_strong),
+                Style::default().bg(theme.surface).fg(theme.text_strong),
             ),
             Span::styled(" ", bg),
         ]))

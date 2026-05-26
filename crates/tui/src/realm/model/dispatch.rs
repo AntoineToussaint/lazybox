@@ -18,10 +18,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// **Returns** the IPC commands the action produces, if any.
     /// UI-only effects (modal mounts, focus moves) happen via
     /// `&mut self` and aren't reflected in the return.
-    pub fn dispatch_action(
-        &mut self,
-        action: &pilot_tui_core::action::Action,
-    ) -> Vec<IpcCommand> {
+    pub fn dispatch_action(&mut self, action: &pilot_tui_core::action::Action) -> Vec<IpcCommand> {
         use pilot_tui_core::action::ActionDef;
         // Destructive gate, type-system enforced via the catalog.
         // Every destructive action is routed through the unified
@@ -128,8 +125,7 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                     crate::intent::Intent::Notice(msg) => {
                         use crate::realm::components::footer::{Notice, NoticeSeverity};
-                        self.status.notice =
-                            Some(Notice::new(msg, NoticeSeverity::Info));
+                        self.status.notice = Some(Notice::new(msg, NoticeSeverity::Info));
                         self.redraw = true;
                     }
                     _ => {}
@@ -221,11 +217,10 @@ impl<T: TerminalAdapter> Model<T> {
                 // Pre-arm the bg_poll indicator so the user gets
                 // feedback on the keystroke — same as the
                 // `Shift+R` handler did inline before.
-                self.status.note_poll_progress("github", "manual refresh requested");
-                self.status.notice = Some(Notice::new(
-                    "refreshing…".to_string(),
-                    NoticeSeverity::Hint,
-                ));
+                self.status
+                    .note_poll_progress("github", "manual refresh requested");
+                self.status.notice =
+                    Some(Notice::new("refreshing…".to_string(), NoticeSeverity::Hint));
                 self.redraw = true;
             }
             Action::OpenHelp => {

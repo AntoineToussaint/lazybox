@@ -1463,33 +1463,31 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
         // pump can stall the daemon's Subscribe handler indefinitely,
         // and `tokio::select!` cannot poll the next command until this
         // arm returns. Stalling here = the entire IPC channel freezes.
-        let (replay, last_seq) = match tokio::time::timeout(
-            SNAPSHOT_PER_SESSION_TIMEOUT,
-            config.backend.snapshot(&key),
-        )
-        .await
-        {
-            Ok(Ok(snap)) => snap,
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    terminal_id = ?id,
-                    key = %key,
-                    error = %e,
-                    "snapshot_terminals: backend.snapshot failed — replay will be empty"
-                );
-                (Vec::new(), 0)
-            }
-            Err(_) => {
-                tracing::warn!(
-                    terminal_id = ?id,
-                    key = %key,
-                    timeout_ms = SNAPSHOT_PER_SESSION_TIMEOUT.as_millis() as u64,
-                    "snapshot_terminals: backend.snapshot timed out (wedged session?) \
-                     — replay will be empty, daemon not blocked"
-                );
-                (Vec::new(), 0)
-            }
-        };
+        let (replay, last_seq) =
+            match tokio::time::timeout(SNAPSHOT_PER_SESSION_TIMEOUT, config.backend.snapshot(&key))
+                .await
+            {
+                Ok(Ok(snap)) => snap,
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        terminal_id = ?id,
+                        key = %key,
+                        error = %e,
+                        "snapshot_terminals: backend.snapshot failed — replay will be empty"
+                    );
+                    (Vec::new(), 0)
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        terminal_id = ?id,
+                        key = %key,
+                        timeout_ms = SNAPSHOT_PER_SESSION_TIMEOUT.as_millis() as u64,
+                        "snapshot_terminals: backend.snapshot timed out (wedged session?) \
+                         — replay will be empty, daemon not blocked"
+                    );
+                    (Vec::new(), 0)
+                }
+            };
         out.push(TerminalSnapshot {
             terminal_id: id,
             session_key,

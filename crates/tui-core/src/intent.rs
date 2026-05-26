@@ -319,9 +319,7 @@ pub fn resolve_open_editor(workspace: Option<&Workspace>) -> Intent {
 pub fn resolve_new_workspace(focused_project_key: Option<pilot_core::ProjectKey>) -> Intent {
     match focused_project_key {
         Some(project_key) => Intent::MountNewWorkspaceInput { project_key },
-        None => Intent::Notice(
-            "Select a project first (Shift-N creates one).".to_string(),
-        ),
+        None => Intent::Notice("Select a project first (Shift-N creates one).".to_string()),
     }
 }
 

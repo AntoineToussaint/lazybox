@@ -28,6 +28,6 @@ pub use session_key::SessionKey;
 pub use task::*;
 pub use workspace::{
     Session as WorkspaceSession, SessionId, SessionKind, SessionLayout, SessionRunState,
-    TileDirection, TileTree, Workspace, WorkspaceKey, project_key_for_task,
-    workspace_key_for, workspace_project_key,
+    TileDirection, TileTree, Workspace, WorkspaceKey, project_key_for_task, workspace_key_for,
+    workspace_project_key,
 };

@@ -805,7 +805,9 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
             use std::collections::HashMap;
             let mut latest: HashMap<String, &str> = HashMap::new();
             for r in &pr.reviews.nodes {
-                let Some(author) = r.author.as_ref() else { continue };
+                let Some(author) = r.author.as_ref() else {
+                    continue;
+                };
                 match r.state.as_str() {
                     "APPROVED" | "CHANGES_REQUESTED" => {
                         latest.insert(author.login.clone(), r.state.as_str());

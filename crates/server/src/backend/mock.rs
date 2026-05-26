@@ -306,13 +306,7 @@ impl SessionBackend for MockBackend {
         Box::pin(async move {
             // `wedge_snapshot(key)` makes this future never resolve —
             // simulating a wedged tmux pump holding the ring mutex.
-            if self
-                .inner
-                .wedged_snapshot_keys
-                .lock()
-                .await
-                .contains(key)
-            {
+            if self.inner.wedged_snapshot_keys.lock().await.contains(key) {
                 std::future::pending::<()>().await;
             }
             let map = self.inner.sessions.lock().await;

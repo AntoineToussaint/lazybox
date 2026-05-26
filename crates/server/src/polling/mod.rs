@@ -25,8 +25,8 @@
 mod handlers;
 
 pub use handlers::{
-    handle_add_assignees, handle_clean_worktrees, handle_fetch_pr_details, handle_merge_pr,
-    handle_request_reviewers, post_reply, ProviderHandle,
+    ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_fetch_pr_details,
+    handle_merge_pr, handle_request_reviewers, post_reply,
 };
 
 use crate::ServerConfig;
@@ -1133,9 +1133,7 @@ fn ensure_project_for_workspace(config: &ServerConfig, workspace: &Workspace) {
             "save_project failed: {e}",
         );
     }
-    let _ = config
-        .bus
-        .send(Event::ProjectUpserted(Box::new(project)));
+    let _ = config.bus.send(Event::ProjectUpserted(Box::new(project)));
 }
 
 /// Heuristic for "is this Task the PR side of a PR/issue pair?".
@@ -1611,9 +1609,7 @@ pub fn create_local_project(config: &ServerConfig, name: &str) -> pilot_core::Pr
             "save_project failed: {e}",
         );
     }
-    let _ = config
-        .bus
-        .send(Event::ProjectUpserted(Box::new(project)));
+    let _ = config.bus.send(Event::ProjectUpserted(Box::new(project)));
     key
 }
 
@@ -1637,9 +1633,7 @@ pub fn migrate_legacy_sandbox(config: &ServerConfig) {
     let mut workspace: Workspace = match serde_json::from_str(&json) {
         Ok(w) => w,
         Err(e) => {
-            tracing::warn!(
-                "migrate_legacy_sandbox: failed to parse stored workspace: {e}"
-            );
+            tracing::warn!("migrate_legacy_sandbox: failed to parse stored workspace: {e}");
             return;
         }
     };
@@ -1651,7 +1645,9 @@ pub fn migrate_legacy_sandbox(config: &ServerConfig) {
     workspace.project_key = Some(project_key);
     let ws_key = workspace.key.clone();
     commit_upsert(config, &ws_key, workspace);
-    tracing::info!("migrate_legacy_sandbox: moved `sandbox` workspace under `local-sandbox` project");
+    tracing::info!(
+        "migrate_legacy_sandbox: moved `sandbox` workspace under `local-sandbox` project"
+    );
 }
 
 /// Set or clear the workspace's `snoozed_until` timestamp. `None`

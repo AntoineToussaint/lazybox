@@ -226,11 +226,7 @@ impl LinearClient {
     /// UUID node id (stored in `task.node_id` after a poll). Wraps
     /// the `commentCreate` GraphQL mutation; returns on success or
     /// surfaces the upstream error message.
-    pub async fn post_comment(
-        &self,
-        issue_id: &str,
-        body: &str,
-    ) -> Result<(), LinearError> {
+    pub async fn post_comment(&self, issue_id: &str, body: &str) -> Result<(), LinearError> {
         let req = serde_json::json!({
             "query": "mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }",
             "variables": { "input": { "issueId": issue_id, "body": body } },
@@ -281,10 +277,7 @@ impl TaskProvider for LinearClient {
             )
         })?;
         let issue_id = task.node_id.as_deref().ok_or_else(|| {
-            ProviderError::permanent(
-                "linear",
-                "task has no node_id (poll first)",
-            )
+            ProviderError::permanent("linear", "task has no node_id (poll first)")
         })?;
         self.post_comment(issue_id, body)
             .await

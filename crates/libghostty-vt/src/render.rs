@@ -351,11 +351,7 @@ impl Snapshot<'_, '_> {
         // flag never actually cleared and the shadow widget's fast
         // path never fired.
         let result = unsafe {
-            ffi::ghostty_render_state_set(
-                self.0.0.as_raw(),
-                tag,
-                (value as *const T).cast(),
-            )
+            ffi::ghostty_render_state_set(self.0.0.as_raw(), tag, (value as *const T).cast())
         };
         // Since we manually model every possible query, this should never fail.
         from_result(result)
@@ -537,11 +533,7 @@ impl RowIteration<'_, '_> {
         // the full story. Pass the address of the *value*, not the
         // address of the `&T` reference parameter.
         let result = unsafe {
-            ffi::ghostty_render_state_row_set(
-                self.iter.0.as_raw(),
-                tag,
-                (value as *const T).cast(),
-            )
+            ffi::ghostty_render_state_row_set(self.iter.0.as_raw(), tag, (value as *const T).cast())
         };
         from_result(result)
     }

@@ -94,10 +94,7 @@ pub enum ProviderHandle {
 }
 
 impl ProviderHandle {
-    pub async fn merge(
-        &self,
-        ws: &pilot_core::Workspace,
-    ) -> Result<(), pilot_core::ProviderError> {
+    pub async fn merge(&self, ws: &pilot_core::Workspace) -> Result<(), pilot_core::ProviderError> {
         match self {
             Self::Github(c) => pilot_core::TaskProvider::merge(c, ws).await,
             Self::Linear(c) => pilot_core::TaskProvider::merge(c, ws).await,
@@ -109,12 +106,8 @@ impl ProviderHandle {
         logins: &[String],
     ) -> Result<(), pilot_core::ProviderError> {
         match self {
-            Self::Github(c) => {
-                pilot_core::TaskProvider::request_reviewers(c, ws, logins).await
-            }
-            Self::Linear(c) => {
-                pilot_core::TaskProvider::request_reviewers(c, ws, logins).await
-            }
+            Self::Github(c) => pilot_core::TaskProvider::request_reviewers(c, ws, logins).await,
+            Self::Linear(c) => pilot_core::TaskProvider::request_reviewers(c, ws, logins).await,
         }
     }
     pub async fn add_assignees(
@@ -123,12 +116,8 @@ impl ProviderHandle {
         logins: &[String],
     ) -> Result<(), pilot_core::ProviderError> {
         match self {
-            Self::Github(c) => {
-                pilot_core::TaskProvider::add_assignees(c, ws, logins).await
-            }
-            Self::Linear(c) => {
-                pilot_core::TaskProvider::add_assignees(c, ws, logins).await
-            }
+            Self::Github(c) => pilot_core::TaskProvider::add_assignees(c, ws, logins).await,
+            Self::Linear(c) => pilot_core::TaskProvider::add_assignees(c, ws, logins).await,
         }
     }
     pub async fn post_reply(
@@ -500,11 +489,7 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
         }
     }
 
-    tracing::info!(
-        removed,
-        skipped,
-        "clean_worktrees: done",
-    );
+    tracing::info!(removed, skipped, "clean_worktrees: done",);
     let _ = config
         .bus
         .send(Event::CleanWorktreesCompleted { removed, skipped });

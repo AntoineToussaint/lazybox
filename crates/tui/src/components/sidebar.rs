@@ -655,7 +655,6 @@ impl Sidebar {
         self.cursor = selectable[target];
     }
 
-
     /// Total unread activity items across all VISIBLE workspaces. Used
     /// by the top header's `N new` badge — only the current mailbox's
     /// unread is counted, so cycling Inbox→Snoozed shows different

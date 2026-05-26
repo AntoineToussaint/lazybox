@@ -381,9 +381,7 @@ async fn run_embedded_realm(
 /// Linear ships without a scope-discovery API so the wizard skips it.
 async fn build_scope_sources() -> Vec<Box<dyn pilot_core::ScopeSource>> {
     let mut sources: Vec<Box<dyn pilot_core::ScopeSource>> = Vec::new();
-    if let Ok(cred) = pilot_gh::credential_chain()
-        .resolve(pilot_gh::SOURCE)
-        .await
+    if let Ok(cred) = pilot_gh::credential_chain().resolve(pilot_gh::SOURCE).await
         && let Ok(client) = pilot_gh::GhClient::from_credential(cred).await
     {
         sources.push(Box::new(pilot_gh::GhScopes::new(std::sync::Arc::new(

@@ -701,12 +701,10 @@ impl<T: TerminalAdapter> Model<T> {
                         libghostty_vt::mouse::Action::Press,
                         libghostty_vt::mouse::Action::Release,
                     ] {
-                        if let Some((terminal_id, bytes)) = self.terminals.encode_mouse(
-                            action,
-                            Some(vt_button),
-                            cell_col,
-                            cell_row,
-                        ) {
+                        if let Some((terminal_id, bytes)) =
+                            self.terminals
+                                .encode_mouse(action, Some(vt_button), cell_col, cell_row)
+                        {
                             self.send_cmd(IpcCommand::Write { terminal_id, bytes });
                         }
                     }

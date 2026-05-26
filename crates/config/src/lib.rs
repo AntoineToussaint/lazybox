@@ -172,7 +172,6 @@ pub struct UiSection {
     pub action_keys: std::collections::BTreeMap<String, String>,
 }
 
-
 /// Concrete UI settings with every `Option<T>` from `UiSection`
 /// resolved to its default. Consumers (panes, model) read this
 /// instead of duplicating defaults inline. Pure data — clone-cheap.
@@ -785,7 +784,6 @@ repos:
         assert_eq!(r.long_snooze, d.long_snooze);
         assert_eq!(r.log_path, d.log_path);
     }
-
 
     #[test]
     fn ui_resolved_honors_explicit_values() {

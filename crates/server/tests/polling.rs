@@ -575,7 +575,11 @@ async fn migrate_picks_up_pr_title_rename() {
 #[tokio::test]
 async fn create_empty_workspace_persists_with_user_name() {
     let config = ServerConfig::in_memory();
-    let key = polling::create_empty_workspace(&config, "fix login flow", pilot_core::ProjectKey::local("test"));
+    let key = polling::create_empty_workspace(
+        &config,
+        "fix login flow",
+        pilot_core::ProjectKey::local("test"),
+    );
     assert_eq!(
         key.as_str(),
         "fix-login-flow",
@@ -597,9 +601,21 @@ async fn create_empty_workspace_persists_with_user_name() {
 #[tokio::test]
 async fn create_empty_workspace_disambiguates_collisions() {
     let config = ServerConfig::in_memory();
-    let k1 = polling::create_empty_workspace(&config, "Refactor auth", pilot_core::ProjectKey::local("test"));
-    let k2 = polling::create_empty_workspace(&config, "Refactor auth", pilot_core::ProjectKey::local("test"));
-    let k3 = polling::create_empty_workspace(&config, "Refactor auth", pilot_core::ProjectKey::local("test"));
+    let k1 = polling::create_empty_workspace(
+        &config,
+        "Refactor auth",
+        pilot_core::ProjectKey::local("test"),
+    );
+    let k2 = polling::create_empty_workspace(
+        &config,
+        "Refactor auth",
+        pilot_core::ProjectKey::local("test"),
+    );
+    let k3 = polling::create_empty_workspace(
+        &config,
+        "Refactor auth",
+        pilot_core::ProjectKey::local("test"),
+    );
     assert_eq!(k1.as_str(), "refactor-auth");
     assert_eq!(k2.as_str(), "refactor-auth-2");
     assert_eq!(k3.as_str(), "refactor-auth-3");
@@ -627,7 +643,11 @@ async fn create_empty_workspace_broadcasts_upserted() {
         .await
         .unwrap();
 
-    polling::create_empty_workspace(&config, "side experiment", pilot_core::ProjectKey::local("test"));
+    polling::create_empty_workspace(
+        &config,
+        "side experiment",
+        pilot_core::ProjectKey::local("test"),
+    );
     let evt = recv_workspace_upsert(&mut client).await;
     match evt {
         Event::WorkspaceUpserted(w) => {

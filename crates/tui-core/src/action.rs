@@ -46,7 +46,6 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Action {
     // ── Workspace-scoped (sidebar) ─────────────────────────────────
-
     /// Open the focused workspace (mount activity / focus terminals).
     OpenWorkspace,
     /// Spawn the default agent (claude) on the focused workspace,
@@ -83,7 +82,6 @@ pub enum Action {
     AddAssignees,
 
     // ── Activity pane (right) ──────────────────────────────────────
-
     /// Toggle the activity-section collapse on the focused workspace.
     ToggleActivity,
     /// Toggle a single activity row's expanded view.
@@ -98,7 +96,6 @@ pub enum Action {
     UndoMarkRead,
 
     // ── Global / cross-pane ────────────────────────────────────────
-
     /// Cycle pane focus (Tab).
     CyclePane,
     /// Force a fresh poll of every provider (Shift+R / g).
@@ -119,7 +116,6 @@ pub enum Action {
     ResizeSplitter(ResizeDirection),
 
     // ── Terminal-pane scoped ───────────────────────────────────────
-
     /// Scroll the focused terminal's scrollback (Shift+PgUp/Dn).
     TerminalScroll(ScrollDirection),
     /// Escape the terminal back to sidebar focus (`]]`).
@@ -702,10 +698,7 @@ impl ActionDef {
     /// catalog bug — the type system can't catch it directly, but
     /// the test `destructive_actions_have_prompts` does.
     pub fn is_destructive(&self) -> bool {
-        matches!(
-            self.kind,
-            ActionKind::Archive | ActionKind::MergePr,
-        )
+        matches!(self.kind, ActionKind::Archive | ActionKind::MergePr,)
     }
 
     /// Confirm-modal prompt text for a destructive action. Returns
@@ -831,10 +824,7 @@ pub fn contextual_label(
 /// Returns `false` when `workspace` is `None` and the action needs
 /// one (most Workspace-section actions). Use the section info to
 /// avoid passing `None` to actions that can't sensibly act on it.
-pub fn availability(
-    kind: ActionKind,
-    workspace: Option<&pilot_core::Workspace>,
-) -> bool {
+pub fn availability(kind: ActionKind, workspace: Option<&pilot_core::Workspace>) -> bool {
     use crate::intent;
     let has_ws = workspace.is_some();
     match kind {

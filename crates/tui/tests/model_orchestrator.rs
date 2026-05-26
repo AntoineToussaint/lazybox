@@ -99,11 +99,7 @@ fn remapped_new_workspace_binding_mounts_input() {
         Utc::now(),
     );
     let workspace = {
-        let mut w = Workspace::empty(
-            WorkspaceKey::new("github:owner/repo#1"),
-            "main",
-            Utc::now(),
-        );
+        let mut w = Workspace::empty(WorkspaceKey::new("github:owner/repo#1"), "main", Utc::now());
         w.project_key = Some(project.key.clone());
         w
     };

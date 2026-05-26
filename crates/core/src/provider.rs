@@ -252,11 +252,7 @@ pub trait TaskProvider: Send + Sync {
     /// Post a reply (comment) on the workspace's task. PR
     /// workspaces target the PR's main thread; issue workspaces
     /// target the issue. Per-comment threading is not yet modeled.
-    async fn post_reply(
-        &self,
-        workspace: &Workspace,
-        body: &str,
-    ) -> Result<(), ProviderError> {
+    async fn post_reply(&self, workspace: &Workspace, body: &str) -> Result<(), ProviderError> {
         let _ = (workspace, body);
         Err(ProviderError::unsupported(self.name(), "post_reply"))
     }

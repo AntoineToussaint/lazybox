@@ -20,7 +20,13 @@
 
 - name: Install C toolchain (Linux)
   if: runner.os == 'Linux'
-  run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config
+  # libc++ + libc++abi: the Zig-built ghostty static archive references
+  # `std::__1::*` symbols (libc++, LLVM's stdlib) from simdutf /
+  # highway / std::optional — NOT libstdc++ (`std::__cxx11::*`).
+  # libc++abi carries the typeinfo + RTTI globals (e.g.
+  # `typeinfo for std::bad_optional_access`). Without both, the
+  # final link fails with ~30 unresolved C++ stdlib symbols.
+  run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
 
 - name: Install C toolchain (macOS)
   if: runner.os == 'macOS'

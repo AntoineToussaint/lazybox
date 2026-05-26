@@ -464,14 +464,26 @@ mod workspace_type_label_tests {
     fn pr_workspace_returns_pr_label() {
         let mut w = empty_ws();
         w.attach_task(task("https://github.com/o/r/pull/1"));
-        assert_eq!(workspace_type_label(&w), Some("[PR]"));
+        assert_eq!(workspace_type_label(&w), Some("[PR] "));
     }
 
     #[test]
     fn issue_workspace_returns_i_label() {
         let mut w = empty_ws();
         w.attach_task(task("https://github.com/o/r/issues/42"));
-        assert_eq!(workspace_type_label(&w), Some("[I ]"));
+        assert_eq!(workspace_type_label(&w), Some("[I]  "));
+    }
+
+    #[test]
+    fn linear_only_workspace_returns_l_label() {
+        // Distinct source from github — issues that came from Linear
+        // get `[L]` so the row gives a stronger "where does this
+        // live?" signal at a glance.
+        let mut w = empty_ws();
+        let mut t = task("https://linear.app/team/issue/ABC-7");
+        t.id.source = "linear".into();
+        w.attach_task(t);
+        assert_eq!(workspace_type_label(&w), Some("[L]  "));
     }
 
     #[test]
@@ -481,7 +493,39 @@ mod workspace_type_label_tests {
         let mut w = empty_ws();
         w.attach_task(task("https://github.com/o/r/pull/1"));
         w.attach_task(task("https://github.com/o/r/issues/42"));
-        assert_eq!(workspace_type_label(&w), Some("[PR]"));
+        assert_eq!(workspace_type_label(&w), Some("[PR] "));
+    }
+
+    #[test]
+    fn all_workspace_type_labels_are_five_cells() {
+        // Column alignment invariant — the `#NNN` number after the
+        // label must land at the same x position on every row.
+        for label in [
+            workspace_type_label(&{
+                let mut w = empty_ws();
+                w.attach_task(task("https://github.com/o/r/pull/1"));
+                w
+            }),
+            workspace_type_label(&{
+                let mut w = empty_ws();
+                w.attach_task(task("https://github.com/o/r/issues/1"));
+                w
+            }),
+            workspace_type_label(&{
+                let mut w = empty_ws();
+                let mut t = task("https://linear.app/team/issue/ABC-1");
+                t.id.source = "linear".into();
+                w.attach_task(t);
+                w
+            }),
+        ] {
+            let label = label.expect("each workspace shape has a label");
+            assert_eq!(
+                label.chars().count(),
+                5,
+                "label {label:?} must be exactly 5 cells",
+            );
+        }
     }
 
     #[test]

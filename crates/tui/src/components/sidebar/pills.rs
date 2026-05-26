@@ -52,19 +52,27 @@ pub(crate) struct StatusPill {
 /// Each signal (unread / CI / review / agent-asking / mentioned)
 /// is independently toggleable via `~/.pilot/config.yaml::attention`.
 /// Short type marker rendered before the `#number` on each workspace
-/// row. Returns `Some("[PR]")` for workspaces holding a pull request,
-/// `Some("[I]")` for issue-only workspaces, and `None` for empty
-/// scratch workspaces (no PR, no issues — those have no number to
-/// label anyway).
+/// row. Each label is exactly 5 cells (`[PR] `, `[I]  `, `[L]  `)
+/// so the `#NNN` number after the label always lands at the same
+/// x-position — the eye can scan the column without the brackets
+/// wandering left-right between rows.
+///
+/// Variants:
+/// - `[PR] ` — workspaces holding a pull request.
+/// - `[I]  ` — github-issue-only workspaces.
+/// - `[L]  ` — linear-ticket-only workspaces. Distinguished from
+///   `[I]` because they're a different source (different keymaps
+///   later, no review threads, no PRs, …).
+/// - `None`  — empty scratch workspaces (no PR, no issues).
 pub(crate) fn workspace_type_label(workspace: &Workspace) -> Option<&'static str> {
-    // Pad to 4 cells so [PR] and [I ] line up column-wise — the
-    // `#NNN` number after the label needs the same x position on
-    // every row or the eye can't scan the column.
     if workspace.pr.is_some() {
-        return Some("[PR]");
+        return Some("[PR] ");
     }
-    if !workspace.gh_issues.is_empty() || !workspace.linear_issues.is_empty() {
-        return Some("[I ]");
+    if !workspace.gh_issues.is_empty() {
+        return Some("[I]  ");
+    }
+    if !workspace.linear_issues.is_empty() {
+        return Some("[L]  ");
     }
     None
 }

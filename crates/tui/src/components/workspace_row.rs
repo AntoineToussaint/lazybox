@@ -156,9 +156,11 @@ fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .fg(ctx.theme.text_dim)
             .add_modifier(Modifier::BOLD)
     };
-    // `tag` is "[PR]" or "[I ]" (4 cells). Trailing space pulls the
-    // PR number off the bracket so the columns visually separate.
-    Cell::from_span(Span::styled(format!("{tag} "), style))
+    // `tag` is already 5 cells (`[PR] ` / `[I]  ` / `[L]  `) — the
+    // trailing whitespace is part of the label itself so the
+    // `#NNN` number after it lands at the same x-position on
+    // every row.
+    Cell::from_span(Span::styled(tag.to_string(), style))
 }
 
 fn cell_pr_num(ctx: &WorkspaceRowCtx<'_>) -> Cell {

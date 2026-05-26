@@ -170,6 +170,7 @@ mod tests {
             .collect()
     }
 
+    #[allow(dead_code, reason = "kept for the drift-from-vt.h check; the matching test is gated with #[ignore] because the vendored bindings are intentionally older than the upstream header")]
     fn parse_header_symbols(input: &str) -> BTreeSet<String> {
         let mut symbols = BTreeSet::new();
         let mut statement = String::new();

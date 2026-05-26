@@ -190,10 +190,22 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
                     if cell_style.italic {
                         style = style.add_modifier(Modifier::ITALIC);
                     }
-                    if cell_style.underline != Underline::None {
+                    // Suppress UNDERLINED / CROSSED_OUT on
+                    // whitespace-only cells. Claude Code (and other
+                    // CLIs) sometimes leave the underline-on ANSI
+                    // mode active across newlines, which paints a
+                    // styled space for every cell of every following
+                    // row — terminals render that as a thin
+                    // underline at the bottom of the cell, producing
+                    // the stack of stray horizontal bars the user
+                    // screenshotted. Real underlines are always
+                    // applied to glyphs; bare spaces with these
+                    // modifiers are essentially never intentional.
+                    let glyph_is_blank = text == " " || text.is_empty();
+                    if cell_style.underline != Underline::None && !glyph_is_blank {
                         style = style.add_modifier(Modifier::UNDERLINED);
                     }
-                    if cell_style.strikethrough {
+                    if cell_style.strikethrough && !glyph_is_blank {
                         style = style.add_modifier(Modifier::CROSSED_OUT);
                     }
                     if cell_style.inverse {

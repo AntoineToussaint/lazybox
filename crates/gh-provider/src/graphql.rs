@@ -783,12 +783,47 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         TaskState::Open
     };
 
-    // Review status from reviewDecision.
+    // Review status from reviewDecision, with a fallback that
+    // walks the reviews list. GitHub returns `reviewDecision: null`
+    // when no review is REQUIRED (no branch protection, no
+    // CODEOWNERS) — even if reviewers have explicitly approved.
+    // In that case the sidebar previously showed REVIEW (pending)
+    // forever even on PRs the user knew were approved. Fall back
+    // to "any latest-per-reviewer APPROVED submission" so the
+    // APPROVED pill actually surfaces.
     let review = match pr.review_decision.as_deref() {
         Some("APPROVED") => ReviewStatus::Approved,
         Some("CHANGES_REQUESTED") => ReviewStatus::ChangesRequested,
         Some("REVIEW_REQUIRED") => ReviewStatus::Pending,
-        _ => ReviewStatus::None,
+        _ => {
+            // No required review — derive from actual submissions.
+            // Each reviewer's latest non-COMMENT/PENDING/DISMISSED
+            // state is what counts: APPROVED or CHANGES_REQUESTED.
+            // The reviews array is in submitted-order so a later
+            // CHANGES_REQUESTED supersedes an earlier APPROVED from
+            // the same author.
+            use std::collections::HashMap;
+            let mut latest: HashMap<String, &str> = HashMap::new();
+            for r in &pr.reviews.nodes {
+                let Some(author) = r.author.as_ref() else { continue };
+                match r.state.as_str() {
+                    "APPROVED" | "CHANGES_REQUESTED" => {
+                        latest.insert(author.login.clone(), r.state.as_str());
+                    }
+                    // COMMENT / PENDING / DISMISSED — ignore. A dismissed
+                    // review doesn't count; a comment-only review is
+                    // signal-less for approval status.
+                    _ => {}
+                }
+            }
+            if latest.values().any(|s| *s == "CHANGES_REQUESTED") {
+                ReviewStatus::ChangesRequested
+            } else if latest.values().any(|s| *s == "APPROVED") {
+                ReviewStatus::Approved
+            } else {
+                ReviewStatus::None
+            }
+        }
     };
 
     // Build activity from all sources, sorted by time.

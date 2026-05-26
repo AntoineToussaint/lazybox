@@ -97,8 +97,10 @@ pub enum Intent {
 /// hardcoded duplicate strings to drift apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkPriority {
-    /// User selected comments on an activity row. Agent gets an
-    /// "address these comments" prompt.
+    /// User selected comments on an activity row OR the workspace
+    /// has unread activity and the viewer is the PR's author /
+    /// assignee. Agent gets an "address these comments" prompt:
+    /// investigate → reply on GH → push commit.
     AddressComments,
     /// PR has merge conflicts with its base. Agent gets a
     /// "rebase + resolve" prompt. Beats CI fail because CI can't
@@ -106,6 +108,10 @@ pub enum WorkPriority {
     FixConflict,
     /// PR's CI is failing. Agent gets a "fix CI" prompt.
     FixCi,
+    /// Viewer is the assigned reviewer on a healthy PR. Agent
+    /// gets a "review this PR" prompt (walk the diff, leave
+    /// inline comments, submit an overall review).
+    ReviewCode,
     /// Issue-only workspace (no PR yet). Agent gets an "implement
     /// this issue" prompt.
     ImplementIssue,
@@ -120,6 +126,7 @@ impl WorkPriority {
             Self::AddressComments => "address comments",
             Self::FixConflict => "fix conflict",
             Self::FixCi => "fix CI",
+            Self::ReviewCode => "review",
             Self::ImplementIssue => "implement",
         }
     }
@@ -129,6 +136,19 @@ impl WorkPriority {
 /// state. `None` means `w` is NoOp — the hint bar should hide it.
 /// Used by both `resolve_work` (to build the Intent) and the
 /// sidebar's contextual-footer label resolver.
+///
+/// Priority chain:
+/// 1. Explicit selected comments → AddressComments (user is
+///    pointing at specific rows).
+/// 2. PR + conflicts → FixConflict (blocks everything else).
+/// 3. PR + CI failing → FixCi.
+/// 4. PR + role=Reviewer (and CI/conflict clean) → ReviewCode
+///    (the viewer's job is to read the diff and approve / request
+///    changes).
+/// 5. PR + role=Author/Assignee + unread activity → AddressComments
+///    auto-built from the unread indices. Replies / re-reviews
+///    arrived since the user last looked — likely something to act on.
+/// 6. Issue-only workspace → ImplementIssue.
 pub fn classify_work(
     workspace: Option<&Workspace>,
     selected_comments: &[usize],
@@ -144,8 +164,22 @@ pub fn classify_work(
         if pr.ci == pilot_core::CiStatus::Failure {
             return Some(WorkPriority::FixCi);
         }
-        // PR present but healthy → no work-key target.
-        return None;
+        // Role-based defaults for healthy PRs. Reviewer always gets
+        // ReviewCode — even with no unread, "press w to review" is
+        // the natural action when you land on a PR you owe a review
+        // on. Author/Assignee get AddressComments only when there's
+        // something new to look at.
+        match pr.role {
+            pilot_core::TaskRole::Reviewer => return Some(WorkPriority::ReviewCode),
+            pilot_core::TaskRole::Author
+            | pilot_core::TaskRole::Assignee
+            | pilot_core::TaskRole::Mentioned => {
+                if ws.unread_count() > 0 {
+                    return Some(WorkPriority::AddressComments);
+                }
+                return None;
+            }
+        }
     }
     if ws.gh_issues.first().is_some() {
         return Some(WorkPriority::ImplementIssue);
@@ -171,7 +205,17 @@ pub fn resolve_work(
     };
     let session_key = SessionKey::from(&ws.key);
     let prompt = match priority {
-        WorkPriority::AddressComments => build_address_comments_prompt(ws, selected_comments),
+        WorkPriority::AddressComments => {
+            // Explicit selection wins; otherwise auto-fill from
+            // the workspace's unread indices (the "you have new
+            // comments, address them" path).
+            let indices = if selected_comments.is_empty() {
+                ws.unread_activity_indices()
+            } else {
+                selected_comments.to_vec()
+            };
+            build_address_comments_prompt(ws, &indices)
+        }
         WorkPriority::FixConflict => {
             // classify_work already confirmed `pr.has_conflicts`,
             // so the inner Option always unwraps. `expect` over
@@ -186,6 +230,7 @@ pub fn resolve_work(
                 .expect("FixCi classification implies build_fix_ci_prompt returns Some")
                 .1
         }
+        WorkPriority::ReviewCode => build_review_pr_prompt(ws),
         WorkPriority::ImplementIssue => {
             let issue = ws
                 .gh_issues
@@ -199,6 +244,48 @@ pub fn resolve_work(
         agent_id: agent_id.to_string(),
         prompt: Some(prompt),
     }
+}
+
+/// Build the "review this PR" agent prompt. Used when the viewer is
+/// the assigned reviewer on a healthy PR — `w` should pre-load the
+/// agent with the instruction to walk the diff and submit a review.
+fn build_review_pr_prompt(workspace: &Workspace) -> String {
+    let (pr_ref, body_block) = workspace
+        .pr
+        .as_ref()
+        .map(|pr| {
+            let n = pr
+                .id
+                .key
+                .rsplit_once('#')
+                .map(|(_, n)| n)
+                .unwrap_or(&pr.id.key);
+            let repo = pr.repo.as_deref().unwrap_or("unknown");
+            let branch = pr.branch.as_deref().unwrap_or("unknown");
+            let r = format!("PR #{n} in {repo} (branch `{branch}`)");
+            let body = pr
+                .body
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("\n\nPR description:\n{s}\n"))
+                .unwrap_or_default();
+            (r, body)
+        })
+        .unwrap_or_else(|| (format!("workspace {}", workspace.key), String::new()));
+
+    format!(
+        "Review {pr_ref}. You're listed as a reviewer.\
+         {body_block}\n\n\
+         Use `gh pr diff` to read the changes against the base branch. \
+         For each meaningful concern: leave an inline comment via \
+         `gh pr review --comment --body \"...\"` (or `--request-changes` \
+         for blockers). When you've walked the whole diff, submit the \
+         overall review: `gh pr review --approve` if it looks good, \
+         `--request-changes` if there are blockers, or `--comment` if \
+         it's nuanced. Be concise — reviewers read review comments, \
+         not essays."
+    )
 }
 
 /// Resolve `r` (reply). No state-dependent variation — either we

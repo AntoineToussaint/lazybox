@@ -312,6 +312,17 @@ impl Workspace {
             .count()
     }
 
+    /// Indices of activity items the user hasn't seen yet, in
+    /// activity-list order (newest first since `sort_activity`
+    /// sorts descending). Used by `resolve_work` to auto-fill the
+    /// "address comments" prompt when the user hasn't explicitly
+    /// selected any but the row has unread activity.
+    pub fn unread_activity_indices(&self) -> Vec<usize> {
+        (0..self.activity.len().saturating_sub(self.seen_count))
+            .filter(|i| !self.read_indices.contains(i))
+            .collect()
+    }
+
     /// Whether the activity at `index` is currently unread.
     pub fn is_activity_unread(&self, index: usize) -> bool {
         index < self.activity.len().saturating_sub(self.seen_count)

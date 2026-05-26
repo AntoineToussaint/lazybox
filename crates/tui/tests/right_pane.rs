@@ -189,18 +189,25 @@ fn w_with_selected_comments_addresses_them() {
 }
 
 #[test]
-fn w_with_no_selection_and_passing_ci_open_pr_is_noop() {
-    // Sanity: no actionable work + no selection = nothing fires.
-    // (Don't pre-emptively spawn an agent just because the user
-    // pressed `w`; that's how the original bug crept in.)
+fn w_on_author_healthy_pr_no_unread_is_noop() {
+    // Sanity: a PR I AUTHORED with green CI, no conflicts, no
+    // unread activity has nothing actionable to do. Pressing `w`
+    // here is a no-op (don't pre-emptively spawn an agent just
+    // because the user pressed a key).
+    //
+    // Reviewer + healthy now fires ReviewCode (the user explicitly
+    // wants `w` to mean "review this" when you're the reviewer);
+    // this test covers the author side.
     use pilot_ipc::Command;
     let mut rp = RightPane::new(PaneId::new(1));
     let mut t = make_task("o/r#1");
+    t.role = pilot_core::TaskRole::Author;
     t.ci = CiStatus::Success;
     t.url = "https://github.com/o/r/pull/1".into();
     let mut ws = Workspace::from_task(t, Utc::now());
     ws.activity
         .push(activity("alice", "lgtm", ActivityKind::Comment));
+    ws.mark_read_all(); // no unread activity
     rp.set_workspace(Some(ws));
     let mut cmds: Vec<Command> = Vec::new();
     rp.handle_key(
@@ -209,8 +216,45 @@ fn w_with_no_selection_and_passing_ci_open_pr_is_noop() {
     );
     assert!(
         cmds.is_empty(),
-        "w on a healthy open PR with no comments selected must NOT spawn anything, \
+        "w on a healthy PR I authored with no unread activity must NOT spawn anything, \
          got {cmds:?}",
+    );
+}
+
+#[test]
+fn w_on_reviewer_healthy_pr_fires_review_prompt() {
+    // The new "w on a reviewer's PR" contract: pressing `w` while
+    // landed on a PR you're assigned to review should pre-load
+    // claude with a review prompt — no need to manually type
+    // "review this PR" each time.
+    use pilot_ipc::Command;
+    let mut rp = RightPane::new(PaneId::new(1));
+    let mut t = make_task("o/r#1");
+    t.role = pilot_core::TaskRole::Reviewer;
+    t.ci = CiStatus::Success;
+    t.url = "https://github.com/o/r/pull/1".into();
+    let mut ws = Workspace::from_task(t, Utc::now());
+    // The right-pane `w` handler skips when activity is collapsed
+    // (auto-collapses on empty workspaces). Seed one row so the
+    // section auto-opens AND so the workspace looks plausible.
+    ws.activity
+        .push(activity("alice", "lgtm", ActivityKind::Comment));
+    rp.set_workspace(Some(ws));
+    rp.set_activity_collapsed(false);
+    let mut cmds: Vec<Command> = Vec::new();
+    rp.handle_key(
+        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+        &mut cmds,
+    );
+    let prompt = match cmds.first() {
+        Some(Command::Spawn { initial_prompt, .. }) => initial_prompt
+            .clone()
+            .expect("Spawn must carry an initial_prompt"),
+        other => panic!("expected a Spawn command, got {other:?}"),
+    };
+    assert!(
+        prompt.contains("Review") && prompt.contains("reviewer"),
+        "reviewer w → review prompt; got:\n{prompt}",
     );
 }
 

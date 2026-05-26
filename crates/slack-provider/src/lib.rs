@@ -1,7 +1,7 @@
 //! Slack provider — outbound notifications + inbound Socket Mode.
 //!
 //! Pilot uses Slack as a "second display" for the inbox: each
-//! workspace gets a mirrored channel where PR/agent events post,
+//! workspace gets a mirrored channel where workspace + agent events post,
 //! and inbound `@pilot` mentions route back to claude sessions
 //! running on the daemon. Designed for "pilot at home, control
 //! from phone."

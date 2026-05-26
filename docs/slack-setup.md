@@ -1,8 +1,8 @@
 # Slack integration — app setup
 
-Pilot can run on your home machine and surface PR activity through a
+Pilot can run on your home machine and surface workspace activity through a
 Slack workspace so you can monitor + control sessions from your phone.
-Inbound messages route to claude sessions; outbound events (PR
+Inbound messages route to claude sessions; outbound events (workspace
 updates, CI failures, agent-asking signals) post to per-workspace
 channels.
 
@@ -22,7 +22,7 @@ main README under "Slack".
 ```yaml
 display_information:
   name: pilot
-  description: Reactive PR-inbox bot — mirrors PRs into channels, accepts commands to drive claude sessions.
+  description: Reactive workspace-inbox bot — mirrors workspaces into channels, accepts commands to drive claude sessions.
   background_color: "#0b0b0b"
 
 features:
@@ -37,7 +37,7 @@ oauth_config:
       - chat:write
       - channels:read
       - channels:history
-      - groups:history    # private channels (in case you DM-style a per-PR channel)
+      - groups:history    # private channels (in case you DM-style a per-workspace channel)
       - im:history        # DMs to the bot
       - im:read
       - mpim:history      # multi-party DMs
@@ -134,9 +134,9 @@ and a "pilot online" message in `#pilot`.
 ## 5. Verify
 
 1. Trigger a poll: press `Shift-R` in the TUI, or wait ~60s.
-2. For each PR pilot finds, it auto-creates a channel
+2. For each workspace pilot finds, it auto-creates a channel
    `#<owner>-<repo>-<n>` (e.g. `#acme-widget-186`) and posts the
-   PR description as the first message.
+   primary task's description (or workspace name) as the first message.
 3. From Slack (web / mobile), type a message in a per-workspace
    channel:
    ```
@@ -156,14 +156,14 @@ and a "pilot online" message in `#pilot`.
 
 - **Channel limits**: free Slack tiers cap at ~9000 channels. If
   you watch hundreds of repos, set `per_workspace_channels: false`
-  and route everything through the anchor channel with thread-per-PR
+  and route everything through the anchor channel with thread-per-workspace
   (use `channel_strategy: thread_per_workspace`).
 - **Channel name length**: Slack truncates at 80 chars. Pilot
   sluggifies and clips automatically.
 - **Re-using existing channels**: pilot looks up by name before
   creating. So if `#acme-widget-186` already exists, it just joins
   + posts (won't recreate).
-- **Archived channels**: pilot won't auto-unarchive. If a PR you
+- **Archived channels**: pilot won't auto-unarchive. If a workspace you
   archived in Slack comes back to life, pilot posts to the anchor
   channel with a hint to unarchive manually.
 - **Two pilot instances on one Slack workspace**: don't. Both will

@@ -98,7 +98,7 @@ impl Client {
     }
 
     /// `chat.postMessage` — post a message to a channel by id.
-    /// `thread_ts` optional for threading (used by the per-PR
+    /// `thread_ts` optional for threading (used by the per-workspace
     /// thread strategy).
     pub async fn post_message(&self, m: &Message) -> Result<PostMessageResponse, SlackError> {
         self.call::<_, PostMessageResponse>("chat.postMessage", m).await

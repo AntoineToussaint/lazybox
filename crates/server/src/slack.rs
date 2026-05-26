@@ -5,7 +5,7 @@
 //! 2. **Outbound** — subscribes to the daemon's broadcast bus and
 //!    fans events to Slack:
 //!    - `WorkspaceUpserted`: ensure a per-workspace channel exists
-//!      (auto-create on first sight) and post the PR / issue
+//!      (auto-create on first sight) and post the workspace's primary task
 //!      description.
 //!    - `AgentState::Asking`: claude/codex/cursor is waiting on
 //!      the user (a yes/no prompt, or "done — what next?"). Grab
@@ -26,7 +26,16 @@ use pilot_slack::api::{Client as ApiClient, Message, channel_name_for_workspace}
 use pilot_slack::socket::{InboundEvent, SocketModeClient};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+
+/// How long the agent must be quiet (no PTY bytes) before pilot
+/// labels the Asking state as `done — waiting for next task`
+/// rather than `paused — input expected`. Heuristic: claude's
+/// status-line redraws stop ~1-2 seconds after the last real
+/// output, so 3 seconds gives a comfortable margin without making
+/// short Y/N prompts read as "done".
+const DONE_QUIET_THRESHOLD: Duration = Duration::from_secs(3);
 
 /// State shared between outbound (bus → Slack) and inbound (Slack →
 /// PTY) halves. Built once at startup; both halves take `Arc` clones.
@@ -45,6 +54,12 @@ struct SlackState {
     /// replies here. Falls back to any terminal in the workspace
     /// if no agent is tracked yet.
     workspace_to_terminal: HashMap<String, TerminalId>,
+    /// `terminal_id → last instant we saw PTY output`. Updated on
+    /// every `TerminalOutput` bus event. When `AgentState::Asking`
+    /// fires we read this to decide between "paused — input
+    /// expected" (recent output) and "done — waiting for next task"
+    /// (no output for ≥ `DONE_QUIET_THRESHOLD`).
+    last_output_at: HashMap<TerminalId, Instant>,
 }
 
 /// Spawn the Slack task. Returns immediately; the task drives
@@ -165,8 +180,8 @@ async fn handle_bus_event(
         Event::WorkspaceUpserted(ws) => {
             // Only post on the first time we see a workspace — the
             // bus broadcasts on every read-state change too, and we
-            // don't want to spam Slack with re-posts of the same PR
-            // description.
+            // don't want to spam Slack with re-posts of the same
+            // workspace.
             let workspace_key = ws.key.as_str().to_string();
             let already = state
                 .lock()
@@ -206,13 +221,14 @@ async fn handle_bus_event(
             else {
                 return;
             };
-            let Some(terminal_id) = state
-                .lock()
-                .await
-                .workspace_to_terminal
-                .get(&workspace_key)
-                .copied()
-            else {
+            let (terminal_id, quiet_for) = {
+                let s = state.lock().await;
+                let tid = s.workspace_to_terminal.get(&workspace_key).copied();
+                let quiet = tid.and_then(|t| s.last_output_at.get(&t).copied())
+                    .map(|t| t.elapsed());
+                (tid, quiet)
+            };
+            let Some(terminal_id) = terminal_id else {
                 // No agent terminal tracked yet — just post a heads-up.
                 let _ = api
                     .post_message(&Message::new(
@@ -222,17 +238,18 @@ async fn handle_bus_event(
                     .await;
                 return;
             };
-            // Pull recent PTY output for context. Last ~2 KB of the
-            // ring buffer, stripped of ANSI + truncated to last 30
-            // non-empty lines — enough to show the question without
-            // dumping the whole conversation.
+            // Differentiate "claude finished, waiting for next task"
+            // (no output for a few seconds = `done`) from "claude
+            // hit a yes/no mid-task and is asking right now"
+            // (output still streaming = `paused`). Without this the
+            // user can't tell whether to expect a quick prompt or a
+            // longer wait.
+            let label = asking_label(quiet_for);
             let context = recent_terminal_text(server, terminal_id).await;
             let body = if context.is_empty() {
-                "⏸ agent is waiting on input — reply in this channel to answer".to_string()
+                format!("{label} · reply in this channel to answer")
             } else {
-                format!(
-                    "⏸ *waiting on input* — reply in this channel to answer\n```\n{context}\n```"
-                )
+                format!("{label} · reply in this channel to answer\n```\n{context}\n```")
             };
             let _ = api.post_message(&Message::new(channel_id, body)).await;
         }
@@ -243,16 +260,28 @@ async fn handle_bus_event(
             if !matches!(kind, pilot_ipc::TerminalKind::Agent(_)) {
                 return;
             }
+            let mut s = state.lock().await;
+            s.workspace_to_terminal
+                .insert(session_key.as_str().to_string(), terminal_id);
+            // Seed last-output-at so a brand-new terminal that goes
+            // straight into Asking on its first prompt doesn't get
+            // labelled `done` (no recorded output ever → elapsed
+            // calculation would be None, falls through to `paused`,
+            // which is the right default).
+            s.last_output_at.insert(terminal_id, Instant::now());
+        }
+        Event::TerminalOutput { terminal_id, .. } => {
             state
                 .lock()
                 .await
-                .workspace_to_terminal
-                .insert(session_key.as_str().to_string(), terminal_id);
+                .last_output_at
+                .insert(terminal_id, Instant::now());
         }
         Event::TerminalExited { terminal_id, .. } => {
             let mut s = state.lock().await;
             s.workspace_to_terminal
                 .retain(|_, tid| *tid != terminal_id);
+            s.last_output_at.remove(&terminal_id);
         }
         _ => {}
     }
@@ -437,11 +466,13 @@ async fn handle_inbound(
         );
         return;
     };
-    // Write the text + CR (claude's stream-json mode treats CR as
-    // submit). For plain claude TUI this is the same — the prompt
-    // line submits on Enter.
-    let mut bytes = text.into_bytes();
-    bytes.push(b'\r');
+    // Multi-line messages need bracket-paste sequences (`ESC[200~
+    // ... ESC[201~`) — without them claude's terminal interprets
+    // each embedded newline as a submit, which sends the message
+    // line-by-line and triggers a separate inference per line. The
+    // submit-cr lives outside the paste markers so claude actually
+    // dispatches the assembled prompt.
+    let bytes = encode_for_pty(&text);
     let backend_key = {
         let terminals = server.terminals.lock().await;
         terminals.get(&terminal_id).cloned()
@@ -455,6 +486,43 @@ async fn handle_inbound(
             workspace = %workspace_key,
             "slack: routed inbound message to agent"
         );
+    }
+}
+
+/// Encode a Slack reply for the agent's PTY. Single-line → raw
+/// text + CR. Multi-line → bracket-paste wrapper + CR. Bracket-paste
+/// is the same protocol shells/editors use for terminal paste —
+/// claude detects the open marker and treats everything until the
+/// close marker as one logical input.
+fn encode_for_pty(text: &str) -> Vec<u8> {
+    if !text.contains('\n') {
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.push(b'\r');
+        return bytes;
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(text.len() + 16);
+    out.extend_from_slice(b"\x1b[200~");
+    // Normalize line endings: Slack delivers `\n`, claude (like
+    // most terminals in paste mode) wants `\r` between lines.
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push(b'\r');
+        }
+        out.extend_from_slice(line.as_bytes());
+    }
+    out.extend_from_slice(b"\x1b[201~");
+    out.push(b'\r');
+    out
+}
+
+/// Pick the label that fronts an Asking notification. `quiet_for` is
+/// the elapsed time since the last PTY output we recorded. `None`
+/// means the terminal has no recorded output yet — that's `paused`
+/// territory (a brand-new agent that prompts on first run).
+fn asking_label(quiet_for: Option<Duration>) -> &'static str {
+    match quiet_for {
+        Some(d) if d >= DONE_QUIET_THRESHOLD => "✅ *done — waiting for next task*",
+        _ => "⏸ *paused — input expected*",
     }
 }
 
@@ -500,5 +568,43 @@ mod tests {
     #[test]
     fn strip_bot_mention_leaves_text_alone_if_no_mention() {
         assert_eq!(strip_bot_mention("just text", "UBOT"), "just text");
+    }
+
+    #[test]
+    fn encode_for_pty_single_line_appends_cr() {
+        assert_eq!(encode_for_pty("yes"), b"yes\r");
+    }
+
+    #[test]
+    fn encode_for_pty_multi_line_wraps_in_bracket_paste() {
+        let out = encode_for_pty("line one\nline two");
+        // Open marker + line1 + CR + line2 + close marker + CR.
+        assert_eq!(out, b"\x1b[200~line one\rline two\x1b[201~\r");
+    }
+
+    #[test]
+    fn encode_for_pty_preserves_blank_lines_between_content() {
+        let out = encode_for_pty("a\n\nb");
+        assert_eq!(out, b"\x1b[200~a\r\rb\x1b[201~\r");
+    }
+
+    #[test]
+    fn asking_label_recent_output_is_paused() {
+        // Output within the threshold → still working.
+        let recent = Duration::from_millis(500);
+        assert_eq!(asking_label(Some(recent)), "⏸ *paused — input expected*");
+    }
+
+    #[test]
+    fn asking_label_stale_output_is_done() {
+        // Output older than threshold → claude is just sitting idle.
+        let stale = DONE_QUIET_THRESHOLD + Duration::from_secs(1);
+        assert_eq!(asking_label(Some(stale)), "✅ *done — waiting for next task*");
+    }
+
+    #[test]
+    fn asking_label_no_recorded_output_defaults_to_paused() {
+        // Untracked terminal — safer to assume paused than done.
+        assert_eq!(asking_label(None), "⏸ *paused — input expected*");
     }
 }

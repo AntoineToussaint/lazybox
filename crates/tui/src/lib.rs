@@ -7,6 +7,24 @@
 //! activity-feed renderers, status pills) live under
 //! `crate::components`.
 
+// Cosmetic clippy 1.95 suppressions — same shape as pilot-server.
+// Doc-list-indentation, manual-strip, collapsible-match,
+// nonminimal-bool, ptr-arg, manual-strip suggestions are pedantic
+// style; the let-else→? rewrite makes affected sites less
+// readable. Each can be re-enabled in a focused cleanup pass.
+#![allow(
+    clippy::doc_list_item_without_indent,
+    clippy::doc_overindented_list_items,
+    clippy::empty_line_after_doc_comments,
+    clippy::manual_strip,
+    clippy::collapsible_match,
+    clippy::collapsible_if,
+    clippy::nonminimal_bool,
+    clippy::unnecessary_get_then_check,
+    clippy::redundant_closure,
+    clippy::needless_late_init
+)]
+
 pub mod components;
 pub mod latch_set;
 pub mod pane;

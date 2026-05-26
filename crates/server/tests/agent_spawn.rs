@@ -3,6 +3,7 @@
 //! coverage previously lived here but required real `sh` + `curl`
 //! subprocesses through a real PTY — gated behind `#[ignore]` and
 //! replaced with focused unit tests for the building blocks.
+#![allow(clippy::unnecessary_get_then_check)]
 
 use pilot_server::agent_spawn::{ProxyProvider, ProxyTarget, inject_proxy_env};
 use std::collections::HashMap;

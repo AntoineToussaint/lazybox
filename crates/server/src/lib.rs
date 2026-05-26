@@ -23,7 +23,7 @@
     clippy::type_complexity,
     clippy::too_many_arguments,
     clippy::question_mark,
-    clippy::unwrap_or_default,
+    clippy::unwrap_or_default
 )]
 
 pub mod agent_runs;

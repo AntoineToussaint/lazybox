@@ -592,13 +592,19 @@ impl GhClient {
     }
 
     pub async fn fetch_all_prs(&self) -> Result<Vec<Task>, GhError> {
-        // Assemble: defaults (is:open is:pr archived:false) + caller-
-        // supplied qualifiers (role narrowing + scope narrowing).
-        // The caller is responsible for including a role qualifier
-        // — `involves:USER` if they want everything the user is
-        // involved in, or a narrower `author:USER` / `OR`-combo
-        // string when filtered. This keeps GraphQL search precise:
-        // PRs we'd just drop never come back over the wire.
+        // Parallelize the three independent branches of a PR fetch:
+        //   1. Main paginated PR search (involves the user).
+        //   2. Recently-merged sweep (`is:merged` last 7d).
+        //   3. Watched-repo fan-out (one query per subscribed repo).
+        // Pre-fix these ran sequentially — a user with 10 watched
+        // repos saw ~30s polls dominated by sequential repo
+        // queries. Now: main + merged + watched concurrent, watched
+        // bounded to 5 in flight at once so the rate budget
+        // (capacity 30, refill 30/min) doesn't blow up.
+        use futures::stream::{self, StreamExt};
+
+        // Build the qualifiers once so both the main search and the
+        // merged-sweep share role+scope narrowing.
         let mut quals = graphql::default_search_qualifiers();
         if self.pr_filters.is_empty() {
             quals.push(format!("involves:{}", self.user));
@@ -606,203 +612,12 @@ impl GhClient {
             quals.extend(self.pr_filters.iter().cloned());
         }
         let search_query = graphql::build_query(&quals);
-
         tracing::info!("GraphQL search: {search_query}");
 
-        // Paginate until GitHub reports no more pages. Without this, users
-        // with >100 inbox PRs lose the tail on first poll, which the stale
-        // purge then deletes from SQLite — PRs "disappear" after restart.
-        let mut tasks: Vec<Task> = Vec::new();
-        let mut cursor: Option<String> = None;
-        let mut page = 0usize;
-        loop {
-            // Local guard rail. Refuse to fire if pilot's
-            // self-imposed budget is exhausted OR the previous
-            // response told us GitHub is low. Surfaces as a
-            // retryable error to the polling layer.
-            self.acquire_or_block("PR search")?;
+        // Branch 1: main paginated search.
+        let main_fut = self.fetch_pr_search_paginated(&search_query);
 
-            let body = graphql::query_body_after(&search_query, cursor.as_deref());
-            tracing::debug!(
-                "GraphQL page {page} body: {}",
-                serde_json::to_string(&body).unwrap_or_default()
-            );
-
-            let raw: serde_json::Value =
-                self.post_graphql_with_retry(&body).await.map_err(|e| {
-                    // octocrab's Display on Error::GitHub drops
-                    // status + message — print Debug too so
-                    // /tmp/pilot.log has actionable context.
-                    tracing::error!("GraphQL HTTP error (page {page}): {e}\n{e:?}");
-                    tracing::error!(
-                        "GraphQL request body was: {}",
-                        serde_json::to_string_pretty(&body).unwrap_or_default()
-                    );
-                    GhError::Api(e)
-                })?;
-
-            let response: graphql::GqlResponse = match serde_json::from_value(raw.clone()) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!(
-                        "GraphQL response did not match schema (page {page}): {e}\n\
-                         Full response body:\n{}",
-                        serde_json::to_string_pretty(&raw).unwrap_or_default()
-                    );
-                    return Err(GhError::Graphql(format!(
-                        "response schema mismatch (page {page}): {e}"
-                    )));
-                }
-            };
-
-            if let Some(errors) = &response.errors {
-                let detailed: Vec<_> = errors.iter().map(|e| e.full()).collect();
-                let joined = detailed.join("; ");
-                tracing::error!("GraphQL errors (search page {page}): {joined}");
-                tracing::error!("GraphQL search was: {search_query}");
-                tracing::error!(
-                    "GraphQL request body:\n{}",
-                    serde_json::to_string_pretty(&body).unwrap_or_default()
-                );
-                tracing::error!(
-                    "GraphQL full response body:\n{}",
-                    serde_json::to_string_pretty(&raw).unwrap_or_default()
-                );
-                return Err(GhError::Graphql(format!(
-                    "search `{search_query}` (page {page}): {joined}"
-                )));
-            }
-
-            let data = response
-                .data
-                .ok_or_else(|| GhError::Graphql("No data in response".into()))?;
-
-            if let Some(rl) = &data.rate_limit {
-                tracing::info!(
-                    "GitHub rate limit: {}/{} remaining, resets {}",
-                    rl.remaining,
-                    rl.limit,
-                    rl.reset_at
-                );
-                self.observe_rate_limit(rl);
-            }
-
-            tasks.extend(
-                data.search
-                    .nodes
-                    .iter()
-                    .map(|pr| graphql::pr_to_task(pr, &self.user)),
-            );
-
-            let page_info = data.search.page_info.unwrap_or_default();
-            if !page_info.has_next_page {
-                break;
-            }
-            cursor = page_info.end_cursor;
-            if cursor.is_none() {
-                // Defensive: hasNextPage=true but no cursor. Bail out rather
-                // than looping forever.
-                tracing::warn!("GraphQL paged: hasNextPage=true but endCursor=null");
-                break;
-            }
-            page += 1;
-            if page >= 20 {
-                // 20 pages × 100 per page = 2000 PRs. Past that, we
-                // truncate. Almost always means the user's filter is
-                // way too loose; surface it as a retryable error so
-                // the TUI's footer can warn instead of silently
-                // dropping the tail.
-                tracing::error!(
-                    "GraphQL paged: bailing after {page} pages (safety cap; tail truncated)"
-                );
-                return Err(GhError::Truncated {
-                    count: tasks.len(),
-                    pages: page,
-                });
-            }
-        }
-
-        // Fetch watched repos (all open PRs, not just involves:user).
-        // Each repo is its own GraphQL search, so each one must be
-        // gated independently AND must record GitHub's reported
-        // rate-limit. Pre-fix this loop was the biggest ungated
-        // request path: 10 watched repos = 10 ungated GraphQL calls
-        // per poll cycle.
-        let mut watch_failures: usize = 0;
-        for repo in &self.watch_repos {
-            // If the budget is exhausted mid-loop, stop trying — we
-            // already have the main-search results to return; better
-            // to ship those than fail the whole poll. Treat as a
-            // failure for the "all watched failed" classifier below.
-            if let Err(reason) = self.try_acquire() {
-                tracing::warn!("watch-repo query for {repo} blocked by rate budget: {reason}");
-                watch_failures += 1;
-                continue;
-            }
-            let watch_query = format!("is:open is:pr repo:{repo} archived:false");
-            let watch_body = graphql::query_body(&watch_query);
-            tracing::debug!("Watch query for {repo}: {watch_query}");
-
-            match self
-                .post_graphql_with_retry::<graphql::GqlResponse>(&watch_body)
-                .await
-            {
-                Ok(resp) => {
-                    if let Some(data) = &resp.data {
-                        // Observe rate-limit from this response. The
-                        // unified search above already did this for
-                        // its own response; the watch loop wasn't.
-                        // Result: a long watch loop on a low budget
-                        // would keep firing without updating our
-                        // remote-awareness.
-                        if let Some(rl) = &data.rate_limit {
-                            self.observe_rate_limit(rl);
-                        }
-                        let existing_keys: std::collections::HashSet<String> =
-                            tasks.iter().map(|t| t.id.key.clone()).collect();
-                        for pr in &data.search.nodes {
-                            let task = graphql::pr_to_task(pr, &self.user);
-                            if !existing_keys.contains(&task.id.key) {
-                                tasks.push(task);
-                            }
-                        }
-                    }
-                    if let Some(errors) = resp.errors {
-                        let detailed: Vec<_> = errors.iter().map(|e| e.full()).collect();
-                        tracing::warn!("Watch query errors for {repo}: {}", detailed.join("; "));
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Watch query failed for {repo}: {e}");
-                    watch_failures += 1;
-                }
-            }
-        }
-
-        // Recently-merged sweep. The main inbox search is `is:open`,
-        // so a PR that merges between polls drops out entirely —
-        // pilot's local copy keeps showing the last-known state
-        // (typically QUEUED or AUTO) forever, until rescope finally
-        // removes the row. The user never sees MERGED.
-        //
-        // Fix: one extra search per poll for PRs merged in the last
-        // 7 days, scoped by the SAME role qualifiers as the inbox
-        // search. The merged PRs land via the same upsert path; the
-        // mailbox-membership predicate routes them to Inactive
-        // (state=Merged → not in Inbox) so they don't pollute the
-        // active view. User sees them briefly with the MERGED pill
-        // before they fall into history.
-        //
-        // Window: 7d (was 24h). A user who opens pilot once every
-        // few days kept seeing stale PRs that merged on day 2 — the
-        // 24h sweep missed them and the local row stayed "Open"
-        // forever. 7d covers normal usage gaps without ballooning
-        // the result set.
-        //
-        // Cost: ONE extra GraphQL search per poll. 7d window
-        // expands the page count maybe 3-7× on busy repos; we
-        // accept the cost because the alternative is a permanently-
-        // stale Inbox row.
+        // Branch 2: recently-merged sweep.
         let week_ago = (chrono::Utc::now() - chrono::Duration::days(7))
             .format("%Y-%m-%d")
             .to_string();
@@ -819,43 +634,67 @@ impl GhClient {
         }
         let merged_query = graphql::build_query(&merged_quals);
         tracing::debug!("Recently-merged sweep: {merged_query}");
-        if let Err(reason) = self.try_acquire() {
-            tracing::warn!("recently-merged sweep blocked by rate budget: {reason}");
-        } else {
-            let body = graphql::query_body(&merged_query);
-            match self
-                .post_graphql_with_retry::<graphql::GqlResponse>(&body)
-                .await
-            {
-                Ok(resp) => {
-                    if let Some(data) = &resp.data {
-                        if let Some(rl) = &data.rate_limit {
-                            self.observe_rate_limit(rl);
-                        }
-                        let existing_keys: std::collections::HashSet<String> =
-                            tasks.iter().map(|t| t.id.key.clone()).collect();
-                        let mut added = 0usize;
-                        for pr in &data.search.nodes {
-                            let task = graphql::pr_to_task(pr, &self.user);
-                            if !existing_keys.contains(&task.id.key) {
-                                tasks.push(task);
-                                added += 1;
-                            }
-                        }
-                        if added > 0 {
-                            tracing::info!(
-                                "recently-merged sweep: {added} PRs back-filled \
-                                 with final MERGED state",
-                            );
-                        }
+        let merged_fut = self.fetch_pr_single_query("merged-sweep", merged_query);
+
+        // Branch 3: bounded-concurrent watched-repo fan-out. 5 in
+        // flight is a healthy compromise — small enough that the
+        // local rate budget (capacity 30) doesn't get fully drained
+        // by a single poll even when paired with the other two
+        // branches above; large enough that 10 watched repos
+        // complete in two batches instead of ten sequential calls.
+        const WATCHED_CONCURRENCY: usize = 5;
+        let watched_fut = stream::iter(self.watch_repos.iter().cloned())
+            .map(|repo| async move {
+                let query = format!("is:open is:pr repo:{repo} archived:false");
+                let result = self.fetch_pr_single_query("watched-repo", query).await;
+                (repo, result)
+            })
+            .buffer_unordered(WATCHED_CONCURRENCY)
+            .collect::<Vec<_>>();
+
+        let (main_res, merged_res, watched_results) =
+            tokio::join!(main_fut, merged_fut, watched_fut);
+
+        // The main search is load-bearing — if it fails the whole
+        // poll fails so the polling layer's error path fires. The
+        // sweep + watched paths are best-effort: log + continue.
+        let mut tasks = main_res?;
+        let mut existing: std::collections::HashSet<String> =
+            tasks.iter().map(|t| t.id.key.clone()).collect();
+
+        match merged_res {
+            Ok(merged_tasks) => {
+                let mut added = 0usize;
+                for t in merged_tasks {
+                    if existing.insert(t.id.key.clone()) {
+                        tasks.push(t);
+                        added += 1;
                     }
-                    if let Some(errors) = resp.errors {
-                        let detailed: Vec<_> = errors.iter().map(|e| e.full()).collect();
-                        tracing::warn!("recently-merged sweep errors: {}", detailed.join("; "),);
+                }
+                if added > 0 {
+                    tracing::info!(
+                        "recently-merged sweep: {added} PRs back-filled with final MERGED state"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!("recently-merged sweep failed: {e}");
+            }
+        }
+
+        let mut watch_failures: usize = 0;
+        for (repo, result) in watched_results {
+            match result {
+                Ok(repo_tasks) => {
+                    for t in repo_tasks {
+                        if existing.insert(t.id.key.clone()) {
+                            tasks.push(t);
+                        }
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("recently-merged sweep failed: {e}");
+                    tracing::warn!("Watch query failed for {repo}: {e}");
+                    watch_failures += 1;
                 }
             }
         }
@@ -865,17 +704,145 @@ impl GhClient {
             tasks.len(),
             self.watch_repos.len()
         );
-        // If every configured watched-repo query failed, surface a
-        // retryable error. The main query succeeded so we have
-        // *some* tasks, but the user explicitly opted in to those
-        // extra repos and silently missing them is worse than a
-        // visible "couldn't fetch watched repos" notice.
         if !self.watch_repos.is_empty() && watch_failures == self.watch_repos.len() {
             return Err(GhError::WatchAllFailed {
                 count: self.watch_repos.len(),
             });
         }
         Ok(tasks)
+    }
+
+    /// Run the main paginated PR search (cursor pages run
+    /// sequentially because each page's `endCursor` is the next
+    /// page's input). Extracted so the parallel-branches outer
+    /// fetch can `tokio::join!` it alongside the merged-sweep + the
+    /// watched-repo fan-out.
+    async fn fetch_pr_search_paginated(&self, search_query: &str) -> Result<Vec<Task>, GhError> {
+        let mut tasks: Vec<Task> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut page = 0usize;
+        loop {
+            self.acquire_or_block("PR search")?;
+            let body = graphql::query_body_after(search_query, cursor.as_deref());
+            tracing::debug!(
+                "GraphQL page {page} body: {}",
+                serde_json::to_string(&body).unwrap_or_default()
+            );
+            let raw: serde_json::Value =
+                self.post_graphql_with_retry(&body).await.map_err(|e| {
+                    tracing::error!("GraphQL HTTP error (page {page}): {e}\n{e:?}");
+                    tracing::error!(
+                        "GraphQL request body was: {}",
+                        serde_json::to_string_pretty(&body).unwrap_or_default()
+                    );
+                    GhError::Api(e)
+                })?;
+            let response: graphql::GqlResponse = match serde_json::from_value(raw.clone()) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(
+                        "GraphQL response did not match schema (page {page}): {e}\n\
+                         Full response body:\n{}",
+                        serde_json::to_string_pretty(&raw).unwrap_or_default()
+                    );
+                    return Err(GhError::Graphql(format!(
+                        "response schema mismatch (page {page}): {e}"
+                    )));
+                }
+            };
+            if let Some(errors) = &response.errors {
+                let joined: String = errors
+                    .iter()
+                    .map(|e| e.full())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                tracing::error!("GraphQL errors (search page {page}): {joined}");
+                return Err(GhError::Graphql(format!(
+                    "search `{search_query}` (page {page}): {joined}"
+                )));
+            }
+            let data = response
+                .data
+                .ok_or_else(|| GhError::Graphql("No data in response".into()))?;
+            if let Some(rl) = &data.rate_limit {
+                tracing::info!(
+                    "GitHub rate limit: {}/{} remaining, resets {}",
+                    rl.remaining,
+                    rl.limit,
+                    rl.reset_at
+                );
+                self.observe_rate_limit(rl);
+            }
+            tasks.extend(
+                data.search
+                    .nodes
+                    .iter()
+                    .map(|pr| graphql::pr_to_task(pr, &self.user)),
+            );
+            let page_info = data.search.page_info.unwrap_or_default();
+            if !page_info.has_next_page {
+                break;
+            }
+            cursor = page_info.end_cursor;
+            if cursor.is_none() {
+                tracing::warn!("GraphQL paged: hasNextPage=true but endCursor=null");
+                break;
+            }
+            page += 1;
+            if page >= 20 {
+                tracing::error!(
+                    "GraphQL paged: bailing after {page} pages (safety cap; tail truncated)"
+                );
+                return Err(GhError::Truncated {
+                    count: tasks.len(),
+                    pages: page,
+                });
+            }
+        }
+        Ok(tasks)
+    }
+
+    /// One-shot PR search (no pagination). Used by the merged-sweep
+    /// and the watched-repo fan-out — both have small expected
+    /// result sets and a `first: 100` page is fine. Returns `Ok(empty)`
+    /// when the rate budget gates the request, so failures are
+    /// distinguishable from "no results."
+    async fn fetch_pr_single_query(
+        &self,
+        op: &'static str,
+        query: String,
+    ) -> Result<Vec<Task>, GhError> {
+        if let Err(reason) = self.try_acquire() {
+            return Err(GhError::RateLimited {
+                retry_after_secs: 1,
+                reason: format!("{op} blocked: {reason}"),
+            });
+        }
+        let body = graphql::query_body(&query);
+        let resp: graphql::GqlResponse = self
+            .post_graphql_with_retry(&body)
+            .await
+            .map_err(GhError::Api)?;
+        if let Some(errors) = resp.errors {
+            let joined: String = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(format!("{op}: {joined}")));
+        }
+        let Some(data) = resp.data else {
+            return Ok(Vec::new());
+        };
+        if let Some(rl) = &data.rate_limit {
+            self.observe_rate_limit(rl);
+        }
+        Ok(data
+            .search
+            .nodes
+            .iter()
+            .map(|pr| graphql::pr_to_task(pr, &self.user))
+            .collect())
     }
 
     /// Fetch all open GitHub Issues involving the authenticated user,

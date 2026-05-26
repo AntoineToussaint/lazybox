@@ -1872,6 +1872,7 @@ name = "pilot-gh"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures",
  "octocrab",
  "pilot-auth",
  "pilot-core",

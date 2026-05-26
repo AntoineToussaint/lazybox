@@ -301,7 +301,7 @@ pub mod builtins {
                 .rev()
                 .map(str::trim)
                 .find(|l| !l.is_empty() && !looks_like_footer_hint(l))
-                && last_non_empty.ends_with('?')
+                && looks_like_prompt_question(last_non_empty)
             {
                 return Some(AgentState::Asking);
             }
@@ -369,6 +369,49 @@ pub mod builtins {
     /// need correctness for rendering (libghostty-vt does that) — just
     /// enough to make pattern matches survive cursor moves and color
     /// codes interleaved with the literal text.
+    /// Tighter `?`-heuristic gate: the line ends with `?` AND looks
+    /// like an actual prompt rather than prose chat output. Without
+    /// this, every claude response containing "Is this right?" or
+    /// "Want me to proceed?" mid-paragraph triggered Asking, and
+    /// the 8s Asking→Active hysteresis amplified each blip into a
+    /// visible-for-8-seconds false positive in the sidebar pill.
+    ///
+    /// Heuristics (all must hold):
+    /// - ends with `?`.
+    /// - <= 80 chars long — real prompts are short; multi-clause
+    ///   prose questions are longer.
+    /// - doesn't contain a period followed by uppercase mid-line
+    ///   (`.[A-Z]` strongly suggests "two sentences, last one
+    ///   happens to end with `?`" — prose, not a prompt).
+    fn looks_like_prompt_question(line: &str) -> bool {
+        if !line.ends_with('?') {
+            return false;
+        }
+        if line.chars().count() > 80 {
+            return false;
+        }
+        // Sentence-break heuristic: a `.` (or `!`) followed by
+        // optional whitespace + an uppercase letter strongly
+        // suggests "two sentences, last one happens to end with
+        // `?`" — that's prose narration, not a real prompt.
+        // Catches both `.Word` and `. Word` shapes.
+        let chars: Vec<char> = line.chars().collect();
+        for (i, c) in chars.iter().enumerate() {
+            if *c != '.' && *c != '!' {
+                continue;
+            }
+            // Walk past whitespace to find the next non-space char.
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && chars[j].is_ascii_uppercase() {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Recognize lines that are claude's UI footer / hint strip.
     /// The last-line-ends-with-? heuristic skips these because they
     /// can appear unchanged on idle screens (e.g. `Esc to cancel`

@@ -354,9 +354,12 @@ mod tests {
     fn bg_poll_guard_clears_after_long_silence() {
         let mut s = StatusCtx::new();
         s.note_poll_progress("github", "Querying…");
-        // Backdate the last_event past the guard.
+        // Backdate the last_event well past the guard so the
+        // assertion isn't sensitive to the exact constant. (Guard
+        // was bumped 20s → 90s when long-PR-details polls were
+        // misread as stuck; the test now backdates 5 min.)
         if let Some(bg) = s.bg_poll.as_mut() {
-            bg.last_event = Instant::now() - Duration::from_secs(30);
+            bg.last_event = Instant::now() - Duration::from_secs(300);
         }
         assert!(s.tick_bg_poll(), "stale bg_poll cleared by guard");
         assert!(s.bg_poll.is_none());

@@ -473,3 +473,34 @@ fn claude_detect_state_handles_multibyte_at_tail_boundary() {
     // not crashing inside detect_state.
     let _ = agent.detect_state(&buf);
 }
+
+#[test]
+fn claude_qmark_heuristic_skips_long_prose_lines() {
+    // A long-form question (claude narrating its plan and ending
+    // with `?`) used to flicker the Asking state — the 8s Asking→
+    // Active hysteresis amplified each blip into 8s of stuck
+    // "needs input." Real prompts are short; >80 chars is prose.
+    let agent = Claude;
+    let buf = b"Reading through the file now to figure out which of the three \
+                possible refactors would land us the cleanest API surface, so \
+                we extract the inner type or keep it inline?";
+    assert_eq!(agent.detect_state(buf), Some(AgentState::Active));
+}
+
+#[test]
+fn claude_qmark_heuristic_skips_two_sentence_prose() {
+    // Two-sentence line ending in `?` (with the second sentence
+    // starting with a capital after `.`) is prose, not a prompt.
+    let agent = Claude;
+    let buf = b"I've finished the implementation. Want me to run the tests now?";
+    assert_eq!(agent.detect_state(buf), Some(AgentState::Active));
+}
+
+#[test]
+fn claude_qmark_heuristic_still_fires_on_short_prompts() {
+    // Belt-and-braces: the tightened heuristic must still catch
+    // the canonical short prompt that motivated it.
+    let agent = Claude;
+    let buf = b"Some context above\nProceed with the rewrite?";
+    assert_eq!(agent.detect_state(buf), Some(AgentState::Asking));
+}

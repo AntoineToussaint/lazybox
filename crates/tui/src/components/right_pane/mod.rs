@@ -271,7 +271,12 @@ impl RightPane {
         if self.feed.cursor < self.comment_scroll {
             self.comment_scroll = self.feed.cursor;
         } else if self.feed.cursor >= self.comment_scroll + self.last_visible_cards {
-            self.comment_scroll = self.feed.cursor + 1 - self.last_visible_cards;
+            // `(cursor + 1) - last_visible_cards` underflows when
+            // `last_visible_cards > cursor + 1` (tiny viewport at
+            // pre-first-render state). Saturating subtraction
+            // clamps to 0, which means "top of buffer" — the
+            // safest fallback that doesn't strand the cursor.
+            self.comment_scroll = (self.feed.cursor + 1).saturating_sub(self.last_visible_cards);
         }
     }
 

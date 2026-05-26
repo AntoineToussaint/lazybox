@@ -366,6 +366,17 @@ impl<T: TerminalAdapter> Model<T> {
                 // queued Action without firing.
                 self.pending_action_confirm = None;
             }
+            Some(Id::RequestReviewers) => {
+                // Esc cancels; drop the stashed workspace key +
+                // candidate list so a later mount on a *different*
+                // workspace doesn't pick up the wrong target.
+                self.pending_review_request = None;
+                self.review_choices.clear();
+            }
+            Some(Id::AddAssignees) => {
+                self.pending_assignees_request = None;
+                self.assignees_choices.clear();
+            }
             _ => {}
         }
         // Always try to surface a queued prompt after a modal

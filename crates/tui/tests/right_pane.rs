@@ -968,3 +968,30 @@ fn page_up_walks_back() {
     );
     assert!(rp.comment_cursor() < mid, "PageUp walks back");
 }
+
+#[test]
+fn clamp_scroll_to_cursor_does_not_underflow_on_tiny_viewport() {
+    // Regression: `(cursor + 1) - last_visible_cards` underflowed
+    // to a giant usize when `last_visible_cards > cursor + 1` (the
+    // window had never rendered or rendered into a tiny rect, so
+    // `last_visible_cards` was still the conservative default but
+    // the cursor was at 0). The scroll viewport then jumped to
+    // ~18 quintillion, painting nothing.
+    let mut rp = RightPane::new(PaneId::new(1));
+    rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 5)));
+    // Render at a height too small to fit even one card cleanly.
+    // The renderer sets `last_visible_cards` to the line budget
+    // (which here is 0-1 after the header + divider). With cursor
+    // at 0 and last_visible_cards ≥ 2, the old code underflowed.
+    let _ = render_to_string(&mut rp, 80, 6, true);
+    // Walk to cursor=0 explicitly + clamp. No panic + scroll stays
+    // sane.
+    for _ in 0..10 {
+        rp.handle_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut Vec::new(),
+        );
+    }
+    assert_eq!(rp.comment_cursor(), 0);
+    assert_eq!(rp.comment_scroll(), 0, "scroll clamps to 0, not usize::MAX");
+}

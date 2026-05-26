@@ -592,6 +592,11 @@ impl GhClient {
     }
 
     pub async fn fetch_all_prs(&self) -> Result<Vec<Task>, GhError> {
+        // Per-call wall-clock timer so the log can quantify the
+        // parallelization win and so a regression jumps out in
+        // `grep "fetch_all_prs: completed" /tmp/pilot.log`. Cheap;
+        // Instant::now() is ~10ns on macOS.
+        let started = std::time::Instant::now();
         // Parallelize the three independent branches of a PR fetch:
         //   1. Main paginated PR search (involves the user).
         //   2. Recently-merged sweep (`is:merged` last 7d).
@@ -699,8 +704,9 @@ impl GhClient {
             }
         }
 
+        let elapsed_ms = started.elapsed().as_millis();
         tracing::info!(
-            "GraphQL returned {} PRs (incl. {} watched repos + merged-sweep)",
+            "fetch_all_prs: completed in {elapsed_ms}ms — {} PRs (incl. {} watched repos + merged-sweep)",
             tasks.len(),
             self.watch_repos.len()
         );
@@ -849,6 +855,7 @@ impl GhClient {
     /// paginated. Separate from `fetch_all_prs` so callers opt in
     /// explicitly.
     pub async fn fetch_all_issues(&self) -> Result<Vec<Task>, GhError> {
+        let started = std::time::Instant::now();
         // Same assembly as `fetch_all_prs` — see notes there.
         let mut quals = graphql::default_issues_qualifiers();
         if self.issue_filters.is_empty() {
@@ -924,7 +931,11 @@ impl GhClient {
             }
         }
 
-        tracing::info!("GraphQL returned {} issues", tasks.len());
+        let elapsed_ms = started.elapsed().as_millis();
+        tracing::info!(
+            "fetch_all_issues: completed in {elapsed_ms}ms — {} issues",
+            tasks.len()
+        );
         Ok(tasks)
     }
 
@@ -966,6 +977,7 @@ impl GhClient {
         want_prs: bool,
         want_issues: bool,
     ) -> Result<Vec<Task>, GhError> {
+        let started = std::time::Instant::now();
         if !want_prs && !want_issues {
             return Ok(Vec::new());
         }
@@ -984,6 +996,13 @@ impl GhClient {
             }
         };
         let (prs, issues) = tokio::join!(pr_fut, issue_fut);
+        // Log the outer wall-clock so the parallelization win shows
+        // up directly: this is the value the poll loop pays per
+        // cycle, equal to max(PR-branches, Issues-branches).
+        let elapsed_ms = started.elapsed().as_millis();
+        tracing::info!(
+            "fetch_selected: completed in {elapsed_ms}ms (PRs={want_prs}, Issues={want_issues})"
+        );
         match (prs, issues) {
             (Ok(mut p), Ok(i)) => {
                 p.extend(i);

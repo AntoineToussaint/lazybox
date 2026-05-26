@@ -97,14 +97,14 @@ fn main() {
         println!("cargo:rustc-link-lib=c");
         println!("cargo:rustc-link-lib=c++");
     } else if target.contains("linux") {
-        // The Zig-built static lib pulls in libcxx code that
-        // references libstdc++ runtime symbols
-        // (`__cxa_throw`, `std::length_error::~length_error`,
-        // `vtable for std::length_error`, …). Without `-lstdc++`
-        // the final link fails with `undefined symbol` for each.
-        // Same `-lc` for sanity even though rustc usually injects
-        // it on glibc.
-        println!("cargo:rustc-link-lib=stdc++");
+        // Zig builds against libc++ (LLVM's C++ stdlib) by default,
+        // so the vendored ghostty archive references `std::__1::*`
+        // symbols (simdutf, highway, std::optional) which only libc++
+        // provides — libstdc++ uses `std::__cxx11::*`. Link both
+        // libc++ AND libc++abi (typeinfo + RTTI live in libc++abi),
+        // plus libc for sanity. CI installs `libc++-dev libc++abi-dev`.
+        println!("cargo:rustc-link-lib=c++");
+        println!("cargo:rustc-link-lib=c++abi");
         println!("cargo:rustc-link-lib=c");
     }
     println!("cargo:include={}", include_dir.display());

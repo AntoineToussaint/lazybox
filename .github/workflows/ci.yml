@@ -25,19 +25,17 @@ jobs:
 
       - name: Install C toolchain (Linux)
         if: runner.os == 'Linux'
-        # `libstdc++-dev` (any recent version on the runner image)
-        # is required so rust-lld can resolve the libcxx runtime
-        # symbols that the Zig-built ghostty static archive
-        # references (`__cxa_throw`, `std::length_error` vtable, …).
-        # build-essential brings the runtime in but not the
-        # link-time stubs on `ubuntu-22.04`.
+        # The Zig-built ghostty static archive vendors simdutf /
+        # highway / std::optional from libc++ (LLVM's C++ stdlib,
+        # symbols namespaced `std::__1::`), NOT libstdc++ (GNU's,
+        # `std::__cxx11::`). Linking with -lstdc++ leaves every
+        # libc++ symbol unresolved (`std::__1::basic_string`,
+        # `typeinfo for std::bad_optional_access`, `hwy::Abort`,
+        # …). Install libc++ + libc++abi so the build script can
+        # link them.
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config
-          # Prefer the version that matches the runner's default gcc.
-          sudo apt-get install -y libstdc++-12-dev || \
-            sudo apt-get install -y libstdc++-11-dev || \
-            sudo apt-get install -y libstdc++-dev
+          sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:

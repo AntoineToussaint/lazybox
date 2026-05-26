@@ -353,9 +353,18 @@ impl<T: TerminalAdapter> Model<T> {
     /// Drive the polling spinner + termination check from the run
     /// loop. Cheap; called every iteration. Returns Some(msg) when
     /// the polling modal wants to be torn down.
+    ///
+    /// Flips `redraw` when:
+    /// - the modal tick produced a termination message (caller will
+    ///   apply it), OR
+    /// - a background-poll spinner is active (the spinner glyph +
+    ///   the `· Ns` elapsed counter both need a re-render every
+    ///   tick or the user sees `4s` frozen forever even though the
+    ///   poll is still in flight).
     pub fn polling_tick(&mut self) -> Option<Msg> {
         let msg = self.status.polling_tick();
-        if msg.is_some() {
+        let needs_redraw = msg.is_some() || self.status.bg_poll.is_some();
+        if needs_redraw {
             self.redraw = true;
         }
         msg

@@ -1,0 +1,19 @@
+[package]
+name = "pilot-slack"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pilot-auth = { workspace = true }
+pilot-core = { workspace = true }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio = { workspace = true }
+tokio-tungstenite = { version = "0.27", features = ["rustls-tls-native-roots"] }
+futures = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

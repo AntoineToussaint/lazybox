@@ -9,6 +9,7 @@ members = [
     "crates/config",
     "crates/git-ops",
     "crates/gh-provider",
+    "crates/slack-provider",
     "crates/tui-term",
     "crates/ipc",
     "crates/server",

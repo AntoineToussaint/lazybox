@@ -17,8 +17,12 @@ pub struct Event {
 /// Source-agnostic event payloads.
 #[derive(Debug, Clone)]
 pub enum EventKind {
-    /// A new or updated task was discovered.
-    TaskUpdated(Task),
+    /// A new or updated task was discovered. Boxed because `Task`
+    /// is ~424 bytes while the other variants are <64 — without
+    /// the box, every `EventKind` instance reserves the full Task
+    /// footprint regardless of variant (clippy's
+    /// `large_enum_variant` lint).
+    TaskUpdated(Box<Task>),
 
     /// A task's state changed (e.g. merged, closed).
     TaskStateChanged {

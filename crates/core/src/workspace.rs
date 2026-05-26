@@ -204,8 +204,12 @@ impl Workspace {
 
     /// Sort the activity list by `created_at` descending. Idempotent.
     pub fn sort_activity(&mut self) {
+        // `sort_by_key` with `Reverse` is what the modern clippy lint
+        // wants — same descending order as the old `b.cmp(&a)` closure
+        // but without the bare-comparison shape `unnecessary_sort_by`
+        // denies.
         self.activity
-            .sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            .sort_by_key(|a| std::cmp::Reverse(a.created_at));
     }
 
     /// Attach a task to this workspace. Routing rules:

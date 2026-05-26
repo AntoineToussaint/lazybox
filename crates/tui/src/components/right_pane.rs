@@ -1001,21 +1001,21 @@ impl RightPane {
         const TEASER_CELLS: usize = 60;
 
         let body_width = inner.width.saturating_sub(BODY_INDENT);
+        // Build EVERY card into a single virtual line buffer first —
+        // no skip, no break — then apply `comment_scroll` as a
+        // **line offset** when we clip to `inner.height`. The older
+        // shape skipped whole activities and broke at the viewport
+        // boundary, which made wheel-scrolling useless once even one
+        // activity was expanded: the body lines past the viewport
+        // were never rendered AND the wheel only ever advanced by
+        // an entire activity, so you'd skip past the very lines you
+        // wanted to read.
         let mut cards: Vec<Line<'static>> = Vec::new();
-        let mut rendered_activities: usize = 0;
+        let mut card_spans: Vec<(usize, u16, u16)> = Vec::new(); // (activity_idx, start_line, end_line)
         self.click_hits.activity_cards.clear();
         let now = chrono::Utc::now();
-        for (i, activity) in workspace
-            .activity
-            .iter()
-            .enumerate()
-            .skip(self.comment_scroll)
-        {
-            if cards.len() >= inner.height as usize {
-                break;
-            }
-            rendered_activities += 1;
-            let card_start = cards.len() as u16;
+        for (i, activity) in workspace.activity.iter().enumerate() {
+            let start_line = cards.len() as u16;
             let state = CardState {
                 is_cursor: i == self.feed.cursor,
                 is_unread: workspace.is_activity_unread(i),
@@ -1040,20 +1040,47 @@ impl RightPane {
                     BODY_INDENT,
                 ));
             }
-            // One hit-test push per card. Collapsed → single row;
-            // expanded → header + body lines.
-            let card_end = cards.len().saturating_sub(1) as u16;
-            let abs_start = inner.y.saturating_add(card_start);
-            let abs_end = inner.y.saturating_add(card_end);
-            if abs_end < inner.y.saturating_add(inner.height) {
-                self.click_hits
-                    .activity_cards
-                    .push((i, abs_start..=abs_end));
-            }
+            let end_line = cards.len().saturating_sub(1) as u16;
+            card_spans.push((i, start_line, end_line));
         }
 
-        frame.render_widget(Paragraph::new(cards), inner);
-        self.last_visible_cards = rendered_activities.max(1);
+        // Clamp `comment_scroll` to a valid line offset (the buffer
+        // may have shrunk since the last render, e.g. a card was
+        // collapsed). `last_visible_lines` is the height of the
+        // window we're about to draw — used by `scroll_activity`
+        // and `clamp_scroll_to_cursor` to bound the scroll.
+        let total_lines = cards.len();
+        let window = (inner.height as usize).min(total_lines);
+        let max_scroll = total_lines.saturating_sub(window);
+        if self.comment_scroll > max_scroll {
+            self.comment_scroll = max_scroll;
+        }
+        let scroll = self.comment_scroll;
+
+        // Window the virtual buffer down to what fits, and translate
+        // each card's line span into absolute on-screen y-range for
+        // hit-testing. Cards fully above / below the window are
+        // dropped from the click index — they're not visible, no
+        // click target.
+        let visible: Vec<Line<'static>> =
+            cards.into_iter().skip(scroll).take(window).collect();
+        for (i, start, end) in card_spans {
+            let s = start as usize;
+            let e = end as usize;
+            if e < scroll || s >= scroll + window {
+                continue;
+            }
+            let visible_start = s.max(scroll) - scroll;
+            let visible_end = e.min(scroll + window - 1) - scroll;
+            let abs_start = inner.y.saturating_add(visible_start as u16);
+            let abs_end = inner.y.saturating_add(visible_end as u16);
+            self.click_hits
+                .activity_cards
+                .push((i, abs_start..=abs_end));
+        }
+
+        frame.render_widget(Paragraph::new(visible), inner);
+        self.last_visible_cards = window.max(1);
         area.height
     }
 }

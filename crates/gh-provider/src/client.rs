@@ -290,6 +290,13 @@ impl GhClient {
         T: serde::de::DeserializeOwned,
     {
         const DELAYS_MS: &[u64] = &[200, 800];
+        // Per-request wall-clock cap. The default reqwest client has
+        // no timeout — a flaky network can leave the HTTP call
+        // hanging forever, which the user perceives as "pilot's
+        // sync froze." 25s is generous (a real PR search rarely
+        // breaks 5s) but well under the 90s spinner guard so a hung
+        // call surfaces as an error before the UI gives up.
+        const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
         let mut last_err: Option<octocrab::Error> = None;
         // `0..=DELAYS_MS.len()` is intentional: we try once at
         // attempt=0 (no delay yet), then once per entry of
@@ -301,14 +308,15 @@ impl GhClient {
             reason = "the index is the attempt count; see comment above"
         )]
         for attempt in 0..=DELAYS_MS.len() {
-            match self.inner.post::<_, T>("/graphql", Some(body)).await {
-                Ok(v) => {
+            let req = self.inner.post::<_, T>("/graphql", Some(body));
+            match tokio::time::timeout(REQUEST_TIMEOUT, req).await {
+                Ok(Ok(v)) => {
                     if attempt > 0 {
                         tracing::info!("graphql request succeeded on retry {attempt}");
                     }
                     return Ok(v);
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     if !is_transient(&e) {
                         return Err(e);
                     }
@@ -322,6 +330,33 @@ impl GhClient {
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     }
                     last_err = Some(e);
+                }
+                Err(_elapsed) => {
+                    // Wall-clock timeout. Treat as transient so the
+                    // retry loop gets a chance, but log loudly — a
+                    // 25s request is unusual enough to investigate.
+                    tracing::warn!(
+                        "graphql request exceeded {}s wall-clock; \
+                         attempt {}/{} will retry",
+                        REQUEST_TIMEOUT.as_secs(),
+                        attempt + 1,
+                        DELAYS_MS.len() + 1,
+                    );
+                    if attempt < DELAYS_MS.len() {
+                        tokio::time::sleep(std::time::Duration::from_millis(DELAYS_MS[attempt]))
+                            .await;
+                    }
+                    // No octocrab::Error to stash — synthesize one
+                    // by making a clearly-labelled HTTP error.
+                    use snafu::GenerateImplicitData;
+                    last_err = Some(octocrab::Error::Other {
+                        source: format!(
+                            "graphql request timed out after {}s",
+                            REQUEST_TIMEOUT.as_secs()
+                        )
+                        .into(),
+                        backtrace: snafu::Backtrace::generate(),
+                    });
                 }
             }
         }

@@ -250,6 +250,13 @@ pub struct Model<T: TerminalAdapter> {
     /// Reset to `false` on every focus-enter of `Terminals` so each
     /// fresh visit gets the cycle-out behavior.
     terminal_user_typed_since_focus: bool,
+    /// `true` between a Shift-R Refresh and the next PollCompleted
+    /// arriving from the daemon. Drives a one-shot "✓ sync ok"
+    /// footer notice so the user knows the manual refresh actually
+    /// landed (silent spinner-clears were being read as "did
+    /// anything happen?"). Cleared on the next PollCompleted OR a
+    /// ProviderError for the same source.
+    pending_refresh_ack: bool,
     /// Whether pilot is capturing mouse events. Toggled by F8 /
     /// Alt-s. When `false`, pilot has issued `DisableMouseCapture`
     /// so the host terminal regains native text selection (which
@@ -462,6 +469,7 @@ impl<T: TerminalAdapter> Model<T> {
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
             last_click: None,
             terminal_user_typed_since_focus: false,
+            pending_refresh_ack: false,
             mouse_capture_on: true,
             terminal_selection: None,
             preselect: None,

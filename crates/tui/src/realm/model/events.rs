@@ -265,9 +265,37 @@ impl<T: TerminalAdapter> Model<T> {
                     self.status.note_poll_progress(source, message);
                     self.redraw = true;
                 }
-                IpcEvent::PollCompleted { source, .. } => {
+                IpcEvent::PollCompleted { source, count } => {
                     self.status.note_poll_completed(source);
+                    // Consume the manual-refresh ack with a clear
+                    // success footer notice. Auto-cycles (the user
+                    // didn't ask for them) stay silent.
+                    if self.pending_refresh_ack {
+                        use crate::realm::components::footer::{Notice, NoticeSeverity};
+                        self.pending_refresh_ack = false;
+                        self.status.notice = Some(Notice::new(
+                            format!("✓ sync ok — {count} tasks from {source}"),
+                            NoticeSeverity::Info,
+                        ));
+                    }
                     self.redraw = true;
+                }
+                IpcEvent::ProviderError {
+                    source, message, ..
+                } => {
+                    // Manual refresh failed — convert the ack flag
+                    // into a "sync failed" notice so the user
+                    // doesn't have to guess whether their Shift-R
+                    // worked.
+                    if self.pending_refresh_ack {
+                        use crate::realm::components::footer::{Notice, NoticeSeverity};
+                        self.pending_refresh_ack = false;
+                        self.status.notice = Some(Notice::new(
+                            format!("✗ sync failed — {source}: {message}"),
+                            NoticeSeverity::Permanent,
+                        ));
+                        self.redraw = true;
+                    }
                 }
                 _ => {}
             }

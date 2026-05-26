@@ -221,6 +221,12 @@ impl<T: TerminalAdapter> Model<T> {
                     .note_poll_progress("github", "manual refresh requested");
                 self.status.notice =
                     Some(Notice::new("refreshing…".to_string(), NoticeSeverity::Hint));
+                // Arm a one-shot ack so the next PollCompleted /
+                // ProviderError surfaces a clear "✓ sync ok" or
+                // "✗ sync failed" footer notice — silent
+                // spinner-clears were being read as "did anything
+                // happen?"
+                self.pending_refresh_ack = true;
                 self.redraw = true;
             }
             Action::OpenHelp => {

@@ -55,7 +55,7 @@ fn is_transient(e: &octocrab::Error) -> bool {
             // limit is for the budget layer, not retry-loops.
             // NOT 5xx in general: e.g. a 500 with a deterministic
             // error message won't change on retry.
-            matches!(source.status_code.as_u16(), 502 | 503 | 504)
+            matches!(source.status_code.as_u16(), 502..=504)
         }
         _ => false,
     }
@@ -291,6 +291,15 @@ impl GhClient {
     {
         const DELAYS_MS: &[u64] = &[200, 800];
         let mut last_err: Option<octocrab::Error> = None;
+        // `0..=DELAYS_MS.len()` is intentional: we try once at
+        // attempt=0 (no delay yet), then once per entry of
+        // `DELAYS_MS`. The index is used both as the sleep offset
+        // and in the log line, so an enumerate-over-delays rewrite
+        // would be less clear than just allowing the lint here.
+        #[allow(
+            clippy::needless_range_loop,
+            reason = "the index is the attempt count; see comment above"
+        )]
         for attempt in 0..=DELAYS_MS.len() {
             match self.inner.post::<_, T>("/graphql", Some(body)).await {
                 Ok(v) => {

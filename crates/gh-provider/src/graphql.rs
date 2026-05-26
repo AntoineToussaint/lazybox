@@ -1231,8 +1231,37 @@ fn extract_ci_status(pr: &GqlPr) -> CiStatus {
     match rollup.state.as_str() {
         "SUCCESS" => CiStatus::Success,
         "FAILURE" | "ERROR" => CiStatus::Failure,
-        "PENDING" => CiStatus::Pending,
-        "EXPECTED" => CiStatus::Pending,
+        // PENDING = the rollup is genuinely in flight (queued or
+        // running). Walk the contexts to distinguish "actually
+        // running" from "branch protection declared a required
+        // check that nobody has triggered" — the latter renders
+        // as `CI RUN` today which misleads the user into thinking
+        // a job is in progress when it isn't.
+        "PENDING" => {
+            let any_in_flight = rollup.contexts.nodes.iter().any(|ctx| match ctx {
+                GqlCheckContext::CheckRun { status, .. } => matches!(
+                    status.as_deref(),
+                    Some("IN_PROGRESS" | "QUEUED" | "WAITING" | "PENDING" | "REQUESTED")
+                ),
+                GqlCheckContext::StatusContext { state, .. } => {
+                    matches!(state.as_str(), "PENDING")
+                }
+            });
+            if any_in_flight {
+                CiStatus::Pending
+            } else {
+                // Rollup says PENDING but every context is
+                // EXPECTED / COMPLETED — required check exists in
+                // branch protection but no job is running. Surface
+                // as None so the sidebar doesn't pretend something
+                // is in flight.
+                CiStatus::None
+            }
+        }
+        // Top-level `EXPECTED` is the same "required but unstarted"
+        // case GitHub uses when branch protection lists a check
+        // that hasn't been triggered. Don't lie that it's running.
+        "EXPECTED" => CiStatus::None,
         _ => CiStatus::None,
     }
 }

@@ -663,9 +663,13 @@ impl RightPane {
             Span::styled(branch, Style::default().fg(theme.accent)),
         ]));
 
-        // Reviewers + assignees — skip rendering when empty so the
-        // header doesn't add noise on tasks that don't have them
-        // (issues, draft PRs without reviewer requests, …).
+        // Reviewers + assignees. When populated, render the @logins.
+        // When empty AND the task is a PR, surface a discoverable
+        // hint with the keyboard shortcut so the user doesn't have
+        // to dig through `?` to learn how to add them. Empty
+        // *issues* don't get the hint for reviewers (issues have no
+        // reviewers on GitHub), but they DO get the assignees hint.
+        let is_pr = task.url.contains("/pull/");
         if !task.reviewers.is_empty() {
             let mut spans: Vec<Span> = Vec::with_capacity(task.reviewers.len() * 2 + 1);
             spans.push(Span::styled(
@@ -682,6 +686,17 @@ impl RightPane {
                 ));
             }
             lines.push(Line::from(spans));
+        } else if is_pr {
+            lines.push(Line::from(vec![
+                Span::styled("Reviewers: ", Style::default().fg(theme.text_dim)),
+                Span::styled(
+                    "none ",
+                    Style::default()
+                        .fg(theme.text_dim)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+                Span::styled("— Shift-V to request", Style::default().fg(theme.text_dim)),
+            ]));
         }
         if !task.assignees.is_empty() {
             let mut spans: Vec<Span> = Vec::with_capacity(task.assignees.len() * 2 + 1);
@@ -699,6 +714,17 @@ impl RightPane {
                 ));
             }
             lines.push(Line::from(spans));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("Assignees: ", Style::default().fg(theme.text_dim)),
+                Span::styled(
+                    "none ",
+                    Style::default()
+                        .fg(theme.text_dim)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+                Span::styled("— Shift-G to add", Style::default().fg(theme.text_dim)),
+            ]));
         }
 
         let para = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -1379,12 +1405,12 @@ impl RightPane {
         let body = body.as_str();
         // Three-state glyph: ▶ collapsed, ▼ preview-capped, ▽ full.
         // The downward-pointing open triangle for Full is just a
-        // visual hint that "this isn't capped anymore" — the (b)
+        // visual hint that "this isn't capped anymore" — the (d)
         // suffix below tells the user which key cycles forward.
         let (glyph, suffix) = match self.task_body_view {
-            TaskBodyView::Collapsed => ("▶", "  (b)"),
-            TaskBodyView::Preview => ("▼", "  (b)"),
-            TaskBodyView::Full => ("▽", "  (b · full)"),
+            TaskBodyView::Collapsed => ("▶", "  (d · expand)"),
+            TaskBodyView::Preview => ("▼", "  (d · full)"),
+            TaskBodyView::Full => ("▽", "  (d · collapse)"),
         };
         let header = Line::from(vec![
             Span::styled(

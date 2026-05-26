@@ -66,6 +66,23 @@ the GitHub CLI for credentials (`gh auth login`), and network
 access to github.com on first build (subsequent builds use the
 cached `target/.../ghostty-src/`).
 
+**Linux** also needs libc++ + libc++abi (Zig builds ghostty
+against LLVM's C++ stdlib, not GNU libstdc++):
+
+```sh
+# Debian / Ubuntu
+sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
+
+# Fedora / RHEL
+sudo dnf install -y gcc-c++ pkgconf-pkg-config libcxx-devel libcxxabi-devel
+
+# Arch
+sudo pacman -S --needed base-devel pkgconf libc++ libc++abi
+```
+
+Without these, the ghostty static archive links cleanly but
+linking pilot fails with `undefined reference to std::__1::*`.
+
 If you `cargo build` directly (no Makefile / `run.sh`), put
 **zig 0.15.2** on PATH first — newer zig trips ghostty's
 `requireZig` check.

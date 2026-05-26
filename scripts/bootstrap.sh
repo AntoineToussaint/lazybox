@@ -78,6 +78,32 @@ if ! command -v tmux >/dev/null 2>&1; then
   echo "warning: tmux not found — sessions won't persist across pilot restarts"
 fi
 
+# ── Linux libc++ check (warn only) ──────────────────────────────────────
+# Zig builds ghostty against LLVM's libc++ (NOT GNU libstdc++) — pilot
+# fails to link with `undefined reference to std::__1::*` on Linux
+# unless libc++ + libc++abi are installed. CI installs them
+# (.github/release-setup.yml); local users typically forget.
+if [ "${os}" = "linux" ]; then
+  missing=""
+  if [ ! -f /usr/include/c++/v1/string ] && [ ! -f /usr/include/x86_64-linux-gnu/c++/v1/string ] && [ ! -f /usr/include/aarch64-linux-gnu/c++/v1/string ]; then
+    missing="libc++ headers"
+  fi
+  if ldconfig -p 2>/dev/null | grep -q libc++abi; then
+    :
+  else
+    missing="${missing:+${missing}, }libc++abi"
+  fi
+  if [ -n "${missing}" ]; then
+    echo
+    echo "warning: missing Linux build dependency: ${missing}"
+    echo "  Debian/Ubuntu: sudo apt-get install -y libc++-dev libc++abi-dev"
+    echo "  Fedora/RHEL:   sudo dnf install -y libcxx-devel libcxxabi-devel"
+    echo "  Arch:          sudo pacman -S --needed libc++ libc++abi"
+    echo "without these, cargo build will fail at link time with"
+    echo "\`undefined reference to std::__1::*\`."
+  fi
+fi
+
 # ── Print activation hint ───────────────────────────────────────────────
 echo
 echo "Bootstrap complete. To use pinned zig in this shell:"

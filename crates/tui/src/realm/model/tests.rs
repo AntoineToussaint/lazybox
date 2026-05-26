@@ -284,7 +284,7 @@ mod effects_tests {
 
 #[cfg(test)]
 mod base64_tests {
-    use super::super::base64_encode;
+    use super::super::helpers::base64_encode;
 
     #[test]
     fn rfc4648_test_vectors() {

@@ -1954,6 +1954,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "chrono",
+ "futures",
  "http-body-util",
  "hyper",
  "hyper-util",

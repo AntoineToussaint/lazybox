@@ -31,6 +31,7 @@ pub use handlers::{
 
 use crate::ServerConfig;
 use chrono::Utc;
+use futures::FutureExt;
 use pilot_core::{ProviderConfig, Task, Workspace, WorkspaceKey};
 use pilot_gh::GhClient;
 use pilot_ipc::Event;
@@ -852,10 +853,16 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
         const CHUNK: Duration = Duration::from_secs(5);
         const UNKNOWN_RETRY: Duration = Duration::from_secs(5);
 
+        tracing::info!(
+            "polling: loop started (interval={}s, every tick logs `polling: tick #N starting`)",
+            interval.as_secs()
+        );
+
         // `next_due` starts in the past so the first iteration ticks
         // immediately (matches the previous loop's "first run is
         // eager" behaviour).
         let mut next_due: Instant = Instant::now();
+        let mut tick_n: u64 = 0;
         loop {
             // Wait until `next_due`, with the chunked-sleep + wake
             // path baked in. If we're already past `next_due` (e.g.
@@ -871,13 +878,53 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
                 tokio::select! {
                     _ = tokio::time::sleep(chunk) => {}
                     _ = config.poll_wake.notified() => {
-                        // Manual wake → tick now.
+                        tracing::info!("polling: woken (Refresh / Subscribe / UNKNOWN retry)");
                         break;
                     }
                 }
             }
 
-            let summary = run_one_tick(&config).await;
+            tick_n += 1;
+            tracing::info!("polling: tick #{tick_n} starting");
+
+            // Tolerate panics inside `run_one_tick`. tokio swallows
+            // panics from spawned tasks by default; without this
+            // wrapper a single buggy poll cycle would silently kill
+            // the entire long-lived loop, leaving CI/mergeable badges
+            // frozen until daemon restart. Caught panics get logged
+            // at error level + the loop continues with a normal
+            // interval — degraded behaviour is far better than
+            // silent death.
+            let summary = match std::panic::AssertUnwindSafe(run_one_tick(&config))
+                .catch_unwind()
+                .await
+            {
+                Ok(s) => s,
+                Err(payload) => {
+                    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "<non-string panic payload>".to_string()
+                    };
+                    tracing::error!(
+                        "polling: tick #{tick_n} PANICKED: {msg} — loop will continue at next interval"
+                    );
+                    let _ = config.bus.send(Event::ProviderError {
+                        source: "github".into(),
+                        message: format!("poll cycle crashed: {msg}"),
+                        detail: msg,
+                        kind: "retryable".into(),
+                    });
+                    TickSummary::default()
+                }
+            };
+            tracing::info!(
+                "polling: tick #{tick_n} done (retry_after={:?}, unknown_mergeable={})",
+                summary.retry_after_secs,
+                summary.saw_unknown_mergeable,
+            );
 
             // Base cadence is `interval`. If a provider reported a
             // rate-limit reset window, use whichever is longer.
@@ -903,6 +950,7 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
                 next_in = UNKNOWN_RETRY;
             }
             next_due = Instant::now() + next_in;
+            tracing::debug!("polling: tick #{tick_n} next_due in {}s", next_in.as_secs());
         }
     })
 }

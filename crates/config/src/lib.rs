@@ -246,7 +246,7 @@ pub struct WorktreeConfig {
 ///
 /// ```yaml
 /// repos:
-///   tensorzero/tensorzero:
+///   acme/widget:
 ///     env:
 ///       DATABASE_URL: postgres://localhost/dev
 ///       OPENAI_API_KEY: sk-...
@@ -567,7 +567,7 @@ impl Default for GithubConfig {
 /// YAML format:
 /// ```yaml
 /// filters:
-///   - org: tensorzero
+///   - org: acme
 ///   - repo: owner/name
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -708,7 +708,7 @@ mod tests {
     fn repos_section_round_trips() {
         let yaml = r#"
 repos:
-  tensorzero/tensorzero:
+  acme/widget:
     env:
       DATABASE_URL: postgres://localhost/dev
       OPENAI_API_KEY: sk-test
@@ -722,8 +722,8 @@ repos:
         let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
         let entry = cfg
             .repos
-            .get("tensorzero/tensorzero")
-            .expect("repos.tensorzero/tensorzero block present");
+            .get("acme/widget")
+            .expect("repos.acme/widget block present");
         assert_eq!(
             entry.env.get("DATABASE_URL").map(String::as_str),
             Some("postgres://localhost/dev")
@@ -739,7 +739,7 @@ repos:
         // Now serialize back + parse + compare.
         let written = serde_yaml::to_string(&cfg).expect("serialize");
         let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
-        let reentry = reparsed.repos.get("tensorzero/tensorzero").unwrap();
+        let reentry = reparsed.repos.get("acme/widget").unwrap();
         assert_eq!(reentry.env, entry.env);
         assert_eq!(reentry.mounts.len(), entry.mounts.len());
     }

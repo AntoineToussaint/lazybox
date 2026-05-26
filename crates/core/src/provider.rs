@@ -263,7 +263,7 @@ pub trait TaskProvider: Send + Sync {
 /// claims it (scratch sandbox workspaces with no upstream source).
 ///
 /// Workspace keys follow `<source>-<rest>` — e.g.
-/// `"github-tensorzero-nanogateway-186"` matches a provider with
+/// `"github-acme-widget-186"` matches a provider with
 /// `name() == "github"`. The `"sandbox"` prefix has no provider
 /// today and gracefully returns `None`; callers should fall back to
 /// "no upstream, local-only" semantics.

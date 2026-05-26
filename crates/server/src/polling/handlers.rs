@@ -134,7 +134,7 @@ impl ProviderHandle {
 
 /// Build a provider handle for the workspace that owns this
 /// mutation. Routes on the workspace key's `<source>-<rest>`
-/// prefix — `"github-tensorzero-nanogateway-186"` → github,
+/// prefix — `"github-acme-widget-186"` → github,
 /// `"linear-team-xyz"` → linear, `"sandbox"` → no upstream
 /// (returns `Err`).
 ///

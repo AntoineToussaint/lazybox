@@ -1875,7 +1875,7 @@ mod tests {
         // only populates it for actual issues.
         let mut pr = make_pr(166, "alice");
         pr.body = Some("Closes #73.\n\nSummary: ...".into());
-        pr.url = "https://github.com/tensorzero/nanogateway/pull/166".into();
+        pr.url = "https://github.com/acme/widget/pull/166".into();
         pr.closing_issues_references = None;
         let task = pr_to_task(&pr, "alice");
         assert!(

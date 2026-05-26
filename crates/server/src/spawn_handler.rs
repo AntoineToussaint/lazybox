@@ -174,7 +174,7 @@ pub async fn handle_spawn(
     };
 
     // Human-readable hint the backend bakes into its session name so
-    // `tmux ls` shows something like `pilot-github-tensorzero-nanogateway-126-claude-NNNN`
+    // `tmux ls` shows something like `pilot-github-acme-widget-126-claude-NNNN`
     // instead of `pilot-4`. Backends append their own uniqueness
     // suffix (PID + counter) so the hint doesn't need to be unique.
     let kind_label = match &kind {
@@ -1594,7 +1594,7 @@ mod tests {
         env.insert("DATABASE_URL".to_string(), "postgres://x".to_string());
         env.insert("OPENAI_API_KEY".to_string(), "sk-test".to_string());
         cfg.repos.insert(
-            "tensorzero/tensorzero".into(),
+            "acme/widget".into(),
             pilot_config::RepoConfig {
                 env,
                 mounts: vec![],
@@ -1602,7 +1602,7 @@ mod tests {
             },
         );
 
-        let out = env_for_repo(&cfg, "tensorzero/tensorzero");
+        let out = env_for_repo(&cfg, "acme/widget");
         assert_eq!(out.len(), 2);
         let map: std::collections::BTreeMap<_, _> = out.into_iter().collect();
         assert_eq!(

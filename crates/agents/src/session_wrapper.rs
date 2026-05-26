@@ -11,7 +11,7 @@ pub trait SessionWrapper: Send + Sync {
     fn id(&self) -> &'static str;
 
     /// Transform an inner argv into a wrapped argv. Given `inner = ["claude", "--continue"]`
-    /// and `key = "github_tensorzero_tensorzero#7305"`, tmux returns
+    /// and `key = "github_acme_widget#7305"`, tmux returns
     /// something like `["tmux", "new-session", "-A", "-s", "<key>", "claude --continue"]`.
     fn wrap(&self, session_id: &str, inner: &[String], cwd: &Path) -> Vec<String>;
 

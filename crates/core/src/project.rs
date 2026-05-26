@@ -109,8 +109,8 @@ mod tests {
 
     #[test]
     fn github_key_round_trips_prefix() {
-        let k = ProjectKey::github("tensorzero", "pilot");
-        assert_eq!(k.as_str(), "github-tensorzero-pilot");
+        let k = ProjectKey::github("acme", "widget");
+        assert_eq!(k.as_str(), "github-acme-widget");
         assert_eq!(k.source_prefix(), "github");
     }
 

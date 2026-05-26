@@ -659,7 +659,7 @@ pub enum Event {
     },
     /// Granular progress signal during a poll cycle. Drives the
     /// polling modal's "what is pilot doing right now" indicator
-    /// (e.g. "Querying PRs in tensorzero/tensorzero…", "Got 5 PRs,
+    /// (e.g. "Querying PRs in acme/widget…", "Got 5 PRs,
     /// fetching reviews…"). Also great for debugging — every
     /// progress step shows up in the log.
     PollProgress {

@@ -942,9 +942,9 @@ impl SetupRunner {
     ) -> Box<dyn AppComponent<Msg, UserEvent>> {
         self.current_choice = Some(CurrentChoice::ScopePick(scopes.clone()));
         // Pre-tick orgs the user already subscribed to. `selected_scopes`
-        // mixes two id flavors: an org-level id like `github:tensorzero`
+        // mixes two id flavors: an org-level id like `github:acme`
         // (whole-org subscription) and repo-level ids like
-        // `github:tensorzero/tensorzero` (narrowed). An org is "already
+        // `github:acme/widget` (narrowed). An org is "already
         // selected" if EITHER its own id is in the set OR any repo
         // under it is. Without the prefix check, an org you've narrowed
         // to specific repos would show up unchecked, and confirming the
@@ -1162,7 +1162,7 @@ mod tests {
                 let mut m = BTreeMap::new();
                 m.insert(
                     "github".to_string(),
-                    ["tensorzero/tensorzero", "owner/repo"]
+                    ["acme/widget", "owner/repo"]
                         .iter()
                         .map(|s| s.to_string())
                         .collect::<BTreeSet<_>>(),
@@ -1326,13 +1326,13 @@ mod tests {
     async fn editing_orgs_preserves_existing_narrowed_repos() {
         use std::sync::Arc;
 
-        // Start state: user is subscribed to ONE specific tensorzero
+        // Start state: user is subscribed to ONE specific acme
         // repo and to the whole `acme` org. We simulate the Settings
         // → "Add a repo" flow by constructing a runner with this
         // existing state in its accumulator, then driving the orgs
         // picker confirm path.
         let mut prior: BTreeSet<String> = BTreeSet::new();
-        prior.insert("github:tensorzero/tensorzero".into());
+        prior.insert("github:acme/widget".into());
         prior.insert("github:acme".into());
         let mut outcome = SetupOutcome {
             enabled_providers: ["github"].iter().map(|s| s.to_string()).collect(),
@@ -1352,13 +1352,13 @@ mod tests {
             expecting: ExpectingStep::ScopePickFor("github".into()),
             current_choice: None,
         };
-        // The picker offered three orgs; user kept tensorzero +
-        // acme ticked and added nanogateway. The CurrentChoice
+        // The picker offered three orgs; user kept acme +
+        // acme ticked and added widget. The CurrentChoice
         // holds the items in the SAME order the picker rendered.
         let items = vec![
             Scope {
-                id: "github:tensorzero".into(),
-                label: "tensorzero".into(),
+                id: "github:acme".into(),
+                label: "acme".into(),
                 parent: None,
                 kind: pilot_core::ScopeKind::Org,
             },
@@ -1369,8 +1369,8 @@ mod tests {
                 kind: pilot_core::ScopeKind::Org,
             },
             Scope {
-                id: "github:nanogateway".into(),
-                label: "nanogateway".into(),
+                id: "github:widget".into(),
+                label: "widget".into(),
                 parent: None,
                 kind: pilot_core::ScopeKind::Org,
             },
@@ -1386,16 +1386,16 @@ mod tests {
             .get("github")
             .cloned()
             .unwrap_or_default();
-        // The narrowed tensorzero repo MUST still be there.
+        // The narrowed acme repo MUST still be there.
         assert!(
-            after.contains("github:tensorzero/tensorzero"),
+            after.contains("github:acme/widget"),
             "narrowed repo subscription dropped after partial flow: {after:?}"
         );
         // The acme whole-org entry stays.
         assert!(after.contains("github:acme"));
-        // nanogateway joins as a whole-org subscription (no narrowed
+        // widget joins as a whole-org subscription (no narrowed
         // children yet).
-        assert!(after.contains("github:nanogateway"));
+        assert!(after.contains("github:widget"));
     }
 
     #[tokio::test(flavor = "current_thread")]

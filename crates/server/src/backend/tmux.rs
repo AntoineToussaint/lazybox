@@ -152,7 +152,7 @@ impl TmuxBackend {
     fn alloc_key(&self, hint: &str) -> String {
         let n = self.next_key.fetch_add(1, Ordering::Relaxed);
         // Format: `pilot-{hint}-{pid}-{n}`. The hint is a readable
-        // seed (`nanogateway-126-claude`) so `tmux ls` shows what
+        // seed (`widget-126-claude`) so `tmux ls` shows what
         // each session is for; PID + counter guarantee uniqueness
         // across pilot launches (PIDs aren't reused while in-use)
         // and within a single process. Recovery is name-agnostic

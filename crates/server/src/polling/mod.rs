@@ -762,9 +762,9 @@ pub async fn rescope_with_state(
                 // JSON if available; fall back to the raw key.
                 //
                 // `task.id.key` is already `owner/repo#N` (e.g.
-                // `tensorzero/tensorzero#7307`) — concatenating `repo`
+                // `acme/widget#7307`) — concatenating `repo`
                 // in front of it previously produced
-                // `tensorzero/tensorzero#tensorzero/tensorzero#7307`.
+                // `acme/widget#acme/widget#7307`.
                 // Trust `id.key` and only fall back to `repo` when the
                 // key is missing.
                 let task_ref = r

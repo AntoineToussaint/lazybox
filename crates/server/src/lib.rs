@@ -11,6 +11,21 @@
 //! worktree management, agent hook plumbing, and LLM proxy integration
 //! land on top of this core in the order described in `../DESIGN.md`.
 
+// Cosmetic / pedantic lints that landed with clippy 1.95. The
+// daemon is a high-traffic codebase mid-refactor; we don't want
+// every CI bump to gate on style-only suggestions. The ones
+// suppressed here either don't improve clarity (the `?` rewrite
+// of `let-else`, blanket type-alias for one Tokio mpsc tuple) or
+// would require an enum-variant rebox that touches every IPC
+// handler. Re-enable individually as we touch the relevant code.
+#![allow(
+    clippy::large_enum_variant,
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::question_mark,
+    clippy::unwrap_or_default,
+)]
+
 pub mod agent_runs;
 pub mod agent_spawn;
 pub mod agent_stream;

@@ -93,10 +93,11 @@ pub enum AgentSpawnError {
 /// `OPENAI_BASE_URL`.
 ///
 /// The caller is responsible for:
-/// - Polling `records` and forwarding each record as
-///   `Event::ProxyRecord` through the IPC server channel.
-/// - Shutting down the returned `ProxyServer` when the PTY exits
-///   (otherwise the proxy keeps its port bound forever).
+///   - Polling `records` and forwarding each record as
+///     `Event::ProxyRecord` through the IPC server channel.
+///   - Shutting down the returned `ProxyServer` when the PTY exits
+///     (otherwise the proxy keeps its port bound forever).
+///
 /// Inject the proxy base-URL env var when a proxy was attached.
 /// Pure helper — pulled out of `spawn_with_proxy` so tests can verify
 /// env injection without starting a real PTY or proxy.

@@ -258,6 +258,15 @@ pub struct ServerConfig {
     /// `std::sync::Mutex` (not tokio's) because the data is tiny
     /// and read/written from sync contexts only — no await needed.
     pub viewer_identities: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// Wake handle for the long-lived poll loop. Pinging this
+    /// `Notify` makes the next poll tick fire immediately instead of
+    /// waiting out the remainder of its current sleep. Used by:
+    /// - `Command::Refresh` (manual `Shift-R`)
+    /// - client connect (so a freshly-opened TUI sees current data
+    ///   instead of "whatever the daemon polled last")
+    /// - the lazy mergeable retry path (`Mergeable::Unknown` PRs
+    ///   re-fired ~5s later so GitHub's lazy compute lands)
+    pub poll_wake: Arc<tokio::sync::Notify>,
 }
 
 impl ServerConfig {
@@ -328,6 +337,7 @@ impl ServerConfig {
             default_principal_id: pilot_ipc::PrincipalId::local(),
             poll_state: Arc::new(Mutex::new(polling::TickState::default())),
             viewer_identities: Arc::new(std::sync::Mutex::new(Vec::new())),
+            poll_wake: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -433,6 +443,13 @@ impl Server {
                                 terminals,
                                 projects,
                             });
+                            // Kick a fresh poll. The freshly-opened
+                            // TUI sees the store-cached snapshot
+                            // immediately above; the wake makes the
+                            // poll loop refresh it within a few
+                            // seconds instead of waiting out the
+                            // remainder of its current sleep.
+                            self.config.poll_wake.notify_one();
                             // Replay cached viewer identities so a
                             // reconnecting TUI can render `@me` for
                             // the local user's bylines without
@@ -618,58 +635,13 @@ impl Server {
                             polling::delete_workspace(&self.config, &key).await;
                         }
                         pilot_ipc::Command::Refresh => {
-                            // Manual poll trigger. Reads the current
-                            // persisted setup off `~/.pilot/config.yaml`
-                            // (so newly-added repos are picked up
-                            // without waiting for the long-lived poll
-                            // loop to tick), builds the matching
-                            // sources, runs ONE tick, then rescopes:
-                            // workspaces in the store that the poll
-                            // DIDN'T return (filter changed, scope
-                            // dropped, repo unsubscribed) and that
-                            // have no active session get cleaned up.
-                            let cfg = self.config.clone();
-                            tokio::spawn(async move {
-                                let setup = match pilot_config::Config::load() {
-                                    Ok(c) => persisted_from_config(&c),
-                                    Err(e) => {
-                                        tracing::warn!("Refresh: config load failed: {e}");
-                                        return;
-                                    }
-                                };
-                                // Share TickState with the long-lived
-                                // poll loop so a prompt dismissed here
-                                // stays dismissed there (and vice versa).
-                                // Lock BEFORE building sources so the
-                                // cached GhClient (held in TickState)
-                                // is reused / refreshed atomically.
-                                let mut state = cfg.poll_state.lock().await;
-                                let sources = polling::sources_for(
-                                    &setup,
-                                    cfg.bus.clone(),
-                                    &mut state,
-                                    cfg.viewer_identities.clone(),
-                                )
-                                .await;
-                                let outcome = if sources.is_empty() {
-                                    // User just disabled every provider.
-                                    // Treat as a deliberately empty
-                                    // result so existing workspaces
-                                    // get rescoped out instead of
-                                    // frozen in the sidebar.
-                                    tracing::info!(
-                                        "Refresh: no sources configured — rescoping with empty result"
-                                    );
-                                    polling::TickOutcome {
-                                        polled: vec![],
-                                        any_source_succeeded: true,
-                                        retry_after_secs: None,
-                                    }
-                                } else {
-                                    polling::tick_with_state(&cfg, &sources, &mut state).await
-                                };
-                                polling::rescope_with_state(&cfg, &outcome, &mut state).await;
-                            });
+                            // Manual poll trigger. Wakes the long-lived
+                            // poll loop so it runs `run_one_tick`
+                            // immediately on its own task — single
+                            // source of truth for ticks, no parallel
+                            // inline spawn that could race the loop's
+                            // own next-due bookkeeping.
+                            self.config.poll_wake.notify_one();
                         }
                         pilot_ipc::Command::PostReply { session_key, body } => {
                             // GraphQL post — detach to keep the serve

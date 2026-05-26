@@ -1153,6 +1153,7 @@ async fn rescope_removes_workspaces_with_no_active_session() {
         ))],
         any_source_succeeded: true,
         retry_after_secs: None,
+        saw_unknown_mergeable: false,
     };
     polling::rescope(&config, &outcome).await;
 
@@ -1197,6 +1198,7 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
         ))],
         any_source_succeeded: true,
         retry_after_secs: None,
+        saw_unknown_mergeable: false,
     };
     let mut state = polling::TickState::default();
     polling::rescope_with_state(&config, &outcome, &mut state).await;
@@ -1252,6 +1254,7 @@ async fn rescope_with_empty_but_successful_poll_still_cleans_up() {
         polled: vec![],
         any_source_succeeded: true,
         retry_after_secs: None,
+        saw_unknown_mergeable: false,
     };
     polling::rescope(&config, &outcome).await;
     let after: Vec<String> = config
@@ -1278,6 +1281,7 @@ async fn rescope_with_all_sources_failed_skips_cleanup() {
         polled: vec![],
         any_source_succeeded: false,
         retry_after_secs: None,
+        saw_unknown_mergeable: false,
     };
     polling::rescope(&config, &outcome).await;
     let after: Vec<String> = config
@@ -1853,4 +1857,76 @@ async fn tick_no_retry_after_when_no_source_supplied_a_hint() {
     let mut state = polling::TickState::default();
     let outcome = polling::tick_with_state(&config, &sources, &mut state).await;
     assert_eq!(outcome.retry_after_secs, None);
+}
+
+// ── poll_wake handle + UNKNOWN-mergeable retry ────────────────────────
+
+#[tokio::test]
+async fn poll_wake_fires_an_extra_tick_before_interval() {
+    // The long-lived loop sleeps in chunks AND selects against
+    // `config.poll_wake.notified()`. Pinging the Notify must make
+    // the next tick run before the regular cadence would have
+    // delivered it — that's the property Refresh / Subscribe lean
+    // on to deliver fresh data on demand.
+    let config = ServerConfig::in_memory();
+    let wake = config.poll_wake.clone();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let source: Box<dyn TaskSource> = Box::new(CountingSource {
+        name: "test".into(),
+        counter: counter.clone(),
+    });
+    // 10s interval — way longer than the test runs, so any extra
+    // tick beyond the eager first one must be wake-driven.
+    let handle = polling::spawn_with_sources(config, vec![source], Duration::from_secs(10));
+    // Yield until the first eager tick has run.
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let first = counter.load(Ordering::SeqCst);
+    assert!(
+        first >= 1,
+        "first eager tick should have landed (got {first})"
+    );
+    // Ping wake — second tick should land within ~chunk window.
+    wake.notify_one();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let after_wake = counter.load(Ordering::SeqCst);
+    handle.abort();
+    assert!(
+        after_wake > first,
+        "wake should have produced an extra tick (got {after_wake}, before {first})"
+    );
+}
+
+#[tokio::test]
+async fn tick_outcome_flags_unknown_mergeable_when_any_task_is_unknown() {
+    // A single Unknown PR in the result set must light up
+    // `saw_unknown_mergeable` so the spawn loop can schedule the
+    // quick re-poll that chases GitHub's lazy compute.
+    let config = ServerConfig::in_memory();
+    let mut t = make_task("o/r#unknown");
+    t.mergeable = pilot_core::Mergeable::Unknown;
+    let source: Box<dyn TaskSource> = Box::new(FakeSource {
+        name: "github".into(),
+        tasks: vec![t],
+    });
+    let mut state = polling::TickState::default();
+    let outcome = polling::tick_with_state(&config, &[source], &mut state).await;
+    assert!(
+        outcome.saw_unknown_mergeable,
+        "Unknown mergeable in result must set the retry flag"
+    );
+}
+
+#[tokio::test]
+async fn tick_outcome_does_not_flag_unknown_when_all_tasks_are_resolved() {
+    // Belt-and-braces: an all-resolved tick must NOT request the
+    // quick retry, otherwise we'd fire 12 polls/minute just because
+    // the regular cadence is 5s and the retry path stayed wired.
+    let config = ServerConfig::in_memory();
+    let source: Box<dyn TaskSource> = Box::new(FakeSource {
+        name: "github".into(),
+        tasks: vec![make_task("o/r#1"), make_task("o/r#2")],
+    });
+    let mut state = polling::TickState::default();
+    let outcome = polling::tick_with_state(&config, &[source], &mut state).await;
+    assert!(!outcome.saw_unknown_mergeable);
 }

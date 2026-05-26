@@ -589,6 +589,7 @@ pub async fn tick_with_state(
     // keep firing the same rate-limited query at the normal cadence
     // and watch the budget stay pegged.
     let mut max_retry_after_secs: Option<u64> = None;
+    let mut saw_unknown_mergeable = false;
     for source in sources {
         match source.fetch().await {
             Ok(tasks) => {
@@ -596,6 +597,9 @@ pub async fn tick_with_state(
                 let count = tasks.len();
                 tracing::info!(source = source.name(), count, "poll succeeded");
                 for task in tasks {
+                    if task.mergeable == pilot_core::Mergeable::Unknown {
+                        saw_unknown_mergeable = true;
+                    }
                     let key = WorkspaceKey::new(pilot_core::workspace_key_for(&task));
                     polled.push(key);
                     upsert(config, task).await;
@@ -659,6 +663,7 @@ pub async fn tick_with_state(
         polled,
         any_source_succeeded,
         retry_after_secs: max_retry_after_secs,
+        saw_unknown_mergeable,
     }
 }
 
@@ -678,6 +683,12 @@ pub struct TickOutcome {
     /// blindly tick-tick-ticking at the configured cadence and
     /// burning the same rate-limit error each time.
     pub retry_after_secs: Option<u64>,
+    /// True when at least one polled task carried
+    /// `Mergeable::Unknown` — GitHub returns that while it lazily
+    /// computes mergeability after a new commit. The loop schedules
+    /// one extra wake at +5s so the next poll picks up the real
+    /// value instead of waiting out the full interval.
+    pub saw_unknown_mergeable: bool,
 }
 
 /// Compare `polled` against the persisted workspace set; remove
@@ -817,26 +828,81 @@ pub async fn rescope_with_state(
 /// per-Finish-respawn pattern (which leaked one tokio task per
 /// edit) is gone.
 pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandle<()> {
+    // Two reasons this loop is more complicated than the old
+    // `tick → sleep(interval)` shape:
+    //
+    // 1. **Laptop sleep** — `tokio::time::sleep` uses the OS
+    //    monotonic clock, which on macOS pauses while the lid is
+    //    closed. A 60s sleep started before sleep finishes 60s
+    //    *after* wake, so polling effectively dies for whatever
+    //    wall-clock interval the laptop was asleep. We now sleep in
+    //    short chunks (≤5s) and compare wall-clock `Instant` since
+    //    last tick — the moment the wake delivers a chunk that took
+    //    longer than the interval, we tick.
+    //
+    // 2. **Active TUI waiting on fresh data** — `Command::Refresh`,
+    //    a new client connecting, or "GitHub returned `mergeable:
+    //    UNKNOWN`, please re-query in a few seconds" all want a
+    //    fast wake instead of waiting out the rest of a 60s sleep.
+    //    `config.poll_wake.notified()` is selected against the
+    //    chunked sleep — pinging the Notify forces an immediate
+    //    re-check of the wall-clock condition.
     tokio::spawn(async move {
+        use std::time::Instant;
+        const CHUNK: Duration = Duration::from_secs(5);
+        const UNKNOWN_RETRY: Duration = Duration::from_secs(5);
+
+        // `next_due` starts in the past so the first iteration ticks
+        // immediately (matches the previous loop's "first run is
+        // eager" behaviour).
+        let mut next_due: Instant = Instant::now();
         loop {
-            // First iteration also runs immediately — the loop
-            // structure differs from the previous `tokio::time::interval`
-            // tick-then-act dance because we want the sleep duration
-            // computed AFTER each tick (rate-limit hints override
-            // the normal cadence). Trade-off: tick-jitter accumulates
-            // over hours; rate-limit honoring is more important.
-            let retry_after = run_one_tick(&config).await;
-            let sleep_for = match retry_after {
+            // Wait until `next_due`, with the chunked-sleep + wake
+            // path baked in. If we're already past `next_due` (e.g.
+            // first iteration, or laptop just woke), skip straight
+            // through.
+            loop {
+                let now = Instant::now();
+                if now >= next_due {
+                    break;
+                }
+                let remaining = next_due - now;
+                let chunk = remaining.min(CHUNK);
+                tokio::select! {
+                    _ = tokio::time::sleep(chunk) => {}
+                    _ = config.poll_wake.notified() => {
+                        // Manual wake → tick now.
+                        break;
+                    }
+                }
+            }
+
+            let summary = run_one_tick(&config).await;
+
+            // Base cadence is `interval`. If a provider reported a
+            // rate-limit reset window, use whichever is longer.
+            let mut next_in = match summary.retry_after_secs {
                 Some(secs) => interval.max(Duration::from_secs(secs)),
                 None => interval,
             };
-            if retry_after.is_some() {
+            if summary.retry_after_secs.is_some() {
                 tracing::warn!(
                     "polling: backing off {}s before next tick (rate-limit hint)",
-                    sleep_for.as_secs(),
+                    next_in.as_secs(),
                 );
             }
-            tokio::time::sleep(sleep_for).await;
+            // GitHub returns `mergeable: UNKNOWN` while it computes
+            // mergeability in the background. The second query
+            // (issued ~5s later) almost always returns the real
+            // value, so override the cadence in that case.
+            if summary.saw_unknown_mergeable && UNKNOWN_RETRY < next_in {
+                tracing::info!(
+                    "polling: re-firing in {}s to chase UNKNOWN mergeable",
+                    UNKNOWN_RETRY.as_secs(),
+                );
+                next_in = UNKNOWN_RETRY;
+            }
+            next_due = Instant::now() + next_in;
         }
     })
 }
@@ -851,21 +917,44 @@ pub fn spawn_with_sources(
     sources: Vec<Box<dyn TaskSource>>,
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
+    // Mirrors `spawn`'s chunked-sleep + Notify-wake loop so the
+    // test entry covers the same control flow (laptop-sleep
+    // resilience + Refresh / Subscribe waking the next tick).
     tokio::spawn(async move {
         if sources.is_empty() {
             tracing::warn!("no provider sources configured — polling task is idle");
             return;
         }
+        use std::time::Instant;
+        let chunk = interval.min(Duration::from_secs(5));
+        const UNKNOWN_RETRY: Duration = Duration::from_secs(5);
         let mut state = TickState::default();
+        let mut next_due: Instant = Instant::now();
         loop {
+            loop {
+                let now = Instant::now();
+                if now >= next_due {
+                    break;
+                }
+                let remaining = next_due - now;
+                let nap = remaining.min(chunk);
+                tokio::select! {
+                    _ = tokio::time::sleep(nap) => {}
+                    _ = config.poll_wake.notified() => { break; }
+                }
+            }
             let outcome = tick_with_state(&config, &sources, &mut state).await;
             let retry_after = outcome.retry_after_secs;
+            let saw_unknown = outcome.saw_unknown_mergeable;
             rescope_with_state(&config, &outcome, &mut state).await;
-            let sleep_for = match retry_after {
+            let mut next_in = match retry_after {
                 Some(secs) => interval.max(Duration::from_secs(secs)),
                 None => interval,
             };
-            tokio::time::sleep(sleep_for).await;
+            if saw_unknown && UNKNOWN_RETRY < next_in {
+                next_in = UNKNOWN_RETRY;
+            }
+            next_due = Instant::now() + next_in;
         }
     })
 }
@@ -875,12 +964,23 @@ pub fn spawn_with_sources(
 /// long-lived spawn and the `Command::Refresh` immediate-tick path.
 /// Uses `config.poll_state` so prompt-dismissal memory crosses both
 /// paths.
-pub async fn run_one_tick(config: &ServerConfig) -> Option<u64> {
+/// Summary of one tick — what the driver loop needs to schedule
+/// the next one. `retry_after_secs` extends the next sleep when a
+/// provider reported a rate-limit reset window; `saw_unknown_mergeable`
+/// triggers a quick re-poll so GitHub's lazy mergeability landing
+/// doesn't have to wait out the full interval.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TickSummary {
+    pub retry_after_secs: Option<u64>,
+    pub saw_unknown_mergeable: bool,
+}
+
+pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
     let setup = match pilot_config::Config::load() {
         Ok(c) => crate::persisted_from_config(&c),
         Err(e) => {
             tracing::warn!("polling: config.yaml load failed: {e}");
-            return None;
+            return TickSummary::default();
         }
     };
     // Hold the lock across the entire tick — `sources_for` needs
@@ -907,14 +1007,18 @@ pub async fn run_one_tick(config: &ServerConfig) -> Option<u64> {
             polled: vec![],
             any_source_succeeded: true,
             retry_after_secs: None,
+            saw_unknown_mergeable: false,
         };
         rescope_with_state(config, &outcome, &mut state).await;
-        return None;
+        return TickSummary::default();
     }
     let outcome = tick_with_state(config, &sources, &mut state).await;
-    let retry_after = outcome.retry_after_secs;
+    let summary = TickSummary {
+        retry_after_secs: outcome.retry_after_secs,
+        saw_unknown_mergeable: outcome.saw_unknown_mergeable,
+    };
     rescope_with_state(config, &outcome, &mut state).await;
-    retry_after
+    summary
 }
 
 /// Merge `task` into the existing workspace for its workspace key

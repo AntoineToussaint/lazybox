@@ -13,7 +13,7 @@
 // style; the let-else→? rewrite makes affected sites less
 // readable. Each can be re-enabled in a focused cleanup pass.
 #![allow(
-    clippy::doc_list_item_without_indent,
+    clippy::doc_lazy_continuation,
     clippy::doc_overindented_list_items,
     clippy::empty_line_after_doc_comments,
     clippy::manual_strip,

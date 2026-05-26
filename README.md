@@ -137,12 +137,12 @@ logs, which go to `/tmp/pilot.log` (the TUI takes the screen).
 | `x` | Spawn Codex |
 | `u` | Spawn Cursor |
 | `w` | Work — spawns Claude with the right prompt for the row's state (fix CI / fix conflict / address comments / implement issue) |
-| `f` | Narrower work shortcut — only fires on CI-failing rows |
+| `f` | Cycle role filter: `all → author → reviewer → assignee → mentioned`. Chip on row 1 of the sidebar header; click to cycle too |
+| `o` | Cycle sort order: `recent → by-role → split` (split adds role-section headers between groups within each repo). Click the chip to cycle |
 | `m` | Mark **all** of this workspace's activity as read (bulk) |
 | `n` | New pre-PR workspace |
 | `e` | Open the worktree in your editor (Zed / VS Code / Cursor / …) |
-| `g` | Manual refresh — re-poll providers right now |
-| `/` | Search |
+| `Shift-R` | Manual refresh — re-poll providers right now |
 | `Shift-M` | Merge PR (opens a Confirm modal; arrows / Tab navigate Yes/No) |
 | `Shift-X` | Archive workspace (Confirm modal; kills running sessions if any) |
 
@@ -199,7 +199,7 @@ flip mouse capture off, drag, then `F8` to flip back.
 
 ## Architecture
 
-14 pilot crates in a client/daemon split (+ 2 vendored libghostty
+16 pilot crates in a client/daemon split (+ 2 vendored libghostty
 crates for the embedded terminal). The four core libraries (`core`,
 `auth`, `events`, `store`) never depend on each other. Providers
 plug in via two traits — see
@@ -217,10 +217,12 @@ crates/
   tui-term/        # Embedded terminal (libghostty-vt + portable-pty).
   gh-provider/     # GitHub PRs + Issues.
   linear-provider/ # Linear issues.
+  slack-provider/  # Slack mirror (per-workspace channels, Socket Mode).
   ipc/             # Wire types + transport (in-process channel + Unix socket).
   agents/          # Agent trait + Claude/Codex/Cursor/Generic builtins.
   llm-proxy/       # 127.0.0.1 HTTP pass-through that records token usage.
   server/          # Daemon: PTY lifecycle, polling, JSON API gateway.
+  tui-core/        # Pure UI primitives (Action catalog, key chords) shared with the TUI.
   tui/             # Realm-based TUI client. Hosts the `pilot` binary.
 ```
 
@@ -299,6 +301,23 @@ A ready-to-use Rust workspace cleanup script lives at
 `scripts/examples/rust-cleanup.sh` in this repo. Copy it somewhere
 on your machine and reference it from `repos.<owner/name>.scripts`
 to get `./_pilot/scripts/cleanup` inside every worktree.
+
+**Slack mirror** (optional): pilot can mirror workspace activity
+into per-workspace Slack channels and route `@pilot`-mentioned
+replies back into the running agent's stdin — useful for keeping an
+eye on long-running Claude/Codex sessions from your phone. Bot
+token (`xoxb-...`) and Socket Mode app token (`xapp-...`) live
+under `slack:`; see [`docs/slack-setup.md`](docs/slack-setup.md)
+for the Slack app manifest and [`docs/slack-testing.md`](docs/slack-testing.md)
+for the smoke test.
+
+```yaml
+slack:
+  bot_token: xoxb-...
+  app_token: xapp-...
+  anchor_channel: pilot
+  per_workspace_channels: true
+```
 
 State (workspace activity, read/unread, snooze, terminal scrollback
 ring) persists in `~/.pilot/v2/state.db` via SQLite.

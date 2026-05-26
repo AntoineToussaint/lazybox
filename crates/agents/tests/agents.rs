@@ -414,3 +414,36 @@ fn claude_standalone_does_not_fire_on_chat_context() {
         Some(AgentState::Active),
     );
 }
+
+#[test]
+fn claude_detects_question_via_last_line_ends_with_qmark() {
+    // Last-resort heuristic: if the most recent non-footer line ends
+    // with `?`, claude is most likely asking. Catches prompts that
+    // don't match any of the specific patterns (custom approval UIs,
+    // future claude prompt shapes, etc.).
+    let agent = Claude;
+    let buf = b"I checked the file.\nShall I delete the cache directory?";
+    assert_eq!(agent.detect_state(buf), Some(AgentState::Asking));
+}
+
+#[test]
+fn claude_question_heuristic_skips_quoted_continuation_lines() {
+    // Lines prefixed with `>` are claude's quote-block UI for echoing
+    // a prior prompt or a code-block continuation. They commonly end
+    // in `?` (because the prior prompt was a question) but the
+    // ACTUAL current state isn't Asking. The heuristic must skip
+    // them and look at the next non-quote line.
+    let agent = Claude;
+    let buf = b"> Why does this happen?\nReading the file to find out.";
+    assert_eq!(agent.detect_state(buf), Some(AgentState::Active));
+}
+
+#[test]
+fn claude_question_heuristic_stays_active_on_plain_streaming() {
+    // No question mark anywhere → Active. Belt-and-braces.
+    let agent = Claude;
+    assert_eq!(
+        agent.detect_state(b"Running tests...\nCompiling pilot-tui v0.1.0\nFinished in 4.2s"),
+        Some(AgentState::Active),
+    );
+}

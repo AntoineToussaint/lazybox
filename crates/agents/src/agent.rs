@@ -270,6 +270,30 @@ pub mod builtins {
             ) {
                 return Some(AgentState::Asking);
             }
+
+            // Cheap last-resort heuristic: if the most recent non-
+            // empty line ends with `?`, the model is most likely
+            // soliciting input. Tighter than scanning the whole
+            // buffer for `?` (false-positives on chat output that
+            // includes a question mid-paragraph); the *last* line is
+            // load-bearing because claude renders the prompt at the
+            // bottom of the screen. Skips lines that are just the
+            // footer hint (`Esc to cancel · …`) since those carry no
+            // question even on idle screens. Bound the search to the
+            // tail of the buffer (the last ~1 KB) so a flush full of
+            // chat output doesn't drag the heuristic back to a
+            // long-ago question.
+            let tail_start = s.len().saturating_sub(1024);
+            if let Some(last_non_empty) = s[tail_start..]
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !looks_like_footer_hint(l))
+                && last_non_empty.ends_with('?')
+            {
+                return Some(AgentState::Asking);
+            }
+
             Some(AgentState::Active)
         }
     }
@@ -333,6 +357,22 @@ pub mod builtins {
     /// need correctness for rendering (libghostty-vt does that) — just
     /// enough to make pattern matches survive cursor moves and color
     /// codes interleaved with the literal text.
+    /// Recognize lines that are claude's UI footer / hint strip.
+    /// The last-line-ends-with-? heuristic skips these because they
+    /// can appear unchanged on idle screens (e.g. `Esc to cancel`
+    /// after the user already answered the previous prompt) and
+    /// would otherwise look like a question.
+    fn looks_like_footer_hint(line: &str) -> bool {
+        let lower = line.to_lowercase();
+        lower.contains("esc to cancel")
+            || lower.contains("tab to amend")
+            || lower.contains("ctrl+")
+            || lower.contains("shift+")
+            || lower.starts_with("⎿")
+            || lower.starts_with(">")
+            || lower.starts_with("│")
+    }
+
     fn strip_ansi_lossy(bytes: &[u8]) -> String {
         // Filter out ANSI CSI / OSC escape sequences in-place, then
         // UTF-8-decode the remainder. Earlier this function pushed

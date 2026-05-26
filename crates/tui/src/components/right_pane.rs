@@ -1062,8 +1062,7 @@ impl RightPane {
         // hit-testing. Cards fully above / below the window are
         // dropped from the click index — they're not visible, no
         // click target.
-        let visible: Vec<Line<'static>> =
-            cards.into_iter().skip(scroll).take(window).collect();
+        let visible: Vec<Line<'static>> = cards.into_iter().skip(scroll).take(window).collect();
         for (i, start, end) in card_spans {
             let s = start as usize;
             let e = end as usize;

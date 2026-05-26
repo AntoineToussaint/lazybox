@@ -181,7 +181,7 @@ pub fn classify_work(
             }
         }
     }
-    if ws.gh_issues.first().is_some() {
+    if !ws.gh_issues.is_empty() {
         return Some(WorkPriority::ImplementIssue);
     }
     None

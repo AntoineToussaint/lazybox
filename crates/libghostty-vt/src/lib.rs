@@ -32,6 +32,20 @@
     reason = "underlying C API may return any error outside of expected and
     mitigated situations, and it is not feasible to document them all"
 )]
+// Cosmetic pedantic lints that landed after the bindings were
+// written. These don't change behavior and the suggested fixes are
+// either churn-only (must_use_candidate, elidable_lifetime_names)
+// or DANGEROUS in this codebase (ref_as_ptr — see render.rs;
+// `from_ref(&value)` returns the address of the LOCAL REFERENCE
+// param, not the value, which silently broke `set_dirty` once
+// already; the explicit `(value as *const T).cast()` form is the
+// only correct shape for our `set<T>` FFI wrapper).
+#![allow(
+    clippy::must_use_candidate,
+    clippy::elidable_lifetime_names,
+    clippy::ref_as_ptr,
+    reason = "see lib.rs comment above; ref_as_ptr in particular hides a real bug"
+)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub use libghostty_vt_sys as ffi;

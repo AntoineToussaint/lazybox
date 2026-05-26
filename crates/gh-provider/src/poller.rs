@@ -82,8 +82,10 @@ impl GhPoller {
 
         for (key, task) in &current {
             if self.first_poll {
-                self.producer
-                    .send(Event::new("github", EventKind::TaskUpdated(Box::new(task.clone()))));
+                self.producer.send(Event::new(
+                    "github",
+                    EventKind::TaskUpdated(Box::new(task.clone())),
+                ));
                 continue;
             }
 
@@ -170,13 +172,17 @@ impl GhPoller {
                 }
 
                 if changed || prev_task.updated_at != task.updated_at {
-                    self.producer
-                        .send(Event::new("github", EventKind::TaskUpdated(Box::new(task.clone()))));
+                    self.producer.send(Event::new(
+                        "github",
+                        EventKind::TaskUpdated(Box::new(task.clone())),
+                    ));
                 }
             } else {
                 debug!(task_id = %task.id, "New task");
-                self.producer
-                    .send(Event::new("github", EventKind::TaskUpdated(Box::new(task.clone()))));
+                self.producer.send(Event::new(
+                    "github",
+                    EventKind::TaskUpdated(Box::new(task.clone())),
+                ));
                 for activity in &task.recent_activity {
                     self.producer.send(Event::new(
                         "github",

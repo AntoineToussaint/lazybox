@@ -1989,9 +1989,7 @@ pub(crate) fn status_pill(task: &pilot_core::Task) -> Option<StatusPill> {
 /// **Open PRs in flight** return `(review_pill, ci_pill)` so the
 /// row shows both. Either slot may be `None` (e.g. CI not yet
 /// configured → ci=None; new PR with no review activity → review=None).
-pub(crate) fn status_pills(
-    task: &pilot_core::Task,
-) -> (Option<StatusPill>, Option<StatusPill>) {
+pub(crate) fn status_pills(task: &pilot_core::Task) -> (Option<StatusPill>, Option<StatusPill>) {
     use pilot_core::{CiStatus, ReviewStatus, TaskState};
     if let Some(lifecycle) = lifecycle_pill(task) {
         return (Some(lifecycle), None);

@@ -597,14 +597,14 @@ impl<T: TerminalAdapter> Model<T> {
                         self.redraw = true;
                     }
                     if focus == PaneFocus::Sidebar {
-                        // Header chips first — filter, then sort.
-                        // If neither hit, fall through to row select.
-                        if self.sidebar.click_to_cycle_filter(m.column, m.row)
+                        // Try the header chips first (filter, then
+                        // sort); if neither hit, fall through to row
+                        // selection. All three outcomes update the
+                        // same state, so one consolidated branch.
+                        let handled = self.sidebar.click_to_cycle_filter(m.column, m.row)
                             || self.sidebar.click_to_cycle_sort(m.column, m.row)
-                        {
-                            self.sync_panes();
-                            self.redraw = true;
-                        } else if self.sidebar.click_to_select(sidebar_rect, m.row) {
+                            || self.sidebar.click_to_select(sidebar_rect, m.row);
+                        if handled {
                             self.sync_panes();
                             self.redraw = true;
                         }

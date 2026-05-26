@@ -1164,24 +1164,24 @@ mod role_filter_tests {
         }
         sb.cycle_sort_mode();
         sb.cycle_sort_mode();
-        // Cursor lands somewhere; just confirm `selected_session_key`
-        // never returns a role header value — that's what
-        // `cursor_on_repo_header` already does for repo headers.
-        // The implementation returns None for both header types.
-        for _ in 0..sb.visible.len() {
-            // Cycle the cursor through every row. None of them should
-            // make `selected_session_key` return Some(_) for a role
-            // header position — that's the contract this test guards.
-            if matches!(sb.visible.get(sb.cursor()), Some(VisibleRow::RoleHeader(_))) {
+        // Contract: every RoleHeader row resolves to `None` from
+        // `selected_session_key` — same skip-the-header semantics
+        // RepoHeader already provides. Walk the entire visible list
+        // and check each header row directly (no cursor mutation
+        // needed; the predicate is per-row).
+        let visible_snapshot: Vec<VisibleRow> = sb.visible.to_vec();
+        for (idx, row) in visible_snapshot.iter().enumerate() {
+            if matches!(row, VisibleRow::RoleHeader(_)) {
+                // The accessor pulls from `self.cursor`, so park the
+                // cursor on this row and assert. The cursor mutation
+                // doesn't go through `move_cursor_by` — we're poking
+                // private state to exercise the public predicate.
+                sb.cursor = idx;
                 assert!(
                     sb.selected_session_key().is_none(),
-                    "RoleHeader cursor must not resolve to a session key"
+                    "RoleHeader cursor must not resolve to a session key (row {idx})"
                 );
             }
-            // Step forward; use the public method by re-invoking via
-            // recompute on a no-op (we just want to advance the
-            // cursor by some means visible from the test surface).
-            break;
         }
     }
 

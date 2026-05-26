@@ -1,9 +1,8 @@
 ---
 source: crates/tui/tests/snapshots.rs
-assertion_line: 115
 expression: rendered
 ---
  PILOT  0  [7d]
- / filter (needs:reply ci:failed …)
+ f [all]  o [recent]
 
  ────────────────────────────────────

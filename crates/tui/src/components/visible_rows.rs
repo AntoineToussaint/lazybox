@@ -13,7 +13,9 @@
 //! preservation stays on `Sidebar` (it reads/writes `self.cursor`);
 //! this function is purely the rebuild half.
 
-use crate::components::sidebar::{Mailbox, RepoSummary, VisibleRow, mailbox_membership};
+use crate::components::sidebar::{
+    Mailbox, RepoSummary, RoleFilter, SortMode, VisibleRow, mailbox_membership, role_rank,
+};
 use pilot_core::{Project, ProjectKey, SessionKey, Workspace};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -30,6 +32,13 @@ pub struct ComputeOutcome {
 pub struct ComputeInputs<'a> {
     pub workspaces: &'a HashMap<SessionKey, Workspace>,
     pub mailbox: Mailbox,
+    /// Quick role-based filter layered on top of the mailbox. `All`
+    /// (default) is the no-op identity. See `RoleFilter::accepts`.
+    pub role_filter: RoleFilter,
+    /// How to order workspaces within each repo group. `Default`
+    /// (recency) is the legacy behavior; `ByRole` / `ByRoleSplit`
+    /// promote Author rows then Reviewer etc. See [`SortMode`].
+    pub sort_mode: SortMode,
     pub show_inactive_in_inbox: bool,
     /// Projects mirrored from the daemon's project table — plus
     /// synthetic entries for the user's subscribed scopes (the model
@@ -58,6 +67,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         .filter(|(_, w)| {
             mailbox_membership(w, input.mailbox, input.now, input.show_inactive_in_inbox)
         })
+        .filter(|(_, w)| input.role_filter.accepts(w.primary_task().map(|t| t.role)))
         .collect();
 
     // Step 2: bucket by project. A workspace's parent project is
@@ -74,8 +84,12 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
             .push((k, w));
     }
 
-    // Step 3: sort each bucket by primary task's updated_at desc.
-    // Ties broken by SessionKey for a stable order across renders.
+    // Step 3: sort each bucket. `Default` keeps the legacy recency
+    // order. `ByRole*` promotes Author rows, then Reviewer, then
+    // Assignee, then Mentioned — with recency as the tiebreaker
+    // within a role so the most recently updated PR-you-authored is
+    // still on top.
+    let role_first = matches!(input.sort_mode, SortMode::ByRole | SortMode::ByRoleSplit);
     for rows in by_repo.values_mut() {
         rows.sort_by(|(ka, a), (kb, b)| {
             let a_ts = a
@@ -86,7 +100,15 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
                 .primary_task()
                 .map(|t| t.updated_at)
                 .unwrap_or(b.created_at);
-            b_ts.cmp(&a_ts).then_with(|| ka.as_str().cmp(kb.as_str()))
+            let recency = b_ts.cmp(&a_ts);
+            let tie = ka.as_str().cmp(kb.as_str());
+            if role_first {
+                let a_rank = role_rank(a.primary_task().map(|t| t.role));
+                let b_rank = role_rank(b.primary_task().map(|t| t.role));
+                a_rank.cmp(&b_rank).then(recency).then(tie)
+            } else {
+                recency.then(tie)
+            }
         });
     }
 
@@ -118,7 +140,25 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
                 }
             }
             if !input.collapsed_repos.contains(repo) {
+                // ByRoleSplit interleaves a `RoleHeader` whenever the
+                // role changes within the already-sorted bucket. The
+                // rows are sorted by role rank above (Step 3), so a
+                // single linear pass detects boundaries cleanly. In
+                // other sort modes the role header is suppressed.
+                let split = input.sort_mode == SortMode::ByRoleSplit;
+                let mut prev_role: Option<Option<pilot_core::TaskRole>> = None;
                 for (k, w) in rows {
+                    let cur_role = w.primary_task().map(|t| t.role);
+                    if split && prev_role != Some(cur_role) {
+                        if let Some(role) = cur_role {
+                            visible.push(VisibleRow::RoleHeader(role));
+                        }
+                        // (We deliberately skip emitting a header for
+                        // the "no primary task" bucket — `(no role)`
+                        // is rarely populated and adds visual noise
+                        // for the common case.)
+                        prev_role = Some(cur_role);
+                    }
                     visible.push(VisibleRow::Workspace((*k).clone()));
                     // Session sub-rows only when 2+ sessions —
                     // showing the single-session case would be
@@ -233,6 +273,8 @@ mod tests {
         ComputeInputs {
             workspaces,
             mailbox: Mailbox::Inbox,
+            role_filter: RoleFilter::All,
+            sort_mode: SortMode::Default,
             show_inactive_in_inbox: false,
             projects,
             collapsed_repos: collapsed,

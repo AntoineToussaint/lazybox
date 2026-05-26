@@ -72,24 +72,80 @@ impl Sidebar {
         let row0 = Rect::new(area.x + l_pad, area.y, inner_width, 1.min(area.height));
         frame.render_widget(Paragraph::new(Line::from(header_spans)), row0);
 
-        // Row 1 — filter hint.
+        // Row 1 — role filter + sort chips, both clickable. Each
+        // chip is dim while at its default, accent-bold when the
+        // user has selected a non-default value, so the row stays
+        // quiet by default but visually shouts when a filter is on.
         if area.height >= 2 {
             let row1 = Rect::new(area.x + l_pad, area.y + 1, inner_width, 1);
+
+            let filter_active = self.role_filter != RoleFilter::All;
+            let sort_active = self.sort_mode != SortMode::Default;
+            let active_style = Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD);
+            let dim_style = Style::default().fg(theme.text_dim);
+            let key_style = active_style;
+
+            let filter_prefix = "f ";
+            let filter_chip = format!("[{}]", self.role_filter.chip_label());
+            let sep = "  ";
+            let sort_prefix = "o ";
+            let sort_chip = format!("[{}]", self.sort_mode.chip_label());
+
+            let filter_prefix_cells = visual_width(filter_prefix) as u16;
+            let filter_chip_cells = visual_width(&filter_chip) as u16;
+            let sep_cells = visual_width(sep) as u16;
+            let sort_prefix_cells = visual_width(sort_prefix) as u16;
+            let sort_chip_cells = visual_width(&sort_chip) as u16;
+
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
+                    Span::styled(filter_prefix, key_style),
                     Span::styled(
-                        "/ ",
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
+                        filter_chip.clone(),
+                        if filter_active {
+                            active_style
+                        } else {
+                            dim_style
+                        },
                     ),
+                    Span::raw(sep),
+                    Span::styled(sort_prefix, key_style),
                     Span::styled(
-                        "filter (needs:reply ci:failed …)",
-                        Style::default().fg(theme.text_dim),
+                        sort_chip.clone(),
+                        if sort_active { active_style } else { dim_style },
                     ),
                 ])),
                 row1,
             );
+
+            // Record clickable rects. Filter zone = `f ` + chip;
+            // sort zone = `o ` + chip. The intervening separator is
+            // a dead zone — clicks there are ignored.
+            let filter_w = (filter_prefix_cells + filter_chip_cells).min(row1.width);
+            self.filter_chip_rect = Some(Rect {
+                x: row1.x,
+                y: row1.y,
+                width: filter_w,
+                height: 1,
+            });
+            let sort_x = row1.x + filter_w + sep_cells;
+            let remaining = row1.width.saturating_sub(filter_w + sep_cells);
+            let sort_w = (sort_prefix_cells + sort_chip_cells).min(remaining);
+            self.sort_chip_rect = if sort_w > 0 {
+                Some(Rect {
+                    x: sort_x,
+                    y: row1.y,
+                    width: sort_w,
+                    height: 1,
+                })
+            } else {
+                None
+            };
+        } else {
+            self.filter_chip_rect = None;
+            self.sort_chip_rect = None;
         }
 
         // Row 2 — stats summary, only when there's something to summarize.
@@ -222,6 +278,53 @@ impl Sidebar {
                         }
                     }
                     let _ = row_budget;
+                    Line::from(spans)
+                }
+                VisibleRow::RoleHeader(role) => {
+                    // Indented role section header, sitting between
+                    // the repo header and the workspace rows of that
+                    // role. Borrowed visual from the role badge so
+                    // the colour matches the per-row letter.
+                    let (letter, color) =
+                        crate::components::sidebar::pills::role_badge(theme, *role);
+                    let is_cursor = i == self.cursor;
+                    let row_bg = if is_cursor && focused {
+                        Some(theme.row_focused())
+                    } else if is_cursor {
+                        Some(theme.row_unfocused())
+                    } else {
+                        None
+                    };
+                    let caret = if is_cursor { "▸ " } else { "  " };
+                    let label = match role {
+                        pilot_core::TaskRole::Author => "author",
+                        pilot_core::TaskRole::Reviewer => "reviewer",
+                        pilot_core::TaskRole::Assignee => "assignee",
+                        pilot_core::TaskRole::Mentioned => "mentioned",
+                    };
+                    let mut spans: Vec<Span> = vec![
+                        Span::styled(
+                            caret.to_string(),
+                            row_bg.unwrap_or_default().fg(theme.text_dim),
+                        ),
+                        // Two-space indent so role headers tuck under
+                        // their parent repo header visually.
+                        Span::raw("  "),
+                        Span::styled(format!("{letter} "), row_bg.unwrap_or_default().fg(color)),
+                        Span::styled(
+                            label,
+                            row_bg
+                                .unwrap_or_default()
+                                .fg(color)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ];
+                    if let Some(bg) = row_bg {
+                        let used = caret.chars().count() + 2 + 2 + label.chars().count();
+                        if used < row_budget {
+                            spans.push(Span::styled(" ".repeat(row_budget - used), bg));
+                        }
+                    }
                     Line::from(spans)
                 }
                 VisibleRow::Workspace(key) => {

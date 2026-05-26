@@ -243,6 +243,17 @@ impl Sidebar {
         self.inner.click_to_select(area, click_row)
     }
 
+    /// Click the role-filter chip in the sidebar header → cycle it.
+    /// Returns true on a hit (caller should mark a redraw).
+    pub fn click_to_cycle_filter(&mut self, col: u16, row: u16) -> bool {
+        self.inner.click_to_cycle_filter(col, row)
+    }
+
+    /// Click the sort chip in the sidebar header → cycle it.
+    pub fn click_to_cycle_sort(&mut self, col: u16, row: u16) -> bool {
+        self.inner.click_to_cycle_sort(col, row)
+    }
+
     /// Forward to the inner pane's detach spec, if any.
     pub fn detachable(&self) -> Option<crate::pane::DetachSpec> {
         self.inner.detachable()

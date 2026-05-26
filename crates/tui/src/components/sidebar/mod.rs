@@ -67,6 +67,105 @@ pub enum Mailbox {
     Snoozed,
 }
 
+/// Quick role-based filter layered on top of the mailbox. Default
+/// `All` shows everything the mailbox would normally show; the other
+/// variants drop workspaces whose primary task carries a different
+/// `TaskRole`. Cycled with `f` in the sidebar. Workspaces with no
+/// primary task fail any non-`All` filter (role lives on the task,
+/// so there's nothing to compare).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RoleFilter {
+    #[default]
+    All,
+    Author,
+    Reviewer,
+    Assignee,
+    Mentioned,
+}
+
+/// How the sidebar orders workspaces within each repo group.
+/// Default is recency (`updated_at desc`); `ByRole` puts authored
+/// PRs first then reviews-requested etc.; `ByRoleSplit` keeps the
+/// same order but interleaves role-section headers between groups.
+/// Cycled via `o` in the sidebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortMode {
+    #[default]
+    Default,
+    ByRole,
+    ByRoleSplit,
+}
+
+impl SortMode {
+    pub fn next(self) -> Self {
+        match self {
+            SortMode::Default => SortMode::ByRole,
+            SortMode::ByRole => SortMode::ByRoleSplit,
+            SortMode::ByRoleSplit => SortMode::Default,
+        }
+    }
+
+    pub fn chip_label(self) -> &'static str {
+        match self {
+            SortMode::Default => "recent",
+            SortMode::ByRole => "by-role",
+            SortMode::ByRoleSplit => "split",
+        }
+    }
+}
+
+/// Sort key for the `ByRole*` modes. Author first (your own PRs are
+/// usually the most actionable), then Reviewer (someone's waiting on
+/// you), then Assignee, then Mentioned. Lower number sorts first.
+pub fn role_rank(role: Option<pilot_core::TaskRole>) -> u8 {
+    match role {
+        Some(pilot_core::TaskRole::Author) => 0,
+        Some(pilot_core::TaskRole::Reviewer) => 1,
+        Some(pilot_core::TaskRole::Assignee) => 2,
+        Some(pilot_core::TaskRole::Mentioned) => 3,
+        None => 4,
+    }
+}
+
+impl RoleFilter {
+    /// Cycle order matches the `f`-key rotation.
+    pub fn next(self) -> Self {
+        match self {
+            RoleFilter::All => RoleFilter::Author,
+            RoleFilter::Author => RoleFilter::Reviewer,
+            RoleFilter::Reviewer => RoleFilter::Assignee,
+            RoleFilter::Assignee => RoleFilter::Mentioned,
+            RoleFilter::Mentioned => RoleFilter::All,
+        }
+    }
+
+    /// Short label for the title chip.
+    pub fn chip_label(self) -> &'static str {
+        match self {
+            RoleFilter::All => "all",
+            RoleFilter::Author => "author",
+            RoleFilter::Reviewer => "reviewer",
+            RoleFilter::Assignee => "assignee",
+            RoleFilter::Mentioned => "mentioned",
+        }
+    }
+
+    /// Decide whether a workspace passes this filter. `None` means
+    /// "no primary task" — only `All` accepts it.
+    pub fn accepts(self, role: Option<pilot_core::TaskRole>) -> bool {
+        let Some(role) = role else {
+            return matches!(self, RoleFilter::All);
+        };
+        match self {
+            RoleFilter::All => true,
+            RoleFilter::Author => role == pilot_core::TaskRole::Author,
+            RoleFilter::Reviewer => role == pilot_core::TaskRole::Reviewer,
+            RoleFilter::Assignee => role == pilot_core::TaskRole::Assignee,
+            RoleFilter::Mentioned => role == pilot_core::TaskRole::Mentioned,
+        }
+    }
+}
+
 /// One row in the rendered sidebar list. The visual model is a
 /// three-level tree:
 ///
@@ -92,6 +191,13 @@ pub enum VisibleRow {
     /// (`"owner/name"` for GitHub, the project key for Linear, or
     /// `"(no repo)"` for unattached workspaces).
     RepoHeader(String),
+    /// Role group header — only emitted in `SortMode::ByRoleSplit`,
+    /// nested under each repo header. Splits the workspaces of one
+    /// repo into Author / Reviewer / Assignee / Mentioned sections
+    /// so the visual hierarchy is `repo > role > workspace`.
+    /// Non-selectable like `RepoHeader`; the cursor skips past on
+    /// j/k just like any other header.
+    RoleHeader(pilot_core::TaskRole),
     /// A workspace under whichever repo header most recently appeared.
     Workspace(SessionKey),
     /// A session sub-row (workspace key + session id). Only emitted
@@ -137,6 +243,13 @@ pub struct Sidebar {
     /// j/k handlers maintain that invariant.
     cursor: usize,
     mailbox: Mailbox,
+    /// Live filter on top of the mailbox. Cycles via `f`. Default
+    /// `All` is a no-op; the other variants restrict the visible
+    /// list to workspaces whose primary task role matches.
+    role_filter: RoleFilter,
+    /// Sort order within each repo group. Default is recency; `o`
+    /// cycles to `ByRole` and `ByRoleSplit`. See [`SortMode`].
+    sort_mode: SortMode,
     /// Two-press confirm latches keyed by trigger. Registers
     /// entries for `Shift-X` (kill) + `Shift-Z` (long snooze).
     /// Disarms every non-matching entry on each keypress, so
@@ -195,6 +308,13 @@ pub struct Sidebar {
     /// `Workspace.sessions[i].state` (which gets clobbered every
     /// poll cycle when the daemon re-broadcasts `WorkspaceUpserted`).
     agents_asking: std::collections::HashSet<SessionKey>,
+    /// Screen rect of the role-filter chip in row 1 of the header,
+    /// stashed by `render` so mouse clicks can cycle it without
+    /// re-deriving the layout. `None` before the first render.
+    filter_chip_rect: Option<Rect>,
+    /// Same idea for the sort chip on row 1, sitting to the right of
+    /// the filter chip. Click cycles the sort mode.
+    sort_chip_rect: Option<Rect>,
 }
 
 /// A queued user-facing notification that the outer (IO-aware) layer
@@ -224,6 +344,8 @@ impl Sidebar {
             repo_summaries: BTreeMap::new(),
             cursor: 0,
             mailbox: Mailbox::Inbox,
+            role_filter: RoleFilter::default(),
+            sort_mode: SortMode::default(),
             latches: {
                 let mut s: crate::latch_set::LatchSet<SessionKey> =
                     crate::latch_set::LatchSet::new();
@@ -241,6 +363,8 @@ impl Sidebar {
             pending_notifications: Vec::new(),
             pending_asking_notices: Vec::new(),
             agents_asking: std::collections::HashSet::new(),
+            filter_chip_rect: None,
+            sort_chip_rect: None,
         }
     }
 
@@ -394,7 +518,7 @@ impl Sidebar {
         match self.visible.get(self.cursor)? {
             VisibleRow::Workspace(k) => Some(k),
             VisibleRow::Session { workspace, .. } => Some(workspace),
-            VisibleRow::RepoHeader(_) => None,
+            VisibleRow::RepoHeader(_) | VisibleRow::RoleHeader(_) => None,
         }
     }
 
@@ -474,6 +598,32 @@ impl Sidebar {
     /// landed on a selectable row (not a repo header / outside the
     /// content area). Header rows + clicks above the content area
     /// are ignored.
+    /// Click on the role-filter chip cycles it — same effect as
+    /// pressing `f`. Returns true on a hit so the caller knows the
+    /// click was consumed and a redraw is needed.
+    pub fn click_to_cycle_filter(&mut self, col: u16, row: u16) -> bool {
+        let Some(rect) = self.filter_chip_rect else {
+            return false;
+        };
+        if row != rect.y || col < rect.x || col >= rect.x + rect.width {
+            return false;
+        }
+        self.cycle_role_filter();
+        true
+    }
+
+    /// Click on the sort chip cycles it — same effect as `o`.
+    pub fn click_to_cycle_sort(&mut self, col: u16, row: u16) -> bool {
+        let Some(rect) = self.sort_chip_rect else {
+            return false;
+        };
+        if row != rect.y || col < rect.x || col >= rect.x + rect.width {
+            return false;
+        }
+        self.cycle_sort_mode();
+        true
+    }
+
     pub fn click_to_select(&mut self, area: Rect, click_row: u16) -> bool {
         // Mirror the constants from `render`.
         const HEADER_HEIGHT: u16 = 5;
@@ -566,6 +716,35 @@ impl Sidebar {
             .and_then(|k| self.workspaces.get(k))
     }
 
+    pub fn role_filter(&self) -> RoleFilter {
+        self.role_filter
+    }
+
+    pub fn sort_mode(&self) -> SortMode {
+        self.sort_mode
+    }
+
+    /// Cycle the sort mode (`Default → ByRole → ByRoleSplit →
+    /// Default`) and rebuild. Cursor resets — re-sorted lists put a
+    /// different row at the top, and the user re-anchors visually.
+    pub fn cycle_sort_mode(&mut self) -> SortMode {
+        self.sort_mode = self.sort_mode.next();
+        self.reset_cursor_and_recompute();
+        self.sort_mode
+    }
+
+    /// Cycle the role filter (`All → Author → … → All`) and rebuild
+    /// the visible list. Returns the new filter so the caller can
+    /// surface a footer notice if it wants. Cursor is reset because
+    /// the row the user was parked on may have just been filtered
+    /// out — landing on the new top is less surprising than landing
+    /// off-screen.
+    pub fn cycle_role_filter(&mut self) -> RoleFilter {
+        self.role_filter = self.role_filter.next();
+        self.reset_cursor_and_recompute();
+        self.role_filter
+    }
+
     pub fn mailbox(&self) -> Mailbox {
         self.mailbox
     }
@@ -622,6 +801,23 @@ impl Sidebar {
                 .values()
                 .find(|p| &p.name == name)
                 .map(|p| p.key.clone()),
+            // Role headers don't belong to a single project — they
+            // partition workspaces within a project, so the parent
+            // project is whichever RepoHeader came above. Walk back.
+            VisibleRow::RoleHeader(_) => {
+                self.visible
+                    .iter()
+                    .take(self.cursor)
+                    .rev()
+                    .find_map(|r| match r {
+                        VisibleRow::RepoHeader(name) => self
+                            .projects
+                            .values()
+                            .find(|p| &p.name == name)
+                            .map(|p| p.key.clone()),
+                        _ => None,
+                    })
+            }
         }
     }
 
@@ -757,7 +953,9 @@ impl Sidebar {
     pub fn toggle_repo_at_cursor(&mut self) -> bool {
         let repo = match self.visible.get(self.cursor).cloned() {
             Some(VisibleRow::RepoHeader(name)) => Some(name),
-            Some(VisibleRow::Workspace(_)) | Some(VisibleRow::Session { .. }) => self
+            Some(VisibleRow::Workspace(_))
+            | Some(VisibleRow::Session { .. })
+            | Some(VisibleRow::RoleHeader(_)) => self
                 .visible
                 .iter()
                 .take(self.cursor + 1)
@@ -851,6 +1049,8 @@ impl Sidebar {
             crate::components::visible_rows::ComputeInputs {
                 workspaces: &self.workspaces,
                 mailbox: self.mailbox,
+                role_filter: self.role_filter,
+                sort_mode: self.sort_mode,
                 show_inactive_in_inbox: self.show_inactive_in_inbox,
                 projects: &self.projects,
                 collapsed_repos: &self.collapsed_repos,
@@ -887,7 +1087,7 @@ impl Sidebar {
                         workspace,
                         session_id,
                     } => *workspace == key && Some(*session_id) == prior_session,
-                    VisibleRow::RepoHeader(_) => false,
+                    VisibleRow::RepoHeader(_) | VisibleRow::RoleHeader(_) => false,
                 };
                 if matched {
                     self.cursor = i;
@@ -1053,8 +1253,12 @@ impl Sidebar {
                 label: "mark all read",
             },
             Binding {
-                keys: "/",
-                label: "search",
+                keys: "f",
+                label: "filter role",
+            },
+            Binding {
+                keys: "o",
+                label: "order/sort",
             },
         ]
     }
@@ -1081,7 +1285,7 @@ impl Sidebar {
                 layout: "workspace",
                 args: vec!["--workspace".to_string(), k.as_str().to_string()],
             }),
-            VisibleRow::RepoHeader(_) => None,
+            VisibleRow::RepoHeader(_) | VisibleRow::RoleHeader(_) => None,
         }
     }
 }

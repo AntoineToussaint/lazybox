@@ -596,11 +596,18 @@ impl<T: TerminalAdapter> Model<T> {
                         self.set_focus_attr();
                         self.redraw = true;
                     }
-                    if focus == PaneFocus::Sidebar
-                        && self.sidebar.click_to_select(sidebar_rect, m.row)
-                    {
-                        self.sync_panes();
-                        self.redraw = true;
+                    if focus == PaneFocus::Sidebar {
+                        // Header chips first — filter, then sort.
+                        // If neither hit, fall through to row select.
+                        if self.sidebar.click_to_cycle_filter(m.column, m.row)
+                            || self.sidebar.click_to_cycle_sort(m.column, m.row)
+                        {
+                            self.sync_panes();
+                            self.redraw = true;
+                        } else if self.sidebar.click_to_select(sidebar_rect, m.row) {
+                            self.sync_panes();
+                            self.redraw = true;
+                        }
                     }
                     // Pilot-side selection start: any left-click that
                     // landed in the terminal pane. Recording start ==

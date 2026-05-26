@@ -216,6 +216,26 @@ impl Sidebar {
                 PaneOutcome::Consumed
             }
 
+            // ── Role filter cycle ─────────────────────────────────────
+            // `f` cycles the role filter (All → Author → Reviewer →
+            // Assignee → Mentioned → All). Renders as a chip on row 1
+            // of the sidebar header. Cursor resets — the row the user
+            // was on may have been filtered out, and landing at the
+            // new top is less surprising than vanishing off-screen.
+            (KeyCode::Char('f'), KeyModifiers::NONE) => {
+                self.cycle_role_filter();
+                PaneOutcome::Consumed
+            }
+
+            // `o` cycles sort order (Default → ByRole → ByRoleSplit →
+            // Default). Default is recency; ByRole groups Author /
+            // Reviewer / Assignee / Mentioned within each repo;
+            // ByRoleSplit adds role section headers between groups.
+            (KeyCode::Char('o'), KeyModifiers::NONE) => {
+                self.cycle_sort_mode();
+                PaneOutcome::Consumed
+            }
+
             // ── Mailbox cycle (Inbox → Inactive → Snoozed → Inbox)
             (KeyCode::Char('S'), m) if m.contains(KeyModifiers::SHIFT) => {
                 self.mailbox = match self.mailbox {

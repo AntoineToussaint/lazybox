@@ -18,7 +18,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GHOSTTY_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=HOST");
-    println!("cargo:rerun-if-changed=crates/libghostty-vt-sys/build.rs");
+    // rerun-if-changed paths are resolved relative to this package's root
+    // (crates/libghostty-vt-sys/), not the workspace root. build.rs sits at
+    // that root, so watch it by bare name — a workspace-relative path here
+    // points at a nonexistent file, which cargo treats as perpetually stale
+    // and reruns the script (and the whole downstream chain) every build.
+    println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
     let target = env::var("TARGET").expect("TARGET must be set");

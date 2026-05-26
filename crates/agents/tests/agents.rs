@@ -447,3 +447,29 @@ fn claude_question_heuristic_stays_active_on_plain_streaming() {
         Some(AgentState::Active),
     );
 }
+
+#[test]
+fn claude_detect_state_handles_multibyte_at_tail_boundary() {
+    // Regression: the `?`-heuristic's `s[tail_start..]` was raw-byte
+    // slicing, which panicked when `tail_start` landed inside a
+    // multi-byte UTF-8 codepoint (`─` is 3 bytes; claude renders
+    // it heavily for box-drawing borders). The panic killed the
+    // per-terminal pump task and the user's host terminal got
+    // stuck in raw mode with the alt screen still up.
+    //
+    // Construct a buffer where the natural 1024-byte tail boundary
+    // hits the middle of a multi-byte character.
+    let agent = Claude;
+    let mut buf = Vec::new();
+    // 1000 bytes of padding + 30 box-drawing dashes (90 bytes of
+    // UTF-8) → ~1090 bytes total; the tail at len-1024 must land
+    // inside one of the `─` sequences.
+    buf.extend(std::iter::repeat(b'.').take(1000));
+    for _ in 0..30 {
+        buf.extend_from_slice("─".as_bytes());
+    }
+    buf.extend_from_slice(b"\nclean line.");
+    // Should not panic. Result is whatever — we only care about
+    // not crashing inside detect_state.
+    let _ = agent.detect_state(&buf);
+}

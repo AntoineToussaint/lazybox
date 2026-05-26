@@ -488,8 +488,54 @@ impl<T: TerminalAdapter> Model<T> {
     }
 }
 
+/// Best-effort restore of the host terminal — disable raw mode,
+/// leave the alt screen, drop mouse capture + bracketed paste +
+/// kitty keyboard flags. Idempotent (each crossterm call no-ops
+/// when the state isn't active). Called both on clean shutdown and
+/// from the panic hook so a crash doesn't strand the user's
+/// terminal in raw mode with mouse-tracking on, where every input
+/// becomes escape sequences pasted into the prompt.
+fn restore_terminal() {
+    use crossterm::event::{
+        DisableBracketedPaste, DisableMouseCapture, PopKeyboardEnhancementFlags,
+    };
+    use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
+    let mut out = std::io::stdout();
+    let _ = crossterm::execute!(
+        out,
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+    );
+    let _ = disable_raw_mode();
+    // Flush so the host terminal sees the resets before the
+    // panic message (or shell prompt) takes over the screen.
+    use std::io::Write;
+    let _ = out.flush();
+}
+
+/// Install a panic hook that restores the terminal before falling
+/// through to the default panic printer. Without this, a panic
+/// during the TUI run leaves the host stuck in raw mode + the
+/// alt screen, with the panic message painted on top of the still-
+/// live mouse-tracking escape stream — the screenshot the user
+/// just shared. Idempotent across multiple Model::new calls.
+fn install_panic_hook() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore_terminal();
+            prev(info);
+        }));
+    });
+}
+
 impl Model<CrosstermTerminalAdapter> {
     pub fn new(client: Client) -> anyhow::Result<Self> {
+        install_panic_hook();
         let mut terminal = CrosstermTerminalAdapter::new()?;
         terminal.enable_raw_mode()?;
         terminal.enter_alternate_screen()?;

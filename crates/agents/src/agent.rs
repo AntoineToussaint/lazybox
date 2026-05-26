@@ -283,7 +283,19 @@ pub mod builtins {
             // tail of the buffer (the last ~1 KB) so a flush full of
             // chat output doesn't drag the heuristic back to a
             // long-ago question.
-            let tail_start = s.len().saturating_sub(1024);
+            // `tail_start` rounded UP to the next char boundary so
+            // we never slice into the middle of a multi-byte UTF-8
+            // sequence — claude renders Unicode glyphs (box-drawing
+            // `─`, the choice arrow `❯`, the middle-dot separator
+            // `·`) that span 2-3 bytes each. Slicing at a raw byte
+            // index inside one of those was the source of a
+            // `byte index N is not a char boundary` panic that
+            // killed the per-terminal pump task and silently
+            // disabled state detection until daemon restart.
+            let mut tail_start = s.len().saturating_sub(1024);
+            while tail_start < s.len() && !s.is_char_boundary(tail_start) {
+                tail_start += 1;
+            }
             if let Some(last_non_empty) = s[tail_start..]
                 .lines()
                 .rev()

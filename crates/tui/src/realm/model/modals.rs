@@ -131,9 +131,12 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
-    /// Mount the "add assignees" multi-select picker for the
-    /// workspace's PR or issue. Symmetric with
-    /// `mount_request_reviewers`.
+    /// Mount the "assignees" multi-select picker for the workspace's
+    /// PR or issue. Pre-checks the currently-assigned logins so this
+    /// is a "change assignees" UX (toggle to add / untoggle to
+    /// remove) rather than an additive picker — submitting fires
+    /// `Command::SetAssignees`, which diffs against the persisted
+    /// task and runs add + remove mutations as needed.
     pub(crate) fn mount_add_assignees(&mut self, workspace_key: pilot_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
         use crate::realm::components::footer::{Notice, NoticeSeverity};
@@ -141,7 +144,10 @@ impl<T: TerminalAdapter> Model<T> {
         if matches!(self.modal_stack.last(), Some(Id::AddAssignees)) {
             return;
         }
-        let candidates = self.gather_candidate_logins(&workspace_key, false);
+        // Include existing assignees in the candidate list (they're
+        // pre-checked below) so the user can untick to remove. The
+        // old shape filtered them out, making the picker add-only.
+        let candidates = self.gather_candidate_logins_inclusive(&workspace_key);
         if candidates.is_empty() {
             self.status.notice = Some(Notice::new(
                 "no candidate assignees yet — interact with the task first",
@@ -150,12 +156,26 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // Pre-tick the currently-assigned logins. `with_selected_by`
+        // walks the items and sets the selected bit for any match.
+        let existing: std::collections::HashSet<String> = self
+            .sidebar
+            .workspace_iter()
+            .find(|(k, _)| k.as_str() == workspace_key.as_str())
+            .and_then(|(_, w)| w.primary_task().map(|t| t.assignees.clone()))
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         let labels: Vec<String> = candidates.iter().map(|l| format!("@{l}")).collect();
-        self.assignees_choices = candidates;
+        self.assignees_choices = candidates.clone();
         self.pending_assignees_request = Some(workspace_key);
         let modal = Choice::multi("Assign to", labels)
-            .title("Add assignees")
-            .label(|s: &String| s.clone());
+            .title("Assignees (toggle to add/remove)")
+            .label(|s: &String| s.clone())
+            .with_selected_by(move |label: &String| {
+                let login = label.strip_prefix('@').unwrap_or(label);
+                existing.contains(login)
+            });
         let _ = self.app.mount(
             Id::AddAssignees,
             Box::new(modal),
@@ -174,6 +194,52 @@ impl<T: TerminalAdapter> Model<T> {
     /// PR) OR the existing assignees (for the assignees picker).
     /// Dedupes; first-seen order preserved so the most relevant
     /// faces are at the top.
+    /// Variant of `gather_candidate_logins` that *includes* the
+    /// currently-assigned logins. Used by the assignees picker
+    /// (which needs them visible + pre-checked) so the same submit
+    /// path can untick → remove.
+    pub(super) fn gather_candidate_logins_inclusive(
+        &self,
+        workspace_key: &pilot_core::WorkspaceKey,
+    ) -> Vec<String> {
+        let Some(ws) = self
+            .sidebar
+            .workspace_iter()
+            .find(|(k, _)| k.as_str() == workspace_key.as_str())
+            .map(|(_, w)| w)
+        else {
+            return Vec::new();
+        };
+        let excluded: std::collections::HashSet<String> =
+            self.viewer_logins.values().cloned().collect();
+        let mut out: Vec<String> = Vec::new();
+        let push = |login: &str, out: &mut Vec<String>| {
+            if !login.is_empty() && !excluded.contains(login) && !out.iter().any(|l| l == login) {
+                out.push(login.to_string());
+            }
+        };
+        // Existing assignees go FIRST so the most relevant set
+        // bubbles to the top of the list (and is naturally aligned
+        // with the pre-checked items).
+        if let Some(pr) = &ws.pr {
+            for a in &pr.assignees {
+                push(a, &mut out);
+            }
+            for r in &pr.reviewers {
+                push(r, &mut out);
+            }
+        }
+        for issue in &ws.gh_issues {
+            for a in &issue.assignees {
+                push(a, &mut out);
+            }
+        }
+        for act in &ws.activity {
+            push(&act.author, &mut out);
+        }
+        out
+    }
+
     pub(super) fn gather_candidate_logins(
         &self,
         workspace_key: &pilot_core::WorkspaceKey,

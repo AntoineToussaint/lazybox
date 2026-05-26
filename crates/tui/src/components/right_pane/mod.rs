@@ -723,7 +723,7 @@ impl RightPane {
                         .fg(theme.text_dim)
                         .add_modifier(Modifier::ITALIC),
                 ),
-                Span::styled("— Shift-G to add", Style::default().fg(theme.text_dim)),
+                Span::styled("— Shift-G to change", Style::default().fg(theme.text_dim)),
             ]));
         }
 

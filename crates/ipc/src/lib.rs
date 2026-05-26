@@ -412,6 +412,16 @@ pub enum Command {
         workspace_key: pilot_core::WorkspaceKey,
         logins: Vec<String>,
     },
+    /// Replace the assignee set on the workspace's PR / issue.
+    /// Daemon diffs against the currently-persisted assignees and
+    /// fires `addAssigneesToAssignable` + `removeAssigneesFromAssignable`
+    /// as needed so this is a single atomic-feeling "set to exactly
+    /// this list" operation from the TUI's POV. Empty list clears
+    /// every assignee.
+    SetAssignees {
+        workspace_key: pilot_core::WorkspaceKey,
+        logins: Vec<String>,
+    },
     /// Admin command: walk every persisted workspace, drop sessions
     /// whose terminals aren't currently live, and remove the
     /// corresponding worktrees from disk. Used to reclaim disk

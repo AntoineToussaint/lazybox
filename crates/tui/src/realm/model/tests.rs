@@ -248,9 +248,12 @@ mod effects_tests {
         assert!(m.review_choices.is_empty());
     }
 
-    /// `Id::AddAssignees` picker symmetry.
+    /// `Id::AddAssignees` picker now fires `SetAssignees` (not Add)
+    /// so the daemon can diff against the current task and run both
+    /// add + remove mutations as needed. The picked indices are the
+    /// *full desired set*, not deltas.
     #[test]
-    fn choice_picked_on_add_assignees_modal_returns_add_assignees_cmd() {
+    fn choice_picked_on_add_assignees_modal_returns_set_assignees_cmd() {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#5");
         m.pending_assignees_request = Some(ws_key.clone());
@@ -259,14 +262,39 @@ mod effects_tests {
         let cmds = m.handle_choice_picked(vec![1]);
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            IpcCommand::AddAssignees {
+            IpcCommand::SetAssignees {
                 workspace_key,
                 logins,
             } => {
                 assert_eq!(workspace_key, &ws_key);
                 assert_eq!(logins, &vec!["bob".to_string()]);
             }
-            other => panic!("expected AddAssignees, got {other:?}"),
+            other => panic!("expected SetAssignees, got {other:?}"),
+        }
+    }
+
+    /// Empty pick on the assignees picker is meaningful — it clears
+    /// every assignee. Fire SetAssignees with an empty Vec so the
+    /// daemon can remove them all. (Distinct from the reviewers
+    /// picker, where empty pick is treated as cancel.)
+    #[test]
+    fn choice_picked_on_add_assignees_with_empty_picks_clears_assignees() {
+        let mut m = build_model();
+        let ws_key = WorkspaceKey::new("github:o/r#7");
+        m.pending_assignees_request = Some(ws_key.clone());
+        m.assignees_choices = vec!["alice".into()];
+        m.modal_stack.push(Id::AddAssignees);
+        let cmds = m.handle_choice_picked(vec![]);
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::SetAssignees {
+                workspace_key,
+                logins,
+            } => {
+                assert_eq!(workspace_key, &ws_key);
+                assert!(logins.is_empty(), "empty pick clears assignees");
+            }
+            other => panic!("expected SetAssignees, got {other:?}"),
         }
     }
 

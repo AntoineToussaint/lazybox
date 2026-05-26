@@ -273,6 +273,41 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                 }
             }
+            Action::OpenInBrowser => {
+                // Read the primary task's URL and hand it to the
+                // platform launcher. Surfaces a footer notice on
+                // success / failure so the user knows whether the
+                // browser actually came up — silent spawn failures
+                // (no xdg-open on a headless box, etc.) would be
+                // confusing otherwise.
+                use crate::realm::components::footer::{Notice, NoticeSeverity};
+                let Some(ws) = self.sidebar.selected_workspace() else {
+                    return cmds;
+                };
+                let Some(url) = ws.primary_task().map(|t| t.url.clone()) else {
+                    self.status.notice = Some(Notice::new(
+                        "no task URL on this workspace",
+                        NoticeSeverity::Info,
+                    ));
+                    self.redraw = true;
+                    return cmds;
+                };
+                match pilot_tui_core::editors::open_url(&url) {
+                    Ok(()) => {
+                        tracing::info!(%url, "opened workspace URL in browser");
+                        self.status.notice =
+                            Some(Notice::new(format!("opened {url}"), NoticeSeverity::Info));
+                    }
+                    Err(e) => {
+                        tracing::warn!(%url, "open_url failed: {e}");
+                        self.status.notice = Some(Notice::new(
+                            format!("open failed: {e}"),
+                            NoticeSeverity::Retryable,
+                        ));
+                    }
+                }
+                self.redraw = true;
+            }
             // Actions not yet handled here stay in the existing
             // handlers. As we migrate, the per-key match arms in
             // `handle_pane_key` and the pane wrappers get deleted

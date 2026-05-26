@@ -26,7 +26,7 @@ mod handlers;
 
 pub use handlers::{
     ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_fetch_pr_details,
-    handle_merge_pr, handle_request_reviewers, post_reply,
+    handle_merge_pr, handle_request_reviewers, handle_set_assignees, post_reply,
 };
 
 use crate::ServerConfig;

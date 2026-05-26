@@ -144,6 +144,42 @@ pub fn discover_at_startup(user: Vec<UserEditorEntry>) -> Vec<EditorTemplate> {
 /// placeholders in args. Detached so the editor outlives pilot.
 /// Returns Ok on successful spawn — the editor's own success is
 /// not waited on.
+/// Open `url` in the host's default web browser. Picks the right
+/// per-platform launcher (`open` on macOS, `xdg-open` on Linux,
+/// `cmd /c start` on Windows) and detaches so the browser outlives
+/// pilot. Used by the `O` (Shift-O) shortcut on workspaces to jump
+/// to the PR / issue page on GitHub / Linear.
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    // Minimal allow-list: must be http(s) so a malformed task URL
+    // can't be coerced into running an arbitrary shell command.
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing to open non-http(s) URL: {url}"),
+        ));
+    }
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    } else if cfg!(target_os = "windows") {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/c", "start", "", url]);
+        c
+    } else {
+        // Linux + the rest. `xdg-open` is the de facto standard;
+        // most desktop distros ship it.
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    crate::platform::detach_child_process(&mut cmd);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    cmd.spawn().map(|_| ())
+}
+
 pub fn launch(template: &EditorTemplate, worktree: &Path) -> std::io::Result<()> {
     let path_str = worktree.to_string_lossy().into_owned();
     let mut cmd = std::process::Command::new(&template.command);

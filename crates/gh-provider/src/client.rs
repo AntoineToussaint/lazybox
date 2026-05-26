@@ -1220,6 +1220,45 @@ impl GhClient {
         Ok(())
     }
 
+    /// Remove assignees from a PR or Issue. Counterpart to
+    /// `add_assignees`; the `SetAssignees` path fires both with the
+    /// computed diff so the daemon can implement "make assignees
+    /// exactly this list" without the TUI needing two round-trips.
+    pub async fn remove_assignees(
+        &self,
+        assignable_node_id: &str,
+        logins: &[String],
+    ) -> Result<(), GhError> {
+        if logins.is_empty() {
+            return Ok(());
+        }
+        let mut user_ids: Vec<String> = Vec::with_capacity(logins.len());
+        for login in logins {
+            user_ids.push(self.lookup_user_id(login).await?);
+        }
+        self.acquire_or_block("removeAssigneesFromAssignable mutation")?;
+        let body = graphql::remove_assignees_body(assignable_node_id, &user_ids);
+        let response: graphql::GqlResponse = self
+            .post_graphql_with_retry(&body)
+            .await
+            .map_err(GhError::Api)?;
+        if let Some(data) = &response.data
+            && let Some(rl) = &data.rate_limit
+        {
+            self.observe_rate_limit(rl);
+        }
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::error!("removeAssigneesFromAssignable errors: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        Ok(())
+    }
+
     pub async fn merge_pr(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("mergePullRequest mutation")?;
         let body = graphql::merge_pr_body(pull_request_node_id);
@@ -1340,6 +1379,69 @@ impl pilot_core::TaskProvider for GhClient {
         self.add_assignees(node_id, logins)
             .await
             .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))
+    }
+
+    /// Replace the assignee set on the workspace's PR or issue.
+    /// Computes the diff against the task's persisted assignees and
+    /// fires both `addAssigneesToAssignable` and
+    /// `removeAssigneesFromAssignable` mutations. Empty `logins`
+    /// clears every assignee (intentional — the UX cycles through
+    /// an unchecked picker for that case).
+    async fn set_assignees(
+        &self,
+        workspace: &pilot_core::Workspace,
+        logins: &[String],
+    ) -> Result<(), pilot_core::ProviderError> {
+        // Resolve the same Assignable node we'd add against.
+        let (node_id, existing) = {
+            let pr_match = workspace
+                .pr
+                .as_ref()
+                .and_then(|p| p.node_id.as_deref().map(|n| (n, &p.assignees)));
+            let issue_match = workspace
+                .gh_issues
+                .first()
+                .and_then(|i| i.node_id.as_deref().map(|n| (n, &i.assignees)));
+            pr_match.or(issue_match).ok_or_else(|| {
+                pilot_core::ProviderError::permanent(
+                    "github",
+                    format!(
+                        "workspace {} has neither a PR nor an issue with a node_id",
+                        workspace.key
+                    ),
+                )
+            })?
+        };
+        // Compute the symmetric diff against `existing`.
+        let desired: std::collections::HashSet<&str> = logins.iter().map(String::as_str).collect();
+        let current: std::collections::HashSet<&str> =
+            existing.iter().map(String::as_str).collect();
+        let to_add: Vec<String> = desired
+            .difference(&current)
+            .map(|s| s.to_string())
+            .collect();
+        let to_remove: Vec<String> = current
+            .difference(&desired)
+            .map(|s| s.to_string())
+            .collect();
+        if to_add.is_empty() && to_remove.is_empty() {
+            tracing::debug!(
+                workspace = %workspace.key,
+                "set_assignees: no-op (desired matches existing)"
+            );
+            return Ok(());
+        }
+        if !to_add.is_empty() {
+            self.add_assignees(node_id, &to_add)
+                .await
+                .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+        }
+        if !to_remove.is_empty() {
+            self.remove_assignees(node_id, &to_remove)
+                .await
+                .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Post a reply (comment) on the workspace's PR or issue.

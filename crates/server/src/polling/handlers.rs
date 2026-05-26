@@ -120,6 +120,16 @@ impl ProviderHandle {
             Self::Linear(c) => pilot_core::TaskProvider::add_assignees(c, ws, logins).await,
         }
     }
+    pub async fn set_assignees(
+        &self,
+        ws: &pilot_core::Workspace,
+        logins: &[String],
+    ) -> Result<(), pilot_core::ProviderError> {
+        match self {
+            Self::Github(c) => pilot_core::TaskProvider::set_assignees(c, ws, logins).await,
+            Self::Linear(c) => pilot_core::TaskProvider::set_assignees(c, ws, logins).await,
+        }
+    }
     pub async fn post_reply(
         &self,
         ws: &pilot_core::Workspace,
@@ -317,6 +327,50 @@ pub async fn handle_add_assignees(
     } else {
         tracing::info!("added assignees {logins:?} on workspace {workspace_key}");
     }
+}
+
+/// Handle `Command::SetAssignees`: replace the workspace's assignee
+/// set with the given logins (provider diffs against the current
+/// task state and fires add + remove mutations as needed). Empty
+/// `logins` clears every assignee. Triggers an immediate Refresh-
+/// style poll afterwards so the sidebar / right pane reflect the
+/// new set without waiting for the regular tick.
+pub async fn handle_set_assignees(
+    config: &ServerConfig,
+    workspace_key: WorkspaceKey,
+    logins: Vec<String>,
+) {
+    let emit_err = |msg: &str| {
+        let _ = config.bus.send(Event::ProviderError {
+            source: "assignees".into(),
+            message: msg.to_string(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+    };
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        emit_err(&format!(
+            "set_assignees: workspace {workspace_key} not found"
+        ));
+        return;
+    };
+    let provider = match build_provider_for_workspace(&workspace_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            emit_err(&e);
+            return;
+        }
+    };
+    if let Err(e) = provider.set_assignees(&ws, &logins).await {
+        tracing::warn!("set_assignees {workspace_key} {logins:?}: {e:?}");
+        emit_err(&format!("update assignees failed: {e}"));
+        return;
+    }
+    tracing::info!("set assignees to {logins:?} on workspace {workspace_key}");
+    // Wake the poll loop so the task row picks up the new assignee
+    // set immediately — without this the row stays stale for up to
+    // a full interval (60s default).
+    config.poll_wake.notify_one();
 }
 
 /// Handle `Command::FetchPrDetails`: pull the workspace's PR

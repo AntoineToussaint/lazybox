@@ -240,6 +240,7 @@ impl<T: TerminalAdapter> Model<T> {
                     Some(Action::RequestReviewers)
                 }
                 pilot_tui_core::action::ActionKind::AddAssignees => Some(Action::AddAssignees),
+                pilot_tui_core::action::ActionKind::OpenInBrowser => Some(Action::OpenInBrowser),
                 pilot_tui_core::action::ActionKind::OpenHelp => Some(Action::OpenHelp),
                 pilot_tui_core::action::ActionKind::OpenSettings => Some(Action::OpenSettings),
                 pilot_tui_core::action::ActionKind::JumpToAsking => Some(Action::JumpToAsking),

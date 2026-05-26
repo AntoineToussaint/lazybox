@@ -597,6 +597,31 @@ pub fn add_assignees_body(assignable_node_id: &str, user_node_ids: &[String]) ->
     })
 }
 
+/// Sibling mutation for removing assignees. Same Assignable
+/// interface; the `SetAssignees` command path fires this with the
+/// diff `existing − desired` after firing the add mutation with
+/// `desired − existing`.
+const REMOVE_ASSIGNEES_MUTATION: &str = r#"
+mutation($id: ID!, $userIds: [ID!]!) {
+  removeAssigneesFromAssignable(input: { assignableId: $id, assigneeIds: $userIds }) {
+    assignable { __typename }
+  }
+}
+"#;
+
+pub fn remove_assignees_body(
+    assignable_node_id: &str,
+    user_node_ids: &[String],
+) -> serde_json::Value {
+    serde_json::json!({
+        "query": REMOVE_ASSIGNEES_MUTATION,
+        "variables": {
+            "id": assignable_node_id,
+            "userIds": user_node_ids,
+        },
+    })
+}
+
 pub fn merge_pr_body(pull_request_node_id: &str) -> serde_json::Value {
     serde_json::json!({
         "query": MERGE_PR_MUTATION,

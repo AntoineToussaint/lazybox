@@ -249,6 +249,21 @@ pub trait TaskProvider: Send + Sync {
         Err(ProviderError::unsupported(self.name(), "add_assignees"))
     }
 
+    /// Replace the assignee set on the workspace's task. Default
+    /// implementation falls back to `add_assignees` after diffing
+    /// — providers that need separate add + remove paths (e.g.
+    /// GitHub) override. The slice is the *desired* set; the
+    /// provider computes its own diff against the current task
+    /// state.
+    async fn set_assignees(
+        &self,
+        workspace: &Workspace,
+        logins: &[String],
+    ) -> Result<(), ProviderError> {
+        let _ = (workspace, logins);
+        Err(ProviderError::unsupported(self.name(), "set_assignees"))
+    }
+
     /// Post a reply (comment) on the workspace's task. PR
     /// workspaces target the PR's main thread; issue workspaces
     /// target the issue. Per-comment threading is not yet modeled.

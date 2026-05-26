@@ -80,6 +80,11 @@ pub enum Action {
     RequestReviewers,
     /// Add assignee(s) to the workspace's PR or issue.
     AddAssignees,
+    /// Open the focused workspace's PR / issue page in the host's
+    /// default web browser. Useful for jumping to GitHub when the
+    /// in-pilot UI doesn't carry every affordance yet (mobile-rich
+    /// review thread, full diff view, etc.).
+    OpenInBrowser,
 
     // ── Activity pane (right) ──────────────────────────────────────
     /// Toggle the activity-section collapse on the focused workspace.
@@ -178,6 +183,7 @@ pub enum ActionKind {
     AdoptSessions,
     RequestReviewers,
     AddAssignees,
+    OpenInBrowser,
     // Activity
     ToggleActivity,
     ToggleRow,
@@ -224,6 +230,7 @@ impl Action {
             Action::AdoptSessions => ActionKind::AdoptSessions,
             Action::RequestReviewers => ActionKind::RequestReviewers,
             Action::AddAssignees => ActionKind::AddAssignees,
+            Action::OpenInBrowser => ActionKind::OpenInBrowser,
             Action::ToggleActivity => ActionKind::ToggleActivity,
             Action::ToggleRow => ActionKind::ToggleRow,
             Action::Reply => ActionKind::Reply,
@@ -419,7 +426,14 @@ impl ActionDef {
                 kind: ActionKind::AddAssignees,
                 default_keys: "Shift-G",
                 label: "assignees",
-                describe: "Add assignee(s) to the workspace's PR / issue.",
+                describe: "Change assignees on the workspace's PR / issue — pre-checks existing; toggle to add or remove.",
+                section: Section::Workspace,
+            },
+            ActionKind::OpenInBrowser => &Self {
+                kind: ActionKind::OpenInBrowser,
+                default_keys: "Shift-O",
+                label: "open in browser",
+                describe: "Open the focused workspace's PR / issue page in your default web browser.",
                 section: Section::Workspace,
             },
             // ── Activity ────────────────────────────────────────────
@@ -520,6 +534,7 @@ impl ActionDef {
             ActionKind::MergePr,
             ActionKind::RequestReviewers,
             ActionKind::AddAssignees,
+            ActionKind::OpenInBrowser,
             ActionKind::Reply,
             ActionKind::AdoptSessions,
             ActionKind::Archive,
@@ -762,6 +777,7 @@ impl ActionKind {
             ActionKind::AdoptSessions => "adopt_sessions",
             ActionKind::RequestReviewers => "request_reviewers",
             ActionKind::AddAssignees => "add_assignees",
+            ActionKind::OpenInBrowser => "open_in_browser",
             ActionKind::ToggleActivity => "toggle_activity",
             ActionKind::ToggleRow => "toggle_row",
             ActionKind::Reply => "reply",
@@ -863,7 +879,8 @@ pub fn availability(kind: ActionKind, workspace: Option<&pilot_core::Workspace>)
         | ActionKind::MarkAllRead
         | ActionKind::ToggleSnooze
         | ActionKind::RequestReviewers
-        | ActionKind::AddAssignees => has_ws,
+        | ActionKind::AddAssignees
+        | ActionKind::OpenInBrowser => has_ws,
         // Activity actions need a workspace AND that workspace
         // having some activity to act on. The pane that owns this
         // section already enforces "has activity"; the catalog

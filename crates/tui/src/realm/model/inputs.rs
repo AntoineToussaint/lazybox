@@ -229,7 +229,12 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return cmds;
         }
-        // Assignees picker (Id::AddAssignees) — same shape.
+        // Assignees picker (Id::AddAssignees) — picker is pre-
+        // checked with existing assignees, so submitting the current
+        // selection is the *full desired set*. Fire SetAssignees;
+        // the daemon diffs against the persisted task and runs
+        // add + remove mutations as needed. Empty pick is meaningful
+        // here ("clear all assignees") — don't drop it.
         if matches!(self.modal_stack.last(), Some(Id::AddAssignees)) {
             let logins: Vec<String> = picks
                 .iter()
@@ -237,18 +242,19 @@ impl<T: TerminalAdapter> Model<T> {
                 .collect();
             self.assignees_choices.clear();
             self.pop_modal();
-            let workspace_key = self.pending_assignees_request.take();
-            if let (Some(workspace_key), false) = (workspace_key, logins.is_empty()) {
+            if let Some(workspace_key) = self.pending_assignees_request.take() {
                 use crate::realm::components::footer::{Notice, NoticeSeverity};
                 let count = logins.len();
-                cmds.push(IpcCommand::AddAssignees {
+                let msg = if count == 0 {
+                    "cleared assignees".to_string()
+                } else {
+                    format!("set assignees ({count})")
+                };
+                cmds.push(IpcCommand::SetAssignees {
                     workspace_key,
                     logins,
                 });
-                self.status.notice = Some(Notice::new(
-                    format!("added {count} assignee(s)"),
-                    NoticeSeverity::Info,
-                ));
+                self.status.notice = Some(Notice::new(msg, NoticeSeverity::Info));
                 self.redraw = true;
             }
             return cmds;

@@ -13,8 +13,8 @@
 //! sidebar.
 
 use crate::components::sidebar::{
-    BADGE_COL_W, STATUS_COL_W, TIME_COL_W, UNREAD_COL_W, badge_pill_style, role_badge, status_pill,
-    workspace_type_label,
+    BADGE_COL_W, STATUS_COL_W, TIME_COL_W, UNREAD_COL_W, badge_pill_style, role_badge,
+    status_pills, workspace_type_label,
 };
 use crate::components::table::{Cell, Column, Row};
 use crate::theme::Theme;
@@ -318,13 +318,25 @@ fn badge_slot_cell(ctx: &WorkspaceRowCtx<'_>, badge: Option<(char, usize)>) -> C
 }
 
 fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let Some(pill) = ctx.task.and_then(status_pill) else {
+    use ratatui::text::Span as RSpan;
+    let Some(task) = ctx.task else {
         return Cell::empty();
     };
-    // The pill label is already padded to STATUS_COL_W (see
-    // `pill_for_tag`), so the cell's width equals the column's
-    // width and no extra padding is added.
-    Cell::from_span(Span::styled(pill.label.to_string(), pill.style))
+    let (primary, secondary) = status_pills(task);
+    // Each pill renders 9 cells; a 1-cell gutter between them. The
+    // total = STATUS_COL_W (19). Empty slots render as row-style
+    // spaces so the column lines up across rows.
+    let mut spans: Vec<RSpan<'static>> = Vec::with_capacity(3);
+    match primary {
+        Some(p) => spans.push(RSpan::styled(p.label.to_string(), p.style)),
+        None => spans.push(RSpan::styled(" ".repeat(9), ctx.row_style())),
+    }
+    spans.push(RSpan::styled(" ".to_string(), ctx.row_style()));
+    match secondary {
+        Some(p) => spans.push(RSpan::styled(p.label.to_string(), p.style)),
+        None => spans.push(RSpan::styled(" ".repeat(9), ctx.row_style())),
+    }
+    Cell::new(spans)
 }
 
 fn cell_gutter(ctx: &WorkspaceRowCtx<'_>) -> Cell {

@@ -573,11 +573,11 @@ fn render_to_string(s: &mut Sidebar, width: u16, height: u16, focused: bool) -> 
 #[test]
 fn render_smoke_has_mailbox_label_and_grouped_rows() {
     let mut s = populated_sidebar();
-    // Width 60 leaves breathing room for the `[PR]`/`[I]` type
-    // marker, role char, and the status/time trailers without
-    // truncating the title — this test is about presence, not
-    // density.
-    let rendered = render_to_string(&mut s, 60, 12, true);
+    // Width 80 leaves breathing room for the `[PR]`/`[I]` type
+    // marker, role char, the dual-pill status column (19 cells),
+    // and the time trailer without truncating the title — this
+    // test is about presence, not density.
+    let rendered = render_to_string(&mut s, 80, 12, true);
     // V1-style brand label: `PILOT` for the Inbox mailbox.
     assert!(rendered.contains("PILOT"));
     assert!(rendered.contains('2'), "row count in title");
@@ -592,7 +592,7 @@ fn render_smoke_has_mailbox_label_and_grouped_rows() {
 #[test]
 fn render_shows_cursor_marker_on_selected_workspace() {
     let mut s = populated_sidebar();
-    let rendered = render_to_string(&mut s, 60, 10, true);
+    let rendered = render_to_string(&mut s, 80, 10, true);
     let cursor_line = rendered
         .lines()
         .find(|l| l.contains('▸'))

@@ -1723,10 +1723,11 @@ impl Sidebar {
     }
 }
 
-/// Visible width of the status column. Sized for the longest pill
-/// (` CONFLICT ` = 10 cells) so the time column always lands at the
-/// same offset.
-pub(crate) const STATUS_COL_W: usize = 10;
+/// Visible width of the status column — now TWO side-by-side pills:
+/// review (9 cells) + a 1-cell gutter + CI (9 cells) = 19 cells.
+/// Lifecycle / blocker pills (`MERGED`, `CONFLICT`, `READY`, …)
+/// also use 9 cells and the CI half stays empty for those rows.
+pub(crate) const STATUS_COL_W: usize = 19;
 /// Visible width of the time column. `now`/`Xm`/`Xh`/`Xd`/`Xmo` all
 /// fit in 4 cells (max is `12mo`).
 pub(crate) const TIME_COL_W: usize = 4;
@@ -1970,14 +1971,189 @@ pub(crate) fn workspace_needs_attention(
 ///
 /// Returning `Option<StatusPill>` so the `StatusTag::None` case
 /// renders as a hole (no pill) without making every caller filter.
+#[cfg(test)]
 pub(crate) fn status_pill(task: &pilot_core::Task) -> Option<StatusPill> {
     pill_for_tag(pilot_core::StatusTag::for_task(task))
+}
+
+/// Two-column status: a (review-or-lifecycle, ci) pair. Review and
+/// CI are conceptually orthogonal — squashing them into one pill
+/// hides one of the two signals. A PR with `REVIEW pending + CI
+/// FAIL` is something the user needs to see BOTH of.
+///
+/// **Terminal / blocker** states (`MERGED`, `CLOSED`, `DRAFT`,
+/// `CONFLICT`, `READY`, `QUEUED`, `AUTO`) are single-purpose — they
+/// override both signals — so they return as the first slot with
+/// the CI slot empty.
+///
+/// **Open PRs in flight** return `(review_pill, ci_pill)` so the
+/// row shows both. Either slot may be `None` (e.g. CI not yet
+/// configured → ci=None; new PR with no review activity → review=None).
+pub(crate) fn status_pills(
+    task: &pilot_core::Task,
+) -> (Option<StatusPill>, Option<StatusPill>) {
+    use pilot_core::{CiStatus, ReviewStatus, TaskState};
+    if let Some(lifecycle) = lifecycle_pill(task) {
+        return (Some(lifecycle), None);
+    }
+    // Open PR in flight. Review + CI rendered separately.
+    let review = match task.review {
+        ReviewStatus::Approved => Some(StatusPill {
+            label: " APPROVED",
+            style: Style::default()
+                .bg(crate::theme::current().accent)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        }),
+        ReviewStatus::ChangesRequested => Some(StatusPill {
+            label: " CHANGES ",
+            style: Style::default()
+                .bg(Color::Indexed(196))
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        }),
+        ReviewStatus::Pending => Some(StatusPill {
+            label: " REVIEW  ",
+            style: Style::default()
+                .bg(crate::theme::current().warn)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        }),
+        ReviewStatus::None => None,
+    };
+    let ci = match task.ci {
+        CiStatus::Failure => Some(StatusPill {
+            label: " CI FAIL ",
+            style: Style::default()
+                .bg(Color::Indexed(196))
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        }),
+        CiStatus::Mixed => Some(StatusPill {
+            label: " CI MIX  ",
+            style: Style::default()
+                .bg(Color::Indexed(214))
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        }),
+        CiStatus::Pending | CiStatus::Running => Some(StatusPill {
+            label: " CI RUN  ",
+            style: Style::default()
+                .bg(Color::Indexed(220))
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        }),
+        CiStatus::Success => Some(StatusPill {
+            label: " CI OK   ",
+            style: Style::default()
+                .bg(Color::Indexed(40))
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        }),
+        CiStatus::None => None,
+    };
+    // Open issue (no PR) or no signals at all → keep both columns
+    // empty rather than showing stale review/ci state from a
+    // non-existent PR. Caller still reserves the column space so
+    // the time trailer doesn't shift.
+    if task.state != TaskState::Open && task.state != TaskState::InReview {
+        return (None, None);
+    }
+    (review, ci)
+}
+
+/// Single-pill lifecycle override: returns `Some` for states that
+/// take over the whole status area (no review+ci pair beside them).
+/// `None` for normal open PRs in flight.
+fn lifecycle_pill(task: &pilot_core::Task) -> Option<StatusPill> {
+    use pilot_core::{CiStatus, ReviewStatus, StatusTag, TaskState};
+    let pill_red = Style::default()
+        .bg(Color::Indexed(196))
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    let pill_green = Style::default()
+        .bg(Color::Indexed(40))
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    let theme = crate::theme::current();
+    // Match the priority chain in StatusTag::for_task for the
+    // terminal / blocker bands. The non-blocker tags
+    // (CiFailed/CiMixed/CiRunning/CiOk + Approved/Changes/Review)
+    // are handled by the side-by-side pills in `status_pills`.
+    match task.state {
+        TaskState::Merged => {
+            return Some(StatusPill {
+                label: " MERGED  ",
+                style: Style::default()
+                    .bg(theme.hover)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            });
+        }
+        TaskState::Closed => {
+            return Some(StatusPill {
+                label: " CLOSED  ",
+                style: Style::default()
+                    .bg(theme.error)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            });
+        }
+        TaskState::Draft => {
+            return Some(StatusPill {
+                label: " DRAFT   ",
+                style: Style::default()
+                    .bg(theme.chrome)
+                    .fg(theme.text_strong)
+                    .add_modifier(Modifier::BOLD),
+            });
+        }
+        _ => {}
+    }
+    if task.has_conflicts {
+        return Some(StatusPill {
+            label: " CONFLICT",
+            style: pill_red,
+        });
+    }
+    if task.is_in_merge_queue {
+        return Some(StatusPill {
+            label: " QUEUED  ",
+            style: pill_green,
+        });
+    }
+    // Approved + CI green = READY (one pill, end-state for "this PR
+    // is good to go"). Approved-without-green-CI shows up as a
+    // separate APPROVED pill in the review slot via `status_pills`.
+    if task.review == ReviewStatus::Approved
+        && matches!(task.ci, CiStatus::Success | CiStatus::None)
+    {
+        return Some(StatusPill {
+            label: " READY   ",
+            style: pill_green,
+        });
+    }
+    if task.auto_merge_enabled {
+        return Some(StatusPill {
+            label: " AUTO    ",
+            style: Style::default()
+                .bg(theme.accent)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        });
+    }
+    // Behind base is informational only — don't fight for the
+    // lifecycle column. `StatusTag` keeps surfacing it via the old
+    // path for any consumer that still wants it.
+    let _ = StatusTag::for_task(task);
+    None
 }
 
 /// Pure tag → pill mapping. Exists as its own function so the
 /// contract tests (`status_pill_consistency_tests`) can pin every
 /// `(StatusTag, StatusPill)` pair without going through a
 /// constructed `Task`.
+#[cfg(test)]
 fn pill_for_tag(tag: pilot_core::StatusTag) -> Option<StatusPill> {
     use pilot_core::StatusTag::*;
     let theme = crate::theme::current();

@@ -597,6 +597,28 @@ pub async fn tick_with_state(
                 any_source_succeeded = true;
                 let count = tasks.len();
                 tracing::info!(source = source.name(), count, "poll succeeded");
+                // 0-result polls are almost always misconfiguration —
+                // wrong scope, no role enabled, filter narrowed too far.
+                // Log loudly + surface a one-shot info notice so a
+                // returning user with an empty inbox knows whether
+                // "nothing matches" or "something's wrong with config."
+                if count == 0 {
+                    tracing::warn!(
+                        source = source.name(),
+                        "poll returned 0 tasks — check `,` Settings: filter roles + selected \
+                         scopes both have to match SOMETHING in the user's repos. /tmp/pilot.log \
+                         has the exact GraphQL query string above."
+                    );
+                    let _ = config.bus.send(Event::ProviderError {
+                        source: source.name().to_string(),
+                        message: format!(
+                            "{} returned 0 tasks — check filter + scope in `,` Settings",
+                            source.name()
+                        ),
+                        detail: "the exact GraphQL query is logged in /tmp/pilot.log".into(),
+                        kind: "retryable".into(),
+                    });
+                }
                 for task in tasks {
                     if task.mergeable == pilot_core::Mergeable::Unknown {
                         saw_unknown_mergeable = true;

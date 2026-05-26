@@ -751,26 +751,31 @@ impl GhClient {
         // removes the row. The user never sees MERGED.
         //
         // Fix: one extra search per poll for PRs merged in the last
-        // 24h, scoped by the SAME role qualifiers as the inbox
+        // 7 days, scoped by the SAME role qualifiers as the inbox
         // search. The merged PRs land via the same upsert path; the
         // mailbox-membership predicate routes them to Inactive
         // (state=Merged → not in Inbox) so they don't pollute the
         // active view. User sees them briefly with the MERGED pill
         // before they fall into history.
         //
-        // Cost: ONE extra GraphQL search per poll. 24h window keeps
-        // the result set small (most repos merge a few PRs per day).
-        // No pagination: if a repo merges >100 PRs in 24h, the tail
-        // is silently dropped — accept that, the user can still see
-        // them via GitHub directly.
-        let yesterday = (chrono::Utc::now() - chrono::Duration::hours(24))
+        // Window: 7d (was 24h). A user who opens pilot once every
+        // few days kept seeing stale PRs that merged on day 2 — the
+        // 24h sweep missed them and the local row stayed "Open"
+        // forever. 7d covers normal usage gaps without ballooning
+        // the result set.
+        //
+        // Cost: ONE extra GraphQL search per poll. 7d window
+        // expands the page count maybe 3-7× on busy repos; we
+        // accept the cost because the alternative is a permanently-
+        // stale Inbox row.
+        let week_ago = (chrono::Utc::now() - chrono::Duration::days(7))
             .format("%Y-%m-%d")
             .to_string();
         let mut merged_quals = vec![
             "is:pr".to_string(),
             "is:merged".to_string(),
             "archived:false".to_string(),
-            format!("merged:>={yesterday}"),
+            format!("merged:>={week_ago}"),
         ];
         if self.pr_filters.is_empty() {
             merged_quals.push(format!("involves:{}", self.user));

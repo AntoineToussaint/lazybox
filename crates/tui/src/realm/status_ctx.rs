@@ -30,7 +30,21 @@ const BG_SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "
 /// timeout when a source finishes without an explicit PollCompleted
 /// — keeps the spinner from spinning forever if the daemon drops
 /// the completion event.
-const BG_POLL_IDLE_GUARD: Duration = Duration::from_secs(20);
+///
+/// Bumped from 20s → 90s. The previous 20s cap was clearing the
+/// spinner on real, in-flight polls — GitHub's PR-details fan-out
+/// runs ~50 GraphQL calls per cycle, and a small handful of those
+/// can sit on a 15s socket-level retry without emitting a
+/// `PollProgress`. The user perception was "sync stuck at 20s"
+/// even though the underlying poll was healthy.
+const BG_POLL_IDLE_GUARD: Duration = Duration::from_secs(90);
+
+/// Past this elapsed time without a PollCompleted, the footer
+/// label switches from `syncing github · Ns` to
+/// `syncing github · Ns · still working`. Visual signal that
+/// pilot hasn't given up — useful on slow networks where a
+/// 60+ second poll is normal.
+const STILL_WORKING_HINT_AFTER: Duration = Duration::from_secs(30);
 
 /// Lightweight footer indicator for poll cycles AFTER the initial
 /// blocking modal has been dismissed. Lit up on any `PollProgress`,
@@ -50,13 +64,19 @@ impl BackgroundPoll {
     /// Footer label — `syncing github · 2s` once a cycle has been in
     /// flight long enough to be worth surfacing the elapsed time.
     /// Below ~1s we skip the suffix so the indicator doesn't flicker
-    /// `0s → 1s` on fast polls.
+    /// `0s → 1s` on fast polls. Past `STILL_WORKING_HINT_AFTER`
+    /// the label gains a `· still working` suffix so a slow but
+    /// healthy poll reads as "in progress" instead of "stuck."
     pub fn label(&self) -> String {
-        let elapsed = self.started_at.elapsed().as_secs();
-        if elapsed >= 1 {
-            format!("syncing {} · {elapsed}s", self.source)
+        let elapsed = self.started_at.elapsed();
+        let secs = elapsed.as_secs();
+        if secs < 1 {
+            return format!("syncing {}", self.source);
+        }
+        if elapsed >= STILL_WORKING_HINT_AFTER {
+            format!("syncing {} · {secs}s · still working", self.source)
         } else {
-            format!("syncing {}", self.source)
+            format!("syncing {} · {secs}s", self.source)
         }
     }
 }

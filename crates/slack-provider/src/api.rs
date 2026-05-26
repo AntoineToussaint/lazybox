@@ -101,7 +101,8 @@ impl Client {
     /// `thread_ts` optional for threading (used by the per-workspace
     /// thread strategy).
     pub async fn post_message(&self, m: &Message) -> Result<PostMessageResponse, SlackError> {
-        self.call::<_, PostMessageResponse>("chat.postMessage", m).await
+        self.call::<_, PostMessageResponse>("chat.postMessage", m)
+            .await
     }
 
     /// Internal: shared request shape. Slack returns 200 OK with

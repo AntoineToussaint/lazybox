@@ -89,12 +89,7 @@ impl SocketModeClient {
     /// Spawn the driver loop in the background. Returns an mpsc
     /// receiver of `InboundEvent`s and a `JoinHandle` so callers
     /// can shut down on daemon exit.
-    pub fn start(
-        self,
-    ) -> (
-        mpsc::Receiver<InboundEvent>,
-        tokio::task::JoinHandle<()>,
-    ) {
+    pub fn start(self) -> (mpsc::Receiver<InboundEvent>, tokio::task::JoinHandle<()>) {
         let (tx, rx) = mpsc::channel(128);
         let handle = tokio::spawn(async move {
             self.run_forever(tx).await;
@@ -126,9 +121,8 @@ impl SocketModeClient {
                 r.error.unwrap_or_else(|| "apps.connections.open".into()),
             ));
         }
-        r.url.ok_or_else(|| {
-            SlackError::Api("apps.connections.open: missing `url`".into())
-        })
+        r.url
+            .ok_or_else(|| SlackError::Api("apps.connections.open: missing `url`".into()))
     }
 
     async fn run_forever(self, tx: mpsc::Sender<InboundEvent>) {
@@ -288,8 +282,7 @@ mod tests {
 
     #[test]
     fn hello_frame_surfaces_as_hello_event() {
-        let env: SocketEnvelope =
-            serde_json::from_value(json!({ "type": "hello" })).unwrap();
+        let env: SocketEnvelope = serde_json::from_value(json!({ "type": "hello" })).unwrap();
         assert!(matches!(
             env.into_inbound().as_slice(),
             [InboundEvent::Hello]
@@ -324,12 +317,14 @@ mod tests {
         }))
         .unwrap();
         match env.into_inbound().as_slice() {
-            [InboundEvent::Mention {
-                channel,
-                user,
-                text,
-                ts,
-            }] => {
+            [
+                InboundEvent::Mention {
+                    channel,
+                    user,
+                    text,
+                    ts,
+                },
+            ] => {
                 assert_eq!(channel, "C123");
                 assert_eq!(user, "U456");
                 assert_eq!(text, "<@UBOT> work");

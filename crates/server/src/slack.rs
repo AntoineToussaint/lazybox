@@ -121,13 +121,20 @@ async fn run(
     // Anchor-channel hello. Best-effort — if the channel doesn't
     // exist yet the user needs to /invite the bot, so we post once
     // we find it AND log clearly when we don't.
-    if let Some(anchor_id) = state.lock().await.name_to_id.get(&slack.anchor_channel).cloned() {
+    if let Some(anchor_id) = state
+        .lock()
+        .await
+        .name_to_id
+        .get(&slack.anchor_channel)
+        .cloned()
+    {
         let _ = api
             .post_message(&Message::new(
                 anchor_id,
                 format!(
                     "*pilot online* · connected as <@{}>. Mirroring {} project(s).",
-                    auth.user_id, listing.channels.len()
+                    auth.user_id,
+                    listing.channels.len()
                 ),
             ))
             .await;
@@ -208,7 +215,10 @@ async fn handle_bus_event(
             };
             let _ = api.post_message(&Message::new(channel_id, body)).await;
         }
-        Event::AgentState { session_key, state: agent_state } => {
+        Event::AgentState {
+            session_key,
+            state: agent_state,
+        } => {
             // Only post on Asking transitions — Active is the
             // default and Slack would drown in "now streaming"
             // messages otherwise.
@@ -224,7 +234,8 @@ async fn handle_bus_event(
             let (terminal_id, quiet_for) = {
                 let s = state.lock().await;
                 let tid = s.workspace_to_terminal.get(&workspace_key).copied();
-                let quiet = tid.and_then(|t| s.last_output_at.get(&t).copied())
+                let quiet = tid
+                    .and_then(|t| s.last_output_at.get(&t).copied())
                     .map(|t| t.elapsed());
                 (tid, quiet)
             };
@@ -253,7 +264,12 @@ async fn handle_bus_event(
             };
             let _ = api.post_message(&Message::new(channel_id, body)).await;
         }
-        Event::TerminalSpawned { terminal_id, session_key, kind, .. } => {
+        Event::TerminalSpawned {
+            terminal_id,
+            session_key,
+            kind,
+            ..
+        } => {
             // Track agent terminals only (shells aren't claude/codex/
             // cursor — sending Slack replies to a shell does the
             // wrong thing).
@@ -279,8 +295,7 @@ async fn handle_bus_event(
         }
         Event::TerminalExited { terminal_id, .. } => {
             let mut s = state.lock().await;
-            s.workspace_to_terminal
-                .retain(|_, tid| *tid != terminal_id);
+            s.workspace_to_terminal.retain(|_, tid| *tid != terminal_id);
             s.last_output_at.remove(&terminal_id);
         }
         _ => {}
@@ -302,7 +317,12 @@ async fn ensure_channel_for_workspace(
     workspace_key: &str,
 ) -> Option<String> {
     if !cfg.per_workspace_channels {
-        return state.lock().await.name_to_id.get(&cfg.anchor_channel).cloned();
+        return state
+            .lock()
+            .await
+            .name_to_id
+            .get(&cfg.anchor_channel)
+            .cloned();
     }
     let name = channel_name_for_workspace(workspace_key, &cfg.channel_prefix);
     if let Some(id) = state.lock().await.name_to_id.get(&name).cloned() {
@@ -379,10 +399,7 @@ async fn recent_terminal_text(server: &ServerConfig, terminal_id: TerminalId) ->
     // Slack renders them as garbage characters otherwise.
     let cleaned = strip_ansi(&text);
     // Last 30 non-empty lines.
-    let lines: Vec<&str> = cleaned
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect();
+    let lines: Vec<&str> = cleaned.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = lines.len().saturating_sub(30);
     lines[start..].join("\n")
 }
@@ -448,7 +465,12 @@ async fn handle_inbound(
     if text.is_empty() {
         return;
     }
-    let Some(workspace_key) = state.lock().await.channel_to_workspace.get(&channel).cloned()
+    let Some(workspace_key) = state
+        .lock()
+        .await
+        .channel_to_workspace
+        .get(&channel)
+        .cloned()
     else {
         tracing::debug!(channel = %channel, "slack: inbound in untracked channel — ignoring");
         return;
@@ -599,7 +621,10 @@ mod tests {
     fn asking_label_stale_output_is_done() {
         // Output older than threshold → claude is just sitting idle.
         let stale = DONE_QUIET_THRESHOLD + Duration::from_secs(1);
-        assert_eq!(asking_label(Some(stale)), "✅ *done — waiting for next task*");
+        assert_eq!(
+            asking_label(Some(stale)),
+            "✅ *done — waiting for next task*"
+        );
     }
 
     #[test]

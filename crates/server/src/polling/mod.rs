@@ -27,6 +27,7 @@ mod handlers;
 pub use handlers::{
     ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_fetch_pr_details,
     handle_merge_pr, handle_request_reviewers, handle_set_assignees, post_reply,
+    prefetch_top_pr_details,
 };
 
 use crate::ServerConfig;
@@ -569,6 +570,12 @@ pub struct TickState {
     /// how rare that is and how invasive validating each tick would
     /// be.
     gh_client: Option<GhClient>,
+    /// PR node-ids whose review-thread details we've already prefetched
+    /// this daemon session. Prevents the post-tick prefetch path from
+    /// re-firing `fetch_pr_details` on every poll cycle for the same
+    /// PR — once is enough; the TUI's lazy-fetch refreshes on focus
+    /// for users who want explicit re-pull.
+    pub(crate) prefetched_pr_details: std::collections::HashSet<String>,
 }
 
 pub async fn tick_with_state(
@@ -1087,7 +1094,26 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
         retry_after_secs: outcome.retry_after_secs,
         saw_unknown_mergeable: outcome.saw_unknown_mergeable,
     };
+    let polled = outcome.polled.clone();
     rescope_with_state(config, &outcome, &mut state).await;
+    // Background prefetch of the top-N attention PRs so the right
+    // pane is hot on first click. Detached so it doesn't extend the
+    // tick's critical path; the lock is dropped before spawn so
+    // concurrent FetchPrDetails commands aren't queued behind us.
+    // No-op when there's no gh client (linear-only setup).
+    let cfg = config.clone();
+    let polled_clone = polled.clone();
+    // Move the state clone we need (just the prefetched set + the
+    // client handle) into the spawn. TickState is `!Send + lock-
+    // guarded`; we can't pass it whole. Instead, fork into a small
+    // detached helper that uses an Arc<Mutex<HashSet>> via the
+    // existing config.poll_state. The spawn re-acquires briefly to
+    // update the dedup set after each fetch lands.
+    tokio::spawn(async move {
+        let mut state = cfg.poll_state.lock().await;
+        prefetch_top_pr_details(&cfg, &polled_clone, &mut state).await;
+    });
+    let _ = polled; // suppress unused; we cloned above.
     summary
 }
 

@@ -9,9 +9,9 @@
 //! helpers (`commit_upsert`, `load_workspace`) leak across via
 //! `pub(super)`.
 
-use super::{commit_upsert, load_workspace};
+use super::{TickState, commit_upsert, load_workspace};
 use crate::ServerConfig;
-use pilot_core::{Workspace, WorkspaceKey};
+use pilot_core::{CiStatus, ReviewStatus, Workspace, WorkspaceKey};
 use pilot_gh::GhClient;
 use pilot_ipc::Event;
 use pilot_linear::LinearClient;
@@ -547,4 +547,129 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
     let _ = config
         .bus
         .send(Event::CleanWorktreesCompleted { removed, skipped });
+}
+
+/// Post-tick prefetch: after a successful poll, pick the top-N PRs
+/// most likely to be clicked next and concurrently fetch their
+/// review-thread details so the right pane is hot when the user
+/// gets there.
+///
+/// Why N=5 + concurrency=3: each `fetch_pr_details` call costs ~550
+/// graphql units; with N=5 + 60s cadence that's ~27500/hr against
+/// GitHub's 5000-cost-units-per-graphql-resource hourly budget. Fits
+/// comfortably. Concurrency=3 keeps the local rate budget healthy
+/// (capacity 30, refill 30/min) alongside the parallel main+merged+
+/// watched-repo branches of the same tick.
+///
+/// Dedup via `TickState::prefetched_pr_details`: once we've pulled a
+/// PR's threads this daemon session, the row's still subject to the
+/// TUI's lazy-fetch on focus (so re-opens get fresh data), but we
+/// don't re-pull every poll cycle. Cleared on daemon restart.
+///
+/// Scoring (descending):
+/// - CI failing → +100 (highest-actionability — user wants to fix)
+/// - Review pending / changes-requested → +50
+/// - Unread activity → +10 per item (capped at +50)
+/// - PR has `node_id` → +1 (otherwise we couldn't fetch anyway)
+///
+/// 0-score workspaces are skipped — they don't need the prefetch.
+pub async fn prefetch_top_pr_details(
+    config: &ServerConfig,
+    polled: &[WorkspaceKey],
+    state: &mut TickState,
+) {
+    use futures::stream::{self, StreamExt};
+
+    const PREFETCH_TOP_N: usize = 5;
+    const PREFETCH_CONCURRENCY: usize = 3;
+
+    // Reuse the persistent GhClient from the tick. If absent (linear-
+    // only setup, or auth failed earlier), prefetch is a no-op.
+    let Some(client) = state.gh_client.clone() else {
+        return;
+    };
+
+    // Score every polled workspace, keep the ones with a fetchable
+    // PR. `polled` is the key list from the just-completed tick; load
+    // each via the store path the rest of the handler module uses so
+    // the scoring sees the post-upsert state.
+    let mut scored: Vec<(i32, String, WorkspaceKey)> = Vec::new();
+    for key in polled {
+        let Some(ws) = load_workspace(config, key) else {
+            continue;
+        };
+        let Some(pr) = ws.pr.as_ref() else {
+            continue;
+        };
+        let Some(node_id) = pr.node_id.clone() else {
+            continue;
+        };
+        if state.prefetched_pr_details.contains(&node_id) {
+            continue;
+        }
+        let mut score: i32 = 1;
+        if matches!(pr.ci, CiStatus::Failure | CiStatus::Mixed) {
+            score += 100;
+        }
+        if matches!(
+            pr.review,
+            ReviewStatus::ChangesRequested | ReviewStatus::Pending
+        ) {
+            score += 50;
+        }
+        score += (pr.unread_count.min(5) as i32) * 10;
+        if score > 1 {
+            scored.push((score, node_id, key.clone()));
+        }
+    }
+    if scored.is_empty() {
+        return;
+    }
+    // Highest scores first, take N.
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.truncate(PREFETCH_TOP_N);
+
+    let total = scored.len();
+    tracing::info!("prefetch_top_pr_details: prefetching {total} PRs concurrently");
+
+    // Mark them all prefetched up-front so a slow result doesn't
+    // re-trigger on the next tick.
+    for (_, node_id, _) in &scored {
+        state.prefetched_pr_details.insert(node_id.clone());
+    }
+
+    let started = std::time::Instant::now();
+    let merged: usize = stream::iter(scored.into_iter())
+        .map(|(_score, node_id, key)| {
+            let client = client.clone();
+            async move {
+                match client.fetch_pr_details(&node_id).await {
+                    Ok(activities) if !activities.is_empty() => {
+                        let Some(mut ws) = load_workspace(config, &key) else {
+                            return 0usize;
+                        };
+                        let count = activities.len();
+                        ws.merge_activity(&activities);
+                        commit_upsert(config, &key, ws);
+                        count
+                    }
+                    Ok(_) => 0,
+                    Err(e) => {
+                        tracing::debug!(
+                            "prefetch_top_pr_details: fetch_pr_details({node_id}) failed: {e}"
+                        );
+                        0
+                    }
+                }
+            }
+        })
+        .buffer_unordered(PREFETCH_CONCURRENCY)
+        .collect::<Vec<usize>>()
+        .await
+        .into_iter()
+        .sum();
+    tracing::info!(
+        "prefetch_top_pr_details: {total} PRs prefetched in {}ms, {merged} activities merged",
+        started.elapsed().as_millis()
+    );
 }

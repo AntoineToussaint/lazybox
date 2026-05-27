@@ -97,6 +97,21 @@ impl SocketModeClient {
         (rx, handle)
     }
 
+    /// One-shot validator for the app token: opens `apps.connections.open`
+    /// and discards the returned WSS URL. The Slack-side semantics —
+    /// `xapp-` token shape, `connections:write` scope, app installed
+    /// to the workspace — are checked server-side as part of that
+    /// call, so a success here is sufficient evidence the token is
+    /// usable for Socket Mode without actually consuming the
+    /// (short-lived) WebSocket URL.
+    ///
+    /// Used by `pilot slack init` and `pilot slack doctor` to fail
+    /// fast on a misconfigured app token instead of waiting for the
+    /// daemon to surface a vague "websocket: …" error later.
+    pub async fn validate(&self) -> Result<(), SlackError> {
+        self.open_wss_url().await.map(|_| ())
+    }
+
     /// Open a fresh WSS URL via `apps.connections.open`. Slack
     /// returns a one-shot URL valid for ~30 seconds.
     async fn open_wss_url(&self) -> Result<String, SlackError> {

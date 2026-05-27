@@ -11,6 +11,8 @@
 //!   pilot daemon stop             stop a running standalone daemon
 //!   pilot daemon status           show daemon status
 //!   pilot server api              foreground JSON HTTP API gateway
+//!   pilot slack init              interactive Slack token setup wizard
+//!   pilot slack doctor            read-only validation of an existing setup
 //!
 //! All arg parsing is intentionally stupid — see `take_flag`.
 
@@ -136,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
     }
     match args.first().map(String::as_str) {
         Some("server") => server_subcommand(&args[1..]).await,
+        Some("slack") => slack_subcommand(&args[1..]).await,
         Some("--connect") => {
             let socket_path = args
                 .get(1)
@@ -421,6 +424,49 @@ fn load_user_editors() -> Vec<pilot_tui::editors::UserEditorEntry> {
             args: e.args,
         })
         .collect()
+}
+
+/// `pilot slack <init|doctor>` — Slack-side setup helpers. See
+/// `pilot_tui::slack_init` for the actual flow; this is just the
+/// argv dispatch.
+///
+/// User-facing output goes through `println!` (stdout) because
+/// `init_tracing` redirects fd 2 to the log file — anything written
+/// to stderr from here would vanish into `/tmp/pilot.log` instead of
+/// reaching the user's terminal.
+async fn slack_subcommand(args: &[String]) -> anyhow::Result<()> {
+    use pilot_tui::slack_init;
+    match args.first().map(String::as_str) {
+        Some("init") => {
+            let outcome = slack_init::run_init().await?;
+            match outcome {
+                slack_init::InitOutcome::Ready => Ok(()),
+                slack_init::InitOutcome::ReadyNeedsInvite { anchor_channel } => {
+                    // Exit 0 — tokens are persisted and validated, the
+                    // user just needs to make the channel reachable.
+                    // Doctor will re-run the same check.
+                    println!("(re-run `pilot slack doctor` once #{anchor_channel} is created.)");
+                    Ok(())
+                }
+                slack_init::InitOutcome::Failed => std::process::exit(1),
+            }
+        }
+        Some("doctor") => {
+            let outcome = slack_init::run_doctor().await?;
+            match outcome {
+                slack_init::DoctorOutcome::Healthy => Ok(()),
+                slack_init::DoctorOutcome::HealthyNeedsInvite { anchor_channel } => {
+                    println!("(create / unarchive #{anchor_channel} to finish setup.)");
+                    Ok(())
+                }
+                slack_init::DoctorOutcome::Failed => std::process::exit(1),
+            }
+        }
+        _ => {
+            println!("usage: pilot slack [init|doctor]");
+            std::process::exit(2);
+        }
+    }
 }
 
 async fn server_subcommand(args: &[String]) -> anyhow::Result<()> {

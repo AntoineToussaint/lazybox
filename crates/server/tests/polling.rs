@@ -1241,12 +1241,13 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
     assert!(after.iter().any(|k| k.contains("alive")));
 }
 #[tokio::test]
-async fn rescope_with_empty_but_successful_poll_still_cleans_up() {
-    // User had a wide filter, polled saw 10 PRs. Then they narrow
-    // it to "only assigned to me" and they have none. polled is
-    // empty but the poll itself succeeded. Existing workspaces in
-    // the store must be removed — otherwise narrowing your filter
-    // leaves ghost rows in the sidebar.
+async fn rescope_with_empty_but_successful_poll_keeps_workspaces() {
+    // Previously: an empty-but-successful poll would wipe the entire
+    // store. That's catastrophic — the user pressed Shift-R, got a
+    // transient 0-result GitHub response, and watched ALL their
+    // workspaces disappear (real incident, 2026-05-27). The fix: a
+    // 0-task poll never rescopes. The user can explicitly remove
+    // rows via Shift-X / Settings → Clean.
     let config = ServerConfig::in_memory();
     polling::upsert(&config, make_task("o/r#ghost-1")).await;
     polling::upsert(&config, make_task("o/r#ghost-2")).await;
@@ -1264,9 +1265,10 @@ async fn rescope_with_empty_but_successful_poll_still_cleans_up() {
         .into_iter()
         .map(|r| r.key)
         .collect();
-    assert!(
-        after.is_empty(),
-        "successful but empty poll should still clean up: got {after:?}"
+    assert_eq!(
+        after.len(),
+        2,
+        "empty-but-successful poll must NOT delete workspaces — got {after:?}"
     );
 }
 #[tokio::test]

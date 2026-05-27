@@ -1006,18 +1006,18 @@ mod role_filter_tests {
 
     #[test]
     fn sort_mode_default_is_recency() {
-        assert_eq!(SortMode::default(), SortMode::Default);
+        assert_eq!(SortMode::default(), SortMode::Recent);
     }
 
     #[test]
     fn sort_mode_cycles_through_three_variants() {
         let order = [
-            SortMode::Default,
+            SortMode::Recent,
             SortMode::ByRole,
             SortMode::ByRoleSplit,
-            SortMode::Default,
+            SortMode::Recent,
         ];
-        let mut cur = SortMode::Default;
+        let mut cur = SortMode::Recent;
         for expected in &order[1..] {
             cur = cur.next();
             assert_eq!(cur, *expected);
@@ -1040,7 +1040,7 @@ mod role_filter_tests {
     #[test]
     fn cycle_sort_mode_reorders_visible_workspaces_by_role() {
         // Build a sidebar with one workspace per role under the same
-        // repo. In `Default` mode they sort by recency; in `ByRole`
+        // repo. In `Recent` mode they sort by recency; in `ByRole`
         // they sort by role rank with Author on top.
         let mut sb = Sidebar::new(PaneId::new(1));
         let now = chrono::Utc::now();
@@ -1061,7 +1061,7 @@ mod role_filter_tests {
         }
         sb.recompute_visible();
 
-        // Default sort: Mentioned (newest updated_at) leads, Author
+        // Recent sort: Mentioned (newest updated_at) leads, Author
         // (oldest) trails.
         let order_default: Vec<&str> = sb
             .visible
@@ -1127,7 +1127,7 @@ mod role_filter_tests {
             let sk = SessionKey::from(&w.key);
             sb.workspaces.insert(sk, w);
         }
-        // Cycle Default → ByRole → ByRoleSplit.
+        // Cycle Recent → ByRole → ByRoleSplit.
         sb.cycle_sort_mode();
         sb.cycle_sort_mode();
         assert_eq!(sb.sort_mode(), SortMode::ByRoleSplit);
@@ -1171,9 +1171,9 @@ mod role_filter_tests {
             sb.workspaces.insert(SessionKey::from(&w.key), w);
         }
 
-        for mode in [SortMode::Default, SortMode::ByRole] {
+        for mode in [SortMode::Recent, SortMode::ByRole] {
             // Reset to Default then cycle to the target.
-            while sb.sort_mode() != SortMode::Default {
+            while sb.sort_mode() != SortMode::Recent {
                 sb.cycle_sort_mode();
             }
             while sb.sort_mode() != mode {
@@ -1231,7 +1231,7 @@ mod role_filter_tests {
 
     #[test]
     fn sort_chip_label_short_enough() {
-        for m in [SortMode::Default, SortMode::ByRole, SortMode::ByRoleSplit] {
+        for m in [SortMode::Recent, SortMode::ByRole, SortMode::ByRoleSplit] {
             assert!(
                 m.chip_label().chars().count() <= 10,
                 "sort chip `{}` exceeds 10 cells",

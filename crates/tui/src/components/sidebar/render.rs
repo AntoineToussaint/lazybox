@@ -80,7 +80,7 @@ impl Sidebar {
             let row1 = Rect::new(area.x + l_pad, area.y + 1, inner_width, 1);
 
             let filter_active = self.role_filter != RoleFilter::All;
-            let sort_active = self.sort_mode != SortMode::Default;
+            let sort_active = self.sort_mode != SortMode::Recent;
             let active_style = Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD);

@@ -274,7 +274,7 @@ mod tests {
             workspaces,
             mailbox: Mailbox::Inbox,
             role_filter: RoleFilter::All,
-            sort_mode: SortMode::Default,
+            sort_mode: SortMode::Recent,
             show_inactive_in_inbox: false,
             projects,
             collapsed_repos: collapsed,

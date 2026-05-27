@@ -389,9 +389,15 @@ pub async fn handle_set_assignees(
 /// failure shouldn't pop a modal. The diagnostic still lands in
 /// `/tmp/pilot.log`.
 pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: WorkspaceKey) {
-    let Some(mut ws) = load_workspace(config, &workspace_key) else {
-        tracing::info!("fetch_pr_details: workspace {workspace_key} not found");
-        return;
+    // First load is read-only — we just need the PR's node_id.
+    // We re-load right before commit so the activity merge applies
+    // to the freshest workspace state (see race fix below).
+    let ws = match load_workspace(config, &workspace_key) {
+        Some(w) => w,
+        None => {
+            tracing::info!("fetch_pr_details: workspace {workspace_key} not found");
+            return;
+        }
     };
     let Some(pr) = ws.pr.as_ref() else {
         tracing::debug!("fetch_pr_details: workspace {workspace_key} has no PR");
@@ -444,6 +450,23 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
         return;
     }
 
+    // Race fix: the fetch above can take 1-2s on the network. If the
+    // main poll cycle wrote a fresher workspace (with updated CI /
+    // review / mergeable state) during that window, committing the
+    // `ws` we read at the top of this fn would clobber the fresh
+    // data with our stale snapshot. Symptom: PR shows `CI RUN` in
+    // pilot long after GitHub flipped it to SUCCESS. Fix: re-load
+    // right before commit, apply the activity merge to the
+    // freshest copy, then persist.
+    let mut ws = match load_workspace(config, &workspace_key) {
+        Some(w) => w,
+        None => {
+            // Workspace removed between our initial load + now (e.g.
+            // user pressed Shift-X). Drop the activity merge silently
+            // — the workspace is gone.
+            return;
+        }
+    };
     // Route through `Workspace::merge_activity` — the same path the
     // poll cycle uses. Crucial: it dedups by (author, body,
     // created_at) AND remaps `read_indices` across the post-sort

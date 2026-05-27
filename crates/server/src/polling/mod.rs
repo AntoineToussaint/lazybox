@@ -808,6 +808,29 @@ pub async fn rescope_with_state(
     if !outcome.any_source_succeeded {
         return;
     }
+    // CRITICAL data-loss guard: a 0-result poll wipes the entire
+    // inbox if we let rescope run. Plausible causes for "0 tasks
+    // returned" include:
+    //   - GitHub API hiccup mid-search (returns 200 OK with empty
+    //     `search.nodes`)
+    //   - the user just edited their `~/.pilot/config.yaml` scopes
+    //     and removed every repo (deliberate)
+    //   - a transient auth issue that returns no results without
+    //     erroring
+    // Only the second case is a real intent-to-rescope. Without a
+    // way to distinguish, the safest default is "never rescope on
+    // an empty result." The user can press Shift-X / Settings →
+    // Clean to explicitly remove rows.
+    //
+    // Symptom this fixes: user pressed Shift-R, got
+    // "github returned 0 tasks", and ALL workspaces vanished.
+    if outcome.polled.is_empty() {
+        tracing::warn!(
+            "rescope: skipping (0 polled tasks — refusing to delete every workspace; \
+             the next non-empty poll will rescope normally)"
+        );
+        return;
+    }
     let polled_set: std::collections::HashSet<&str> =
         outcome.polled.iter().map(|k| k.as_str()).collect();
     // Anything we polled is back in scope — drop any "already

@@ -84,14 +84,15 @@ pub enum RoleFilter {
 }
 
 /// How the sidebar orders workspaces within each repo group.
-/// Default is recency (`updated_at desc`); `ByRole` puts authored
-/// PRs first then reviews-requested etc.; `ByRoleSplit` keeps the
-/// same order but interleaves role-section headers between groups.
+/// `Recent` is the legacy `updated_at desc` order; `ByRole` puts
+/// authored PRs first then reviews-requested etc.; `ByRoleSplit`
+/// keeps the same order but interleaves role-section headers
+/// between groups (Author / Reviewer / Assignee / Mentioned).
 /// Cycled via `o` in the sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortMode {
     #[default]
-    Default,
+    Recent,
     ByRole,
     ByRoleSplit,
 }
@@ -99,15 +100,15 @@ pub enum SortMode {
 impl SortMode {
     pub fn next(self) -> Self {
         match self {
-            SortMode::Default => SortMode::ByRole,
+            SortMode::Recent => SortMode::ByRole,
             SortMode::ByRole => SortMode::ByRoleSplit,
-            SortMode::ByRoleSplit => SortMode::Default,
+            SortMode::ByRoleSplit => SortMode::Recent,
         }
     }
 
     pub fn chip_label(self) -> &'static str {
         match self {
-            SortMode::Default => "recent",
+            SortMode::Recent => "recent",
             SortMode::ByRole => "by-role",
             SortMode::ByRoleSplit => "split",
         }
@@ -632,13 +633,21 @@ impl Sidebar {
         }
         let idx = (click_row - area.y - HEADER_HEIGHT) as usize;
         match self.visible.get(idx) {
-            Some(VisibleRow::Workspace(_)) | Some(VisibleRow::Session { .. }) => {
+            // Headers ARE selectable now (post-Stage-4): the user
+            // needs to land cursor on a project header to fire
+            // `n` (new workspace) against that project, or to
+            // `Space`-toggle the repo's collapsed state. Without
+            // this a newly-created local project was unreachable
+            // via mouse — the user had to keyboard-navigate j/k
+            // through every workspace above it.
+            Some(VisibleRow::Workspace(_))
+            | Some(VisibleRow::Session { .. })
+            | Some(VisibleRow::RepoHeader(_))
+            | Some(VisibleRow::RoleHeader(_)) => {
                 self.cursor = idx;
                 true
             }
-            // RepoHeader / out-of-bounds → no-op so the click doesn't
-            // strand the cursor on a non-selectable row.
-            _ => false,
+            None => false,
         }
     }
 
@@ -1166,6 +1175,7 @@ impl Sidebar {
             actions.push(Action::SpawnAgent("claude".into()));
             actions.push(Action::SpawnShell);
             actions.push(Action::OpenEditor);
+            actions.push(Action::ToggleSnooze);
             actions.push(Action::Archive);
         }
         actions.push(Action::NewWorkspace);
@@ -1178,11 +1188,14 @@ impl Sidebar {
             .into_iter()
             .map(|a| {
                 let def = ActionDef::for_action(&a);
-                // SpawnAgent's runtime id needs surface-specific
-                // labeling — the catalog's static "spawn agent"
-                // would be too generic.
+                // SpawnAgent's hint key is `c / x / u` — three agents
+                // — so the label needs to read "agent" generically,
+                // not "claude." Previously the row said
+                // "c / x / u   claude" which implied all three keys
+                // launch claude. Switching to "agent" matches the
+                // catalog's static `def.label` and removes the
+                // ambiguity.
                 let label = match &a {
-                    Action::SpawnAgent(id) if id == "claude" => "claude",
                     Action::SpawnAgent(_) => def.label,
                     _ => contextual_label(&a, workspace),
                 };

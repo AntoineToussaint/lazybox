@@ -220,20 +220,6 @@ the sidebar, but on the next poll it disappears.
 - Add a `is_locally_created` flag to Workspace OR check the
   shape predicate above.
 
-## Auto-mark `z` undo can target wrong activity after poll shrinks list
-
-**Symptom.** User hovers row 3, auto-mark fires, then a poll
-delivers a smaller activity list (issue closed, dedup, etc.), the
-user presses `z` and unmarks the wrong row.
-
-- Location: `crates/tui/src/components/right_pane/mod.rs` —
-  `last_marked_read: Option<usize>`. Stores index only. If the
-  activity list shrinks between fire and undo, the index points
-  at a different row.
-- Fix: store `(workspace_key, activity_node_id)` instead so the
-  undo can refuse if the workspace changed or the activity at
-  that index no longer matches.
-
 ## TerminalStack active_tab_idx not clamped after shrink
 
 **Symptom.** Closing all but the first terminal then Tab-cycling

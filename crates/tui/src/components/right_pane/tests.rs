@@ -259,3 +259,120 @@ mod click_dispatch_tests {
         assert!(!pane.feed.is_expanded(3));
     }
 }
+
+/// Regression tests for the `z` undo path. The auto-mark feature
+/// stores a fingerprint of the activity being marked, not just the
+/// raw index, so a poll that introduces a new top-of-feed comment
+/// (shifting every older row down by one) doesn't make `z` un-read
+/// the wrong row.
+#[cfg(test)]
+mod undo_auto_mark_tests {
+    use super::super::{ActivityFingerprint, AutoMarkRecord, PaneId, RightPane};
+    use chrono::{TimeZone, Utc};
+    use pilot_core::{Activity, ActivityKind, Workspace, WorkspaceKey};
+
+    fn activity_with(node_id: &str, body: &str) -> Activity {
+        Activity {
+            author: "alice".into(),
+            body: body.into(),
+            // Fixed timestamp keeps the fingerprint stable across
+            // workspace mutations within the same test.
+            created_at: Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap(),
+            kind: ActivityKind::Comment,
+            node_id: Some(node_id.into()),
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        }
+    }
+
+    fn ws_with(activities: Vec<Activity>) -> Workspace {
+        let mut w = Workspace::empty(WorkspaceKey::new("k"), "main", Utc::now());
+        w.activity = activities;
+        w
+    }
+
+    /// Fingerprint matches the original row even after a new top-
+    /// of-feed item shifts it down by one.
+    #[test]
+    fn resolve_finds_row_after_shift() {
+        let activities = vec![
+            activity_with("n-A", "alpha"),
+            activity_with("n-B", "beta"),
+            activity_with("n-C", "gamma"),
+        ];
+        let record = AutoMarkRecord {
+            last_index: 1,
+            fingerprint: ActivityFingerprint::NodeId("n-B".into()),
+        };
+        // Pre-shift the resolver returns the cached index.
+        assert_eq!(record.resolve(&activities), Some(1));
+
+        // Insert a fresh item at the top — every old row shifts +1.
+        let mut shifted = activities.clone();
+        shifted.insert(0, activity_with("n-NEW", "fresh"));
+        assert_eq!(record.resolve(&shifted), Some(2));
+    }
+
+    /// When the activity is gone (deleted upstream, never re-merged)
+    /// the resolver returns None — undo refuses rather than guessing.
+    #[test]
+    fn resolve_returns_none_when_activity_missing() {
+        let activities = vec![activity_with("n-A", "alpha")];
+        let record = AutoMarkRecord {
+            last_index: 1,
+            fingerprint: ActivityFingerprint::NodeId("n-GONE".into()),
+        };
+        assert_eq!(record.resolve(&activities), None);
+    }
+
+    /// Activities without `node_id` (status changes / CI events) use
+    /// the (author, created_at, body_prefix) fingerprint instead.
+    #[test]
+    fn content_fingerprint_survives_when_node_id_missing() {
+        let mut act = activity_with("", "ci passed");
+        act.node_id = None;
+        let fp = ActivityFingerprint::of(&act);
+        assert!(matches!(fp, ActivityFingerprint::Content { .. }));
+        let activities = vec![act];
+        let record = AutoMarkRecord {
+            last_index: 0,
+            fingerprint: fp,
+        };
+        assert_eq!(record.resolve(&activities), Some(0));
+    }
+
+    /// Pre-fix bug: marking row 1, polling adds a new row at 0 (so
+    /// the marked row is now at 2), pressing `z` unmarks row 1 (the
+    /// wrong activity). Post-fix: `z` resolves the fingerprint to
+    /// the new index 2 and emits the correct UnmarkActivityRead.
+    #[test]
+    fn z_undo_follows_the_row_across_a_shift() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        let activities = vec![
+            activity_with("n-A", "alpha"),
+            activity_with("n-B", "beta"),
+            activity_with("n-C", "gamma"),
+        ];
+        pane.set_workspace(Some(ws_with(activities.clone())));
+        // Manually arm + fire on row index 1 (the "beta" row).
+        pane.feed.cursor = 1;
+        let fired = pane.fire_auto_mark();
+        assert_eq!(fired.map(|(_k, i)| i), Some(1));
+
+        // Poll injects a new row at the top, shifting everything down.
+        let mut shifted = activities.clone();
+        shifted.insert(0, activity_with("n-NEW", "fresh"));
+        pane.set_workspace(Some(ws_with(shifted)));
+
+        let undone = pane.undo_auto_mark();
+        // The "beta" row is now at index 2 — undo MUST resolve to 2,
+        // not the stale 1.
+        assert_eq!(
+            undone.map(|(_k, i)| i),
+            Some(2),
+            "z undo should follow the fingerprint to the new index, not unmark the wrong row"
+        );
+    }
+}

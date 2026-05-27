@@ -82,11 +82,17 @@ pub struct RightPane {
     /// Auto-mark-read timer. Armed when the cursor lands on an
     /// unread row while the pane has focus; on the next `tick`
     /// past `auto_mark_delay` the activity flips to read and we
-    /// remember the index in `last_marked_read` so `z` can undo
-    /// it. Backed by the generic `TimerLatch` so the
+    /// remember it in `last_marked_read` so `z` can undo it.
+    /// Backed by the generic `TimerLatch` so the
     /// "arm-on-event, fire-on-elapsed" contract is one place.
     mark_timer: crate::confirm_latch::TimerLatch,
-    last_marked_read: Option<usize>,
+    /// Fingerprint of the most recently auto-marked activity, plus
+    /// its last-known index. On `z` we resolve the fingerprint back
+    /// to the CURRENT index — a poll that introduced a new comment
+    /// at the top shifts every older row down by one, and using the
+    /// raw cached index would un-read the wrong comment. See
+    /// `AutoMarkRecord::resolve` for the lookup.
+    last_marked_read: Option<AutoMarkRecord>,
     /// Agent the `f` (fix) shortcut spawns. Configurable via YAML
     /// (`setup.default_agent`); defaults to `"claude"`.
     default_agent: String,
@@ -173,6 +179,70 @@ impl TaskBodyView {
 
     pub fn is_visible(self) -> bool {
         !matches!(self, Self::Collapsed)
+    }
+}
+
+/// Stable enough identifier for one activity row, used by the `z`
+/// undo flow to find the row's *current* index after a poll that
+/// reshuffled the list (a new top-of-feed comment shifts every
+/// older row down by one). Prefers the upstream `node_id` (GitHub
+/// gives this for comments and reviews); falls back to a
+/// content tuple for kinds that don't carry one (CI events,
+/// status changes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ActivityFingerprint {
+    NodeId(String),
+    Content {
+        author: String,
+        created_at: chrono::DateTime<chrono::Utc>,
+        body_prefix: String,
+    },
+}
+
+impl ActivityFingerprint {
+    fn of(activity: &pilot_core::Activity) -> Self {
+        if let Some(id) = &activity.node_id
+            && !id.is_empty()
+        {
+            return Self::NodeId(id.clone());
+        }
+        // Keep the prefix short — comparing whole bodies is wasteful
+        // and the prefix is enough to distinguish row from row in
+        // practice. 64 chars survives auto-formatting that trims or
+        // wraps trailing whitespace.
+        let body_prefix: String = activity.body.chars().take(64).collect();
+        Self::Content {
+            author: activity.author.clone(),
+            created_at: activity.created_at,
+            body_prefix,
+        }
+    }
+
+    fn matches(&self, activity: &pilot_core::Activity) -> bool {
+        *self == Self::of(activity)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AutoMarkRecord {
+    /// Hint at the position we last saw this activity at — first
+    /// thing `resolve` checks before scanning the list. Stale after
+    /// a reshuffle but the scan covers the falls-out-of-place case.
+    last_index: usize,
+    fingerprint: ActivityFingerprint,
+}
+
+impl AutoMarkRecord {
+    /// Find the activity matching this record in `activity` and
+    /// return its current index. None when the row is gone (e.g.
+    /// removed upstream between the mark and the undo).
+    fn resolve(&self, activity: &[pilot_core::Activity]) -> Option<usize> {
+        if let Some(act) = activity.get(self.last_index)
+            && self.fingerprint.matches(act)
+        {
+            return Some(self.last_index);
+        }
+        activity.iter().position(|a| self.fingerprint.matches(a))
     }
 }
 
@@ -306,6 +376,10 @@ impl RightPane {
             );
             return None;
         }
+        let fingerprint = workspace
+            .activity
+            .get(i)
+            .map(ActivityFingerprint::of)?;
         workspace.mark_activity_read(i);
         let unread_after = workspace.unread_count();
         tracing::info!(
@@ -314,7 +388,10 @@ impl RightPane {
             unread_after,
             "auto-mark fire: flipped row to read",
         );
-        self.last_marked_read = Some(i);
+        self.last_marked_read = Some(AutoMarkRecord {
+            last_index: i,
+            fingerprint,
+        });
         self.mark_timer.disarm();
         Some((pilot_core::SessionKey::from(&workspace.key), i))
     }
@@ -322,15 +399,32 @@ impl RightPane {
     /// Undo the most recent auto-mark, if any. Returns
     /// `(session_key, index)` for the caller to persist via
     /// `Command::UnmarkActivityRead`.
+    ///
+    /// Resolves the stored fingerprint to the activity's *current*
+    /// position — a poll that introduced a new top-of-feed comment
+    /// shifts every older row down by one, and a raw cached index
+    /// would un-read the wrong comment.
     fn undo_auto_mark(&mut self) -> Option<(pilot_core::SessionKey, usize)> {
-        let i = self.last_marked_read.take()?;
+        let record = self.last_marked_read.take()?;
         let workspace = self.workspace.as_mut()?;
-        workspace.unmark_activity_read(i);
+        let index = match record.resolve(&workspace.activity) {
+            Some(i) => i,
+            None => {
+                tracing::debug!(
+                    workspace = %workspace.key,
+                    last_index = record.last_index,
+                    "z undo: activity gone — refusing to unmark a stranger",
+                );
+                self.mark_timer.disarm();
+                return None;
+            }
+        };
+        workspace.unmark_activity_read(index);
         // Re-arm if the cursor is still on this row — otherwise the
         // timer would re-fire on the next tick and undo the undo.
         // Simpler: just clear; user can re-arm by moving.
         self.mark_timer.disarm();
-        Some((pilot_core::SessionKey::from(&workspace.key), i))
+        Some((pilot_core::SessionKey::from(&workspace.key), index))
     }
 
     /// Drive the auto-mark timer. Called from the App's per-tick
@@ -1262,11 +1356,17 @@ impl RightPane {
             (KeyCode::Char('m'), KeyModifiers::NONE) => {
                 if !workspace.activity.is_empty() && workspace.is_activity_unread(self.feed.cursor)
                 {
+                    let cursor = self.feed.cursor;
                     cmds.push(Command::MarkActivityRead {
                         session_key: workspace.key.clone().into(),
-                        index: self.feed.cursor,
+                        index: cursor,
                     });
-                    self.last_marked_read = Some(self.feed.cursor);
+                    if let Some(act) = workspace.activity.get(cursor) {
+                        self.last_marked_read = Some(AutoMarkRecord {
+                            last_index: cursor,
+                            fingerprint: ActivityFingerprint::of(act),
+                        });
+                    }
                 }
                 PaneOutcome::Consumed
             }

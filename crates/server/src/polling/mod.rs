@@ -23,12 +23,14 @@
 //! there's only one place sessions enter the system.
 
 mod handlers;
+mod mutate;
 
 pub use handlers::{
     ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_fetch_pr_details,
     handle_merge_pr, handle_request_reviewers, handle_set_assignees, post_reply,
     prefetch_top_pr_details,
 };
+pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 
 use crate::ServerConfig;
 use chrono::Utc;

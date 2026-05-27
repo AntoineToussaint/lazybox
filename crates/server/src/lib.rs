@@ -32,6 +32,7 @@ pub mod agent_stream;
 pub mod api_gateway;
 pub mod auth;
 pub mod backend;
+pub mod chat;
 pub mod lifecycle;
 pub mod polling;
 pub mod pty;

@@ -495,11 +495,16 @@ impl Server {
                         pilot_ipc::Command::Write { terminal_id, bytes } => {
                             spawn_handler::handle_write(&self.config, terminal_id, &bytes).await;
                         }
-                        pilot_ipc::Command::InjectPrompt { terminal_id, prompt } => {
+                        pilot_ipc::Command::InjectPrompt {
+                            terminal_id,
+                            prompt,
+                            fallback_spawn,
+                        } => {
                             spawn_handler::handle_inject_prompt(
                                 &self.config,
                                 terminal_id,
                                 &prompt,
+                                fallback_spawn,
                             )
                             .await;
                         }

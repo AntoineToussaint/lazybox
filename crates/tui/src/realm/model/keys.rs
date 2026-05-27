@@ -388,9 +388,24 @@ impl<T: TerminalAdapter> Model<T> {
                         format!("→ injecting into existing {agent_id}"),
                         NoticeSeverity::Hint,
                     ));
+                    // Always carry the Spawn parameters so a stale
+                    // terminal id (agent died between this lookup and
+                    // the command arriving at the daemon) falls back
+                    // to Spawn instead of silently dropping the
+                    // user's prompt. The TUI's view of
+                    // `running_terminals` is updated from a broadcast
+                    // channel, so there's always a small window where
+                    // `find_agent_terminal` returns a dead id.
+                    let fallback_spawn = Some(pilot_ipc::SpawnFallback {
+                        session_key: session_key.clone(),
+                        session_id,
+                        kind: pilot_ipc::TerminalKind::Agent(agent_id.clone()),
+                        cwd: cwd.clone(),
+                    });
                     IpcCommand::InjectPrompt {
                         terminal_id,
                         prompt,
+                        fallback_spawn,
                     }
                 } else {
                     IpcCommand::Spawn {

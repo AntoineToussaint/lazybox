@@ -234,21 +234,6 @@ user presses `z` and unmarks the wrong row.
   undo can refuse if the workspace changed or the activity at
   that index no longer matches.
 
-## `find_agent_terminal` race — Spawn after TerminalExited reuses dead id
-
-**Symptom.** User spawns agent → agent exits → user spawns again
-quickly → spawn reuses the dead terminal id and the PTY write
-silently no-ops.
-
-- Location: `crates/tui/src/components/sidebar/mod.rs::find_agent_terminal`.
-  Reads `running_terminals` which is updated on `TerminalExited`.
-  Race: keypress → `find_agent_terminal` → dispatch — if
-  `TerminalExited` arrives during this window, we already
-  captured the dead id.
-- Fix: when the daemon receives an `InjectPrompt` for a
-  terminal_id that no longer exists, fall back to spawning a
-  fresh one (with the same workspace + agent + prompt).
-
 ## TerminalStack active_tab_idx not clamped after shrink
 
 **Symptom.** Closing all but the first terminal then Tab-cycling

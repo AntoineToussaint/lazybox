@@ -225,6 +225,20 @@ impl fmt::Debug for ProviderCredentialInput {
     }
 }
 
+/// Spawn parameters carried alongside `Command::InjectPrompt` so the
+/// daemon can fall back to creating a fresh terminal when the cached
+/// `terminal_id` no longer exists (agent died between the user's `w`
+/// press and the command arriving). Mirrors the `Spawn` variant's
+/// fields exactly so the rewrite is a straight field-for-field copy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpawnFallback {
+    pub session_key: SessionKey,
+    #[serde(default)]
+    pub session_id: Option<pilot_core::SessionId>,
+    pub kind: TerminalKind,
+    pub cwd: Option<String>,
+}
+
 /// TUI → daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
@@ -273,11 +287,20 @@ pub enum Command {
     /// the user's running claude tab instead of spawning a second
     /// one. The daemon looks up the agent for `terminal_id` and
     /// runs `agent.inject_prompt(prompt)` + `agent.inject_submit()`,
-    /// the same paste/submit split used at spawn time. Quietly
-    /// no-ops if the terminal is not an agent or doesn't exist.
+    /// the same paste/submit split used at spawn time.
+    ///
+    /// `fallback_spawn` covers the race where the TUI cached the
+    /// agent's terminal id, the agent died, `TerminalExited` is in
+    /// flight but the user already pressed `w`. Without the fallback
+    /// the daemon used to silently no-op and the prompt was lost.
+    /// When set, an unknown / dead `terminal_id` is rewritten back
+    /// into a Spawn with the carried parameters + `prompt` as the
+    /// initial prompt.
     InjectPrompt {
         terminal_id: TerminalId,
         prompt: String,
+        #[serde(default)]
+        fallback_spawn: Option<SpawnFallback>,
     },
     Resize {
         terminal_id: TerminalId,

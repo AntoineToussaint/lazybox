@@ -1312,10 +1312,43 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
 /// targeted at a live terminal instead of a fresh one. Quietly
 /// no-ops if the terminal isn't an agent (shell terminals don't
 /// have `inject_prompt`) or doesn't exist.
-pub async fn handle_inject_prompt(config: &ServerConfig, terminal_id: TerminalId, prompt: &str) {
-    let backend_key = match config.terminals.lock().await.get(&terminal_id).cloned() {
+pub async fn handle_inject_prompt(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    prompt: &str,
+    fallback_spawn: Option<pilot_ipc::SpawnFallback>,
+) {
+    // Look up — and drop the guard — before any further await so
+    // a nested handle_spawn (in the fallback path) can re-acquire
+    // the same lock without deadlocking. Without the explicit
+    // scope, the temporary `MutexGuard` from the match scrutinee
+    // lives for the entire match arm.
+    let backend_key = {
+        let guard = config.terminals.lock().await;
+        guard.get(&terminal_id).cloned()
+    };
+    let backend_key = match backend_key {
         Some(k) => k,
         None => {
+            // The TUI's cached terminal id is stale — the agent died
+            // between the user's `w` press and this command arriving.
+            // If a fallback was provided, rewrite this into a Spawn
+            // so the user's prompt isn't silently lost.
+            if let Some(fb) = fallback_spawn {
+                tracing::info!(
+                    "inject_prompt: terminal {terminal_id:?} gone — falling back to Spawn"
+                );
+                handle_spawn(
+                    config,
+                    fb.session_key,
+                    fb.session_id,
+                    fb.kind,
+                    fb.cwd,
+                    Some(prompt.to_string()),
+                )
+                .await;
+                return;
+            }
             tracing::debug!("inject_prompt to unknown terminal {terminal_id:?}");
             return;
         }

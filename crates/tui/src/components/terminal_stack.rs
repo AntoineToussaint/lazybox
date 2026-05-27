@@ -669,10 +669,16 @@ impl TerminalStack {
     /// grid. Returns plain text joined with newlines between rows.
     /// Empty when nothing's focused or the range is degenerate.
     ///
-    /// MVP: row-major rectangular selection. A "true" selection
-    /// would follow text flow (line-wrap awareness) but rectangular
-    /// matches what most terminals do under Option-drag and is
-    /// enough to copy a paragraph of claude output.
+    /// **Flowing-text selection** (mailer / browser style):
+    /// - Same row: copy cells `[sx, ex]` on that row.
+    /// - Multi-row: first row goes from `sx` to end-of-row; full
+    ///   middle rows are copied whole; last row goes from start
+    ///   to `ex`.
+    ///
+    /// This matches what users expect from "drag from word X on
+    /// line 2 to word Y on line 5" — they get EVERYTHING in
+    /// between, not just the rectangular cells `[sx..ex] × [sy..ey]`
+    /// which is what the previous version produced.
     pub fn extract_text(
         &mut self,
         rect: tuirealm::ratatui::layout::Rect,
@@ -685,22 +691,22 @@ impl TerminalStack {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return String::new();
         };
-        // Normalize: drag can start lower-right and end upper-left.
-        let (sx, ex) = if start.0 <= end.0 {
-            (start.0, end.0)
+        // Normalize: anchor (anchor_x, anchor_y) is the row-then-
+        // column "earlier" endpoint of the selection — i.e. the
+        // smaller (y, x) pair. The other endpoint is the focus.
+        // This is the *row-major* normalization the flowing-text
+        // model needs (sort by y first, then x), distinct from the
+        // axis-independent normalization the rectangle model used.
+        let (anchor_x, anchor_y, focus_x, focus_y) = if (start.1, start.0) <= (end.1, end.0) {
+            (start.0, start.1, end.0, end.1)
         } else {
-            (end.0, start.0)
+            (end.0, end.1, start.0, start.1)
         };
-        let (sy, ey) = if start.1 <= end.1 {
-            (start.1, end.1)
-        } else {
-            (end.1, start.1)
-        };
-        // Translate to grid-cell coords (zero-based inside `rect`).
-        let col_start = sx.saturating_sub(rect.x);
-        let col_end = ex.saturating_sub(rect.x);
-        let row_start = sy.saturating_sub(rect.y);
-        let row_end = ey.saturating_sub(rect.y);
+        let anchor_col = anchor_x.saturating_sub(rect.x);
+        let focus_col = focus_x.saturating_sub(rect.x);
+        let row_start = anchor_y.saturating_sub(rect.y);
+        let row_end = focus_y.saturating_sub(rect.y);
+        let single_row = row_start == row_end;
         let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) else {
             return String::new();
         };
@@ -714,11 +720,33 @@ impl TerminalStack {
                 break;
             }
             if y >= row_start {
+                // Decide which column range applies to THIS row.
+                // Single-row selection → strict [anchor_col, focus_col].
+                // Multi-row selection:
+                //   - first row → [anchor_col, ∞)
+                //   - middle row → [0, ∞)
+                //   - last row → [0, focus_col]
+                let (col_start, col_end): (u16, Option<u16>) = if single_row {
+                    let (a, b) = if anchor_col <= focus_col {
+                        (anchor_col, focus_col)
+                    } else {
+                        (focus_col, anchor_col)
+                    };
+                    (a, Some(b))
+                } else if y == row_start {
+                    (anchor_col, None)
+                } else if y == row_end {
+                    (0, Some(focus_col))
+                } else {
+                    (0, None)
+                };
                 let mut line = String::new();
                 if let Ok(mut cell_iter) = slot.vt.cell_iter.update(row) {
                     let mut x: u16 = 0;
                     while let Some(cell) = cell_iter.next() {
-                        if x > col_end {
+                        if let Some(end_col) = col_end
+                            && x > end_col
+                        {
                             break;
                         }
                         if x >= col_start {
@@ -735,7 +763,7 @@ impl TerminalStack {
                     }
                 }
                 // Trim trailing spaces so the copy doesn't include
-                // the row's blank tail — terminals fill rows with
+                // the row's blank tail — terminals pad rows with
                 // spaces but the user expects "just the text."
                 let line = line.trim_end().to_string();
                 if !out.is_empty() {

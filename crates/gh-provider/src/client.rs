@@ -622,6 +622,39 @@ impl GhClient {
         // Branch 1: main paginated search.
         let main_fut = self.fetch_pr_search_paginated(&search_query);
 
+        // Branch 1b: `review-requested:USER` companion search.
+        // GitHub's `involves:` qualifier covers author + assignee +
+        // mentioned + commenter — but NOT requested reviewer. For a
+        // user whose only involvement in a repo is "requested to
+        // review", `involves:USER` returns 0 results. The single-
+        // scope path used to compensate via the explicit `repo:`
+        // qualifier (which broadens the search), but multi-scope
+        // can't use that without hitting the parens-OR footgun.
+        //
+        // Fire a parallel `review-requested:USER` search whenever
+        // the user has the reviewer role enabled OR has no specific
+        // PR role enabled. Results union into the main set with
+        // dedup by task id. Cost: one extra GraphQL search per poll.
+        let want_reviewer_pass = self.pr_filters.is_empty()
+            || self
+                .pr_filters
+                .iter()
+                .any(|q| q.contains("review-requested") || q.contains("involves:"));
+        let reviewer_query = if want_reviewer_pass {
+            let mut q = graphql::default_search_qualifiers();
+            q.push(format!("review-requested:{}", self.user));
+            Some(graphql::build_query(&q))
+        } else {
+            None
+        };
+        let reviewer_fut = async {
+            if let Some(q) = reviewer_query {
+                self.fetch_pr_single_query("review-requested", q).await
+            } else {
+                Ok(Vec::new())
+            }
+        };
+
         // Branch 2: recently-merged sweep.
         let week_ago = (chrono::Utc::now() - chrono::Duration::days(7))
             .format("%Y-%m-%d")
@@ -657,15 +690,36 @@ impl GhClient {
             .buffer_unordered(WATCHED_CONCURRENCY)
             .collect::<Vec<_>>();
 
-        let (main_res, merged_res, watched_results) =
-            tokio::join!(main_fut, merged_fut, watched_fut);
+        let (main_res, reviewer_res, merged_res, watched_results) =
+            tokio::join!(main_fut, reviewer_fut, merged_fut, watched_fut);
 
         // The main search is load-bearing — if it fails the whole
         // poll fails so the polling layer's error path fires. The
-        // sweep + watched paths are best-effort: log + continue.
+        // sweep + watched + reviewer paths are best-effort: log +
+        // continue.
         let mut tasks = main_res?;
         let mut existing: std::collections::HashSet<String> =
             tasks.iter().map(|t| t.id.key.clone()).collect();
+
+        match reviewer_res {
+            Ok(rev_tasks) => {
+                let mut added = 0usize;
+                for t in rev_tasks {
+                    if existing.insert(t.id.key.clone()) {
+                        tasks.push(t);
+                        added += 1;
+                    }
+                }
+                if added > 0 {
+                    tracing::info!(
+                        "review-requested branch: {added} PRs added (GH `involves:` misses these)"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!("review-requested branch failed: {e}");
+            }
+        }
 
         match merged_res {
             Ok(merged_tasks) => {

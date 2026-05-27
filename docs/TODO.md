@@ -176,6 +176,50 @@ credentials in headers") shows as a SEPARATE row under
   in the title (no body link, no GitHub-side
   `closingIssuesReferences`) would never collapse.
 
+## Archive (`Shift-X`) → workspace reappears on next sync
+
+**Symptom.** User archived a workspace (`Shift-X` confirmed),
+then the next poll's `WorkspaceUpserted` for the same task
+re-created the row.
+
+- Likely location: `polling::delete_workspace` removes the row
+  but doesn't prevent the next poll's `upsert` from re-creating
+  it. The `archived` state needs to live somewhere durable so
+  the upsert path checks "did the user already archive this?"
+  and skips OR routes to the Snoozed mailbox.
+- Suggested shape: a `archived: HashSet<WorkspaceKey>` on
+  `TickState` (or persisted in the store under a kv key) that
+  the upsert path consults before writing. The user can re-add
+  the workspace by un-archiving (no UI for that yet — add
+  Settings → Restore Archive).
+
+## Spawning claude from an Issue doesn't create the worktree
+
+**Symptom.** User pressed `c` on an issue row, claude spawned in
+the same dir as pilot's CWD (or failed silently). The expected
+behavior is "create a worktree on a fresh branch named after the
+issue, spawn claude in that worktree."
+
+- Likely location: `spawn_handler::handle_spawn` should auto-
+  create a session + worktree when the workspace has no
+  sessions yet. For PR workspaces this exists via
+  `worktree_path_for_session`. For issue workspaces with no
+  upstream branch, the path lookup might return `None` and the
+  spawn falls through to a no-worktree mode.
+
+## Mouse copy only works on multi-line, then copies one line
+
+**Symptom.** Single-line drag-to-select doesn't copy at all;
+multi-line copies but only one line of the selection ends up in
+the clipboard.
+
+- FIXED (this commit): rewrote `extract_text` from a rectangular
+  selection model to row-major flowing-text (first row from
+  anchor → end; middle rows whole; last row from start → focus).
+- The single-line-doesn't-copy case might still hit an edge with
+  drags shorter than one cell width. Test interactively after
+  rebuild.
+
 ## Pressing `w` on an issue doesn't inject "implement/solve this issue" into running agent
 
 **Symptom.** `w` on an issue row with a running claude doesn't

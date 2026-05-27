@@ -858,6 +858,15 @@ impl Sidebar {
         }
     }
 
+    /// Iterate every workspace in local state. Used by the
+    /// `CollapseIntoPr` dispatcher to find a PR that closes the
+    /// focused issue — the cross-workspace relationship lookup
+    /// doesn't fit the per-workspace `intent::resolve_*` shape, so
+    /// the dispatcher walks the map directly.
+    pub fn workspaces_iter(&self) -> impl Iterator<Item = &pilot_core::Workspace> {
+        self.workspaces.values()
+    }
+
     /// Look up the display label of a project by key. Used by the
     /// destructive-delete confirm modal so the prompt reads
     /// "Delete project foo/bar" instead of the raw key. Returns

@@ -416,6 +416,7 @@ impl Server {
                         pilot_ipc::Command::Unsnooze { .. } => "Unsnooze",
                         pilot_ipc::Command::Kill { .. } => "Kill",
                         pilot_ipc::Command::DeleteProject { .. } => "DeleteProject",
+                        pilot_ipc::Command::CollapseIntoPr { .. } => "CollapseIntoPr",
                         pilot_ipc::Command::CreateWorkspace { .. } => "CreateWorkspace",
                         pilot_ipc::Command::CreateProject { .. } => "CreateProject",
                         pilot_ipc::Command::AdoptSessions { .. } => "AdoptSessions",
@@ -643,6 +644,14 @@ impl Server {
                         }
                         pilot_ipc::Command::DeleteProject { project_key } => {
                             polling::delete_project(&self.config, &project_key).await;
+                        }
+                        pilot_ipc::Command::CollapseIntoPr {
+                            issue_workspace_key,
+                        } => {
+                            let key = pilot_core::WorkspaceKey::new(
+                                issue_workspace_key.as_str().to_string(),
+                            );
+                            polling::handle_collapse_into_pr(&self.config, key).await;
                         }
                         pilot_ipc::Command::Refresh => {
                             // Manual poll trigger. Wakes the long-lived

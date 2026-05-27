@@ -322,6 +322,16 @@ pub enum Command {
     DeleteProject {
         project_key: pilot_core::ProjectKey,
     },
+    /// Manually collapse an issue workspace into the PR workspace
+    /// that closes it. Same end-state as the auto-detect path
+    /// (`merge_closing_issue_workspaces`) but invoked by the user —
+    /// bypasses the `rejected_merge` / `prompted_merge` dedupe
+    /// state so a previously-dismissed prompt becomes actionable
+    /// again. The daemon picks the target PR by scanning workspaces
+    /// for one whose `closes_issues` includes this issue.
+    CollapseIntoPr {
+        issue_workspace_key: SessionKey,
+    },
     MarkRead {
         session_key: SessionKey,
     },

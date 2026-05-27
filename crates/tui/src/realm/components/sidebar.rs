@@ -213,6 +213,11 @@ impl Sidebar {
         self.inner.project_label_for(key)
     }
 
+    /// See `Sidebar::workspaces_iter`.
+    pub fn workspaces_iter(&self) -> impl Iterator<Item = &pilot_core::Workspace> {
+        self.inner.workspaces_iter()
+    }
+
     /// See `Sidebar::workspaces_in_project`.
     pub fn workspaces_in_project(&self, key: &pilot_core::ProjectKey) -> usize {
         self.inner.workspaces_in_project(key)

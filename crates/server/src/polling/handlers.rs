@@ -624,7 +624,7 @@ pub async fn prefetch_top_pr_details(
         return;
     }
     // Highest scores first, take N.
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|s| std::cmp::Reverse(s.0));
     scored.truncate(PREFETCH_TOP_N);
 
     let total = scored.len();
@@ -637,7 +637,7 @@ pub async fn prefetch_top_pr_details(
     }
 
     let started = std::time::Instant::now();
-    let merged: usize = stream::iter(scored.into_iter())
+    let merged: usize = stream::iter(scored)
         .map(|(_score, node_id, key)| {
             let client = client.clone();
             async move {

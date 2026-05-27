@@ -149,6 +149,83 @@ fn create_project_auto_focuses_new_header_and_opens_workspace_input() {
     );
 }
 
+/// Shift+J on an issue workspace whose closing PR is in local
+/// state emits `CollapseIntoPr` so the daemon can fold the rows.
+#[test]
+fn shift_j_on_issue_with_claiming_pr_emits_collapse_command() {
+    use pilot_ipc::{Command, TerminalKind};
+    let _ = TerminalKind::Shell; // appease unused-import warning if Command is re-exported lazily
+
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+
+    // Issue workspace (no PR) + PR workspace whose closes_issues
+    // includes the issue's task id. The dispatcher's local lookup
+    // must connect them.
+    let issue = task_with_issue("o/r#71", "fix the thing", None);
+    let issue_id = issue.id.clone();
+    let mut pr = task_with_pr("o/r#141");
+    pr.closes_issues = vec![issue_id.clone()];
+    let issue_ws = Workspace::from_task(issue, Utc::now());
+    let pr_ws = Workspace::from_task(pr, Utc::now());
+
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![issue_ws.clone(), pr_ws],
+        terminals: vec![],
+        projects: vec![],
+    });
+
+    // Force cursor onto the issue row — default sort can place
+    // the PR first, which would route Shift+J at the PR (where
+    // CollapseIntoPr isn't available because the workspace has a
+    // PR).
+    let issue_key: SessionKey = (&issue_ws.key).into();
+    assert!(
+        m.__test_sidebar_mut().focus_workspace_key(&issue_key),
+        "test setup: failed to focus the issue row",
+    );
+
+    m.dispatch_key(key_with(Key::Char('J'), KeyModifiers::SHIFT));
+
+    let mut commands: Vec<Command> = Vec::new();
+    while let Ok(cmd) = server.rx.try_recv() {
+        commands.push(cmd);
+    }
+    let collapse = commands.iter().find(|c| matches!(c, Command::CollapseIntoPr { .. }));
+    assert!(
+        collapse.is_some(),
+        "Shift+J on issue with claiming PR must emit CollapseIntoPr, got: {commands:#?}",
+    );
+}
+
+/// Shift+J on an issue whose PR isn't in local state surfaces a
+/// footer notice instead of firing a no-op IPC.
+#[test]
+fn shift_j_on_orphan_issue_surfaces_notice_no_ipc() {
+    use pilot_ipc::Command;
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+
+    let issue = task_with_issue("o/r#71", "stray issue", None);
+    let issue_ws = Workspace::from_task(issue, Utc::now());
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![issue_ws],
+        terminals: vec![],
+        projects: vec![],
+    });
+
+    m.dispatch_key(key_with(Key::Char('J'), KeyModifiers::SHIFT));
+
+    let mut commands: Vec<Command> = Vec::new();
+    while let Ok(cmd) = server.rx.try_recv() {
+        commands.push(cmd);
+    }
+    assert!(
+        !commands.iter().any(|c| matches!(c, Command::CollapseIntoPr { .. })),
+        "no CollapseIntoPr should fire when no PR closes the issue",
+    );
+}
+
 #[test]
 fn create_project_with_no_matching_upsert_does_not_auto_open_input() {
     use pilot_core::{Project, ProjectKey};

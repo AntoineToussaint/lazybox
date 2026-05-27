@@ -63,80 +63,20 @@ suite covering Plain / Shift / Ctrl.
 is the worst time. Pick up once sync is healthy and the next-tick log
 cadence is consistent.
 
-## Projects: new-project row not selectable + new-workspace invisible
+## Issue ↔ PR merge: sidebar relationship chip
 
-**Two stacked bugs the user hit during a "create project, then create
-workspace inside it" flow.**
+**Status.** Shift+J ("join into PR") now triggers a manual
+collapse from the focused issue row into the PR that closes it,
+bypassing the dedupe state so a previously-dismissed prompt is
+actionable. Daemon side is `polling::handle_collapse_into_pr`;
+TUI dispatch surfaces a "no PR closes this" footer notice when
+the relationship isn't known locally.
 
-### Bug 1: New project row isn't selectable
-
-After `N` (new project) creates a local project, its `RepoHeader`
-row in the sidebar is shown but the cursor can't land on it for
-the purposes of `n` (new workspace). The catalog gate is
-`focused_project_key()` returning `None` because the cursor sits
-on a row whose `selected_session_key` is `None` (the header).
-
-- Likely location: `crates/tui/src/components/sidebar/mod.rs`
-  `focused_project_key()` — currently handles `VisibleRow::Workspace`,
-  `Session`, `RepoHeader`, `RoleHeader`. RepoHeader maps to project
-  by name lookup. For a brand-new local project, the lookup might
-  miss because the project was just upserted but the sidebar's
-  `projects` map isn't refreshed before the user navigates.
-- Verify: log `focused_project_key()` result when cursor sits on a
-  fresh-created project header. If `None`, the bug is the
-  projects-map sync; if `Some`, the bug is somewhere downstream in
-  `Action::NewWorkspace` dispatch.
-
-### Bug 2: New workspace doesn't render after creation
-
-`Command::CreateWorkspace { name, project_key }` succeeds on the
-daemon side (presumably — needs verification) but the new
-workspace doesn't appear in the sidebar. Three likely causes:
-
-1. Daemon doesn't broadcast `WorkspaceUpserted` for sandbox/pre-PR
-   workspaces — only PR/issue-attached ones go through the polling
-   upsert path.
-2. The sidebar's `recompute_visible` filter (mailbox membership)
-   drops the new workspace because it has no primary task.
-3. The store write succeeds but the broadcast event has no
-   subscribers (UI was disconnected at the moment, store-only).
-
-Trace: `grep -E "CreateWorkspace|WorkspaceUpserted" /tmp/pilot.log`
-after pressing `n` on a new project. The first thing to confirm is
-whether the daemon even saw the command.
-
-**Fix shape (probably)**:
-- After `CreateWorkspace`, daemon explicitly upserts the empty
-  workspace (already does this presumably) AND broadcasts the
-  event, AND ensures `mailbox_membership` accepts empty workspaces
-  in the Inbox.
-
-## Issue ↔ PR merge: manual trigger key + label
-
-**Status.** The auto-detect side now works: `closes_issues` is
-populated from BOTH `closingIssuesReferences` and the PR title
-fallback, `merge_closing_issue_workspaces` is invoked from the
-upsert path, Esc on the merge modal is now a silent dismissal
-(was pinning rejected_merge for the whole session), and
-`prompted_merge` re-fires after 5 minutes so dismissals self-heal.
-
-**Still missing.** The user should be able to *manually* fold an
-issue into its PR without waiting for the next poll's re-prompt.
-Two pieces:
-
-- Key binding (e.g. `Shift+M`) on a workspace row that triggers
-  `Command::TriggerMerge { issue_workspace_key, pr_workspace_key }`.
-  The daemon side runs the same `absorb_issue_workspace` path that
-  the modal Y reaches today, bypassing `rejected_merge` /
-  `prompted_merge`. The binding is only available when the
-  resolver can identify a target PR (issue has a PR that closes
-  it, or PR has the issue in `closes_issues`).
-- Sidebar label: when the issue and its PR are both in the inbox,
-  the issue row should show `→ PR #N` as a hint chip so the user
-  knows the relationship exists.
-
-Both are pure UX surface — the underlying daemon path already
-exists in `handle_confirm_merge`.
+**Still missing.** Sidebar relationship chip: when both rows are
+visible, the issue row should show `→ PR #N` so the user knows
+the relationship exists before they press Shift+J. Pure render
+surface — daemon already broadcasts the data the chip needs (PR's
+`closes_issues` includes the issue's task id).
 
 ## macOS desktop notifications: ship a .app bundle
 

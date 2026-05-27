@@ -2068,6 +2068,97 @@ async fn delete_project_cascades_through_workspaces() {
     );
 }
 
+/// Manual `Shift+J` collapse: the user folds an issue workspace
+/// into the PR that closes it. Same end state as the auto-merge
+/// path but bypasses the dedupe state so a previously-dismissed
+/// prompt is actionable again.
+#[tokio::test]
+async fn collapse_into_pr_folds_issue_workspace_into_claiming_pr() {
+    use pilot_core::WorkspaceKey;
+
+    let config = ServerConfig::in_memory();
+
+    // Seed an issue workspace with a live session — this is what
+    // triggers the auto-prompt path that the manual flow has to
+    // override. Without a session the auto path silently merges and
+    // there's nothing for the manual key to do.
+    let (issue_key, _session_id) = seed_issue_with_session(&config, "o/r#71").await;
+
+    // Seed the PR that closes the issue.
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+
+    // Simulate "user dismissed the auto-prompt with No" — pins
+    // the issue in `rejected_merge`. The manual trigger must
+    // override that pin.
+    let pr_key_for_reject = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+        "o/r#141",
+        &["o/r#71"],
+    )));
+    polling::handle_confirm_merge(
+        &config,
+        issue_key.clone(),
+        pr_key_for_reject.clone(),
+        false,
+    )
+    .await;
+    // Sanity: rejecting kept both rows in place.
+    assert!(config.store.get_workspace(&issue_key).unwrap().is_some());
+
+    polling::handle_collapse_into_pr(&config, issue_key.clone()).await;
+
+    let pr_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+        "o/r#141",
+        &["o/r#71"],
+    )));
+    assert!(
+        config.store.get_workspace(&issue_key).unwrap().is_none(),
+        "issue workspace must be removed after manual collapse",
+    );
+    let pr_record = config.store.get_workspace(&pr_key).unwrap().expect("pr exists");
+    let pr_ws: pilot_core::Workspace =
+        serde_json::from_str(&pr_record.workspace_json.unwrap()).unwrap();
+    // The absorb path migrates the issue task onto the PR
+    // workspace's gh_issues. Verify it landed by task key —
+    // seed_issue_with_session uses key "o/r#71" for the issue.
+    assert!(
+        pr_ws.gh_issues.iter().any(|t| t.id.key == "o/r#71"),
+        "issue task should be attached to the PR workspace after collapse",
+    );
+}
+
+/// `handle_collapse_into_pr` is a no-op when no PR claims the
+/// focused issue. The TUI's dispatcher should catch this case
+/// first (via local lookup) — this is the belt-and-braces
+/// defense in case a stale Command arrives.
+#[tokio::test]
+async fn collapse_into_pr_is_noop_when_no_claiming_pr_known() {
+    use pilot_core::WorkspaceKey;
+    let config = ServerConfig::in_memory();
+
+    // Issue workspace, NO matching PR seeded.
+    let issue_task = {
+        let mut t = make_task("o/r#71");
+        t.url = "https://github.com/o/r/issues/71".into();
+        t.branch = None;
+        t
+    };
+    let issue_ws = pilot_core::Workspace::from_task(issue_task, Utc::now());
+    let issue_key = WorkspaceKey::new(issue_ws.key.as_str());
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: issue_key.as_str().to_string(),
+            created_at: issue_ws.created_at,
+            workspace_json: Some(serde_json::to_string(&issue_ws).unwrap()),
+        })
+        .unwrap();
+
+    polling::handle_collapse_into_pr(&config, issue_key.clone()).await;
+
+    // Issue workspace still there — nothing was collapsed.
+    assert!(config.store.get_workspace(&issue_key).unwrap().is_some());
+}
+
 /// `delete_project` on a project with NO workspaces still removes
 /// the project record and fires `ProjectRemoved`. Covers the "user
 /// just made a local project, hasn't added a workspace yet, presses

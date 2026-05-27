@@ -235,6 +235,7 @@ impl<T: TerminalAdapter> Model<T> {
                 pilot_tui_core::action::ActionKind::ToggleSnooze => Some(Action::ToggleSnooze),
                 pilot_tui_core::action::ActionKind::Refresh => Some(Action::Refresh),
                 pilot_tui_core::action::ActionKind::AdoptSessions => Some(Action::AdoptSessions),
+                pilot_tui_core::action::ActionKind::CollapseIntoPr => Some(Action::CollapseIntoPr),
                 pilot_tui_core::action::ActionKind::Reply => Some(Action::Reply),
                 pilot_tui_core::action::ActionKind::RequestReviewers => {
                     Some(Action::RequestReviewers)
@@ -432,6 +433,17 @@ impl<T: TerminalAdapter> Model<T> {
     /// Test accessor — read-only handle to the sidebar wrapper.
     pub fn sidebar(&self) -> &crate::realm::components::sidebar::Sidebar {
         &self.sidebar
+    }
+
+    /// Test accessor — mutable handle to the sidebar wrapper. Used
+    /// by orchestrator tests (integration test crate) to position
+    /// the cursor on a specific row before dispatching a key. Not
+    /// `#[cfg(test)]` because integration tests live in a separate
+    /// crate; doc-hidden + `__test_` prefix mark it as off-limits
+    /// for production callers without forcing a test-config wall.
+    #[doc(hidden)]
+    pub fn __test_sidebar_mut(&mut self) -> &mut crate::realm::components::sidebar::Sidebar {
+        &mut self.sidebar
     }
 
     /// Look up the Quit chord — catalog default OR

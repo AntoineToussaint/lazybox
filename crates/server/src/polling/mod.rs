@@ -1788,6 +1788,63 @@ pub async fn handle_confirm_merge(
     commit_upsert(config, &pr_key, pr_ws);
 }
 
+/// Manual issue→PR collapse triggered by the user. Resolves the
+/// target PR locally (scanning for a workspace whose
+/// `closes_issues` includes this issue's task id), then runs the
+/// same absorb path the auto-prompt's "Yes" reaches.
+///
+/// Bypasses both `rejected_merge` (so a previously-dismissed prompt
+/// becomes actionable again) and the live-session safety gate (the
+/// user explicitly asked for this — the safety gate exists to
+/// protect against silent absorption, not to block explicit intent).
+///
+/// No-op when the issue has no claiming PR in local state — there's
+/// nothing to collapse into yet. The TUI's availability gate
+/// (`Action::CollapseIntoPr` resolver) should keep this no-op rare.
+pub async fn handle_collapse_into_pr(config: &ServerConfig, issue_workspace_key: WorkspaceKey) {
+    let Some(issue_ws) = load_workspace(config, &issue_workspace_key) else {
+        tracing::warn!(
+            issue_workspace = %issue_workspace_key,
+            "collapse_into_pr: issue workspace missing — aborting"
+        );
+        return;
+    };
+    if issue_ws.pr.is_some() {
+        // Defensive: only ISSUE workspaces can be folded; refuse to
+        // absorb a PR row.
+        tracing::warn!(
+            target_workspace = %issue_workspace_key,
+            "collapse_into_pr: refusing — target is itself a PR workspace"
+        );
+        return;
+    }
+    // Find the PR workspace that closes this issue. The issue
+    // workspace has at most one primary task; route through it.
+    let Some(primary) = issue_ws.primary_task() else {
+        return;
+    };
+    let Some(pr_workspace_key) = pr_workspace_claiming_issue(config, &primary.id) else {
+        tracing::info!(
+            issue_workspace = %issue_workspace_key,
+            "collapse_into_pr: no PR workspace claims this issue — nothing to collapse"
+        );
+        return;
+    };
+
+    // Clear any dedupe state so the modal pipeline doesn't re-fire
+    // a duplicate prompt right after this completes.
+    {
+        let mut state = config.poll_state.lock().await;
+        state.prompted_merge.remove(issue_workspace_key.as_str());
+        state.rejected_merge.remove(issue_workspace_key.as_str());
+    }
+
+    // Reuse the confirm-accept path — same end-state, one
+    // implementation. `handle_confirm_merge` re-loads workspaces
+    // before mutating so the explicit-bypass path stays race-safe.
+    handle_confirm_merge(config, issue_workspace_key, pr_workspace_key, true).await;
+}
+
 /// Manual "adopt": move every session out of `source_key`'s
 /// workspace and into `target_key`'s, rebadging `terminal_meta` so
 /// wire-side traffic follows them. Unlike the issue→PR merge, we

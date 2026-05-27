@@ -246,6 +246,45 @@ impl<T: TerminalAdapter> Model<T> {
                     _ => {}
                 }
             }
+            Action::CollapseIntoPr => {
+                // Catalog availability gates on "issue workspace exists"
+                // — the cross-workspace lookup ("does any PR close
+                // this?") happens here so the catalog stays
+                // single-workspace. When no claiming PR is known
+                // locally, surface a footer notice instead of firing
+                // a no-op IPC the daemon would just log + drop.
+                use crate::realm::components::footer::{Notice, NoticeSeverity};
+                let Some(issue_ws) = self.sidebar.selected_workspace().cloned() else {
+                    return cmds;
+                };
+                let Some(primary) = issue_ws.primary_task() else {
+                    return cmds;
+                };
+                let claiming_pr = self
+                    .sidebar
+                    .workspaces_iter()
+                    .find(|w| w.pr.as_ref().is_some_and(|pr| pr.closes_issues.contains(&primary.id)))
+                    .map(|w| pilot_core::SessionKey::from(&w.key));
+                match claiming_pr {
+                    Some(_pr_key) => {
+                        cmds.push(IpcCommand::CollapseIntoPr {
+                            issue_workspace_key: pilot_core::SessionKey::from(&issue_ws.key),
+                        });
+                        self.status.notice = Some(Notice::new(
+                            "joining into PR…",
+                            NoticeSeverity::Info,
+                        ));
+                        self.redraw = true;
+                    }
+                    None => {
+                        self.status.notice = Some(Notice::new(
+                            "no PR closes this issue (or it isn't synced yet)",
+                            NoticeSeverity::Info,
+                        ));
+                        self.redraw = true;
+                    }
+                }
+            }
             Action::ToggleSnooze => {
                 // When the workspace is already snoozed, `z` toggles
                 // it off (no picker — that'd be friction). When NOT

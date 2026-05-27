@@ -17,7 +17,7 @@ pilot-ipc       = { workspace = true }
 pilot-agents    = { workspace = true }
 pilot-llm-proxy = { workspace = true }
 pilot-linear       = { path = "../linear-provider" }
-pilot-slack        = { path = "../slack-provider" }
+pilot-slack        = { workspace = true }
 
 tokio            = { workspace = true }
 futures          = { workspace = true }

@@ -2034,6 +2034,7 @@ dependencies = [
  "pilot-ipc",
  "pilot-linear",
  "pilot-server",
+ "pilot-slack",
  "pilot-store",
  "pilot-tui-core",
  "pilot-tui-term",

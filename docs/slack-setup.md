@@ -6,9 +6,13 @@ Inbound messages route to claude sessions; outbound events (workspace
 updates, CI failures, agent-asking signals) post to per-workspace
 channels.
 
-This doc covers the Slack-side setup. The pilot-side wiring (bot
-token in config, channel-to-workspace routing) is documented in the
-main README under "Slack".
+Setup is two steps:
+
+1. **Create the Slack app from the shipped manifest.** This step
+   requires a browser session — Slack requires it.
+2. **Run `pilot slack init`.** Pastes the two tokens through a
+   wizard that validates each and writes them to
+   `~/.pilot/config.yaml`.
 
 ## 1. Create the Slack app (manifest)
 
@@ -17,112 +21,74 @@ main README under "Slack".
 2. Pick the Slack workspace where you want pilot to live (typically
    your personal workspace, since the bot can see every channel
    it's invited to).
-3. Paste the YAML below. Save.
+3. Paste the contents of [`slack-manifest.yml`](./slack-manifest.yml)
+   into the manifest editor. Save.
+4. Slack walks you through OAuth consent + workspace install — accept.
 
-```yaml
-display_information:
-  name: pilot
-  description: Reactive workspace-inbox bot — mirrors workspaces into channels, accepts commands to drive claude sessions.
-  background_color: "#0b0b0b"
-
-features:
-  bot_user:
-    display_name: pilot
-    always_online: true
-
-oauth_config:
-  scopes:
-    bot:
-      # Read + post in channels pilot creates / is invited to.
-      - chat:write
-      - channels:read
-      - channels:history
-      - groups:history    # private channels (in case you DM-style a per-workspace channel)
-      - im:history        # DMs to the bot
-      - im:read
-      - mpim:history      # multi-party DMs
-      # Receive @mentions + slash commands.
-      - app_mentions:read
-      # Auto-create one channel per workspace.
-      - channels:manage
-      # File uploads (paste diff hunks back to channel).
-      - files:write
-
-settings:
-  event_subscriptions:
-    # Socket Mode — pilot opens a WebSocket out from your home
-    # machine, so no public HTTPS endpoint required.
-    bot_events:
-      - app_mention
-      - message.channels
-      - message.im
-      - message.groups
-  interactivity:
-    is_enabled: true
-  socket_mode_enabled: true
-  org_deploy_enabled: false
-  token_rotation_enabled: false
-```
-
-## 2. Generate tokens
-
-You'll need TWO tokens from the Slack app config page:
-
-### Bot User OAuth Token (`xoxb-...`)
-
-For HTTP API calls (`chat.postMessage`, `conversations.create`, etc).
-
-- Sidebar → **OAuth & Permissions** → **Install to Workspace** →
-  approve.
-- The "Bot User OAuth Token" appears at the top of that page
-  (`xoxb-...`). Copy it.
-
-### App-Level Token (`xapp-...`)
-
-For Socket Mode (the persistent WebSocket connection).
+You also need an app-level token for Socket Mode. Slack hides this
+behind a separate dialog:
 
 - Sidebar → **Basic Information** → scroll to **App-Level Tokens**
   → **Generate Token and Scopes**.
 - Name it `socket-mode`.
 - Add scope: `connections:write`.
-- Click **Generate**, copy the `xapp-...` token.
+- Click **Generate**. Leave this tab open — `pilot slack init`
+  will ask you to paste this token in a moment.
 
-## 3. Invite the bot to a discovery channel
+The Bot User OAuth Token lives under **OAuth & Permissions** (it
+appears once you've installed the app to a workspace in step 4
+above). Also leave that tab open.
 
-Pilot needs ONE channel to anchor in — by default a channel named
-`#pilot` (configurable). It uses this channel to:
-- Post bootstrap messages on first connect ("pilot online, mirroring
-  N projects").
-- Post errors that don't belong to a specific workspace.
+## 2. Run the wizard
 
 ```sh
-# In Slack
-/invite @pilot
+pilot slack init
 ```
 
-(Or invite from the channel settings UI.)
+The wizard:
 
-## 4. Configure pilot
+1. Prompts for the Bot User OAuth Token (`xoxb-...`), validates it
+   via `auth.test`, and bails with a clear message if the token is
+   the wrong type or lacks scopes.
+2. Prompts for the App-Level Token (`xapp-...`) and validates it by
+   opening (and immediately closing) one Socket Mode connection.
+3. Writes both tokens into `~/.pilot/config.yaml` under `slack:`,
+   preserving every other key in the file.
+4. Looks up the anchor channel (`#pilot` by default) and self-joins
+   it, so there's no manual `/invite @pilot` step.
+5. Prints `✓ Slack ready` or, if `#pilot` doesn't exist yet, the
+   exact next manual step (create the channel, then run
+   `pilot slack doctor`).
 
-Add the tokens to `~/.pilot/config.yaml`:
+If you ever want to confirm the setup still works (e.g. after a
+hand-edit to `~/.pilot/config.yaml`):
+
+```sh
+pilot slack doctor
+```
+
+This runs the same validations read-only — no prompts, no writes.
+
+## Configuration knobs
+
+`pilot slack init` only writes the two tokens. Everything else lives
+under `slack:` in `~/.pilot/config.yaml` and has sensible defaults:
 
 ```yaml
 slack:
-  # Required.
-  bot_token: xoxb-...
-  app_token: xapp-...
-  # Optional — defaults below.
-  anchor_channel: pilot            # bootstrap + error channel
-  channel_prefix: ""               # auto-created channel name template;
-                                   # empty = "<owner>-<repo>-<n>". A
-                                   # value like "pr-" produces
-                                   # "pr-<owner>-<repo>-<n>".
-  per_workspace_channels: true     # set false to skip auto-create
-                                   # and route everything through the
-                                   # anchor channel
+  bot_token: xoxb-...               # written by `pilot slack init`
+  app_token: xapp-...               # written by `pilot slack init`
+  anchor_channel: pilot             # bootstrap + error channel
+  channel_prefix: ""                # auto-created channel name template;
+                                    # empty = "<owner>-<repo>-<n>". A
+                                    # value like "pr-" produces
+                                    # "pr-<owner>-<repo>-<n>".
+  per_workspace_channels: true      # set false to skip auto-create
+                                    # and route everything through the
+                                    # anchor channel
 ```
 
-Restart pilot:
+Restart pilot after editing:
 
 ```sh
 make run
@@ -131,7 +97,7 @@ make run
 You should see `pilot: slack connected as @pilot` in `/tmp/pilot.log`
 and a "pilot online" message in `#pilot`.
 
-## 5. Verify
+## Verify
 
 1. Trigger a poll: press `Shift-R` in the TUI, or wait ~60s.
 2. For each workspace pilot finds, it auto-creates a channel

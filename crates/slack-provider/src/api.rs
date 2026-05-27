@@ -105,6 +105,30 @@ impl Client {
             .await
     }
 
+    /// `conversations.join` — self-join a public channel by id. Used
+    /// by `pilot slack init` so the bot lands in `#pilot` without
+    /// requiring a manual `/invite @pilot` from the user.
+    ///
+    /// Idempotent: Slack returns `ok: true` even when the bot is
+    /// already a member (with `already_in_channel: true` in the
+    /// payload, which we don't bother surfacing).
+    pub async fn conversations_join(
+        &self,
+        channel_id: &str,
+    ) -> Result<ConversationsJoinResponse, SlackError> {
+        #[derive(Serialize)]
+        struct Args<'a> {
+            channel: &'a str,
+        }
+        self.call::<_, ConversationsJoinResponse>(
+            "conversations.join",
+            &Args {
+                channel: channel_id,
+            },
+        )
+        .await
+    }
+
     /// Internal: shared request shape. Slack returns 200 OK with
     /// `{ok: false, error: "..."}` for application errors — surface
     /// those as `SlackError::Api(error_code)` so callers can pattern-
@@ -181,6 +205,11 @@ pub struct Channel {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ConversationsCreateResponse {
+    pub channel: Channel,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct ConversationsJoinResponse {
     pub channel: Channel,
 }
 

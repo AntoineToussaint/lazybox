@@ -532,6 +532,7 @@ pub async fn handle_spawn(
         let backend_key = backend_key.clone();
         let id = terminal_id;
         let first_output = first_output_signal_for_inject;
+        let agent_states = config.agent_states.clone();
         tokio::spawn(async move {
             // Readiness check: wait until the pump task signals it
             // saw the first byte of output, then a brief settle so
@@ -547,6 +548,15 @@ pub async fn handle_spawn(
             // finishes drawing.
             const HARD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
             const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
+            // Maximum time we'll wait for the agent to leave an
+            // initial `Asking` state (Claude's "trust this folder?
+            // y/n" permission prompt) before injecting. If the user
+            // genuinely stares at the prompt for over a minute,
+            // we give up and inject anyway — at that point pushing
+            // the queued instruction past the prompt is the only
+            // way it doesn't get silently dropped.
+            const ASKING_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+            const ASKING_POLL: std::time::Duration = std::time::Duration::from_millis(200);
             tracing::info!(
                 terminal_id = ?id,
                 paste_len = paste.len(),
@@ -568,6 +578,36 @@ pub async fn handle_spawn(
                 );
             }
             tokio::time::sleep(SETTLE).await;
+            // Don't write into a startup permission prompt
+            // ("Trust this folder? y/n"). The agent state pump
+            // flips to Asking when one's on screen; if we paste
+            // the instruction now, the first char becomes the y/n
+            // answer and the rest gets typed afterwards as a
+            // soft-line response — both halves silently corrupt.
+            // Poll the cached state and wait until it leaves
+            // Asking (user pressed y, OR pump cleared it). The
+            // outer deadline keeps the inject task from leaking
+            // if the user walks away.
+            let asking_started = std::time::Instant::now();
+            loop {
+                let state = agent_states.lock().await.get(&id).copied();
+                if state != Some(pilot_ipc::AgentState::Asking) {
+                    break;
+                }
+                if asking_started.elapsed() >= ASKING_DEADLINE {
+                    tracing::warn!(
+                        terminal_id = ?id,
+                        "initial_prompt: agent still Asking after {:?} — injecting anyway",
+                        ASKING_DEADLINE,
+                    );
+                    break;
+                }
+                tracing::debug!(
+                    terminal_id = ?id,
+                    "initial_prompt: agent is Asking — waiting before paste",
+                );
+                tokio::time::sleep(ASKING_POLL).await;
+            }
             tracing::info!(
                 terminal_id = ?id,
                 paste_len = paste.len(),

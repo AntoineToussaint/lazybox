@@ -1237,12 +1237,9 @@ async fn persist_and_broadcast(
 }
 
 pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes: &[u8]) {
-    let key = match config.terminals.lock().await.get(&terminal_id).cloned() {
-        Some(k) => k,
-        None => {
-            tracing::trace!("write to unknown terminal {terminal_id:?}");
-            return;
-        }
+    let Some(key) = config.backend_key_for(terminal_id).await else {
+        tracing::trace!("write to unknown terminal {terminal_id:?}");
+        return;
     };
     if let Err(e) = config.backend.write(&key, bytes).await {
         tracing::warn!("backend write {key}: {e}");
@@ -1259,8 +1256,7 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     if !bytes.contains(&b'\r') && !bytes.contains(&b'\n') {
         return;
     }
-    let current = config.agent_states.lock().await.get(&terminal_id).copied();
-    if current != Some(pilot_ipc::AgentState::Asking) {
+    if config.agent_state_for(terminal_id).await != Some(pilot_ipc::AgentState::Asking) {
         return;
     }
     let session_key = config
@@ -1302,12 +1298,10 @@ pub async fn handle_inject_prompt(
     // a nested handle_spawn (in the fallback path) can re-acquire
     // the same lock without deadlocking. Without the explicit
     // scope, the temporary `MutexGuard` from the match scrutinee
-    // lives for the entire match arm.
-    let backend_key = {
-        let guard = config.terminals.lock().await;
-        guard.get(&terminal_id).cloned()
-    };
-    let backend_key = match backend_key {
+    // lives for the entire match arm. The helpers acquire-then-drop
+    // the lock inside one method call so no guard can outlive the
+    // scrutinee.
+    let backend_key = match config.backend_key_for(terminal_id).await {
         Some(k) => k,
         None => {
             // The TUI's cached terminal id is stale — the agent died
@@ -1333,7 +1327,7 @@ pub async fn handle_inject_prompt(
             return;
         }
     };
-    let kind = match config.terminal_meta.lock().await.get(&terminal_id).cloned() {
+    let kind = match config.terminal_meta_for(terminal_id).await {
         Some((_session_key, kind)) => kind,
         None => {
             tracing::debug!("inject_prompt: no terminal_meta for {terminal_id:?} — skipping");
@@ -1373,9 +1367,8 @@ pub async fn handle_inject_prompt(
 }
 
 pub async fn handle_resize(config: &ServerConfig, terminal_id: TerminalId, cols: u16, rows: u16) {
-    let key = match config.terminals.lock().await.get(&terminal_id).cloned() {
-        Some(k) => k,
-        None => return,
+    let Some(key) = config.backend_key_for(terminal_id).await else {
+        return;
     };
     if let Err(e) = config.backend.resize(&key, cols, rows).await {
         tracing::warn!("backend resize {key}: {e}");
@@ -1386,9 +1379,8 @@ pub async fn handle_resize(config: &ServerConfig, terminal_id: TerminalId, cols:
 /// remaining output chunks (if any), sees the stream close, and emits
 /// `Event::TerminalExited` itself.
 pub async fn handle_close(config: &ServerConfig, terminal_id: TerminalId) {
-    let key = match config.terminals.lock().await.get(&terminal_id).cloned() {
-        Some(k) => k,
-        None => return,
+    let Some(key) = config.backend_key_for(terminal_id).await else {
+        return;
     };
     if let Err(e) = config.backend.kill(&key).await {
         tracing::warn!("backend kill {key}: {e}");

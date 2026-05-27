@@ -763,13 +763,20 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                // Apply the inertia damper BEFORE checking which pane
+                // owns the event so the OS-driven "flick keeps
+                // scrolling for 500ms after the gesture" phase decays
+                // its STEP and a reverse-direction gesture cancels
+                // the queued inertia. `dampen_scroll_step` returns 0
+                // when the event should be dropped entirely (reverse
+                // mid-burst).
+                let raw_up = matches!(m.kind, MouseEventKind::ScrollUp);
+                let scaled = self.dampen_scroll_step(raw_up, m);
+                if scaled == 0 {
+                    return;
+                }
                 if rect_contains(right_top_rect, m.column, m.row) {
-                    const STEP: isize = 8;
-                    let delta = if matches!(m.kind, MouseEventKind::ScrollUp) {
-                        -STEP
-                    } else {
-                        STEP
-                    };
+                    let delta = if raw_up { -scaled } else { scaled };
                     if self.right.scroll_activity(delta) {
                         self.redraw = true;
                     }
@@ -781,7 +788,7 @@ impl<T: TerminalAdapter> Model<T> {
                 if self.terminals.focused_terminal_tracks_mouse() {
                     let cell_col = m.column.saturating_sub(right_bottom_rect.x) as u32;
                     let cell_row = m.row.saturating_sub(right_bottom_rect.y) as u32;
-                    let button = if matches!(m.kind, MouseEventKind::ScrollUp) {
+                    let button = if raw_up {
                         libghostty_vt::mouse::Button::Four
                     } else {
                         libghostty_vt::mouse::Button::Five
@@ -797,12 +804,7 @@ impl<T: TerminalAdapter> Model<T> {
                         return;
                     }
                 }
-                const STEP: isize = 5;
-                let delta = if matches!(m.kind, MouseEventKind::ScrollUp) {
-                    -STEP
-                } else {
-                    STEP
-                };
+                let delta = if raw_up { -scaled } else { scaled };
                 let _ = self.terminals.scroll_active(delta);
                 self.redraw = true;
             }

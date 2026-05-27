@@ -1394,6 +1394,38 @@ pub async fn handle_inject_prompt(
     };
     let paste = agent.inject_prompt(prompt);
     let submit = agent.inject_submit();
+
+    // Don't write into a prompt the agent is currently showing
+    // (y/n permission gate, file-conflict chooser, etc.). The
+    // first char of the paste becomes the chooser answer and
+    // the rest types in as a soft-line response — both halves
+    // corrupt. Same race the spawn-time initial_prompt path
+    // handles; mirror the wait here.
+    //
+    // 60s outer deadline so an idle Asking modal doesn't leak the
+    // task. Better a slightly-late inject than losing the prompt.
+    const ASKING_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+    const ASKING_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+    let started = std::time::Instant::now();
+    loop {
+        if config.agent_state_for(terminal_id).await != Some(pilot_ipc::AgentState::Asking) {
+            break;
+        }
+        if started.elapsed() >= ASKING_DEADLINE {
+            tracing::warn!(
+                terminal_id = ?terminal_id,
+                "inject_prompt: agent still Asking after {:?} — injecting anyway",
+                ASKING_DEADLINE,
+            );
+            break;
+        }
+        tracing::debug!(
+            terminal_id = ?terminal_id,
+            "inject_prompt: agent is Asking — waiting before paste",
+        );
+        tokio::time::sleep(ASKING_POLL).await;
+    }
+
     if let Err(e) = config.backend.write(&backend_key, &paste).await {
         tracing::warn!("inject_prompt: backend.write(paste) failed: {e}");
         return;

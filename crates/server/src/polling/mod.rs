@@ -946,6 +946,36 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
             "polling: loop started (interval={}s, every tick logs `polling: tick #N starting`)",
             interval.as_secs()
         );
+        // One-shot config snapshot at boot — single greppable line
+        // for "why no PRs?" debugging. Lists every enabled provider,
+        // its filter-role keys, and its scope set. Without this, a
+        // collaborator's "doesn't sync for me" report required us to
+        // ask 4 questions over chat; now: `grep "polling: config" /tmp/pilot.log`.
+        if let Ok(cfg) = pilot_config::Config::load() {
+            let providers: Vec<&String> = cfg.setup.providers.iter().collect();
+            let filters: std::collections::BTreeMap<&String, Vec<&String>> = cfg
+                .setup
+                .filters
+                .iter()
+                .map(|(p, keys)| (p, keys.iter().collect()))
+                .collect();
+            let scopes: std::collections::BTreeMap<&String, Vec<&String>> = cfg
+                .setup
+                .scopes
+                .iter()
+                .map(|(p, keys)| (p, keys.iter().collect()))
+                .collect();
+            tracing::info!(
+                "polling: config — providers={:?} filters={:?} scopes={:?}",
+                providers,
+                filters,
+                scopes,
+            );
+        } else {
+            tracing::warn!(
+                "polling: config — could not load ~/.pilot/config.yaml; falling back to defaults"
+            );
+        }
 
         // `next_due` starts in the past so the first iteration ticks
         // immediately (matches the previous loop's "first run is

@@ -1215,6 +1215,44 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     if let Err(e) = config.backend.write(&key, bytes).await {
         tracing::warn!("backend write {key}: {e}");
     }
+    // If the user just sent Enter (`\r` or `\n`) to an agent
+    // terminal that's currently in `Asking` state, optimistically
+    // flip it back to `Active`. The detect_state loop will re-fire
+    // `Asking` on the next output chunk if the agent's response
+    // turned out to be another prompt; but for the common case
+    // (user typed `y`/`yes`/`1`/<text> + Enter), the `?` pill
+    // disappears immediately instead of lingering through the 8s
+    // hysteresis window. Bracket-paste markers (`ESC[200~` / `ESC[201~`)
+    // count too — those wrap claude's submit at the end.
+    if !bytes.contains(&b'\r') && !bytes.contains(&b'\n') {
+        return;
+    }
+    let current = config.agent_states.lock().await.get(&terminal_id).copied();
+    if current != Some(pilot_ipc::AgentState::Asking) {
+        return;
+    }
+    let session_key = config
+        .terminal_meta
+        .lock()
+        .await
+        .get(&terminal_id)
+        .map(|(sk, _)| sk.clone());
+    let Some(session_key) = session_key else {
+        return;
+    };
+    config
+        .agent_states
+        .lock()
+        .await
+        .insert(terminal_id, pilot_ipc::AgentState::Active);
+    tracing::debug!(
+        ?terminal_id,
+        "user pressed Enter; optimistically clearing Asking → Active"
+    );
+    let _ = config.bus.send(Event::AgentState {
+        session_key,
+        state: pilot_ipc::AgentState::Active,
+    });
 }
 
 /// Inject a prompt into an existing agent terminal. Same paste +

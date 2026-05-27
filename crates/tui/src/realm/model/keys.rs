@@ -255,7 +255,8 @@ impl<T: TerminalAdapter> Model<T> {
                 // handled the key, the pane shouldn't see it.
                 self.sync_panes();
                 for cmd in cmds {
-                    self.send_cmd(cmd);
+                    let rewritten = self.rewrite_spawn_to_inject(cmd);
+                    self.send_cmd(rewritten);
                 }
                 self.redraw = true;
                 return;
@@ -299,44 +300,8 @@ impl<T: TerminalAdapter> Model<T> {
                 ));
             }
         }
-        // Rewrite Spawn-with-initial_prompt → InjectPrompt when an
-        // agent terminal already exists for the workspace. The user
-        // pressing `w` on a PR that already has a running claude tab
-        // expects the new prompt to land in that claude (continue the
-        // conversation), not a second claude tab.
         for cmd in cmds {
-            let rewritten = match cmd {
-                IpcCommand::Spawn {
-                    session_key,
-                    session_id,
-                    kind: pilot_ipc::TerminalKind::Agent(agent_id),
-                    cwd,
-                    initial_prompt: Some(prompt),
-                } => {
-                    if let Some(terminal_id) =
-                        self.sidebar.find_agent_terminal(&session_key, &agent_id)
-                    {
-                        use crate::realm::components::footer::{Notice, NoticeSeverity};
-                        self.status.notice = Some(Notice::new(
-                            format!("→ injecting into existing {agent_id}"),
-                            NoticeSeverity::Hint,
-                        ));
-                        IpcCommand::InjectPrompt {
-                            terminal_id,
-                            prompt,
-                        }
-                    } else {
-                        IpcCommand::Spawn {
-                            session_key,
-                            session_id,
-                            kind: pilot_ipc::TerminalKind::Agent(agent_id),
-                            cwd,
-                            initial_prompt: Some(prompt),
-                        }
-                    }
-                }
-                other => other,
-            };
+            let rewritten = self.rewrite_spawn_to_inject(cmd);
             self.send_cmd(rewritten);
         }
         // Sidebar j/k changes selection — propagate to right + terminals.
@@ -398,6 +363,46 @@ impl<T: TerminalAdapter> Model<T> {
                 return;
             }
             std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Rewrite a `Spawn { kind: Agent(id), initial_prompt: Some(_) }`
+    /// into `InjectPrompt { terminal_id, prompt }` when an agent
+    /// of the same kind is already running on this workspace.
+    /// Used by BOTH the pane-handler key path and the catalog
+    /// dispatch path so `w` and per-pane shortcuts agree on
+    /// "continue the existing conversation" semantics.
+    fn rewrite_spawn_to_inject(&mut self, cmd: IpcCommand) -> IpcCommand {
+        match cmd {
+            IpcCommand::Spawn {
+                session_key,
+                session_id,
+                kind: pilot_ipc::TerminalKind::Agent(agent_id),
+                cwd,
+                initial_prompt: Some(prompt),
+            } => {
+                if let Some(terminal_id) = self.sidebar.find_agent_terminal(&session_key, &agent_id)
+                {
+                    use crate::realm::components::footer::{Notice, NoticeSeverity};
+                    self.status.notice = Some(Notice::new(
+                        format!("→ injecting into existing {agent_id}"),
+                        NoticeSeverity::Hint,
+                    ));
+                    IpcCommand::InjectPrompt {
+                        terminal_id,
+                        prompt,
+                    }
+                } else {
+                    IpcCommand::Spawn {
+                        session_key,
+                        session_id,
+                        kind: pilot_ipc::TerminalKind::Agent(agent_id),
+                        cwd,
+                        initial_prompt: Some(prompt),
+                    }
+                }
+            }
+            other => other,
         }
     }
 

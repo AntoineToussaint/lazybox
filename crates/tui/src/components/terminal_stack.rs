@@ -927,10 +927,6 @@ impl TerminalStack {
                 label: "→ PTY",
             },
             Binding {
-                keys: "Shift-PgUp/Dn",
-                label: "scroll",
-            },
-            Binding {
                 keys: "]]",
                 label: "exit to sidebar",
             },

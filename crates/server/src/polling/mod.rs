@@ -62,6 +62,17 @@ pub trait TaskSource: Send + Sync + 'static {
     fn fetch<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>;
+
+    /// Drain side-effect actions accumulated during the most recent
+    /// `fetch`. The polling tick calls this after each fetch and
+    /// dispatches the resulting [`ProviderAction`]s with full
+    /// `&ServerConfig` access — used today by `GhSource` to surface
+    /// auto-spawn requests triggered by `@pilot` mentions. Default
+    /// impl returns nothing so sources without side effects don't
+    /// have to think about it.
+    fn drain_actions(&self) -> Vec<ProviderAction> {
+        Vec::new()
+    }
 }
 
 /// `GhClient` adapter. The filter narrows the upstream result by
@@ -78,6 +89,41 @@ pub struct GhSource {
     /// to `TaskSource::fetch` (would couple them), so each source
     /// keeps a clone of just the broadcast sender.
     pub bus: tokio::sync::broadcast::Sender<Event>,
+    /// GitHub logins that may trigger auto-spawn via a `@pilot`
+    /// mention. Resolved by `sources_for` from
+    /// `config.yaml::mention.allowed_logins`, with the authenticated
+    /// viewer's login added as a default when the YAML list is
+    /// empty. Empty here disables the feature entirely.
+    pub mention_allowed_logins: std::collections::BTreeSet<String>,
+    /// Side channel for actions the source wants the polling tick to
+    /// take after `fetch()` returns — today, auto-spawn requests
+    /// triggered by `@pilot` mentions. Populated inside `fetch` and
+    /// drained by `tick_with_state` after the upsert pass so the
+    /// freshly-created issue workspace exists before we spawn into it.
+    pub pending_actions: std::sync::Arc<std::sync::Mutex<Vec<ProviderAction>>>,
+}
+
+/// Out-of-band action a `TaskSource` may surface alongside the
+/// `Vec<Task>` from `fetch()`. The polling tick drains these after
+/// each fetch and dispatches them with full `&ServerConfig` access
+/// (which the trait's `fetch` deliberately does not get).
+#[derive(Debug, Clone)]
+pub enum ProviderAction {
+    /// Spawn `agent_id` in the workspace identified by `session_key`,
+    /// optionally with `prompt` injected after the agent reaches its
+    /// ready state. Today this fires when an allowed user has
+    /// written `@pilot` in an issue body or comment and pilot
+    /// already posted the 👀 reaction (the idempotency marker).
+    AutoSpawnAgent {
+        session_key: pilot_core::SessionKey,
+        agent_id: String,
+        prompt: Option<String>,
+        /// Free-text reason for the trace log: "@pilot mention by
+        /// alice on owner/repo#42 body". Surfaces in /tmp/pilot.log
+        /// so a user wondering "why did pilot start typing?" can
+        /// trace it back to a specific comment.
+        reason: String,
+    },
 }
 
 impl GhSource {
@@ -91,9 +137,67 @@ impl GhSource {
     }
 }
 
+/// Default agent id the auto-spawn flow uses when no override is
+/// configured. Mirrors the historical `pilot-tui` fallback so the
+/// user gets the same agent whether they press `w` or `@pilot`-tag
+/// the issue. Lives here (not behind a config lookup) because the
+/// polling layer doesn't get a `&PersistedSetup` at fetch time —
+/// the source is constructed once per tick and `fetch` is async.
+fn default_agent_id() -> String {
+    "claude".to_string()
+}
+
+/// Dispatch one [`ProviderAction`] surfaced by a [`TaskSource`]
+/// during the most recent fetch. Today this is just the
+/// auto-spawn-on-mention path; future provider-driven actions plug
+/// in by adding a variant + an arm.
+///
+/// Auto-spawn singleton enforcement happens inside `handle_spawn`
+/// (it checks `find_existing_singleton` per `(session_key, kind)`),
+/// so a `@pilot` mention on an issue that already has a running
+/// claude session focuses the existing terminal instead of starting
+/// a second one. We rely on that rather than re-implementing the
+/// check here, so the auto-spawn path and the user-pressed `w` path
+/// have IDENTICAL semantics.
+async fn dispatch_action(config: &ServerConfig, source_name: &str, action: ProviderAction) {
+    match action {
+        ProviderAction::AutoSpawnAgent {
+            session_key,
+            agent_id,
+            prompt,
+            reason,
+        } => {
+            tracing::info!(
+                source = source_name,
+                %session_key,
+                %agent_id,
+                %reason,
+                has_prompt = prompt.is_some(),
+                "auto-spawning agent on provider action"
+            );
+            crate::spawn_handler::handle_spawn(
+                config,
+                session_key,
+                None,
+                pilot_ipc::TerminalKind::Agent(agent_id),
+                None,
+                prompt,
+            )
+            .await;
+        }
+    }
+}
+
 impl TaskSource for GhSource {
     fn name(&self) -> &str {
         "github"
+    }
+    fn drain_actions(&self) -> Vec<ProviderAction> {
+        let mut guard = self
+            .pending_actions
+            .lock()
+            .expect("GhSource.pending_actions poisoned");
+        std::mem::take(&mut *guard)
     }
     fn fetch<'a>(
         &'a self,
@@ -129,9 +233,13 @@ impl TaskSource for GhSource {
                 self.emit_progress(format!("Issue query: {}", self.client.issue_search_query()));
             }
 
-            let (raw, partial_warning) = self
+            let (raw, partial_warning, mentions) = self
                 .client
-                .fetch_selected_with_status(want_prs, want_issues)
+                .fetch_selected_with_status_and_mentions(
+                    want_prs,
+                    want_issues,
+                    &self.mention_allowed_logins,
+                )
                 .await
                 .map_err(pilot_core::ProviderError::from)?;
             // Surface partial sync failures to the user — one side
@@ -146,6 +254,78 @@ impl TaskSource for GhSource {
                     detail: "see /tmp/pilot.log for the full error".into(),
                     kind: "retryable".into(),
                 });
+            }
+
+            // Process `@pilot` mention triggers BEFORE returning the
+            // task list. For each mention we (1) post the 👀
+            // reaction so the next poll sees `viewerHasReacted=true`
+            // and skips, then (2) queue an AutoSpawnAgent action the
+            // polling tick will dispatch after upsert (the issue
+            // workspace must exist on disk before we spawn into it).
+            //
+            // Reaction failures are LOGGED but do NOT block the
+            // spawn — better to act on the mention than to silently
+            // ignore it. A failed react means we might re-spawn next
+            // tick; that's noisy but recoverable (user can Shift-X).
+            if !mentions.is_empty() {
+                self.emit_progress(format!(
+                    "Found {} @pilot mention(s); reacting + queueing auto-spawn",
+                    mentions.len()
+                ));
+            }
+            for mention in mentions {
+                if let Err(e) = self.client.react_eyes(&mention.target_node_id).await {
+                    tracing::warn!(
+                        repo = %mention.repo,
+                        issue = mention.issue_number,
+                        target = %mention.target_node_id,
+                        "react_eyes failed (will still queue auto-spawn): {e}",
+                    );
+                }
+                // Look up the matching task in the freshly-polled
+                // set so we can use the real title/body for the
+                // prompt + the canonical workspace key derivation.
+                // If we can't find it (shouldn't happen — the scan
+                // ran on the same response that produced `raw`),
+                // skip rather than spawn against a synthetic task.
+                let Some(task) = raw.iter().find(|t| {
+                    t.id.source == "github"
+                        && t.repo.as_deref() == Some(mention.repo.as_str())
+                        && t.id
+                            .key
+                            .rsplit_once('#')
+                            .and_then(|(_, n)| n.parse::<u64>().ok())
+                            == Some(mention.issue_number)
+                }) else {
+                    tracing::warn!(
+                        repo = %mention.repo,
+                        issue = mention.issue_number,
+                        "mention scan returned a target with no matching Task — skipping auto-spawn"
+                    );
+                    continue;
+                };
+                let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(task));
+                let prompt = Some(pilot_core::prompts::build_implement_issue_prompt(task));
+                let reason = format!(
+                    "@pilot mention by {} on {}#{} ({})",
+                    mention.triggered_by_login,
+                    mention.repo,
+                    mention.issue_number,
+                    match &mention.source {
+                        pilot_gh::MentionSource::Body => "issue body",
+                        pilot_gh::MentionSource::Comment { .. } => "comment",
+                    },
+                );
+                tracing::info!(%reason, target = %mention.target_node_id, "queued auto-spawn");
+                self.pending_actions
+                    .lock()
+                    .expect("GhSource.pending_actions poisoned")
+                    .push(ProviderAction::AutoSpawnAgent {
+                        session_key,
+                        agent_id: default_agent_id(),
+                        prompt,
+                        reason,
+                    });
             }
 
             self.emit_progress(format!("Got {} raw items, applying filters…", raw.len()));
@@ -494,11 +674,26 @@ pub async fn sources_for(
                             }
                         }
                         state.gh_client = Some(client.clone());
+                        // Resolve the `@pilot` allowlist. Empty
+                        // YAML list → fall back to "just the
+                        // authenticated viewer", which mirrors the
+                        // design doc's MVP scope (only the local
+                        // pilot user's own issues + comments count).
+                        let mut mention_allowed: std::collections::BTreeSet<String> =
+                            pilot_config::Config::load()
+                                .ok()
+                                .map(|c| c.mention.allowed_logins.into_iter().collect())
+                                .unwrap_or_default();
+                        if mention_allowed.is_empty() && !viewer.is_empty() {
+                            mention_allowed.insert(viewer.clone());
+                        }
                         sources.push(Box::new(GhSource {
                             client,
                             filter,
                             scopes,
                             bus: bus.clone(),
+                            mention_allowed_logins: mention_allowed,
+                            pending_actions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                         }));
                     }
                     Err(e) => tracing::warn!("github client init failed: {e}"),
@@ -727,6 +922,22 @@ pub async fn tick_with_state(
                     source: source.name().to_string(),
                     count,
                 });
+                // Drain + dispatch any side-effect actions the
+                // source queued during `fetch` (today: auto-spawn
+                // requests from `@pilot` mentions). Runs AFTER the
+                // upsert loop so the freshly-created issue
+                // workspaces exist before we spawn into them.
+                let actions = source.drain_actions();
+                if !actions.is_empty() {
+                    tracing::info!(
+                        source = source.name(),
+                        count = actions.len(),
+                        "dispatching provider actions"
+                    );
+                }
+                for action in actions {
+                    dispatch_action(config, source.name(), action).await;
+                }
             }
             Err(e) => {
                 if e.is_retryable() {

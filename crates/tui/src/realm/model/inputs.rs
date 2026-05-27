@@ -522,20 +522,14 @@ impl<T: TerminalAdapter> Model<T> {
         &mut self,
         component: Box<dyn tuirealm::component::AppComponent<Msg, UserEvent>>,
     ) {
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
-        // Unmount whatever's on top.
+        // Unmount whatever's on top — setup is a one-modal-at-a-time
+        // flow; the same Id::Setup gets re-mounted for each wizard
+        // step.
         if let Some(top) = self.modal_stack.last().cloned() {
             let _ = self.app.umount(&top);
             self.modal_stack.pop();
         }
-        let _ = self.app.mount(
-            Id::Setup,
-            component,
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::Setup);
-        let _ = self.app.active(&Id::Setup);
-        self.redraw = true;
+        self.mount_modal_boxed(Id::Setup, component);
     }
 
     /// Drop whatever setup-related modal is on top of the stack.

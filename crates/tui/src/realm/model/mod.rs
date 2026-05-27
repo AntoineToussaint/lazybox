@@ -661,17 +661,9 @@ impl<T: TerminalAdapter> Model<T> {
         report: crate::setup::SetupReport,
         sources: std::sync::Arc<Vec<Box<dyn pilot_core::ScopeSource>>>,
     ) {
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
         self.setup.inputs = Some((report.clone(), sources.clone()));
         self.setup.runner = Some(crate::setup_flow::SetupRunner::new(report, sources));
-        let _ = self.app.mount(
-            Id::Splash,
-            Box::new(Splash::new()),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        let _ = self.app.active(&Id::Splash);
-        self.modal_stack.push(Id::Splash);
-        self.redraw = true;
+        self.mount_modal(Id::Splash, Splash::new());
     }
 
     /// Pre-populate the cached setup inputs without launching the
@@ -843,6 +835,42 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
+    /// Mount a modal under `id` with the standard "subscribe to any
+    /// event, always" subscription, push it onto the modal stack,
+    /// activate it, and mark the screen dirty.
+    ///
+    /// Bundles the four-step ritual every `mount_*` helper repeats:
+    /// `app.mount` → `modal_stack.push` → `app.active` → `redraw`.
+    /// Forgetting any step has been a recurring source of "modal up
+    /// but won't dismiss" or "modal mounted but invisible until next
+    /// keypress" bugs.
+    pub fn mount_modal<C>(&mut self, id: Id, component: C)
+    where
+        C: tuirealm::component::AppComponent<Msg, UserEvent> + 'static,
+    {
+        self.mount_modal_boxed(id, Box::new(component));
+    }
+
+    /// Same as [`mount_modal`] but accepts an already-boxed
+    /// component. Use this when the caller has a
+    /// `Box<dyn AppComponent>` (e.g. setup-flow runners that
+    /// dispatch on a polymorphic boxed step).
+    pub fn mount_modal_boxed(
+        &mut self,
+        id: Id,
+        component: Box<dyn tuirealm::component::AppComponent<Msg, UserEvent>>,
+    ) {
+        use tuirealm::subscription::{EventClause, Sub, SubClause};
+        let _ = self.app.mount(
+            id.clone(),
+            component,
+            vec![Sub::new(EventClause::Any, SubClause::Always)],
+        );
+        self.modal_stack.push(id.clone());
+        let _ = self.app.active(&id);
+        self.redraw = true;
+    }
+
     /// Drain a handler's returned IPC commands into `send_cmd`.
     /// Used at the `update()` call sites so handlers can be
     /// unit-tested in isolation: tests construct a Model, call
@@ -928,7 +956,6 @@ impl<T: TerminalAdapter> Model<T> {
 
     fn mount_editor_picker(&mut self) {
         use crate::realm::components::choice::Choice;
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
         let labels: Vec<String> = self
             .setup
             .editors
@@ -939,14 +966,7 @@ impl<T: TerminalAdapter> Model<T> {
         let modal = Choice::single("Open in which editor?", labels)
             .title("Open editor")
             .label(|s: &String| s.clone());
-        let _ = self.app.mount(
-            Id::Editor,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::Editor);
-        let _ = self.app.active(&Id::Editor);
-        self.redraw = true;
+        self.mount_modal(Id::Editor, modal);
     }
 
     fn launch_editor(
@@ -981,7 +1001,6 @@ impl<T: TerminalAdapter> Model<T> {
     /// (first-run path or `--test` mode).
     pub fn open_settings(&mut self) {
         use crate::realm::components::choice::Choice;
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
 
         if self.setup.runner.is_some() || matches!(self.modal_stack.last(), Some(Id::Setup)) {
             return;
@@ -998,14 +1017,7 @@ impl<T: TerminalAdapter> Model<T> {
         let modal = Choice::single("What do you want to configure?", labels)
             .title("Settings")
             .label(|s: &String| s.clone());
-        let _ = self.app.mount(
-            Id::Setup,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::Setup);
-        let _ = self.app.active(&Id::Setup);
-        self.redraw = true;
+        self.mount_modal(Id::Setup, modal);
     }
 
     /// Build the visible actions from the user's cached persisted

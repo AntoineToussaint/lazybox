@@ -20,7 +20,6 @@ impl<T: TerminalAdapter> Model<T> {
     /// `Command::PostReply { session_key, body }`.
     pub(super) fn mount_reply(&mut self, workspace_key: pilot_core::SessionKey) {
         use crate::realm::components::textarea::Textarea;
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
 
         if matches!(self.modal_stack.last(), Some(Id::Reply)) {
             return;
@@ -28,15 +27,8 @@ impl<T: TerminalAdapter> Model<T> {
 
         let label = workspace_key.to_string();
         let modal = Textarea::new("Reply").with_header(format!("on {label}"));
-        let _ = self.app.mount(
-            Id::Reply,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::Reply);
-        let _ = self.app.active(&Id::Reply);
         self.pending_reply = Some(workspace_key);
-        self.redraw = true;
+        self.mount_modal(Id::Reply, modal);
     }
 
     /// Mount the "New workspace" name prompt under a specific
@@ -46,7 +38,6 @@ impl<T: TerminalAdapter> Model<T> {
     /// here and consumed by `handle_input_submitted`.
     pub(super) fn mount_new_workspace_input(&mut self, project_key: pilot_core::ProjectKey) {
         use crate::realm::components::input::Input;
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
 
         if matches!(self.modal_stack.last(), Some(Id::NewWorkspace)) {
             return;
@@ -57,14 +48,7 @@ impl<T: TerminalAdapter> Model<T> {
             .title("New workspace")
             .placeholder("e.g. spike-rate-limit, refactor-auth, …")
             .with_validator(|s: &str| !s.trim().is_empty());
-        let _ = self.app.mount(
-            Id::NewWorkspace,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::NewWorkspace);
-        let _ = self.app.active(&Id::NewWorkspace);
-        self.redraw = true;
+        self.mount_modal(Id::NewWorkspace, modal);
     }
 
     /// Mount the "New project" name prompt. Submit →
@@ -73,7 +57,6 @@ impl<T: TerminalAdapter> Model<T> {
     /// project keyed `local-<slug>` (idempotent on collision).
     pub(super) fn mount_new_project_input(&mut self) {
         use crate::realm::components::input::Input;
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
 
         if matches!(self.modal_stack.last(), Some(Id::NewProject)) {
             return;
@@ -83,14 +66,7 @@ impl<T: TerminalAdapter> Model<T> {
             .title("New project")
             .placeholder("e.g. my-experiments, side-quests, scratch, …")
             .with_validator(|s: &str| !s.trim().is_empty());
-        let _ = self.app.mount(
-            Id::NewProject,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::NewProject);
-        let _ = self.app.active(&Id::NewProject);
-        self.redraw = true;
+        self.mount_modal(Id::NewProject, modal);
     }
 
     /// Mount the "request reviewers" multi-select picker for the
@@ -102,7 +78,6 @@ impl<T: TerminalAdapter> Model<T> {
     pub(crate) fn mount_request_reviewers(&mut self, workspace_key: pilot_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
         
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
         if matches!(self.modal_stack.last(), Some(Id::RequestReviewers)) {
             return;
         }
@@ -117,14 +92,7 @@ impl<T: TerminalAdapter> Model<T> {
         let modal = Choice::multi("Request review from", labels)
             .title("Add reviewers")
             .label(|s: &String| s.clone());
-        let _ = self.app.mount(
-            Id::RequestReviewers,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::RequestReviewers);
-        let _ = self.app.active(&Id::RequestReviewers);
-        self.redraw = true;
+        self.mount_modal(Id::RequestReviewers, modal);
     }
 
     /// Mount the "assignees" multi-select picker for the workspace's
@@ -136,7 +104,6 @@ impl<T: TerminalAdapter> Model<T> {
     pub(crate) fn mount_add_assignees(&mut self, workspace_key: pilot_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
         
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
         if matches!(self.modal_stack.last(), Some(Id::AddAssignees)) {
             return;
         }
@@ -168,14 +135,7 @@ impl<T: TerminalAdapter> Model<T> {
                 let login = label.strip_prefix('@').unwrap_or(label);
                 existing.contains(login)
             });
-        let _ = self.app.mount(
-            Id::AddAssignees,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::AddAssignees);
-        let _ = self.app.active(&Id::AddAssignees);
-        self.redraw = true;
+        self.mount_modal(Id::AddAssignees, modal);
     }
 
     /// Mount the snooze duration picker. Used by `z` (ToggleSnooze)
@@ -187,7 +147,6 @@ impl<T: TerminalAdapter> Model<T> {
         use crate::realm::components::choice::Choice;
         use chrono::Datelike;
         use std::time::Duration;
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
         if matches!(self.modal_stack.last(), Some(Id::SnoozeDuration)) {
             return;
         }
@@ -248,14 +207,7 @@ impl<T: TerminalAdapter> Model<T> {
         let modal = Choice::single("Snooze for…", labels)
             .title("Snooze duration")
             .label(|s: &String| s.clone());
-        let _ = self.app.mount(
-            Id::SnoozeDuration,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::SnoozeDuration);
-        let _ = self.app.active(&Id::SnoozeDuration);
-        self.redraw = true;
+        self.mount_modal(Id::SnoozeDuration, modal);
     }
 
     /// Build the candidate-logins list for the picker. Source set
@@ -368,7 +320,6 @@ impl<T: TerminalAdapter> Model<T> {
     /// help is up is a no-op (the existing modal stays).
     pub(super) fn mount_help(&mut self) {
         use crate::realm::components::help::Help;
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
 
         if self.modal_stack.last() == Some(&Id::Help) {
             return;
@@ -379,14 +330,7 @@ impl<T: TerminalAdapter> Model<T> {
         // hand-curated GLOBAL block, which is how `g` (sidebar refresh)
         // shipped without ever appearing in the help. Now adding an
         // entry to the catalog automatically surfaces it.
-        let _ = self.app.mount(
-            Id::Help,
-            Box::new(Help::from_catalog()),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::Help);
-        let _ = self.app.active(&Id::Help);
-        self.redraw = true;
+        self.mount_modal(Id::Help, Help::from_catalog());
     }
 
     /// If there's a queued "out-of-scope workspace has active
@@ -395,7 +339,6 @@ impl<T: TerminalAdapter> Model<T> {
     /// `Msg::Confirmed` / `Msg::ModalDismissed` arms.
     pub(super) fn maybe_mount_next_removal_prompt(&mut self) {
         use crate::realm::components::confirm::Confirm;
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
 
         if !self.modal_stack.is_empty() {
             return;
@@ -430,14 +373,7 @@ impl<T: TerminalAdapter> Model<T> {
         };
         let modal = Confirm::new(runner_label).default_no();
         self.active_removal_prompt = Some(workspace_key);
-        let _ = self.app.mount(
-            Id::RemoveOutOfScope,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::RemoveOutOfScope);
-        let _ = self.app.active(&Id::RemoveOutOfScope);
-        self.redraw = true;
+        self.mount_modal(Id::RemoveOutOfScope, modal);
     }
 
     /// Mount the `Shift-A` adopt-target picker. Lists every other
@@ -462,7 +398,6 @@ impl<T: TerminalAdapter> Model<T> {
     ) {
         use crate::realm::components::confirm::Confirm;
         use pilot_tui_core::action::ActionDef;
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
         // Override wins so callers can render context-sensitive copy
         // (e.g. "Delete project X with 3 workspaces" vs. the generic
         // "Archive the focused workspace"). Catalog default is the
@@ -475,14 +410,7 @@ impl<T: TerminalAdapter> Model<T> {
         });
         self.pending_action_confirm = Some(action);
         let modal = Confirm::new(&prompt).default_no();
-        let _ = self.app.mount(
-            Id::ActionConfirm,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::ActionConfirm);
-        let _ = self.app.active(&Id::ActionConfirm);
-        self.redraw = true;
+        self.mount_modal(Id::ActionConfirm, modal);
     }
 
     /// Confirm prompt before dispatching `Command::CleanWorktrees`.
@@ -492,20 +420,12 @@ impl<T: TerminalAdapter> Model<T> {
     /// `(false)` / dismiss drops the prompt silently.
     pub(super) fn mount_clean_worktrees_confirm(&mut self) {
         use crate::realm::components::confirm::Confirm;
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
         let modal = Confirm::new(
             "Wipe every worktree whose session has no live terminal? \
              PR / issue rows stay; active sessions are skipped.",
         )
         .default_no();
-        let _ = self.app.mount(
-            Id::CleanWorktreesConfirm,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::CleanWorktreesConfirm);
-        let _ = self.app.active(&Id::CleanWorktreesConfirm);
-        self.redraw = true;
+        self.mount_modal(Id::CleanWorktreesConfirm, modal);
     }
 
     /// Build the action list for a right-click on a sidebar
@@ -516,7 +436,6 @@ impl<T: TerminalAdapter> Model<T> {
     pub(super) fn mount_sidebar_context_menu(&mut self, session_key: pilot_core::SessionKey) {
         use crate::realm::components::choice::Choice;
         use pilot_tui_core::action::{Action, ActionDef, ActionKind, availability};
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
 
         // Snapshot the workspace state — the catalog's `availability`
         // resolver takes `Option<&Workspace>` and decides whether each
@@ -575,20 +494,12 @@ impl<T: TerminalAdapter> Model<T> {
         let modal = Choice::single("Actions", labels)
             .title("Workspace actions")
             .label(|s: &String| s.clone());
-        let _ = self.app.mount(
-            Id::SidebarContext,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::SidebarContext);
-        let _ = self.app.active(&Id::SidebarContext);
-        self.redraw = true;
+        self.mount_modal(Id::SidebarContext, modal);
     }
 
     pub(super) fn mount_adopt_picker(&mut self, source_key: pilot_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
         
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
 
         // Build (target_key, label) pairs from every workspace EXCEPT
         // the source. Labels prefer the primary task's `owner/repo#N`
@@ -615,14 +526,7 @@ impl<T: TerminalAdapter> Model<T> {
         let modal = Choice::single("Move sessions to which workspace?", labels)
             .title("Adopt sessions")
             .label(|s: &String| s.clone());
-        let _ = self.app.mount(
-            Id::AdoptTarget,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::AdoptTarget);
-        let _ = self.app.active(&Id::AdoptTarget);
-        self.redraw = true;
+        self.mount_modal(Id::AdoptTarget, modal);
     }
 
     /// Surface the next queued issue→PR merge prompt when no modal
@@ -633,7 +537,6 @@ impl<T: TerminalAdapter> Model<T> {
     /// outcome, so Enter biases toward "leave them separate".
     pub(super) fn maybe_mount_next_merge_prompt(&mut self) {
         use crate::realm::components::confirm::Confirm;
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
 
         if !self.modal_stack.is_empty() {
             return;
@@ -654,14 +557,7 @@ impl<T: TerminalAdapter> Model<T> {
         );
         let modal = Confirm::new(question).default_no();
         self.active_merge_prompt = Some((issue_key, pr_key));
-        let _ = self.app.mount(
-            Id::MergeConfirm,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::MergeConfirm);
-        let _ = self.app.active(&Id::MergeConfirm);
-        self.redraw = true;
+        self.mount_modal(Id::MergeConfirm, modal);
     }
 
     /// Push a modal.

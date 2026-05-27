@@ -351,10 +351,27 @@ impl RightPane {
     }
 
     /// changes in a way that might affect the answer (j/k/g/G,
-    /// set_workspace, focus enter). Idempotent on re-arm.
+    /// set_workspace, focus enter). Idempotent on re-arm — relies on
+    /// `TimerLatch::arm` preserving an existing `armed_at`, so a
+    /// `WorkspaceUpserted` arriving every poll interval doesn't
+    /// reset the countdown out from under a user reading a row.
     fn rearm_mark_timer(&mut self, focused: bool) {
         if should_arm_mark_timer(focused, self.workspace.as_ref(), self.feed.cursor) {
             self.mark_timer.arm();
+        } else {
+            self.mark_timer.disarm();
+        }
+    }
+
+    /// Cursor moved to a new row — disarm + rearm fresh so the
+    /// previous row's elapsed time doesn't carry over. Idempotent
+    /// `arm` is correct for the "same row, refresh on tick" case
+    /// but wrong here: if the user was 0.9s into row A and j's to
+    /// row B, plain `arm` would leave the timer at 0.9s and fire
+    /// almost immediately on B (which the user hasn't dwelt on).
+    fn rearm_mark_timer_for_new_row(&mut self, focused: bool) {
+        if should_arm_mark_timer(focused, self.workspace.as_ref(), self.feed.cursor) {
+            self.mark_timer.rearm_fresh();
         } else {
             self.mark_timer.disarm();
         }
@@ -1376,10 +1393,11 @@ impl RightPane {
         // Cursor moves invalidate the previous undo target (you don't
         // get to undo a mark-read after navigating elsewhere — saves a
         // surprising "z reverts the comment two rows up" footgun) and
-        // re-arm the timer for the new row.
+        // re-arm the timer with a fresh countdown so the previous
+        // row's elapsed time doesn't carry over to the new one.
         if result == PaneOutcome::Consumed {
             self.last_marked_read = None;
-            self.rearm_mark_timer(true);
+            self.rearm_mark_timer_for_new_row(true);
         }
         result
     }

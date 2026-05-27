@@ -151,12 +151,9 @@ pub async fn handle_spawn(
             match resolve_or_create_session(config, &session_key, session_id, &kind).await {
                 Ok((path, sid)) => (Some(path), Some(sid)),
                 Err(e) => {
-                    let _ = config.bus.send(Event::ProviderError {
-                        source: "spawn:session".into(),
-                        message: format!("{e}"),
-                        detail: String::new(),
-                        kind: String::new(),
-                    });
+                    let _ = config
+                        .bus
+                        .send(Event::provider_error_permanent("spawn:session", e.to_string()));
                     return;
                 }
             }
@@ -164,12 +161,10 @@ pub async fn handle_spawn(
     let argv = match argv_for(config, &kind, &cwd_path) {
         Some(a) => a,
         None => {
-            let _ = config.bus.send(Event::ProviderError {
-                source: format!("spawn:{kind:?}"),
-                message: "no agent registered for this id".into(),
-                detail: String::new(),
-                kind: String::new(),
-            });
+            let _ = config.bus.send(Event::provider_error_permanent(
+                &format!("spawn:{kind:?}"),
+                "no agent registered for this id",
+            ));
             return;
         }
     };
@@ -206,12 +201,9 @@ pub async fn handle_spawn(
         Ok(k) => k,
         Err(e) => {
             tracing::error!("handle_spawn: backend.spawn failed: {e}");
-            let _ = config.bus.send(Event::ProviderError {
-                source: "spawn".into(),
-                message: format!("{e}"),
-                detail: String::new(),
-                kind: String::new(),
-            });
+            let _ = config
+                .bus
+                .send(Event::provider_error_permanent("spawn", e.to_string()));
             return;
         }
     };
@@ -686,12 +678,10 @@ async fn resolve_or_create_session(
         // a non-fatal error so the user knows their `s` press landed
         // in a bare directory, not the PR's tree.
         tracing::warn!("worktree provisioning failed: {e}");
-        let _ = config.bus.send(Event::ProviderError {
-            source: "worktree".into(),
-            message: format!("git worktree setup failed; using empty dir ({e})"),
-            detail: String::new(),
-            kind: "retryable".into(),
-        });
+        let _ = config.bus.send(Event::provider_error_retryable(
+            "worktree",
+            format!("git worktree setup failed; using empty dir ({e})"),
+        ));
         ensure_dir_exists(&path).await;
     }
 
@@ -959,12 +949,10 @@ async fn ensure_worktree_present(
     tracing::info!("worktree {} missing — re-provisioning", path.display());
     if let Err(e) = provision_worktree(workspace, path).await {
         tracing::warn!("re-provision failed: {e}");
-        let _ = config.bus.send(Event::ProviderError {
-            source: "worktree".into(),
-            message: format!("re-checkout failed; using empty dir ({e})"),
-            detail: String::new(),
-            kind: "retryable".into(),
-        });
+        let _ = config.bus.send(Event::provider_error_retryable(
+            "worktree",
+            format!("re-checkout failed; using empty dir ({e})"),
+        ));
         ensure_dir_exists(path).await;
     }
 }
@@ -1127,12 +1115,10 @@ pub async fn migrate_session_paths_if_needed(
                     actual.display(),
                     expected.display()
                 );
-                let _ = config.bus.send(pilot_ipc::Event::ProviderError {
-                    source: "worktree".into(),
-                    message: format!("PR-attach migration failed: {e}"),
-                    detail: String::new(),
-                    kind: "retryable".into(),
-                });
+                let _ = config.bus.send(pilot_ipc::Event::provider_error_retryable(
+                    "worktree",
+                    format!("PR-attach migration failed: {e}"),
+                ));
             }
         }
     }
@@ -1174,12 +1160,9 @@ pub async fn handle_create_session(
     let mut workspace = match load_workspace(config, &workspace_key) {
         Ok(w) => w,
         Err(e) => {
-            let _ = config.bus.send(Event::ProviderError {
-                source: "create_session".into(),
-                message: format!("{e}"),
-                detail: String::new(),
-                kind: String::new(),
-            });
+            let _ = config
+                .bus
+                .send(Event::provider_error_permanent("create_session", e.to_string()));
             return;
         }
     };
@@ -1195,12 +1178,9 @@ pub async fn handle_create_session(
     }
     workspace.add_session(session.clone());
     if let Err(e) = persist_and_broadcast(config, &workspace).await {
-        let _ = config.bus.send(Event::ProviderError {
-            source: "create_session".into(),
-            message: format!("{e}"),
-            detail: String::new(),
-            kind: String::new(),
-        });
+        let _ = config
+            .bus
+            .send(Event::provider_error_permanent("create_session", e.to_string()));
         return;
     }
     let _ = config.bus.send(Event::SessionCreated(Box::new(session)));

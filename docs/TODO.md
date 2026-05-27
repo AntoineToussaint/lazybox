@@ -111,40 +111,6 @@ whether the daemon even saw the command.
   event, AND ensures `mailbox_membership` accepts empty workspaces
   in the Inbox.
 
-## `w` (work) doesn't inject "fix CI" prompt into a running claude
-
-**Symptom.** User pressed `w` on a CI-failing PR with an existing
-claude session already running. Expectation: "fix CI failures"
-prompt streams into the running claude prompt input. Actual:
-nothing happens, OR a new agent is spawned instead of injecting.
-
-- Likely location: `crates/tui-core/src/intent.rs::resolve_work` +
-  the `Action::Work` dispatch.
-- The work resolver returns `Intent::SpawnAgent { prompt }` —
-  which the dispatcher uses to spawn a *new* claude. When a
-  claude is already running on this workspace, we should inject
-  the prompt into the existing session's PTY instead.
-- The "inject into existing" path exists for Slack replies (see
-  `crates/server/src/slack.rs::handle_inbound`'s
-  `encode_for_pty` + `backend.write`). The local `w` flow should
-  use it.
-
-## Auto-mark-read on activity hover not firing
-
-**Symptom.** Cursor sits on an unread activity for >1s, doesn't
-flip to read.
-
-- Likely location: `crates/tui/src/components/right_pane/mod.rs`
-  `rearm_mark_timer` (line ~285), `tick` (line ~339).
-- `arm()` resets `armed_at` to `Instant::now` on every call. Every
-  consumed keypress calls `rearm_mark_timer(true)` (line ~1262).
-  If anything else continuously fires rearm (e.g., set_workspace
-  on every poll cycle's WorkspaceUpserted), the timer never
-  reaches the 1s threshold.
-- Verify: log `mark_timer.armed_at` + `auto_mark_delay` at every
-  tick. If `armed_at` jumps around without crossing the delay
-  threshold, that's the cause.
-
 ## Issue ↔ PR merge: manual trigger key + label
 
 **Status.** The auto-detect side now works: `closes_issues` is
@@ -171,60 +137,6 @@ Two pieces:
 
 Both are pure UX surface — the underlying daemon path already
 exists in `handle_confirm_merge`.
-
-## Mouse copy only works on multi-line, then copies one line
-
-**Symptom.** Single-line drag-to-select doesn't copy at all;
-multi-line copies but only one line of the selection ends up in
-the clipboard.
-
-- FIXED (this commit): rewrote `extract_text` from a rectangular
-  selection model to row-major flowing-text (first row from
-  anchor → end; middle rows whole; last row from start → focus).
-- The single-line-doesn't-copy case might still hit an edge with
-  drags shorter than one cell width. Test interactively after
-  rebuild.
-
-## Empty pre-PR workspace deleted by rescope on next poll
-
-**Symptom.** User creates an empty workspace via `n`, it shows in
-the sidebar, but on the next poll it disappears.
-
-- Likely location: `polling::create_empty_workspace` in
-  `polling/mod.rs` writes the workspace but `rescope_with_state`
-  doesn't see it in `polled` (no upstream task) so deletes it.
-- The same rescope guards added for snoozed workspaces should
-  apply here: skip workspaces whose `pr.is_none() && gh_issues.is_empty() && linear_issues.is_empty()`
-  AND `project_key.is_some()` (locally created).
-- Add a `is_locally_created` flag to Workspace OR check the
-  shape predicate above.
-
-## TerminalStack active_tab_idx not clamped after shrink
-
-**Symptom.** Closing all but the first terminal then Tab-cycling
-skips that lone tab because the active index was stale.
-
-- Location: `terminal_stack.rs::cycle_tab_forward/backward`.
-  Compute `n = visible_terminals().len()` but don't call
-  `clamp_active_tab()` before reading `active_tab_idx`.
-- Fix: one-line `self.clamp_active_tab();` before each cycle's
-  arithmetic.
-
-## `m` (mark) is workspace-only — no "mark this one activity"
-
-**Symptom.** User clicks an activity row to select it, presses
-`m` — expects "mark THIS activity as read." Actually marks ALL
-of the workspace's activities as read.
-
-- The action catalog has one `m` mapping: `MarkAllRead`. Should
-  be context-sensitive:
-  - cursor on workspace, no activity selected → mark all.
-  - one activity selected → mark only that one.
-  - multiple selected → mark the selected set.
-- Likely path: in the right pane's `m` handler, check
-  `self.feed.selected()` first; if non-empty, fire one
-  `Command::MarkActivityRead` per selected index instead of
-  `Command::MarkRead`.
 
 ## macOS desktop notifications: ship a .app bundle
 

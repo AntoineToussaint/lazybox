@@ -674,9 +674,9 @@ pub enum Event {
         /// if the producer didn't classify the error (legacy path).
         #[serde(default)]
         detail: String,
-        /// Severity. `"retryable"` / `"auth"` / `"permanent"`. Drives
-        /// whether the TUI auto-mounts an error modal. Empty
-        /// (uncategorized) is treated as `"permanent"` for safety.
+        /// Severity. See [`ProviderErrorKind`] — the daemon writes
+        /// `kind.as_str()` here. Empty (uncategorized) is treated
+        /// as `Permanent` for safety.
         #[serde(default)]
         kind: String,
     },
@@ -799,6 +799,63 @@ pub enum Event {
         principal_id: PrincipalId,
         credentials: Vec<ProviderCredentialMetadata>,
     },
+}
+
+/// Severity classification for `Event::ProviderError`. The TUI uses
+/// this to decide whether to auto-mount an error modal or just flash
+/// a footer notice. Stored on the wire as the plain string returned
+/// by `as_str` so existing TUI matches keep working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderErrorKind {
+    /// Network blip, rate limit, transient API failure. The TUI
+    /// shows a footer notice and we keep polling.
+    Retryable,
+    /// Credentials failed to resolve / unauthorized. The TUI walks
+    /// the user through re-auth.
+    Auth,
+    /// Genuine misconfiguration or upstream invariant violation.
+    /// Surfaces an error modal.
+    Permanent,
+}
+
+impl ProviderErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Retryable => "retryable",
+            Self::Auth => "auth",
+            Self::Permanent => "permanent",
+        }
+    }
+}
+
+impl Event {
+    /// Build a `ProviderError` event with the given source / message
+    /// / kind. Replaces ~28 hand-rolled struct literals that all
+    /// carried the same `detail: String::new()` shape. Use the
+    /// kind-specific shortcuts below when classification is clear at
+    /// the call site.
+    pub fn provider_error(source: &str, message: impl Into<String>, kind: ProviderErrorKind) -> Self {
+        Self::ProviderError {
+            source: source.to_string(),
+            message: message.into(),
+            detail: String::new(),
+            kind: kind.as_str().to_string(),
+        }
+    }
+
+    /// Shorthand for a retryable provider error. Use for the
+    /// transient cases — network, rate limit, "GitHub said please
+    /// try again." The TUI doesn't escalate these to a modal.
+    pub fn provider_error_retryable(source: &str, message: impl Into<String>) -> Self {
+        Self::provider_error(source, message, ProviderErrorKind::Retryable)
+    }
+
+    /// Shorthand for a permanent provider error. Use for the genuine
+    /// "this won't fix itself by waiting" cases — bad config, missing
+    /// repo, malformed task. The TUI auto-mounts a modal.
+    pub fn provider_error_permanent(source: &str, message: impl Into<String>) -> Self {
+        Self::provider_error(source, message, ProviderErrorKind::Permanent)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

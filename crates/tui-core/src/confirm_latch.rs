@@ -84,7 +84,27 @@ impl TimerLatch {
         Self { armed_at: None }
     }
 
+    /// Arm the timer. **Idempotent** — when already armed, the
+    /// existing `armed_at` is left untouched so the elapsed time
+    /// keeps accruing toward `delay`. Without this, callers that
+    /// re-arm on every state-change tick (e.g. the right pane
+    /// re-arms on every `WorkspaceUpserted`) would never see the
+    /// timer elapse, because each tick reset `armed_at` back to
+    /// `Instant::now`. Symptom this guards against: user sits on
+    /// an unread activity > the poll interval (60s default) and
+    /// auto-mark-read never fires.
     pub fn arm(&mut self) {
+        if self.armed_at.is_none() {
+            self.armed_at = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Force a fresh arm — sets `armed_at` to `now` even when
+    /// already armed. Use sparingly; most call sites want the
+    /// idempotent `arm`. The right pane uses this when the cursor
+    /// MOVES to a new unread row — the previous row's accumulated
+    /// time shouldn't count toward the new one.
+    pub fn rearm_fresh(&mut self) {
         self.armed_at = Some(std::time::Instant::now());
     }
 
@@ -308,6 +328,46 @@ mod tests {
         t.arm();
         std::thread::sleep(std::time::Duration::from_millis(15));
         assert!(t.ready(std::time::Duration::from_millis(10)));
+    }
+
+    /// Regression for the "user sits on a row > poll interval and
+    /// auto-mark never fires" bug. Pre-fix, every poll's
+    /// WorkspaceUpserted re-armed the timer, resetting `armed_at`
+    /// back to `now`. The timer never accumulated past the rearm
+    /// cadence. Now `arm()` is idempotent: a re-arm while already
+    /// armed leaves `armed_at` untouched.
+    #[test]
+    fn timer_arm_is_idempotent_while_armed() {
+        let mut t = TimerLatch::new();
+        t.arm();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        // Re-arm — must NOT reset the countdown.
+        t.arm();
+        assert!(
+            t.ready(std::time::Duration::from_millis(10)),
+            "idempotent arm must preserve elapsed time",
+        );
+    }
+
+    /// `rearm_fresh` is the explicit "I want a new countdown" path —
+    /// used by the right pane when the cursor moves to a different
+    /// row. Distinct from `arm()` so the call sites are visibly
+    /// different at the seams: idempotent arm-on-tick vs.
+    /// reset-on-cursor-move.
+    #[test]
+    fn timer_rearm_fresh_resets_countdown_even_when_armed() {
+        let mut t = TimerLatch::new();
+        t.arm();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        t.rearm_fresh();
+        // 0ms has elapsed since the rearm — the 10ms threshold can't
+        // possibly be ready yet.
+        assert!(
+            !t.ready(std::time::Duration::from_millis(10)),
+            "rearm_fresh must reset armed_at to now",
+        );
+        // But still armed.
+        assert!(t.is_armed());
     }
 
     // ── PrefixLatch tests ────────────────────────────────────────

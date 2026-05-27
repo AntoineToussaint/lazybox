@@ -293,12 +293,11 @@ fn send_auth_error(
     provider_id: &str,
     error: CredentialStoreError,
 ) {
-    let _ = tx.send(Event::ProviderError {
-        source: format!("auth:{provider_id}"),
-        message: error.to_string(),
-        detail: String::new(),
-        kind: String::new(),
-    });
+    let _ = tx.send(Event::provider_error(
+        &format!("auth:{provider_id}"),
+        error.to_string(),
+        pilot_ipc::ProviderErrorKind::Auth,
+    ));
 }
 
 #[cfg(test)]

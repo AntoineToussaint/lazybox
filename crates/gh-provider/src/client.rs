@@ -61,6 +61,26 @@ fn is_transient(e: &octocrab::Error) -> bool {
     }
 }
 
+/// Strip snafu's location + backtrace dump from an error's
+/// `Display` output. Octocrab's `Error` variants (Serde, Hyper,
+/// etc.) use snafu, whose Display includes `Found at 0: ...` and a
+/// trail of `/rustc/...` source paths — totally illegible to a
+/// user, and our footer pipes it straight in. Take only what
+/// comes before the first snafu marker and the first newline,
+/// trim trailing whitespace.
+fn strip_error_backtrace(s: &str) -> String {
+    // snafu's backtrace prelude is "Found at" on the line right
+    // after the message. Cut everything from "Found at" onward.
+    // Some snafu versions use "Caused by:" — handle both.
+    let cut_at = s
+        .find("\nFound at")
+        .or_else(|| s.find("Found at"))
+        .or_else(|| s.find("\nCaused by:"))
+        .unwrap_or(s.len());
+    let head = &s[..cut_at];
+    head.lines().next().unwrap_or("").trim_end().to_string()
+}
+
 fn detail_of(err: &GhError) -> String {
     match err {
         GhError::Graphql(s) => s.clone(),
@@ -81,7 +101,16 @@ fn detail_of(err: &GhError) -> String {
                 // includes status, message, docs URL, errors.
                 format!("GitHub API ({}): {}", source.status_code, source)
             }
-            other => format!("{other}"),
+            // Serde / Json failures usually mean GitHub returned a
+            // non-JSON body (502 page, redirect to login). Add a
+            // hint to the technical message so the user knows
+            // what's likely going on without us having to plumb
+            // the raw response status through octocrab.
+            octocrab::Error::Serde { .. } | octocrab::Error::Json { .. } => {
+                let s = strip_error_backtrace(&format!("{other}", other = octo));
+                format!("{s} (likely GitHub returned a non-JSON page — 502 / login redirect)")
+            }
+            other => strip_error_backtrace(&format!("{other}")),
         },
     }
 }
@@ -1628,5 +1657,59 @@ impl pilot_core::TaskProvider for GhClient {
         self.post_issue_comment(repo, number, body)
             .await
             .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod backtrace_strip_tests {
+    use super::strip_error_backtrace;
+
+    /// Plain one-line message passes through unchanged.
+    #[test]
+    fn passes_short_message_through() {
+        assert_eq!(
+            strip_error_backtrace("expected value at line 1 column 1"),
+            "expected value at line 1 column 1"
+        );
+    }
+
+    /// snafu's "Found at 0: ..." prelude marks the backtrace —
+    /// cut everything from there. This is the actual format octocrab
+    /// uses; the user's footer was dumping the rest verbatim.
+    #[test]
+    fn cuts_snafu_found_at_prelude() {
+        let raw = "Serde Error: expected value at line 1 column 1\n\
+                   Found at 0: std::backtrace_rs::backtrace::libunwind::trace\n\
+                              at /rustc/59807616e1fa2540724bfbac14d7c0d/library/std/src/backtrace_rs.rs:66";
+        assert_eq!(
+            strip_error_backtrace(raw),
+            "Serde Error: expected value at line 1 column 1"
+        );
+    }
+
+    /// Some snafu versions / wrappers use "Caused by:" instead.
+    #[test]
+    fn cuts_caused_by_prelude() {
+        let raw = "outer error\nCaused by: deeper error\nfurther frame";
+        assert_eq!(strip_error_backtrace(raw), "outer error");
+    }
+
+    /// "Found at" run together with the message (no newline) — still
+    /// cut. The user's screenshot showed "...column 1Found at 0:..."
+    /// where the newline didn't render because the footer is a
+    /// single line.
+    #[test]
+    fn cuts_inline_found_at_marker() {
+        let raw = "expected value at line 1 column 1Found at 0: trace";
+        assert_eq!(
+            strip_error_backtrace(raw),
+            "expected value at line 1 column 1"
+        );
+    }
+
+    /// Trailing whitespace gets trimmed — keeps the footer flush.
+    #[test]
+    fn trims_trailing_whitespace() {
+        assert_eq!(strip_error_backtrace("oh no   "), "oh no");
     }
 }

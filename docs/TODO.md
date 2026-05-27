@@ -231,23 +231,6 @@ skips that lone tab because the active index was stale.
 - Fix: one-line `self.clamp_active_tab();` before each cycle's
   arithmetic.
 
-## Pressing `w` on an issue doesn't inject "implement/solve this issue" into running agent
-
-**Symptom.** `w` on an issue row with a running claude doesn't
-ingest the issue's "implement / solve this issue" prompt into the
-existing claude session.
-
-- Related to the `w → InjectPrompt` rewrite fix landed in
-  e6c1bf2 — that fix covers the catalog dispatch path generally,
-  but issue-implement prompt might be a different branch in
-  `intent::resolve_work` that doesn't hit `Intent::SpawnAgent`
-  the same way.
-- Verify: `grep "w on" /tmp/pilot.log` after pressing `w` on an
-  issue row + observe whether the resolved Intent is
-  `SpawnAgent { prompt: Some("…implement…") }` or something
-  else. Check `crates/tui-core/src/intent.rs::resolve_work`
-  branches for issue handling.
-
 ## `m` (mark) is workspace-only — no "mark this one activity"
 
 **Symptom.** User clicks an activity row to select it, presses

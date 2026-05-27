@@ -592,6 +592,171 @@ fn merge_confirm_esc_sends_reject_command() {
     }
 }
 
+/// GitHub issue (not PR) — `url` carries `/issues/<n>`, no branch.
+fn task_with_issue(key: &str, title: &str, body: Option<&str>) -> pilot_core::Task {
+    use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
+    let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
+    Task {
+        id: TaskId {
+            source: "github".into(),
+            key: key.into(),
+        },
+        title: title.into(),
+        body: body.map(str::to_string),
+        state: TaskState::Open,
+        role: TaskRole::Assignee,
+        ci: CiStatus::None,
+        review: ReviewStatus::None,
+        checks: vec![],
+        unread_count: 0,
+        url: format!("https://github.com/{path}/issues/{num}"),
+        repo: Some("o/r".into()),
+        branch: None,
+        base_branch: None,
+        updated_at: Utc::now(),
+        labels: vec![],
+        reviewers: vec![],
+        assignees: vec![],
+        auto_merge_enabled: false,
+        is_in_merge_queue: false,
+        mergeable: pilot_core::Mergeable::Unknown,
+        is_behind_base: false,
+        node_id: None,
+        needs_reply: false,
+        last_commenter: None,
+        recent_activity: vec![],
+        additions: 0,
+        deletions: 0,
+        closes_issues: vec![],
+    }
+}
+
+/// Pressing `w` on an issue with a claude already running for that
+/// workspace must rewrite the Spawn into InjectPrompt — otherwise the
+/// user's implement-issue prompt spawns a second claude tab instead
+/// of being delivered to the one already on-screen. Regression: the
+/// rewrite previously skipped the catalog path that handles
+/// `Action::Work` on an issue.
+#[test]
+fn w_on_issue_with_running_claude_injects_implement_prompt() {
+    use pilot_ipc::{Command, TerminalId, TerminalKind};
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let issue = task_with_issue("o/r#42", "Migrate to Postgres 16", None);
+    let ws = Workspace::from_task(issue, Utc::now());
+    let ws_key = ws.key.clone();
+
+    // Seed: workspace exists, and a claude is already running for it.
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+        projects: vec![],
+    });
+    m.handle_daemon_event(IpcEvent::TerminalSpawned {
+        terminal_id: TerminalId(7),
+        session_key: SessionKey::from(&ws_key),
+        kind: TerminalKind::Agent("claude".into()),
+    });
+
+    // TerminalSpawned auto-focuses the terminal pane. In real usage
+    // the user Tab's back to the sidebar; do the same here so `w`
+    // hits the catalog instead of being written into the PTY.
+    while m.focus() != PaneFocus::Sidebar {
+        m.dispatch_key(key(Key::Tab));
+    }
+
+    // Press `w`.
+    m.dispatch_key(key(Key::Char('w')));
+
+    // Drain and look for the inject (NOT a duplicate spawn).
+    let mut commands: Vec<Command> = Vec::new();
+    while let Ok(cmd) = server.rx.try_recv() {
+        commands.push(cmd);
+    }
+    let inject = commands.iter().find_map(|c| match c {
+        Command::InjectPrompt {
+            terminal_id,
+            prompt,
+            fallback_spawn,
+        } => Some((*terminal_id, prompt.clone(), fallback_spawn.clone())),
+        _ => None,
+    });
+    let (terminal_id, prompt, fallback) =
+        inject.unwrap_or_else(|| panic!("w on issue with running claude must emit InjectPrompt — got: {commands:#?}"));
+    assert_eq!(terminal_id, TerminalId(7), "must target the running claude");
+    assert!(
+        prompt.contains("Implement GitHub issue #42"),
+        "prompt should carry the implement-issue text, got: {prompt}",
+    );
+    assert!(
+        fallback.is_some(),
+        "InjectPrompt should always carry a SpawnFallback for the dead-id race",
+    );
+
+    // And there must NOT be a duplicate Spawn alongside the inject —
+    // otherwise the user gets two claude tabs instead of one.
+    let spawn_count = commands
+        .iter()
+        .filter(|c| matches!(c, Command::Spawn { kind: TerminalKind::Agent(_), .. }))
+        .count();
+    assert_eq!(
+        spawn_count, 0,
+        "must rewrite to inject — no duplicate Spawn should fire alongside",
+    );
+    let _ = prompt; // keep `prompt` in scope for assertions above
+}
+
+/// Same as above but the user presses `w` from the right (activity)
+/// pane. The right pane has its own `w` handler that emits a Spawn
+/// into the orchestrator's cmd queue — the rewrite must catch that
+/// path too, not only the catalog dispatch path.
+#[test]
+fn w_on_issue_from_right_pane_also_injects() {
+    use pilot_ipc::{Command, TerminalId, TerminalKind};
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let issue = task_with_issue("o/r#42", "Migrate to Postgres 16", None);
+    let ws = Workspace::from_task(issue, Utc::now());
+    let ws_key = ws.key.clone();
+
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+        projects: vec![],
+    });
+    m.handle_daemon_event(IpcEvent::TerminalSpawned {
+        terminal_id: TerminalId(7),
+        session_key: SessionKey::from(&ws_key),
+        kind: TerminalKind::Agent("claude".into()),
+    });
+
+    // Get to the right pane. TerminalSpawned auto-focused terminals;
+    // Tab to sidebar, Tab again to right pane.
+    while m.focus() != PaneFocus::Right {
+        m.dispatch_key(key(Key::Tab));
+    }
+
+    m.dispatch_key(key(Key::Char('w')));
+
+    let mut commands: Vec<Command> = Vec::new();
+    while let Ok(cmd) = server.rx.try_recv() {
+        commands.push(cmd);
+    }
+    let inject_found = commands.iter().any(|c| {
+        matches!(
+            c,
+            Command::InjectPrompt {
+                terminal_id: TerminalId(7),
+                ..
+            }
+        )
+    });
+    assert!(
+        inject_found,
+        "right-pane `w` on issue with running claude should InjectPrompt, got: {commands:#?}",
+    );
+}
+
 fn task_with_pr(key: &str) -> pilot_core::Task {
     use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
     let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));

@@ -229,6 +229,38 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return cmds;
         }
+        // Snooze duration picker (Id::SnoozeDuration) — single-pick.
+        // Translate the chosen index into a snooze deadline via the
+        // stashed `snooze_choices`. Empty / Esc dismisses without
+        // snoozing.
+        if matches!(self.modal_stack.last(), Some(Id::SnoozeDuration)) {
+            let duration = picks
+                .first()
+                .and_then(|i| self.snooze_choices.get(*i).copied());
+            let workspace_key = self.pending_snooze_workspace.take();
+            self.snooze_choices.clear();
+            self.pop_modal();
+            if let (Some(session_key), Some(duration)) = (workspace_key, duration) {
+                use crate::realm::components::footer::{Notice, NoticeSeverity};
+                let until = chrono::Utc::now()
+                    + chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::hours(4));
+                cmds.push(IpcCommand::Snooze { session_key, until });
+                let mins = duration.as_secs() / 60;
+                let label = if mins < 60 {
+                    format!("{mins}m")
+                } else if mins < 60 * 24 {
+                    format!("{}h", mins / 60)
+                } else {
+                    format!("{}d", mins / 60 / 24)
+                };
+                self.status.notice = Some(Notice::new(
+                    format!("snoozed for {label}"),
+                    NoticeSeverity::Info,
+                ));
+                self.redraw = true;
+            }
+            return cmds;
+        }
         // Assignees picker (Id::AddAssignees) — picker is pre-
         // checked with existing assignees, so submitting the current
         // selection is the *full desired set*. Fire SetAssignees;
@@ -376,6 +408,10 @@ impl<T: TerminalAdapter> Model<T> {
             Some(Id::AddAssignees) => {
                 self.pending_assignees_request = None;
                 self.assignees_choices.clear();
+            }
+            Some(Id::SnoozeDuration) => {
+                self.pending_snooze_workspace = None;
+                self.snooze_choices.clear();
             }
             _ => {}
         }

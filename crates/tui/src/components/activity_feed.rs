@@ -116,6 +116,18 @@ impl ActivityFeed {
         }
     }
 
+    /// Replace the selection with exactly `{idx}`. Used by the
+    /// click path so a left-click feels like "select this row"
+    /// (the natural mental model) instead of "toggle this row into
+    /// the multi-select set" (which made clicking a new row
+    /// deselect the old one without making the new one selected).
+    /// `v` (keyboard) keeps the toggle behaviour for explicit
+    /// multi-select accumulation.
+    pub fn select_only(&mut self, idx: usize) {
+        self.selected.clear();
+        self.selected.insert(idx);
+    }
+
     /// Borrow the selected set (read-only). `f` reads this to
     /// build the prompt; empty set means "use the cursor row".
     pub fn selected(&self) -> &HashSet<usize> {

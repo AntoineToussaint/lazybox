@@ -166,32 +166,21 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::ToggleSnooze => {
-                // Resolver decides Snooze (when not snoozed) vs
-                // Unsnooze (when snoozed) based on the workspace
-                // state. The catalog dispatch reads
-                // `ui_defaults.short_snooze` so the user's YAML
-                // override (`ui.short_snooze`) drives the duration.
+                // When the workspace is already snoozed, `z` toggles
+                // it off (no picker — that'd be friction). When NOT
+                // snoozed, mount the duration picker so the user can
+                // pick something meaningful instead of paying the
+                // YAML default every time.
                 let now = chrono::Utc::now();
-                let workspace = self.sidebar.selected_workspace().cloned();
-                let intent = crate::intent::resolve_short_snooze(
-                    workspace.as_ref(),
-                    now,
-                    self.ui_defaults.short_snooze,
-                );
-                match intent {
-                    crate::intent::Intent::Snooze {
-                        session_key,
-                        duration,
-                    } => {
-                        let until = now
-                            + chrono::Duration::from_std(duration)
-                                .unwrap_or(chrono::Duration::hours(4));
-                        cmds.push(IpcCommand::Snooze { session_key, until });
-                    }
-                    crate::intent::Intent::Unsnooze { session_key } => {
-                        cmds.push(IpcCommand::Unsnooze { session_key });
-                    }
-                    _ => {}
+                let Some(workspace) = self.sidebar.selected_workspace().cloned() else {
+                    return cmds;
+                };
+                if workspace.is_snoozed(now) {
+                    let session_key = pilot_core::SessionKey::from(&workspace.key);
+                    cmds.push(IpcCommand::Unsnooze { session_key });
+                } else {
+                    let session_key = pilot_core::SessionKey::from(&workspace.key);
+                    self.mount_snooze_picker(session_key);
                 }
             }
             Action::MergePr => {

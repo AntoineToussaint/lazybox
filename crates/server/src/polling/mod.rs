@@ -626,14 +626,34 @@ pub async fn tick_with_state(
                         kind: "retryable".into(),
                     });
                 }
-                for task in tasks {
+                // Wall-clock the upsert loop. If one of these hangs
+                // (git worktree migration, sqlite contention, …) the
+                // log lands a clear "upsert loop stalled at index N"
+                // line instead of silently consuming the rest of the
+                // tick budget.
+                let upsert_started = std::time::Instant::now();
+                let total = tasks.len();
+                for (i, task) in tasks.into_iter().enumerate() {
                     if task.mergeable == pilot_core::Mergeable::Unknown {
                         saw_unknown_mergeable = true;
                     }
                     let key = WorkspaceKey::new(pilot_core::workspace_key_for(&task));
+                    let task_id = task.id.to_string();
                     polled.push(key);
+                    let one_started = std::time::Instant::now();
                     upsert(config, task).await;
+                    let one_ms = one_started.elapsed().as_millis();
+                    if one_ms > 500 {
+                        tracing::warn!(
+                            "upsert {}/{total} ({task_id}) took {one_ms}ms — slow",
+                            i + 1
+                        );
+                    }
                 }
+                tracing::info!(
+                    "tick: upserted {total} tasks in {}ms",
+                    upsert_started.elapsed().as_millis()
+                );
                 // Clear the debounce slot — the next failure should
                 // broadcast even if it carries the same message as a
                 // previous run.
@@ -1094,26 +1114,15 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
         retry_after_secs: outcome.retry_after_secs,
         saw_unknown_mergeable: outcome.saw_unknown_mergeable,
     };
-    let polled = outcome.polled.clone();
     rescope_with_state(config, &outcome, &mut state).await;
-    // Background prefetch of the top-N attention PRs so the right
-    // pane is hot on first click. Detached so it doesn't extend the
-    // tick's critical path; the lock is dropped before spawn so
-    // concurrent FetchPrDetails commands aren't queued behind us.
-    // No-op when there's no gh client (linear-only setup).
-    let cfg = config.clone();
-    let polled_clone = polled.clone();
-    // Move the state clone we need (just the prefetched set + the
-    // client handle) into the spawn. TickState is `!Send + lock-
-    // guarded`; we can't pass it whole. Instead, fork into a small
-    // detached helper that uses an Arc<Mutex<HashSet>> via the
-    // existing config.poll_state. The spawn re-acquires briefly to
-    // update the dedup set after each fetch lands.
-    tokio::spawn(async move {
-        let mut state = cfg.poll_state.lock().await;
-        prefetch_top_pr_details(&cfg, &polled_clone, &mut state).await;
-    });
-    let _ = polled; // suppress unused; we cloned above.
+    // (Prefetch of top-N PR details — implemented but disabled
+    // until the underlying sync stability work lands. The spawn
+    // was re-locking `poll_state` which is held by the very tick
+    // we're trying to finish; conceptually fine because the
+    // outer guard drops on return, but layering "background
+    // fetch fan-out" on top of "single sync is fragile" was the
+    // wrong order. Re-enable once the next-tick cadence is
+    // visibly healthy in `/tmp/pilot.log`.)
     summary
 }
 

@@ -734,14 +734,38 @@ async fn apply_inline_script(target: &Path, body: &str) -> Result<(), GitError> 
 }
 
 async fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
+    // Wall-clock cap on every git invocation. Without this, a single
+    // hung `git worktree move` (waiting on credentials, an fs lock,
+    // a stalled network connection to the remote) wedged the daemon
+    // poll loop forever — the symptom was "poll succeeded" logged
+    // but no `tick #N done`, no further polls, no panic. 30s is long
+    // enough that a real `git fetch` over a slow network can still
+    // complete; short enough that a hung process surfaces as an
+    // error rather than silent paralysis.
+    const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     let started = std::time::Instant::now();
     tracing::info!("git (in {}) {}", cwd.display(), args.join(" "));
-    let output = Command::new("git")
+    let fut = Command::new("git")
         .current_dir(cwd)
         .args(args)
         .envs(git_env())
-        .output()
-        .await?;
+        .output();
+    let output = match tokio::time::timeout(GIT_TIMEOUT, fut).await {
+        Ok(res) => res?,
+        Err(_) => {
+            let elapsed = started.elapsed();
+            tracing::error!(
+                "git (in {}) {} TIMED OUT after {elapsed:?}",
+                cwd.display(),
+                args.join(" ")
+            );
+            return Err(GitError::Command(format!(
+                "`git {}` exceeded {}s wall-clock",
+                args.join(" "),
+                GIT_TIMEOUT.as_secs()
+            )));
+        }
+    };
     let elapsed = started.elapsed();
     if output.status.success() {
         tracing::info!(

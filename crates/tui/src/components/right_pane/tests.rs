@@ -223,19 +223,28 @@ mod click_dispatch_tests {
     }
 
     #[test]
-    fn card_click_moves_cursor_and_toggles_selection() {
+    fn card_click_moves_cursor_and_selects_only_this_row() {
+        // Click is now radio-select (matches the mental model: "click
+        // moves the highlight"). Previously it toggled the row in/out
+        // of a multi-select set, which made clicking a *different*
+        // row deselect the first without making the second feel
+        // selected. Multi-select stays available via `v` (keyboard).
         let mut pane = RightPane::new(PaneId::new(0));
-        // Card index 3 occupies rows 12..=14.
         pane.click_hits.activity_cards.push((3, 12..=14));
+        pane.click_hits.activity_cards.push((5, 16..=18));
+        // First click on row 3 — selection is {3}.
         assert!(pane.handle_mouse_click(0, 13));
         assert_eq!(pane.feed.cursor, 3);
-        // Single click toggles SELECTION (not expand — that's
-        // double-click).
         assert!(pane.feed.is_selected(3));
         assert!(!pane.feed.is_expanded(3));
-        // Second click toggles selection off.
-        assert!(pane.handle_mouse_click(0, 13));
-        assert!(!pane.feed.is_selected(3));
+        // Click row 5 — selection becomes {5} only, NOT {3, 5}.
+        assert!(pane.handle_mouse_click(0, 17));
+        assert_eq!(pane.feed.cursor, 5);
+        assert!(pane.feed.is_selected(5));
+        assert!(
+            !pane.feed.is_selected(3),
+            "clicking row 5 should replace the selection, not add to it"
+        );
     }
 
     #[test]

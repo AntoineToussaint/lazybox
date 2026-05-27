@@ -474,26 +474,25 @@ impl RightPane {
         {
             let target = *idx;
             self.feed.cursor = target;
-            // Single click on a card → move cursor + toggle the
-            // multi-select set. Expand/collapse is double-click
-            // (handled separately) so the user can pick rows without
-            // having to read every body. Matches the mailer pattern.
-            // Queue a notice so the user gets explicit feedback —
-            // the ✓ marker alone was too subtle for some.
-            let now_selected = self.feed.toggle_select(target);
-            self.pending_selection_notice = Some(if now_selected {
-                format!(
-                    "selected activity #{} ({}/{})",
-                    target + 1,
-                    self.feed.selected().len(),
-                    self.workspace
-                        .as_ref()
-                        .map(|w| w.activity.len())
-                        .unwrap_or(0),
-                )
-            } else {
-                format!("deselected — {} still selected", self.feed.selected().len(),)
-            });
+            // Single click on a card = "select THIS row" (radio).
+            // Replaces the previous toggle-into-set behaviour, which
+            // meant clicking row B while row A was selected
+            // deselected A (toggle off… no wait, A stayed; the bug
+            // was clicking the SAME row twice in a row deselected it
+            // visually without re-selecting on next click — and
+            // accumulating selection across clicks confused users
+            // who expected mailer-style "click moves the highlight").
+            // Explicit multi-select stays available via `v`
+            // (keyboard).
+            self.feed.select_only(target);
+            self.pending_selection_notice = Some(format!(
+                "selected activity #{} of {}",
+                target + 1,
+                self.workspace
+                    .as_ref()
+                    .map(|w| w.activity.len())
+                    .unwrap_or(0),
+            ));
             self.rearm_mark_timer(true);
             return true;
         }

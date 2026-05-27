@@ -186,6 +186,86 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
+    /// Mount the snooze duration picker. Used by `z` (ToggleSnooze)
+    /// when the workspace is NOT currently snoozed — the user picks
+    /// the duration instead of always paying the YAML default.
+    /// Cycle of options is curated: each one's a "I'll come back
+    /// to this when…" moment that maps to a real schedule.
+    pub(crate) fn mount_snooze_picker(&mut self, session_key: pilot_core::SessionKey) {
+        use crate::realm::components::choice::Choice;
+        use chrono::Datelike;
+        use std::time::Duration;
+        use tuirealm::subscription::{EventClause, Sub, SubClause};
+        if matches!(self.modal_stack.last(), Some(Id::SnoozeDuration)) {
+            return;
+        }
+        // Anchor "tomorrow / next week" on the user's local wall
+        // clock so "tomorrow morning" lands at ~9am local time, not
+        // 9am UTC. Each option is computed as a `Duration` from
+        // `now` so the daemon-side snooze deadline (which uses
+        // UTC) doesn't need to know about the user's timezone.
+        let now_local = chrono::Local::now();
+        let now_naive = now_local.naive_local();
+
+        let until_eod = {
+            let today_6pm = now_local
+                .date_naive()
+                .and_hms_opt(18, 0, 0)
+                .unwrap_or(now_naive);
+            let diff = today_6pm.signed_duration_since(now_naive);
+            // Clamp: a 17:55 press should snooze at least 1h, not 5min.
+            diff.to_std()
+                .unwrap_or(Duration::from_secs(3600))
+                .max(Duration::from_secs(3600))
+        };
+        let until_tomorrow = {
+            let tomorrow_9am = (now_local + chrono::Duration::days(1))
+                .date_naive()
+                .and_hms_opt(9, 0, 0)
+                .unwrap_or(now_naive);
+            tomorrow_9am
+                .signed_duration_since(now_naive)
+                .to_std()
+                .unwrap_or(Duration::from_secs(24 * 3600))
+        };
+        let until_next_week = {
+            let weekday = now_local.weekday().num_days_from_monday() as i64;
+            let days_until_monday = if weekday == 0 { 7 } else { 7 - weekday };
+            let next_monday_9am = (now_local + chrono::Duration::days(days_until_monday))
+                .date_naive()
+                .and_hms_opt(9, 0, 0)
+                .unwrap_or(now_naive);
+            next_monday_9am
+                .signed_duration_since(now_naive)
+                .to_std()
+                .unwrap_or(Duration::from_secs(7 * 24 * 3600))
+        };
+        let options: Vec<(&'static str, Duration)> = vec![
+            ("1 hour", Duration::from_secs(3600)),
+            ("4 hours (default)", Duration::from_secs(4 * 3600)),
+            ("Until end of day (6pm)", until_eod),
+            ("Tomorrow morning (9am)", until_tomorrow),
+            ("Next Monday 9am", until_next_week),
+            ("1 week", Duration::from_secs(7 * 24 * 3600)),
+            ("1 month", Duration::from_secs(30 * 24 * 3600)),
+            ("Forever (1 year)", Duration::from_secs(365 * 24 * 3600)),
+        ];
+        let labels: Vec<String> = options.iter().map(|(l, _)| (*l).to_string()).collect();
+        self.snooze_choices = options.into_iter().map(|(_, d)| d).collect();
+        self.pending_snooze_workspace = Some(session_key);
+        let modal = Choice::single("Snooze for…", labels)
+            .title("Snooze duration")
+            .label(|s: &String| s.clone());
+        let _ = self.app.mount(
+            Id::SnoozeDuration,
+            Box::new(modal),
+            vec![Sub::new(EventClause::Any, SubClause::Always)],
+        );
+        self.modal_stack.push(Id::SnoozeDuration);
+        let _ = self.app.active(&Id::SnoozeDuration);
+        self.redraw = true;
+    }
+
     /// Build the candidate-logins list for the picker. Source set
     /// is the workspace's known people: existing reviewers,
     /// assignees, activity authors. Excludes the local user

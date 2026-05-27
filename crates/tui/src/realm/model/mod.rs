@@ -108,6 +108,14 @@ pub enum Id {
     /// → `Command::AddAssignees { workspace_key, logins }`. Works
     /// on issues too (both PRs and issues are `Assignable`).
     AddAssignees,
+    /// Duration picker mounted on `z` (ToggleSnooze) when the
+    /// workspace is NOT currently snoozed. Single-pick choice
+    /// modal with several common snooze durations (1h, today,
+    /// tomorrow, next week, 1 month, forever). The pending
+    /// workspace key lives in `pending_snooze_workspace`;
+    /// `Msg::ChoicePicked` reads it + the picked Duration and
+    /// dispatches `Command::Snooze`.
+    SnoozeDuration,
     /// Right-click context menu over a sidebar workspace row.
     /// Single-pick `Choice` modal whose items are the workspace's
     /// available actions (spawn claude / shell / mark read /
@@ -304,6 +312,13 @@ pub struct Model<T: TerminalAdapter> {
     pending_assignees_request: Option<pilot_core::WorkspaceKey>,
     /// Candidate logins shown in the `AddAssignees` picker.
     assignees_choices: Vec<String>,
+    /// Workspace currently waiting on the `SnoozeDuration` picker's
+    /// result. `Msg::ChoicePicked` reads this + `snooze_choices` to
+    /// turn the picked index into a `Command::Snooze`.
+    pending_snooze_workspace: Option<pilot_core::SessionKey>,
+    /// The duration each picker option maps to. Order MUST match
+    /// the labels rendered in `mount_snooze_picker`.
+    snooze_choices: Vec<std::time::Duration>,
     /// Workspaces that fell out of scope (filter / scope change) but
     /// have running terminals — the daemon won't auto-remove those.
     /// Each `WorkspaceOutOfScope` event lands here; one at a time
@@ -479,6 +494,8 @@ impl<T: TerminalAdapter> Model<T> {
             review_choices: Vec::new(),
             pending_assignees_request: None,
             assignees_choices: Vec::new(),
+            pending_snooze_workspace: None,
+            snooze_choices: Vec::new(),
             pending_removal_prompts: std::collections::VecDeque::new(),
             active_removal_prompt: None,
             pending_merge_prompts: std::collections::VecDeque::new(),

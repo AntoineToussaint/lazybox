@@ -236,7 +236,7 @@ pub fn resolve_work(
                 .gh_issues
                 .first()
                 .expect("ImplementIssue classification implies at least one gh_issue");
-            build_implement_issue_prompt(issue)
+            pilot_core::prompts::build_implement_issue_prompt(issue)
         }
     };
     Intent::SpawnAgent {
@@ -506,38 +506,6 @@ fn build_address_comments_prompt(workspace: &Workspace, indices: &[usize]) -> St
          technical rationale), then commit. When all the comments are addressed and \
          local checks pass, push the branch. After the push lands, reply to each \
          comment with the commit SHA and a one-line explanation of the change."
-    )
-}
-
-/// Build the "implement this issue" prompt. Mirrors
-/// `sidebar::build_implement_issue_prompt` (private over there)
-/// so the resolver owns the logic.
-fn build_implement_issue_prompt(issue: &pilot_core::Task) -> String {
-    let issue_number = issue
-        .id
-        .key
-        .rsplit_once('#')
-        .map(|(_, n)| n)
-        .unwrap_or(&issue.id.key);
-    let repo = issue.repo.as_deref().unwrap_or("the repository");
-    let body_block = match issue
-        .body
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(body) => format!("\n\nIssue body:\n{body}\n"),
-        None => String::new(),
-    };
-    format!(
-        "Implement GitHub issue #{issue_number} in {repo}: {title}.\
-         {body_block}\
-         \nWalk through it: create a fresh branch from the repo's default base, \
-         implement the change end-to-end (code + tests), run the project's local \
-         checks until they pass, then `gh pr create` with a body that includes \
-         `Closes #{issue_number}` so this issue and the resulting PR collapse to \
-         a single row in pilot. Reply with the PR URL when it's open.",
-        title = issue.title,
     )
 }
 

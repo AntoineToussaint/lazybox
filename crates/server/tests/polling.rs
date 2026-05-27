@@ -163,6 +163,34 @@ impl TaskSource for CountingSource {
     }
 }
 
+/// Source that returns a fixed task set AND queues an
+/// `AutoSpawnAgent` action to be drained after the upsert pass. The
+/// in-process equivalent of `GhSource`'s `@pilot`-mention path
+/// without the network round-trip — used to verify that
+/// `tick_with_state` runs `drain_actions` and routes the spawn
+/// through `handle_spawn` end-to-end.
+struct ActionEmittingSource {
+    name: String,
+    tasks: Vec<Task>,
+    actions: std::sync::Mutex<Vec<polling::ProviderAction>>,
+}
+
+impl TaskSource for ActionEmittingSource {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn fetch<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    {
+        let tasks = self.tasks.clone();
+        Box::pin(async move { Ok(tasks) })
+    }
+    fn drain_actions(&self) -> Vec<polling::ProviderAction> {
+        std::mem::take(&mut *self.actions.lock().unwrap())
+    }
+}
+
 // ── tick() / upsert() ───────────────────────────────────────────────
 
 #[tokio::test]
@@ -2201,4 +2229,62 @@ async fn delete_project_with_no_workspaces_still_removes_project() {
         }
     }
     assert!(saw, "ProjectRemoved must fire even with no workspaces");
+}
+
+// ── ProviderAction dispatch ────────────────────────────────────────
+//
+// The polling tick must drain side-effect actions surfaced by a
+// source after `fetch()` and route them through `handle_spawn`. The
+// `@pilot`-mention auto-spawn path depends on this glue — without
+// `drain_actions` running, the eyes-reacted comment never produces
+// a terminal.
+
+#[tokio::test]
+async fn tick_dispatches_auto_spawn_action_after_upsert() {
+    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let mut bus_rx = config.bus.subscribe();
+
+    // Build a synthetic task + matching auto-spawn action. The
+    // session key MUST match `workspace_key_for(task)` because
+    // `handle_spawn` uses it to find / create the workspace.
+    let task = make_task("o/r#101");
+    let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(&task));
+    let action = polling::ProviderAction::AutoSpawnAgent {
+        session_key: session_key.clone(),
+        agent_id: "claude".to_string(),
+        prompt: Some("Implement issue".to_string()),
+        reason: "@pilot mention by alice on o/r#101 (issue body)".to_string(),
+    };
+
+    let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
+        name: "github".into(),
+        tasks: vec![task],
+        actions: std::sync::Mutex::new(vec![action]),
+    });
+    polling::tick(&config, &[source]).await;
+
+    // Walk the bus and collect events. `TerminalSpawned` proves the
+    // dispatch ran — the action flowed source → drain → handle_spawn.
+    let mut saw_spawn = false;
+    let mut saw_upsert = false;
+    while let Ok(evt) = bus_rx.try_recv() {
+        match evt {
+            Event::TerminalSpawned {
+                session_key: sk, ..
+            } => {
+                assert_eq!(sk, session_key, "spawned in the right workspace");
+                saw_spawn = true;
+            }
+            Event::WorkspaceUpserted(_) => saw_upsert = true,
+            _ => {}
+        }
+    }
+    assert!(
+        saw_upsert,
+        "task upsert ran before action dispatch — required so spawn lands in an existing workspace"
+    );
+    assert!(
+        saw_spawn,
+        "AutoSpawnAgent action must trigger TerminalSpawned"
+    );
 }

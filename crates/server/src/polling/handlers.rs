@@ -239,6 +239,9 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
             pr_label,
         });
     }
+    // Wake the poll loop so MERGED state lands in <5s instead of
+    // waiting out the full interval.
+    config.poll_wake.notify_one();
 }
 
 /// Handle `Command::RequestReviewers`: add the given GitHub logins
@@ -284,6 +287,9 @@ pub async fn handle_request_reviewers(
         emit_err(&format!("request reviewers failed: {e}"));
     } else {
         tracing::info!("requested reviewers {logins:?} on workspace {workspace_key}");
+        // Wake the poll loop so the reviewer chip on the row
+        // updates immediately. Without this the sidebar lags 60s.
+        config.poll_wake.notify_one();
     }
 }
 
@@ -326,6 +332,7 @@ pub async fn handle_add_assignees(
         emit_err(&format!("add assignees failed: {e}"));
     } else {
         tracing::info!("added assignees {logins:?} on workspace {workspace_key}");
+        config.poll_wake.notify_one();
     }
 }
 

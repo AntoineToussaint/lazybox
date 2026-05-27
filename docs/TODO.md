@@ -220,6 +220,60 @@ the clipboard.
   drags shorter than one cell width. Test interactively after
   rebuild.
 
+## Empty pre-PR workspace deleted by rescope on next poll
+
+**Symptom.** User creates an empty workspace via `n`, it shows in
+the sidebar, but on the next poll it disappears.
+
+- Likely location: `polling::create_empty_workspace` in
+  `polling/mod.rs` writes the workspace but `rescope_with_state`
+  doesn't see it in `polled` (no upstream task) so deletes it.
+- The same rescope guards added for snoozed workspaces should
+  apply here: skip workspaces whose `pr.is_none() && gh_issues.is_empty() && linear_issues.is_empty()`
+  AND `project_key.is_some()` (locally created).
+- Add a `is_locally_created` flag to Workspace OR check the
+  shape predicate above.
+
+## Auto-mark `z` undo can target wrong activity after poll shrinks list
+
+**Symptom.** User hovers row 3, auto-mark fires, then a poll
+delivers a smaller activity list (issue closed, dedup, etc.), the
+user presses `z` and unmarks the wrong row.
+
+- Location: `crates/tui/src/components/right_pane/mod.rs` —
+  `last_marked_read: Option<usize>`. Stores index only. If the
+  activity list shrinks between fire and undo, the index points
+  at a different row.
+- Fix: store `(workspace_key, activity_node_id)` instead so the
+  undo can refuse if the workspace changed or the activity at
+  that index no longer matches.
+
+## `find_agent_terminal` race — Spawn after TerminalExited reuses dead id
+
+**Symptom.** User spawns agent → agent exits → user spawns again
+quickly → spawn reuses the dead terminal id and the PTY write
+silently no-ops.
+
+- Location: `crates/tui/src/components/sidebar/mod.rs::find_agent_terminal`.
+  Reads `running_terminals` which is updated on `TerminalExited`.
+  Race: keypress → `find_agent_terminal` → dispatch — if
+  `TerminalExited` arrives during this window, we already
+  captured the dead id.
+- Fix: when the daemon receives an `InjectPrompt` for a
+  terminal_id that no longer exists, fall back to spawning a
+  fresh one (with the same workspace + agent + prompt).
+
+## TerminalStack active_tab_idx not clamped after shrink
+
+**Symptom.** Closing all but the first terminal then Tab-cycling
+skips that lone tab because the active index was stale.
+
+- Location: `terminal_stack.rs::cycle_tab_forward/backward`.
+  Compute `n = visible_terminals().len()` but don't call
+  `clamp_active_tab()` before reading `active_tab_idx`.
+- Fix: one-line `self.clamp_active_tab();` before each cycle's
+  arithmetic.
+
 ## Pressing `w` on an issue doesn't inject "implement/solve this issue" into running agent
 
 **Symptom.** `w` on an issue row with a running claude doesn't

@@ -420,6 +420,14 @@ impl RightPane {
             // `on_workspace_change` resets cursor + expanded + selected
             // atomically — see `ActivityFeed`.
             self.feed.on_workspace_change();
+            // Click hits reference the PREVIOUS workspace's render —
+            // an "activity_cards[3] at row 14..17" doesn't mean
+            // anything for the new workspace. Clear so a click after
+            // the switch hits the freshly-rendered card index.
+            self.click_hits = ClickHits::default();
+            // Footer's "selected activity #N of M" must not leak —
+            // the M was from the old workspace.
+            self.pending_selection_notice = None;
         }
         self.auto_collapse_for_workspace();
         // Arm the auto-mark timer if the new workspace has an unread

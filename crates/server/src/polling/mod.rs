@@ -875,11 +875,28 @@ pub async fn rescope_with_state(
     }
     drop(terminal_meta);
 
+    let now = chrono::Utc::now();
     for r in records {
         if polled_set.contains(r.key.as_str()) {
             continue;
         }
         let key = WorkspaceKey::new(r.key.clone());
+        // Preserve snoozed workspaces. A snoozed workspace
+        // intentionally falls out of the polled set (the user said
+        // "hide this until <date>"), and the search query that
+        // produced `polled` typically filters them out via
+        // `is:open` etc. Deleting them here was the wrong call —
+        // the user expects them to come back when their snooze
+        // expires.
+        let snoozed = r
+            .workspace_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<Workspace>(j).ok())
+            .map(|w| w.is_snoozed(now))
+            .unwrap_or(false);
+        if snoozed {
+            continue;
+        }
         match active_counts.get(r.key.as_str()).copied() {
             None | Some(0) => {
                 // Safe to remove silently: nothing's running.

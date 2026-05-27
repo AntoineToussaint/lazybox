@@ -74,6 +74,19 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcEvent::ProjectUpserted(p) = &event {
             self.projects.insert(p.key.clone(), (**p).clone());
             self.sidebar.apply_projects(self.projects.clone());
+            // Hand-off from Shift-N → CreateProject: the project
+            // just landed in the sidebar, but its RepoHeader row
+            // is unreachable via j/k (header rows are skipped). If
+            // this upsert matches the name the user just typed,
+            // focus the row + auto-mount the new-workspace input so
+            // they can keep typing without re-aiming.
+            if self.pending_focus_project_name.as_deref() == Some(p.name.as_str()) {
+                self.pending_focus_project_name = None;
+                let project_key = p.key.clone();
+                if self.sidebar.focus_project_header(&project_key) {
+                    self.mount_new_workspace_input(project_key);
+                }
+            }
             self.redraw = true;
             return;
         }

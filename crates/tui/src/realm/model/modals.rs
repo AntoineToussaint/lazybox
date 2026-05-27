@@ -463,15 +463,26 @@ impl<T: TerminalAdapter> Model<T> {
     /// same place as the destructive flag, so adding a new
     /// destructive action is one catalog entry, not "remember to
     /// add a prompt".
-    pub(super) fn mount_action_confirm(&mut self, action: pilot_tui_core::action::Action) {
+    pub(super) fn mount_action_confirm(
+        &mut self,
+        action: pilot_tui_core::action::Action,
+        override_prompt: Option<String>,
+    ) {
         use crate::realm::components::confirm::Confirm;
         use pilot_tui_core::action::ActionDef;
         use tuirealm::subscription::{EventClause, Sub, SubClause};
-        let prompt = ActionDef::for_action(&action)
-            .confirm_prompt()
-            .unwrap_or("Confirm action?");
+        // Override wins so callers can render context-sensitive copy
+        // (e.g. "Delete project X with 3 workspaces" vs. the generic
+        // "Archive the focused workspace"). Catalog default is the
+        // safety net when no override is available.
+        let prompt: String = override_prompt.unwrap_or_else(|| {
+            ActionDef::for_action(&action)
+                .confirm_prompt()
+                .unwrap_or("Confirm action?")
+                .to_string()
+        });
         self.pending_action_confirm = Some(action);
-        let modal = Confirm::new(prompt).default_no();
+        let modal = Confirm::new(&prompt).default_no();
         let _ = self.app.mount(
             Id::ActionConfirm,
             Box::new(modal),

@@ -115,6 +115,58 @@ fn remapped_new_workspace_binding_mounts_input() {
     assert_eq!(m.top_modal(), Some(&Id::NewWorkspace));
 }
 
+/// Regression for the "new-project row is unreachable" UX bug. The
+/// user presses Shift-N, types a name, and submits → the daemon
+/// creates the project + broadcasts `ProjectUpserted`. Pre-fix, the
+/// new RepoHeader row appeared but the cursor stayed put and j/k
+/// skips header rows, so `n` (new workspace) had no project to
+/// target. Now: the matching upsert auto-focuses the header and
+/// mounts the new-workspace input so the user can keep typing.
+#[test]
+fn create_project_auto_focuses_new_header_and_opens_workspace_input() {
+    use pilot_core::{Project, ProjectKey};
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+
+    // Simulate the user typing a project name + submitting.
+    m.modal_stack.push(Id::NewProject);
+    let _cmds = m.handle_input_submitted("scratch".into());
+    // The submit hand-off stashed the name we're waiting on; no
+    // modal is up yet because the daemon hasn't responded.
+    assert_eq!(m.top_modal(), None);
+
+    // Daemon responds with ProjectUpserted matching the name.
+    let project_key = ProjectKey::local("scratch");
+    let project = Project::new(project_key.clone(), "scratch", Utc::now());
+    m.handle_daemon_event(IpcEvent::ProjectUpserted(Box::new(project)));
+
+    // The hand-off should have auto-mounted the new-workspace
+    // input so the user can keep typing.
+    assert_eq!(
+        m.top_modal(),
+        Some(&Id::NewWorkspace),
+        "ProjectUpserted matching a just-submitted Shift-N should auto-open the new-workspace input",
+    );
+}
+
+#[test]
+fn create_project_with_no_matching_upsert_does_not_auto_open_input() {
+    use pilot_core::{Project, ProjectKey};
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+
+    // A `ProjectUpserted` arriving outside the Shift-N flow (e.g.
+    // first-sight registration during polling) must not hijack the
+    // user — no modal should mount.
+    let project = Project::new(
+        ProjectKey::github("acme", "widget"),
+        "acme/widget",
+        Utc::now(),
+    );
+    m.handle_daemon_event(IpcEvent::ProjectUpserted(Box::new(project)));
+    assert_eq!(m.top_modal(), None);
+}
+
 #[test]
 fn remapped_help_binding_mounts_help_modal() {
     // Remap help to lowercase `h` and verify the modal opens.

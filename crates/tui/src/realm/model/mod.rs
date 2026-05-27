@@ -391,6 +391,13 @@ pub struct Model<T: TerminalAdapter> {
     /// from the focused-project resolver, consumed by
     /// `handle_input_submitted`'s `Id::NewWorkspace` arm.
     pending_new_workspace_project: Option<pilot_core::ProjectKey>,
+    /// Name of a project the user just submitted via Shift-N. When
+    /// the daemon broadcasts `ProjectUpserted` for a matching name,
+    /// we focus its header row + auto-mount the new-workspace input
+    /// — without this hand-off, the new project is unreachable via
+    /// j/k (RepoHeader rows are skipped by `move_cursor_by`) and the
+    /// user has no clear next step.
+    pending_focus_project_name: Option<String>,
 }
 
 /// Custom Port that drains events from an `mpsc::Receiver`. Pilot
@@ -509,6 +516,7 @@ impl<T: TerminalAdapter> Model<T> {
             action_key_overrides: std::collections::BTreeMap::new(),
             pending_action_confirm: None,
             pending_new_workspace_project: None,
+            pending_focus_project_name: None,
         }
     }
 }

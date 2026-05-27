@@ -46,7 +46,21 @@ fn main() {
     // Build libghostty-vt via zig.
     let install_prefix = out_dir.join("ghostty-install");
 
-    let mut build = Command::new("zig");
+    // Ghostty's build.zig pins `minimum_zig_version = "0.15.2"` AND
+    // requires the same minor — newer zig (e.g. brew's default 0.16.x)
+    // fails at comptime. Resolve the right zig binary in order:
+    //
+    //   1. `PILOT_ZIG_BIN`     — explicit override, takes precedence.
+    //   2. `zig` on PATH       — usually correct; fails fast if too new.
+    //   3. Homebrew's `zig@0.15` keg path — best-effort fallback so a
+    //      `brew install zig@0.15` (it's keg-only, doesn't link to
+    //      /usr/local/bin) "just works" without the user editing PATH.
+    //
+    // The fallback only kicks in when the path exists, so non-mac CI
+    // and users with a system zig 0.15 stay on the PATH binary.
+    let zig_bin = resolve_zig_binary();
+    println!("cargo:rerun-if-env-changed=PILOT_ZIG_BIN");
+    let mut build = Command::new(&zig_bin);
     build
         .arg("build")
         .arg("-Demit-lib-vt")
@@ -113,6 +127,62 @@ fn main() {
         println!("cargo:rustc-link-lib=c");
     }
     println!("cargo:include={}", include_dir.display());
+}
+
+/// Pick the right `zig` binary to invoke. See the call site for the
+/// resolution order. Returns either a PILOT_ZIG_BIN override, the
+/// system `zig` from PATH, or Homebrew's `zig@0.15` keg path on
+/// macOS when system zig is missing or too new.
+fn resolve_zig_binary() -> PathBuf {
+    if let Ok(explicit) = env::var("PILOT_ZIG_BIN") {
+        return PathBuf::from(explicit);
+    }
+
+    // Probe the PATH zig's version. On any failure (missing,
+    // non-zero exit, unexpected output) we fall through to the
+    // platform fallback rather than try to interpret the error.
+    let system_ver = Command::new("zig")
+        .arg("version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string());
+
+    // Ghostty pins 0.15.x specifically; minor mismatch fails at
+    // comptime. Treat anything that doesn't start with "0.15." as
+    // wrong-minor.
+    let system_is_compatible = system_ver
+        .as_deref()
+        .map(|v| v.starts_with("0.15."))
+        .unwrap_or(false);
+    if system_is_compatible {
+        return PathBuf::from("zig");
+    }
+
+    // macOS Homebrew fallback. The `zig@0.15` formula is keg-only
+    // so it won't appear on PATH after `brew install zig@0.15` —
+    // probe the well-known location directly. Tried after the PATH
+    // check so a user with a working zig 0.15 isn't second-guessed.
+    let brew_paths = [
+        "/opt/homebrew/opt/zig@0.15/bin/zig", // Apple Silicon
+        "/usr/local/opt/zig@0.15/bin/zig",    // Intel Macs
+    ];
+    for candidate in brew_paths {
+        if std::path::Path::new(candidate).exists() {
+            eprintln!(
+                "libghostty-vt-sys: system zig {} is incompatible with ghostty (needs 0.15.x); using brew zig@0.15 at {candidate}",
+                system_ver.as_deref().unwrap_or("?"),
+            );
+            return PathBuf::from(candidate);
+        }
+    }
+
+    // Nothing compatible found. Fall back to the PATH binary so
+    // the user gets the ghostty `requireZig` error with the
+    // actionable "install zig 0.15.x" hint, rather than our
+    // version-shim error.
+    PathBuf::from("zig")
 }
 
 /// Clone ghostty at the pinned commit into OUT_DIR/ghostty-src.

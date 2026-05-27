@@ -1972,3 +1972,139 @@ async fn tick_outcome_does_not_flag_unknown_when_all_tasks_are_resolved() {
     let outcome = polling::tick_with_state(&config, &[source], &mut state).await;
     assert!(!outcome.saw_unknown_mergeable);
 }
+
+/// `delete_project` cascades: every workspace whose `project_key`
+/// matches is deleted, then the project record itself. `ProjectRemoved`
+/// fires last so a TUI client doesn't drop the project before its
+/// children's `WorkspaceRemoved` events arrive.
+#[tokio::test]
+async fn delete_project_cascades_through_workspaces() {
+    use pilot_core::{Project, ProjectKey, WorkspaceKey};
+
+    let config = ServerConfig::in_memory();
+    let project_key = ProjectKey::github("acme", "widget");
+    let project = Project::new(project_key.clone(), "acme/widget", Utc::now());
+
+    // Two workspaces under this project + one orphan workspace that
+    // points at a DIFFERENT project — must survive the cascade.
+    let mut ws_a = pilot_core::Workspace::from_task(make_task("acme/widget#1"), Utc::now());
+    ws_a.project_key = Some(project_key.clone());
+    let mut ws_b = pilot_core::Workspace::from_task(make_task("acme/widget#2"), Utc::now());
+    ws_b.project_key = Some(project_key.clone());
+    let mut other = pilot_core::Workspace::from_task(make_task("other/repo#9"), Utc::now());
+    other.project_key = Some(ProjectKey::github("other", "repo"));
+
+    for ws in [&ws_a, &ws_b, &other] {
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: ws.key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+    }
+    config
+        .store
+        .save_project(&pilot_store::ProjectRecord {
+            key: project.key.as_str().to_string(),
+            created_at: project.created_at,
+            project_json: Some(serde_json::to_string(&project).unwrap()),
+        })
+        .unwrap();
+
+    let mut bus = config.bus.subscribe();
+    polling::delete_project(&config, &project_key).await;
+
+    // The two child workspaces are gone, the orphan is not.
+    let key_a = WorkspaceKey::new(ws_a.key.as_str());
+    let key_b = WorkspaceKey::new(ws_b.key.as_str());
+    let key_other = WorkspaceKey::new(other.key.as_str());
+    assert!(config.store.get_workspace(&key_a).unwrap().is_none());
+    assert!(config.store.get_workspace(&key_b).unwrap().is_none());
+    assert!(
+        config.store.get_workspace(&key_other).unwrap().is_some(),
+        "workspaces in OTHER projects must not be touched by the cascade",
+    );
+    // Project record itself is gone.
+    assert!(!config
+        .store
+        .list_projects()
+        .unwrap()
+        .iter()
+        .any(|p| p.key == project_key.as_str()));
+
+    // Drain events: must see WorkspaceRemoved for both, then
+    // ProjectRemoved last (so a client doesn't drop the parent
+    // before the children).
+    let mut removed_workspaces = std::collections::HashSet::new();
+    let mut saw_project_removed = false;
+    let mut saw_project_removed_after_workspace = false;
+    while let Ok(evt) = bus.try_recv() {
+        match evt {
+            Event::WorkspaceRemoved(k) => {
+                removed_workspaces.insert(k.as_str().to_string());
+            }
+            Event::ProjectRemoved(k) => {
+                assert_eq!(k, project_key);
+                if !removed_workspaces.is_empty() {
+                    saw_project_removed_after_workspace = true;
+                }
+                saw_project_removed = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_project_removed, "ProjectRemoved must fire");
+    assert!(
+        saw_project_removed_after_workspace,
+        "ProjectRemoved must come after the children's WorkspaceRemoved events",
+    );
+    assert!(removed_workspaces.contains(ws_a.key.as_str()));
+    assert!(removed_workspaces.contains(ws_b.key.as_str()));
+    assert!(
+        !removed_workspaces.contains(other.key.as_str()),
+        "the orphan workspace must not have been removed",
+    );
+}
+
+/// `delete_project` on a project with NO workspaces still removes
+/// the project record and fires `ProjectRemoved`. Covers the "user
+/// just made a local project, hasn't added a workspace yet, presses
+/// Shift-X" path.
+#[tokio::test]
+async fn delete_project_with_no_workspaces_still_removes_project() {
+    use pilot_core::{Project, ProjectKey};
+
+    let config = ServerConfig::in_memory();
+    let project_key = ProjectKey::local("scratch");
+    let project = Project::new(project_key.clone(), "scratch", Utc::now());
+    config
+        .store
+        .save_project(&pilot_store::ProjectRecord {
+            key: project.key.as_str().to_string(),
+            created_at: project.created_at,
+            project_json: Some(serde_json::to_string(&project).unwrap()),
+        })
+        .unwrap();
+
+    let mut bus = config.bus.subscribe();
+    polling::delete_project(&config, &project_key).await;
+
+    assert!(!config
+        .store
+        .list_projects()
+        .unwrap()
+        .iter()
+        .any(|p| p.key == project_key.as_str()));
+
+    let mut saw = false;
+    while let Ok(evt) = bus.try_recv() {
+        if let Event::ProjectRemoved(k) = evt
+            && k == project_key
+        {
+            saw = true;
+        }
+    }
+    assert!(saw, "ProjectRemoved must fire even with no workspaces");
+}

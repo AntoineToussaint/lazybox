@@ -415,6 +415,7 @@ impl Server {
                         pilot_ipc::Command::Snooze { .. } => "Snooze",
                         pilot_ipc::Command::Unsnooze { .. } => "Unsnooze",
                         pilot_ipc::Command::Kill { .. } => "Kill",
+                        pilot_ipc::Command::DeleteProject { .. } => "DeleteProject",
                         pilot_ipc::Command::CreateWorkspace { .. } => "CreateWorkspace",
                         pilot_ipc::Command::CreateProject { .. } => "CreateProject",
                         pilot_ipc::Command::AdoptSessions { .. } => "AdoptSessions",
@@ -639,6 +640,9 @@ impl Server {
                                 session_key.as_str().to_string(),
                             );
                             polling::delete_workspace(&self.config, &key).await;
+                        }
+                        pilot_ipc::Command::DeleteProject { project_key } => {
+                            polling::delete_project(&self.config, &project_key).await;
                         }
                         pilot_ipc::Command::Refresh => {
                             // Manual poll trigger. Wakes the long-lived

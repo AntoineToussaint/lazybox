@@ -28,7 +28,14 @@ impl<T: TerminalAdapter> Model<T> {
         // destructive variants — there's no way to fire one
         // without the user confirming.
         if ActionDef::for_action(action).is_destructive() {
-            self.mount_action_confirm(action.clone());
+            // Project-header focused Archive deletes the whole
+            // project (cascading to its workspaces) — the default
+            // confirm prompt assumes a workspace target, which would
+            // be a confusing lie. Compute a tailored prompt for that
+            // case and let the rest fall through to the static
+            // catalog prompt.
+            let custom_prompt = self.action_confirm_override(action);
+            self.mount_action_confirm(action.clone(), custom_prompt);
             return Vec::new();
         }
         self.dispatch_action_unchecked(action)
@@ -44,6 +51,46 @@ impl<T: TerminalAdapter> Model<T> {
     /// Callers OTHER than `dispatch_action` and the
     /// `ActionConfirm` Yes-handler must not exist. Keeping it
     /// `pub(crate)` so the type system makes that hard to break.
+    /// Pick a tailored confirm-modal prompt for the destructive
+    /// `action` at its current focus context. Returns `None` to fall
+    /// back to the static `ActionDef::confirm_prompt`.
+    ///
+    /// Today the only override is `Archive` against a project
+    /// header — the workspace-focused phrasing ("Archive the focused
+    /// workspace?") is wrong for "delete this project and N
+    /// workspaces under it." Adding more overrides here is the right
+    /// growth path — keeps catalog defaults declarative and the
+    /// context-sensitive copy out of the dispatch.
+    fn action_confirm_override(
+        &self,
+        action: &pilot_tui_core::action::Action,
+    ) -> Option<String> {
+        use pilot_tui_core::action::Action;
+        if !matches!(action, Action::Archive) {
+            return None;
+        }
+        // Workspace focus → use the default prompt.
+        if self.sidebar.selected_workspace_key().is_some() {
+            return None;
+        }
+        // Project header focus → custom phrasing.
+        let project_key = self.sidebar.focused_project_key()?;
+        let project_label = self
+            .sidebar
+            .project_label_for(&project_key)
+            .unwrap_or_else(|| project_key.as_str().to_string());
+        let child_count = self.sidebar.workspaces_in_project(&project_key);
+        Some(match child_count {
+            0 => format!("Delete project `{project_label}`?"),
+            1 => format!(
+                "Delete project `{project_label}`? Its 1 workspace + any running sessions will be killed."
+            ),
+            n => format!(
+                "Delete project `{project_label}`? Its {n} workspaces + any running sessions will be killed."
+            ),
+        })
+    }
+
     pub(crate) fn dispatch_action_unchecked(
         &mut self,
         action: &pilot_tui_core::action::Action,
@@ -168,10 +215,18 @@ impl<T: TerminalAdapter> Model<T> {
             Action::Archive => {
                 // Destructive — only reachable from
                 // `dispatch_action_unchecked` after the user said
-                // Yes on the unified ActionConfirm modal. Just
-                // fire the Kill.
+                // Yes on the unified ActionConfirm modal.
+                //
+                // Polymorphic by focused row: cursor on a workspace /
+                // session row deletes that workspace; cursor on a
+                // project header (RepoHeader) deletes the whole
+                // project and cascades to its workspaces. The
+                // availability gate (`availability` in the catalog)
+                // already ensures one of the two has a target.
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Kill { session_key: sk });
+                } else if let Some(project_key) = self.sidebar.focused_project_key() {
+                    cmds.push(IpcCommand::DeleteProject { project_key });
                 }
             }
             Action::AdoptSessions => {

@@ -2214,6 +2214,60 @@ pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) {
     let _ = config.bus.send(Event::WorkspaceRemoved(key.clone()));
 }
 
+/// Delete a Project: cascade through every workspace whose
+/// `project_key` matches, then drop the Project record itself.
+/// Broadcasts `WorkspaceRemoved` for each workspace and
+/// `ProjectRemoved` for the project so the TUI can drop the rows
+/// in one batch.
+///
+/// Workspace deletion routes through `delete_workspace` so each
+/// workspace's backing terminals are killed and the archive set is
+/// updated — without that step, the next poll would re-create the
+/// workspaces from upstream tasks and the project would never
+/// stay gone.
+pub async fn delete_project(config: &ServerConfig, project_key: &pilot_core::ProjectKey) {
+    tracing::info!(project_key = %project_key, "delete_project: starting cascade");
+
+    // Snapshot the workspace list before mutation — `delete_workspace`
+    // removes rows from the store, so iterating a live cursor would
+    // miss entries.
+    let records = match config.store.list_workspaces() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("delete_project: list_workspaces failed: {e}");
+            return;
+        }
+    };
+
+    let mut child_keys: Vec<WorkspaceKey> = Vec::new();
+    for record in records {
+        let Some(json) = record.workspace_json else {
+            continue;
+        };
+        let Ok(ws) = serde_json::from_str::<Workspace>(&json) else {
+            continue;
+        };
+        if ws.project_key.as_ref() == Some(project_key) {
+            child_keys.push(ws.key);
+        }
+    }
+
+    tracing::info!(
+        project_key = %project_key,
+        workspace_count = child_keys.len(),
+        "delete_project: cascading workspace deletes"
+    );
+    for key in &child_keys {
+        delete_workspace(config, key).await;
+    }
+
+    if let Err(e) = config.store.delete_project(project_key) {
+        tracing::warn!("delete_project store: {e}");
+    }
+    let _ = config.bus.send(Event::ProjectRemoved(project_key.clone()));
+    tracing::info!(project_key = %project_key, "delete_project: done");
+}
+
 /// Persist a new `SessionLayout` for one session inside a workspace.
 /// The user's tile arrangement (Tabs vs Splits with a tree) is local
 /// to the workspace; this writes it through the store and broadcasts

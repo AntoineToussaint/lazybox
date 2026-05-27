@@ -87,6 +87,12 @@ impl<T: TerminalAdapter> Model<T> {
                 let name = text.trim().to_string();
                 if !name.is_empty() {
                     tracing::info!(project_name = %name, "creating new local project");
+                    // Stash the name so the matching `ProjectUpserted`
+                    // event can focus the new header + auto-mount the
+                    // new-workspace input. Without this hand-off, the
+                    // freshly-created project is unreachable via j/k
+                    // (header rows are skipped by `move_cursor_by`).
+                    self.pending_focus_project_name = Some(name.clone());
                     cmds.push(IpcCommand::CreateProject { name });
                 }
             }

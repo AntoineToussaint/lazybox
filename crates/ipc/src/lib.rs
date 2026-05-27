@@ -313,6 +313,15 @@ pub enum Command {
     Kill {
         session_key: SessionKey,
     },
+    /// Delete a Project: kill every workspace under it (which kills
+    /// every backing terminal) then drop the Project record. The
+    /// daemon broadcasts `WorkspaceRemoved` for each workspace then
+    /// `ProjectRemoved` for the project so the sidebar can drop the
+    /// rows in one batch. Destructive — gated by the unified
+    /// ActionConfirm modal on the TUI side.
+    DeleteProject {
+        project_key: pilot_core::ProjectKey,
+    },
     MarkRead {
         session_key: SessionKey,
     },

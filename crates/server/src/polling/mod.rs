@@ -881,20 +881,30 @@ pub async fn rescope_with_state(
             continue;
         }
         let key = WorkspaceKey::new(r.key.clone());
-        // Preserve snoozed workspaces. A snoozed workspace
-        // intentionally falls out of the polled set (the user said
-        // "hide this until <date>"), and the search query that
-        // produced `polled` typically filters them out via
-        // `is:open` etc. Deleting them here was the wrong call —
-        // the user expects them to come back when their snooze
-        // expires.
-        let snoozed = r
+        // Decode the stored workspace once — used by both the
+        // snoozed-skip guard AND the locally-created (no upstream
+        // task) guard below.
+        let stored_ws = r
             .workspace_json
             .as_deref()
-            .and_then(|j| serde_json::from_str::<Workspace>(j).ok())
-            .map(|w| w.is_snoozed(now))
-            .unwrap_or(false);
-        if snoozed {
+            .and_then(|j| serde_json::from_str::<Workspace>(j).ok());
+        // Preserve snoozed workspaces. The user said "hide until
+        // <date>"; deleting on a poll that doesn't list it would
+        // defeat that intent.
+        if stored_ws.as_ref().is_some_and(|w| w.is_snoozed(now)) {
+            continue;
+        }
+        // Preserve locally-created pre-PR workspaces. They have a
+        // `project_key` (the user explicitly created them under a
+        // project) but no upstream task — so they never appear in
+        // the polled set. Without this guard, every poll deletes
+        // the just-created sandbox workspace.
+        if stored_ws.as_ref().is_some_and(|w| {
+            w.pr.is_none()
+                && w.gh_issues.is_empty()
+                && w.linear_issues.is_empty()
+                && w.project_key.is_some()
+        }) {
             continue;
         }
         match active_counts.get(r.key.as_str()).copied() {
@@ -1312,6 +1322,19 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
 /// polled and a PR already claims it, we route the issue update into
 /// the PR workspace instead of building a duplicate.
 pub async fn upsert(config: &ServerConfig, task: Task) {
+    // Skip re-creating workspaces the user explicitly archived
+    // (`Shift-X`). Without this, every 60s tick re-creates the row
+    // from the upstream task and the dismiss feels broken. Cached
+    // archive set lives in the store under KV_KEY_ARCHIVED.
+    let candidate_key = pilot_core::workspace_key_for(&task);
+    if load_archived_set(config).contains(&candidate_key) {
+        tracing::debug!(
+            workspace_key = %candidate_key,
+            "upsert: skipping archived workspace"
+        );
+        return;
+    }
+
     // For issues: if a PR somewhere already claims this issue as
     // closed-by, route the upsert into that PR workspace. This is
     // the "issue polled AFTER its PR" path. We only kick in when
@@ -1320,8 +1343,7 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
     // remains until the PR shows up. Polling is cheap to scan: the
     // workspace list is bounded by the user's filter scope.
     if !is_pr_task(&task) {
-        let issue_key_str = pilot_core::workspace_key_for(&task);
-        let issue_key = WorkspaceKey::new(issue_key_str);
+        let issue_key = WorkspaceKey::new(candidate_key.clone());
         let already_standalone = config
             .store
             .get_workspace(&issue_key)
@@ -1339,8 +1361,7 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
         }
     }
 
-    let key_str = pilot_core::workspace_key_for(&task);
-    let key = WorkspaceKey::new(key_str.clone());
+    let key = WorkspaceKey::new(candidate_key);
     upsert_into_workspace_key(config, &key, task).await;
 }
 
@@ -2050,8 +2071,59 @@ pub fn set_snooze(config: &ServerConfig, key: &WorkspaceKey, until: Option<chron
 /// hides the tabs in pilot but leaves ghost tmux sessions visible
 /// in `tmux ls`, which then re-surface on the next pilot launch
 /// via `recover_sessions`.
+/// Read the persisted set of archived workspace keys. Used by the
+/// upsert path to skip re-creating a workspace the user explicitly
+/// dismissed via `Shift-X`. Returns an empty set when the kv entry
+/// doesn't exist or fails to parse — degrades gracefully (worst
+/// case the dismissed row reappears one more time).
+pub fn load_archived_set(config: &ServerConfig) -> std::collections::HashSet<String> {
+    config
+        .store
+        .get_kv(pilot_core::KV_KEY_ARCHIVED)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+        .map(|v| v.into_iter().collect())
+        .unwrap_or_default()
+}
+
+/// Add `key` to the persisted archived set. Idempotent.
+pub fn archive_workspace_key(config: &ServerConfig, key: &str) {
+    let mut set = load_archived_set(config);
+    if !set.insert(key.to_string()) {
+        return;
+    }
+    let vec: Vec<&String> = set.iter().collect();
+    if let Ok(json) = serde_json::to_string(&vec)
+        && let Err(e) = config.store.set_kv(pilot_core::KV_KEY_ARCHIVED, &json)
+    {
+        tracing::warn!("archive_workspace_key: set_kv failed: {e}");
+    }
+}
+
+/// Remove `key` from the persisted archived set so the next poll
+/// can re-create the workspace. Today there's no UI for this; kept
+/// public for a future "Settings → Restore Archive" flow.
+pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) {
+    let mut set = load_archived_set(config);
+    if !set.remove(key) {
+        return;
+    }
+    let vec: Vec<&String> = set.iter().collect();
+    if let Ok(json) = serde_json::to_string(&vec)
+        && let Err(e) = config.store.set_kv(pilot_core::KV_KEY_ARCHIVED, &json)
+    {
+        tracing::warn!("unarchive_workspace_key: set_kv failed: {e}");
+    }
+}
+
 pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) {
     let key_str = key.as_str();
+    // Record the archive so the next poll's upsert skips re-creating
+    // this row. Without this, the user pressed `Shift-X`, the row
+    // disappeared briefly, then the next 60s tick re-added it from
+    // the upstream task — extremely confusing.
+    archive_workspace_key(config, key_str);
 
     // Find every terminal whose session_key matches via
     // terminal_meta — the authoritative wire-side mapping. Earlier

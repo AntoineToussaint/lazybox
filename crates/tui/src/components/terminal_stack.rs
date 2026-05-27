@@ -815,6 +815,12 @@ impl TerminalStack {
     }
 
     pub fn cycle_tab_forward(&mut self) {
+        // Clamp first: if a terminal exited mid-session, `active_tab_idx`
+        // may exceed the visible-terminals length. Without this, the
+        // next forward cycle would wrap from a phantom index instead
+        // of from the actual current tab. Symptom user reported:
+        // closed all but the lone terminal, Tab-cycle skipped it.
+        self.clamp_active_tab();
         let n = self.visible_terminals().len();
         if n == 0 {
             self.active_tab_idx = 0;
@@ -824,6 +830,7 @@ impl TerminalStack {
     }
 
     pub fn cycle_tab_backward(&mut self) {
+        self.clamp_active_tab();
         let n = self.visible_terminals().len();
         if n == 0 {
             self.active_tab_idx = 0;

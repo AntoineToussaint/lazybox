@@ -306,3 +306,28 @@ of the workspace's activities as read.
   `self.feed.selected()` first; if non-empty, fire one
   `Command::MarkActivityRead` per selected index instead of
   `Command::MarkRead`.
+
+## macOS notification click opens Script Editor
+
+**Symptom.** Clicking a system notification posted by pilot launches
+Apple's Script Editor with an empty `Untitled` AppleScript window
+instead of focusing the pilot terminal / opening the relevant
+workspace. Almost certainly the notification payload is shipping an
+AppleScript fragment as the click action and macOS hands it to the
+default editor instead of executing it (unsigned / untrusted source,
+or wrong URL scheme entirely).
+
+- Likely path: wherever we post the user-notifications (search for
+  `osascript`, `NSUserNotification`, `notify-rust`, or the macOS
+  framework crate we wired in). The click handler probably uses an
+  `osascript -e "..."` invocation registered as the action URL,
+  which on click is interpreted as "open this script for editing."
+- Fix shape: drop the AppleScript click action and either (a) no
+  click action at all (notification is informational), or (b) a
+  custom URL scheme `pilot://workspace/<key>` registered to focus
+  the running daemon's TUI. Option (b) is the right answer but
+  requires the Info.plist / LSHandler registration; (a) is a 5-line
+  defensive fix.
+- Reproduce: receive any pilot notification (new comment, CI
+  failure), click on the banner. Expect: nothing happens (or pilot
+  comes forward). Actual: Script Editor opens with empty doc.

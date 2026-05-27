@@ -233,6 +233,7 @@ fn all_events() -> Vec<Event> {
         },
         Event::AgentState {
             session_key: key.clone(),
+            terminal_id: TerminalId(2),
             state: AgentState::Asking,
         },
         Event::AgentRunStarted {

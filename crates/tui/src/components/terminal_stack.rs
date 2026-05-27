@@ -1089,11 +1089,15 @@ impl TerminalStack {
                 // Make the matching tab active + bring the pane up.
                 self.focus_terminal(*terminal_id);
             }
-            Event::AgentState { session_key, state } => {
+            Event::AgentState {
+                session_key, state, ..
+            } => {
                 // Update every agent slot in this session — the
-                // daemon broadcasts a single state per session_key.
-                // Today only one agent of each kind runs per session
-                // so this is unambiguous.
+                // daemon broadcasts one event per terminal, but the
+                // sidebar's needs-input indicator is session-keyed so
+                // we apply by session_key. The wire `terminal_id` is
+                // for per-terminal consumers (chat dispatcher); it's
+                // intentionally unused here.
                 for slot in self.terminals.values_mut() {
                     if &slot.session_key == session_key
                         && matches!(slot.kind, TerminalKind::Agent(_))

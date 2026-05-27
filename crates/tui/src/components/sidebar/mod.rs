@@ -1229,6 +1229,14 @@ impl Sidebar {
         // surface whenever a workspace is selected. `Shift-X`
         // archive's "(kills sessions)" suffix flips automatically
         // via `contextual_label`.
+        //
+        // NOTE: `Shift-X` ALSO deletes the project when the cursor
+        // sits on a project header — wired in
+        // `Model::dispatch_action(Archive)` via the polymorphic
+        // session_key / focused_project_key fallback. We
+        // deliberately don't add a second footer entry for the
+        // header case: Shift-X is the universal destroy key,
+        // visible muscle-memory is enough.
         if workspace.is_some() {
             actions.push(Action::SpawnAgent("claude".into()));
             actions.push(Action::SpawnShell);
@@ -1236,8 +1244,12 @@ impl Sidebar {
             actions.push(Action::ToggleSnooze);
             actions.push(Action::Archive);
         }
-        actions.push(Action::NewWorkspace);
+        // Creation actions live last in the row but Project comes
+        // BEFORE Workspace: projects are containers; you need one
+        // before a workspace makes sense. Reversed order read
+        // backwards to dogfood users.
         actions.push(Action::NewProject);
+        actions.push(Action::NewWorkspace);
 
         // Convert to Binding rows. `default_keys` flows through
         // unchanged today; user rebinding will override here once

@@ -127,11 +127,24 @@ impl TaskSource for GhSource {
                 self.emit_progress(format!("Issue query: {}", self.client.issue_search_query()));
             }
 
-            let raw = self
+            let (raw, partial_warning) = self
                 .client
-                .fetch_selected(want_prs, want_issues)
+                .fetch_selected_with_status(want_prs, want_issues)
                 .await
                 .map_err(pilot_core::ProviderError::from)?;
+            // Surface partial sync failures to the user — one side
+            // succeeded, the other errored, we kept the inbox alive
+            // but the visible row set is incomplete. Without this
+            // notice the user silently loses half their inbox until
+            // the next tick maybe recovers.
+            if let Some(msg) = partial_warning {
+                let _ = self.bus.send(Event::ProviderError {
+                    source: "github".into(),
+                    message: format!("partial sync — {msg}"),
+                    detail: "see /tmp/pilot.log for the full error".into(),
+                    kind: "retryable".into(),
+                });
+            }
 
             self.emit_progress(format!("Got {} raw items, applying filters…", raw.len()));
             let kept = filter_github_tasks(raw, &self.filter, &self.scopes);
@@ -626,11 +639,18 @@ pub async fn tick_with_state(
                         kind: "retryable".into(),
                     });
                 }
-                // Wall-clock the upsert loop. If one of these hangs
-                // (git worktree migration, sqlite contention, …) the
-                // log lands a clear "upsert loop stalled at index N"
-                // line instead of silently consuming the rest of the
-                // tick budget.
+                // Per-task wall-clock cap. The git-op `run_git_in`
+                // timeout (30s) already guards against hung subprocs,
+                // but defense-in-depth: anything in the upsert path
+                // (sqlite, bus broadcast, prepare_upsert's
+                // closing-issues scan, an unexpected `.await` on
+                // something we don't own) gets 15s total. If a single
+                // task exceeds that, we log loudly + skip it; the
+                // next tick re-attempts. Without this guard, the
+                // poll loop's critical path was uncapped — one bad
+                // task could paralyze every subsequent tick.
+                const UPSERT_TIMEOUT_PER_TASK: std::time::Duration =
+                    std::time::Duration::from_secs(15);
                 let upsert_started = std::time::Instant::now();
                 let total = tasks.len();
                 for (i, task) in tasks.into_iter().enumerate() {
@@ -641,13 +661,33 @@ pub async fn tick_with_state(
                     let task_id = task.id.to_string();
                     polled.push(key);
                     let one_started = std::time::Instant::now();
-                    upsert(config, task).await;
-                    let one_ms = one_started.elapsed().as_millis();
-                    if one_ms > 500 {
-                        tracing::warn!(
-                            "upsert {}/{total} ({task_id}) took {one_ms}ms — slow",
-                            i + 1
-                        );
+                    match tokio::time::timeout(UPSERT_TIMEOUT_PER_TASK, upsert(config, task)).await
+                    {
+                        Ok(()) => {
+                            let one_ms = one_started.elapsed().as_millis();
+                            if one_ms > 500 {
+                                tracing::warn!(
+                                    "upsert {}/{total} ({task_id}) took {one_ms}ms — slow",
+                                    i + 1
+                                );
+                            }
+                        }
+                        Err(_elapsed) => {
+                            tracing::error!(
+                                "upsert {}/{total} ({task_id}) TIMED OUT after {}s — \
+                                 skipping; next tick will re-attempt",
+                                i + 1,
+                                UPSERT_TIMEOUT_PER_TASK.as_secs(),
+                            );
+                            let _ = config.bus.send(Event::ProviderError {
+                                source: source.name().to_string(),
+                                message: format!(
+                                    "upsert timed out on {task_id} — task skipped this tick"
+                                ),
+                                detail: "see /tmp/pilot.log for the slow step".into(),
+                                kind: "retryable".into(),
+                            });
+                        }
                     }
                 }
                 tracing::info!(
@@ -1109,7 +1149,46 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
         rescope_with_state(config, &outcome, &mut state).await;
         return TickSummary::default();
     }
-    let outcome = tick_with_state(config, &sources, &mut state).await;
+    // Overall tick cap — defense in depth. Each sub-step already has
+    // its own timeout (25s per graphql call × 3 retries, 30s per git
+    // subprocess, 15s per upsert), but the OUTER tick has no cap.
+    // A pathological combination — slow network + busy fs + 35
+    // tasks each timing out — could still consume minutes. 180s is
+    // generous (a real worst-case tick on a slow network with watched
+    // repos can hit ~60s) but well under the long-poll spinner's
+    // 90s footer guard, so a stuck tick surfaces visibly.
+    const TICK_OVERALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+    let outcome = match tokio::time::timeout(
+        TICK_OVERALL_TIMEOUT,
+        tick_with_state(config, &sources, &mut state),
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(_) => {
+            tracing::error!(
+                "tick_with_state TIMED OUT after {}s — abandoning this tick, next interval will retry",
+                TICK_OVERALL_TIMEOUT.as_secs()
+            );
+            let _ = config.bus.send(Event::ProviderError {
+                source: "github".into(),
+                message: format!(
+                    "sync exceeded {}s — see /tmp/pilot.log for the slow step",
+                    TICK_OVERALL_TIMEOUT.as_secs()
+                ),
+                detail: "the per-upsert / per-graphql / per-git timeouts should catch this; \
+                         hitting the outer cap means something escaped them"
+                    .into(),
+                kind: "retryable".into(),
+            });
+            TickOutcome {
+                polled: vec![],
+                any_source_succeeded: false,
+                retry_after_secs: Some(30),
+                saw_unknown_mergeable: false,
+            }
+        }
+    };
     let summary = TickSummary {
         retry_after_secs: outcome.retry_after_secs,
         saw_unknown_mergeable: outcome.saw_unknown_mergeable,

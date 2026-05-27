@@ -1008,12 +1008,6 @@ impl GhClient {
                 p.extend(i);
                 Ok(p)
             }
-            // Partial success: one side failed, the other returned
-            // results. We only soft-degrade if the OTHER side
-            // genuinely contributed something — otherwise the user
-            // gets "0 tasks, no error" because both sides ran but
-            // one was a silent zero. Bubble the failure up so they
-            // see an error modal.
             (Ok(p), Err(e)) => {
                 if want_issues && p.is_empty() {
                     Err(e)
@@ -1028,6 +1022,69 @@ impl GhClient {
                 } else {
                     tracing::warn!("PRs fetch failed (using issues only): {e}");
                     Ok(i)
+                }
+            }
+            (Err(pr_err), Err(issue_err)) => Err(GhError::Graphql(format!(
+                "both PR and issue fetches failed: PRs={pr_err}; issues={issue_err}"
+            ))),
+        }
+    }
+
+    /// Variant of `fetch_selected` that surfaces partial failures
+    /// to the caller as a structured side-channel instead of just a
+    /// `tracing::warn`. Returns `(tasks, partial_failure)` — the
+    /// second slot is `Some` when one side errored but the other
+    /// returned results AND we returned `Ok` to keep the inbox
+    /// alive (the silent-partial behaviour the polling layer wants
+    /// to surface to the user).
+    ///
+    /// Callers can fire a `ProviderError` bus event so the footer
+    /// shows `partial sync: issues failed` instead of the user
+    /// silently losing half their inbox.
+    pub async fn fetch_selected_with_status(
+        &self,
+        want_prs: bool,
+        want_issues: bool,
+    ) -> Result<(Vec<Task>, Option<String>), GhError> {
+        if !want_prs && !want_issues {
+            return Ok((Vec::new(), None));
+        }
+        let pr_fut = async {
+            if want_prs {
+                self.fetch_all_prs().await
+            } else {
+                Ok(Vec::new())
+            }
+        };
+        let issue_fut = async {
+            if want_issues {
+                self.fetch_all_issues().await
+            } else {
+                Ok(Vec::new())
+            }
+        };
+        let (prs, issues) = tokio::join!(pr_fut, issue_fut);
+        match (prs, issues) {
+            (Ok(mut p), Ok(i)) => {
+                p.extend(i);
+                Ok((p, None))
+            }
+            (Ok(p), Err(e)) => {
+                if want_issues && p.is_empty() {
+                    Err(e)
+                } else {
+                    let msg = format!("issues sync failed (PRs OK): {e}");
+                    tracing::warn!("{msg}");
+                    Ok((p, Some(msg)))
+                }
+            }
+            (Err(e), Ok(i)) => {
+                if want_prs && i.is_empty() {
+                    Err(e)
+                } else {
+                    let msg = format!("PRs sync failed (issues OK): {e}");
+                    tracing::warn!("{msg}");
+                    Ok((i, Some(msg)))
                 }
             }
             (Err(pr_err), Err(issue_err)) => Err(GhError::Graphql(format!(

@@ -89,11 +89,16 @@ pub enum RoleFilter {
 /// keeps the same order but interleaves role-section headers
 /// between groups (Author / Reviewer / Assignee / Mentioned).
 /// Cycled via `o` in the sidebar.
+///
+/// Default is `ByRoleSplit` — feedback after a day of real use:
+/// the role-grouped view with section headers is the natural way
+/// to scan ("what's mine vs what's blocked on me?"). Recency is
+/// one `o` press away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortMode {
-    #[default]
     Recent,
     ByRole,
+    #[default]
     ByRoleSplit,
 }
 

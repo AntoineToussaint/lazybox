@@ -3,6 +3,6 @@ source: crates/tui/tests/snapshots.rs
 expression: rendered
 ---
  PILOT  0  [7d]
- f [all]  o [recent]
+ f [all]  o [split]
 
  ────────────────────────────────────

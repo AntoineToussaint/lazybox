@@ -1005,8 +1005,8 @@ mod role_filter_tests {
     }
 
     #[test]
-    fn sort_mode_default_is_recency() {
-        assert_eq!(SortMode::default(), SortMode::Recent);
+    fn sort_mode_default_is_split() {
+        assert_eq!(SortMode::default(), SortMode::ByRoleSplit);
     }
 
     #[test]
@@ -1040,9 +1040,13 @@ mod role_filter_tests {
     #[test]
     fn cycle_sort_mode_reorders_visible_workspaces_by_role() {
         // Build a sidebar with one workspace per role under the same
-        // repo. In `Recent` mode they sort by recency; in `ByRole`
-        // they sort by role rank with Author on top.
+        // repo. Start by flipping to Recent mode (default is now
+        // ByRoleSplit) so we can exercise the recency baseline
+        // before cycling to ByRole.
         let mut sb = Sidebar::new(PaneId::new(1));
+        while sb.sort_mode() != SortMode::Recent {
+            sb.cycle_sort_mode();
+        }
         let now = chrono::Utc::now();
         for (offset_secs, key, role) in [
             (0, "1", TaskRole::Mentioned),
@@ -1127,9 +1131,10 @@ mod role_filter_tests {
             let sk = SessionKey::from(&w.key);
             sb.workspaces.insert(sk, w);
         }
-        // Cycle Recent → ByRole → ByRoleSplit.
-        sb.cycle_sort_mode();
-        sb.cycle_sort_mode();
+        // Default is already ByRoleSplit — just recompute the
+        // visible list (which the cycles used to do as a side
+        // effect).
+        sb.recompute_visible();
         assert_eq!(sb.sort_mode(), SortMode::ByRoleSplit);
 
         // Expected order: RepoHeader, RoleHeader(Author), 2 Workspaces,

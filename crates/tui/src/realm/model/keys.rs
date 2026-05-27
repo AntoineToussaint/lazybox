@@ -611,6 +611,30 @@ impl<T: TerminalAdapter> Model<T> {
                             || self.sidebar.click_to_cycle_sort(m.column, m.row)
                             || self.sidebar.click_to_select(sidebar_rect, m.row);
                         if handled {
+                            // Double-click on a repo header → toggle
+                            // its collapsed state (same effect as
+                            // Space). Cursor already moved via
+                            // click_to_select above so
+                            // `toggle_repo_at_cursor` operates on
+                            // the just-clicked header.
+                            const DOUBLE_CLICK_WINDOW: std::time::Duration =
+                                std::time::Duration::from_millis(400);
+                            let is_double = matches!(button, crossterm::event::MouseButton::Left)
+                                && self
+                                    .last_click
+                                    .map(|(c, r, t)| {
+                                        c == m.column
+                                            && r == m.row
+                                            && t.elapsed() <= DOUBLE_CLICK_WINDOW
+                                    })
+                                    .unwrap_or(false);
+                            if is_double && self.sidebar.cursor_on_repo_header() {
+                                self.last_click = None;
+                                self.sidebar.toggle_repo_at_cursor();
+                            } else {
+                                self.last_click =
+                                    Some((m.column, m.row, std::time::Instant::now()));
+                            }
                             self.sync_panes();
                             self.redraw = true;
                         }

@@ -211,6 +211,13 @@ fn merged_workspace_hidden() {
 #[test]
 fn rows_are_grouped_by_repo_with_headers() {
     let mut s = Sidebar::new(PaneId::new(1));
+    // Flip to Recent sort so the visible list has only RepoHeader
+    // rows + Workspace rows (no RoleHeader interleaving). The
+    // default ByRoleSplit injects RoleHeader rows between groups,
+    // which shifts the expected index assertions in this test.
+    while s.sort_mode() != pilot_tui::components::sidebar::SortMode::Recent {
+        s.cycle_sort_mode();
+    }
     let now = Utc::now();
     s.on_event(&Event::Snapshot {
         workspaces: vec![
@@ -244,7 +251,13 @@ fn cursor_walks_through_repo_headers() {
     // j/k now stop on repo headers too — needed so users can land
     // on a collapsed header and Space-to-expand. Header rows have
     // no session key (selected_session_key is None on them).
+    //
+    // Flip to Recent sort so the layout is just headers + workspaces
+    // (no RoleHeader interleaving from the default ByRoleSplit mode).
     let mut s = Sidebar::new(PaneId::new(1));
+    while s.sort_mode() != pilot_tui::components::sidebar::SortMode::Recent {
+        s.cycle_sort_mode();
+    }
     let now = Utc::now();
     s.on_event(&Event::Snapshot {
         workspaces: vec![
@@ -927,7 +940,14 @@ fn action_keys_on_repo_header_are_silent_noops() {
     // `selected_session_key()` (None on a header). They must all
     // be silent no-ops; the footer's contextual hints should also
     // hide the bindings, but the handlers are the safety net.
+    //
+    // Flip to Recent so cursor lands cleanly on a RepoHeader at
+    // row 0 (rather than going through a RoleHeader in the default
+    // ByRoleSplit mode).
     let mut s = Sidebar::new(PaneId::new(1));
+    while s.sort_mode() != pilot_tui::components::sidebar::SortMode::Recent {
+        s.cycle_sort_mode();
+    }
     let now = Utc::now();
     s.on_event(&Event::Snapshot {
         workspaces: vec![make_workspace("owner/repo", "o/r#1", now)],

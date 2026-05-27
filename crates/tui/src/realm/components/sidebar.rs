@@ -254,6 +254,19 @@ impl Sidebar {
         self.inner.click_to_cycle_sort(col, row)
     }
 
+    /// True iff the cursor sits on a repo header row. Used by the
+    /// orchestrator's double-click handler to decide whether to
+    /// fire `toggle_repo_at_cursor`.
+    pub fn cursor_on_repo_header(&self) -> bool {
+        self.inner.cursor_on_repo_header()
+    }
+
+    /// Toggle the repo header under the cursor. Same effect as the
+    /// `Space` key on a header.
+    pub fn toggle_repo_at_cursor(&mut self) -> bool {
+        self.inner.toggle_repo_at_cursor()
+    }
+
     /// Forward to the inner pane's detach spec, if any.
     pub fn detachable(&self) -> Option<crate::pane::DetachSpec> {
         self.inner.detachable()

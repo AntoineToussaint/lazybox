@@ -226,27 +226,23 @@ of the workspace's activities as read.
   `Command::MarkActivityRead` per selected index instead of
   `Command::MarkRead`.
 
-## macOS notification click opens Script Editor
+## macOS desktop notifications: ship a .app bundle
 
-**Symptom.** Clicking a system notification posted by pilot launches
-Apple's Script Editor with an empty `Untitled` AppleScript window
-instead of focusing the pilot terminal / opening the relevant
-workspace. Almost certainly the notification payload is shipping an
-AppleScript fragment as the click action and macOS hands it to the
-default editor instead of executing it (unsigned / untrusted source,
-or wrong URL scheme entirely).
+**Status.** The Script-Editor-on-click surprise is fixed: the
+`osascript` fallback was dropped (newer macOS attributes the click
+action back to Script Editor, which is awful UX). On macOS pilot
+now only fires desktop notifications when `terminal-notifier` is on
+PATH; otherwise it silently no-ops with a one-time log line.
 
-- Likely path: wherever we post the user-notifications (search for
-  `osascript`, `NSUserNotification`, `notify-rust`, or the macOS
-  framework crate we wired in). The click handler probably uses an
-  `osascript -e "..."` invocation registered as the action URL,
-  which on click is interpreted as "open this script for editing."
-- Fix shape: drop the AppleScript click action and either (a) no
-  click action at all (notification is informational), or (b) a
-  custom URL scheme `pilot://workspace/<key>` registered to focus
-  the running daemon's TUI. Option (b) is the right answer but
-  requires the Info.plist / LSHandler registration; (a) is a 5-line
-  defensive fix.
-- Reproduce: receive any pilot notification (new comment, CI
-  failure), click on the banner. Expect: nothing happens (or pilot
-  comes forward). Actual: Script Editor opens with empty doc.
+**Still missing.** A real solution: bundle pilot as a `.app` with
+its own Info.plist + LSUIElement + bundle id so we can call
+`UNUserNotificationCenter` directly via objc bindings. Then:
+
+- The notification carries pilot's icon (not terminal-notifier's).
+- Click can register a custom URL scheme (`pilot://workspace/<key>`)
+  to focus the running daemon's TUI on the right row.
+- Users don't have to `brew install terminal-notifier` first.
+
+Until that bundle exists, recommending `terminal-notifier` is the
+escape hatch (documented in `notify_user` in
+`crates/tui-core/src/platform.rs`).

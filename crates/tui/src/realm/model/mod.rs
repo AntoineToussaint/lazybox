@@ -812,6 +812,37 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Set the footer notice + mark the screen dirty. Three
+    /// shortcuts for the three severities the codebase uses most
+    /// (`info`, `hint`, `error`) plus a generic `flash` for the
+    /// rare `Retryable` / `Auth` cases.
+    ///
+    /// Pulled out because 30+ call sites open-coded
+    /// `self.status.notice = Some(Notice::new(...)); self.redraw = true;`,
+    /// and forgetting the `redraw = true` left the notice invisible
+    /// until the next event triggered a render — a known footgun.
+    pub fn flash_info(&mut self, msg: impl Into<String>) {
+        self.flash(msg, crate::realm::components::footer::NoticeSeverity::Info);
+    }
+
+    pub fn flash_hint(&mut self, msg: impl Into<String>) {
+        self.flash(msg, crate::realm::components::footer::NoticeSeverity::Hint);
+    }
+
+    pub fn flash_error(&mut self, msg: impl Into<String>) {
+        self.flash(msg, crate::realm::components::footer::NoticeSeverity::Permanent);
+    }
+
+    pub fn flash(
+        &mut self,
+        msg: impl Into<String>,
+        severity: crate::realm::components::footer::NoticeSeverity,
+    ) {
+        use crate::realm::components::footer::Notice;
+        self.status.notice = Some(Notice::new(msg, severity));
+        self.redraw = true;
+    }
+
     /// Drain a handler's returned IPC commands into `send_cmd`.
     /// Used at the `update()` call sites so handlers can be
     /// unit-tested in isolation: tests construct a Model, call
@@ -839,21 +870,17 @@ impl<T: TerminalAdapter> Model<T> {
     /// side-effect, and the editor launches once `TerminalSpawned`
     /// arrives.
     pub fn open_editor(&mut self) {
-        use crate::realm::components::footer::{Notice, NoticeSeverity};
+        
 
         let Some(workspace_key) = self.sidebar.selected_workspace_key().cloned() else {
             return;
         };
         if self.setup.editors.is_empty() {
             let path = pilot_core::paths::config_yaml();
-            self.status.notice = Some(Notice::new(
-                format!(
-                    "no editor detected — add one under `editors:` in {}",
-                    path.display(),
-                ),
-                NoticeSeverity::Info,
+            self.flash_info(format!(
+                "no editor detected — add one under `editors:` in {}",
+                path.display(),
             ));
-            self.redraw = true;
             return;
         }
         let worktree = self
@@ -877,14 +904,10 @@ impl<T: TerminalAdapter> Model<T> {
                     cwd: None,
                     initial_prompt: None,
                 });
-                self.status.notice = Some(Notice::new(
-                    format!(
-                        "Provisioning worktree for {workspace_key} — opening in {} when ready…",
-                        self.setup.editors[0].display
-                    ),
-                    NoticeSeverity::Info,
+                self.flash_info(format!(
+                    "Provisioning worktree for {workspace_key} — opening in {} when ready…",
+                    self.setup.editors[0].display
                 ));
-                self.redraw = true;
             } else {
                 // Multi-editor: defer editor pick + record that the
                 // dispatch needs to spawn first.
@@ -931,7 +954,6 @@ impl<T: TerminalAdapter> Model<T> {
         editor: &crate::editors::EditorTemplate,
         worktree: &std::path::Path,
     ) {
-        use crate::realm::components::footer::{Notice, NoticeSeverity};
         match crate::editors::launch(editor, worktree) {
             Ok(()) => {
                 tracing::info!(
@@ -939,20 +961,17 @@ impl<T: TerminalAdapter> Model<T> {
                     worktree = %worktree.display(),
                     "launched editor"
                 );
-                self.status.notice = Some(Notice::new(
-                    format!("opened {} in {}", worktree.display(), editor.display),
-                    NoticeSeverity::Info,
+                self.flash_info(format!(
+                    "opened {} in {}",
+                    worktree.display(),
+                    editor.display
                 ));
             }
             Err(e) => {
                 tracing::warn!("editor launch failed: {e}");
-                self.status.notice = Some(Notice::new(
-                    format!("failed to launch {}: {e}", editor.display),
-                    NoticeSeverity::Permanent,
-                ));
+                self.flash_error(format!("failed to launch {}: {e}", editor.display));
             }
         }
-        self.redraw = true;
     }
 
     /// Open the in-session Settings palette. Builds a small picker
@@ -1264,15 +1283,14 @@ impl<T: TerminalAdapter> Model<T> {
             // sticky; retryable ones (which shouldn't reach here)
             // auto-fade in render.
             Msg::PollingError((source, kind, detail, message)) => {
+                use crate::realm::components::footer::NoticeSeverity;
                 tracing::warn!("polling error from {source} ({kind}): {message} — {detail}");
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
                 let severity = match kind.as_str() {
                     "auth" => NoticeSeverity::Auth,
                     "retryable" => NoticeSeverity::Retryable,
                     _ => NoticeSeverity::Permanent,
                 };
-                self.status.notice = Some(Notice::new(format!("{source}: {message}"), severity));
-                self.redraw = true;
+                self.flash(format!("{source}: {message}"), severity);
             }
             Msg::PollingTimeout => {
                 tracing::info!("polling first-cycle timeout — modal dismissed");

@@ -21,7 +21,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// "handle mouse natively (selection works)". Footer notice
     /// confirms which mode is now active.
     pub(super) fn toggle_mouse_capture(&mut self) {
-        use crate::realm::components::footer::{Notice, NoticeSeverity};
+        
         self.mouse_capture_on = !self.mouse_capture_on;
         let (msg, _) = if self.mouse_capture_on {
             let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture,);
@@ -33,8 +33,7 @@ impl<T: TerminalAdapter> Model<T> {
                 (),
             )
         };
-        self.status.notice = Some(Notice::new(msg, NoticeSeverity::Hint));
-        self.redraw = true;
+        self.flash_hint(msg);
     }
 
     pub(super) fn set_focus_attr(&mut self) {
@@ -191,12 +190,7 @@ impl<T: TerminalAdapter> Model<T> {
             ..
         } = &event
         {
-            use crate::realm::components::footer::{Notice, NoticeSeverity};
-            self.status.notice = Some(Notice::new(
-                format!("merged {issue_label} into {pr_label}"),
-                NoticeSeverity::Info,
-            ));
-            self.redraw = true;
+            self.flash_info(format!("merged {issue_label} into {pr_label}"));
             return;
         }
         // Shift-M completed: GitHub accepted the merge. Optimistically
@@ -211,12 +205,8 @@ impl<T: TerminalAdapter> Model<T> {
             ..
         } = &event
         {
-            use crate::realm::components::footer::{Notice, NoticeSeverity};
             self.sidebar.mark_workspace_merged(workspace_key);
-            self.status.notice = Some(Notice::new(
-                format!("merged {pr_label}"),
-                NoticeSeverity::Info,
-            ));
+            self.flash_info(format!("merged {pr_label}"));
             // Queue a "remove merged workspace?" prompt. Reuses the
             // existing RemoveOutOfScope confirm flow (Kill on Yes,
             // keep on No) — same UX, just triggered after a merge
@@ -259,8 +249,7 @@ impl<T: TerminalAdapter> Model<T> {
         // in the same tick — they'll see them in sequence anyway as
         // the 3s Hint fade clears each.
         if let Some(msg) = self.sidebar.drain_pending_asking_notices().pop() {
-            use crate::realm::components::footer::{Notice, NoticeSeverity};
-            self.status.notice = Some(Notice::new(msg, NoticeSeverity::Hint));
+            self.flash_hint(msg);
         }
         self.right.on_daemon_event(&event);
         self.terminals.on_daemon_event(&event);
@@ -284,12 +273,8 @@ impl<T: TerminalAdapter> Model<T> {
                     // success footer notice. Auto-cycles (the user
                     // didn't ask for them) stay silent.
                     if self.pending_refresh_ack {
-                        use crate::realm::components::footer::{Notice, NoticeSeverity};
                         self.pending_refresh_ack = false;
-                        self.status.notice = Some(Notice::new(
-                            format!("✓ sync ok — {count} tasks from {source}"),
-                            NoticeSeverity::Info,
-                        ));
+                        self.flash_info(format!("✓ sync ok — {count} tasks from {source}"));
                     }
                     self.redraw = true;
                 }
@@ -301,13 +286,8 @@ impl<T: TerminalAdapter> Model<T> {
                     // doesn't have to guess whether their Shift-R
                     // worked.
                     if self.pending_refresh_ack {
-                        use crate::realm::components::footer::{Notice, NoticeSeverity};
                         self.pending_refresh_ack = false;
-                        self.status.notice = Some(Notice::new(
-                            format!("✗ sync failed — {source}: {message}"),
-                            NoticeSeverity::Permanent,
-                        ));
-                        self.redraw = true;
+                        self.flash_error(format!("✗ sync failed — {source}: {message}"));
                     }
                 }
                 _ => {}
@@ -316,14 +296,12 @@ impl<T: TerminalAdapter> Model<T> {
         // CleanWorktrees finished — replace the "cleaning…" notice
         // with the final count so the user sees how much was done.
         if let IpcEvent::CleanWorktreesCompleted { removed, skipped } = &event {
-            use crate::realm::components::footer::{Notice, NoticeSeverity};
             let msg = if *skipped == 0 {
                 format!("cleaned {removed} worktree(s)")
             } else {
                 format!("cleaned {removed} worktree(s) · kept {skipped} (active)")
             };
-            self.status.notice = Some(Notice::new(msg, NoticeSeverity::Hint));
-            self.redraw = true;
+            self.flash_hint(msg);
         }
         if is_snapshot && self.preselect.is_some() {
             self.apply_preselect();

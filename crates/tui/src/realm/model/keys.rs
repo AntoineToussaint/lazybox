@@ -289,16 +289,13 @@ impl<T: TerminalAdapter> Model<T> {
         // `TerminalSpawned` arrives in `handle_daemon_event`.
         for cmd in &cmds {
             if let IpcCommand::Spawn { kind, .. } = cmd {
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
+                
                 let label = match kind {
                     pilot_ipc::TerminalKind::Shell => "shell".to_string(),
                     pilot_ipc::TerminalKind::Agent(a) => a.to_string(),
                     other => format!("{other:?}").to_lowercase(),
                 };
-                self.status.notice = Some(Notice::new(
-                    format!("Spawning {label}…"),
-                    NoticeSeverity::Info,
-                ));
+                self.flash_info(format!("Spawning {label}…"));
             }
         }
         for cmd in cmds {
@@ -384,11 +381,7 @@ impl<T: TerminalAdapter> Model<T> {
             } => {
                 if let Some(terminal_id) = self.sidebar.find_agent_terminal(&session_key, &agent_id)
                 {
-                    use crate::realm::components::footer::{Notice, NoticeSeverity};
-                    self.status.notice = Some(Notice::new(
-                        format!("→ injecting into existing {agent_id}"),
-                        NoticeSeverity::Hint,
-                    ));
+                    self.flash_hint(format!("→ injecting into existing {agent_id}"));
                     // Always carry the Spawn parameters so a stale
                     // terminal id (agent died between this lookup and
                     // the command arriving at the daemon) falls back
@@ -701,8 +694,7 @@ impl<T: TerminalAdapter> Model<T> {
                             self.redraw = true;
                         }
                         if let Some(msg) = self.right.drain_selection_notice() {
-                            use crate::realm::components::footer::{Notice, NoticeSeverity};
-                            self.status.notice = Some(Notice::new(msg, NoticeSeverity::Hint));
+                            self.flash_hint(msg);
                         }
                     }
                 }
@@ -731,15 +723,11 @@ impl<T: TerminalAdapter> Model<T> {
                         let text = self.terminals.extract_text(right_bottom_rect, start, end);
                         if !text.trim().is_empty() {
                             emit_clipboard_copy(&text);
-                            use crate::realm::components::footer::{Notice, NoticeSeverity};
                             let lines = text.lines().count();
-                            self.status.notice = Some(Notice::new(
-                                format!(
-                                    "copied {} line{} to clipboard",
-                                    lines,
-                                    if lines == 1 { "" } else { "s" }
-                                ),
-                                NoticeSeverity::Hint,
+                            self.flash_hint(format!(
+                                "copied {} line{} to clipboard",
+                                lines,
+                                if lines == 1 { "" } else { "s" }
                             ));
                         }
                     } else {

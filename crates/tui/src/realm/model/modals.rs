@@ -101,18 +101,14 @@ impl<T: TerminalAdapter> Model<T> {
     /// `Command::RequestReviewers`.
     pub(crate) fn mount_request_reviewers(&mut self, workspace_key: pilot_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
-        use crate::realm::components::footer::{Notice, NoticeSeverity};
+        
         use tuirealm::subscription::{EventClause, Sub, SubClause};
         if matches!(self.modal_stack.last(), Some(Id::RequestReviewers)) {
             return;
         }
         let candidates = self.gather_candidate_logins(&workspace_key, true);
         if candidates.is_empty() {
-            self.status.notice = Some(Notice::new(
-                "no candidate reviewers yet — interact with the PR first",
-                NoticeSeverity::Info,
-            ));
-            self.redraw = true;
+            self.flash_info("no candidate reviewers yet — interact with the PR first");
             return;
         }
         let labels: Vec<String> = candidates.iter().map(|l| format!("@{l}")).collect();
@@ -139,7 +135,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// task and runs add + remove mutations as needed.
     pub(crate) fn mount_add_assignees(&mut self, workspace_key: pilot_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
-        use crate::realm::components::footer::{Notice, NoticeSeverity};
+        
         use tuirealm::subscription::{EventClause, Sub, SubClause};
         if matches!(self.modal_stack.last(), Some(Id::AddAssignees)) {
             return;
@@ -149,11 +145,7 @@ impl<T: TerminalAdapter> Model<T> {
         // old shape filtered them out, making the picker add-only.
         let candidates = self.gather_candidate_logins_inclusive(&workspace_key);
         if candidates.is_empty() {
-            self.status.notice = Some(Notice::new(
-                "no candidate assignees yet — interact with the task first",
-                NoticeSeverity::Info,
-            ));
-            self.redraw = true;
+            self.flash_info("no candidate assignees yet — interact with the task first");
             return;
         }
         // Pre-tick the currently-assigned logins. `with_selected_by`
@@ -595,7 +587,7 @@ impl<T: TerminalAdapter> Model<T> {
 
     pub(super) fn mount_adopt_picker(&mut self, source_key: pilot_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
-        use crate::realm::components::footer::{Notice, NoticeSeverity};
+        
         use tuirealm::subscription::{EventClause, Sub, SubClause};
 
         // Build (target_key, label) pairs from every workspace EXCEPT
@@ -613,11 +605,7 @@ impl<T: TerminalAdapter> Model<T> {
             items.push((pilot_core::WorkspaceKey::new(key.as_str()), label));
         }
         if items.is_empty() {
-            self.status.notice = Some(Notice::new(
-                "no other workspace to adopt sessions into",
-                NoticeSeverity::Info,
-            ));
-            self.redraw = true;
+            self.flash_info("no other workspace to adopt sessions into");
             return;
         }
         let labels: Vec<String> = items.iter().map(|(_, l)| l.clone()).collect();

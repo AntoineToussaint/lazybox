@@ -171,9 +171,7 @@ impl<T: TerminalAdapter> Model<T> {
                         self.mount_new_workspace_input(project_key);
                     }
                     crate::intent::Intent::Notice(msg) => {
-                        use crate::realm::components::footer::{Notice, NoticeSeverity};
-                        self.status.notice = Some(Notice::new(msg, NoticeSeverity::Info));
-                        self.redraw = true;
+                        self.flash_info(msg);
                     }
                     _ => {}
                 }
@@ -194,7 +192,7 @@ impl<T: TerminalAdapter> Model<T> {
                 if selected.is_empty() {
                     cmds.push(IpcCommand::MarkRead { session_key: sk });
                 } else {
-                    use crate::realm::components::footer::{Notice, NoticeSeverity};
+                    
                     let n = selected.len();
                     for index in selected {
                         cmds.push(IpcCommand::MarkActivityRead {
@@ -202,14 +200,10 @@ impl<T: TerminalAdapter> Model<T> {
                             index,
                         });
                     }
-                    self.status.notice = Some(Notice::new(
-                        format!(
-                            "marked {n} selected activit{} read",
-                            if n == 1 { "y" } else { "ies" }
-                        ),
-                        NoticeSeverity::Info,
+                    self.flash_info(format!(
+                        "marked {n} selected activit{} read",
+                        if n == 1 { "y" } else { "ies" }
                     ));
-                    self.redraw = true;
                 }
             }
             Action::Archive => {
@@ -239,9 +233,7 @@ impl<T: TerminalAdapter> Model<T> {
                         self.mount_adopt_picker(source_key);
                     }
                     crate::intent::Intent::Notice(msg) => {
-                        use crate::realm::components::footer::{Notice, NoticeSeverity};
-                        self.status.notice = Some(Notice::new(msg, NoticeSeverity::Info));
-                        self.redraw = true;
+                        self.flash_info(msg);
                     }
                     _ => {}
                 }
@@ -253,7 +245,6 @@ impl<T: TerminalAdapter> Model<T> {
                 // single-workspace. When no claiming PR is known
                 // locally, surface a footer notice instead of firing
                 // a no-op IPC the daemon would just log + drop.
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
                 let Some(issue_ws) = self.sidebar.selected_workspace().cloned() else {
                     return cmds;
                 };
@@ -270,18 +261,10 @@ impl<T: TerminalAdapter> Model<T> {
                         cmds.push(IpcCommand::CollapseIntoPr {
                             issue_workspace_key: pilot_core::SessionKey::from(&issue_ws.key),
                         });
-                        self.status.notice = Some(Notice::new(
-                            "joining into PR…",
-                            NoticeSeverity::Info,
-                        ));
-                        self.redraw = true;
+                        self.flash_info("joining into PR…");
                     }
                     None => {
-                        self.status.notice = Some(Notice::new(
-                            "no PR closes this issue (or it isn't synced yet)",
-                            NoticeSeverity::Info,
-                        ));
-                        self.redraw = true;
+                        self.flash_info("no PR closes this issue (or it isn't synced yet)");
                     }
                 }
             }
@@ -321,22 +304,20 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::Refresh => {
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
+                
                 cmds.push(IpcCommand::Refresh);
                 // Pre-arm the bg_poll indicator so the user gets
                 // feedback on the keystroke — same as the
                 // `Shift+R` handler did inline before.
                 self.status
                     .note_poll_progress("github", "manual refresh requested");
-                self.status.notice =
-                    Some(Notice::new("refreshing…".to_string(), NoticeSeverity::Hint));
+                self.flash_hint("refreshing…");
                 // Arm a one-shot ack so the next PollCompleted /
                 // ProviderError surfaces a clear "✓ sync ok" or
                 // "✗ sync failed" footer notice — silent
                 // spinner-clears were being read as "did anything
                 // happen?"
                 self.pending_refresh_ack = true;
-                self.redraw = true;
             }
             Action::OpenHelp => {
                 self.mount_help();
@@ -395,33 +376,27 @@ impl<T: TerminalAdapter> Model<T> {
                 // browser actually came up — silent spawn failures
                 // (no xdg-open on a headless box, etc.) would be
                 // confusing otherwise.
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
+                
                 let Some(ws) = self.sidebar.selected_workspace() else {
                     return cmds;
                 };
                 let Some(url) = ws.primary_task().map(|t| t.url.clone()) else {
-                    self.status.notice = Some(Notice::new(
-                        "no task URL on this workspace",
-                        NoticeSeverity::Info,
-                    ));
-                    self.redraw = true;
+                    self.flash_info("no task URL on this workspace");
                     return cmds;
                 };
                 match pilot_tui_core::editors::open_url(&url) {
                     Ok(()) => {
                         tracing::info!(%url, "opened workspace URL in browser");
-                        self.status.notice =
-                            Some(Notice::new(format!("opened {url}"), NoticeSeverity::Info));
+                        self.flash_info(format!("opened {url}"));
                     }
                     Err(e) => {
                         tracing::warn!(%url, "open_url failed: {e}");
-                        self.status.notice = Some(Notice::new(
+                        self.flash(
                             format!("open failed: {e}"),
-                            NoticeSeverity::Retryable,
-                        ));
+                            crate::realm::components::footer::NoticeSeverity::Retryable,
+                        );
                     }
                 }
-                self.redraw = true;
             }
             // Actions not yet handled here stay in the existing
             // handlers. As we migrate, the per-key match arms in

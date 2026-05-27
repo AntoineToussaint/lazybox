@@ -691,6 +691,18 @@ impl TerminalStack {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return String::new();
         };
+        // Translate from screen-absolute crossterm coords to the
+        // terminal's CONTENT-area coords. The render path puts the
+        // terminal grid at `inner = Rect { x: rect.x + 1, y: rect.y
+        // + 3 }` (border on the left, tab strip + divider on top —
+        // see `TerminalStack::render`). Selection coords came from
+        // crossterm in screen-absolute space; subtracting only
+        // `rect.x/y` left them 1 column too far right and 3 rows
+        // too high, so every copied line was actually the row 3
+        // ABOVE what the user highlighted. Bug user reported as
+        // "doesn't copy what I selected."
+        let inner_x = rect.x.saturating_add(1);
+        let inner_y = rect.y.saturating_add(3);
         // Normalize: anchor (anchor_x, anchor_y) is the row-then-
         // column "earlier" endpoint of the selection — i.e. the
         // smaller (y, x) pair. The other endpoint is the focus.
@@ -702,10 +714,10 @@ impl TerminalStack {
         } else {
             (end.0, end.1, start.0, start.1)
         };
-        let anchor_col = anchor_x.saturating_sub(rect.x);
-        let focus_col = focus_x.saturating_sub(rect.x);
-        let row_start = anchor_y.saturating_sub(rect.y);
-        let row_end = focus_y.saturating_sub(rect.y);
+        let anchor_col = anchor_x.saturating_sub(inner_x);
+        let focus_col = focus_x.saturating_sub(inner_x);
+        let row_start = anchor_y.saturating_sub(inner_y);
+        let row_end = focus_y.saturating_sub(inner_y);
         let single_row = row_start == row_end;
         let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) else {
             return String::new();

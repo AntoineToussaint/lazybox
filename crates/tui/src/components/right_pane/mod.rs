@@ -711,10 +711,11 @@ impl RightPane {
     fn render_header(&self, area: Rect, frame: &mut Frame) {
         let theme = crate::theme::current();
         let Some(workspace) = &self.workspace else {
-            let placeholder = Paragraph::new(Line::from(Span::styled(
-                " (no session selected) ",
-                theme.hint(),
-            )));
+            let line = Line::from(Span::styled(" (no session selected) ", theme.hint()));
+            let placeholder = Paragraph::new(crate::components::table::truncate_line(
+                line,
+                area.width as usize,
+            ));
             frame.render_widget(placeholder, area);
             return;
         };
@@ -945,7 +946,13 @@ impl RightPane {
             area.width.saturating_sub(2),
             1.min(area.height),
         );
-        frame.render_widget(Paragraph::new(Line::from(header_spans)), title_area);
+        frame.render_widget(
+            Paragraph::new(crate::components::table::truncate_line(
+                Line::from(header_spans),
+                title_area.width as usize,
+            )),
+            title_area,
+        );
 
         if self.activity_collapsed {
             return 1;

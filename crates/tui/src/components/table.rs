@@ -234,6 +234,69 @@ impl Row {
     }
 }
 
+/// Clip `line`'s visible width to `max_cells`, preserving span
+/// styles, with a final `…` when truncation actually happened.
+///
+/// Necessary because ratatui's `Paragraph` silently CLIPS content
+/// past `area.width` — there's no built-in "truncate-with-ellipsis"
+/// affordance. A user-visible empty-state hint like
+/// `"(no terminals — press s for shell, c for claude)"` rendered
+/// into a narrow right pane just stopped mid-word, with no visual
+/// indicator that content was missing. Pre-truncating with `…`
+/// makes the cut obvious.
+///
+/// Returns `line` unchanged when it already fits — cheap fast-path
+/// for the common "fits comfortably" case.
+pub fn truncate_line<'a>(
+    line: ratatui::text::Line<'a>,
+    max_cells: usize,
+) -> ratatui::text::Line<'a> {
+    let total: usize = line
+        .spans
+        .iter()
+        .map(|s| crate::util::visual_width(s.content.as_ref()))
+        .sum();
+    if total <= max_cells {
+        return line;
+    }
+    if max_cells == 0 {
+        return ratatui::text::Line::from(Vec::<ratatui::text::Span>::new());
+    }
+    // Reserve a cell for the trailing `…`. We always emit the
+    // ellipsis when we truncated, so callers can rely on the cut
+    // being visible.
+    let budget = max_cells - 1;
+    let mut out: Vec<ratatui::text::Span<'a>> = Vec::with_capacity(line.spans.len() + 1);
+    let mut consumed = 0usize;
+    for span in line.spans.into_iter() {
+        let w = crate::util::visual_width(span.content.as_ref());
+        if consumed + w <= budget {
+            consumed += w;
+            out.push(span);
+            continue;
+        }
+        let remaining = budget - consumed;
+        if remaining > 0 {
+            let truncated: String = span
+                .content
+                .chars()
+                .scan(0usize, |used, ch| {
+                    let cw = crate::util::char_visual_width(ch);
+                    if *used + cw > remaining {
+                        return None;
+                    }
+                    *used += cw;
+                    Some(ch)
+                })
+                .collect();
+            out.push(ratatui::text::Span::styled(truncated, span.style));
+        }
+        break;
+    }
+    out.push(ratatui::text::Span::raw("…"));
+    ratatui::text::Line::from(out)
+}
+
 /// Render a table of rows to ratatui Lines, with each cell padded
 /// (right) to its computed column width. Cells wider than their
 /// column get their last span truncated with `…`. This is the
@@ -524,5 +587,53 @@ mod tests {
         let row1: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(row0, "#1   ");
         assert_eq!(row1, "#7204");
+    }
+
+    /// Short line fits unchanged — fast path.
+    #[test]
+    fn truncate_line_fits_unchanged() {
+        let line = ratatui::text::Line::from(vec![
+            Span::raw("hello "),
+            Span::raw("world"),
+        ]);
+        let out = truncate_line(line, 20);
+        let s: String = out.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(s, "hello world");
+    }
+
+    /// Line longer than budget gets a trailing `…`. Spans split at
+    /// the truncation point keep their styles.
+    #[test]
+    fn truncate_line_clips_with_ellipsis_at_span_boundary() {
+        let style = ratatui::style::Style::default().fg(ratatui::style::Color::Red);
+        let line = ratatui::text::Line::from(vec![
+            Span::raw("hello "),
+            Span::styled("world", style),
+        ]);
+        let out = truncate_line(line, 8);
+        let s: String = out.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(s, "hello w…");
+        // Second-span style preserved on the truncated remainder.
+        assert_eq!(out.spans[1].style, style);
+    }
+
+    /// User-visible bug regression: the right-pane terminal-pane
+    /// empty hint was clipping mid-word with no `…`. Pin the
+    /// truncated form so we don't drift back.
+    #[test]
+    fn truncate_line_handles_user_visible_no_terminals_hint() {
+        let hint = "(no terminals — press s for shell, c for claude)";
+        let line = ratatui::text::Line::from(Span::raw(hint));
+        let out = truncate_line(line, 30);
+        let s: String = out.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(s.ends_with('…'), "expected `…` suffix, got: {s:?}");
+        assert!(crate::util::visual_width(&s) <= 30);
+    }
+
+    #[test]
+    fn truncate_line_budget_zero_returns_empty() {
+        let line = ratatui::text::Line::from(Span::raw("anything"));
+        let out = truncate_line(line, 0);
+        assert!(out.spans.is_empty());
     }
 }

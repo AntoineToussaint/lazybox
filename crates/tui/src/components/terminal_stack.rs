@@ -1267,13 +1267,22 @@ impl TerminalStack {
         };
 
         if visible.is_empty() {
+            let line = Line::from(Span::styled(
+                "(no terminals — press s for shell, c for claude)",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+            // Pre-truncate so a narrow pane doesn't clip mid-word
+            // without an `…` hint. ratatui's Paragraph clips
+            // silently; the user-visible bug was the right pane
+            // showing "c for" with no indication that "claude)"
+            // was cut.
             frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "(no terminals — press s for shell, c for claude)",
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                ))),
+                Paragraph::new(crate::components::table::truncate_line(
+                    line,
+                    inner.width as usize,
+                )),
                 inner,
             );
             return;

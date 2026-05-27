@@ -82,12 +82,15 @@ pub fn detach_child_process(cmd: &mut std::process::Command) {
 /// attention even when pilot isn't the focused app — e.g. Claude
 /// going to `Asking` while the user is reading email.
 ///
-/// **macOS**: prefers `terminal-notifier` (if installed via brew —
-/// gets its own notification icon instead of the generic AppleScript
-/// plug). Falls back to `osascript -e 'display notification ...'` —
-/// works out-of-the-box but the icon comes from Script Editor.
-/// Pilot bundled as a `.app` would solve this properly; until then,
-/// `terminal-notifier` is the easy escape hatch.
+/// **macOS**: only fires when `terminal-notifier` is on PATH. We
+/// previously fell back to `osascript -e 'display notification …'`,
+/// but newer macOS attributes the click action to Script Editor —
+/// clicking a pilot notification opened an empty AppleScript editor
+/// window, which was the opposite of helpful. Until pilot ships as a
+/// `.app` bundle with its own Info.plist and bundle id, the only
+/// reliable click-target on macOS is `terminal-notifier`'s own
+/// bundle. When it's missing we now silently no-op rather than
+/// hijack the user's editor on click.
 ///
 /// **Linux**: `notify-send` (libnotify). Present on every desktop
 /// environment we'd realistically support. Skipped silently if
@@ -104,43 +107,37 @@ pub fn notify_user(title: &str, body: &str) {
         static TERMINAL_NOTIFIER: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
         let tn = TERMINAL_NOTIFIER.get_or_init(|| which::which("terminal-notifier").ok());
 
-        if let Some(tn_path) = tn {
-            // `terminal-notifier` ships with its own bundle, so the
-            // notification carries a proper app icon instead of the
-            // Script Editor plug. We pass `-group pilot` so repeated
-            // notifications collapse into a single stack rather than
-            // piling up. `-sender` is intentionally omitted — without
-            // a real pilot.app bundle id, spoofing one would surface
-            // the wrong app's icon.
-            let _ = std::process::Command::new(tn_path)
-                .arg("-title")
-                .arg(title)
-                .arg("-message")
-                .arg(body)
-                .arg("-group")
-                .arg("com.pilot.agent")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+        let Some(tn_path) = tn else {
+            // No terminal-notifier on PATH → no notification. See the
+            // doc comment for why we don't fall back to osascript.
+            // A one-time tracing line so users can grep
+            // /tmp/pilot.log and find the "install terminal-notifier"
+            // hint when they wonder where their notifications went.
+            static WARNED: OnceLock<()> = OnceLock::new();
+            WARNED.get_or_init(|| {
+                tracing::info!(
+                    "notify_user: terminal-notifier not found on PATH; \
+                     desktop notifications disabled. `brew install terminal-notifier` to enable."
+                );
+            });
+            let _ = (title, body);
             return;
-        }
-
-        // Fallback: AppleScript. Always available; the icon will be
-        // Script Editor's generic plug (cosmetic limitation; install
-        // `brew install terminal-notifier` to get a better icon).
-        // We escape double-quotes so the user's strings can't break
-        // out of the AppleScript string literal.
-        let safe_title = title.replace('"', "\\\"");
-        let safe_body = body.replace('"', "\\\"");
-        let script = format!("display notification \"{safe_body}\" with title \"{safe_title}\"");
-        // Detached + ignored — we don't care about exit status and
-        // don't want to block. `spawn()` returns immediately;
-        // dropping the child handle on a non-waited child is fine
-        // for this fire-and-forget case (the OS reaps it).
-        let _ = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(script)
+        };
+        // `terminal-notifier` ships with its own bundle, so the
+        // notification carries a proper app icon and clicking it
+        // surfaces terminal-notifier (a no-op from the user's
+        // perspective — not the wrong-app surprise of Script Editor).
+        // `-group` collapses repeats into a single stack rather than
+        // piling up. `-sender` is intentionally omitted — without
+        // a real pilot.app bundle id, spoofing one would surface
+        // the wrong app's icon.
+        let _ = std::process::Command::new(tn_path)
+            .arg("-title")
+            .arg(title)
+            .arg("-message")
+            .arg(body)
+            .arg("-group")
+            .arg("com.pilot.agent")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

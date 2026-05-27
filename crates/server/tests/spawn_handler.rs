@@ -302,6 +302,93 @@ async fn recover_sessions_reattaches_survivors() {
     .expect("deadline");
 }
 
+/// Regression: stale `terminal_id` in `InjectPrompt` falls back to
+/// Spawn when `fallback_spawn` is supplied. Symptom pre-fix: user
+/// presses `w` (work) right after the agent crashed, the TUI's
+/// cached terminal id still pointed at the dead terminal, the
+/// daemon's `handle_inject_prompt` quietly no-op'd, and the user's
+/// prompt was lost. After the fix the unknown id triggers a fresh
+/// `Spawn` carrying the same workspace + agent + cwd from the
+/// `SpawnFallback` payload.
+#[tokio::test]
+async fn inject_prompt_falls_back_to_spawn_when_terminal_dead() {
+    timeout(TEST_DEADLINE, async {
+        let config = ServerConfig::in_memory();
+        let mut client = subscribed(config).await;
+
+        // Use a `TerminalId` that has never been issued. Without the
+        // fallback path this command silently no-ops on the daemon.
+        let dead_id = pilot_ipc::TerminalId(99_999);
+        client
+            .send(Command::InjectPrompt {
+                terminal_id: dead_id,
+                prompt: "rescued prompt".into(),
+                fallback_spawn: Some(pilot_ipc::SpawnFallback {
+                    session_key: "test:ws-fallback".into(),
+                    session_id: None,
+                    kind: TerminalKind::Shell,
+                    cwd: None,
+                }),
+            })
+            .unwrap();
+
+        let spawned = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            spawned.is_some(),
+            "inject_prompt with dead terminal_id should fall back to Spawn"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// Mirror of the above, but with no `fallback_spawn`. Pre-fix and
+/// post-fix this is a silent no-op — the test exists to lock in
+/// that "InjectPrompt + None + dead id" stays a no-op rather than
+/// drifting into "auto-resurrect any dead terminal" behavior, which
+/// would be very surprising at the API level.
+#[tokio::test]
+async fn inject_prompt_without_fallback_is_silent_noop() {
+    timeout(TEST_DEADLINE, async {
+        let config = ServerConfig::in_memory();
+        let mut client = subscribed(config).await;
+        let dead_id = pilot_ipc::TerminalId(99_999);
+        client
+            .send(Command::InjectPrompt {
+                terminal_id: dead_id,
+                prompt: "should disappear".into(),
+                fallback_spawn: None,
+            })
+            .unwrap();
+
+        // A 250ms grace window: any spawn / error event in this
+        // window would mean the daemon resurrected something it
+        // shouldn't have.
+        let unexpected = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::TerminalSpawned { .. } | Event::ProviderError { .. }
+                )
+            },
+            Duration::from_millis(250),
+        )
+        .await;
+        assert!(
+            unexpected.is_none(),
+            "no event expected for inject_prompt with no fallback, got {unexpected:?}"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
 /// Regression: a single wedged backend session must not block the
 /// daemon's Subscribe handler. Pre-fix, `snapshot_terminals` would
 /// `.await` `backend.snapshot(key)` with no timeout — one stuck tmux

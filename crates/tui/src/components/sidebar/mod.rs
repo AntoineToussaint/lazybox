@@ -678,6 +678,29 @@ impl Sidebar {
         false
     }
 
+    /// Move the cursor onto the RepoHeader row for the given project.
+    /// Returns true on a hit. Used by the just-created-a-project flow
+    /// so the user lands on their new project ready to press `n` to
+    /// add a workspace. Without this, the cursor stays wherever it
+    /// was before and the new RepoHeader is unreachable via j/k
+    /// (header rows are skipped by `move_cursor_by`), which made the
+    /// new-project flow feel broken.
+    pub fn focus_project_header(&mut self, key: &pilot_core::ProjectKey) -> bool {
+        let label = match self.projects.get(key) {
+            Some(p) => p.name.clone(),
+            None => return false,
+        };
+        for (i, row) in self.visible.iter().enumerate() {
+            if let VisibleRow::RepoHeader(name) = row
+                && name == &label
+            {
+                self.cursor = i;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Move the cursor onto the next workspace whose agent is in the
     /// `Asking` state, starting AFTER the row currently selected (so
     /// `!` cycles through asking workspaces rather than re-selecting
@@ -833,6 +856,36 @@ impl Sidebar {
                     })
             }
         }
+    }
+
+    /// Iterate every workspace in local state. Used by the
+    /// `CollapseIntoPr` dispatcher to find a PR that closes the
+    /// focused issue — the cross-workspace relationship lookup
+    /// doesn't fit the per-workspace `intent::resolve_*` shape, so
+    /// the dispatcher walks the map directly.
+    pub fn workspaces_iter(&self) -> impl Iterator<Item = &pilot_core::Workspace> {
+        self.workspaces.values()
+    }
+
+    /// Look up the display label of a project by key. Used by the
+    /// destructive-delete confirm modal so the prompt reads
+    /// "Delete project foo/bar" instead of the raw key. Returns
+    /// `None` when the key isn't in the local project cache (which
+    /// shouldn't happen for any user-driven action, since the user
+    /// can only target a project that's on screen).
+    pub fn project_label_for(&self, key: &pilot_core::ProjectKey) -> Option<String> {
+        self.projects.get(key).map(|p| p.name.clone())
+    }
+
+    /// Count how many workspaces in the local cache belong to the
+    /// given project. Used by the project-delete confirm so the
+    /// prompt can tell the user how much carnage they're authorizing
+    /// ("Delete project X? Its 3 workspaces…").
+    pub fn workspaces_in_project(&self, key: &pilot_core::ProjectKey) -> usize {
+        self.workspaces
+            .values()
+            .filter(|w| w.project_key.as_ref() == Some(key))
+            .count()
     }
 
     /// Step the cursor `delta` selectable rows from its current

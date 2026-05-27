@@ -28,7 +28,7 @@ use crate::ServerConfig;
 use chrono::Utc;
 use pilot_agents::SpawnCtx;
 use pilot_core::{
-    SessionId, SessionKey, SessionKind, Workspace, WorkspaceKey, WorkspaceSession as Session,
+    SessionId, SessionKey, SessionKind, Task, Workspace, WorkspaceKey, WorkspaceSession as Session,
 };
 use pilot_ipc::{Event, TerminalId, TerminalKind, TerminalSnapshot};
 use pilot_store::WorkspaceRecord;
@@ -150,12 +150,10 @@ pub async fn handle_spawn(
             match resolve_or_create_session(config, &session_key, session_id, &kind).await {
                 Ok((path, sid)) => (Some(path), Some(sid)),
                 Err(e) => {
-                    let _ = config.bus.send(Event::ProviderError {
-                        source: "spawn:session".into(),
-                        message: format!("{e}"),
-                        detail: String::new(),
-                        kind: String::new(),
-                    });
+                    let _ = config.bus.send(Event::provider_error_permanent(
+                        "spawn:session",
+                        e.to_string(),
+                    ));
                     return;
                 }
             }
@@ -163,12 +161,10 @@ pub async fn handle_spawn(
     let argv = match argv_for(config, &kind, &cwd_path) {
         Some(a) => a,
         None => {
-            let _ = config.bus.send(Event::ProviderError {
-                source: format!("spawn:{kind:?}"),
-                message: "no agent registered for this id".into(),
-                detail: String::new(),
-                kind: String::new(),
-            });
+            let _ = config.bus.send(Event::provider_error_permanent(
+                &format!("spawn:{kind:?}"),
+                "no agent registered for this id",
+            ));
             return;
         }
     };
@@ -205,12 +201,9 @@ pub async fn handle_spawn(
         Ok(k) => k,
         Err(e) => {
             tracing::error!("handle_spawn: backend.spawn failed: {e}");
-            let _ = config.bus.send(Event::ProviderError {
-                source: "spawn".into(),
-                message: format!("{e}"),
-                detail: String::new(),
-                kind: String::new(),
-            });
+            let _ = config
+                .bus
+                .send(Event::provider_error_permanent("spawn", e.to_string()));
             return;
         }
     };
@@ -686,12 +679,10 @@ async fn resolve_or_create_session(
         // a non-fatal error so the user knows their `s` press landed
         // in a bare directory, not the PR's tree.
         tracing::warn!("worktree provisioning failed: {e}");
-        let _ = config.bus.send(Event::ProviderError {
-            source: "worktree".into(),
-            message: format!("git worktree setup failed; using empty dir ({e})"),
-            detail: String::new(),
-            kind: "retryable".into(),
-        });
+        let _ = config.bus.send(Event::provider_error_retryable(
+            "worktree",
+            format!("git worktree setup failed; using empty dir ({e})"),
+        ));
         ensure_dir_exists(&path).await;
     }
 
@@ -706,6 +697,41 @@ async fn resolve_or_create_session(
     persist_and_broadcast(config, &workspace).await?;
     let _ = config.bus.send(Event::SessionCreated(Box::new(session)));
     Ok((path, new_session_id))
+}
+
+/// Build a deterministic branch name for a task that has no upstream
+/// branch (issues, Linear tickets, future provider-specific items).
+/// Deterministic on `task.id` so two spawns on the same issue map to
+/// the same local branch — otherwise pressing the spawn key twice
+/// would leave two orphan branches, neither push-ready.
+///
+/// Examples:
+/// - `github:owner/repo#42` → `pilot/issue-42`
+/// - `linear:ENG-456`       → `pilot/linear-eng-456`
+/// - anything else          → `pilot/<source>-<sanitized-key>`
+fn derive_branch_for_branchless(task: &Task) -> String {
+    let source = task.id.source.to_ascii_lowercase();
+    let raw_key = &task.id.key;
+
+    if source == "github" {
+        if let Some(hash_idx) = raw_key.rfind('#') {
+            let number = &raw_key[hash_idx + 1..];
+            if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()) {
+                return format!("pilot/issue-{number}");
+            }
+        }
+    }
+
+    let sanitized: String = raw_key
+        .chars()
+        .map(|c| match c {
+            'A'..='Z' => c.to_ascii_lowercase(),
+            'a'..='z' | '0'..='9' | '-' | '_' => c,
+            _ => '-',
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('-');
+    format!("pilot/{source}-{trimmed}")
 }
 
 /// Try to set up a real git worktree at `target` for the workspace's
@@ -723,19 +749,34 @@ async fn provision_worktree(
         .repo
         .as_deref()
         .ok_or_else(|| ServerError::Workspace("task has no repo".into()))?;
-    let branch = task
-        .branch
-        .as_deref()
-        .ok_or_else(|| ServerError::Workspace("task has no branch".into()))?;
     let (owner, name) = repo
         .split_once('/')
         .ok_or_else(|| ServerError::Workspace(format!("repo '{repo}' is not owner/name")))?;
 
     let mgr = pilot_git_ops::WorktreeManager::default_base();
-    let worktree = mgr
-        .checkout_at(target, owner, name, branch)
-        .await
-        .map_err(|e| ServerError::Worktree(format!("checkout_at: {e}")))?;
+    let worktree = match task.branch.as_deref() {
+        Some(branch) => mgr
+            .checkout_at(target, owner, name, branch)
+            .await
+            .map_err(|e| ServerError::Worktree(format!("checkout_at: {e}")))?,
+        None => {
+            // Issue (or other branchless task): cut a fresh branch
+            // off the repo default. Branch name encodes the task key
+            // so two spawns on the same issue land on the same branch
+            // and subsequent presses are idempotent — without that,
+            // pressing `c` twice on issue #42 would create
+            // `pilot/issue-42-…` and `pilot/issue-42-…-2`, neither of
+            // which corresponds to a PR the user can push.
+            let new_branch = derive_branch_for_branchless(task);
+            let base = mgr
+                .default_branch(owner, name)
+                .await
+                .map_err(|e| ServerError::Worktree(format!("default_branch lookup: {e}")))?;
+            mgr.checkout_new_branch_at(target, owner, name, &new_branch, &base)
+                .await
+                .map_err(|e| ServerError::Worktree(format!("checkout_new_branch_at: {e}")))?
+        }
+    };
 
     // Apply mounts: global `worktree.mounts` + per-repo
     // `repos.<owner/name>.mounts` from YAML. Best-effort — a mount
@@ -908,12 +949,10 @@ async fn ensure_worktree_present(
     tracing::info!("worktree {} missing — re-provisioning", path.display());
     if let Err(e) = provision_worktree(workspace, path).await {
         tracing::warn!("re-provision failed: {e}");
-        let _ = config.bus.send(Event::ProviderError {
-            source: "worktree".into(),
-            message: format!("re-checkout failed; using empty dir ({e})"),
-            detail: String::new(),
-            kind: "retryable".into(),
-        });
+        let _ = config.bus.send(Event::provider_error_retryable(
+            "worktree",
+            format!("re-checkout failed; using empty dir ({e})"),
+        ));
         ensure_dir_exists(path).await;
     }
 }
@@ -1076,12 +1115,10 @@ pub async fn migrate_session_paths_if_needed(
                     actual.display(),
                     expected.display()
                 );
-                let _ = config.bus.send(pilot_ipc::Event::ProviderError {
-                    source: "worktree".into(),
-                    message: format!("PR-attach migration failed: {e}"),
-                    detail: String::new(),
-                    kind: "retryable".into(),
-                });
+                let _ = config.bus.send(pilot_ipc::Event::provider_error_retryable(
+                    "worktree",
+                    format!("PR-attach migration failed: {e}"),
+                ));
             }
         }
     }
@@ -1123,12 +1160,10 @@ pub async fn handle_create_session(
     let mut workspace = match load_workspace(config, &workspace_key) {
         Ok(w) => w,
         Err(e) => {
-            let _ = config.bus.send(Event::ProviderError {
-                source: "create_session".into(),
-                message: format!("{e}"),
-                detail: String::new(),
-                kind: String::new(),
-            });
+            let _ = config.bus.send(Event::provider_error_permanent(
+                "create_session",
+                e.to_string(),
+            ));
             return;
         }
     };
@@ -1144,12 +1179,10 @@ pub async fn handle_create_session(
     }
     workspace.add_session(session.clone());
     if let Err(e) = persist_and_broadcast(config, &workspace).await {
-        let _ = config.bus.send(Event::ProviderError {
-            source: "create_session".into(),
-            message: format!("{e}"),
-            detail: String::new(),
-            kind: String::new(),
-        });
+        let _ = config.bus.send(Event::provider_error_permanent(
+            "create_session",
+            e.to_string(),
+        ));
         return;
     }
     let _ = config.bus.send(Event::SessionCreated(Box::new(session)));
@@ -1206,12 +1239,9 @@ async fn persist_and_broadcast(
 }
 
 pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes: &[u8]) {
-    let key = match config.terminals.lock().await.get(&terminal_id).cloned() {
-        Some(k) => k,
-        None => {
-            tracing::trace!("write to unknown terminal {terminal_id:?}");
-            return;
-        }
+    let Some(key) = config.backend_key_for(terminal_id).await else {
+        tracing::trace!("write to unknown terminal {terminal_id:?}");
+        return;
     };
     if let Err(e) = config.backend.write(&key, bytes).await {
         tracing::warn!("backend write {key}: {e}");
@@ -1228,8 +1258,7 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     if !bytes.contains(&b'\r') && !bytes.contains(&b'\n') {
         return;
     }
-    let current = config.agent_states.lock().await.get(&terminal_id).copied();
-    if current != Some(pilot_ipc::AgentState::Asking) {
+    if config.agent_state_for(terminal_id).await != Some(pilot_ipc::AgentState::Asking) {
         return;
     }
     let session_key = config
@@ -1262,15 +1291,46 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
 /// targeted at a live terminal instead of a fresh one. Quietly
 /// no-ops if the terminal isn't an agent (shell terminals don't
 /// have `inject_prompt`) or doesn't exist.
-pub async fn handle_inject_prompt(config: &ServerConfig, terminal_id: TerminalId, prompt: &str) {
-    let backend_key = match config.terminals.lock().await.get(&terminal_id).cloned() {
+pub async fn handle_inject_prompt(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    prompt: &str,
+    fallback_spawn: Option<pilot_ipc::SpawnFallback>,
+) {
+    // Look up — and drop the guard — before any further await so
+    // a nested handle_spawn (in the fallback path) can re-acquire
+    // the same lock without deadlocking. Without the explicit
+    // scope, the temporary `MutexGuard` from the match scrutinee
+    // lives for the entire match arm. The helpers acquire-then-drop
+    // the lock inside one method call so no guard can outlive the
+    // scrutinee.
+    let backend_key = match config.backend_key_for(terminal_id).await {
         Some(k) => k,
         None => {
+            // The TUI's cached terminal id is stale — the agent died
+            // between the user's `w` press and this command arriving.
+            // If a fallback was provided, rewrite this into a Spawn
+            // so the user's prompt isn't silently lost.
+            if let Some(fb) = fallback_spawn {
+                tracing::info!(
+                    "inject_prompt: terminal {terminal_id:?} gone — falling back to Spawn"
+                );
+                handle_spawn(
+                    config,
+                    fb.session_key,
+                    fb.session_id,
+                    fb.kind,
+                    fb.cwd,
+                    Some(prompt.to_string()),
+                )
+                .await;
+                return;
+            }
             tracing::debug!("inject_prompt to unknown terminal {terminal_id:?}");
             return;
         }
     };
-    let kind = match config.terminal_meta.lock().await.get(&terminal_id).cloned() {
+    let kind = match config.terminal_meta_for(terminal_id).await {
         Some((_session_key, kind)) => kind,
         None => {
             tracing::debug!("inject_prompt: no terminal_meta for {terminal_id:?} — skipping");
@@ -1310,9 +1370,8 @@ pub async fn handle_inject_prompt(config: &ServerConfig, terminal_id: TerminalId
 }
 
 pub async fn handle_resize(config: &ServerConfig, terminal_id: TerminalId, cols: u16, rows: u16) {
-    let key = match config.terminals.lock().await.get(&terminal_id).cloned() {
-        Some(k) => k,
-        None => return,
+    let Some(key) = config.backend_key_for(terminal_id).await else {
+        return;
     };
     if let Err(e) = config.backend.resize(&key, cols, rows).await {
         tracing::warn!("backend resize {key}: {e}");
@@ -1323,9 +1382,8 @@ pub async fn handle_resize(config: &ServerConfig, terminal_id: TerminalId, cols:
 /// remaining output chunks (if any), sees the stream close, and emits
 /// `Event::TerminalExited` itself.
 pub async fn handle_close(config: &ServerConfig, terminal_id: TerminalId) {
-    let key = match config.terminals.lock().await.get(&terminal_id).cloned() {
-        Some(k) => k,
-        None => return,
+    let Some(key) = config.backend_key_for(terminal_id).await else {
+        return;
     };
     if let Err(e) = config.backend.kill(&key).await {
         tracing::warn!("backend kill {key}: {e}");
@@ -1732,5 +1790,67 @@ mod tests {
             mounts[1].placement,
             pilot_git_ops::Placement::Above
         ));
+    }
+
+    fn task_for(source: &str, key: &str) -> Task {
+        Task {
+            id: pilot_core::TaskId {
+                source: source.into(),
+                key: key.into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: pilot_core::TaskState::Open,
+            role: pilot_core::TaskRole::Author,
+            ci: pilot_core::CiStatus::default(),
+            review: pilot_core::ReviewStatus::default(),
+            checks: vec![],
+            unread_count: 0,
+            url: String::new(),
+            repo: Some("acme/widget".into()),
+            branch: None,
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: pilot_core::Mergeable::Unknown,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    /// Issue spawns get a deterministic `pilot/issue-<n>` branch so
+    /// pressing the spawn key twice on the same issue lands on the
+    /// same branch instead of accumulating orphans.
+    #[test]
+    fn derive_branch_for_branchless_github_issue() {
+        let t = task_for("github", "acme/widget#42");
+        assert_eq!(derive_branch_for_branchless(&t), "pilot/issue-42");
+    }
+
+    /// Linear / non-GitHub keys go through the sanitizer fallback so
+    /// any odd characters become dashes and the source prefix keeps
+    /// branches namespaced per-provider.
+    #[test]
+    fn derive_branch_for_branchless_linear() {
+        let t = task_for("linear", "ENG-456");
+        assert_eq!(derive_branch_for_branchless(&t), "pilot/linear-eng-456");
+    }
+
+    /// A non-numeric GitHub key (no `#`) falls through to the
+    /// sanitizer instead of producing `pilot/issue-`.
+    #[test]
+    fn derive_branch_for_branchless_github_without_hash() {
+        let t = task_for("github", "acme/widget");
+        assert_eq!(derive_branch_for_branchless(&t), "pilot/github-acme-widget");
     }
 }

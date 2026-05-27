@@ -28,7 +28,14 @@ impl<T: TerminalAdapter> Model<T> {
         // destructive variants — there's no way to fire one
         // without the user confirming.
         if ActionDef::for_action(action).is_destructive() {
-            self.mount_action_confirm(action.clone());
+            // Project-header focused Archive deletes the whole
+            // project (cascading to its workspaces) — the default
+            // confirm prompt assumes a workspace target, which would
+            // be a confusing lie. Compute a tailored prompt for that
+            // case and let the rest fall through to the static
+            // catalog prompt.
+            let custom_prompt = self.action_confirm_override(action);
+            self.mount_action_confirm(action.clone(), custom_prompt);
             return Vec::new();
         }
         self.dispatch_action_unchecked(action)
@@ -44,6 +51,43 @@ impl<T: TerminalAdapter> Model<T> {
     /// Callers OTHER than `dispatch_action` and the
     /// `ActionConfirm` Yes-handler must not exist. Keeping it
     /// `pub(crate)` so the type system makes that hard to break.
+    /// Pick a tailored confirm-modal prompt for the destructive
+    /// `action` at its current focus context. Returns `None` to fall
+    /// back to the static `ActionDef::confirm_prompt`.
+    ///
+    /// Today the only override is `Archive` against a project
+    /// header — the workspace-focused phrasing ("Archive the focused
+    /// workspace?") is wrong for "delete this project and N
+    /// workspaces under it." Adding more overrides here is the right
+    /// growth path — keeps catalog defaults declarative and the
+    /// context-sensitive copy out of the dispatch.
+    fn action_confirm_override(&self, action: &pilot_tui_core::action::Action) -> Option<String> {
+        use pilot_tui_core::action::Action;
+        if !matches!(action, Action::Archive) {
+            return None;
+        }
+        // Workspace focus → use the default prompt.
+        if self.sidebar.selected_workspace_key().is_some() {
+            return None;
+        }
+        // Project header focus → custom phrasing.
+        let project_key = self.sidebar.focused_project_key()?;
+        let project_label = self
+            .sidebar
+            .project_label_for(&project_key)
+            .unwrap_or_else(|| project_key.as_str().to_string());
+        let child_count = self.sidebar.workspaces_in_project(&project_key);
+        Some(match child_count {
+            0 => format!("Delete project `{project_label}`?"),
+            1 => format!(
+                "Delete project `{project_label}`? Its 1 workspace + any running sessions will be killed."
+            ),
+            n => format!(
+                "Delete project `{project_label}`? Its {n} workspaces + any running sessions will be killed."
+            ),
+        })
+    }
+
     pub(crate) fn dispatch_action_unchecked(
         &mut self,
         action: &pilot_tui_core::action::Action,
@@ -124,9 +168,7 @@ impl<T: TerminalAdapter> Model<T> {
                         self.mount_new_workspace_input(project_key);
                     }
                     crate::intent::Intent::Notice(msg) => {
-                        use crate::realm::components::footer::{Notice, NoticeSeverity};
-                        self.status.notice = Some(Notice::new(msg, NoticeSeverity::Info));
-                        self.redraw = true;
+                        self.flash_info(msg);
                     }
                     _ => {}
                 }
@@ -147,7 +189,6 @@ impl<T: TerminalAdapter> Model<T> {
                 if selected.is_empty() {
                     cmds.push(IpcCommand::MarkRead { session_key: sk });
                 } else {
-                    use crate::realm::components::footer::{Notice, NoticeSeverity};
                     let n = selected.len();
                     for index in selected {
                         cmds.push(IpcCommand::MarkActivityRead {
@@ -155,23 +196,27 @@ impl<T: TerminalAdapter> Model<T> {
                             index,
                         });
                     }
-                    self.status.notice = Some(Notice::new(
-                        format!(
-                            "marked {n} selected activit{} read",
-                            if n == 1 { "y" } else { "ies" }
-                        ),
-                        NoticeSeverity::Info,
+                    self.flash_info(format!(
+                        "marked {n} selected activit{} read",
+                        if n == 1 { "y" } else { "ies" }
                     ));
-                    self.redraw = true;
                 }
             }
             Action::Archive => {
                 // Destructive — only reachable from
                 // `dispatch_action_unchecked` after the user said
-                // Yes on the unified ActionConfirm modal. Just
-                // fire the Kill.
+                // Yes on the unified ActionConfirm modal.
+                //
+                // Polymorphic by focused row: cursor on a workspace /
+                // session row deletes that workspace; cursor on a
+                // project header (RepoHeader) deletes the whole
+                // project and cascades to its workspaces. The
+                // availability gate (`availability` in the catalog)
+                // already ensures one of the two has a target.
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Kill { session_key: sk });
+                } else if let Some(project_key) = self.sidebar.focused_project_key() {
+                    cmds.push(IpcCommand::DeleteProject { project_key });
                 }
             }
             Action::AdoptSessions => {
@@ -184,11 +229,42 @@ impl<T: TerminalAdapter> Model<T> {
                         self.mount_adopt_picker(source_key);
                     }
                     crate::intent::Intent::Notice(msg) => {
-                        use crate::realm::components::footer::{Notice, NoticeSeverity};
-                        self.status.notice = Some(Notice::new(msg, NoticeSeverity::Info));
-                        self.redraw = true;
+                        self.flash_info(msg);
                     }
                     _ => {}
+                }
+            }
+            Action::CollapseIntoPr => {
+                // Catalog availability gates on "issue workspace exists"
+                // — the cross-workspace lookup ("does any PR close
+                // this?") happens here so the catalog stays
+                // single-workspace. When no claiming PR is known
+                // locally, surface a footer notice instead of firing
+                // a no-op IPC the daemon would just log + drop.
+                let Some(issue_ws) = self.sidebar.selected_workspace().cloned() else {
+                    return cmds;
+                };
+                let Some(primary) = issue_ws.primary_task() else {
+                    return cmds;
+                };
+                let claiming_pr = self
+                    .sidebar
+                    .workspaces_iter()
+                    .find(|w| {
+                        w.pr.as_ref()
+                            .is_some_and(|pr| pr.closes_issues.contains(&primary.id))
+                    })
+                    .map(|w| pilot_core::SessionKey::from(&w.key));
+                match claiming_pr {
+                    Some(_pr_key) => {
+                        cmds.push(IpcCommand::CollapseIntoPr {
+                            issue_workspace_key: pilot_core::SessionKey::from(&issue_ws.key),
+                        });
+                        self.flash_info("joining into PR…");
+                    }
+                    None => {
+                        self.flash_info("no PR closes this issue (or it isn't synced yet)");
+                    }
                 }
             }
             Action::ToggleSnooze => {
@@ -227,22 +303,19 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::Refresh => {
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
                 cmds.push(IpcCommand::Refresh);
                 // Pre-arm the bg_poll indicator so the user gets
                 // feedback on the keystroke — same as the
                 // `Shift+R` handler did inline before.
                 self.status
                     .note_poll_progress("github", "manual refresh requested");
-                self.status.notice =
-                    Some(Notice::new("refreshing…".to_string(), NoticeSeverity::Hint));
+                self.flash_hint("refreshing…");
                 // Arm a one-shot ack so the next PollCompleted /
                 // ProviderError surfaces a clear "✓ sync ok" or
                 // "✗ sync failed" footer notice — silent
                 // spinner-clears were being read as "did anything
                 // happen?"
                 self.pending_refresh_ack = true;
-                self.redraw = true;
             }
             Action::OpenHelp => {
                 self.mount_help();
@@ -301,33 +374,27 @@ impl<T: TerminalAdapter> Model<T> {
                 // browser actually came up — silent spawn failures
                 // (no xdg-open on a headless box, etc.) would be
                 // confusing otherwise.
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
+
                 let Some(ws) = self.sidebar.selected_workspace() else {
                     return cmds;
                 };
                 let Some(url) = ws.primary_task().map(|t| t.url.clone()) else {
-                    self.status.notice = Some(Notice::new(
-                        "no task URL on this workspace",
-                        NoticeSeverity::Info,
-                    ));
-                    self.redraw = true;
+                    self.flash_info("no task URL on this workspace");
                     return cmds;
                 };
                 match pilot_tui_core::editors::open_url(&url) {
                     Ok(()) => {
                         tracing::info!(%url, "opened workspace URL in browser");
-                        self.status.notice =
-                            Some(Notice::new(format!("opened {url}"), NoticeSeverity::Info));
+                        self.flash_info(format!("opened {url}"));
                     }
                     Err(e) => {
                         tracing::warn!(%url, "open_url failed: {e}");
-                        self.status.notice = Some(Notice::new(
+                        self.flash(
                             format!("open failed: {e}"),
-                            NoticeSeverity::Retryable,
-                        ));
+                            crate::realm::components::footer::NoticeSeverity::Retryable,
+                        );
                     }
                 }
-                self.redraw = true;
             }
             // Actions not yet handled here stay in the existing
             // handlers. As we migrate, the per-key match arms in

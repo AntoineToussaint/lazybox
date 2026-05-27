@@ -208,10 +208,31 @@ impl Sidebar {
         self.inner.focused_project_key()
     }
 
+    /// See `Sidebar::project_label_for`.
+    pub fn project_label_for(&self, key: &pilot_core::ProjectKey) -> Option<String> {
+        self.inner.project_label_for(key)
+    }
+
+    /// See `Sidebar::workspaces_iter`.
+    pub fn workspaces_iter(&self) -> impl Iterator<Item = &pilot_core::Workspace> {
+        self.inner.workspaces_iter()
+    }
+
+    /// See `Sidebar::workspaces_in_project`.
+    pub fn workspaces_in_project(&self, key: &pilot_core::ProjectKey) -> usize {
+        self.inner.workspaces_in_project(key)
+    }
+
     /// Move the cursor onto the workspace whose key matches.
     /// Returns true if found.
     pub fn focus_workspace_key(&mut self, key: &pilot_core::SessionKey) -> bool {
         self.inner.focus_workspace_key(key)
+    }
+
+    /// Move the cursor onto the RepoHeader row for the given project.
+    /// See `Sidebar::focus_project_header`.
+    pub fn focus_project_header(&mut self, key: &pilot_core::ProjectKey) -> bool {
+        self.inner.focus_project_header(key)
     }
 
     /// Move the cursor onto the named session sub-row. Caller is

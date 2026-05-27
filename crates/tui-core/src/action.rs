@@ -76,6 +76,13 @@ pub enum Action {
     MergePr,
     /// Move every session from the focused workspace to another.
     AdoptSessions,
+    /// Manually fold an issue workspace into the PR workspace that
+    /// closes it. Only available when the local state already knows
+    /// of a PR claiming this issue (via `closes_issues`). Same end-
+    /// state as the daemon's auto-prompt path; this one bypasses
+    /// the `rejected_merge` dedupe so a previously-dismissed prompt
+    /// becomes actionable.
+    CollapseIntoPr,
     /// Add reviewer(s) to the workspace's PR (github GraphQL mutation).
     RequestReviewers,
     /// Add assignee(s) to the workspace's PR or issue.
@@ -181,6 +188,7 @@ pub enum ActionKind {
     Archive,
     MergePr,
     AdoptSessions,
+    CollapseIntoPr,
     RequestReviewers,
     AddAssignees,
     OpenInBrowser,
@@ -228,6 +236,7 @@ impl Action {
             Action::Archive => ActionKind::Archive,
             Action::MergePr => ActionKind::MergePr,
             Action::AdoptSessions => ActionKind::AdoptSessions,
+            Action::CollapseIntoPr => ActionKind::CollapseIntoPr,
             Action::RequestReviewers => ActionKind::RequestReviewers,
             Action::AddAssignees => ActionKind::AddAssignees,
             Action::OpenInBrowser => ActionKind::OpenInBrowser,
@@ -415,6 +424,13 @@ impl ActionDef {
                 describe: "Move every session from this workspace into another.",
                 section: Section::Workspace,
             },
+            ActionKind::CollapseIntoPr => &Self {
+                kind: ActionKind::CollapseIntoPr,
+                default_keys: "Shift-J",
+                label: "join into PR",
+                describe: "Fold this issue into the PR that closes it (one row instead of two).",
+                section: Section::Workspace,
+            },
             ActionKind::RequestReviewers => &Self {
                 kind: ActionKind::RequestReviewers,
                 default_keys: "Shift-V",
@@ -537,6 +553,7 @@ impl ActionDef {
             ActionKind::OpenInBrowser,
             ActionKind::Reply,
             ActionKind::AdoptSessions,
+            ActionKind::CollapseIntoPr,
             ActionKind::Archive,
             // Activity
             ActionKind::ToggleActivity,
@@ -775,6 +792,7 @@ impl ActionKind {
             ActionKind::Archive => "archive",
             ActionKind::MergePr => "merge_pr",
             ActionKind::AdoptSessions => "adopt_sessions",
+            ActionKind::CollapseIntoPr => "collapse_into_pr",
             ActionKind::RequestReviewers => "request_reviewers",
             ActionKind::AddAssignees => "add_assignees",
             ActionKind::OpenInBrowser => "open_in_browser",
@@ -860,6 +878,15 @@ pub fn availability(kind: ActionKind, workspace: Option<&pilot_core::Workspace>)
             intent::resolve_adopt(workspace),
             intent::Intent::MountAdoptPicker { .. },
         ),
+        // Only surfaces on ISSUE workspaces — folding a PR into
+        // itself makes no sense. We can't tell here whether the
+        // local state actually knows a claiming PR (that requires
+        // the cross-workspace lookup), so the dispatcher does the
+        // second-stage gate + surfaces a "no claiming PR known"
+        // footer when the user presses it on an orphan issue.
+        ActionKind::CollapseIntoPr => workspace
+            .map(|w| w.pr.is_none() && (!w.gh_issues.is_empty() || !w.linear_issues.is_empty()))
+            .unwrap_or(false),
         ActionKind::Archive => matches!(
             intent::resolve_kill(workspace),
             intent::Intent::KillWorkspace { .. },

@@ -235,6 +235,7 @@ impl<T: TerminalAdapter> Model<T> {
                 pilot_tui_core::action::ActionKind::ToggleSnooze => Some(Action::ToggleSnooze),
                 pilot_tui_core::action::ActionKind::Refresh => Some(Action::Refresh),
                 pilot_tui_core::action::ActionKind::AdoptSessions => Some(Action::AdoptSessions),
+                pilot_tui_core::action::ActionKind::CollapseIntoPr => Some(Action::CollapseIntoPr),
                 pilot_tui_core::action::ActionKind::Reply => Some(Action::Reply),
                 pilot_tui_core::action::ActionKind::RequestReviewers => {
                     Some(Action::RequestReviewers)
@@ -288,16 +289,12 @@ impl<T: TerminalAdapter> Model<T> {
         // `TerminalSpawned` arrives in `handle_daemon_event`.
         for cmd in &cmds {
             if let IpcCommand::Spawn { kind, .. } = cmd {
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
                 let label = match kind {
                     pilot_ipc::TerminalKind::Shell => "shell".to_string(),
                     pilot_ipc::TerminalKind::Agent(a) => a.to_string(),
                     other => format!("{other:?}").to_lowercase(),
                 };
-                self.status.notice = Some(Notice::new(
-                    format!("Spawning {label}…"),
-                    NoticeSeverity::Info,
-                ));
+                self.flash_info(format!("Spawning {label}…"));
             }
         }
         for cmd in cmds {
@@ -383,14 +380,25 @@ impl<T: TerminalAdapter> Model<T> {
             } => {
                 if let Some(terminal_id) = self.sidebar.find_agent_terminal(&session_key, &agent_id)
                 {
-                    use crate::realm::components::footer::{Notice, NoticeSeverity};
-                    self.status.notice = Some(Notice::new(
-                        format!("→ injecting into existing {agent_id}"),
-                        NoticeSeverity::Hint,
-                    ));
+                    self.flash_hint(format!("→ injecting into existing {agent_id}"));
+                    // Always carry the Spawn parameters so a stale
+                    // terminal id (agent died between this lookup and
+                    // the command arriving at the daemon) falls back
+                    // to Spawn instead of silently dropping the
+                    // user's prompt. The TUI's view of
+                    // `running_terminals` is updated from a broadcast
+                    // channel, so there's always a small window where
+                    // `find_agent_terminal` returns a dead id.
+                    let fallback_spawn = Some(pilot_ipc::SpawnFallback {
+                        session_key: session_key.clone(),
+                        session_id,
+                        kind: pilot_ipc::TerminalKind::Agent(agent_id.clone()),
+                        cwd: cwd.clone(),
+                    });
                     IpcCommand::InjectPrompt {
                         terminal_id,
                         prompt,
+                        fallback_spawn,
                     }
                 } else {
                     IpcCommand::Spawn {
@@ -417,6 +425,17 @@ impl<T: TerminalAdapter> Model<T> {
     /// Test accessor — read-only handle to the sidebar wrapper.
     pub fn sidebar(&self) -> &crate::realm::components::sidebar::Sidebar {
         &self.sidebar
+    }
+
+    /// Test accessor — mutable handle to the sidebar wrapper. Used
+    /// by orchestrator tests (integration test crate) to position
+    /// the cursor on a specific row before dispatching a key. Not
+    /// `#[cfg(test)]` because integration tests live in a separate
+    /// crate; doc-hidden + `__test_` prefix mark it as off-limits
+    /// for production callers without forcing a test-config wall.
+    #[doc(hidden)]
+    pub fn __test_sidebar_mut(&mut self) -> &mut crate::realm::components::sidebar::Sidebar {
+        &mut self.sidebar
     }
 
     /// Look up the Quit chord — catalog default OR
@@ -674,8 +693,7 @@ impl<T: TerminalAdapter> Model<T> {
                             self.redraw = true;
                         }
                         if let Some(msg) = self.right.drain_selection_notice() {
-                            use crate::realm::components::footer::{Notice, NoticeSeverity};
-                            self.status.notice = Some(Notice::new(msg, NoticeSeverity::Hint));
+                            self.flash_hint(msg);
                         }
                     }
                 }
@@ -704,15 +722,11 @@ impl<T: TerminalAdapter> Model<T> {
                         let text = self.terminals.extract_text(right_bottom_rect, start, end);
                         if !text.trim().is_empty() {
                             emit_clipboard_copy(&text);
-                            use crate::realm::components::footer::{Notice, NoticeSeverity};
                             let lines = text.lines().count();
-                            self.status.notice = Some(Notice::new(
-                                format!(
-                                    "copied {} line{} to clipboard",
-                                    lines,
-                                    if lines == 1 { "" } else { "s" }
-                                ),
-                                NoticeSeverity::Hint,
+                            self.flash_hint(format!(
+                                "copied {} line{} to clipboard",
+                                lines,
+                                if lines == 1 { "" } else { "s" }
                             ));
                         }
                     } else {

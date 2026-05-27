@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# pilot pre-commit hook.
+#
+# Runs the same fmt + clippy gates as CI so a botched format never
+# leaves the laptop. Install once: `make install-hooks`.
+#
+# Bypass for a one-off "I know what I'm doing" commit:
+#     git commit --no-verify
+# (Don't do this on the shared branch.)
+
+set -euo pipefail
+
+# Honor pilot's vendored zig if present — same trick the Makefile
+# uses so anything the hook spawns picks up zig 0.15.2 instead of
+# whatever brew put on PATH.
+repo_root="$(git rev-parse --show-toplevel)"
+if [ -x "${repo_root}/vendor/zig/zig" ]; then
+    export PATH="${repo_root}/vendor/zig:${PATH}"
+fi
+
+# 1. Format check — fastest, fails most often. Same invocation
+#    the CI fmt job runs.
+echo "pre-commit: cargo fmt --all -- --check"
+if ! cargo fmt --all -- --check; then
+    cat <<EOF >&2
+
+pre-commit: rustfmt diff above. Run \`cargo fmt --all\` (or
+\`make fmt\`) and re-commit. Bypass with \`git commit --no-verify\`
+if intentional (don't do this on shared branches).
+EOF
+    exit 1
+fi
+
+# 2. Clippy on the staged tree. Slower but catches the things CI
+#    catches before they need a re-push round-trip. Same flags CI
+#    uses.
+echo "pre-commit: cargo clippy --workspace --all-targets -- -D warnings"
+if ! cargo clippy --workspace --all-targets -- -D warnings; then
+    cat <<EOF >&2
+
+pre-commit: clippy warnings above. Fix them or bypass with
+\`git commit --no-verify\`.
+EOF
+    exit 1
+fi
+
+echo "pre-commit: ok"

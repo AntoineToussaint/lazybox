@@ -1719,6 +1719,39 @@ async fn confirm_merge_reject_pins_against_re_prompting() {
         "rejecting must keep the issue workspace intact",
     );
 }
+
+/// Within the dedupe window, a dismissed-but-not-rejected merge must
+/// NOT re-emit `WorkspaceMergePending` on every poll — otherwise the
+/// modal haunts the user. Mirror of the "rejected" guard above but
+/// without the explicit no.
+#[tokio::test]
+async fn dismissed_merge_does_not_re_emit_within_dedupe_window() {
+    let config = ServerConfig::in_memory();
+    let (_issue_key, _) = seed_issue_with_session(&config, "o/r#71").await;
+
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+
+    // No ConfirmMerge — just simulate the user pressing Esc on the
+    // modal. The TUI fix makes this a silent dismissal; the daemon
+    // never hears about it.
+
+    // Re-poll the same PR immediately. Without the re-prompt
+    // window, the daemon would fire a fresh WorkspaceMergePending
+    // every tick.
+    let mut bus = config.bus.subscribe();
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+
+    let mut saw_pending = false;
+    while let Ok(evt) = bus.try_recv() {
+        if matches!(evt, Event::WorkspaceMergePending { .. }) {
+            saw_pending = true;
+        }
+    }
+    assert!(
+        !saw_pending,
+        "dismissed merge prompts must not re-fire on every poll",
+    );
+}
 #[tokio::test]
 async fn body_text_referencing_another_pr_does_not_delete_that_pr() {
     // CRITICAL regression: GitHub's `#N` syntax is shared by issues
@@ -1938,4 +1971,234 @@ async fn tick_outcome_does_not_flag_unknown_when_all_tasks_are_resolved() {
     let mut state = polling::TickState::default();
     let outcome = polling::tick_with_state(&config, &[source], &mut state).await;
     assert!(!outcome.saw_unknown_mergeable);
+}
+
+/// `delete_project` cascades: every workspace whose `project_key`
+/// matches is deleted, then the project record itself. `ProjectRemoved`
+/// fires last so a TUI client doesn't drop the project before its
+/// children's `WorkspaceRemoved` events arrive.
+#[tokio::test]
+async fn delete_project_cascades_through_workspaces() {
+    use pilot_core::{Project, ProjectKey, WorkspaceKey};
+
+    let config = ServerConfig::in_memory();
+    let project_key = ProjectKey::github("acme", "widget");
+    let project = Project::new(project_key.clone(), "acme/widget", Utc::now());
+
+    // Two workspaces under this project + one orphan workspace that
+    // points at a DIFFERENT project — must survive the cascade.
+    let mut ws_a = pilot_core::Workspace::from_task(make_task("acme/widget#1"), Utc::now());
+    ws_a.project_key = Some(project_key.clone());
+    let mut ws_b = pilot_core::Workspace::from_task(make_task("acme/widget#2"), Utc::now());
+    ws_b.project_key = Some(project_key.clone());
+    let mut other = pilot_core::Workspace::from_task(make_task("other/repo#9"), Utc::now());
+    other.project_key = Some(ProjectKey::github("other", "repo"));
+
+    for ws in [&ws_a, &ws_b, &other] {
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: ws.key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+    }
+    config
+        .store
+        .save_project(&pilot_store::ProjectRecord {
+            key: project.key.as_str().to_string(),
+            created_at: project.created_at,
+            project_json: Some(serde_json::to_string(&project).unwrap()),
+        })
+        .unwrap();
+
+    let mut bus = config.bus.subscribe();
+    polling::delete_project(&config, &project_key).await;
+
+    // The two child workspaces are gone, the orphan is not.
+    let key_a = WorkspaceKey::new(ws_a.key.as_str());
+    let key_b = WorkspaceKey::new(ws_b.key.as_str());
+    let key_other = WorkspaceKey::new(other.key.as_str());
+    assert!(config.store.get_workspace(&key_a).unwrap().is_none());
+    assert!(config.store.get_workspace(&key_b).unwrap().is_none());
+    assert!(
+        config.store.get_workspace(&key_other).unwrap().is_some(),
+        "workspaces in OTHER projects must not be touched by the cascade",
+    );
+    // Project record itself is gone.
+    assert!(
+        !config
+            .store
+            .list_projects()
+            .unwrap()
+            .iter()
+            .any(|p| p.key == project_key.as_str())
+    );
+
+    // Drain events: must see WorkspaceRemoved for both, then
+    // ProjectRemoved last (so a client doesn't drop the parent
+    // before the children).
+    let mut removed_workspaces = std::collections::HashSet::new();
+    let mut saw_project_removed = false;
+    let mut saw_project_removed_after_workspace = false;
+    while let Ok(evt) = bus.try_recv() {
+        match evt {
+            Event::WorkspaceRemoved(k) => {
+                removed_workspaces.insert(k.as_str().to_string());
+            }
+            Event::ProjectRemoved(k) => {
+                assert_eq!(k, project_key);
+                if !removed_workspaces.is_empty() {
+                    saw_project_removed_after_workspace = true;
+                }
+                saw_project_removed = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_project_removed, "ProjectRemoved must fire");
+    assert!(
+        saw_project_removed_after_workspace,
+        "ProjectRemoved must come after the children's WorkspaceRemoved events",
+    );
+    assert!(removed_workspaces.contains(ws_a.key.as_str()));
+    assert!(removed_workspaces.contains(ws_b.key.as_str()));
+    assert!(
+        !removed_workspaces.contains(other.key.as_str()),
+        "the orphan workspace must not have been removed",
+    );
+}
+
+/// Manual `Shift+J` collapse: the user folds an issue workspace
+/// into the PR that closes it. Same end state as the auto-merge
+/// path but bypasses the dedupe state so a previously-dismissed
+/// prompt is actionable again.
+#[tokio::test]
+async fn collapse_into_pr_folds_issue_workspace_into_claiming_pr() {
+    use pilot_core::WorkspaceKey;
+
+    let config = ServerConfig::in_memory();
+
+    // Seed an issue workspace with a live session — this is what
+    // triggers the auto-prompt path that the manual flow has to
+    // override. Without a session the auto path silently merges and
+    // there's nothing for the manual key to do.
+    let (issue_key, _session_id) = seed_issue_with_session(&config, "o/r#71").await;
+
+    // Seed the PR that closes the issue.
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+
+    // Simulate "user dismissed the auto-prompt with No" — pins
+    // the issue in `rejected_merge`. The manual trigger must
+    // override that pin.
+    let pr_key_for_reject = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+        "o/r#141",
+        &["o/r#71"],
+    )));
+    polling::handle_confirm_merge(&config, issue_key.clone(), pr_key_for_reject.clone(), false)
+        .await;
+    // Sanity: rejecting kept both rows in place.
+    assert!(config.store.get_workspace(&issue_key).unwrap().is_some());
+
+    polling::handle_collapse_into_pr(&config, issue_key.clone()).await;
+
+    let pr_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+        "o/r#141",
+        &["o/r#71"],
+    )));
+    assert!(
+        config.store.get_workspace(&issue_key).unwrap().is_none(),
+        "issue workspace must be removed after manual collapse",
+    );
+    let pr_record = config
+        .store
+        .get_workspace(&pr_key)
+        .unwrap()
+        .expect("pr exists");
+    let pr_ws: pilot_core::Workspace =
+        serde_json::from_str(&pr_record.workspace_json.unwrap()).unwrap();
+    // The absorb path migrates the issue task onto the PR
+    // workspace's gh_issues. Verify it landed by task key —
+    // seed_issue_with_session uses key "o/r#71" for the issue.
+    assert!(
+        pr_ws.gh_issues.iter().any(|t| t.id.key == "o/r#71"),
+        "issue task should be attached to the PR workspace after collapse",
+    );
+}
+
+/// `handle_collapse_into_pr` is a no-op when no PR claims the
+/// focused issue. The TUI's dispatcher should catch this case
+/// first (via local lookup) — this is the belt-and-braces
+/// defense in case a stale Command arrives.
+#[tokio::test]
+async fn collapse_into_pr_is_noop_when_no_claiming_pr_known() {
+    use pilot_core::WorkspaceKey;
+    let config = ServerConfig::in_memory();
+
+    // Issue workspace, NO matching PR seeded.
+    let issue_task = {
+        let mut t = make_task("o/r#71");
+        t.url = "https://github.com/o/r/issues/71".into();
+        t.branch = None;
+        t
+    };
+    let issue_ws = pilot_core::Workspace::from_task(issue_task, Utc::now());
+    let issue_key = WorkspaceKey::new(issue_ws.key.as_str());
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: issue_key.as_str().to_string(),
+            created_at: issue_ws.created_at,
+            workspace_json: Some(serde_json::to_string(&issue_ws).unwrap()),
+        })
+        .unwrap();
+
+    polling::handle_collapse_into_pr(&config, issue_key.clone()).await;
+
+    // Issue workspace still there — nothing was collapsed.
+    assert!(config.store.get_workspace(&issue_key).unwrap().is_some());
+}
+
+/// `delete_project` on a project with NO workspaces still removes
+/// the project record and fires `ProjectRemoved`. Covers the "user
+/// just made a local project, hasn't added a workspace yet, presses
+/// Shift-X" path.
+#[tokio::test]
+async fn delete_project_with_no_workspaces_still_removes_project() {
+    use pilot_core::{Project, ProjectKey};
+
+    let config = ServerConfig::in_memory();
+    let project_key = ProjectKey::local("scratch");
+    let project = Project::new(project_key.clone(), "scratch", Utc::now());
+    config
+        .store
+        .save_project(&pilot_store::ProjectRecord {
+            key: project.key.as_str().to_string(),
+            created_at: project.created_at,
+            project_json: Some(serde_json::to_string(&project).unwrap()),
+        })
+        .unwrap();
+
+    let mut bus = config.bus.subscribe();
+    polling::delete_project(&config, &project_key).await;
+
+    assert!(
+        !config
+            .store
+            .list_projects()
+            .unwrap()
+            .iter()
+            .any(|p| p.key == project_key.as_str())
+    );
+
+    let mut saw = false;
+    while let Ok(evt) = bus.try_recv() {
+        if let Event::ProjectRemoved(k) = evt
+            && k == project_key
+        {
+            saw = true;
+        }
+    }
+    assert!(saw, "ProjectRemoved must fire even with no workspaces");
 }

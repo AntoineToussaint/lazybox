@@ -815,6 +815,12 @@ impl TerminalStack {
     }
 
     pub fn cycle_tab_forward(&mut self) {
+        // Clamp first: if a terminal exited mid-session, `active_tab_idx`
+        // may exceed the visible-terminals length. Without this, the
+        // next forward cycle would wrap from a phantom index instead
+        // of from the actual current tab. Symptom user reported:
+        // closed all but the lone terminal, Tab-cycle skipped it.
+        self.clamp_active_tab();
         let n = self.visible_terminals().len();
         if n == 0 {
             self.active_tab_idx = 0;
@@ -824,6 +830,7 @@ impl TerminalStack {
     }
 
     pub fn cycle_tab_backward(&mut self) {
+        self.clamp_active_tab();
         let n = self.visible_terminals().len();
         if n == 0 {
             self.active_tab_idx = 0;
@@ -1264,13 +1271,22 @@ impl TerminalStack {
         };
 
         if visible.is_empty() {
+            let line = Line::from(Span::styled(
+                "(no terminals — press s for shell, c for claude)",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+            // Pre-truncate so a narrow pane doesn't clip mid-word
+            // without an `…` hint. ratatui's Paragraph clips
+            // silently; the user-visible bug was the right pane
+            // showing "c for" with no indication that "claude)"
+            // was cut.
             frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "(no terminals — press s for shell, c for claude)",
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                ))),
+                Paragraph::new(crate::components::table::truncate_line(
+                    line,
+                    inner.width as usize,
+                )),
                 inner,
             );
             return;

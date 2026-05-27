@@ -230,6 +230,20 @@ impl fmt::Debug for ProviderCredentialInput {
     }
 }
 
+/// Spawn parameters carried alongside `Command::InjectPrompt` so the
+/// daemon can fall back to creating a fresh terminal when the cached
+/// `terminal_id` no longer exists (agent died between the user's `w`
+/// press and the command arriving). Mirrors the `Spawn` variant's
+/// fields exactly so the rewrite is a straight field-for-field copy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpawnFallback {
+    pub session_key: SessionKey,
+    #[serde(default)]
+    pub session_id: Option<pilot_core::SessionId>,
+    pub kind: TerminalKind,
+    pub cwd: Option<String>,
+}
+
 /// TUI → daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
@@ -278,11 +292,20 @@ pub enum Command {
     /// the user's running claude tab instead of spawning a second
     /// one. The daemon looks up the agent for `terminal_id` and
     /// runs `agent.inject_prompt(prompt)` + `agent.inject_submit()`,
-    /// the same paste/submit split used at spawn time. Quietly
-    /// no-ops if the terminal is not an agent or doesn't exist.
+    /// the same paste/submit split used at spawn time.
+    ///
+    /// `fallback_spawn` covers the race where the TUI cached the
+    /// agent's terminal id, the agent died, `TerminalExited` is in
+    /// flight but the user already pressed `w`. Without the fallback
+    /// the daemon used to silently no-op and the prompt was lost.
+    /// When set, an unknown / dead `terminal_id` is rewritten back
+    /// into a Spawn with the carried parameters + `prompt` as the
+    /// initial prompt.
     InjectPrompt {
         terminal_id: TerminalId,
         prompt: String,
+        #[serde(default)]
+        fallback_spawn: Option<SpawnFallback>,
     },
     Resize {
         terminal_id: TerminalId,
@@ -294,6 +317,25 @@ pub enum Command {
     },
     Kill {
         session_key: SessionKey,
+    },
+    /// Delete a Project: kill every workspace under it (which kills
+    /// every backing terminal) then drop the Project record. The
+    /// daemon broadcasts `WorkspaceRemoved` for each workspace then
+    /// `ProjectRemoved` for the project so the sidebar can drop the
+    /// rows in one batch. Destructive — gated by the unified
+    /// ActionConfirm modal on the TUI side.
+    DeleteProject {
+        project_key: pilot_core::ProjectKey,
+    },
+    /// Manually collapse an issue workspace into the PR workspace
+    /// that closes it. Same end-state as the auto-detect path
+    /// (`merge_closing_issue_workspaces`) but invoked by the user —
+    /// bypasses the `rejected_merge` / `prompted_merge` dedupe
+    /// state so a previously-dismissed prompt becomes actionable
+    /// again. The daemon picks the target PR by scanning workspaces
+    /// for one whose `closes_issues` includes this issue.
+    CollapseIntoPr {
+        issue_workspace_key: SessionKey,
     },
     MarkRead {
         session_key: SessionKey,
@@ -669,9 +711,9 @@ pub enum Event {
         /// if the producer didn't classify the error (legacy path).
         #[serde(default)]
         detail: String,
-        /// Severity. `"retryable"` / `"auth"` / `"permanent"`. Drives
-        /// whether the TUI auto-mounts an error modal. Empty
-        /// (uncategorized) is treated as `"permanent"` for safety.
+        /// Severity. See [`ProviderErrorKind`] — the daemon writes
+        /// `kind.as_str()` here. Empty (uncategorized) is treated
+        /// as `Permanent` for safety.
         #[serde(default)]
         kind: String,
     },
@@ -794,6 +836,67 @@ pub enum Event {
         principal_id: PrincipalId,
         credentials: Vec<ProviderCredentialMetadata>,
     },
+}
+
+/// Severity classification for `Event::ProviderError`. The TUI uses
+/// this to decide whether to auto-mount an error modal or just flash
+/// a footer notice. Stored on the wire as the plain string returned
+/// by `as_str` so existing TUI matches keep working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderErrorKind {
+    /// Network blip, rate limit, transient API failure. The TUI
+    /// shows a footer notice and we keep polling.
+    Retryable,
+    /// Credentials failed to resolve / unauthorized. The TUI walks
+    /// the user through re-auth.
+    Auth,
+    /// Genuine misconfiguration or upstream invariant violation.
+    /// Surfaces an error modal.
+    Permanent,
+}
+
+impl ProviderErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Retryable => "retryable",
+            Self::Auth => "auth",
+            Self::Permanent => "permanent",
+        }
+    }
+}
+
+impl Event {
+    /// Build a `ProviderError` event with the given source / message
+    /// / kind. Replaces ~28 hand-rolled struct literals that all
+    /// carried the same `detail: String::new()` shape. Use the
+    /// kind-specific shortcuts below when classification is clear at
+    /// the call site.
+    pub fn provider_error(
+        source: &str,
+        message: impl Into<String>,
+        kind: ProviderErrorKind,
+    ) -> Self {
+        Self::ProviderError {
+            source: source.to_string(),
+            message: message.into(),
+            detail: String::new(),
+            kind: kind.as_str().to_string(),
+        }
+    }
+
+    /// Shorthand for a retryable provider error. Use for the
+    /// transient cases — network, rate limit, "GitHub said please
+    /// try again." The TUI doesn't escalate these to a modal.
+    pub fn provider_error_retryable(source: &str, message: impl Into<String>) -> Self {
+        Self::provider_error(source, message, ProviderErrorKind::Retryable)
+    }
+
+    /// Shorthand for a permanent provider error. Use for the genuine
+    /// "this won't fix itself by waiting" cases — bad config, missing
+    /// repo, malformed task. The TUI auto-mounts a modal.
+    pub fn provider_error_permanent(source: &str, message: impl Into<String>) -> Self {
+        Self::provider_error(source, message, ProviderErrorKind::Permanent)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

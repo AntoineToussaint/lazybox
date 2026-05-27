@@ -39,11 +39,7 @@ impl<T: TerminalAdapter> Model<T> {
             && !body.trim().is_empty()
         {
             cmds.push(IpcCommand::PostReply { session_key, body });
-            use crate::realm::components::footer::{Notice, NoticeSeverity};
-            self.status.notice = Some(Notice::new(
-                "Reply submitted — fetching…",
-                NoticeSeverity::Info,
-            ));
+            self.flash_info("Reply submitted — fetching…");
             cmds.push(IpcCommand::Refresh);
         }
         cmds
@@ -87,6 +83,12 @@ impl<T: TerminalAdapter> Model<T> {
                 let name = text.trim().to_string();
                 if !name.is_empty() {
                     tracing::info!(project_name = %name, "creating new local project");
+                    // Stash the name so the matching `ProjectUpserted`
+                    // event can focus the new header + auto-mount the
+                    // new-workspace input. Without this hand-off, the
+                    // freshly-created project is unreachable via j/k
+                    // (header rows are skipped by `move_cursor_by`).
+                    self.pending_focus_project_name = Some(name.clone());
                     cmds.push(IpcCommand::CreateProject { name });
                 }
             }
@@ -191,16 +193,11 @@ impl<T: TerminalAdapter> Model<T> {
             self.pop_modal();
             let source = self.pending_adopt_source.take();
             if let (Some(source_key), Some(target_key)) = (source, target) {
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
                 cmds.push(IpcCommand::AdoptSessions {
                     source_workspace_key: source_key.clone(),
                     target_workspace_key: target_key.clone(),
                 });
-                self.status.notice = Some(Notice::new(
-                    format!("adopted sessions: {source_key} → {target_key}"),
-                    NoticeSeverity::Info,
-                ));
-                self.redraw = true;
+                self.flash_info(format!("adopted sessions: {source_key} → {target_key}"));
             }
             return cmds;
         }
@@ -215,17 +212,12 @@ impl<T: TerminalAdapter> Model<T> {
             self.pop_modal();
             let workspace_key = self.pending_review_request.take();
             if let (Some(workspace_key), false) = (workspace_key, logins.is_empty()) {
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
                 let count = logins.len();
                 cmds.push(IpcCommand::RequestReviewers {
                     workspace_key,
                     logins,
                 });
-                self.status.notice = Some(Notice::new(
-                    format!("requested {count} reviewer(s)"),
-                    NoticeSeverity::Info,
-                ));
-                self.redraw = true;
+                self.flash_info(format!("requested {count} reviewer(s)"));
             }
             return cmds;
         }
@@ -241,7 +233,6 @@ impl<T: TerminalAdapter> Model<T> {
             self.snooze_choices.clear();
             self.pop_modal();
             if let (Some(session_key), Some(duration)) = (workspace_key, duration) {
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
                 let until = chrono::Utc::now()
                     + chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::hours(4));
                 cmds.push(IpcCommand::Snooze { session_key, until });
@@ -253,11 +244,7 @@ impl<T: TerminalAdapter> Model<T> {
                 } else {
                     format!("{}d", mins / 60 / 24)
                 };
-                self.status.notice = Some(Notice::new(
-                    format!("snoozed for {label}"),
-                    NoticeSeverity::Info,
-                ));
-                self.redraw = true;
+                self.flash_info(format!("snoozed for {label}"));
             }
             return cmds;
         }
@@ -275,7 +262,6 @@ impl<T: TerminalAdapter> Model<T> {
             self.assignees_choices.clear();
             self.pop_modal();
             if let Some(workspace_key) = self.pending_assignees_request.take() {
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
                 let count = logins.len();
                 let msg = if count == 0 {
                     "cleared assignees".to_string()
@@ -286,8 +272,7 @@ impl<T: TerminalAdapter> Model<T> {
                     workspace_key,
                     logins,
                 });
-                self.status.notice = Some(Notice::new(msg, NoticeSeverity::Info));
-                self.redraw = true;
+                self.flash_info(msg);
             }
             return cmds;
         }
@@ -310,15 +295,10 @@ impl<T: TerminalAdapter> Model<T> {
                     cwd: None,
                     initial_prompt: None,
                 });
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
-                self.status.notice = Some(Notice::new(
-                    format!(
-                        "Provisioning worktree for {workspace_key} — opening in {} when ready…",
-                        editor.display
-                    ),
-                    NoticeSeverity::Info,
+                self.flash_info(format!(
+                    "Provisioning worktree for {workspace_key} — opening in {} when ready…",
+                    editor.display
                 ));
-                self.redraw = true;
                 return cmds;
             }
             // Worktree already on disk — launch directly.
@@ -376,22 +356,23 @@ impl<T: TerminalAdapter> Model<T> {
         // route the "no" decision correctly.
         let top = self.modal_stack.last().cloned();
         self.pop_modal();
-        let mut cmds = Vec::new();
+        let cmds: Vec<IpcCommand> = Vec::new();
         match top {
             Some(Id::RemoveOutOfScope) => {
                 self.active_removal_prompt = None;
             }
             Some(Id::MergeConfirm) => {
-                // Esc on the merge modal = "no, keep them
-                // separate." Tell the daemon to drop the stall so
-                // future polls don't re-prompt.
-                if let Some((issue_key, pr_key)) = self.active_merge_prompt.take() {
-                    cmds.push(IpcCommand::ConfirmMerge {
-                        issue_workspace_key: issue_key,
-                        pr_workspace_key: pr_key,
-                        accept: false,
-                    });
-                }
+                // Esc on the merge modal = "dismiss for now, I'll
+                // decide later." Pre-fix this sent
+                // `ConfirmMerge { accept: false }`, which pinned the
+                // issue in the daemon's `rejected_merge` for the
+                // session and the user never saw the prompt again
+                // until restart. Now: just close the modal. The
+                // daemon's `prompted_merge` re-fires after
+                // `MERGE_REPROMPT_AFTER` (5 min) so the prompt
+                // self-heals; an explicit N (via `handle_confirmed`
+                // below) is the only path that pins as rejected.
+                self.active_merge_prompt = None;
             }
             Some(Id::ActionConfirm) => {
                 // Esc = cancel destructive action; drop the
@@ -465,7 +446,6 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Some(Id::CleanWorktreesConfirm) => {
                 if yes {
-                    use crate::realm::components::footer::{Notice, NoticeSeverity};
                     cmds.push(IpcCommand::CleanWorktrees);
                     // The work happens asynchronously on the daemon
                     // (filesystem walk + git worktree remove per
@@ -473,9 +453,7 @@ impl<T: TerminalAdapter> Model<T> {
                     // user knows the click registered. The final
                     // count comes back via
                     // `Event::CleanWorktreesCompleted`.
-                    self.status.notice =
-                        Some(Notice::new("cleaning worktrees…", NoticeSeverity::Info));
-                    self.redraw = true;
+                    self.flash_info("cleaning worktrees…");
                 }
             }
             _ => {}
@@ -543,20 +521,14 @@ impl<T: TerminalAdapter> Model<T> {
         &mut self,
         component: Box<dyn tuirealm::component::AppComponent<Msg, UserEvent>>,
     ) {
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
-        // Unmount whatever's on top.
+        // Unmount whatever's on top — setup is a one-modal-at-a-time
+        // flow; the same Id::Setup gets re-mounted for each wizard
+        // step.
         if let Some(top) = self.modal_stack.last().cloned() {
             let _ = self.app.umount(&top);
             self.modal_stack.pop();
         }
-        let _ = self.app.mount(
-            Id::Setup,
-            component,
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::Setup);
-        let _ = self.app.active(&Id::Setup);
-        self.redraw = true;
+        self.mount_modal_boxed(Id::Setup, component);
     }
 
     /// Drop whatever setup-related modal is on top of the stack.

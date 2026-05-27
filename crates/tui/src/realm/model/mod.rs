@@ -391,6 +391,13 @@ pub struct Model<T: TerminalAdapter> {
     /// from the focused-project resolver, consumed by
     /// `handle_input_submitted`'s `Id::NewWorkspace` arm.
     pending_new_workspace_project: Option<pilot_core::ProjectKey>,
+    /// Name of a project the user just submitted via Shift-N. When
+    /// the daemon broadcasts `ProjectUpserted` for a matching name,
+    /// we focus its header row + auto-mount the new-workspace input
+    /// — without this hand-off, the new project is unreachable via
+    /// j/k (RepoHeader rows are skipped by `move_cursor_by`) and the
+    /// user has no clear next step.
+    pending_focus_project_name: Option<String>,
 }
 
 /// Custom Port that drains events from an `mpsc::Receiver`. Pilot
@@ -509,6 +516,7 @@ impl<T: TerminalAdapter> Model<T> {
             action_key_overrides: std::collections::BTreeMap::new(),
             pending_action_confirm: None,
             pending_new_workspace_project: None,
+            pending_focus_project_name: None,
         }
     }
 }
@@ -653,17 +661,9 @@ impl<T: TerminalAdapter> Model<T> {
         report: crate::setup::SetupReport,
         sources: std::sync::Arc<Vec<Box<dyn pilot_core::ScopeSource>>>,
     ) {
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
         self.setup.inputs = Some((report.clone(), sources.clone()));
         self.setup.runner = Some(crate::setup_flow::SetupRunner::new(report, sources));
-        let _ = self.app.mount(
-            Id::Splash,
-            Box::new(Splash::new()),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        let _ = self.app.active(&Id::Splash);
-        self.modal_stack.push(Id::Splash);
-        self.redraw = true;
+        self.mount_modal(Id::Splash, Splash::new());
     }
 
     /// Pre-populate the cached setup inputs without launching the
@@ -804,6 +804,76 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Set the footer notice + mark the screen dirty. Three
+    /// shortcuts for the three severities the codebase uses most
+    /// (`info`, `hint`, `error`) plus a generic `flash` for the
+    /// rare `Retryable` / `Auth` cases.
+    ///
+    /// Pulled out because 30+ call sites open-coded
+    /// `self.status.notice = Some(Notice::new(...)); self.redraw = true;`,
+    /// and forgetting the `redraw = true` left the notice invisible
+    /// until the next event triggered a render — a known footgun.
+    pub fn flash_info(&mut self, msg: impl Into<String>) {
+        self.flash(msg, crate::realm::components::footer::NoticeSeverity::Info);
+    }
+
+    pub fn flash_hint(&mut self, msg: impl Into<String>) {
+        self.flash(msg, crate::realm::components::footer::NoticeSeverity::Hint);
+    }
+
+    pub fn flash_error(&mut self, msg: impl Into<String>) {
+        self.flash(
+            msg,
+            crate::realm::components::footer::NoticeSeverity::Permanent,
+        );
+    }
+
+    pub fn flash(
+        &mut self,
+        msg: impl Into<String>,
+        severity: crate::realm::components::footer::NoticeSeverity,
+    ) {
+        use crate::realm::components::footer::Notice;
+        self.status.notice = Some(Notice::new(msg, severity));
+        self.redraw = true;
+    }
+
+    /// Mount a modal under `id` with the standard "subscribe to any
+    /// event, always" subscription, push it onto the modal stack,
+    /// activate it, and mark the screen dirty.
+    ///
+    /// Bundles the four-step ritual every `mount_*` helper repeats:
+    /// `app.mount` → `modal_stack.push` → `app.active` → `redraw`.
+    /// Forgetting any step has been a recurring source of "modal up
+    /// but won't dismiss" or "modal mounted but invisible until next
+    /// keypress" bugs.
+    pub fn mount_modal<C>(&mut self, id: Id, component: C)
+    where
+        C: tuirealm::component::AppComponent<Msg, UserEvent> + 'static,
+    {
+        self.mount_modal_boxed(id, Box::new(component));
+    }
+
+    /// Same as [`mount_modal`] but accepts an already-boxed
+    /// component. Use this when the caller has a
+    /// `Box<dyn AppComponent>` (e.g. setup-flow runners that
+    /// dispatch on a polymorphic boxed step).
+    pub fn mount_modal_boxed(
+        &mut self,
+        id: Id,
+        component: Box<dyn tuirealm::component::AppComponent<Msg, UserEvent>>,
+    ) {
+        use tuirealm::subscription::{EventClause, Sub, SubClause};
+        let _ = self.app.mount(
+            id.clone(),
+            component,
+            vec![Sub::new(EventClause::Any, SubClause::Always)],
+        );
+        self.modal_stack.push(id.clone());
+        let _ = self.app.active(&id);
+        self.redraw = true;
+    }
+
     /// Drain a handler's returned IPC commands into `send_cmd`.
     /// Used at the `update()` call sites so handlers can be
     /// unit-tested in isolation: tests construct a Model, call
@@ -831,21 +901,15 @@ impl<T: TerminalAdapter> Model<T> {
     /// side-effect, and the editor launches once `TerminalSpawned`
     /// arrives.
     pub fn open_editor(&mut self) {
-        use crate::realm::components::footer::{Notice, NoticeSeverity};
-
         let Some(workspace_key) = self.sidebar.selected_workspace_key().cloned() else {
             return;
         };
         if self.setup.editors.is_empty() {
             let path = pilot_core::paths::config_yaml();
-            self.status.notice = Some(Notice::new(
-                format!(
-                    "no editor detected — add one under `editors:` in {}",
-                    path.display(),
-                ),
-                NoticeSeverity::Info,
+            self.flash_info(format!(
+                "no editor detected — add one under `editors:` in {}",
+                path.display(),
             ));
-            self.redraw = true;
             return;
         }
         let worktree = self
@@ -869,14 +933,10 @@ impl<T: TerminalAdapter> Model<T> {
                     cwd: None,
                     initial_prompt: None,
                 });
-                self.status.notice = Some(Notice::new(
-                    format!(
-                        "Provisioning worktree for {workspace_key} — opening in {} when ready…",
-                        self.setup.editors[0].display
-                    ),
-                    NoticeSeverity::Info,
+                self.flash_info(format!(
+                    "Provisioning worktree for {workspace_key} — opening in {} when ready…",
+                    self.setup.editors[0].display
                 ));
-                self.redraw = true;
             } else {
                 // Multi-editor: defer editor pick + record that the
                 // dispatch needs to spawn first.
@@ -897,7 +957,6 @@ impl<T: TerminalAdapter> Model<T> {
 
     fn mount_editor_picker(&mut self) {
         use crate::realm::components::choice::Choice;
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
         let labels: Vec<String> = self
             .setup
             .editors
@@ -908,14 +967,7 @@ impl<T: TerminalAdapter> Model<T> {
         let modal = Choice::single("Open in which editor?", labels)
             .title("Open editor")
             .label(|s: &String| s.clone());
-        let _ = self.app.mount(
-            Id::Editor,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::Editor);
-        let _ = self.app.active(&Id::Editor);
-        self.redraw = true;
+        self.mount_modal(Id::Editor, modal);
     }
 
     fn launch_editor(
@@ -923,7 +975,6 @@ impl<T: TerminalAdapter> Model<T> {
         editor: &crate::editors::EditorTemplate,
         worktree: &std::path::Path,
     ) {
-        use crate::realm::components::footer::{Notice, NoticeSeverity};
         match crate::editors::launch(editor, worktree) {
             Ok(()) => {
                 tracing::info!(
@@ -931,20 +982,17 @@ impl<T: TerminalAdapter> Model<T> {
                     worktree = %worktree.display(),
                     "launched editor"
                 );
-                self.status.notice = Some(Notice::new(
-                    format!("opened {} in {}", worktree.display(), editor.display),
-                    NoticeSeverity::Info,
+                self.flash_info(format!(
+                    "opened {} in {}",
+                    worktree.display(),
+                    editor.display
                 ));
             }
             Err(e) => {
                 tracing::warn!("editor launch failed: {e}");
-                self.status.notice = Some(Notice::new(
-                    format!("failed to launch {}: {e}", editor.display),
-                    NoticeSeverity::Permanent,
-                ));
+                self.flash_error(format!("failed to launch {}: {e}", editor.display));
             }
         }
-        self.redraw = true;
     }
 
     /// Open the in-session Settings palette. Builds a small picker
@@ -954,7 +1002,6 @@ impl<T: TerminalAdapter> Model<T> {
     /// (first-run path or `--test` mode).
     pub fn open_settings(&mut self) {
         use crate::realm::components::choice::Choice;
-        use tuirealm::subscription::{EventClause, Sub, SubClause};
 
         if self.setup.runner.is_some() || matches!(self.modal_stack.last(), Some(Id::Setup)) {
             return;
@@ -971,14 +1018,7 @@ impl<T: TerminalAdapter> Model<T> {
         let modal = Choice::single("What do you want to configure?", labels)
             .title("Settings")
             .label(|s: &String| s.clone());
-        let _ = self.app.mount(
-            Id::Setup,
-            Box::new(modal),
-            vec![Sub::new(EventClause::Any, SubClause::Always)],
-        );
-        self.modal_stack.push(Id::Setup);
-        let _ = self.app.active(&Id::Setup);
-        self.redraw = true;
+        self.mount_modal(Id::Setup, modal);
     }
 
     /// Build the visible actions from the user's cached persisted
@@ -1256,15 +1296,14 @@ impl<T: TerminalAdapter> Model<T> {
             // sticky; retryable ones (which shouldn't reach here)
             // auto-fade in render.
             Msg::PollingError((source, kind, detail, message)) => {
+                use crate::realm::components::footer::NoticeSeverity;
                 tracing::warn!("polling error from {source} ({kind}): {message} — {detail}");
-                use crate::realm::components::footer::{Notice, NoticeSeverity};
                 let severity = match kind.as_str() {
                     "auth" => NoticeSeverity::Auth,
                     "retryable" => NoticeSeverity::Retryable,
                     _ => NoticeSeverity::Permanent,
                 };
-                self.status.notice = Some(Notice::new(format!("{source}: {message}"), severity));
-                self.redraw = true;
+                self.flash(format!("{source}: {message}"), severity);
             }
             Msg::PollingTimeout => {
                 tracing::info!("polling first-cycle timeout — modal dismissed");

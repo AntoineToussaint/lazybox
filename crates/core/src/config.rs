@@ -250,6 +250,13 @@ pub const KV_KEY_THEME: &str = "theme_v1";
 /// old saves are ignored, new writes go to the new key.
 pub const KV_KEY_LAYOUT: &str = "layout_v2";
 
+/// Set of workspace keys the user has explicitly archived
+/// (`Shift-X`). Stored as a JSON-encoded `Vec<String>` so re-poll
+/// upserts know to skip them — without this the next poll's
+/// `WorkspaceUpserted` would just re-create the row the user
+/// just dismissed. Persistence is per-machine, not synced.
+pub const KV_KEY_ARCHIVED: &str = "archived_workspaces_v1";
+
 /// Pane layout knobs. Two splitters today: the sidebar's right edge
 /// (left/right split, **as a percentage of the total width**) and the
 /// right column's horizontal split (top/bottom, also a percentage).

@@ -160,11 +160,14 @@ mod effects_tests {
         }
     }
 
-    /// Esc on a MergeConfirm modal acts the same as `n` — the
-    /// daemon needs the explicit "no" so it drops the stall and
-    /// doesn't re-prompt on the next poll.
+    /// Esc on a MergeConfirm modal dismisses WITHOUT signalling the
+    /// daemon. Pre-fix this sent `ConfirmMerge { accept: false }`,
+    /// which pinned the issue in `rejected_merge` for the whole
+    /// session — the user never saw the prompt again. Now: just
+    /// close the modal; the daemon's `prompted_merge` re-fires
+    /// after 5 minutes so the prompt self-heals.
     #[test]
-    fn modal_dismissed_on_merge_confirm_sends_accept_false() {
+    fn modal_dismissed_on_merge_confirm_is_silent_dismissal() {
         let mut m = build_model();
         m.active_merge_prompt = Some((
             WorkspaceKey::new("github:o/r#1"),
@@ -172,11 +175,14 @@ mod effects_tests {
         ));
         m.modal_stack.push(Id::MergeConfirm);
         let cmds = m.handle_modal_dismissed();
-        assert_eq!(cmds.len(), 1);
-        match &cmds[0] {
-            IpcCommand::ConfirmMerge { accept, .. } => assert!(!*accept),
-            other => panic!("expected ConfirmMerge, got {other:?}"),
-        }
+        assert!(
+            cmds.is_empty(),
+            "Esc on merge modal must NOT signal accept:false, got: {cmds:?}",
+        );
+        assert!(
+            m.active_merge_prompt.is_none(),
+            "active_merge_prompt slot must clear so the queue can advance",
+        );
     }
 
     /// Esc on a RemoveOutOfScope modal clears the slot but

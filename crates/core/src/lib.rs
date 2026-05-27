@@ -18,7 +18,8 @@ mod workspace;
 
 pub use agent::AgentConfig;
 pub use config::{
-    KV_KEY_LAYOUT, KV_KEY_SETUP, KV_KEY_THEME, PaneLayout, PersistedSetup, ProviderConfig,
+    KV_KEY_ARCHIVED, KV_KEY_LAYOUT, KV_KEY_SETUP, KV_KEY_THEME, PaneLayout, PersistedSetup,
+    ProviderConfig,
 };
 pub use issue_links::{IssueLink, extract as extract_issue_links};
 pub use project::{Project, ProjectKey};

@@ -9,7 +9,7 @@
 //! helpers (`commit_upsert`, `load_workspace`) leak across via
 //! `pub(super)`.
 
-use super::{TickState, commit_upsert, load_workspace};
+use super::{TickState, commit_upsert, fetch_and_apply, load_workspace};
 use crate::ServerConfig;
 use pilot_core::{CiStatus, ReviewStatus, Workspace, WorkspaceKey};
 use pilot_gh::GhClient;
@@ -69,12 +69,9 @@ pub async fn post_reply(config: &ServerConfig, session_key: pilot_core::SessionK
 }
 
 fn emit_reply_error(config: &ServerConfig, msg: &str) {
-    let _ = config.bus.send(Event::ProviderError {
-        source: "reply".into(),
-        message: msg.to_string(),
-        detail: String::new(),
-        kind: "retryable".into(),
-    });
+    let _ = config
+        .bus
+        .send(Event::provider_error_retryable("reply", msg));
 }
 
 /// Runtime-polymorphic wrapper around the workspace's
@@ -197,12 +194,9 @@ async fn build_provider_for_workspace(
 /// reason without us inventing a bespoke event variant.
 pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey) {
     let emit_err = |msg: &str| {
-        let _ = config.bus.send(Event::ProviderError {
-            source: "merge".into(),
-            message: msg.to_string(),
-            detail: String::new(),
-            kind: "retryable".into(),
-        });
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("merge", msg));
     };
 
     let Some(ws) = load_workspace(config, &workspace_key) else {
@@ -259,12 +253,9 @@ pub async fn handle_request_reviewers(
     logins: Vec<String>,
 ) {
     let emit_err = |msg: &str| {
-        let _ = config.bus.send(Event::ProviderError {
-            source: "reviewers".into(),
-            message: msg.to_string(),
-            detail: String::new(),
-            kind: "retryable".into(),
-        });
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("reviewers", msg));
     };
     if logins.is_empty() {
         return;
@@ -304,12 +295,9 @@ pub async fn handle_add_assignees(
     logins: Vec<String>,
 ) {
     let emit_err = |msg: &str| {
-        let _ = config.bus.send(Event::ProviderError {
-            source: "assignees".into(),
-            message: msg.to_string(),
-            detail: String::new(),
-            kind: "retryable".into(),
-        });
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("assignees", msg));
     };
     if logins.is_empty() {
         return;
@@ -348,12 +336,9 @@ pub async fn handle_set_assignees(
     logins: Vec<String>,
 ) {
     let emit_err = |msg: &str| {
-        let _ = config.bus.send(Event::ProviderError {
-            source: "assignees".into(),
-            message: msg.to_string(),
-            detail: String::new(),
-            kind: "retryable".into(),
-        });
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("assignees", msg));
     };
     let Some(ws) = load_workspace(config, &workspace_key) else {
         emit_err(&format!(
@@ -396,25 +381,6 @@ pub async fn handle_set_assignees(
 /// failure shouldn't pop a modal. The diagnostic still lands in
 /// `/tmp/pilot.log`.
 pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: WorkspaceKey) {
-    // First load is read-only — we just need the PR's node_id.
-    // We re-load right before commit so the activity merge applies
-    // to the freshest workspace state (see race fix below).
-    let ws = match load_workspace(config, &workspace_key) {
-        Some(w) => w,
-        None => {
-            tracing::info!("fetch_pr_details: workspace {workspace_key} not found");
-            return;
-        }
-    };
-    let Some(pr) = ws.pr.as_ref() else {
-        tracing::debug!("fetch_pr_details: workspace {workspace_key} has no PR");
-        return;
-    };
-    let Some(node_id) = pr.node_id.clone() else {
-        tracing::debug!("fetch_pr_details: PR has no node_id (needs a poll first)");
-        return;
-    };
-
     // Use the persistent client from TickState so the rate budget
     // and observations carry across calls — same logic as the
     // long-lived poll loop. Without this we'd build a fresh client
@@ -445,51 +411,63 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
         }
     };
 
-    let activities = match client.fetch_pr_details(&node_id).await {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::warn!("fetch_pr_details({node_id}): {e}");
-            return;
-        }
-    };
-    if activities.is_empty() {
-        tracing::debug!("fetch_pr_details({node_id}): no review-thread activity");
-        return;
-    }
-
-    // Race fix: the fetch above can take 1-2s on the network. If the
-    // main poll cycle wrote a fresher workspace (with updated CI /
-    // review / mergeable state) during that window, committing the
-    // `ws` we read at the top of this fn would clobber the fresh
-    // data with our stale snapshot. Symptom: PR shows `CI RUN` in
-    // pilot long after GitHub flipped it to SUCCESS. Fix: re-load
-    // right before commit, apply the activity merge to the
-    // freshest copy, then persist.
-    let mut ws = match load_workspace(config, &workspace_key) {
-        Some(w) => w,
-        None => {
-            // Workspace removed between our initial load + now (e.g.
-            // user pressed Shift-X). Drop the activity merge silently
-            // — the workspace is gone.
-            return;
-        }
-    };
-    // Route through `Workspace::merge_activity` — the same path the
-    // poll cycle uses. Crucial: it dedups by (author, body,
-    // created_at) AND remaps `read_indices` across the post-sort
-    // positions. The prior implementation here did a raw push +
-    // sort, which left `read_indices` pointing at stale slots —
-    // every lazy-fetch silently scrambled the user's read marks.
-    let merged_count = activities.len();
-    ws.merge_activity(&activities);
-    tracing::info!(
-        "fetch_pr_details: merged {} review-thread activities into {workspace_key}",
-        merged_count,
-    );
-
-    // Persist + broadcast through the same commit phase the poll
-    // path uses — keeps the store + bus consistent.
-    commit_upsert(config, &workspace_key, ws);
+    // `fetch_and_apply` runs the network call against the initial
+    // workspace snapshot, then re-loads right before the transform
+    // so the activity merge applies to the freshest state — locks
+    // in the race fix that the open-coded version had to discover
+    // the hard way (PR row stuck on "CI RUN" after GitHub flipped
+    // to SUCCESS because a 1-2s GraphQL write clobbered fresh poll
+    // state with a stale snapshot).
+    let result = fetch_and_apply(
+        config,
+        &workspace_key,
+        |initial| {
+            let client = client.clone();
+            async move {
+                let Some(pr) = initial.pr.as_ref() else {
+                    return Ok::<_, ()>(None);
+                };
+                let Some(node_id) = pr.node_id.clone() else {
+                    return Ok(None);
+                };
+                let activities = match client.fetch_pr_details(&node_id).await {
+                    Ok(a) => a,
+                    Err(e) => {
+                        tracing::warn!("fetch_pr_details({node_id}): {e}");
+                        return Ok(None);
+                    }
+                };
+                if activities.is_empty() {
+                    tracing::debug!("fetch_pr_details({node_id}): no review-thread activity");
+                    return Ok(None);
+                }
+                Ok(Some(activities))
+            }
+        },
+        |ws, activities_opt| {
+            let Some(activities) = activities_opt else {
+                return;
+            };
+            let merged_count = activities.len();
+            // `Workspace::merge_activity` dedups by (author, body,
+            // created_at) AND remaps `read_indices` across the
+            // post-sort positions. A prior implementation here did a
+            // raw push + sort, which left `read_indices` pointing at
+            // stale slots — every lazy-fetch silently scrambled the
+            // user's read marks.
+            ws.merge_activity(&activities);
+            tracing::info!(
+                workspace = %ws.key,
+                merged = merged_count,
+                "fetch_pr_details: merged review-thread activities"
+            );
+        },
+    )
+    .await;
+    // Result is Result<MutationOutcome, ()> — the fetcher swallows
+    // its own provider errors; both Applied and Missing are
+    // user-visible-silent successes.
+    let _ = result;
 }
 
 /// Admin: walk every persisted workspace, drop sessions whose
@@ -673,24 +651,39 @@ pub async fn prefetch_top_pr_details(
         .map(|(_score, node_id, key)| {
             let client = client.clone();
             async move {
-                match client.fetch_pr_details(&node_id).await {
-                    Ok(activities) if !activities.is_empty() => {
-                        let Some(mut ws) = load_workspace(config, &key) else {
-                            return 0usize;
-                        };
-                        let count = activities.len();
+                // Route through `fetch_and_apply` so the race fix in
+                // `handle_fetch_pr_details` applies here too: re-load
+                // before the activity merge so a concurrent poll
+                // write isn't clobbered.
+                let mut merged_here = 0usize;
+                let _ = fetch_and_apply(
+                    config,
+                    &key,
+                    |_initial| {
+                        let client = client.clone();
+                        let node_id = node_id.clone();
+                        async move {
+                            match client.fetch_pr_details(&node_id).await {
+                                Ok(activities) => Ok::<_, ()>(activities),
+                                Err(e) => {
+                                    tracing::debug!(
+                                        "prefetch_top_pr_details: fetch_pr_details({node_id}) failed: {e}",
+                                    );
+                                    Ok(Vec::new())
+                                }
+                            }
+                        }
+                    },
+                    |ws, activities| {
+                        if activities.is_empty() {
+                            return;
+                        }
+                        merged_here = activities.len();
                         ws.merge_activity(&activities);
-                        commit_upsert(config, &key, ws);
-                        count
-                    }
-                    Ok(_) => 0,
-                    Err(e) => {
-                        tracing::debug!(
-                            "prefetch_top_pr_details: fetch_pr_details({node_id}) failed: {e}"
-                        );
-                        0
-                    }
-                }
+                    },
+                )
+                .await;
+                merged_here
             }
         })
         .buffer_unordered(PREFETCH_CONCURRENCY)

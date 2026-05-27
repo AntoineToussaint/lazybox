@@ -362,6 +362,45 @@ impl ServerConfig {
             Self::with_store_and_backend(Arc::new(MemoryStore::new()), Arc::new(mock.clone()));
         (config, mock)
     }
+
+    // ── Lock-then-clone helpers ──────────────────────────────────
+    //
+    // Pattern these helpers replace:
+    //
+    //   let key = match config.terminals.lock().await.get(&id).cloned() {
+    //       Some(k) => k,
+    //       None => return,
+    //   };
+    //
+    // The MutexGuard is a temporary in the match scrutinee, so per
+    // Rust temporary-scope rules it lives for the WHOLE match. Any
+    // `.await` in a match arm holds the lock across the suspension
+    // point — exactly the latent deadlock I caught in
+    // `handle_inject_prompt` mid-push. Each helper here takes the
+    // lock, clones the lookup result, and releases on return — no
+    // way for a caller to accidentally hold a guard across an await.
+
+    /// Snapshot the backend key for a wire-side terminal id.
+    /// Returns `None` when the terminal isn't registered.
+    pub async fn backend_key_for(&self, id: TerminalId) -> Option<String> {
+        self.terminals.lock().await.get(&id).cloned()
+    }
+
+    /// Snapshot the `(session_key, kind)` metadata for a terminal.
+    /// `None` when the terminal isn't registered (or the entry got
+    /// cleaned by a concurrent `TerminalExited` between calls).
+    pub async fn terminal_meta_for(
+        &self,
+        id: TerminalId,
+    ) -> Option<(pilot_core::SessionKey, pilot_ipc::TerminalKind)> {
+        self.terminal_meta.lock().await.get(&id).cloned()
+    }
+
+    /// Snapshot the cached `AgentState` for a terminal. `None` when
+    /// the pump hasn't observed a state transition yet.
+    pub async fn agent_state_for(&self, id: TerminalId) -> Option<pilot_ipc::AgentState> {
+        self.agent_states.lock().await.get(&id).copied()
+    }
 }
 
 pub struct Server {
@@ -416,6 +455,8 @@ impl Server {
                         pilot_ipc::Command::Snooze { .. } => "Snooze",
                         pilot_ipc::Command::Unsnooze { .. } => "Unsnooze",
                         pilot_ipc::Command::Kill { .. } => "Kill",
+                        pilot_ipc::Command::DeleteProject { .. } => "DeleteProject",
+                        pilot_ipc::Command::CollapseIntoPr { .. } => "CollapseIntoPr",
                         pilot_ipc::Command::CreateWorkspace { .. } => "CreateWorkspace",
                         pilot_ipc::Command::CreateProject { .. } => "CreateProject",
                         pilot_ipc::Command::AdoptSessions { .. } => "AdoptSessions",
@@ -496,11 +537,16 @@ impl Server {
                         pilot_ipc::Command::Write { terminal_id, bytes } => {
                             spawn_handler::handle_write(&self.config, terminal_id, &bytes).await;
                         }
-                        pilot_ipc::Command::InjectPrompt { terminal_id, prompt } => {
+                        pilot_ipc::Command::InjectPrompt {
+                            terminal_id,
+                            prompt,
+                            fallback_spawn,
+                        } => {
                             spawn_handler::handle_inject_prompt(
                                 &self.config,
                                 terminal_id,
                                 &prompt,
+                                fallback_spawn,
                             )
                             .await;
                         }
@@ -635,6 +681,17 @@ impl Server {
                                 session_key.as_str().to_string(),
                             );
                             polling::delete_workspace(&self.config, &key).await;
+                        }
+                        pilot_ipc::Command::DeleteProject { project_key } => {
+                            polling::delete_project(&self.config, &project_key).await;
+                        }
+                        pilot_ipc::Command::CollapseIntoPr {
+                            issue_workspace_key,
+                        } => {
+                            let key = pilot_core::WorkspaceKey::new(
+                                issue_workspace_key.as_str().to_string(),
+                            );
+                            polling::handle_collapse_into_pr(&self.config, key).await;
                         }
                         pilot_ipc::Command::Refresh => {
                             // Manual poll trigger. Wakes the long-lived

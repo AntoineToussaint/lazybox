@@ -23,12 +23,14 @@
 //! there's only one place sessions enter the system.
 
 mod handlers;
+mod mutate;
 
 pub use handlers::{
     ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_fetch_pr_details,
     handle_merge_pr, handle_request_reviewers, handle_set_assignees, post_reply,
     prefetch_top_pr_details,
 };
+pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 
 use crate::ServerConfig;
 use chrono::Utc;
@@ -576,11 +578,15 @@ pub struct TickState {
     /// of scope again.
     prompted_out_of_scope: std::collections::HashSet<String>,
     /// Issue workspace keys we've already broadcast
-    /// `WorkspaceMergePending` for. Stays set until the matching
-    /// `Command::ConfirmMerge` lands (or the daemon restarts) so a
-    /// user staring at the modal doesn't get a stream of duplicate
-    /// prompts on every poll tick.
-    pub(crate) prompted_merge: std::collections::HashSet<String>,
+    /// `WorkspaceMergePending` for, with the timestamp of the last
+    /// emission. Pre-fix this was a `HashSet` that stayed pinned
+    /// until the matching `Command::ConfirmMerge` arrived — a user
+    /// who Esc-dismissed the modal then never saw it again until
+    /// daemon restart. Now: re-prompt after `MERGE_REPROMPT_AFTER`
+    /// so dismissals self-heal. Entries are still removed on
+    /// explicit confirm/reject so accepted/rejected pairs don't
+    /// re-fire.
+    pub(crate) prompted_merge: std::collections::HashMap<String, std::time::Instant>,
     /// Issue workspace keys for which the user replied "no" to the
     /// merge prompt. We don't re-prompt this session — the user can
     /// always merge by hand via the future adopt-sessions flow.
@@ -881,20 +887,30 @@ pub async fn rescope_with_state(
             continue;
         }
         let key = WorkspaceKey::new(r.key.clone());
-        // Preserve snoozed workspaces. A snoozed workspace
-        // intentionally falls out of the polled set (the user said
-        // "hide this until <date>"), and the search query that
-        // produced `polled` typically filters them out via
-        // `is:open` etc. Deleting them here was the wrong call —
-        // the user expects them to come back when their snooze
-        // expires.
-        let snoozed = r
+        // Decode the stored workspace once — used by both the
+        // snoozed-skip guard AND the locally-created (no upstream
+        // task) guard below.
+        let stored_ws = r
             .workspace_json
             .as_deref()
-            .and_then(|j| serde_json::from_str::<Workspace>(j).ok())
-            .map(|w| w.is_snoozed(now))
-            .unwrap_or(false);
-        if snoozed {
+            .and_then(|j| serde_json::from_str::<Workspace>(j).ok());
+        // Preserve snoozed workspaces. The user said "hide until
+        // <date>"; deleting on a poll that doesn't list it would
+        // defeat that intent.
+        if stored_ws.as_ref().is_some_and(|w| w.is_snoozed(now)) {
+            continue;
+        }
+        // Preserve locally-created pre-PR workspaces. They have a
+        // `project_key` (the user explicitly created them under a
+        // project) but no upstream task — so they never appear in
+        // the polled set. Without this guard, every poll deletes
+        // the just-created sandbox workspace.
+        if stored_ws.as_ref().is_some_and(|w| {
+            w.pr.is_none()
+                && w.gh_issues.is_empty()
+                && w.linear_issues.is_empty()
+                && w.project_key.is_some()
+        }) {
             continue;
         }
         match active_counts.get(r.key.as_str()).copied() {
@@ -1312,6 +1328,19 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
 /// polled and a PR already claims it, we route the issue update into
 /// the PR workspace instead of building a duplicate.
 pub async fn upsert(config: &ServerConfig, task: Task) {
+    // Skip re-creating workspaces the user explicitly archived
+    // (`Shift-X`). Without this, every 60s tick re-creates the row
+    // from the upstream task and the dismiss feels broken. Cached
+    // archive set lives in the store under KV_KEY_ARCHIVED.
+    let candidate_key = pilot_core::workspace_key_for(&task);
+    if load_archived_set(config).contains(&candidate_key) {
+        tracing::debug!(
+            workspace_key = %candidate_key,
+            "upsert: skipping archived workspace"
+        );
+        return;
+    }
+
     // For issues: if a PR somewhere already claims this issue as
     // closed-by, route the upsert into that PR workspace. This is
     // the "issue polled AFTER its PR" path. We only kick in when
@@ -1320,8 +1349,7 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
     // remains until the PR shows up. Polling is cheap to scan: the
     // workspace list is bounded by the user's filter scope.
     if !is_pr_task(&task) {
-        let issue_key_str = pilot_core::workspace_key_for(&task);
-        let issue_key = WorkspaceKey::new(issue_key_str);
+        let issue_key = WorkspaceKey::new(candidate_key.clone());
         let already_standalone = config
             .store
             .get_workspace(&issue_key)
@@ -1339,8 +1367,7 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
         }
     }
 
-    let key_str = pilot_core::workspace_key_for(&task);
-    let key = WorkspaceKey::new(key_str.clone());
+    let key = WorkspaceKey::new(candidate_key);
     upsert_into_workspace_key(config, &key, task).await;
 }
 
@@ -1562,13 +1589,30 @@ fn pr_workspace_claiming_issue(
 ///
 /// No-op when there's no PR, no `closes_issues`, or no matching
 /// issue workspace exists yet.
+/// Re-prompt the merge modal after this long when the previous
+/// prompt was dismissed without an explicit Y/N. 5 minutes is short
+/// enough that a user who Esc'd "I'll deal with this later" sees
+/// the prompt come back the same session, long enough that the
+/// dismissal isn't immediately undone (the user wants a beat to
+/// finish what they were doing).
+const MERGE_REPROMPT_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
 async fn merge_closing_issue_workspaces(config: &ServerConfig, workspace: &mut Workspace) {
     let Some(pr) = workspace.pr.as_ref() else {
         return;
     };
     if pr.closes_issues.is_empty() {
+        tracing::trace!(
+            workspace = %workspace.key,
+            "merge: PR has no closes_issues — nothing to fold"
+        );
         return;
     }
+    tracing::debug!(
+        workspace = %workspace.key,
+        candidates = ?pr.closes_issues.iter().map(|t| &t.key).collect::<Vec<_>>(),
+        "merge: scanning closes_issues for collapse candidates"
+    );
 
     let mut closed_ids: Vec<pilot_core::TaskId> = pr.closes_issues.clone();
     closed_ids.dedup();
@@ -1613,7 +1657,18 @@ async fn merge_closing_issue_workspaces(config: &ServerConfig, workspace: &mut W
                 if state.rejected_merge.contains(&issue_key_str) {
                     false
                 } else {
-                    state.prompted_merge.insert(issue_key_str)
+                    let now = std::time::Instant::now();
+                    let stale = state
+                        .prompted_merge
+                        .get(&issue_key_str)
+                        .map(|prev| now.duration_since(*prev) >= MERGE_REPROMPT_AFTER)
+                        .unwrap_or(true);
+                    if stale {
+                        state.prompted_merge.insert(issue_key_str, now);
+                        true
+                    } else {
+                        false
+                    }
                 }
             };
             if should_prompt {
@@ -1731,6 +1786,63 @@ pub async fn handle_confirm_merge(
         pr_label,
     });
     commit_upsert(config, &pr_key, pr_ws);
+}
+
+/// Manual issue→PR collapse triggered by the user. Resolves the
+/// target PR locally (scanning for a workspace whose
+/// `closes_issues` includes this issue's task id), then runs the
+/// same absorb path the auto-prompt's "Yes" reaches.
+///
+/// Bypasses both `rejected_merge` (so a previously-dismissed prompt
+/// becomes actionable again) and the live-session safety gate (the
+/// user explicitly asked for this — the safety gate exists to
+/// protect against silent absorption, not to block explicit intent).
+///
+/// No-op when the issue has no claiming PR in local state — there's
+/// nothing to collapse into yet. The TUI's availability gate
+/// (`Action::CollapseIntoPr` resolver) should keep this no-op rare.
+pub async fn handle_collapse_into_pr(config: &ServerConfig, issue_workspace_key: WorkspaceKey) {
+    let Some(issue_ws) = load_workspace(config, &issue_workspace_key) else {
+        tracing::warn!(
+            issue_workspace = %issue_workspace_key,
+            "collapse_into_pr: issue workspace missing — aborting"
+        );
+        return;
+    };
+    if issue_ws.pr.is_some() {
+        // Defensive: only ISSUE workspaces can be folded; refuse to
+        // absorb a PR row.
+        tracing::warn!(
+            target_workspace = %issue_workspace_key,
+            "collapse_into_pr: refusing — target is itself a PR workspace"
+        );
+        return;
+    }
+    // Find the PR workspace that closes this issue. The issue
+    // workspace has at most one primary task; route through it.
+    let Some(primary) = issue_ws.primary_task() else {
+        return;
+    };
+    let Some(pr_workspace_key) = pr_workspace_claiming_issue(config, &primary.id) else {
+        tracing::info!(
+            issue_workspace = %issue_workspace_key,
+            "collapse_into_pr: no PR workspace claims this issue — nothing to collapse"
+        );
+        return;
+    };
+
+    // Clear any dedupe state so the modal pipeline doesn't re-fire
+    // a duplicate prompt right after this completes.
+    {
+        let mut state = config.poll_state.lock().await;
+        state.prompted_merge.remove(issue_workspace_key.as_str());
+        state.rejected_merge.remove(issue_workspace_key.as_str());
+    }
+
+    // Reuse the confirm-accept path — same end-state, one
+    // implementation. `handle_confirm_merge` re-loads workspaces
+    // before mutating so the explicit-bypass path stays race-safe.
+    handle_confirm_merge(config, issue_workspace_key, pr_workspace_key, true).await;
 }
 
 /// Manual "adopt": move every session out of `source_key`'s
@@ -2050,8 +2162,59 @@ pub fn set_snooze(config: &ServerConfig, key: &WorkspaceKey, until: Option<chron
 /// hides the tabs in pilot but leaves ghost tmux sessions visible
 /// in `tmux ls`, which then re-surface on the next pilot launch
 /// via `recover_sessions`.
+/// Read the persisted set of archived workspace keys. Used by the
+/// upsert path to skip re-creating a workspace the user explicitly
+/// dismissed via `Shift-X`. Returns an empty set when the kv entry
+/// doesn't exist or fails to parse — degrades gracefully (worst
+/// case the dismissed row reappears one more time).
+pub fn load_archived_set(config: &ServerConfig) -> std::collections::HashSet<String> {
+    config
+        .store
+        .get_kv(pilot_core::KV_KEY_ARCHIVED)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+        .map(|v| v.into_iter().collect())
+        .unwrap_or_default()
+}
+
+/// Add `key` to the persisted archived set. Idempotent.
+pub fn archive_workspace_key(config: &ServerConfig, key: &str) {
+    let mut set = load_archived_set(config);
+    if !set.insert(key.to_string()) {
+        return;
+    }
+    let vec: Vec<&String> = set.iter().collect();
+    if let Ok(json) = serde_json::to_string(&vec)
+        && let Err(e) = config.store.set_kv(pilot_core::KV_KEY_ARCHIVED, &json)
+    {
+        tracing::warn!("archive_workspace_key: set_kv failed: {e}");
+    }
+}
+
+/// Remove `key` from the persisted archived set so the next poll
+/// can re-create the workspace. Today there's no UI for this; kept
+/// public for a future "Settings → Restore Archive" flow.
+pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) {
+    let mut set = load_archived_set(config);
+    if !set.remove(key) {
+        return;
+    }
+    let vec: Vec<&String> = set.iter().collect();
+    if let Ok(json) = serde_json::to_string(&vec)
+        && let Err(e) = config.store.set_kv(pilot_core::KV_KEY_ARCHIVED, &json)
+    {
+        tracing::warn!("unarchive_workspace_key: set_kv failed: {e}");
+    }
+}
+
 pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) {
     let key_str = key.as_str();
+    // Record the archive so the next poll's upsert skips re-creating
+    // this row. Without this, the user pressed `Shift-X`, the row
+    // disappeared briefly, then the next 60s tick re-added it from
+    // the upstream task — extremely confusing.
+    archive_workspace_key(config, key_str);
 
     // Find every terminal whose session_key matches via
     // terminal_meta — the authoritative wire-side mapping. Earlier
@@ -2106,6 +2269,60 @@ pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) {
         tracing::warn!("delete_workspace failed: {e}");
     }
     let _ = config.bus.send(Event::WorkspaceRemoved(key.clone()));
+}
+
+/// Delete a Project: cascade through every workspace whose
+/// `project_key` matches, then drop the Project record itself.
+/// Broadcasts `WorkspaceRemoved` for each workspace and
+/// `ProjectRemoved` for the project so the TUI can drop the rows
+/// in one batch.
+///
+/// Workspace deletion routes through `delete_workspace` so each
+/// workspace's backing terminals are killed and the archive set is
+/// updated — without that step, the next poll would re-create the
+/// workspaces from upstream tasks and the project would never
+/// stay gone.
+pub async fn delete_project(config: &ServerConfig, project_key: &pilot_core::ProjectKey) {
+    tracing::info!(project_key = %project_key, "delete_project: starting cascade");
+
+    // Snapshot the workspace list before mutation — `delete_workspace`
+    // removes rows from the store, so iterating a live cursor would
+    // miss entries.
+    let records = match config.store.list_workspaces() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("delete_project: list_workspaces failed: {e}");
+            return;
+        }
+    };
+
+    let mut child_keys: Vec<WorkspaceKey> = Vec::new();
+    for record in records {
+        let Some(json) = record.workspace_json else {
+            continue;
+        };
+        let Ok(ws) = serde_json::from_str::<Workspace>(&json) else {
+            continue;
+        };
+        if ws.project_key.as_ref() == Some(project_key) {
+            child_keys.push(ws.key);
+        }
+    }
+
+    tracing::info!(
+        project_key = %project_key,
+        workspace_count = child_keys.len(),
+        "delete_project: cascading workspace deletes"
+    );
+    for key in &child_keys {
+        delete_workspace(config, key).await;
+    }
+
+    if let Err(e) = config.store.delete_project(project_key) {
+        tracing::warn!("delete_project store: {e}");
+    }
+    let _ = config.bus.send(Event::ProjectRemoved(project_key.clone()));
+    tracing::info!(project_key = %project_key, "delete_project: done");
 }
 
 /// Persist a new `SessionLayout` for one session inside a workspace.

@@ -303,13 +303,29 @@ fn role_qualifier(filter: &ProviderConfig, username: &str, keys: &[(&str, &str)]
     }
 }
 
-/// `(org:foo OR repo:bar/baz)` for a non-empty scope set; `None`
-/// when the user hasn't narrowed (= subscribe to all).
+/// Scope qualifier for the search query.
+///
+/// Returns a single `repo:owner/name` / `org:foo` qualifier when
+/// there's exactly one scope. With 2+ scopes we return `None` and
+/// rely on `filter_github_tasks` to drop out-of-scope results
+/// after the fetch.
+///
+/// **Why not OR-with-parens.** Same footgun documented on
+/// `role_qualifier`: GitHub's search API silently returns 0 results
+/// for `involves:USER (repo:A OR repo:B)`. The user saw their
+/// entire inbox disappear (2026-05-27 incident) the moment they
+/// added a second repo scope. The previous code emitted
+/// `(repo:A OR repo:B)` — well-intentioned, broken in practice.
+///
+/// Cost: with 2+ scopes the search is now wider (`involves:USER`
+/// alone) and we filter post-fetch. Acceptable — pilot's typical
+/// user is involved in <100 PRs total, well under the pagination
+/// safety cap.
 fn scope_qualifier(scopes: &std::collections::BTreeSet<String>) -> Option<String> {
     if scopes.is_empty() {
         return None;
     }
-    let mut parts: Vec<String> = scopes
+    let parts: Vec<String> = scopes
         .iter()
         .filter_map(|s| {
             let stripped = s.strip_prefix("github:")?;
@@ -320,13 +336,13 @@ fn scope_qualifier(scopes: &std::collections::BTreeSet<String>) -> Option<String
             }
         })
         .collect();
-    if parts.is_empty() {
-        return None;
+    match parts.len() {
+        0 => None,
+        1 => Some(parts.into_iter().next().unwrap()),
+        // 2+: emit no scope qualifier on the wire. Post-fetch
+        // filter handles the narrowing.
+        _ => None,
     }
-    if parts.len() == 1 {
-        return Some(parts.pop().unwrap());
-    }
-    Some(format!("({})", parts.join(" OR ")))
 }
 
 /// Drop GitHub tasks that don't match the user's enabled roles +

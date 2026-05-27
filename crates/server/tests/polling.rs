@@ -1101,14 +1101,21 @@ fn pr_qualifiers_append_repo_scope() {
 }
 
 #[test]
-fn pr_qualifiers_or_multiple_scopes_inside_parens() {
+fn pr_qualifiers_drop_scope_qualifier_with_multiple_scopes() {
+    // Multi-scope used to emit `(org:acme OR repo:widgets/core)`,
+    // which GitHub's search parser silently returns 0 for when
+    // combined with `involves:USER`. 2026-05-27 incident: user
+    // added a second repo scope, entire inbox disappeared. Fix:
+    // 2+ scopes → omit the scope qualifier from the wire query
+    // and filter post-fetch in `filter_github_tasks`.
     let mut scopes = std::collections::BTreeSet::new();
     scopes.insert("github:acme".to_string());
     scopes.insert("github:widgets/core".to_string());
     let quals = polling::build_pr_search_qualifiers(&fully_open_filter(), &scopes, "alice");
     assert_eq!(
         quals,
-        vec!["involves:alice", "(org:acme OR repo:widgets/core)"]
+        vec!["involves:alice"],
+        "multi-scope must NOT add a parens-OR group — that returns 0 results from GH"
     );
 }
 

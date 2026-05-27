@@ -2027,12 +2027,14 @@ async fn delete_project_cascades_through_workspaces() {
         "workspaces in OTHER projects must not be touched by the cascade",
     );
     // Project record itself is gone.
-    assert!(!config
-        .store
-        .list_projects()
-        .unwrap()
-        .iter()
-        .any(|p| p.key == project_key.as_str()));
+    assert!(
+        !config
+            .store
+            .list_projects()
+            .unwrap()
+            .iter()
+            .any(|p| p.key == project_key.as_str())
+    );
 
     // Drain events: must see WorkspaceRemoved for both, then
     // ProjectRemoved last (so a client doesn't drop the parent
@@ -2094,13 +2096,8 @@ async fn collapse_into_pr_folds_issue_workspace_into_claiming_pr() {
         "o/r#141",
         &["o/r#71"],
     )));
-    polling::handle_confirm_merge(
-        &config,
-        issue_key.clone(),
-        pr_key_for_reject.clone(),
-        false,
-    )
-    .await;
+    polling::handle_confirm_merge(&config, issue_key.clone(), pr_key_for_reject.clone(), false)
+        .await;
     // Sanity: rejecting kept both rows in place.
     assert!(config.store.get_workspace(&issue_key).unwrap().is_some());
 
@@ -2114,7 +2111,11 @@ async fn collapse_into_pr_folds_issue_workspace_into_claiming_pr() {
         config.store.get_workspace(&issue_key).unwrap().is_none(),
         "issue workspace must be removed after manual collapse",
     );
-    let pr_record = config.store.get_workspace(&pr_key).unwrap().expect("pr exists");
+    let pr_record = config
+        .store
+        .get_workspace(&pr_key)
+        .unwrap()
+        .expect("pr exists");
     let pr_ws: pilot_core::Workspace =
         serde_json::from_str(&pr_record.workspace_json.unwrap()).unwrap();
     // The absorb path migrates the issue task onto the PR
@@ -2182,12 +2183,14 @@ async fn delete_project_with_no_workspaces_still_removes_project() {
     let mut bus = config.bus.subscribe();
     polling::delete_project(&config, &project_key).await;
 
-    assert!(!config
-        .store
-        .list_projects()
-        .unwrap()
-        .iter()
-        .any(|p| p.key == project_key.as_str()));
+    assert!(
+        !config
+            .store
+            .list_projects()
+            .unwrap()
+            .iter()
+            .any(|p| p.key == project_key.as_str())
+    );
 
     let mut saw = false;
     while let Ok(evt) = bus.try_recv() {

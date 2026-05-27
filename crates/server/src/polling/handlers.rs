@@ -69,7 +69,9 @@ pub async fn post_reply(config: &ServerConfig, session_key: pilot_core::SessionK
 }
 
 fn emit_reply_error(config: &ServerConfig, msg: &str) {
-    let _ = config.bus.send(Event::provider_error_retryable("reply", msg));
+    let _ = config
+        .bus
+        .send(Event::provider_error_retryable("reply", msg));
 }
 
 /// Runtime-polymorphic wrapper around the workspace's
@@ -192,7 +194,9 @@ async fn build_provider_for_workspace(
 /// reason without us inventing a bespoke event variant.
 pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey) {
     let emit_err = |msg: &str| {
-        let _ = config.bus.send(Event::provider_error_retryable("merge", msg));
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("merge", msg));
     };
 
     let Some(ws) = load_workspace(config, &workspace_key) else {
@@ -249,7 +253,9 @@ pub async fn handle_request_reviewers(
     logins: Vec<String>,
 ) {
     let emit_err = |msg: &str| {
-        let _ = config.bus.send(Event::provider_error_retryable("reviewers", msg));
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("reviewers", msg));
     };
     if logins.is_empty() {
         return;
@@ -289,7 +295,9 @@ pub async fn handle_add_assignees(
     logins: Vec<String>,
 ) {
     let emit_err = |msg: &str| {
-        let _ = config.bus.send(Event::provider_error_retryable("assignees", msg));
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("assignees", msg));
     };
     if logins.is_empty() {
         return;
@@ -328,7 +336,9 @@ pub async fn handle_set_assignees(
     logins: Vec<String>,
 ) {
     let emit_err = |msg: &str| {
-        let _ = config.bus.send(Event::provider_error_retryable("assignees", msg));
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("assignees", msg));
     };
     let Some(ws) = load_workspace(config, &workspace_key) else {
         emit_err(&format!(

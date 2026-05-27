@@ -853,7 +853,11 @@ impl Event {
     /// carried the same `detail: String::new()` shape. Use the
     /// kind-specific shortcuts below when classification is clear at
     /// the call site.
-    pub fn provider_error(source: &str, message: impl Into<String>, kind: ProviderErrorKind) -> Self {
+    pub fn provider_error(
+        source: &str,
+        message: impl Into<String>,
+        kind: ProviderErrorKind,
+    ) -> Self {
         Self::ProviderError {
             source: source.to_string(),
             message: message.into(),

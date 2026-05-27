@@ -61,10 +61,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// workspaces under it." Adding more overrides here is the right
     /// growth path — keeps catalog defaults declarative and the
     /// context-sensitive copy out of the dispatch.
-    fn action_confirm_override(
-        &self,
-        action: &pilot_tui_core::action::Action,
-    ) -> Option<String> {
+    fn action_confirm_override(&self, action: &pilot_tui_core::action::Action) -> Option<String> {
         use pilot_tui_core::action::Action;
         if !matches!(action, Action::Archive) {
             return None;
@@ -192,7 +189,6 @@ impl<T: TerminalAdapter> Model<T> {
                 if selected.is_empty() {
                     cmds.push(IpcCommand::MarkRead { session_key: sk });
                 } else {
-                    
                     let n = selected.len();
                     for index in selected {
                         cmds.push(IpcCommand::MarkActivityRead {
@@ -254,7 +250,10 @@ impl<T: TerminalAdapter> Model<T> {
                 let claiming_pr = self
                     .sidebar
                     .workspaces_iter()
-                    .find(|w| w.pr.as_ref().is_some_and(|pr| pr.closes_issues.contains(&primary.id)))
+                    .find(|w| {
+                        w.pr.as_ref()
+                            .is_some_and(|pr| pr.closes_issues.contains(&primary.id))
+                    })
                     .map(|w| pilot_core::SessionKey::from(&w.key));
                 match claiming_pr {
                     Some(_pr_key) => {
@@ -304,7 +303,6 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::Refresh => {
-                
                 cmds.push(IpcCommand::Refresh);
                 // Pre-arm the bg_poll indicator so the user gets
                 // feedback on the keystroke — same as the
@@ -376,7 +374,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // browser actually came up — silent spawn failures
                 // (no xdg-open on a headless box, etc.) would be
                 // confusing otherwise.
-                
+
                 let Some(ws) = self.sidebar.selected_workspace() else {
                     return cmds;
                 };

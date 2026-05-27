@@ -393,10 +393,7 @@ impl RightPane {
             );
             return None;
         }
-        let fingerprint = workspace
-            .activity
-            .get(i)
-            .map(ActivityFingerprint::of)?;
+        let fingerprint = workspace.activity.get(i).map(ActivityFingerprint::of)?;
         workspace.mark_activity_read(i);
         let unread_after = workspace.unread_count();
         tracing::info!(

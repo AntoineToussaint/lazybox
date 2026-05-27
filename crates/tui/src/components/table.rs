@@ -592,10 +592,7 @@ mod tests {
     /// Short line fits unchanged — fast path.
     #[test]
     fn truncate_line_fits_unchanged() {
-        let line = ratatui::text::Line::from(vec![
-            Span::raw("hello "),
-            Span::raw("world"),
-        ]);
+        let line = ratatui::text::Line::from(vec![Span::raw("hello "), Span::raw("world")]);
         let out = truncate_line(line, 20);
         let s: String = out.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(s, "hello world");
@@ -606,10 +603,8 @@ mod tests {
     #[test]
     fn truncate_line_clips_with_ellipsis_at_span_boundary() {
         let style = ratatui::style::Style::default().fg(ratatui::style::Color::Red);
-        let line = ratatui::text::Line::from(vec![
-            Span::raw("hello "),
-            Span::styled("world", style),
-        ]);
+        let line =
+            ratatui::text::Line::from(vec![Span::raw("hello "), Span::styled("world", style)]);
         let out = truncate_line(line, 8);
         let s: String = out.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(s, "hello w…");

@@ -464,7 +464,7 @@ fn claude_detect_state_handles_multibyte_at_tail_boundary() {
     // 1000 bytes of padding + 30 box-drawing dashes (90 bytes of
     // UTF-8) → ~1090 bytes total; the tail at len-1024 must land
     // inside one of the `─` sequences.
-    buf.extend(std::iter::repeat(b'.').take(1000));
+    buf.extend(std::iter::repeat_n(b'.', 1000));
     for _ in 0..30 {
         buf.extend_from_slice("─".as_bytes());
     }

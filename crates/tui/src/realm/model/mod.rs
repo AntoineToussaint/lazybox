@@ -822,7 +822,10 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     pub fn flash_error(&mut self, msg: impl Into<String>) {
-        self.flash(msg, crate::realm::components::footer::NoticeSeverity::Permanent);
+        self.flash(
+            msg,
+            crate::realm::components::footer::NoticeSeverity::Permanent,
+        );
     }
 
     pub fn flash(
@@ -898,8 +901,6 @@ impl<T: TerminalAdapter> Model<T> {
     /// side-effect, and the editor launches once `TerminalSpawned`
     /// arrives.
     pub fn open_editor(&mut self) {
-        
-
         let Some(workspace_key) = self.sidebar.selected_workspace_key().cloned() else {
             return;
         };

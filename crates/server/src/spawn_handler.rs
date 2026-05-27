@@ -28,8 +28,7 @@ use crate::ServerConfig;
 use chrono::Utc;
 use pilot_agents::SpawnCtx;
 use pilot_core::{
-    SessionId, SessionKey, SessionKind, Task, Workspace, WorkspaceKey,
-    WorkspaceSession as Session,
+    SessionId, SessionKey, SessionKind, Task, Workspace, WorkspaceKey, WorkspaceSession as Session,
 };
 use pilot_ipc::{Event, TerminalId, TerminalKind, TerminalSnapshot};
 use pilot_store::WorkspaceRecord;
@@ -151,9 +150,10 @@ pub async fn handle_spawn(
             match resolve_or_create_session(config, &session_key, session_id, &kind).await {
                 Ok((path, sid)) => (Some(path), Some(sid)),
                 Err(e) => {
-                    let _ = config
-                        .bus
-                        .send(Event::provider_error_permanent("spawn:session", e.to_string()));
+                    let _ = config.bus.send(Event::provider_error_permanent(
+                        "spawn:session",
+                        e.to_string(),
+                    ));
                     return;
                 }
             }
@@ -767,14 +767,13 @@ async fn provision_worktree(
             // `pilot/issue-42-…` and `pilot/issue-42-…-2`, neither of
             // which corresponds to a PR the user can push.
             let new_branch = derive_branch_for_branchless(task);
-            let base = mgr.default_branch(owner, name).await.map_err(|e| {
-                ServerError::Worktree(format!("default_branch lookup: {e}"))
-            })?;
+            let base = mgr
+                .default_branch(owner, name)
+                .await
+                .map_err(|e| ServerError::Worktree(format!("default_branch lookup: {e}")))?;
             mgr.checkout_new_branch_at(target, owner, name, &new_branch, &base)
                 .await
-                .map_err(|e| {
-                    ServerError::Worktree(format!("checkout_new_branch_at: {e}"))
-                })?
+                .map_err(|e| ServerError::Worktree(format!("checkout_new_branch_at: {e}")))?
         }
     };
 
@@ -1160,9 +1159,10 @@ pub async fn handle_create_session(
     let mut workspace = match load_workspace(config, &workspace_key) {
         Ok(w) => w,
         Err(e) => {
-            let _ = config
-                .bus
-                .send(Event::provider_error_permanent("create_session", e.to_string()));
+            let _ = config.bus.send(Event::provider_error_permanent(
+                "create_session",
+                e.to_string(),
+            ));
             return;
         }
     };
@@ -1178,9 +1178,10 @@ pub async fn handle_create_session(
     }
     workspace.add_session(session.clone());
     if let Err(e) = persist_and_broadcast(config, &workspace).await {
-        let _ = config
-            .bus
-            .send(Event::provider_error_permanent("create_session", e.to_string()));
+        let _ = config.bus.send(Event::provider_error_permanent(
+            "create_session",
+            e.to_string(),
+        ));
         return;
     }
     let _ = config.bus.send(Event::SessionCreated(Box::new(session)));

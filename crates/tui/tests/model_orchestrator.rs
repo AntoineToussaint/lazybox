@@ -191,7 +191,9 @@ fn shift_j_on_issue_with_claiming_pr_emits_collapse_command() {
     while let Ok(cmd) = server.rx.try_recv() {
         commands.push(cmd);
     }
-    let collapse = commands.iter().find(|c| matches!(c, Command::CollapseIntoPr { .. }));
+    let collapse = commands
+        .iter()
+        .find(|c| matches!(c, Command::CollapseIntoPr { .. }));
     assert!(
         collapse.is_some(),
         "Shift+J on issue with claiming PR must emit CollapseIntoPr, got: {commands:#?}",
@@ -221,7 +223,9 @@ fn shift_j_on_orphan_issue_surfaces_notice_no_ipc() {
         commands.push(cmd);
     }
     assert!(
-        !commands.iter().any(|c| matches!(c, Command::CollapseIntoPr { .. })),
+        !commands
+            .iter()
+            .any(|c| matches!(c, Command::CollapseIntoPr { .. })),
         "no CollapseIntoPr should fire when no PR closes the issue",
     );
 }
@@ -818,8 +822,9 @@ fn w_on_issue_with_running_claude_injects_implement_prompt() {
         } => Some((*terminal_id, prompt.clone(), fallback_spawn.clone())),
         _ => None,
     });
-    let (terminal_id, prompt, fallback) =
-        inject.unwrap_or_else(|| panic!("w on issue with running claude must emit InjectPrompt — got: {commands:#?}"));
+    let (terminal_id, prompt, fallback) = inject.unwrap_or_else(|| {
+        panic!("w on issue with running claude must emit InjectPrompt — got: {commands:#?}")
+    });
     assert_eq!(terminal_id, TerminalId(7), "must target the running claude");
     assert!(
         prompt.contains("Implement GitHub issue #42"),
@@ -834,7 +839,15 @@ fn w_on_issue_with_running_claude_injects_implement_prompt() {
     // otherwise the user gets two claude tabs instead of one.
     let spawn_count = commands
         .iter()
-        .filter(|c| matches!(c, Command::Spawn { kind: TerminalKind::Agent(_), .. }))
+        .filter(|c| {
+            matches!(
+                c,
+                Command::Spawn {
+                    kind: TerminalKind::Agent(_),
+                    ..
+                }
+            )
+        })
         .count();
     assert_eq!(
         spawn_count, 0,

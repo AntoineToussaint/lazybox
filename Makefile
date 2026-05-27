@@ -91,6 +91,19 @@ test-ignored: ## Run #[ignore]'d real-backend integration tests on demand.
 lint: ## Run clippy with workspace lint config (vendored crates excluded).
 	@PATH="$(PINNED_PATH)" cargo clippy --workspace --tests
 
+fmt: ## Format every crate in-place. Run before committing.
+	@cargo fmt --all
+
+fmt-check: ## Verify formatting WITHOUT modifying files. Matches CI's fmt job.
+	@cargo fmt --all -- --check
+
+pre-commit: fmt-check ## Same gate the .githooks/pre-commit hook runs (fmt + clippy).
+	@PATH="$(PINNED_PATH)" cargo clippy --workspace --all-targets -- -D warnings
+
+install-hooks: ## Activate the in-tree .githooks/* (one-time per clone).
+	@git config core.hooksPath .githooks
+	@echo "Installed .githooks/. Bypass any hook with \`git commit --no-verify\`."
+
 clean: ## Clean cargo build artifacts (preserves vendor/).
 	@cargo clean
 

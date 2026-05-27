@@ -262,7 +262,6 @@ impl<T: TerminalAdapter> Model<T> {
             self.assignees_choices.clear();
             self.pop_modal();
             if let Some(workspace_key) = self.pending_assignees_request.take() {
-                
                 let count = logins.len();
                 let msg = if count == 0 {
                     "cleared assignees".to_string()

@@ -133,7 +133,10 @@ mod tests {
 
         assert_eq!(outcome, MutationOutcome::Applied);
         let stored = load_workspace(&config, &key).unwrap();
-        assert!(stored.snoozed_until.is_some(), "transform must be persisted");
+        assert!(
+            stored.snoozed_until.is_some(),
+            "transform must be persisted"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

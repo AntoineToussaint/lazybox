@@ -77,7 +77,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// `Command::RequestReviewers`.
     pub(crate) fn mount_request_reviewers(&mut self, workspace_key: pilot_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
-        
+
         if matches!(self.modal_stack.last(), Some(Id::RequestReviewers)) {
             return;
         }
@@ -103,7 +103,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// task and runs add + remove mutations as needed.
     pub(crate) fn mount_add_assignees(&mut self, workspace_key: pilot_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
-        
+
         if matches!(self.modal_stack.last(), Some(Id::AddAssignees)) {
             return;
         }
@@ -499,7 +499,6 @@ impl<T: TerminalAdapter> Model<T> {
 
     pub(super) fn mount_adopt_picker(&mut self, source_key: pilot_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
-        
 
         // Build (target_key, label) pairs from every workspace EXCEPT
         // the source. Labels prefer the primary task's `owner/repo#N`

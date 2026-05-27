@@ -289,7 +289,6 @@ impl<T: TerminalAdapter> Model<T> {
         // `TerminalSpawned` arrives in `handle_daemon_event`.
         for cmd in &cmds {
             if let IpcCommand::Spawn { kind, .. } = cmd {
-                
                 let label = match kind {
                     pilot_ipc::TerminalKind::Shell => "shell".to_string(),
                     pilot_ipc::TerminalKind::Agent(a) => a.to_string(),

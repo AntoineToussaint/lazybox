@@ -21,7 +21,6 @@ impl<T: TerminalAdapter> Model<T> {
     /// "handle mouse natively (selection works)". Footer notice
     /// confirms which mode is now active.
     pub(super) fn toggle_mouse_capture(&mut self) {
-        
         self.mouse_capture_on = !self.mouse_capture_on;
         let (msg, _) = if self.mouse_capture_on {
             let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture,);

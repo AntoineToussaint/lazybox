@@ -235,20 +235,50 @@ pub struct PostMessageResponse {
 /// lowercase + safe characters) but defensively sluggifies in case
 /// a future workspace key contains unexpected chars.
 pub fn channel_name_for_workspace(workspace_key: &str, prefix: &str) -> String {
-    let mut s = String::with_capacity(prefix.len() + workspace_key.len());
-    s.push_str(prefix);
-    for c in workspace_key.chars() {
+    sluggify(&format!("{prefix}{workspace_key}"))
+}
+
+/// Channel name for a specific (session, agent) pair. Format:
+/// `<prefix><workspace>-<session8>-<agent>`. Each per-(session, agent)
+/// channel is its own conversation so a workspace running Claude in
+/// one worktree and Codex in another doesn't collide on `@pilot`
+/// inbound or status reports.
+///
+/// `session_id` is shortened to 8 hex chars — enough uniqueness for a
+/// per-workspace handful of worktrees and short enough to leave room
+/// inside Slack's 80-char limit. If two sessions in the same
+/// workspace ever collide on the prefix the name_taken recovery path
+/// reuses the first one's channel; not ideal, but the alternative
+/// (full UUID = unreadable channel names) loses more.
+pub fn channel_name_for_terminal(
+    workspace_key: &str,
+    session_id: &str,
+    agent_id: &str,
+    prefix: &str,
+) -> String {
+    let short = session_id
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(8)
+        .collect::<String>();
+    sluggify(&format!("{prefix}{workspace_key}-{short}-{agent_id}",))
+}
+
+/// Slug a string into a valid Slack channel name: lowercase letters,
+/// digits, hyphens, underscores, periods. Caps at 80 chars and trims
+/// trailing punctuation Slack rejects.
+fn sluggify(input: &str) -> String {
+    let mut s = String::with_capacity(input.len());
+    for c in input.chars() {
         if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
             s.push(c.to_ascii_lowercase());
         } else {
             s.push('-');
         }
     }
-    // Slack enforces 80 chars; we cap at 80 too.
     if s.chars().count() > 80 {
         s = s.chars().take(80).collect();
     }
-    // Names can't end with `-` or `.` — trim trailing punctuation.
     while matches!(s.chars().last(), Some('-' | '.' | '_')) {
         s.pop();
     }
@@ -304,5 +334,41 @@ mod tests {
         // Slack rejects those.
         assert_eq!(channel_name_for_workspace("foo-", ""), "foo");
         assert_eq!(channel_name_for_workspace("foo!", ""), "foo");
+    }
+
+    #[test]
+    fn channel_name_for_terminal_includes_session_and_agent() {
+        let n = channel_name_for_terminal(
+            "github-acme-widget-186",
+            "a3f1c277-9abc-4d51-8f01-deadbeef0001",
+            "claude",
+            "",
+        );
+        assert_eq!(n, "github-acme-widget-186-a3f1c277-claude");
+    }
+
+    #[test]
+    fn channel_name_for_terminal_applies_prefix() {
+        let n =
+            channel_name_for_terminal("github-acme-widget-186", "a3f1c277-9abc", "codex", "pr-");
+        assert_eq!(n, "pr-github-acme-widget-186-a3f1c277-codex");
+    }
+
+    #[test]
+    fn channel_name_for_terminal_caps_at_eighty_chars() {
+        let long = format!("github-{}", "a".repeat(100));
+        let n = channel_name_for_terminal(&long, "deadbeef", "claude", "");
+        assert!(n.chars().count() <= 80);
+    }
+
+    #[test]
+    fn channel_name_for_terminal_uses_only_hex_from_session_id() {
+        // UUIDs come dash-separated; the slug helper would already
+        // dash them out, but `channel_name_for_terminal` shortens by
+        // filtering hex digits first so the truncated form looks like
+        // `a3f1c277` and not `a3f1c27`. Pin that contract.
+        let n =
+            channel_name_for_terminal("ws", "a3f1c277-9abc-4d51-8f01-deadbeef0001", "claude", "");
+        assert!(n.contains("a3f1c277"));
     }
 }

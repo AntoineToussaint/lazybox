@@ -2,38 +2,43 @@
 //!
 //! Pilot uses external chat systems (Slack today; Discord / Matrix /
 //! IRC planned) as a "second display" for the inbox — a place where
-//! workspace and agent events surface, and from which the user can
-//! drive the agent without being at the keyboard.
+//! agent events surface, and from which the user can drive the
+//! agent without being at the keyboard.
 //!
-//! The pieces of that integration split cleanly between
-//! *provider-specific* and *provider-agnostic* code:
+//! ## Channel granularity — one channel per (session, agent)
 //!
-//! - **Provider-specific:** auth (Slack uses bot + app tokens;
-//!   Discord uses a single bot token; Matrix uses an access token),
-//!   wire protocol (Slack Socket Mode WebSocket; Discord gateway;
-//!   Matrix `/sync`), channel creation, mention syntax.
-//! - **Provider-agnostic:** mapping `channel_id ↔ workspace_key`,
-//!   parsing inbound commands like `status` / `ls`, formatting the
-//!   reply, deciding whether an inbound message routes to the PTY or
-//!   to the status formatter, picking the right channel for an
-//!   outbound bus event.
+//! A pilot workspace can host multiple sessions (= worktrees on
+//! disk), each running one or more agents. Each `(session_id, agent)`
+//! pair gets its own chat channel, named
+//! `<workspace>-<session-short>-<agent>`:
 //!
-//! This module owns the provider-agnostic half. The Slack adapter
-//! (`crate::slack`) plugs in by implementing [`ChatProvider`] and
-//! delegating its inbound + bus-event loops to the dispatcher
-//! functions here.
+//! ```text
+//! #github-acme-widget-186-a3f1c277-claude
+//! #github-acme-widget-186-a3f1c277-codex     (codex in the same session)
+//! #github-acme-widget-186-9e22d100-claude   (a second worktree's claude)
+//! ```
 //!
-//! ## Adding a new provider
+//! This shape means inbound `@pilot yes` is unambiguous — the
+//! channel uniquely identifies which agent's PTY to write to. The
+//! older workspace-keyed model couldn't distinguish two agents in
+//! the same workspace and silently routed everything to the
+//! most-recently-spawned terminal.
 //!
-//! 1. Add a `pilot-<name>` crate with the wire types + a thin client
-//!    (HTTP / WebSocket as needed).
-//! 2. In `crate::<name>`, define a struct that implements
-//!    [`ChatProvider`] (the post + ensure-channel + bot-id +
-//!    strip-mention quartet).
-//! 3. Spawn a task that drains the provider's inbound stream into
-//!    normalized [`ChatInbound`]s and calls
-//!    [`handle_inbound`] for each.
-//! 4. Subscribe to the bus and call [`handle_bus_event`].
+//! ## Provider abstraction
+//!
+//! The pieces split between *provider-specific* and *provider-
+//! agnostic*:
+//!
+//! - **Provider-specific:** auth, wire protocol, channel creation,
+//!   mention syntax. (Slack adapter: `crate::slack`.)
+//! - **Provider-agnostic:** mapping channel_id ↔ terminal_id,
+//!   parsing inbound commands, formatting the status reply, picking
+//!   what to post for each bus event.
+//!
+//! This module owns the provider-agnostic half. Adapters plug in by
+//! implementing [`ChatProvider`] and feeding normalized inbound
+//! events into [`handle_inbound`] + bus events into
+//! [`handle_bus_event`].
 
 use crate::ServerConfig;
 use pilot_ipc::{AgentState, Event, TerminalId, TerminalKind};
@@ -53,9 +58,9 @@ use tokio::sync::Mutex;
 /// prompts read as "done".
 const DONE_QUIET_THRESHOLD: Duration = Duration::from_secs(3);
 
-/// Limit on workspaces summarized in a global status reply.
-/// Mostly there to keep replies scannable on a phone.
-const STATUS_GLOBAL_LIMIT: usize = 15;
+/// Limit on rows in the global status reply. Mostly there to keep
+/// replies scannable on a phone.
+const STATUS_GLOBAL_LIMIT: usize = 30;
 
 /// Error type for the chat layer. Providers convert their own
 /// error types into this so the dispatcher only deals with one
@@ -71,15 +76,10 @@ pub enum ChatError {
 /// gets mapped into this before the dispatcher sees it.
 #[derive(Debug, Clone)]
 pub enum ChatInbound {
-    /// Provider has come online — useful for "bot just (re)started"
-    /// log lines. The dispatcher ignores it today.
+    /// Provider has come online. The dispatcher ignores it today —
+    /// adapters can log "connected" themselves.
     Connected,
-    /// User said something in a channel pilot can see. `channel` is
-    /// the provider's stable id (Slack channel id, Discord channel
-    /// id). `user` is the speaker's id; pilot uses it only for
-    /// logging today. `ts` is the provider's message timestamp,
-    /// preserved so future thread-reply code can use it as an
-    /// anchor.
+    /// User said something in a channel pilot can see.
     Message {
         channel: String,
         user: String,
@@ -91,14 +91,7 @@ pub enum ChatInbound {
     Disconnected { reason: String },
 }
 
-/// Provider-side interface every chat backend implements. Three jobs:
-///
-/// 1. **Post** a message — outbound notifications.
-/// 2. **Ensure a channel** exists for a workspace — pilot creates
-///    one per workspace by default.
-/// 3. **Strip self-mention** — `<@bot>` in slack, `<@!123>` in
-///    discord. Pulled into the trait because the rest of the
-///    dispatch logic shouldn't care which syntax the provider uses.
+/// What pilot needs from a chat backend.
 ///
 /// Return-style follows the [`crate::backend::SessionBackend`]
 /// pattern: `Pin<Box<dyn Future>>` rather than `async-trait`, so the
@@ -112,6 +105,16 @@ pub trait ChatProvider: Send + Sync {
     /// `<@Uxxx>`, discord `<@!123>`, matrix `@bot:server`).
     fn strip_self_mention<'a>(&self, text: &'a str) -> &'a str;
 
+    /// Compute the channel name the provider will use for a given
+    /// (workspace, session_id, agent_id) tuple. Returning `None`
+    /// means "no per-terminal channel for this provider" — e.g.
+    /// Slack with `per_workspace_channels: false`, where everything
+    /// routes through the anchor channel instead. When `None`, the
+    /// dispatcher silently drops outbound events for this terminal
+    /// and never creates a channel.
+    fn channel_name(&self, workspace_key: &str, session_id: &str, agent_id: &str)
+    -> Option<String>;
+
     /// Post a plain-text message to a channel id.
     fn post<'a>(
         &'a self,
@@ -119,16 +122,13 @@ pub trait ChatProvider: Send + Sync {
         body: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), ChatError>> + Send + 'a>>;
 
-    /// Find or create the channel that hosts `workspace_key`'s
-    /// conversation. `Ok(None)` means the provider intentionally
-    /// has no channel for it (e.g. `per_workspace_channels: false`
-    /// in Slack, channel-not-allowed in Discord). The dispatcher
-    /// caches the returned id so a stable call only hits the
-    /// network once.
-    fn ensure_workspace_channel<'a>(
+    /// Find or create the channel with the given name. Returns the
+    /// provider's stable channel id. `name_taken` should be
+    /// transparent (provider returns the existing id).
+    fn ensure_channel<'a>(
         &'a self,
-        workspace_key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<String>, ChatError>> + Send + 'a>>;
+        name: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ChatError>> + Send + 'a>>;
 }
 
 /// Shared state for one chat provider's dispatcher. Built once at
@@ -136,37 +136,23 @@ pub trait ChatProvider: Send + Sync {
 /// status) halves take `Arc` clones.
 #[derive(Default)]
 pub struct RouterState {
-    /// `channel_id → workspace_key`. Built when pilot resolves a
-    /// channel for a workspace; used by inbound to route a chat
-    /// message back to the right session.
-    channel_to_workspace: HashMap<String, String>,
-    /// `workspace_key → primary agent terminal_id`. Updated on
-    /// `TerminalSpawned` / `TerminalExited`. Pilot writes inbound
-    /// replies here. Empty entries mean "no agent yet — skip".
-    workspace_to_terminal: HashMap<String, TerminalId>,
+    /// `terminal_id → channel id`. One entry per agent terminal that
+    /// has a chat channel. Populated on `TerminalSpawned(Agent)` and
+    /// cleared on `TerminalExited`.
+    terminal_to_channel: HashMap<TerminalId, String>,
+    /// Reverse map for inbound routing. Same lifetime as
+    /// `terminal_to_channel`.
+    channel_to_terminal: HashMap<String, TerminalId>,
     /// `terminal_id → last instant we saw PTY output`. Updated on
     /// every `TerminalOutput` bus event. When `AgentState::Asking`
     /// fires the dispatcher reads this to label notifications as
     /// "paused" (recent output) vs "done" (quiet for a while).
     last_output_at: HashMap<TerminalId, Instant>,
-    /// Workspaces we've already posted the "new workspace"
-    /// notification for. The bus broadcasts `WorkspaceUpserted` on
-    /// every read-state change too — without this set the dispatcher
-    /// would re-post on every keystroke.
-    posted_workspaces: std::collections::HashSet<String>,
 }
 
 impl RouterState {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Pre-seed the workspace → channel mapping with channels the
-    /// provider already knows about at boot. Slack uses this after
-    /// `conversations.list` so subsequent `ensure_workspace_channel`
-    /// calls find the existing id without an HTTP roundtrip.
-    pub fn record_channel(&mut self, channel_id: String, workspace_key: String) {
-        self.channel_to_workspace.insert(channel_id, workspace_key);
     }
 }
 
@@ -175,9 +161,9 @@ impl RouterState {
 /// chatbot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatCommand {
-    /// Report state of sessions. In a workspace channel: that
-    /// workspace's sessions + agent state. Anywhere else (anchor /
-    /// untracked): a summary across every known workspace.
+    /// Report state of sessions. In a per-terminal channel: that
+    /// agent's state + recent activity. In a channel pilot doesn't
+    /// route to a terminal: a summary across every tracked agent.
     Status,
 }
 
@@ -187,8 +173,8 @@ pub enum ChatCommand {
 /// Matched keywords (case-insensitive, leading token only):
 /// `status`, `state`, `ls`, `list`. The token has to lead — "what's
 /// the status" does NOT match — so plain chat doesn't accidentally
-/// trigger a status reply. Tokens like `ls -la` still route to
-/// status (everything after the keyword is ignored today).
+/// trigger a status reply. Trailing punctuation is tolerated
+/// (`status?` matches); trailing args are ignored (`ls -la` matches).
 pub fn parse_command(text: &str) -> Option<ChatCommand> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -208,7 +194,7 @@ pub fn parse_command(text: &str) -> Option<ChatCommand> {
 /// Top-level inbound handler. Provider-specific code maps its own
 /// wire event into [`ChatInbound`] and calls this. Either the
 /// message is a [`ChatCommand`] (we reply via the provider) or it's
-/// agent input (we forward to the workspace's PTY).
+/// agent input (we forward to the channel's terminal).
 pub async fn handle_inbound(
     provider: &dyn ChatProvider,
     server: &ServerConfig,
@@ -223,41 +209,30 @@ pub async fn handle_inbound(
     if text.is_empty() {
         return;
     }
-    let workspace_key = state
+    let terminal_id = state
         .lock()
         .await
-        .channel_to_workspace
+        .channel_to_terminal
         .get(&channel)
-        .cloned();
-    // Query commands short-circuit before PTY-forward: `status` in
-    // the anchor channel (no workspace mapping) still produces a
-    // reply.
+        .copied();
+    // Query commands short-circuit before the PTY-forward: `status`
+    // in an unmapped channel (e.g. anchor / DMs) still gets a reply.
     if let Some(cmd) = parse_command(&text) {
-        let body = build_status_reply(server, state, workspace_key.as_deref(), cmd).await;
+        let body = build_status_reply(server, state, terminal_id, cmd).await;
         if let Err(e) = provider.post(&channel, &body).await {
-            tracing::warn!(provider = provider.id(), channel = %channel, "{}: status post failed: {e}", provider.id());
+            tracing::warn!(
+                provider = provider.id(),
+                channel = %channel,
+                "chat: status post failed: {e}"
+            );
         }
         return;
     }
-    let Some(workspace_key) = workspace_key else {
+    let Some(terminal_id) = terminal_id else {
         tracing::debug!(
             provider = provider.id(),
             channel = %channel,
             "chat: inbound in untracked channel — ignoring"
-        );
-        return;
-    };
-    let Some(terminal_id) = state
-        .lock()
-        .await
-        .workspace_to_terminal
-        .get(&workspace_key)
-        .copied()
-    else {
-        tracing::warn!(
-            provider = provider.id(),
-            workspace = %workspace_key,
-            "chat: inbound message but no agent terminal — skipping"
         );
         return;
     };
@@ -283,7 +258,7 @@ pub async fn handle_inbound(
     } else {
         tracing::info!(
             provider = provider.id(),
-            workspace = %workspace_key,
+            ?terminal_id,
             "chat: routed inbound message to agent"
         );
     }
@@ -299,59 +274,83 @@ pub async fn handle_bus_event(
     event: Event,
 ) {
     match event {
-        Event::WorkspaceUpserted(ws) => {
-            // Only post on the first time we see a workspace — the
-            // bus broadcasts on every read-state change too.
-            let workspace_key = ws.key.as_str().to_string();
-            {
-                let mut s = state.lock().await;
-                if s.posted_workspaces.contains(&workspace_key) {
-                    return;
-                }
-                s.posted_workspaces.insert(workspace_key.clone());
-            }
-            let Some(channel_id) = resolve_channel(provider, state, &workspace_key).await else {
+        Event::TerminalSpawned {
+            terminal_id,
+            session_key,
+            kind,
+            ..
+        } => {
+            let TerminalKind::Agent(agent_id) = kind else {
                 return;
             };
-            let title = ws
-                .primary_task()
-                .map(|t| t.title.clone())
-                .unwrap_or_else(|| ws.name.clone());
-            let url = ws.primary_task().map(|t| t.url.clone());
-            let body = match url {
-                Some(u) => format!("📋 *{title}*\n<{u}>"),
-                None => format!("📋 *{title}*"),
+            // Look up the session id; without it we can't name the
+            // channel uniquely per (session, agent).
+            let session_id = server
+                .terminal_sessions
+                .lock()
+                .await
+                .get(&terminal_id)
+                .copied();
+            let Some(session_id) = session_id else {
+                tracing::debug!(
+                    ?terminal_id,
+                    "chat: TerminalSpawned with no session — skipping channel create"
+                );
+                return;
             };
-            if let Err(e) = provider.post(&channel_id, &body).await {
-                tracing::warn!(provider = provider.id(), "chat: post failed: {e}");
+            let workspace_key = session_key.as_str().to_string();
+            let Some(name) =
+                provider.channel_name(&workspace_key, &session_id.to_string(), &agent_id)
+            else {
+                return;
+            };
+            let channel_id = match provider.ensure_channel(&name).await {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!(
+                        provider = provider.id(),
+                        name = %name,
+                        "chat: ensure_channel failed: {e}"
+                    );
+                    return;
+                }
+            };
+            {
+                let mut s = state.lock().await;
+                s.terminal_to_channel
+                    .insert(terminal_id, channel_id.clone());
+                s.channel_to_terminal
+                    .insert(channel_id.clone(), terminal_id);
+                // Seed last-output-at so a brand-new terminal that
+                // goes straight into Asking on its first prompt
+                // doesn't get labelled `done`.
+                s.last_output_at.insert(terminal_id, Instant::now());
+            }
+            // Header so the channel isn't a wall of confusing
+            // notifications — include the workspace title and the
+            // agent so a phone reader can orient.
+            let header = workspace_header(&*server.store, &workspace_key, &agent_id);
+            if let Err(e) = provider.post(&channel_id, &header).await {
+                tracing::warn!(provider = provider.id(), "chat: header post failed: {e}");
             }
         }
         Event::AgentState {
-            session_key,
+            terminal_id,
             state: agent_state,
+            ..
         } => {
-            // Only post on Asking transitions — Active is the
-            // default and the channel would drown in "now streaming"
-            // messages otherwise.
             if agent_state != AgentState::Asking {
                 return;
             }
-            let workspace_key = session_key.as_str().to_string();
-            let Some(channel_id) = resolve_channel(provider, state, &workspace_key).await else {
-                return;
-            };
-            let (terminal_id, quiet_for) = {
+            let (channel_id, quiet_for) = {
                 let s = state.lock().await;
-                let tid = s.workspace_to_terminal.get(&workspace_key).copied();
-                let quiet = tid
-                    .and_then(|t| s.last_output_at.get(&t).copied())
-                    .map(|t| t.elapsed());
-                (tid, quiet)
+                let ch = s.terminal_to_channel.get(&terminal_id).cloned();
+                let quiet = s.last_output_at.get(&terminal_id).map(|t| t.elapsed());
+                (ch, quiet)
             };
-            let Some(terminal_id) = terminal_id else {
-                let _ = provider
-                    .post(&channel_id, "⏸ agent is waiting on input")
-                    .await;
+            let Some(channel_id) = channel_id else {
+                // Terminal not tracked — probably spawned before the
+                // chat task came up, or `channel_name` returned None.
                 return;
             };
             let label = asking_label(quiet_for);
@@ -365,25 +364,6 @@ pub async fn handle_bus_event(
                 tracing::warn!(provider = provider.id(), "chat: post failed: {e}");
             }
         }
-        Event::TerminalSpawned {
-            terminal_id,
-            session_key,
-            kind,
-            ..
-        } => {
-            if !matches!(kind, TerminalKind::Agent(_)) {
-                return;
-            }
-            let mut s = state.lock().await;
-            s.workspace_to_terminal
-                .insert(session_key.as_str().to_string(), terminal_id);
-            // Seed last-output-at so a brand-new terminal that goes
-            // straight into Asking on its first prompt doesn't get
-            // labelled `done` (no recorded output ever → elapsed
-            // calculation falls through to `paused`, the right
-            // default).
-            s.last_output_at.insert(terminal_id, Instant::now());
-        }
         Event::TerminalOutput { terminal_id, .. } => {
             state
                 .lock()
@@ -393,40 +373,42 @@ pub async fn handle_bus_event(
         }
         Event::TerminalExited { terminal_id, .. } => {
             let mut s = state.lock().await;
-            s.workspace_to_terminal.retain(|_, tid| *tid != terminal_id);
+            if let Some(ch) = s.terminal_to_channel.remove(&terminal_id) {
+                s.channel_to_terminal.remove(&ch);
+            }
             s.last_output_at.remove(&terminal_id);
         }
         _ => {}
     }
 }
 
-/// Resolve the channel for a workspace, caching the
-/// channel → workspace reverse map. Returns `None` when the
-/// provider has no channel for it (config disabled, error).
-async fn resolve_channel(
-    provider: &dyn ChatProvider,
-    state: &Arc<Mutex<RouterState>>,
-    workspace_key: &str,
-) -> Option<String> {
-    match provider.ensure_workspace_channel(workspace_key).await {
-        Ok(Some(id)) => {
-            state
-                .lock()
-                .await
-                .channel_to_workspace
-                .insert(id.clone(), workspace_key.to_string());
-            Some(id)
+/// One-line header posted into a newly-created (session, agent)
+/// channel. Pulls the workspace title from the store so phone
+/// readers see what they're looking at without context-switching
+/// to GitHub.
+fn workspace_header(store: &dyn Store, workspace_key: &str, agent_id: &str) -> String {
+    let title = store_workspace_title(store, workspace_key);
+    match title {
+        Some(t) => {
+            format!("🤖 *{t}* · `{agent_id}` session\nreply in this channel to send to the agent")
         }
-        Ok(None) => None,
-        Err(e) => {
-            tracing::warn!(
-                provider = provider.id(),
-                workspace = %workspace_key,
-                "chat: ensure_workspace_channel failed: {e}"
-            );
-            None
-        }
+        None => format!("🤖 `{agent_id}` session in `{workspace_key}`"),
     }
+}
+
+/// Resolve a workspace title from the store. Returns `None` if the
+/// store can't read or the workspace isn't there yet (race between
+/// `TerminalSpawned` and the polling tick that inserts the row).
+fn store_workspace_title(store: &dyn Store, workspace_key: &str) -> Option<String> {
+    let records = store.list_workspaces().ok()?;
+    let r = records.into_iter().find(|r| r.key == workspace_key)?;
+    let json = r.workspace_json?;
+    let ws: pilot_core::Workspace = serde_json::from_str(&json).ok()?;
+    let title = ws
+        .primary_task()
+        .map(|t| t.title.clone())
+        .unwrap_or(ws.name);
+    Some(title)
 }
 
 /// Pick the label that fronts an Asking notification. `quiet_for` is
@@ -441,9 +423,9 @@ fn asking_label(quiet_for: Option<Duration>) -> &'static str {
 }
 
 /// Pull the last ~2 KB of the terminal's ring buffer, strip ANSI,
-/// drop blank lines, and return up to the last 30 non-empty lines.
-/// Used as the "context" block in chat "waiting on input" messages
-/// so the user can see what the agent is asking.
+/// drop blank lines, return up to the last 30 non-empty lines. Used
+/// as the "context" block in chat "waiting on input" messages so the
+/// user can see what the agent is asking.
 async fn recent_terminal_text(server: &ServerConfig, terminal_id: TerminalId) -> String {
     let backend_key = {
         let terminals = server.terminals.lock().await;
@@ -500,9 +482,8 @@ fn strip_ansi(s: &str) -> String {
                 None => break,
             }
         } else if c == '\r' {
-            // Strip CR — terminals use \r for cursor reset between
-            // status-line updates; in chat it just produces blank
-            // line noise.
+            // \r is used by status-line updaters; in non-terminal
+            // contexts (chat) it produces blank lines.
         } else {
             out.push(c);
         }
@@ -536,34 +517,52 @@ fn encode_for_pty(text: &str) -> Vec<u8> {
 
 // ── Status reply ──────────────────────────────────────────────────
 
-/// Build the body of a status reply. Pure read of the daemon's
-/// existing state — no provider I/O happens here.
+/// Build the status reply for a chat command. `terminal_id` is
+/// `Some` when the command came from a channel pilot routes to a
+/// specific agent — that channel reports just that agent. `None`
+/// means the channel isn't routed (anchor / DM / random) — return
+/// the global summary across every tracked terminal.
 async fn build_status_reply(
     server: &ServerConfig,
     state: &Arc<Mutex<RouterState>>,
-    workspace_key: Option<&str>,
+    terminal_id: Option<TerminalId>,
     cmd: ChatCommand,
 ) -> String {
     let ChatCommand::Status = cmd;
-    let workspaces = load_workspaces_for_status(&*server.store);
     let agent_states_snapshot: HashMap<TerminalId, AgentState> = {
         let m = server.agent_states.lock().await;
         m.clone()
     };
-    let workspace_to_terminal: HashMap<String, TerminalId> = {
+    let terminal_to_channel: HashMap<TerminalId, String> = {
         let s = state.lock().await;
-        s.workspace_to_terminal.clone()
+        s.terminal_to_channel.clone()
     };
     let terminal_meta: HashMap<TerminalId, (pilot_core::SessionKey, TerminalKind)> = {
         let m = server.terminal_meta.lock().await;
         m.clone()
     };
+    let terminal_sessions: HashMap<TerminalId, pilot_core::SessionId> = {
+        let m = server.terminal_sessions.lock().await;
+        m.clone()
+    };
+    let workspaces = load_workspaces_for_status(&*server.store);
+    let workspace_titles: HashMap<String, String> = workspaces
+        .iter()
+        .map(|w| {
+            let title = w
+                .primary_task()
+                .map(|t| t.title.clone())
+                .unwrap_or_else(|| w.name.clone());
+            (w.key.as_str().to_string(), title)
+        })
+        .collect();
     format_status_reply(
-        workspace_key,
-        &workspaces,
+        terminal_id,
         &agent_states_snapshot,
-        &workspace_to_terminal,
+        &terminal_to_channel,
         &terminal_meta,
+        &terminal_sessions,
+        &workspace_titles,
     )
 }
 
@@ -588,97 +587,107 @@ fn load_workspaces_for_status(store: &dyn Store) -> Vec<pilot_core::Workspace> {
 /// Pure so tests can drive it without standing up a Store or a
 /// running provider.
 pub fn format_status_reply(
-    workspace_key: Option<&str>,
-    workspaces: &[pilot_core::Workspace],
+    terminal_id: Option<TerminalId>,
     agent_states: &HashMap<TerminalId, AgentState>,
-    workspace_to_terminal: &HashMap<String, TerminalId>,
+    terminal_to_channel: &HashMap<TerminalId, String>,
     terminal_meta: &HashMap<TerminalId, (pilot_core::SessionKey, TerminalKind)>,
+    terminal_sessions: &HashMap<TerminalId, pilot_core::SessionId>,
+    workspace_titles: &HashMap<String, String>,
 ) -> String {
-    if let Some(key) = workspace_key {
-        let Some(ws) = workspaces.iter().find(|w| w.key.as_str() == key) else {
-            return format!("❓ no workspace tracked for `{key}`");
-        };
-        return format_workspace_status(ws, agent_states, workspace_to_terminal, terminal_meta);
-    }
-    if workspaces.is_empty() {
-        return "📭 no workspaces in the inbox yet".to_string();
-    }
-    let mut lines: Vec<String> = Vec::with_capacity(workspaces.len() + 2);
-    lines.push(format!("📋 *{} workspace(s)*", workspaces.len()));
-    for ws in workspaces.iter().take(STATUS_GLOBAL_LIMIT) {
-        lines.push(format_workspace_one_liner(
-            ws,
+    if let Some(tid) = terminal_id {
+        return format_terminal_status(
+            tid,
             agent_states,
-            workspace_to_terminal,
             terminal_meta,
-        ));
+            terminal_sessions,
+            workspace_titles,
+        );
     }
-    if workspaces.len() > STATUS_GLOBAL_LIMIT {
-        lines.push(format!(
-            "… and {} more",
-            workspaces.len() - STATUS_GLOBAL_LIMIT
-        ));
+    let tracked: Vec<TerminalId> = terminal_to_channel.keys().copied().collect();
+    if tracked.is_empty() {
+        return "📭 no agent sessions tracked yet".to_string();
+    }
+    let mut rows: Vec<(String, String)> = tracked
+        .iter()
+        .filter_map(|tid| {
+            let (workspace_key, kind) = terminal_meta.get(tid)?;
+            let agent = match kind {
+                TerminalKind::Agent(id) => id.clone(),
+                _ => return None,
+            };
+            let ws_key = workspace_key.as_str().to_string();
+            Some((
+                ws_key.clone(),
+                format_one_liner(*tid, &ws_key, &agent, agent_states, workspace_titles),
+            ))
+        })
+        .collect();
+    // Group adjacent rows from the same workspace so the reader
+    // sees PR's agents next to each other.
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 2);
+    lines.push(format!("📋 *{} agent session(s)*", rows.len()));
+    for (_, line) in rows.iter().take(STATUS_GLOBAL_LIMIT) {
+        lines.push(line.clone());
+    }
+    if rows.len() > STATUS_GLOBAL_LIMIT {
+        lines.push(format!("… and {} more", rows.len() - STATUS_GLOBAL_LIMIT));
     }
     lines.join("\n")
 }
 
-fn format_workspace_one_liner(
-    ws: &pilot_core::Workspace,
+fn format_one_liner(
+    tid: TerminalId,
+    workspace_key: &str,
+    agent_id: &str,
     agent_states: &HashMap<TerminalId, AgentState>,
-    workspace_to_terminal: &HashMap<String, TerminalId>,
-    terminal_meta: &HashMap<TerminalId, (pilot_core::SessionKey, TerminalKind)>,
+    workspace_titles: &HashMap<String, String>,
 ) -> String {
-    let icon = workspace_icon(ws, agent_states, workspace_to_terminal);
-    let name = ws.name.as_str();
-    let session_count = ws.sessions.len();
-    let agents = agent_kinds_for_workspace(ws, workspace_to_terminal, terminal_meta);
-    let agent_suffix = if agents.is_empty() {
-        String::new()
-    } else {
-        format!(" · {}", agents.join(", "))
-    };
-    format!("{icon} `{name}` · {session_count} session(s){agent_suffix}")
+    let icon = agent_icon(tid, agent_states);
+    let title = workspace_titles
+        .get(workspace_key)
+        .cloned()
+        .unwrap_or_else(|| workspace_key.to_string());
+    format!("{icon} `{title}` · {agent_id}")
 }
 
-fn format_workspace_status(
-    ws: &pilot_core::Workspace,
+fn format_terminal_status(
+    tid: TerminalId,
     agent_states: &HashMap<TerminalId, AgentState>,
-    workspace_to_terminal: &HashMap<String, TerminalId>,
     terminal_meta: &HashMap<TerminalId, (pilot_core::SessionKey, TerminalKind)>,
+    terminal_sessions: &HashMap<TerminalId, pilot_core::SessionId>,
+    workspace_titles: &HashMap<String, String>,
 ) -> String {
-    let mut out = String::new();
-    let icon = workspace_icon(ws, agent_states, workspace_to_terminal);
-    out.push_str(&format!("{icon} *{}*\n", ws.name));
-    if let Some(task) = ws.primary_task() {
-        out.push_str(&format!("<{}>\n", task.url));
-    }
-    let agents = agent_kinds_for_workspace(ws, workspace_to_terminal, terminal_meta);
-    if !agents.is_empty() {
-        out.push_str(&format!("agents: {}\n", agents.join(", ")));
-    }
-    let tid = workspace_to_terminal.get(ws.key.as_str()).copied();
-    let agent_state = tid.and_then(|t| agent_states.get(&t).copied());
-    let state_label = match agent_state {
+    let Some((workspace_key, kind)) = terminal_meta.get(&tid) else {
+        return "❓ this channel's agent is no longer tracked".to_string();
+    };
+    let agent_id = match kind {
+        TerminalKind::Agent(id) => id.as_str(),
+        _ => "(non-agent)",
+    };
+    let ws_key = workspace_key.as_str();
+    let title = workspace_titles
+        .get(ws_key)
+        .cloned()
+        .unwrap_or_else(|| ws_key.to_string());
+    let icon = agent_icon(tid, agent_states);
+    let state_label = match agent_states.get(&tid).copied() {
         Some(AgentState::Asking) => "⏸ asking",
         Some(AgentState::Active) => "▶ active",
         None => "—",
     };
-    out.push_str(&format!("state: {state_label}\n"));
-    out.push_str(&format!("sessions: {}", ws.sessions.len()));
-    if ws.unread_count() > 0 {
-        out.push_str(&format!(" · {} unread", ws.unread_count()));
-    }
-    out
+    let session_short: String = terminal_sessions
+        .get(&tid)
+        .map(|s| s.to_string().chars().take(8).collect())
+        .unwrap_or_else(|| "—".to_string());
+    format!(
+        "{icon} *{title}*\nagent: `{agent_id}`\nsession: `{session_short}`\nstate: {state_label}"
+    )
 }
 
-fn workspace_icon(
-    ws: &pilot_core::Workspace,
-    agent_states: &HashMap<TerminalId, AgentState>,
-    workspace_to_terminal: &HashMap<String, TerminalId>,
-) -> &'static str {
-    let Some(tid) = workspace_to_terminal.get(ws.key.as_str()).copied() else {
-        return "·";
-    };
+/// Status icon for an agent terminal. `⏸` if asking, `▶` if
+/// active, `·` if untracked.
+fn agent_icon(tid: TerminalId, agent_states: &HashMap<TerminalId, AgentState>) -> &'static str {
     match agent_states.get(&tid).copied() {
         Some(AgentState::Asking) => "⏸",
         Some(AgentState::Active) => "▶",
@@ -686,25 +695,17 @@ fn workspace_icon(
     }
 }
 
-fn agent_kinds_for_workspace(
-    ws: &pilot_core::Workspace,
-    workspace_to_terminal: &HashMap<String, TerminalId>,
-    terminal_meta: &HashMap<TerminalId, (pilot_core::SessionKey, TerminalKind)>,
-) -> Vec<String> {
-    let Some(tid) = workspace_to_terminal.get(ws.key.as_str()).copied() else {
-        return vec![];
-    };
-    match terminal_meta.get(&tid) {
-        Some((_, TerminalKind::Agent(id))) => vec![id.clone()],
-        _ => vec![],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
-    use pilot_core::{SessionKey, Workspace, WorkspaceKey};
+    use pilot_core::{SessionId, SessionKey};
+
+    fn ws_titles(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
 
     #[test]
     fn parse_command_matches_lead_status_keyword() {
@@ -719,7 +720,6 @@ mod tests {
 
     #[test]
     fn parse_command_ignores_non_leading_keywords() {
-        // "status" appears, but not leading — chat shouldn't trigger.
         assert_eq!(parse_command("what is the status"), None);
         assert_eq!(parse_command("please list it"), None);
     }
@@ -734,122 +734,115 @@ mod tests {
 
     #[test]
     fn parse_command_strips_punctuation_on_keyword() {
-        // Trailing `?` shouldn't defeat the match — common in chat.
         assert_eq!(parse_command("status?"), Some(ChatCommand::Status));
     }
 
-    fn make_workspace(key: &str, name: &str) -> Workspace {
-        Workspace::empty(WorkspaceKey::new(key), "main", Utc::now()).tap_name(name)
-    }
-
-    // helper extension so the empty-workspace test fixture sets a
-    // readable name without rebuilding the literal `Workspace`
-    // every time
-    trait WorkspaceTestExt {
-        fn tap_name(self, name: &str) -> Self;
-    }
-    impl WorkspaceTestExt for Workspace {
-        fn tap_name(mut self, name: &str) -> Self {
-            self.name = name.to_string();
-            self
-        }
-    }
-
     #[test]
-    fn format_status_reply_global_lists_workspaces() {
-        let ws_a = make_workspace("a", "Alpha");
-        let ws_b = make_workspace("b", "Beta");
+    fn format_status_reply_global_lists_terminals_grouped_by_workspace() {
+        let mut agent_states = HashMap::new();
+        agent_states.insert(TerminalId(1), AgentState::Active);
+        agent_states.insert(TerminalId(2), AgentState::Asking);
+        let mut terminal_to_channel = HashMap::new();
+        terminal_to_channel.insert(TerminalId(1), "C1".to_string());
+        terminal_to_channel.insert(TerminalId(2), "C2".to_string());
+        let mut terminal_meta = HashMap::new();
+        terminal_meta.insert(
+            TerminalId(1),
+            (
+                SessionKey::new("ws-a"),
+                TerminalKind::Agent("claude".into()),
+            ),
+        );
+        terminal_meta.insert(
+            TerminalId(2),
+            (SessionKey::new("ws-b"), TerminalKind::Agent("codex".into())),
+        );
+        let terminal_sessions = HashMap::new();
+        let titles = ws_titles(&[("ws-a", "Alpha"), ("ws-b", "Beta")]);
+
         let reply = format_status_reply(
             None,
-            &[ws_a, ws_b],
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
+            &agent_states,
+            &terminal_to_channel,
+            &terminal_meta,
+            &terminal_sessions,
+            &titles,
         );
-        assert!(reply.contains("2 workspace(s)"));
+        assert!(reply.contains("2 agent session(s)"), "{}", reply);
         assert!(reply.contains("Alpha"));
         assert!(reply.contains("Beta"));
+        assert!(reply.contains("claude"));
+        assert!(reply.contains("codex"));
     }
 
     #[test]
-    fn format_status_reply_global_caps_at_limit() {
-        let many: Vec<Workspace> = (0..(STATUS_GLOBAL_LIMIT + 5))
-            .map(|i| make_workspace(&format!("k{i}"), &format!("Name{i}")))
-            .collect();
+    fn format_status_reply_global_empty_when_nothing_tracked() {
         let reply = format_status_reply(
             None,
-            &many,
+            &HashMap::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
         );
-        assert!(reply.contains("… and 5 more"));
+        assert_eq!(reply, "📭 no agent sessions tracked yet");
     }
 
     #[test]
-    fn format_status_reply_global_handles_empty_inbox() {
-        let reply =
-            format_status_reply(None, &[], &HashMap::new(), &HashMap::new(), &HashMap::new());
-        assert_eq!(reply, "📭 no workspaces in the inbox yet");
-    }
-
-    #[test]
-    fn format_status_reply_per_workspace_renders_state() {
-        let mut ws = make_workspace("a", "Alpha");
-        ws.name = "Alpha workspace".into();
-        let mut workspace_to_terminal = HashMap::new();
-        workspace_to_terminal.insert("a".to_string(), TerminalId(7));
+    fn format_status_reply_per_terminal_includes_workspace_agent_session_state() {
         let mut agent_states = HashMap::new();
         agent_states.insert(TerminalId(7), AgentState::Asking);
         let mut terminal_meta = HashMap::new();
         terminal_meta.insert(
             TerminalId(7),
-            (SessionKey::new("a"), TerminalKind::Agent("claude".into())),
+            (
+                SessionKey::new("github-acme-widget-186"),
+                TerminalKind::Agent("claude".into()),
+            ),
         );
+        let mut terminal_sessions = HashMap::new();
+        let session_id =
+            SessionId(uuid::Uuid::parse_str("a3f1c277-9abc-4d51-8f01-deadbeef0001").unwrap());
+        terminal_sessions.insert(TerminalId(7), session_id);
+        let titles = ws_titles(&[("github-acme-widget-186", "Fix the date picker")]);
 
         let reply = format_status_reply(
-            Some("a"),
-            &[ws],
+            Some(TerminalId(7)),
             &agent_states,
-            &workspace_to_terminal,
+            &HashMap::new(),
             &terminal_meta,
+            &terminal_sessions,
+            &titles,
         );
-        assert!(reply.starts_with("⏸ *Alpha workspace*"), "{}", reply);
-        assert!(reply.contains("agents: claude"));
-        assert!(reply.contains("state: ⏸ asking"));
+        assert!(reply.starts_with("⏸ *Fix the date picker*"), "{}", reply);
+        assert!(reply.contains("agent: `claude`"), "{}", reply);
+        assert!(reply.contains("session: `a3f1c277"), "{}", reply);
+        assert!(reply.contains("state: ⏸ asking"), "{}", reply);
     }
 
     #[test]
-    fn format_status_reply_per_workspace_missing_key_reports_so() {
+    fn format_status_reply_per_terminal_unknown_id_reports_so() {
         let reply = format_status_reply(
-            Some("nope"),
-            &[],
+            Some(TerminalId(999)),
+            &HashMap::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
         );
-        assert!(reply.contains("nope"));
-        assert!(reply.contains("no workspace"));
+        assert!(reply.contains("no longer tracked"));
     }
 
     #[test]
-    fn workspace_icon_reflects_agent_state() {
-        let ws = make_workspace("a", "A");
-        let mut workspace_to_terminal = HashMap::new();
-        workspace_to_terminal.insert("a".to_string(), TerminalId(1));
-        // Untracked terminal → `·`
-        assert_eq!(
-            workspace_icon(&ws, &HashMap::new(), &workspace_to_terminal),
-            "·"
-        );
-        // Active → `▶`
+    fn agent_icon_reflects_state() {
+        let tid = TerminalId(1);
+        assert_eq!(agent_icon(tid, &HashMap::new()), "·");
         let mut active = HashMap::new();
-        active.insert(TerminalId(1), AgentState::Active);
-        assert_eq!(workspace_icon(&ws, &active, &workspace_to_terminal), "▶");
-        // Asking → `⏸`
+        active.insert(tid, AgentState::Active);
+        assert_eq!(agent_icon(tid, &active), "▶");
         let mut asking = HashMap::new();
-        asking.insert(TerminalId(1), AgentState::Asking);
-        assert_eq!(workspace_icon(&ws, &asking, &workspace_to_terminal), "⏸");
+        asking.insert(tid, AgentState::Asking);
+        assert_eq!(agent_icon(tid, &asking), "⏸");
     }
 
     #[test]

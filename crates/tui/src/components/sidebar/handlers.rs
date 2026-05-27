@@ -331,7 +331,9 @@ impl Sidebar {
                     self.recompute_visible();
                 }
             }
-            Event::AgentState { session_key, state } => {
+            Event::AgentState {
+                session_key, state, ..
+            } => {
                 tracing::info!(
                     %session_key,
                     state = ?state,

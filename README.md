@@ -325,7 +325,7 @@ replies back into the running agent's stdin — useful for keeping an
 eye on long-running Claude/Codex sessions from your phone. Bot
 token (`xoxb-...`) and Socket Mode app token (`xapp-...`) live
 under `slack:`; see [`docs/slack-setup.md`](docs/slack-setup.md)
-for the Slack app manifest and [`docs/slack-testing.md`](docs/slack-testing.md)
+for the Slack app manifest and [`docs/dev/slack-testing.md`](docs/dev/slack-testing.md)
 for the smoke test.
 
 ```yaml

@@ -18,7 +18,7 @@
 use crate::ServerConfig;
 use crate::chat::{self, ChatError, ChatInbound, ChatProvider, RouterState};
 use pilot_config::SlackConfig;
-use pilot_slack::api::{Client as ApiClient, Message, channel_name_for_workspace};
+use pilot_slack::api::{Client as ApiClient, Message, channel_name_for_terminal};
 use pilot_slack::socket::{InboundEvent, SocketModeClient};
 use std::collections::HashMap;
 use std::future::Future;
@@ -80,25 +80,44 @@ impl ChatProvider for SlackProvider {
         })
     }
 
-    fn ensure_workspace_channel<'a>(
+    fn channel_name(
+        &self,
+        workspace_key: &str,
+        session_id: &str,
+        agent_id: &str,
+    ) -> Option<String> {
+        // `per_workspace_channels: false` means "don't auto-create
+        // per-(session, agent) channels" — outbound notifications
+        // are dropped. The user wanted everything in `#pilot` in
+        // that mode; today we just stay silent there.
+        if !self.cfg.per_workspace_channels {
+            return None;
+        }
+        Some(channel_name_for_terminal(
+            workspace_key,
+            session_id,
+            agent_id,
+            &self.cfg.channel_prefix,
+        ))
+    }
+
+    fn ensure_channel<'a>(
         &'a self,
-        workspace_key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<String>, ChatError>> + Send + 'a>> {
+        name: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ChatError>> + Send + 'a>> {
         Box::pin(async move {
-            if !self.cfg.per_workspace_channels {
-                let s = self.name_to_id.lock().await;
-                return Ok(s.get(&self.cfg.anchor_channel).cloned());
+            if let Some(id) = self.name_to_id.lock().await.get(name).cloned() {
+                return Ok(id);
             }
-            let name = channel_name_for_workspace(workspace_key, &self.cfg.channel_prefix);
-            if let Some(id) = self.name_to_id.lock().await.get(&name).cloned() {
-                return Ok(Some(id));
-            }
-            match self.api.conversations_create(&name).await {
+            match self.api.conversations_create(name).await {
                 Ok(resp) => {
                     let id = resp.channel.id.clone();
-                    self.name_to_id.lock().await.insert(name, id.clone());
+                    self.name_to_id
+                        .lock()
+                        .await
+                        .insert(name.to_string(), id.clone());
                     tracing::info!(channel = %resp.channel.name, "slack: created channel");
-                    Ok(Some(id))
+                    Ok(id)
                 }
                 Err(pilot_slack::SlackError::Api(ref e)) if e == "name_taken" => {
                     // Race: someone (us, in a prior session?) made
@@ -111,7 +130,11 @@ impl ChatProvider for SlackProvider {
                             for c in &listing.channels {
                                 s.insert(c.name.clone(), c.id.clone());
                             }
-                            Ok(s.get(&name).cloned())
+                            s.get(name).cloned().ok_or_else(|| {
+                                ChatError::Provider(format!(
+                                    "name_taken but channel `{name}` not in refreshed listing"
+                                ))
+                            })
                         }
                         Err(e) => Err(ChatError::Provider(e.to_string())),
                     }

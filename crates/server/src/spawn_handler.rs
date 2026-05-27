@@ -448,6 +448,7 @@ pub async fn handle_spawn(
             );
             let _ = bus.send(Event::AgentState {
                 session_key: session_key.clone(),
+                terminal_id: id,
                 state: new_state,
             });
         }
@@ -1251,6 +1252,7 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     );
     let _ = config.bus.send(Event::AgentState {
         session_key,
+        terminal_id,
         state: pilot_ipc::AgentState::Active,
     });
 }

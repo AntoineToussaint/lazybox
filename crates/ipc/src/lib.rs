@@ -32,7 +32,12 @@ pub const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 
 /// Stable id for a spawned terminal. Distinct from SessionKey because a
 /// single session may hold multiple terminals (agent + shell + logs).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `Default = TerminalId(0)` is used by `#[serde(default)]` on optional
+/// terminal-id fields in bus events — `0` never corresponds to a real
+/// allocation (the daemon's id allocator starts at 1), so it's a safe
+/// sentinel meaning "field was absent from a pre-bump producer."
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TerminalId(pub u64);
 
 /// Stable id for a structured agent runtime. This is intentionally
@@ -640,7 +645,20 @@ pub enum Event {
         terminal_id: TerminalId,
     },
     AgentState {
+        /// Workspace the asking agent lives in. Kept for backwards
+        /// compatibility with TUI consumers that index by workspace
+        /// (sidebar "needs input" badge); the per-terminal id below is
+        /// what new consumers (e.g. the chat dispatcher's
+        /// channel-per-(session, agent) routing) should key off.
         session_key: SessionKey,
+        /// Which terminal flipped state. A workspace with two agents
+        /// running (Claude + Codex) emits two distinct `AgentState`
+        /// events; previously the wire carried only `session_key` and
+        /// consumers couldn't tell them apart. `#[serde(default)]` lets
+        /// pre-bump clients deserialize new events as `TerminalId(0)`
+        /// — TUIs ignore the field, only the chat dispatcher cares.
+        #[serde(default)]
+        terminal_id: TerminalId,
         state: AgentState,
     },
     ProviderError {

@@ -1407,6 +1407,7 @@ fn agent_state_asking_makes_workspace_findable_by_bang() {
     );
 
     s.on_event(&Event::AgentState {
+        terminal_id: pilot_ipc::TerminalId(0),
         session_key: key.clone(),
         state: pilot_ipc::AgentState::Asking,
     });
@@ -1439,6 +1440,7 @@ fn workspace_upserted_does_not_clobber_asking_state() {
 
     // 1. Agent goes Asking.
     s.on_event(&Event::AgentState {
+        terminal_id: pilot_ipc::TerminalId(0),
         session_key: key.clone(),
         state: pilot_ipc::AgentState::Asking,
     });
@@ -1481,6 +1483,7 @@ fn agent_state_asking_queues_a_desktop_notification() {
     let _ = s.drain_pending_notifications();
 
     s.on_event(&Event::AgentState {
+        terminal_id: pilot_ipc::TerminalId(0),
         session_key: key.clone(),
         state: pilot_ipc::AgentState::Asking,
     });
@@ -1494,6 +1497,7 @@ fn agent_state_asking_queues_a_desktop_notification() {
 
     // Repeat broadcast — no new notification.
     s.on_event(&Event::AgentState {
+        terminal_id: pilot_ipc::TerminalId(0),
         session_key: key,
         state: pilot_ipc::AgentState::Asking,
     });
@@ -1522,6 +1526,7 @@ fn bang_jumps_to_next_asking_workspace() {
     });
 
     s.on_event(&Event::AgentState {
+        terminal_id: pilot_ipc::TerminalId(0),
         session_key: k2.clone(),
         state: pilot_ipc::AgentState::Asking,
     });

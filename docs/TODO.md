@@ -110,3 +110,53 @@ whether the daemon even saw the command.
   workspace (already does this presumably) AND broadcasts the
   event, AND ensures `mailbox_membership` accepts empty workspaces
   in the Inbox.
+
+## `w` (work) doesn't inject "fix CI" prompt into a running claude
+
+**Symptom.** User pressed `w` on a CI-failing PR with an existing
+claude session already running. Expectation: "fix CI failures"
+prompt streams into the running claude prompt input. Actual:
+nothing happens, OR a new agent is spawned instead of injecting.
+
+- Likely location: `crates/tui-core/src/intent.rs::resolve_work` +
+  the `Action::Work` dispatch.
+- The work resolver returns `Intent::SpawnAgent { prompt }` —
+  which the dispatcher uses to spawn a *new* claude. When a
+  claude is already running on this workspace, we should inject
+  the prompt into the existing session's PTY instead.
+- The "inject into existing" path exists for Slack replies (see
+  `crates/server/src/slack.rs::handle_inbound`'s
+  `encode_for_pty` + `backend.write`). The local `w` flow should
+  use it.
+
+## Auto-mark-read on activity hover not firing
+
+**Symptom.** Cursor sits on an unread activity for >1s, doesn't
+flip to read.
+
+- Likely location: `crates/tui/src/components/right_pane/mod.rs`
+  `rearm_mark_timer` (line ~285), `tick` (line ~339).
+- `arm()` resets `armed_at` to `Instant::now` on every call. Every
+  consumed keypress calls `rearm_mark_timer(true)` (line ~1262).
+  If anything else continuously fires rearm (e.g., set_workspace
+  on every poll cycle's WorkspaceUpserted), the timer never
+  reaches the 1s threshold.
+- Verify: log `mark_timer.armed_at` + `auto_mark_delay` at every
+  tick. If `armed_at` jumps around without crossing the delay
+  threshold, that's the cause.
+
+## `m` (mark) is workspace-only — no "mark this one activity"
+
+**Symptom.** User clicks an activity row to select it, presses
+`m` — expects "mark THIS activity as read." Actually marks ALL
+of the workspace's activities as read.
+
+- The action catalog has one `m` mapping: `MarkAllRead`. Should
+  be context-sensitive:
+  - cursor on workspace, no activity selected → mark all.
+  - one activity selected → mark only that one.
+  - multiple selected → mark the selected set.
+- Likely path: in the right pane's `m` handler, check
+  `self.feed.selected()` first; if non-empty, fire one
+  `Command::MarkActivityRead` per selected index instead of
+  `Command::MarkRead`.

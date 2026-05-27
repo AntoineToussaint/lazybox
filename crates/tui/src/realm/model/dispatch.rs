@@ -135,8 +135,34 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_new_project_input();
             }
             Action::MarkAllRead => {
-                if let Some(sk) = session_key {
+                // Context-sensitive: when the user has activities
+                // multi-selected in the right pane, `m` marks only
+                // THOSE rows. When no selection, falls back to the
+                // bulk "mark all of this workspace" behaviour. Same
+                // key, smarter semantics based on what's selected.
+                let Some(sk) = session_key else {
+                    return cmds;
+                };
+                let selected = self.right.selected_activity_indices();
+                if selected.is_empty() {
                     cmds.push(IpcCommand::MarkRead { session_key: sk });
+                } else {
+                    use crate::realm::components::footer::{Notice, NoticeSeverity};
+                    let n = selected.len();
+                    for index in selected {
+                        cmds.push(IpcCommand::MarkActivityRead {
+                            session_key: sk.clone(),
+                            index,
+                        });
+                    }
+                    self.status.notice = Some(Notice::new(
+                        format!(
+                            "marked {n} selected activit{} read",
+                            if n == 1 { "y" } else { "ies" }
+                        ),
+                        NoticeSeverity::Info,
+                    ));
+                    self.redraw = true;
                 }
             }
             Action::Archive => {

@@ -140,6 +140,12 @@ impl Right {
     pub fn drain_selection_notice(&mut self) -> Option<String> {
         self.inner.drain_selection_notice()
     }
+
+    /// Indices the user explicitly multi-selected. Used by `m`
+    /// dispatch to mark only those instead of the whole workspace.
+    pub fn selected_activity_indices(&self) -> Vec<usize> {
+        self.inner.selected_activity_indices()
+    }
 }
 
 impl Component for Right {

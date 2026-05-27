@@ -577,6 +577,18 @@ impl RightPane {
         self.comment_scroll
     }
 
+    /// Activity indices the user explicitly multi-selected (via `v`
+    /// or click). Empty when nothing's selected. Used by the
+    /// orchestrator's `m` (mark) dispatch to decide between
+    /// "mark only the selected activities" and "mark all" — same
+    /// `m` key, smarter semantics based on whether the user has
+    /// a per-row selection in flight.
+    pub fn selected_activity_indices(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = self.feed.selected().iter().copied().collect();
+        v.sort_unstable();
+        v
+    }
+
     fn render_header(&self, area: Rect, frame: &mut Frame) {
         let theme = crate::theme::current();
         let Some(workspace) = &self.workspace else {

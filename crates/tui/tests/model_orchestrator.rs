@@ -570,7 +570,7 @@ fn merge_confirm_yes_sends_accept_command() {
 }
 
 #[test]
-fn merge_confirm_esc_sends_reject_command() {
+fn merge_confirm_esc_dismisses_silently_so_re_prompt_can_self_heal() {
     use pilot_ipc::Command;
     let (client, mut server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
@@ -582,14 +582,22 @@ fn merge_confirm_esc_sends_reject_command() {
         active_terminal_count: 1,
     });
     m.update(pilot_tui::realm::Msg::ModalDismissed);
-    let cmd = server
-        .rx
-        .try_recv()
-        .expect("ConfirmMerge command emitted on Esc");
-    match cmd {
-        Command::ConfirmMerge { accept, .. } => assert!(!accept),
-        other => panic!("expected ConfirmMerge, got {other:?}"),
+    // Pre-fix Esc sent `ConfirmMerge { accept: false }`, which pinned
+    // the issue in `rejected_merge` for the whole session — the user
+    // never saw the prompt again until daemon restart. Now: silent
+    // dismissal; the daemon re-fires after 5 min so the prompt
+    // self-heals if the user wanted to act on it later.
+    let mut commands: Vec<Command> = Vec::new();
+    while let Ok(cmd) = server.rx.try_recv() {
+        commands.push(cmd);
     }
+    let confirm = commands
+        .iter()
+        .find(|c| matches!(c, Command::ConfirmMerge { .. }));
+    assert!(
+        confirm.is_none(),
+        "Esc on merge modal must NOT signal ConfirmMerge, got: {commands:?}",
+    );
 }
 
 /// GitHub issue (not PR) — `url` carries `/issues/<n>`, no branch.

@@ -145,53 +145,32 @@ flip to read.
   tick. If `armed_at` jumps around without crossing the delay
   threshold, that's the cause.
 
-## Issue ↔ PR merge fails when PR has `closes_issues` but issue stays as standalone row
+## Issue ↔ PR merge: manual trigger key + label
 
-**Symptom** (screenshot 2026-05-27). PR #222 titled
-"Add dynamic credential source for per-request secrets (closes #31)"
-shows in the inbox AND issue #31 ("Add support for dynamic
-credentials in headers") shows as a SEPARATE row under
-`@ assignee`. The merge-into-PR collapse never fired.
+**Status.** The auto-detect side now works: `closes_issues` is
+populated from BOTH `closingIssuesReferences` and the PR title
+fallback, `merge_closing_issue_workspaces` is invoked from the
+upsert path, Esc on the merge modal is now a silent dismissal
+(was pinning rejected_merge for the whole session), and
+`prompted_merge` re-fires after 5 minutes so dismissals self-heal.
 
-- Look at:
-  - `crates/server/src/polling/mod.rs::merge_closing_issue_workspaces`
-    (line ~1391). It only runs when `workspace.pr.closes_issues`
-    is non-empty.
-  - `crates/gh-provider/src/graphql.rs::pr_to_task` — does it
-    populate `closes_issues` from `closingIssuesReferences`?
-  - The PR title contains `(closes #31)` but the canonical
-    `closingIssuesReferences` GraphQL field is what populates
-    `closes_issues`. If the GH side has the link, `closes_issues`
-    should have it.
-- Verify: `grep "closingIssuesReferences\|closes_issues" /tmp/pilot.log`.
-  Look for "routing issue upsert into PR workspace
-  (closingIssuesReferences)" — that's the merge log line.
-- Edge case: when the ISSUE polls in AFTER the PR, `upsert` should
-  detect the existing PR workspace claiming it (line 1157-1164).
-  When the PR polls in AFTER the issue, the
-  merge_closing_issue_workspaces path handles it.
-- One specific concern: the body-text fallback parser at
-  `pilot_core::Workspace::from_task` mentioned in comments may
-  only check the body, not the title. A PR with `closes #31` only
-  in the title (no body link, no GitHub-side
-  `closingIssuesReferences`) would never collapse.
+**Still missing.** The user should be able to *manually* fold an
+issue into its PR without waiting for the next poll's re-prompt.
+Two pieces:
 
-## Archive (`Shift-X`) → workspace reappears on next sync
+- Key binding (e.g. `Shift+M`) on a workspace row that triggers
+  `Command::TriggerMerge { issue_workspace_key, pr_workspace_key }`.
+  The daemon side runs the same `absorb_issue_workspace` path that
+  the modal Y reaches today, bypassing `rejected_merge` /
+  `prompted_merge`. The binding is only available when the
+  resolver can identify a target PR (issue has a PR that closes
+  it, or PR has the issue in `closes_issues`).
+- Sidebar label: when the issue and its PR are both in the inbox,
+  the issue row should show `→ PR #N` as a hint chip so the user
+  knows the relationship exists.
 
-**Symptom.** User archived a workspace (`Shift-X` confirmed),
-then the next poll's `WorkspaceUpserted` for the same task
-re-created the row.
-
-- Likely location: `polling::delete_workspace` removes the row
-  but doesn't prevent the next poll's `upsert` from re-creating
-  it. The `archived` state needs to live somewhere durable so
-  the upsert path checks "did the user already archive this?"
-  and skips OR routes to the Snoozed mailbox.
-- Suggested shape: a `archived: HashSet<WorkspaceKey>` on
-  `TickState` (or persisted in the store under a kv key) that
-  the upsert path consults before writing. The user can re-add
-  the workspace by un-archiving (no UI for that yet — add
-  Settings → Restore Archive).
+Both are pure UX surface — the underlying daemon path already
+exists in `handle_confirm_merge`.
 
 ## Mouse copy only works on multi-line, then copies one line
 

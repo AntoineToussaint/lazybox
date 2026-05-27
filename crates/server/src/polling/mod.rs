@@ -576,11 +576,15 @@ pub struct TickState {
     /// of scope again.
     prompted_out_of_scope: std::collections::HashSet<String>,
     /// Issue workspace keys we've already broadcast
-    /// `WorkspaceMergePending` for. Stays set until the matching
-    /// `Command::ConfirmMerge` lands (or the daemon restarts) so a
-    /// user staring at the modal doesn't get a stream of duplicate
-    /// prompts on every poll tick.
-    pub(crate) prompted_merge: std::collections::HashSet<String>,
+    /// `WorkspaceMergePending` for, with the timestamp of the last
+    /// emission. Pre-fix this was a `HashSet` that stayed pinned
+    /// until the matching `Command::ConfirmMerge` arrived — a user
+    /// who Esc-dismissed the modal then never saw it again until
+    /// daemon restart. Now: re-prompt after `MERGE_REPROMPT_AFTER`
+    /// so dismissals self-heal. Entries are still removed on
+    /// explicit confirm/reject so accepted/rejected pairs don't
+    /// re-fire.
+    pub(crate) prompted_merge: std::collections::HashMap<String, std::time::Instant>,
     /// Issue workspace keys for which the user replied "no" to the
     /// merge prompt. We don't re-prompt this session — the user can
     /// always merge by hand via the future adopt-sessions flow.
@@ -1583,13 +1587,30 @@ fn pr_workspace_claiming_issue(
 ///
 /// No-op when there's no PR, no `closes_issues`, or no matching
 /// issue workspace exists yet.
+/// Re-prompt the merge modal after this long when the previous
+/// prompt was dismissed without an explicit Y/N. 5 minutes is short
+/// enough that a user who Esc'd "I'll deal with this later" sees
+/// the prompt come back the same session, long enough that the
+/// dismissal isn't immediately undone (the user wants a beat to
+/// finish what they were doing).
+const MERGE_REPROMPT_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
 async fn merge_closing_issue_workspaces(config: &ServerConfig, workspace: &mut Workspace) {
     let Some(pr) = workspace.pr.as_ref() else {
         return;
     };
     if pr.closes_issues.is_empty() {
+        tracing::trace!(
+            workspace = %workspace.key,
+            "merge: PR has no closes_issues — nothing to fold"
+        );
         return;
     }
+    tracing::debug!(
+        workspace = %workspace.key,
+        candidates = ?pr.closes_issues.iter().map(|t| &t.key).collect::<Vec<_>>(),
+        "merge: scanning closes_issues for collapse candidates"
+    );
 
     let mut closed_ids: Vec<pilot_core::TaskId> = pr.closes_issues.clone();
     closed_ids.dedup();
@@ -1634,7 +1655,18 @@ async fn merge_closing_issue_workspaces(config: &ServerConfig, workspace: &mut W
                 if state.rejected_merge.contains(&issue_key_str) {
                     false
                 } else {
-                    state.prompted_merge.insert(issue_key_str)
+                    let now = std::time::Instant::now();
+                    let stale = state
+                        .prompted_merge
+                        .get(&issue_key_str)
+                        .map(|prev| now.duration_since(*prev) >= MERGE_REPROMPT_AFTER)
+                        .unwrap_or(true);
+                    if stale {
+                        state.prompted_merge.insert(issue_key_str, now);
+                        true
+                    } else {
+                        false
+                    }
                 }
             };
             if should_prompt {

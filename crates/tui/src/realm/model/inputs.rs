@@ -376,22 +376,23 @@ impl<T: TerminalAdapter> Model<T> {
         // route the "no" decision correctly.
         let top = self.modal_stack.last().cloned();
         self.pop_modal();
-        let mut cmds = Vec::new();
+        let cmds: Vec<IpcCommand> = Vec::new();
         match top {
             Some(Id::RemoveOutOfScope) => {
                 self.active_removal_prompt = None;
             }
             Some(Id::MergeConfirm) => {
-                // Esc on the merge modal = "no, keep them
-                // separate." Tell the daemon to drop the stall so
-                // future polls don't re-prompt.
-                if let Some((issue_key, pr_key)) = self.active_merge_prompt.take() {
-                    cmds.push(IpcCommand::ConfirmMerge {
-                        issue_workspace_key: issue_key,
-                        pr_workspace_key: pr_key,
-                        accept: false,
-                    });
-                }
+                // Esc on the merge modal = "dismiss for now, I'll
+                // decide later." Pre-fix this sent
+                // `ConfirmMerge { accept: false }`, which pinned the
+                // issue in the daemon's `rejected_merge` for the
+                // session and the user never saw the prompt again
+                // until restart. Now: just close the modal. The
+                // daemon's `prompted_merge` re-fires after
+                // `MERGE_REPROMPT_AFTER` (5 min) so the prompt
+                // self-heals; an explicit N (via `handle_confirmed`
+                // below) is the only path that pins as rejected.
+                self.active_merge_prompt = None;
             }
             Some(Id::ActionConfirm) => {
                 // Esc = cancel destructive action; drop the

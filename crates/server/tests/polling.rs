@@ -1719,6 +1719,39 @@ async fn confirm_merge_reject_pins_against_re_prompting() {
         "rejecting must keep the issue workspace intact",
     );
 }
+
+/// Within the dedupe window, a dismissed-but-not-rejected merge must
+/// NOT re-emit `WorkspaceMergePending` on every poll — otherwise the
+/// modal haunts the user. Mirror of the "rejected" guard above but
+/// without the explicit no.
+#[tokio::test]
+async fn dismissed_merge_does_not_re_emit_within_dedupe_window() {
+    let config = ServerConfig::in_memory();
+    let (_issue_key, _) = seed_issue_with_session(&config, "o/r#71").await;
+
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+
+    // No ConfirmMerge — just simulate the user pressing Esc on the
+    // modal. The TUI fix makes this a silent dismissal; the daemon
+    // never hears about it.
+
+    // Re-poll the same PR immediately. Without the re-prompt
+    // window, the daemon would fire a fresh WorkspaceMergePending
+    // every tick.
+    let mut bus = config.bus.subscribe();
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+
+    let mut saw_pending = false;
+    while let Ok(evt) = bus.try_recv() {
+        if matches!(evt, Event::WorkspaceMergePending { .. }) {
+            saw_pending = true;
+        }
+    }
+    assert!(
+        !saw_pending,
+        "dismissed merge prompts must not re-fire on every poll",
+    );
+}
 #[tokio::test]
 async fn body_text_referencing_another_pr_does_not_delete_that_pr() {
     // CRITICAL regression: GitHub's `#N` syntax is shared by issues

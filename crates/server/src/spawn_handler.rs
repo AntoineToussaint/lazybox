@@ -28,7 +28,8 @@ use crate::ServerConfig;
 use chrono::Utc;
 use pilot_agents::SpawnCtx;
 use pilot_core::{
-    SessionId, SessionKey, SessionKind, Workspace, WorkspaceKey, WorkspaceSession as Session,
+    SessionId, SessionKey, SessionKind, Task, Workspace, WorkspaceKey,
+    WorkspaceSession as Session,
 };
 use pilot_ipc::{Event, TerminalId, TerminalKind, TerminalSnapshot};
 use pilot_store::WorkspaceRecord;
@@ -707,6 +708,41 @@ async fn resolve_or_create_session(
     Ok((path, new_session_id))
 }
 
+/// Build a deterministic branch name for a task that has no upstream
+/// branch (issues, Linear tickets, future provider-specific items).
+/// Deterministic on `task.id` so two spawns on the same issue map to
+/// the same local branch — otherwise pressing the spawn key twice
+/// would leave two orphan branches, neither push-ready.
+///
+/// Examples:
+/// - `github:owner/repo#42` → `pilot/issue-42`
+/// - `linear:ENG-456`       → `pilot/linear-eng-456`
+/// - anything else          → `pilot/<source>-<sanitized-key>`
+fn derive_branch_for_branchless(task: &Task) -> String {
+    let source = task.id.source.to_ascii_lowercase();
+    let raw_key = &task.id.key;
+
+    if source == "github" {
+        if let Some(hash_idx) = raw_key.rfind('#') {
+            let number = &raw_key[hash_idx + 1..];
+            if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()) {
+                return format!("pilot/issue-{number}");
+            }
+        }
+    }
+
+    let sanitized: String = raw_key
+        .chars()
+        .map(|c| match c {
+            'A'..='Z' => c.to_ascii_lowercase(),
+            'a'..='z' | '0'..='9' | '-' | '_' => c,
+            _ => '-',
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('-');
+    format!("pilot/{source}-{trimmed}")
+}
+
 /// Try to set up a real git worktree at `target` for the workspace's
 /// primary task. Returns Ok(()) when a checkout succeeded, Err when
 /// we couldn't (caller falls back to a plain mkdir).
@@ -722,19 +758,35 @@ async fn provision_worktree(
         .repo
         .as_deref()
         .ok_or_else(|| ServerError::Workspace("task has no repo".into()))?;
-    let branch = task
-        .branch
-        .as_deref()
-        .ok_or_else(|| ServerError::Workspace("task has no branch".into()))?;
     let (owner, name) = repo
         .split_once('/')
         .ok_or_else(|| ServerError::Workspace(format!("repo '{repo}' is not owner/name")))?;
 
     let mgr = pilot_git_ops::WorktreeManager::default_base();
-    let worktree = mgr
-        .checkout_at(target, owner, name, branch)
-        .await
-        .map_err(|e| ServerError::Worktree(format!("checkout_at: {e}")))?;
+    let worktree = match task.branch.as_deref() {
+        Some(branch) => mgr
+            .checkout_at(target, owner, name, branch)
+            .await
+            .map_err(|e| ServerError::Worktree(format!("checkout_at: {e}")))?,
+        None => {
+            // Issue (or other branchless task): cut a fresh branch
+            // off the repo default. Branch name encodes the task key
+            // so two spawns on the same issue land on the same branch
+            // and subsequent presses are idempotent — without that,
+            // pressing `c` twice on issue #42 would create
+            // `pilot/issue-42-…` and `pilot/issue-42-…-2`, neither of
+            // which corresponds to a PR the user can push.
+            let new_branch = derive_branch_for_branchless(task);
+            let base = mgr.default_branch(owner, name).await.map_err(|e| {
+                ServerError::Worktree(format!("default_branch lookup: {e}"))
+            })?;
+            mgr.checkout_new_branch_at(target, owner, name, &new_branch, &base)
+                .await
+                .map_err(|e| {
+                    ServerError::Worktree(format!("checkout_new_branch_at: {e}"))
+                })?
+        }
+    };
 
     // Apply mounts: global `worktree.mounts` + per-repo
     // `repos.<owner/name>.mounts` from YAML. Best-effort — a mount
@@ -1730,5 +1782,67 @@ mod tests {
             mounts[1].placement,
             pilot_git_ops::Placement::Above
         ));
+    }
+
+    fn task_for(source: &str, key: &str) -> Task {
+        Task {
+            id: pilot_core::TaskId {
+                source: source.into(),
+                key: key.into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: pilot_core::TaskState::Open,
+            role: pilot_core::TaskRole::Author,
+            ci: pilot_core::CiStatus::default(),
+            review: pilot_core::ReviewStatus::default(),
+            checks: vec![],
+            unread_count: 0,
+            url: String::new(),
+            repo: Some("acme/widget".into()),
+            branch: None,
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: pilot_core::Mergeable::Unknown,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    /// Issue spawns get a deterministic `pilot/issue-<n>` branch so
+    /// pressing the spawn key twice on the same issue lands on the
+    /// same branch instead of accumulating orphans.
+    #[test]
+    fn derive_branch_for_branchless_github_issue() {
+        let t = task_for("github", "acme/widget#42");
+        assert_eq!(derive_branch_for_branchless(&t), "pilot/issue-42");
+    }
+
+    /// Linear / non-GitHub keys go through the sanitizer fallback so
+    /// any odd characters become dashes and the source prefix keeps
+    /// branches namespaced per-provider.
+    #[test]
+    fn derive_branch_for_branchless_linear() {
+        let t = task_for("linear", "ENG-456");
+        assert_eq!(derive_branch_for_branchless(&t), "pilot/linear-eng-456");
+    }
+
+    /// A non-numeric GitHub key (no `#`) falls through to the
+    /// sanitizer instead of producing `pilot/issue-`.
+    #[test]
+    fn derive_branch_for_branchless_github_without_hash() {
+        let t = task_for("github", "acme/widget");
+        assert_eq!(derive_branch_for_branchless(&t), "pilot/github-acme-widget");
     }
 }

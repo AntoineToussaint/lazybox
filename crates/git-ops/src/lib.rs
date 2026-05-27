@@ -229,8 +229,25 @@ impl WorktreeManager {
         new_branch: &str,
         base_branch: &str,
     ) -> Result<Worktree, GitError> {
-        let bare_path = self.bare_clone_path(owner, repo);
         let wt_path = self.worktree_path(owner, repo, new_branch);
+        self.checkout_new_branch_at(&wt_path, owner, repo, new_branch, base_branch)
+            .await
+    }
+
+    /// Same as [`checkout_new_branch`] but with an explicit target path.
+    /// Used by pilot's session model where the worktree path is derived
+    /// from a stable session UUID and must not depend on branch names
+    /// (so a branch rename inside the worktree doesn't relocate the
+    /// on-disk folder).
+    pub async fn checkout_new_branch_at(
+        &self,
+        wt_path: &Path,
+        owner: &str,
+        repo: &str,
+        new_branch: &str,
+        base_branch: &str,
+    ) -> Result<Worktree, GitError> {
+        let bare_path = self.bare_clone_path(owner, repo);
 
         if wt_path.exists() {
             let name = wt_path
@@ -239,7 +256,7 @@ impl WorktreeManager {
                 .unwrap_or_else(|| new_branch.to_string());
             return Ok(Worktree {
                 name,
-                path: wt_path,
+                path: wt_path.to_path_buf(),
                 branch: new_branch.into(),
             });
         }
@@ -279,12 +296,18 @@ impl WorktreeManager {
                 )));
             };
 
+        // `-B` (not `-b`) so a stale local branch with the same name —
+        // left behind from a previous spawn that failed mid-mounts —
+        // is reset to `start_point` rather than failing the worktree
+        // add. Symptom this prevents: user presses `c` on an issue,
+        // mount fails, fixes config, presses `c` again, get "branch
+        // already exists" and the spawn falls through to empty dir.
         run_git_in(
             &bare_path,
             &[
                 "worktree",
                 "add",
-                "-b",
+                "-B",
                 new_branch,
                 &wt_path.to_string_lossy(),
                 &start_point,
@@ -298,9 +321,53 @@ impl WorktreeManager {
             .unwrap_or_else(|| new_branch.to_string());
         Ok(Worktree {
             name,
-            path: wt_path,
+            path: wt_path.to_path_buf(),
             branch: new_branch.into(),
         })
+    }
+
+    /// Resolve the repo's default branch (e.g. `main`, `master`,
+    /// `develop`) by consulting the bare clone's `origin/HEAD`
+    /// symbolic ref. Falls back to fetching once if the ref isn't
+    /// present locally yet. Used by the "spawn from issue" path
+    /// where the task has no PR branch — we cut a fresh branch
+    /// off the default.
+    pub async fn default_branch(&self, owner: &str, repo: &str) -> Result<String, GitError> {
+        let bare_path = self.bare_clone_path(owner, repo);
+
+        if !bare_path.exists() {
+            if let Some(parent) = bare_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            let url = format!("git@github.com:{owner}/{repo}.git");
+            run_git(&["clone", "--bare", &url, &bare_path.to_string_lossy()]).await?;
+        }
+
+        // Pull origin/HEAD if we don't already have it. Tolerate
+        // failure — we still try the local symbolic-ref lookup
+        // afterwards, and only fail if that also can't resolve.
+        let _ = run_git_in(&bare_path, &["remote", "set-head", "origin", "--auto"]).await;
+
+        let out = run_git_in(&bare_path, &["symbolic-ref", "refs/remotes/origin/HEAD"]).await;
+        if let Ok(ref_str) = out {
+            let trimmed = ref_str.trim();
+            if let Some(branch) = trimmed.strip_prefix("refs/remotes/origin/") {
+                return Ok(branch.to_string());
+            }
+        }
+
+        // Last resort: probe common defaults before giving up.
+        for guess in ["main", "master"] {
+            if ref_exists(&bare_path, &format!("refs/remotes/origin/{guess}")).await
+                || ref_exists(&bare_path, &format!("refs/heads/{guess}")).await
+            {
+                return Ok(guess.to_string());
+            }
+        }
+
+        Err(GitError::Command(format!(
+            "could not resolve default branch for {owner}/{repo}"
+        )))
     }
 
     /// Apply configured mount points to a worktree. Each mount creates

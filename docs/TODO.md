@@ -193,20 +193,6 @@ re-created the row.
   the workspace by un-archiving (no UI for that yet — add
   Settings → Restore Archive).
 
-## Spawning claude from an Issue doesn't create the worktree
-
-**Symptom.** User pressed `c` on an issue row, claude spawned in
-the same dir as pilot's CWD (or failed silently). The expected
-behavior is "create a worktree on a fresh branch named after the
-issue, spawn claude in that worktree."
-
-- Likely location: `spawn_handler::handle_spawn` should auto-
-  create a session + worktree when the workspace has no
-  sessions yet. For PR workspaces this exists via
-  `worktree_path_for_session`. For issue workspaces with no
-  upstream branch, the path lookup might return `None` and the
-  spawn falls through to a no-worktree mode.
-
 ## Mouse copy only works on multi-line, then copies one line
 
 **Symptom.** Single-line drag-to-select doesn't copy at all;

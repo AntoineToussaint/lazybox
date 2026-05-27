@@ -145,6 +145,54 @@ flip to read.
   tick. If `armed_at` jumps around without crossing the delay
   threshold, that's the cause.
 
+## Issue ↔ PR merge fails when PR has `closes_issues` but issue stays as standalone row
+
+**Symptom** (screenshot 2026-05-27). PR #222 titled
+"Add dynamic credential source for per-request secrets (closes #31)"
+shows in the inbox AND issue #31 ("Add support for dynamic
+credentials in headers") shows as a SEPARATE row under
+`@ assignee`. The merge-into-PR collapse never fired.
+
+- Look at:
+  - `crates/server/src/polling/mod.rs::merge_closing_issue_workspaces`
+    (line ~1391). It only runs when `workspace.pr.closes_issues`
+    is non-empty.
+  - `crates/gh-provider/src/graphql.rs::pr_to_task` — does it
+    populate `closes_issues` from `closingIssuesReferences`?
+  - The PR title contains `(closes #31)` but the canonical
+    `closingIssuesReferences` GraphQL field is what populates
+    `closes_issues`. If the GH side has the link, `closes_issues`
+    should have it.
+- Verify: `grep "closingIssuesReferences\|closes_issues" /tmp/pilot.log`.
+  Look for "routing issue upsert into PR workspace
+  (closingIssuesReferences)" — that's the merge log line.
+- Edge case: when the ISSUE polls in AFTER the PR, `upsert` should
+  detect the existing PR workspace claiming it (line 1157-1164).
+  When the PR polls in AFTER the issue, the
+  merge_closing_issue_workspaces path handles it.
+- One specific concern: the body-text fallback parser at
+  `pilot_core::Workspace::from_task` mentioned in comments may
+  only check the body, not the title. A PR with `closes #31` only
+  in the title (no body link, no GitHub-side
+  `closingIssuesReferences`) would never collapse.
+
+## Pressing `w` on an issue doesn't inject "implement/solve this issue" into running agent
+
+**Symptom.** `w` on an issue row with a running claude doesn't
+ingest the issue's "implement / solve this issue" prompt into the
+existing claude session.
+
+- Related to the `w → InjectPrompt` rewrite fix landed in
+  e6c1bf2 — that fix covers the catalog dispatch path generally,
+  but issue-implement prompt might be a different branch in
+  `intent::resolve_work` that doesn't hit `Intent::SpawnAgent`
+  the same way.
+- Verify: `grep "w on" /tmp/pilot.log` after pressing `w` on an
+  issue row + observe whether the resolved Intent is
+  `SpawnAgent { prompt: Some("…implement…") }` or something
+  else. Check `crates/tui-core/src/intent.rs::resolve_work`
+  branches for issue handling.
+
 ## `m` (mark) is workspace-only — no "mark this one activity"
 
 **Symptom.** User clicks an activity row to select it, presses

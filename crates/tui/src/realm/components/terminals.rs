@@ -53,6 +53,13 @@ impl Terminals {
     }
 
     /// Set which session's terminals to display.
+    /// The session whose terminals are currently visible, if any.
+    /// Lets the model anchor relative-path / same-repo `#N` resolution
+    /// to the focused workspace.
+    pub fn active_session(&self) -> Option<&SessionKey> {
+        self.inner.active_session()
+    }
+
     pub fn set_active_session(&mut self, session: Option<SessionKey>) {
         self.inner.set_active_session(session);
     }
@@ -97,17 +104,15 @@ impl Terminals {
         self.focused = focused;
     }
 
-    /// Forward to the inner pane's keymap so the help panel can list
-    /// the same bindings the legacy hint bar showed.
-    pub fn keymap(&self) -> &'static [crate::pane::Binding] {
-        self.inner.keymap()
-    }
-
-    /// State-aware short list for the footer hint bar. The terminal
-    /// pane's static keymap is already tight (3 entries) so we just
-    /// reuse it — most keys forward to the PTY anyway.
-    pub fn contextual_bindings(&self) -> Vec<crate::pane::Binding> {
-        self.inner.keymap().to_vec()
+    /// State-aware short list for the footer hint bar. Catalog-driven
+    /// (scroll + leave-terminal) plus the hand-curated `Ctrl-c`
+    /// interrupt hint — see `TerminalStack::contextual_bindings_static`
+    /// for the per-row rationale.
+    pub fn contextual_bindings(
+        &self,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<crate::pane::Binding> {
+        crate::components::terminal_stack::TerminalStack::contextual_bindings(overrides)
     }
 
     /// Detach spec for the focused tile, if any (delegates to the
@@ -138,18 +143,18 @@ impl Terminals {
         self.inner.extract_text(rect, start, end)
     }
 
-    /// Return the URL the focused terminal's grid shows at the
-    /// frame-space cell `(col, row)`, if any. Used by the
-    /// right-click handler to detect "the user clicked on a link"
-    /// and route to the system browser before falling through to
-    /// PTY mouse forwarding.
-    pub fn url_at(
+    /// Classify whatever the focused terminal's grid shows at the
+    /// frame-space cell `(col, row)` — a URL, file path, or issue
+    /// reference. Used by the right-click handler to detect "the user
+    /// clicked on something openable" and route it before falling
+    /// through to PTY mouse forwarding.
+    pub fn target_at(
         &mut self,
         rect: tuirealm::ratatui::layout::Rect,
         col: u16,
         row: u16,
-    ) -> Option<String> {
-        self.inner.url_at(rect, col, row)
+    ) -> Option<crate::components::terminal_stack::ClickTarget> {
+        self.inner.target_at(rect, col, row)
     }
 
     /// Human-readable scrollbar diagnostic for the focused
@@ -198,6 +203,16 @@ impl Terminals {
     /// `Write` at the right pane.
     pub fn focused_terminal_id(&self) -> Option<pilot_ipc::TerminalId> {
         self.inner.focused_terminal_id()
+    }
+
+    /// Mirror a bracketed-paste payload into the focused terminal's
+    /// user-message tracker so the pinned recap line picks up text
+    /// that arrives via paste (not just key-by-key typing). No-op
+    /// when the focused terminal isn't an Agent. The caller is still
+    /// responsible for sending the paste bytes to the PTY — this
+    /// only updates pilot's own composing buffer.
+    pub fn record_paste(&mut self, text: &str) {
+        self.inner.record_paste(text);
     }
 
     /// Encode a mouse event for the focused terminal. Returns the

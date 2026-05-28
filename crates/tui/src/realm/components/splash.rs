@@ -39,12 +39,16 @@ impl Default for Splash {
 impl Component for Splash {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
         // The render body — copied from the original SplashModal so
-        // pilot's brand mark + bullets stay identical. Theme tokens
-        // are pulled from `crate::theme` while we still have it;
-        // post-migration this lives in pilot's own theme module.
+        // pilot's brand mark + bullets stay identical. The "Tour of
+        // commands" block (issue #25) lists the always-available
+        // global shortcuts here so the per-view footer doesn't need
+        // to repeat them on every screen. The list is built from the
+        // catalog (`ActionDef::all()`) so a rename/rebind here flows
+        // through automatically — same single source of truth that
+        // drives the footer + `?` help modal.
         let theme = crate::theme::current();
-        let modal_w = 58u16.min(area.width.saturating_sub(4));
-        let modal_h = 20u16.min(area.height.saturating_sub(2));
+        let modal_w = 64u16.min(area.width.saturating_sub(4));
+        let modal_h = 28u16.min(area.height.saturating_sub(2));
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;
         let modal = Rect::new(x, y, modal_w, modal_h);
@@ -57,7 +61,7 @@ impl Component for Splash {
         let inner = block.inner(modal);
         frame.render_widget(block, modal);
 
-        let lines = vec![
+        let mut lines = vec![
             Line::raw(""),
             Line::from(Span::styled(
                 "  pilot  ",
@@ -84,14 +88,33 @@ impl Component for Splash {
                 Style::default().fg(theme.warn),
             )),
             Line::raw(""),
-            Line::raw(""),
             Line::from(Span::styled(
-                "    Press Enter to begin · Esc to cancel",
+                "    Tour of commands — always available:",
                 Style::default()
-                    .fg(theme.success)
+                    .fg(theme.text_strong)
                     .add_modifier(Modifier::BOLD),
             )),
         ];
+        for (keys, label) in universal_shortcuts() {
+            lines.push(Line::from(vec![
+                Span::styled("      ", Style::default()),
+                Span::styled(
+                    format!("{keys:<14}"),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  ", Style::default()),
+                Span::styled(label, Style::default().fg(theme.text_dim)),
+            ]));
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "    Press Enter to begin · Esc to cancel",
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(Modifier::BOLD),
+        )));
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
@@ -108,6 +131,33 @@ impl Component for Splash {
     fn perform(&mut self, _cmd: Cmd) -> CmdResult {
         CmdResult::NoChange
     }
+}
+
+/// The "always available" shortcuts surfaced in the onboarding tour
+/// + `?` help modal. Reads from the catalog so footer / help / tour
+/// stay in lockstep — the single source of truth is `ActionDef`.
+///
+/// Returns `(default_keys, label)` pairs. We pick the six globals
+/// that matter for first-run discoverability: help, quit, settings,
+/// refresh, cycle pane, detach. The Resize splitter binding is
+/// available but not listed in the tour to keep the card scannable;
+/// the `?` help modal lists every global.
+pub fn universal_shortcuts() -> Vec<(&'static str, &'static str)> {
+    use pilot_tui_core::action::{ActionDef, ActionKind};
+    [
+        ActionKind::OpenHelp,
+        ActionKind::Quit,
+        ActionKind::OpenSettings,
+        ActionKind::Refresh,
+        ActionKind::CyclePane,
+        ActionKind::DetachPane,
+    ]
+    .into_iter()
+    .map(|k| {
+        let def = ActionDef::for_kind(k);
+        (def.default_keys, def.label)
+    })
+    .collect()
 }
 
 impl AppComponent<Msg, UserEvent> for Splash {

@@ -202,8 +202,14 @@ impl Sidebar {
         // Pre-pass: compute the widest `#NNN` across visible workspace
         // rows so every row pads to the same column. Without this,
         // `#7204 R` and `#31 R` had different role-letter positions
-        // and the whole column visibly jittered. Minimum 3 ("#NN")
-        // so very-short numbers still leave space for a separator.
+        // and the whole column visibly jittered.
+        //
+        // Width is `1` (the `#`) + digit count of `n`, computed via
+        // `ilog10` so the hot path doesn't allocate a String per row.
+        // The natural width is the floor — no extra "separator"
+        // padding — so the glyph in column 1 sits flush against the
+        // number (`⇄#18`, not `⇄  #18`); see issue #42. The role
+        // cell that follows brings its own leading space.
         let max_pr_num_width = self
             .visible
             .iter()
@@ -213,12 +219,11 @@ impl Sidebar {
                     .get(k)
                     .and_then(|w| w.primary_task())
                     .and_then(crate::components::task_label::pr_number)
-                    .map(|n| format!("#{n}").chars().count()),
+                    .map(|n| 2 + n.checked_ilog10().unwrap_or(0) as usize),
                 _ => None,
             })
             .max()
-            .unwrap_or(3)
-            .max(3);
+            .unwrap_or(2);
         // Column spec for workspace rows — built once per render
         // (max_pr_num_width is fixed across rows in this pass).
         let workspace_columns = crate::components::workspace_row::build_columns(max_pr_num_width);
@@ -437,6 +442,7 @@ impl Sidebar {
                     crate::agent_attention::workspace_is_asking(w, &self.agents_asking)
                 }),
                 badges: self.runner_badges(key),
+                ascii_glyphs: self.ascii_glyphs,
             };
             positions.push(i);
             rows.push(build_workspace_row(&ctx));

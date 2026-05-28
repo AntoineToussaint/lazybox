@@ -13,7 +13,7 @@
 //! sidebar.
 
 use crate::components::sidebar::{
-    badge_pill_style, role_badge, status_pills, workspace_type_label,
+    StatusPill, badge_pill_style, role_badge, status_pills, workspace_type_label,
 };
 use crate::components::table::{Cell, Column, Row};
 use crate::theme::Theme;
@@ -44,6 +44,10 @@ pub struct WorkspaceRowCtx<'a> {
     pub asking: bool,
     /// `Sidebar::runner_badges(key)` — `[('C', n), ('S', m)]` etc.
     pub badges: Vec<(char, usize)>,
+    /// Render the type indicator as plain ASCII (`p`/`i`/`l`) instead
+    /// of the default unicode glyphs (`⇄`/`○`/`◆`). Wired from
+    /// `display.ascii_glyphs` in `~/.pilot/config.yaml`.
+    pub ascii_glyphs: bool,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -77,7 +81,9 @@ impl<'a> WorkspaceRowCtx<'a> {
 /// Order (left → right):
 ///
 /// 0. Prefix — `  ▸ ` (cursor) / `    ` (no cursor).
-/// 1. Type label — `[PR] ` / `[I]  ` / `[L]  ` / blank.
+/// 1. Type glyph — `⇄` / `○` / `◆` (or ASCII `p`/`i`/`l`) / blank.
+///    Exactly 1 cell so it sits flush against the `#NNN` to its right
+///    — see issue #42.
 /// 2. PR number — `#NNN`, padded to `max_pr_num_width`.
 /// 3. Role badge — ` R` colored marker, or blank.
 /// 4. Asking glyph — ` ? ` warn-colored, or blank — reserved width so
@@ -86,37 +92,41 @@ impl<'a> WorkspaceRowCtx<'a> {
 /// 5. Kind label — `[FEAT] ` etc, or blank. Max across rows so titles
 ///    align even when some rows have no kind prefix.
 /// 6. Title — flex, absorbs the remaining width. Truncates with `…`.
-/// 7. Kill mark — ` [snooze 1y?]`, or blank. Max so the title flex
+/// 7. Labels — ` [bug] [ci] +2`, or blank. Max so the title flex
+///    reclaims the space when no row has labels; truncates at 3
+///    chips with a `+N` overflow indicator.
+/// 8. Kill mark — ` [snooze 1y?]`, or blank. Max so the title flex
 ///    reclaims the space when no row is armed.
-/// 8. Unread pill — ` ●N `, right-aligned. Max so the column collapses
+/// 9. Unread pill — ` ●N `, right-aligned. Max so the column collapses
 ///    when no row has unread, and lines up at a consistent x when any
 ///    row does.
-/// 9. Badge: agent slot — ` C ` / ` C×2 ` / blank. Same Max semantics.
-/// 10. Badge: shell slot — ` S ` / blank. Cell carries a leading space
+/// 10. Badge: agent slot — ` C ` / ` C×2 ` / blank. Same Max semantics.
+/// 11. Badge: shell slot — ` S ` / blank. Cell carries a leading space
 ///    so the two badges visually separate when both present.
-/// 11. Status pill — ` MERGED  ` / ` REVIEW   CI FAIL ` / blank.
+/// 12. Status pill — ` MERGED  ` / ` REVIEW   CI FAIL ` / blank.
 ///    Right-aligned. Cell is empty (width 0) when both review + CI
 ///    pills are None, so the column collapses for an all-empty table
 ///    instead of always reserving 19 cells of dead air.
-/// 12. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
+/// 13. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
 ///    baked into the cell so a 1-cell gap separates time from
 ///    whatever sits to its left (status pill or, when status is
 ///    empty, the title flex padding).
 pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     vec![
         Column::fixed(4),                        // 0: prefix
-        Column::fixed(5),                        // 1: type label (incl. trailing space)
+        Column::fixed(1),                        // 1: type glyph (single cell, flush against #N)
         Column::fixed(max_pr_num_width).right(), // 2: pr_num (right-aligned so digits line up)
         Column::fixed(2),                        // 3: role (" R" or blank)
         Column::fixed(3),                        // 4: asking (" ? " reserved)
         Column::max(0),                          // 5: kind ("[FEAT] " or blank)
         Column::flex(0),                         // 6: title
-        Column::max(0),                          // 7: kill_mark
-        Column::max(0).right(),                  // 8: unread
-        Column::max(0),                          // 9: badge_agent
-        Column::max(0),                          // 10: badge_shell (carries its own leading space)
-        Column::max(0).right(),                  // 11: status
-        Column::max(0).right(),                  // 12: time (carries its own leading space)
+        Column::max(0),                          // 7: labels
+        Column::max(0),                          // 8: kill_mark
+        Column::max(0).right(),                  // 9: unread
+        Column::max(0),                          // 10: badge_agent
+        Column::max(0),                          // 11: badge_shell (carries its own leading space)
+        Column::max(0).right(),                  // 12: status
+        Column::max(0).right(),                  // 13: time (carries its own leading space)
     ]
 }
 
@@ -133,6 +143,7 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
         cell_asking(ctx),
         cell_kind(ctx),
         cell_title(ctx),
+        cell_labels(ctx),
         cell_kill_mark(ctx),
         cell_unread(ctx),
         cell_badge_agent(ctx),
@@ -149,7 +160,10 @@ fn cell_prefix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 }
 
 fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let Some(tag) = ctx.workspace.and_then(workspace_type_label) else {
+    let Some(glyph) = ctx
+        .workspace
+        .and_then(|w| workspace_type_label(w, ctx.ascii_glyphs))
+    else {
         return Cell::empty();
     };
     let style = if ctx.is_cursor {
@@ -159,11 +173,11 @@ fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .fg(ctx.theme.text_dim)
             .add_modifier(Modifier::BOLD)
     };
-    // `tag` is already 5 cells (`[PR] ` / `[I]  ` / `[L]  `) — the
-    // trailing whitespace is part of the label itself so the
-    // `#NNN` number after it lands at the same x-position on
-    // every row.
-    Cell::from_span(Span::styled(tag.to_string(), style))
+    // Single cell, no trailing space — the glyph sits flush against
+    // the `#NNN` cell that follows so the row reads `⇄#312` instead
+    // of `[PR]   #312` (issue #42). `glyph` is `&'static str` so the
+    // Span borrows it without allocating on the per-frame hot path.
+    Cell::from_span(Span::styled(glyph, style))
 }
 
 fn cell_pr_num(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -254,6 +268,80 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     Cell::from_span(Span::styled(body.to_string(), ctx.row_style()))
 }
 
+/// Render the task's labels as compact chips: ` [name] [name] +N`.
+/// Caps at 3 chips with a `+N` overflow indicator so the row layout
+/// stays predictable when a PR has many labels. Each chip's text
+/// adopts the GitHub label color (parsed from the hex string) as
+/// the foreground; falls back to `text_dim` for the bracket
+/// delimiters so the bracket framing reads consistently across the
+/// rainbow.
+fn cell_labels(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    const MAX_CHIPS: usize = 3;
+    let labels = match ctx.task.map(|t| t.labels.as_slice()) {
+        Some(ls) if !ls.is_empty() => ls,
+        _ => return Cell::empty(),
+    };
+    let total = labels.len();
+    let shown = labels.iter().take(MAX_CHIPS);
+    // Upper bound: MAX_CHIPS chips × (space + `[` + name + `]`) +
+    // one optional overflow span. Sized to the visible rendering,
+    // not the input length — a PR with 50 labels still only emits
+    // 13 spans worth of buffer here.
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(MAX_CHIPS * 4 + 1);
+    for label in shown {
+        spans.push(Span::styled(" ".to_string(), ctx.row_style()));
+        let bracket_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default().fg(ctx.theme.text_dim)
+        };
+        let text_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            label_text_style(ctx.theme, &label.color)
+        };
+        spans.push(Span::styled("[", bracket_style));
+        spans.push(Span::styled(label.name.clone(), text_style));
+        spans.push(Span::styled("]", bracket_style));
+    }
+    if total > MAX_CHIPS {
+        let overflow_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default().fg(ctx.theme.text_dim)
+        };
+        spans.push(Span::styled(
+            format!(" +{}", total - MAX_CHIPS),
+            overflow_style,
+        ));
+    }
+    Cell::new(spans)
+}
+
+/// Translate GitHub's hex color (e.g. `"d73a4a"`) into a ratatui
+/// `Style`. Empty / unparseable → `text_dim`. The hex string may
+/// arrive with or without a leading `#`; both shapes are handled.
+///
+/// ASCII-gated before byte-slicing: `.len()` is byte length, not
+/// char count, so without the gate a 2-byte UTF-8 char that happens
+/// to fit in 6 bytes would slice through a code point and panic.
+/// GitHub never returns that, but providers are external input.
+fn label_text_style(theme: &Theme, hex: &str) -> Style {
+    let cleaned = hex.trim_start_matches('#');
+    if !cleaned.is_ascii() || cleaned.len() != 6 {
+        return Style::default().fg(theme.text_dim);
+    }
+    let parse = |s: &str| u8::from_str_radix(s, 16).ok();
+    match (
+        parse(&cleaned[0..2]),
+        parse(&cleaned[2..4]),
+        parse(&cleaned[4..6]),
+    ) {
+        (Some(r), Some(g), Some(b)) => Style::default().fg(ratatui::style::Color::Rgb(r, g, b)),
+        _ => Style::default().fg(theme.text_dim),
+    }
+}
+
 fn cell_kill_mark(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let text = if ctx.long_snooze_armed {
         " [snooze 1y?]"
@@ -317,33 +405,35 @@ fn badge_slot_cell(ctx: &WorkspaceRowCtx<'_>, badge: Option<(char, usize)>) -> C
     }
 }
 
+/// Width of each status pill slot — review (9) + CI (9), matching the
+/// label widths in `status_pills`. Lifted to a `const` so the
+/// blank-slot span doesn't have to `" ".repeat(9)` on every call.
+const BLANK_PILL: &str = "         ";
+
 fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let Some(task) = ctx.task else {
         return Cell::empty();
     };
     let (primary, secondary) = status_pills(task);
     // Empty cell when there's nothing to show — `Column::max(0)`
-    // collapses the column to 0 cells across the whole table when
-    // NO row in the visible list has a pill, handing the slack back
-    // to the title flex. When ANY row has a pill, the column expands
-    // to 19 cells (9 review + 1 gutter + 9 CI) and rows without
-    // pills get padded by the table renderer.
+    // collapses the column across the whole table when NO row has
+    // a pill, handing the slack back to the title flex. When ANY
+    // row has a pill, the column expands to 19 cells (9 review + 1
+    // gutter + 9 CI) and pill-less rows get padded by the table
+    // renderer.
     if primary.is_none() && secondary.is_none() {
         return Cell::empty();
     }
-    let blank_pill =
-        |spans: &mut Vec<Span<'static>>| spans.push(Span::styled(" ".repeat(9), ctx.row_style()));
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(3);
-    match primary {
-        Some(p) => spans.push(Span::styled(p.label.to_string(), p.style)),
-        None => blank_pill(&mut spans),
-    }
-    spans.push(Span::styled(" ".to_string(), ctx.row_style()));
-    match secondary {
-        Some(p) => spans.push(Span::styled(p.label.to_string(), p.style)),
-        None => blank_pill(&mut spans),
-    }
-    Cell::new(spans)
+    let row_style = ctx.row_style();
+    let pill_span = |pill: Option<StatusPill>| match pill {
+        Some(p) => Span::styled(p.label, p.style),
+        None => Span::styled(BLANK_PILL, row_style),
+    };
+    Cell::new(vec![
+        pill_span(primary),
+        Span::styled(" ", row_style),
+        pill_span(secondary),
+    ])
 }
 
 fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -362,7 +452,7 @@ fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // left (status pill, or — when status collapses to 0 — the
     // title flex padding).
     Cell::new(vec![
-        Span::styled(" ".to_string(), ctx.row_style()),
+        Span::styled(" ", ctx.row_style()),
         Span::styled(text, style),
     ])
 }
@@ -429,6 +519,7 @@ mod tests {
             long_snooze_armed: false,
             asking: false,
             badges: vec![],
+            ascii_glyphs: false,
         }
     }
 
@@ -439,7 +530,7 @@ mod tests {
     #[test]
     fn build_columns_have_expected_count_and_order() {
         let cols = build_columns(5);
-        assert_eq!(cols.len(), 13);
+        assert_eq!(cols.len(), 14);
         // Title column (idx 6) is the only Flex one.
         let flex_indices: Vec<_> = cols
             .iter()
@@ -494,6 +585,86 @@ mod tests {
         ctx.asking = true;
         let cell = cell_asking(&ctx);
         assert_eq!(cell.width(), 3);
+    }
+
+    /// Build a PR-shaped task — `make_task` fills `url` from `key`,
+    /// so the `/pull/` segment is what makes `Workspace::attach_task`
+    /// classify it as a PR (not an issue). The two `cell_type` tests
+    /// need this; the existing `make_task` keys (`owner/repo#1`)
+    /// would land in the gh_issues slot and render `○`.
+    fn pr_task(repo: &str, n: u64) -> Task {
+        let mut task = make_task(&format!("{repo}#{n}"), "x");
+        task.url = format!("https://github.com/{repo}/pull/{n}");
+        task
+    }
+
+    /// Type cell renders the single-cell unicode glyph by default.
+    /// Anchors the layout contract for issue #42: type column is
+    /// exactly 1 cell wide so `#NNN` sits flush against the glyph.
+    #[test]
+    fn cell_type_emits_single_cell_glyph_for_pr() {
+        let task = pr_task("owner/repo", 1);
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_type(&ctx);
+        assert_eq!(cell.width(), 1);
+        assert_eq!(cell.spans[0].content.as_ref(), "⇄");
+    }
+
+    /// `ascii_glyphs = true` (config opt-in) swaps the unicode glyph
+    /// for the plain letter so fonts that don't render the unicode
+    /// reliably still get a usable, single-cell marker.
+    #[test]
+    fn cell_type_honors_ascii_fallback() {
+        let task = pr_task("owner/repo", 1);
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.ascii_glyphs = true;
+        let cell = cell_type(&ctx);
+        assert_eq!(cell.width(), 1);
+        assert_eq!(cell.spans[0].content.as_ref(), "p");
+    }
+
+    /// Issue workspace (no PR slot) renders the `○` glyph — pins
+    /// the per-variant routing through `workspace_type_label`.
+    #[test]
+    fn cell_type_emits_circle_for_issue() {
+        let task = make_task("owner/repo#1", "x"); // make_task URL → issue
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_type(&ctx);
+        assert_eq!(cell.width(), 1);
+        assert_eq!(cell.spans[0].content.as_ref(), "○");
+    }
+
+    /// Empty workspace (no PR, no issues) → no type cell, so the
+    /// glyph column collapses to nothing rather than rendering a
+    /// stray character.
+    #[test]
+    fn cell_type_empty_for_scratch_workspace() {
+        let ws = Workspace::empty(
+            pilot_core::WorkspaceKey("scratch".into()),
+            "main",
+            fixed_time(),
+        );
+        let theme = theme();
+        let ctx = WorkspaceRowCtx {
+            workspace: Some(&ws),
+            task: None,
+            theme: &theme,
+            now: fixed_time(),
+            focused: false,
+            is_cursor: false,
+            max_pr_num_width: 2,
+            long_snooze_armed: false,
+            asking: false,
+            badges: vec![],
+            ascii_glyphs: false,
+        };
+        assert_eq!(cell_type(&ctx).width(), 0);
     }
 
     /// Kind label parses `feat: foo` into a `[feat] ` cell.
@@ -612,6 +783,7 @@ mod tests {
             long_snooze_armed: false,
             asking: false,
             badges: vec![],
+            ascii_glyphs: false,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -737,15 +909,63 @@ mod tests {
             "rows must render to the same total width or trailing columns drift: {row_a:?} vs {row_b:?}",
         );
         // Find the `C` glyph in row A; row B must have a space at
-        // the SAME byte/cell offset, not anything else. (Both rows
-        // share the prefix layout so cell == char counting is safe
-        // here.)
-        let c_pos = row_a.find(" C ").expect("row A should have a ` C ` badge");
+        // the SAME char/cell offset, not anything else. The type
+        // glyph (`⇄` / `○`) is multi-byte UTF-8, so anchor by char
+        // position — `str::find` is byte-based and would drift.
+        let row_a_chars: Vec<char> = row_a.chars().collect();
+        let c_pos = row_a_chars
+            .windows(3)
+            .position(|w| w == [' ', 'C', ' '])
+            .expect("row A should have a ` C ` badge");
         let same_window: String = row_b.chars().skip(c_pos).take(3).collect();
         assert_eq!(
             same_window, "   ",
             "row B did not reserve the ` C ` column at the same x as row A",
         );
+    }
+
+    /// Labels render as bracketed chips with one leading space per
+    /// chip. Empty label list → empty cell so the column collapses
+    /// to 0 when no row in the table has labels.
+    #[test]
+    fn cell_labels_empty_for_taskless_or_unlabeled_row() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(cell_labels(&ctx).width(), 0);
+    }
+
+    #[test]
+    fn cell_labels_renders_bracketed_chips() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.labels = vec![pilot_core::Label::new("bug"), pilot_core::Label::new("ci")];
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_labels(&ctx);
+        let joined: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, " [bug] [ci]");
+    }
+
+    /// More than 3 labels collapses extras into a `+N` overflow
+    /// indicator — the issue's "graceful truncation" requirement.
+    #[test]
+    fn cell_labels_truncates_with_overflow_indicator() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.labels = vec![
+            pilot_core::Label::new("bug"),
+            pilot_core::Label::new("ci"),
+            pilot_core::Label::new("backend"),
+            pilot_core::Label::new("priority"),
+            pilot_core::Label::new("docs"),
+        ];
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_labels(&ctx);
+        let joined: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, " [bug] [ci] [backend] +2");
     }
 
     /// Multi-instance badge (` C×2 `, 5 cells) no longer gets

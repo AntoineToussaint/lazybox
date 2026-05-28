@@ -550,3 +550,239 @@ fn claude_qmark_heuristic_still_fires_on_short_prompts() {
     let buf = b"Some context above\nProceed with the rewrite?";
     assert_eq!(agent.detect_state(buf), Some(AgentState::Asking));
 }
+
+// ── Prompt-shape fixture suite ─────────────────────────────────────────
+//
+// A canonical version of every Claude Code prompt shape pilot's
+// detector is expected to recognise. Each fixture pairs a stable
+// name with a representative buffer and the expected `AgentState`.
+// The single test below iterates so adding a new prompt shape is a
+// one-fixture entry — no per-shape `#[test]` boilerplate.
+//
+// Maintainer flow:
+//   1. Capture the new shape (see `/tmp/pilot.log` when claude
+//      renders the prompt in pilot, or transcribe the visible
+//      terminal).
+//   2. Add a `PromptFixture` row.
+//   3. If the detector misses it, extend `Claude::detect_state`
+//      until this test passes. Keep the STANDALONE / paired /
+//      arrow branches in sync with the shapes named here so the
+//      coverage table stays auditable from one place.
+
+struct PromptFixture {
+    /// Stable name surfaced in failure messages. Should describe
+    /// the prompt shape, not its content (e.g.
+    /// `write_tool_permission_arrow_on_option_2`).
+    name: &'static str,
+    /// Raw buffer (post-ANSI, pre-detector) as it would appear in
+    /// the per-terminal ring buffer. Newlines and indentation
+    /// preserved; multi-line content uses `\n` literals so the
+    /// fixture is one source line per visual row.
+    buffer: &'static str,
+    /// Expected `AgentState`. `Asking` for real prompts, `Active`
+    /// for false-positive controls (chat output that LOOKS like a
+    /// prompt but isn't).
+    expected: AgentState,
+}
+
+const PROMPT_FIXTURES: &[PromptFixture] = &[
+    // ── Asking shapes — the real prompts ─────────────────────────
+    PromptFixture {
+        // Regression for issue #26: cursor on option 2 (not 1),
+        // and the chooser footer is just "Esc to cancel" (no
+        // "Tab to amend"). Earlier detector missed all three
+        // independent matchers — `> 2.` ≠ `> 1.` for the arrow,
+        // missing "Tab to amend" for the footer pair, and no
+        // STANDALONE entry for "do you want to create". Pinned
+        // here so a future tightening can't silently re-introduce
+        // the gap.
+        name: "write_tool_permission_arrow_on_option_2",
+        buffer: concat!(
+            "Do you want to create MEMORY.md?\n",
+            "  1. Yes\n",
+            "> 2. Yes, and allow Claude to edit its own settings for this session\n",
+            "  3. No\n",
+            "Esc to cancel",
+        ),
+        expected: AgentState::Asking,
+    },
+    PromptFixture {
+        name: "edit_tool_permission_utf8_arrow",
+        buffer: concat!(
+            "Do you want to make this edit to agent.rs?\n",
+            "❯ 1. Yes\n",
+            "  2. Yes, allow all edits during this session\n",
+            "  3. No, and tell Claude what to do differently\n",
+            "Esc to cancel",
+        ),
+        expected: AgentState::Asking,
+    },
+    PromptFixture {
+        // Arrow on option 3 — exercises the generalized
+        // `has_ascii_chooser_arrow` helper (any `> N.` shape, not
+        // just `> 1.`).
+        name: "bash_permission_cursor_on_option_3",
+        buffer: concat!(
+            "Allow Bash this command?\n",
+            "  1. Yes\n",
+            "  2. Yes, and don't ask again\n",
+            "> 3. No, and tell Claude what to do differently\n",
+            "Esc to cancel",
+        ),
+        expected: AgentState::Asking,
+    },
+    PromptFixture {
+        name: "bash_permission_utf8_arrow",
+        buffer: concat!(
+            "Allow Bash this command?\n",
+            "❯ 1. Yes\n",
+            "  2. Yes, and don't ask again\n",
+            "  3. No, and tell Claude what to do differently\n",
+            "Esc to cancel",
+        ),
+        expected: AgentState::Asking,
+    },
+    PromptFixture {
+        name: "plan_mode_exit",
+        buffer: concat!(
+            "Do you want to proceed?\n",
+            "❯ 1. Yes\n",
+            "  2. No\n",
+            "Esc to cancel",
+        ),
+        expected: AgentState::Asking,
+    },
+    PromptFixture {
+        name: "trust_folder_chooser",
+        buffer: concat!(
+            "Do you trust the files in this folder?\n",
+            "❯ 1. Yes, proceed\n",
+            "  2. No, exit\n",
+            "Esc to cancel",
+        ),
+        expected: AgentState::Asking,
+    },
+    PromptFixture {
+        // AskUserQuestion-style multi-option chooser. Same shape
+        // as a permission prompt but more options, free-form
+        // question text. Coverage hangs on the arrow+options
+        // branch — no question-phrase pairing required.
+        name: "ask_user_question_three_options",
+        buffer: concat!(
+            "Which library should we use?\n",
+            "❯ 1. tokio\n",
+            "  2. async-std\n",
+            "  3. smol\n",
+            "Esc to cancel",
+        ),
+        expected: AgentState::Asking,
+    },
+    PromptFixture {
+        // Permission dialog where the footer (`Esc to cancel`)
+        // and the chooser shape are the only signals — no `❯`
+        // glyph, no `> N.` arrow, no recognised question phrase.
+        // The new `Esc to cancel + numbered options` branch is
+        // the only matcher that fires here.
+        name: "permission_dialog_no_arrow_no_question_phrase",
+        buffer: concat!(
+            "  1. Approve\n",
+            "  2. Skip\n",
+            "  3. Cancel\n",
+            "Esc to cancel",
+        ),
+        expected: AgentState::Asking,
+    },
+    PromptFixture {
+        // Standalone "do you want to <verb>" phrase variants —
+        // each one is a permission/consent prompt class.
+        name: "write_permission_standalone_no_chooser",
+        buffer: "Do you want to create README.md?",
+        expected: AgentState::Asking,
+    },
+    PromptFixture {
+        name: "overwrite_permission_standalone",
+        buffer: "Do you want to overwrite the existing file?",
+        expected: AgentState::Asking,
+    },
+    PromptFixture {
+        name: "delete_permission_standalone",
+        buffer: "Do you want to delete src/old_module.rs?",
+        expected: AgentState::Asking,
+    },
+    PromptFixture {
+        name: "settings_edit_consent",
+        buffer: concat!(
+            "Claude wants to edit its own settings. Allow?\n",
+            "❯ 1. Yes\n",
+            "  2. No\n",
+            "Esc to cancel",
+        ),
+        expected: AgentState::Asking,
+    },
+    // ── Active controls — must NOT fire as Asking ────────────────
+    PromptFixture {
+        // Plain build output. No prompt markers, no `?`. Belt-
+        // and-braces baseline.
+        name: "active_streaming_build_output",
+        buffer: concat!(
+            "Compiling pilot-tui v0.1.0\n",
+            "Finished release [optimized] target(s) in 4.32s",
+        ),
+        expected: AgentState::Active,
+    },
+    PromptFixture {
+        // Long prose ending in `?` — must NOT fire because the
+        // last line is >80 chars (prose, not a prompt). Without
+        // this guard the 8-second Asking→Active hysteresis turns
+        // every long-form question in chat into a stuck "needs
+        // input" pill.
+        name: "active_long_prose_question",
+        buffer: "I have a few approaches in mind: refactor the loop, extract a helper, or inline the whole thing. Which would you prefer?",
+        expected: AgentState::Active,
+    },
+    PromptFixture {
+        // Chat output that mentions "do you want to" but isn't
+        // an actual prompt. The STANDALONE entries are tight
+        // enough not to fire on this prose.
+        name: "active_chat_mentions_proceed",
+        buffer: "I'll proceed with the change once you say so.",
+        expected: AgentState::Active,
+    },
+];
+
+#[test]
+fn claude_detector_covers_every_documented_prompt_shape() {
+    let agent = Claude;
+    let mut failures: Vec<String> = Vec::new();
+    for fixture in PROMPT_FIXTURES {
+        let actual = agent.detect_state(fixture.buffer.as_bytes());
+        if actual != Some(fixture.expected) {
+            failures.push(format!(
+                "fixture `{}` expected {:?} but got {:?}\n--- buffer ---\n{}\n--- end ---",
+                fixture.name, fixture.expected, actual, fixture.buffer,
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} prompt-shape fixtures failed:\n\n{}",
+        failures.len(),
+        PROMPT_FIXTURES.len(),
+        failures.join("\n\n"),
+    );
+}
+
+#[test]
+fn claude_prompt_fixture_names_are_unique() {
+    // Catches a copy-paste mistake — two fixtures with the same
+    // name make failure messages ambiguous.
+    let mut names: Vec<&str> = PROMPT_FIXTURES.iter().map(|f| f.name).collect();
+    names.sort_unstable();
+    let original_len = names.len();
+    names.dedup();
+    assert_eq!(
+        names.len(),
+        original_len,
+        "fixture names must be unique — duplicate(s) found",
+    );
+}

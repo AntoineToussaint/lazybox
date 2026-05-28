@@ -1873,6 +1873,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "futures",
+ "http",
  "octocrab",
  "pilot-auth",
  "pilot-core",

@@ -3,6 +3,7 @@ use pilot_auth::Credential;
 use pilot_core::*;
 
 use crate::graphql;
+use crate::notifications::{self, NotificationEntry, NotificationsPoll, SharedNotificationsState};
 
 #[derive(Debug, thiserror::Error)]
 pub enum GhError {
@@ -322,6 +323,15 @@ impl From<GhError> for pilot_core::ProviderError {
     }
 }
 
+/// Read-only view of notifications heartbeat state, returned by
+/// [`GhClient::notifications_snapshot`]. Tests and logs use this to
+/// observe whether the slow-sweep cadence is armed.
+#[derive(Debug, Clone)]
+pub struct NotificationsSnapshot {
+    pub has_last_modified: bool,
+    pub last_full_sweep_elapsed: Option<std::time::Duration>,
+}
+
 #[derive(Clone)]
 pub struct GhClient {
     inner: Octocrab,
@@ -339,6 +349,10 @@ pub struct GhClient {
     /// (currently we only construct one, but cheap insurance against
     /// future "spawn a worker pool" ideas).
     budget: std::sync::Arc<std::sync::Mutex<crate::rate_budget::RateBudget>>,
+    /// Notifications heartbeat state — `Last-Modified` echo + slow-sweep
+    /// timer. Shared across clones so `with_filters` doesn't reset the
+    /// 304-conditional or trigger a redundant full sweep.
+    notifications_state: SharedNotificationsState,
 }
 
 impl GhClient {
@@ -367,6 +381,7 @@ impl GhClient {
             budget: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::rate_budget::RateBudget::default_for_pilot(),
             )),
+            notifications_state: notifications::shared(),
         })
     }
 
@@ -805,6 +820,244 @@ impl GhClient {
     /// **One API call instead of 68.**
     pub fn authenticated_user(&self) -> &str {
         &self.user
+    }
+
+    /// Default cadence for the slow full-sweep. The notifications
+    /// heartbeat runs every poll tick (cheap); the heavy `involves:USER`
+    /// search runs at most once every `FULL_SWEEP_INTERVAL`. Picks the
+    /// 10-minute number from #19 — long enough to keep GraphQL cost
+    /// down by an order of magnitude, short enough that the long-tail
+    /// gap (a PR notifications didn't tell us about, e.g. a silent
+    /// `closed` with no comment) closes within a coffee break.
+    pub const FULL_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+
+    /// Should the next sync cycle run a heavy full sweep, or is the
+    /// notifications-driven incremental path safe to use? Returns true
+    /// when no sweep has run yet (first tick after daemon start) or
+    /// when the last one was ≥ `FULL_SWEEP_INTERVAL` ago.
+    ///
+    /// The polling layer calls this BEFORE deciding which fetch to fire
+    /// — so a true response means "the rescope-eligible source is in
+    /// play this tick" and the tick driver knows to honor rescoping;
+    /// false means the tick is an incremental refresh and rescope
+    /// must be skipped (covered by `FetchMode::Incremental`).
+    pub fn should_full_sweep(&self) -> bool {
+        self.notifications_state
+            .lock()
+            .expect("notifications state mutex poisoned")
+            .is_full_sweep_due(Self::FULL_SWEEP_INTERVAL)
+    }
+
+    /// Mark a full sweep complete *now*. Resets the heartbeat baseline
+    /// too: future incremental ticks send an `If-Modified-Since` of
+    /// "right after the sweep" so GitHub answers 304 until activity
+    /// genuinely lands. Without this reset, the first incremental tick
+    /// after a sweep would re-fan-out to every notification that piled
+    /// up DURING the sweep and double-count work the sweep already did.
+    pub fn mark_full_sweep_done(&self) {
+        let mut state = self
+            .notifications_state
+            .lock()
+            .expect("notifications state mutex poisoned");
+        state.last_full_sweep_at = Some(std::time::Instant::now());
+        // Reset the conditional baseline to "now" — drop any stale
+        // `Last-Modified` echo from a pre-sweep notifications call.
+        state.last_modified = Some(notifications::format_http_date(chrono::Utc::now()));
+    }
+
+    /// Snapshot of the current notifications heartbeat state. Read-only;
+    /// exists so tests (and a future status indicator) can observe
+    /// whether the slow-sweep timer is armed.
+    pub fn notifications_snapshot(&self) -> NotificationsSnapshot {
+        let s = self
+            .notifications_state
+            .lock()
+            .expect("notifications state mutex poisoned");
+        NotificationsSnapshot {
+            has_last_modified: s.last_modified.is_some(),
+            last_full_sweep_elapsed: s.last_full_sweep_at.map(|i| i.elapsed()),
+        }
+    }
+
+    /// Cheap heartbeat against `GET /notifications` with
+    /// `If-Modified-Since` set to the previously-observed `Last-Modified`.
+    ///
+    /// - **304 No Content** → returns `NotificationsPoll::NotModified`;
+    ///   caller can skip the deep-fetch entirely. This is the steady
+    ///   state — most ticks land here.
+    /// - **200 OK** → deserializes the body into `NotificationEntry`s
+    ///   and captures the response's `Last-Modified` header for echo
+    ///   on the next call. Caller fans out to single-PR / single-issue
+    ///   deep-fetches keyed off each entry's `subject.url`.
+    /// - Anything else → bubbled as `GhError`.
+    ///
+    /// Notifications are rate-budgeted SEPARATELY from GraphQL (REST has
+    /// its own 5000-req/hr quota), but we still gate through the local
+    /// bucket so a runaway loop can't hammer this endpoint either.
+    pub async fn fetch_notifications(&self) -> Result<NotificationsPoll, GhError> {
+        use http::StatusCode;
+        use http::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, LAST_MODIFIED};
+
+        self.acquire_or_block("notifications heartbeat")?;
+
+        // Capture the saved header BEFORE the request, so the lock is
+        // released before we await the network call. The Mutex is a
+        // std::sync::Mutex (not tokio's), so holding it across `.await`
+        // would risk a hang if any other code path tried to lock during
+        // the request. Clone-and-drop is the right pattern.
+        let if_modified_since = self
+            .notifications_state
+            .lock()
+            .expect("notifications state mutex poisoned")
+            .last_modified
+            .clone();
+
+        let mut headers = HeaderMap::new();
+        if let Some(ims) = if_modified_since.as_ref()
+            && let Ok(v) = HeaderValue::from_str(ims)
+        {
+            headers.insert(IF_MODIFIED_SINCE, v);
+        }
+        // `participating=false` — match #19's recommendation. Returns
+        // every notification the user can see, not just ones they're
+        // explicitly mentioned in. That's what we want: pilot's job is
+        // to surface activity on rows already in the inbox.
+        // `all=false` (default) — only unread items. Read notifications
+        // wouldn't add information since we already saw them.
+        let uri = "/notifications?participating=false";
+        let response = self
+            .inner
+            ._get_with_headers(uri, Some(headers))
+            .await
+            .map_err(GhError::Api)?;
+
+        let status = response.status();
+        // 304 = nothing new since If-Modified-Since. The endpoint also
+        // sends an empty body in that case; don't try to deserialize.
+        if status == StatusCode::NOT_MODIFIED {
+            tracing::debug!("notifications: 304 Not Modified");
+            return Ok(NotificationsPoll::NotModified);
+        }
+
+        // Capture `Last-Modified` before consuming the body — once we
+        // hand the response to `body_to_string`, the headers go with it.
+        let new_last_modified = response
+            .headers()
+            .get(LAST_MODIFIED)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        if !status.is_success() {
+            // 401/403/5xx — surface as a typed GhError so the normal
+            // ProviderError classification (auth vs retryable) kicks in.
+            // We synthesize a GhError::Graphql with the status because
+            // the REST body shape isn't a GqlResponse; the caller logs
+            // it and the next tick retries naturally.
+            let body = self
+                .inner
+                .body_to_string(response)
+                .await
+                .unwrap_or_else(|_| "<unreadable body>".to_string());
+            return Err(GhError::Graphql(format!(
+                "notifications HTTP {}: {}",
+                status.as_u16(),
+                body
+            )));
+        }
+
+        let body = self
+            .inner
+            .body_to_string(response)
+            .await
+            .map_err(GhError::Api)?;
+        let entries: Vec<NotificationEntry> = serde_json::from_str(&body).map_err(|e| {
+            GhError::Graphql(format!(
+                "notifications response did not match schema: {e}; body prefix: {}",
+                body.chars().take(200).collect::<String>()
+            ))
+        })?;
+
+        // Persist the new `Last-Modified` for the next call's
+        // conditional. Skip the write when GitHub didn't send one
+        // (rare; happens on test fixtures) — leaving the old value
+        // alone is safer than clearing it and re-pulling the world.
+        if let Some(lm) = new_last_modified.as_ref() {
+            self.notifications_state
+                .lock()
+                .expect("notifications state mutex poisoned")
+                .last_modified = Some(lm.clone());
+        }
+
+        Ok(NotificationsPoll::Modified {
+            entries,
+            last_modified: new_last_modified,
+        })
+    }
+
+    /// Targeted deep-fetch: pull one PR by `(owner, repo, number)` via
+    /// the single-node GraphQL query. ~85 cost units total (vs. the
+    /// 1000s the inbox-scan query burns when re-walking every PR).
+    /// Returns `Ok(None)` when GitHub can't find / no longer exposes
+    /// the PR (deleted, scope changed, transferred); the caller treats
+    /// that as "skip this entry."
+    pub async fn fetch_single_pr(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<Task>, GhError> {
+        self.acquire_or_block("single-PR notification deep-fetch")?;
+        let body = graphql::single_pr_body(owner, repo, number);
+        let response: graphql::GqlSinglePrResponse =
+            self.post_graphql_with_retry(&body).await?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::warn!("fetch_single_pr {owner}/{repo}#{number}: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        let Some(data) = response.data else {
+            return Ok(None);
+        };
+        if let Some(rl) = &data.rate_limit {
+            self.observe_rate_limit(rl);
+        }
+        let pr = data.repository.and_then(|r| r.pull_request);
+        Ok(pr.map(|pr| graphql::pr_to_task(&pr, &self.user)))
+    }
+
+    /// Sibling of `fetch_single_pr` for Issue-typed notifications.
+    /// Same Ok(None) "not visible" semantics.
+    pub async fn fetch_single_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<Task>, GhError> {
+        self.acquire_or_block("single-issue notification deep-fetch")?;
+        let body = graphql::single_issue_body(owner, repo, number);
+        let response: graphql::GqlSingleIssueResponse =
+            self.post_graphql_with_retry(&body).await?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::warn!("fetch_single_issue {owner}/{repo}#{number}: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        let Some(data) = response.data else {
+            return Ok(None);
+        };
+        if let Some(rl) = &data.rate_limit {
+            self.observe_rate_limit(rl);
+        }
+        let issue = data.repository.and_then(|r| r.issue);
+        Ok(issue.map(|i| graphql::issue_to_task(&i, &self.user)))
     }
 
     pub async fn fetch_all_prs(&self) -> Result<Vec<Task>, GhError> {

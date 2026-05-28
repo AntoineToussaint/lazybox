@@ -17,8 +17,7 @@ pub fn build_implement_issue_prompt(issue: &Task) -> String {
         .id
         .key
         .rsplit_once('#')
-        .map(|(_, n)| n)
-        .unwrap_or(&issue.id.key);
+        .map_or(issue.id.key.as_str(), |(_, n)| n);
     let repo = issue.repo.as_deref().unwrap_or("the repository");
     let body_block = match issue
         .body

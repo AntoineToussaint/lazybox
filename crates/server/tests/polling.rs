@@ -1573,11 +1573,7 @@ async fn rescope_preserves_workspaces_from_unreported_sources() {
         .into_iter()
         .map(|r| r.key)
         .collect();
-    assert_eq!(
-        after.len(),
-        2,
-        "both workspaces must survive: {after:?}",
-    );
+    assert_eq!(after.len(), 2, "both workspaces must survive: {after:?}",);
 }
 
 #[tokio::test]

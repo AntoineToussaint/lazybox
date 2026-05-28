@@ -1112,7 +1112,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::Editor, modal);
     }
 
-    /// Route a [`ClickTarget`] produced by a right-click in the agent
+    /// Route a [`crate::components::terminal_stack::ClickTarget`] produced by a right-click in the agent
     /// view to the right opener: URLs and `#N` / `owner/repo#N` issue
     /// references go to the system browser; file paths open in the
     /// configured editor (jumping to `line:col` when present).

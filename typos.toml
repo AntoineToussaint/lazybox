@@ -27,6 +27,7 @@ clonable = "clonable"        # accepted English variant
 activit = "activit"          # format-string fragment: "activit{}"
 mis = "mis"                  # hyphenated prefix: "mis-decode" etc.
 fo = "fo"                    # RFC 4648 base64 test vector (b"fo")
+hel = "hel"                  # composing-buffer test value ("hello" minus 2 chars)
 
 [files]
 extend-exclude = [

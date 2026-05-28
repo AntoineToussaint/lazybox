@@ -1867,7 +1867,7 @@ impl GhClient {
     }
 
     /// Round-robin variant of
-    /// [`fetch_selected_with_status_and_mentions`]: runs the PR side
+    /// [`Self::fetch_selected_with_status_and_mentions`]: runs the PR side
     /// as a per-repo fan-out instead of a global `involves:USER`
     /// sweep, optionally OR'd with the global sweep on K-th refresh
     /// ticks. Same partial-failure semantics as the non-round-robin

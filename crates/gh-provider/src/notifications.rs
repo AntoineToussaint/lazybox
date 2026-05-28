@@ -32,7 +32,7 @@ pub enum NotificationsPoll {
     NotModified,
     /// `200 OK` with a (possibly empty) list of notification entries.
     /// The response's `Last-Modified` header is captured into
-    /// [`NotificationsState`] for the next call's `If-Modified-Since`;
+    /// `NotificationsState` (crate-private) for the next call's `If-Modified-Since`;
     /// callers don't need it directly.
     Modified { entries: Vec<NotificationEntry> },
 }

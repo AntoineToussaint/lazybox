@@ -745,7 +745,7 @@ mod subscribed_projects_tests {
     //! subscriptions before the daemon surfaces a workspace.
     use super::super::*;
     use pilot_core::{PersistedSetup, Project, ProjectKey};
-    use pilot_ipc::{channel, Event as IpcEvent};
+    use pilot_ipc::{Event as IpcEvent, channel};
     use tuirealm::ratatui::layout::Size;
 
     fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
@@ -822,7 +822,11 @@ mod subscribed_projects_tests {
         let discovered = ProjectKey::github("acme", "found-by-polling");
         m.projects.insert(
             discovered.clone(),
-            Project::new(discovered.clone(), "acme/found-by-polling", chrono::Utc::now()),
+            Project::new(
+                discovered.clone(),
+                "acme/found-by-polling",
+                chrono::Utc::now(),
+            ),
         );
 
         m.setup.persisted = Some(persisted_with_scopes(&["github:acme"]));

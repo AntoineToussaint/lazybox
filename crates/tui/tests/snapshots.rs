@@ -99,6 +99,28 @@ fn sidebar_golden_render_focused() {
     insta::assert_snapshot!("sidebar_focused_3_sessions", rendered);
 }
 
+/// Issue #65 golden: a list whose rows carry 1-, 2-, and 3-digit
+/// numbers. The type glyph must sit flush against the `#NNN` on EVERY
+/// row (`○#7`, `○#42`, `○#312`) — the regression was a right-aligned
+/// number column that left-padded the shorter numbers, opening an
+/// inconsistent gap after the glyph. Pinning the render keeps the
+/// flush spacing from drifting back.
+#[test]
+fn sidebar_golden_render_mixed_number_widths() {
+    let mut s = Sidebar::new(PaneId::new(1));
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            Workspace::from_task(make_task("o/r#7", 10), fixed_time()),
+            Workspace::from_task(make_task("o/r#42", 60), fixed_time()),
+            Workspace::from_task(make_task("o/r#312", 120), fixed_time()),
+        ],
+        terminals: vec![],
+        projects: vec![],
+    });
+    let rendered = render_to_string(&mut s, 40, 10, true);
+    insta::assert_snapshot!("sidebar_mixed_number_widths", rendered);
+}
+
 #[test]
 fn sidebar_golden_render_unfocused() {
     let mut s = Sidebar::new(PaneId::new(1));

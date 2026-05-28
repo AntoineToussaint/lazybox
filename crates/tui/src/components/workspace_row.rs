@@ -84,7 +84,12 @@ impl<'a> WorkspaceRowCtx<'a> {
 /// 1. Type glyph — `⇄` / `○` / `◆` (or ASCII `p`/`i`/`l`) / blank.
 ///    Exactly 1 cell so it sits flush against the `#NNN` to its right
 ///    — see issue #42.
-/// 2. PR number — `#NNN`, padded to `max_pr_num_width`.
+/// 2. PR number — `#NNN`, left-aligned and padded to `max_pr_num_width`
+///    so the digits sit FLUSH against the type glyph (`⇄#312`, `○#7`)
+///    on every row. Right-aligning instead pushed shorter numbers off
+///    the glyph with leading padding (`⇄#312` vs `○  #7`) — the
+///    inconsistent post-glyph spacing of issue #65. Trailing padding
+///    still aligns the role column to a fixed x across rows.
 /// 3. Role badge — ` R` colored marker, or blank.
 /// 4. Asking glyph — ` ? ` warn-colored, or blank — reserved width so
 ///    the kind/title to the right don't jitter between asking /
@@ -113,20 +118,20 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///    empty, the title flex padding).
 pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     vec![
-        Column::fixed(4),                        // 0: prefix
-        Column::fixed(1),                        // 1: type glyph (single cell, flush against #N)
-        Column::fixed(max_pr_num_width).right(), // 2: pr_num (right-aligned so digits line up)
-        Column::fixed(2),                        // 3: role (" R" or blank)
-        Column::fixed(3),                        // 4: asking (" ? " reserved)
-        Column::max(0),                          // 5: kind ("[FEAT] " or blank)
-        Column::flex(0),                         // 6: title
-        Column::max(0),                          // 7: labels
-        Column::max(0),                          // 8: kill_mark
-        Column::max(0).right(),                  // 9: unread
-        Column::max(0),                          // 10: badge_agent
-        Column::max(0),                          // 11: badge_shell (carries its own leading space)
-        Column::max(0).right(),                  // 12: status
-        Column::max(0).right(),                  // 13: time (carries its own leading space)
+        Column::fixed(4),                // 0: prefix
+        Column::fixed(1),                // 1: type glyph (single cell, flush against #N)
+        Column::fixed(max_pr_num_width), // 2: pr_num (left-aligned, flush against the glyph)
+        Column::fixed(2),                // 3: role (" R" or blank)
+        Column::fixed(3),                // 4: asking (" ? " reserved)
+        Column::max(0),                  // 5: kind ("[FEAT] " or blank)
+        Column::flex(0),                 // 6: title
+        Column::max(0),                  // 7: labels
+        Column::max(0),                  // 8: kill_mark
+        Column::max(0).right(),          // 9: unread
+        Column::max(0),                  // 10: badge_agent
+        Column::max(0),                  // 11: badge_shell (carries its own leading space)
+        Column::max(0).right(),          // 12: status
+        Column::max(0).right(),          // 13: time (carries its own leading space)
     ]
 }
 
@@ -192,13 +197,12 @@ fn cell_pr_num(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .fg(crate::components::task_label::pr_number_color(n))
             .add_modifier(Modifier::BOLD)
     };
-    // Padding to `max_pr_num_width` happens here (not in the column)
-    // because the trailing space should inherit the colored
-    // background of the PR number row — but in practice the
-    // `pr_number_color` only colors the digits, so the padding is
-    // row-style spaces. The Table column is Fixed(max_pr_num_width),
-    // so any deficit is auto-padded by the renderer using the row's
-    // fill_style. We emit just the `#NNN` span here.
+    // We emit just the `#NNN` span; the column is
+    // Fixed(max_pr_num_width) and LEFT-aligned, so the renderer pads
+    // the deficit on the RIGHT with the row's fill_style. Left
+    // alignment keeps the number flush against the type glyph on every
+    // row (issue #65) — a right-aligned column padded shorter numbers
+    // on the left, opening an inconsistent gap after the glyph.
     Cell::from_span(Span::styled(label, style))
 }
 
@@ -985,6 +989,86 @@ mod tests {
         assert!(
             line.contains(" C×2 "),
             "multi-instance badge was truncated: {line:?}",
+        );
+    }
+
+    /// Regression for issue #65: the type glyph must sit FLUSH against
+    /// the `#NNN` on every row, regardless of how wide that row's
+    /// number is. The bug was a right-aligned pr-number column: it
+    /// padded shorter numbers on the LEFT, so `⇄#312` rendered flush
+    /// while `○#7` picked up leading spaces (`○  #7`) — inconsistent
+    /// post-glyph spacing across rows. Left alignment moves the
+    /// padding to the right, keeping the glyph→number gap a constant
+    /// zero cells everywhere.
+    #[test]
+    fn type_glyph_is_flush_against_number_for_mixed_widths() {
+        let theme = theme();
+        // Three PRs with 1-, 2-, and 3-digit numbers → max_pr_num_width
+        // is driven by `#312` (4 cells). The narrower rows are the ones
+        // the old right-align padded on the left.
+        let widths = [7u64, 42, 312];
+        let tasks: Vec<Task> = widths.iter().map(|n| pr_task("owner/repo", *n)).collect();
+        let wss: Vec<Workspace> = tasks
+            .iter()
+            .map(|t| Workspace::from_task(t.clone(), fixed_time()))
+            .collect();
+        let ctxs: Vec<WorkspaceRowCtx<'_>> = wss
+            .iter()
+            .zip(tasks.iter())
+            .map(|(ws, t)| ctx_for(ws, t, &theme))
+            .collect();
+        let columns = build_columns(4); // width of "#312"
+        let rows: Vec<Row> = ctxs.iter().map(build_row).collect();
+        let lines = crate::components::table::render_table(&rows, &columns, 80);
+        for (line, n) in lines.iter().zip(widths.iter()) {
+            let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                joined.contains(&format!("⇄#{n}")),
+                "glyph must be flush against the number (no gap): {joined:?}",
+            );
+        }
+    }
+
+    /// Companion to the above for the "without a task" case in the
+    /// acceptance criteria: a scratch workspace (no PR / issue / linear
+    /// ticket) renders the same total width as task rows so the title
+    /// and trailing columns stay aligned across the mixed list — the
+    /// empty type / number cells are padded by their fixed columns, not
+    /// dropped.
+    #[test]
+    fn taskless_row_keeps_alignment_with_task_rows() {
+        let theme = theme();
+        let task = pr_task("owner/repo", 312);
+        let ws_task = Workspace::from_task(task.clone(), fixed_time());
+        let ctx_task = ctx_for(&ws_task, &task, &theme);
+
+        let ws_scratch = Workspace::empty(
+            pilot_core::WorkspaceKey("scratch-branch".into()),
+            "main",
+            fixed_time(),
+        );
+        let ctx_scratch = WorkspaceRowCtx {
+            workspace: Some(&ws_scratch),
+            task: None,
+            theme: &theme,
+            now: fixed_time(),
+            focused: false,
+            is_cursor: false,
+            max_pr_num_width: 4,
+            long_snooze_armed: false,
+            asking: false,
+            badges: vec![],
+            ascii_glyphs: false,
+        };
+        let columns = build_columns(4);
+        let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];
+        let lines = crate::components::table::render_table(&rows, &columns, 80);
+        let task_line: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let scratch_line: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            crate::util::visual_width(&task_line),
+            crate::util::visual_width(&scratch_line),
+            "taskless row must render to the same width as a task row: {task_line:?} vs {scratch_line:?}",
         );
     }
 }

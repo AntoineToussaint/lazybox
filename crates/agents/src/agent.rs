@@ -241,22 +241,29 @@ pub mod detect {
 
         /// A single conversational line is an ask when it ends with a
         /// question mark (the model parked on a question) or contains
-        /// one of the known confirmation/clarification phrases.
+        /// one of the known confirmation/clarification phrases. The
+        /// `?` check runs first so the common case allocates nothing.
         fn line_is_ask(line: &str) -> bool {
-            if line.is_empty() {
-                return false;
+            if line.ends_with('?') {
+                return true;
             }
             let lower = line.to_lowercase();
-            lower.ends_with('?')
-                || CONVERSATIONAL_ASK_PHRASES.iter().any(|p| lower.contains(p))
+            CONVERSATIONAL_ASK_PHRASES.iter().any(|p| lower.contains(p))
         }
 
         /// Lines that are Claude's rendered UI chrome rather than
         /// conversational content. The ask sits ABOVE the input box in
         /// the transcript, so we skip the box borders, the empty
-        /// prompt line, and the footer hint strip to reach it. A line
-        /// of actual prose never starts with a box-drawing glyph and
-        /// never carries these footer markers.
+        /// prompt line, and the footer hint / mode-indicator strip to
+        /// reach it. A line of actual prose never starts with a
+        /// box-drawing glyph and never carries these footer markers.
+        ///
+        /// This is load-bearing for RECALL: the footer sits below the
+        /// input box, so the bottom-up scan hits it first. A footer
+        /// line we fail to recognise as chrome becomes the apparent
+        /// "last content line" and masks the real ask above it — a
+        /// false negative, the expensive failure mode. Hence the
+        /// generous marker list.
         fn is_chrome_line(line: &str) -> bool {
             if line.is_empty() {
                 return true;
@@ -270,9 +277,14 @@ pub mod detect {
                 || lower.contains("bypass permissions")
                 || lower.contains("accept edits")
                 || lower.contains("auto-accept")
+                || lower.contains("plan mode on")
             {
                 return true;
             }
+            // Leading glyphs that only ever open a chrome line: the
+            // input-box borders (`╭│╰` …), the tool-output gutter
+            // (`⎿`), the mode-indicator arrow (`⏵⏵ accept edits`), and
+            // the bare prompt marker (`>`).
             matches!(
                 line.chars().next(),
                 Some(
@@ -287,6 +299,7 @@ pub mod detect {
                         | '┘'
                         | '>'
                         | '⎿'
+                        | '⏵'
                 )
             )
         }

@@ -816,6 +816,22 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
         expected: AgentState::Asking,
     },
     PromptFixture {
+        // Hardening: the footer below the input box is a standalone
+        // mode indicator (`⏵⏵ accept edits on`) with no "for
+        // shortcuts" text. The bottom-up scan must still recognise it
+        // as chrome and reach the ask above — otherwise the footer
+        // masquerades as the last content line and the ask is missed.
+        name: "conversational_ask_above_mode_indicator_footer",
+        buffer: concat!(
+            "● Should I run the test suite now?\n",
+            "╭─────────────────────────────────────────╮\n",
+            "│ >                                         │\n",
+            "╰─────────────────────────────────────────╯\n",
+            "  ⏵⏵ accept edits on",
+        ),
+        expected: AgentState::Asking,
+    },
+    PromptFixture {
         name: "conversational_should_i",
         buffer: "Should I also update the tests for this change?",
         expected: AgentState::Asking,

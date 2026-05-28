@@ -703,6 +703,10 @@ async fn dispatch_action(config: &ServerConfig, source_name: &str, action: Provi
                 pilot_ipc::TerminalKind::Agent(agent_id),
                 None,
                 prompt,
+                // Autonomous `@pilot` spawn — launch unattended with
+                // permission prompts disabled (subject to the
+                // `agent.autonomous_skip_permissions` toggle).
+                true,
             )
             .await;
         }

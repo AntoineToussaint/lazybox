@@ -24,6 +24,11 @@
 
 mod handlers;
 mod mutate;
+mod scheduler;
+
+pub use scheduler::{
+    CURSOR_TTL, DEFAULT_ROUND_ROBIN_N, RoundRobinPick, RoundRobinState, pick_repos_for_tick,
+};
 
 pub use handlers::{
     ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_fetch_pr_details,
@@ -101,6 +106,13 @@ pub struct GhSource {
     /// drained by `tick_with_state` after the upsert pass so the
     /// freshly-created issue workspace exists before we spawn into it.
     pub pending_actions: std::sync::Arc<std::sync::Mutex<Vec<ProviderAction>>>,
+    /// Per-tick scheduling decision from `pick_repos_for_tick`.
+    /// `sources_for` computes this against the cursor in
+    /// `TickState::repo_sync_cursor` and writes it here so the
+    /// `TaskSource::fetch` impl knows whether to fan out per-repo or
+    /// to fire the global sweep. Held by value (not Arc) — each
+    /// `sources_for` call produces a fresh source.
+    pub scheduling: RoundRobinPick,
 }
 
 /// Out-of-band action a `TaskSource` may surface alongside the
@@ -227,7 +239,24 @@ impl TaskSource for GhSource {
             // they can paste the query into github.com/search and
             // verify what GitHub itself thinks is in scope.
             if want_prs {
-                self.emit_progress(format!("PR query: {}", self.client.pr_search_query()));
+                if self.scheduling.run_global {
+                    self.emit_progress(format!(
+                        "PR query (global): {}",
+                        self.client.pr_search_query()
+                    ));
+                }
+                if !self.scheduling.repos.is_empty() {
+                    self.emit_progress(format!(
+                        "PR query (round-robin {} repo{}): {}",
+                        self.scheduling.repos.len(),
+                        if self.scheduling.repos.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
+                        self.scheduling.repos.join(", "),
+                    ));
+                }
             }
             if want_issues {
                 self.emit_progress(format!("Issue query: {}", self.client.issue_search_query()));
@@ -235,8 +264,10 @@ impl TaskSource for GhSource {
 
             let (raw, partial_warning, mentions) = self
                 .client
-                .fetch_selected_with_status_and_mentions(
+                .fetch_round_robin_with_status_and_mentions(
                     want_prs,
+                    &self.scheduling.repos,
+                    self.scheduling.run_global,
                     want_issues,
                     &self.mention_allowed_logins,
                 )
@@ -687,6 +718,43 @@ pub async fn sources_for(
                         if mention_allowed.is_empty() && !viewer.is_empty() {
                             mention_allowed.insert(viewer.clone());
                         }
+                        // Round-robin scheduling. Pre-fetch we:
+                        //   1. Prune stale cursor entries so repos
+                        //      the user stopped touching age out
+                        //      (otherwise the cursor would grow with
+                        //      every new involvement, never shrink).
+                        //   2. Pick the per-tick slice from the
+                        //      remaining cursor.
+                        //   3. Bump the cursor for repos we're about
+                        //      to query (even a 0-result query
+                        //      advances the rotation — without it, an
+                        //      empty repo stays "stalest" forever).
+                        //   4. Increment the tick counter AFTER the
+                        //      pick so the scheduler's K-th-tick rule
+                        //      observes the value we passed in.
+                        let now = std::time::Instant::now();
+                        state.round_robin.prune(now);
+                        let scheduling = pick_repos_for_tick(
+                            &state.round_robin.cursor,
+                            state.round_robin.focused_repo.as_deref(),
+                            state.round_robin.tick,
+                            DEFAULT_ROUND_ROBIN_N,
+                        );
+                        if scheduling.run_global || !scheduling.repos.is_empty() {
+                            tracing::info!(
+                                source = pilot_gh::SOURCE,
+                                tick = state.round_robin.tick,
+                                run_global = scheduling.run_global,
+                                round_robin = ?scheduling.repos,
+                                known_repos = state.round_robin.cursor.len(),
+                                focused = state.round_robin.focused_repo.as_deref().unwrap_or(""),
+                                "round-robin scheduling decision"
+                            );
+                        }
+                        for repo in &scheduling.repos {
+                            state.round_robin.record_sync(repo, now);
+                        }
+                        state.round_robin.tick = state.round_robin.tick.wrapping_add(1);
                         sources.push(Box::new(GhSource {
                             client,
                             filter,
@@ -694,6 +762,7 @@ pub async fn sources_for(
                             bus: bus.clone(),
                             mention_allowed_logins: mention_allowed,
                             pending_actions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                            scheduling,
                         }));
                     }
                     Err(e) => tracing::warn!("github client init failed: {e}"),
@@ -806,6 +875,12 @@ pub struct TickState {
     /// PR — once is enough; the TUI's lazy-fetch refreshes on focus
     /// for users who want explicit re-pull.
     pub(crate) prefetched_pr_details: std::collections::HashSet<String>,
+    /// Per-repo round-robin bookkeeping: cursor, focused repo, and
+    /// monotonic tick counter. Co-located in `RoundRobinState` so
+    /// the scheduling-related logic stays inside `polling::scheduler`
+    /// — adding TTL pruning or a dynamic-N knob doesn't touch this
+    /// struct.
+    pub round_robin: RoundRobinState,
 }
 
 pub async fn tick_with_state(
@@ -870,6 +945,33 @@ pub async fn tick_with_state(
                     std::time::Duration::from_secs(15);
                 let upsert_started = std::time::Instant::now();
                 let total = tasks.len();
+                // Seed the round-robin cursor with repos we
+                // observed in the result set. Borrowed `&str` dedup
+                // keeps allocation cost proportional to unique repos
+                // (typically <10), not total task count (often >30).
+                // Done BEFORE `tasks.into_iter()` so the dedup set's
+                // borrow lifetime ends cleanly; the cursor write
+                // itself owns the small handful of unique strings.
+                // Combined with the pre-fetch bump in `sources_for`,
+                // this captures both "we queried this repo" and "the
+                // global sweep turned up a new repo we now want to
+                // round-robin through" — the rotation expands
+                // automatically as the user's involvement set grows.
+                let now = std::time::Instant::now();
+                if source.name() == pilot_gh::SOURCE {
+                    let mut seen_repos: std::collections::HashSet<&str> =
+                        std::collections::HashSet::new();
+                    for task in &tasks {
+                        if let Some(repo) = task.repo.as_deref()
+                            && !repo.is_empty()
+                        {
+                            seen_repos.insert(repo);
+                        }
+                    }
+                    for repo in &seen_repos {
+                        state.round_robin.record_sync(repo, now);
+                    }
+                }
                 for (i, task) in tasks.into_iter().enumerate() {
                     if task.mergeable == pilot_core::Mergeable::Unknown {
                         saw_unknown_mergeable = true;
@@ -2195,6 +2297,51 @@ pub(super) fn load_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Optio
     let record = config.store.get_workspace(key).ok().flatten()?;
     let json = record.workspace_json?;
     serde_json::from_str::<Workspace>(&json).ok()
+}
+
+/// Record the user's "I'm looking at this workspace" hint on the
+/// round-robin scheduler. The next `pick_repos_for_tick` call reads
+/// it and bumps the repo to the front of the rotation so a comment
+/// landing on the visible PR shows up next cycle instead of waiting
+/// its turn.
+///
+/// No-op when:
+/// - the workspace is missing from the store (race with a delete);
+/// - the workspace has no primary task (locally-created pre-PR
+///   sandbox);
+/// - the primary task isn't a GitHub item (Linear doesn't share the
+///   per-repo fan-out model);
+/// - the primary task has no usable repo string.
+///
+/// The hint is *replaced*, not accumulated — only the most-recent
+/// focus matters; older selections age out via stalest-first ordering.
+pub async fn set_focused_workspace(config: &ServerConfig, key: &WorkspaceKey) {
+    let Some(workspace) = load_workspace(config, key) else {
+        return;
+    };
+    let Some(task) = workspace.primary_task() else {
+        return;
+    };
+    if task.id.source != pilot_gh::SOURCE {
+        return;
+    }
+    let Some(repo) = task
+        .repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let mut state = config.poll_state.lock().await;
+    let prev = state.round_robin.focused_repo.replace(repo.to_string());
+    if prev.as_deref() != Some(repo) {
+        tracing::debug!(
+            workspace_key = %key.as_str(),
+            repo,
+            "round-robin focus updated"
+        );
+    }
 }
 
 /// `owner/repo#N` for PR / issue rows; falls back to the workspace

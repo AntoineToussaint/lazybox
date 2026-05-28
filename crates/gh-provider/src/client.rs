@@ -988,6 +988,155 @@ impl GhClient {
         Ok(tasks)
     }
 
+    /// Round-robin variant of `fetch_all_prs`. Instead of one big
+    /// `involves:USER` paginated sweep across every repo the user
+    /// touches, this fires a small batch of `repo:owner/name`-scoped
+    /// PR searches in parallel — driven by the polling layer's
+    /// `pick_repos_for_tick` scheduler.
+    ///
+    /// Always runs the cheap, role-narrowing companions alongside:
+    /// - `review-requested:USER` (GitHub's `involves:` qualifier
+    ///   misses requested reviewers, same as `fetch_all_prs`).
+    /// - The 7-day `is:merged` sweep so a PR landing right after a
+    ///   sync still gets the final MERGED state on the next tick.
+    ///
+    /// The full watched-repo fan-out from `fetch_all_prs` is *not*
+    /// duplicated here — that path already has its own pacing,
+    /// and the round-robin's whole point is to keep per-tick cost
+    /// low.
+    ///
+    /// Returns `Ok([])` when `repos` is empty (`pick_repos_for_tick`
+    /// returns an empty list during cold start). Caller is
+    /// responsible for also running `fetch_all_prs` on global-sweep
+    /// ticks (`RoundRobinPick::run_global`).
+    pub async fn fetch_prs_for_repos(&self, repos: &[String]) -> Result<Vec<Task>, GhError> {
+        let started = std::time::Instant::now();
+        use futures::stream::{self, StreamExt};
+
+        // Same bounded-concurrent fan-out shape as the watched-repo
+        // branch in `fetch_all_prs`. 5 in flight keeps the local
+        // rate budget breathable when 3 repos + reviewer + merged
+        // all dispatch on the same tick.
+        const PER_REPO_CONCURRENCY: usize = 5;
+        let per_repo_fut = stream::iter(repos.iter().cloned())
+            .map(|repo| async move {
+                let query = format!("is:open is:pr repo:{repo} archived:false");
+                let result = self.fetch_pr_single_query("round-robin-repo", query).await;
+                (repo, result)
+            })
+            .buffer_unordered(PER_REPO_CONCURRENCY)
+            .collect::<Vec<_>>();
+
+        // Reviewer companion — same logic as `fetch_all_prs`. Without
+        // it, repos where the user is ONLY a requested reviewer would
+        // never enter the inbox via the round-robin path either.
+        let want_reviewer_pass = self.pr_filters.is_empty()
+            || self
+                .pr_filters
+                .iter()
+                .any(|q| q.contains("review-requested") || q.contains("involves:"));
+        let reviewer_query = if want_reviewer_pass {
+            let mut q = graphql::default_search_qualifiers();
+            q.push(format!("review-requested:{}", self.user));
+            Some(graphql::build_query(&q))
+        } else {
+            None
+        };
+        let reviewer_fut = async {
+            if let Some(q) = reviewer_query {
+                self.fetch_pr_single_query("review-requested", q).await
+            } else {
+                Ok(Vec::new())
+            }
+        };
+
+        // Merged sweep — global, cheap, identical to `fetch_all_prs`.
+        // Skipping this would mean PRs that merged between our last
+        // sync of their repo and now stay stuck on `OPEN`.
+        let week_ago = (chrono::Utc::now() - chrono::Duration::days(7))
+            .format("%Y-%m-%d")
+            .to_string();
+        let mut merged_quals = vec![
+            "is:pr".to_string(),
+            "is:merged".to_string(),
+            "archived:false".to_string(),
+            format!("merged:>={week_ago}"),
+        ];
+        if self.pr_filters.is_empty() {
+            merged_quals.push(format!("involves:{}", self.user));
+        } else {
+            merged_quals.extend(self.pr_filters.iter().cloned());
+        }
+        let merged_query = graphql::build_query(&merged_quals);
+        let merged_fut = self.fetch_pr_single_query("merged-sweep", merged_query);
+
+        let (per_repo_results, reviewer_res, merged_res) =
+            tokio::join!(per_repo_fut, reviewer_fut, merged_fut);
+
+        // Same dedup-by-task-id assembly as `fetch_all_prs`. Per-repo
+        // results win first (they're the freshest, scoped exactly to
+        // the repos we asked about); reviewer + merged back-fill the
+        // gaps. A repo-scoped query failure does NOT fail the whole
+        // tick — the next round-robin slot picks it up.
+        let mut tasks: Vec<Task> = Vec::new();
+        let mut existing: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut repo_failures = 0usize;
+        for (repo, result) in per_repo_results {
+            match result {
+                Ok(repo_tasks) => {
+                    for t in repo_tasks {
+                        if existing.insert(t.id.key.clone()) {
+                            tasks.push(t);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("round-robin repo query failed for {repo}: {e}");
+                    repo_failures += 1;
+                }
+            }
+        }
+        match reviewer_res {
+            Ok(rev_tasks) => {
+                for t in rev_tasks {
+                    if existing.insert(t.id.key.clone()) {
+                        tasks.push(t);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("round-robin review-requested branch failed: {e}"),
+        }
+        match merged_res {
+            Ok(merged_tasks) => {
+                for t in merged_tasks {
+                    if existing.insert(t.id.key.clone()) {
+                        tasks.push(t);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("round-robin merged-sweep failed: {e}"),
+        }
+
+        let elapsed_ms = started.elapsed().as_millis();
+        tracing::info!(
+            "fetch_prs_for_repos: completed in {elapsed_ms}ms — {} PRs across {} repos \
+             ({repo_failures} repo-query failure(s))",
+            tasks.len(),
+            repos.len(),
+        );
+        // Mirror `fetch_all_prs`'s "everything failed" defensive
+        // check: if EVERY repo we asked about failed, surface the
+        // error so the tick doesn't silently wipe focus repo's PRs
+        // from the inbox on the next rescope.
+        if !repos.is_empty() && repo_failures == repos.len() {
+            return Err(GhError::Graphql(format!(
+                "all {} round-robin repo queries failed",
+                repos.len()
+            )));
+        }
+        Ok(tasks)
+    }
+
     /// Run the main paginated PR search (cursor pages run
     /// sequentially because each page's `endCursor` is the next
     /// page's input). Extracted so the parallel-branches outer
@@ -1376,6 +1525,86 @@ impl GhClient {
                     let msg = format!("PRs sync failed (issues OK): {e}");
                     tracing::warn!("{msg}");
                     Ok((i, Some(msg)))
+                }
+            }
+            (Err(pr_err), Err(issue_err)) => Err(GhError::Graphql(format!(
+                "both PR and issue fetches failed: PRs={pr_err}; issues={issue_err}"
+            ))),
+        }
+    }
+
+    /// Round-robin variant of
+    /// [`fetch_selected_with_status_and_mentions`]: runs the PR side
+    /// as a per-repo fan-out instead of a global `involves:USER`
+    /// sweep, optionally OR'd with the global sweep on K-th refresh
+    /// ticks. Same partial-failure semantics as the non-round-robin
+    /// variant — a failed PR side keeps issues + mentions and vice
+    /// versa.
+    ///
+    /// Caller is the polling layer: it consults
+    /// [`crate::polling::pick_repos_for_tick`][polling]'s
+    /// `RoundRobinPick` and passes `pick.repos` + `pick.run_global`
+    /// through here.
+    ///
+    /// When BOTH `repos` is empty AND `run_global` is false (shouldn't
+    /// happen given the scheduler's cold-start rule, but defensive),
+    /// the PR side is skipped entirely.
+    ///
+    /// [polling]: ../../../pilot_server/polling/fn.pick_repos_for_tick.html
+    pub async fn fetch_round_robin_with_status_and_mentions(
+        &self,
+        want_prs: bool,
+        repos: &[String],
+        run_global: bool,
+        want_issues: bool,
+        allowed_logins: &std::collections::BTreeSet<String>,
+    ) -> Result<(Vec<Task>, Option<String>, Vec<crate::PilotMention>), GhError> {
+        if !want_prs && !want_issues {
+            return Ok((Vec::new(), None, Vec::new()));
+        }
+        let do_pr_side = want_prs && (run_global || !repos.is_empty());
+        let pr_fut = async {
+            if !do_pr_side {
+                return Ok(Vec::new());
+            }
+            if run_global {
+                // Global sweep on this tick — same payload as the
+                // pre-round-robin path. The per-repo fan-out is
+                // skipped because the global already covers it.
+                self.fetch_all_prs().await
+            } else {
+                self.fetch_prs_for_repos(repos).await
+            }
+        };
+        let issue_fut = async {
+            if want_issues {
+                self.fetch_all_issues_with_mentions(allowed_logins).await
+            } else {
+                Ok((Vec::new(), Vec::new()))
+            }
+        };
+        let (prs, issues) = tokio::join!(pr_fut, issue_fut);
+        match (prs, issues) {
+            (Ok(mut p), Ok((i, m))) => {
+                p.extend(i);
+                Ok((p, None, m))
+            }
+            (Ok(p), Err(e)) => {
+                if want_issues && p.is_empty() {
+                    Err(e)
+                } else {
+                    let msg = format!("issues sync failed (PRs OK): {e}");
+                    tracing::warn!("{msg}");
+                    Ok((p, Some(msg), Vec::new()))
+                }
+            }
+            (Err(e), Ok((i, m))) => {
+                if do_pr_side && i.is_empty() {
+                    Err(e)
+                } else {
+                    let msg = format!("PRs sync failed (issues OK): {e}");
+                    tracing::warn!("{msg}");
+                    Ok((i, Some(msg), m))
                 }
             }
             (Err(pr_err), Err(issue_err)) => Err(GhError::Graphql(format!(

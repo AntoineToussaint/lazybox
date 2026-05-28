@@ -92,19 +92,22 @@ impl<'a> WorkspaceRowCtx<'a> {
 /// 5. Kind label — `[FEAT] ` etc, or blank. Max across rows so titles
 ///    align even when some rows have no kind prefix.
 /// 6. Title — flex, absorbs the remaining width. Truncates with `…`.
-/// 7. Kill mark — ` [snooze 1y?]`, or blank. Max so the title flex
+/// 7. Labels — ` [bug] [ci] +2`, or blank. Max so the title flex
+///    reclaims the space when no row has labels; truncates at 3
+///    chips with a `+N` overflow indicator.
+/// 8. Kill mark — ` [snooze 1y?]`, or blank. Max so the title flex
 ///    reclaims the space when no row is armed.
-/// 8. Unread pill — ` ●N `, right-aligned. Max so the column collapses
+/// 9. Unread pill — ` ●N `, right-aligned. Max so the column collapses
 ///    when no row has unread, and lines up at a consistent x when any
 ///    row does.
-/// 9. Badge: agent slot — ` C ` / ` C×2 ` / blank. Same Max semantics.
-/// 10. Badge: shell slot — ` S ` / blank. Cell carries a leading space
+/// 10. Badge: agent slot — ` C ` / ` C×2 ` / blank. Same Max semantics.
+/// 11. Badge: shell slot — ` S ` / blank. Cell carries a leading space
 ///    so the two badges visually separate when both present.
-/// 11. Status pill — ` MERGED  ` / ` REVIEW   CI FAIL ` / blank.
+/// 12. Status pill — ` MERGED  ` / ` REVIEW   CI FAIL ` / blank.
 ///    Right-aligned. Cell is empty (width 0) when both review + CI
 ///    pills are None, so the column collapses for an all-empty table
 ///    instead of always reserving 19 cells of dead air.
-/// 12. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
+/// 13. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
 ///    baked into the cell so a 1-cell gap separates time from
 ///    whatever sits to its left (status pill or, when status is
 ///    empty, the title flex padding).
@@ -117,12 +120,13 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
         Column::fixed(3),                        // 4: asking (" ? " reserved)
         Column::max(0),                          // 5: kind ("[FEAT] " or blank)
         Column::flex(0),                         // 6: title
-        Column::max(0),                          // 7: kill_mark
-        Column::max(0).right(),                  // 8: unread
-        Column::max(0),                          // 9: badge_agent
-        Column::max(0),                          // 10: badge_shell (carries its own leading space)
-        Column::max(0).right(),                  // 11: status
-        Column::max(0).right(),                  // 12: time (carries its own leading space)
+        Column::max(0),                          // 7: labels
+        Column::max(0),                          // 8: kill_mark
+        Column::max(0).right(),                  // 9: unread
+        Column::max(0),                          // 10: badge_agent
+        Column::max(0),                          // 11: badge_shell (carries its own leading space)
+        Column::max(0).right(),                  // 12: status
+        Column::max(0).right(),                  // 13: time (carries its own leading space)
     ]
 }
 
@@ -139,6 +143,7 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
         cell_asking(ctx),
         cell_kind(ctx),
         cell_title(ctx),
+        cell_labels(ctx),
         cell_kill_mark(ctx),
         cell_unread(ctx),
         cell_badge_agent(ctx),
@@ -260,6 +265,80 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // No truncation here — the table renderer trims with `…` when
     // the flex column ends up smaller than the cell's natural width.
     Cell::from_span(Span::styled(body.to_string(), ctx.row_style()))
+}
+
+/// Render the task's labels as compact chips: ` [name] [name] +N`.
+/// Caps at 3 chips with a `+N` overflow indicator so the row layout
+/// stays predictable when a PR has many labels. Each chip's text
+/// adopts the GitHub label color (parsed from the hex string) as
+/// the foreground; falls back to `text_dim` for the bracket
+/// delimiters so the bracket framing reads consistently across the
+/// rainbow.
+fn cell_labels(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    const MAX_CHIPS: usize = 3;
+    let labels = match ctx.task.map(|t| t.labels.as_slice()) {
+        Some(ls) if !ls.is_empty() => ls,
+        _ => return Cell::empty(),
+    };
+    let total = labels.len();
+    let shown = labels.iter().take(MAX_CHIPS);
+    // Upper bound: MAX_CHIPS chips × (space + `[` + name + `]`) +
+    // one optional overflow span. Sized to the visible rendering,
+    // not the input length — a PR with 50 labels still only emits
+    // 13 spans worth of buffer here.
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(MAX_CHIPS * 4 + 1);
+    for label in shown {
+        spans.push(Span::styled(" ".to_string(), ctx.row_style()));
+        let bracket_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default().fg(ctx.theme.text_dim)
+        };
+        let text_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            label_text_style(ctx.theme, &label.color)
+        };
+        spans.push(Span::styled("[", bracket_style));
+        spans.push(Span::styled(label.name.clone(), text_style));
+        spans.push(Span::styled("]", bracket_style));
+    }
+    if total > MAX_CHIPS {
+        let overflow_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default().fg(ctx.theme.text_dim)
+        };
+        spans.push(Span::styled(
+            format!(" +{}", total - MAX_CHIPS),
+            overflow_style,
+        ));
+    }
+    Cell::new(spans)
+}
+
+/// Translate GitHub's hex color (e.g. `"d73a4a"`) into a ratatui
+/// `Style`. Empty / unparseable → `text_dim`. The hex string may
+/// arrive with or without a leading `#`; both shapes are handled.
+///
+/// ASCII-gated before byte-slicing: `.len()` is byte length, not
+/// char count, so without the gate a 2-byte UTF-8 char that happens
+/// to fit in 6 bytes would slice through a code point and panic.
+/// GitHub never returns that, but providers are external input.
+fn label_text_style(theme: &Theme, hex: &str) -> Style {
+    let cleaned = hex.trim_start_matches('#');
+    if !cleaned.is_ascii() || cleaned.len() != 6 {
+        return Style::default().fg(theme.text_dim);
+    }
+    let parse = |s: &str| u8::from_str_radix(s, 16).ok();
+    match (
+        parse(&cleaned[0..2]),
+        parse(&cleaned[2..4]),
+        parse(&cleaned[4..6]),
+    ) {
+        (Some(r), Some(g), Some(b)) => Style::default().fg(ratatui::style::Color::Rgb(r, g, b)),
+        _ => Style::default().fg(theme.text_dim),
+    }
 }
 
 fn cell_kill_mark(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -450,7 +529,7 @@ mod tests {
     #[test]
     fn build_columns_have_expected_count_and_order() {
         let cols = build_columns(5);
-        assert_eq!(cols.len(), 13);
+        assert_eq!(cols.len(), 14);
         // Title column (idx 6) is the only Flex one.
         let flex_indices: Vec<_> = cols
             .iter()
@@ -774,6 +853,50 @@ mod tests {
             same_window, "   ",
             "row B did not reserve the ` C ` column at the same x as row A",
         );
+    }
+
+    /// Labels render as bracketed chips with one leading space per
+    /// chip. Empty label list → empty cell so the column collapses
+    /// to 0 when no row in the table has labels.
+    #[test]
+    fn cell_labels_empty_for_taskless_or_unlabeled_row() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(cell_labels(&ctx).width(), 0);
+    }
+
+    #[test]
+    fn cell_labels_renders_bracketed_chips() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.labels = vec![pilot_core::Label::new("bug"), pilot_core::Label::new("ci")];
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_labels(&ctx);
+        let joined: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, " [bug] [ci]");
+    }
+
+    /// More than 3 labels collapses extras into a `+N` overflow
+    /// indicator — the issue's "graceful truncation" requirement.
+    #[test]
+    fn cell_labels_truncates_with_overflow_indicator() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.labels = vec![
+            pilot_core::Label::new("bug"),
+            pilot_core::Label::new("ci"),
+            pilot_core::Label::new("backend"),
+            pilot_core::Label::new("priority"),
+            pilot_core::Label::new("docs"),
+        ];
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_labels(&ctx);
+        let joined: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, " [bug] [ci] [backend] +2");
     }
 
     /// Multi-instance badge (` C×2 `, 5 cells) no longer gets

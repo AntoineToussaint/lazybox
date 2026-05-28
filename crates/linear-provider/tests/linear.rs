@@ -211,7 +211,7 @@ fn mapper_no_branch_no_ci_no_review() {
 fn mapper_labels_preserved() {
     let issue = make_issue("x", "ENG-1", "started", None, None);
     let task = graphql::issue_to_task(&issue, "me");
-    assert_eq!(task.labels, vec!["bug".to_string()]);
+    assert_eq!(task.labels, vec![pilot_core::Label::new("bug")]);
 }
 
 // ── End-to-end against mock ────────────────────────────────────────────

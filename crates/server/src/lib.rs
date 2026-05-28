@@ -464,6 +464,8 @@ impl Server {
                         pilot_ipc::Command::RequestReviewers { .. } => "RequestReviewers",
                         pilot_ipc::Command::AddAssignees { .. } => "AddAssignees",
                         pilot_ipc::Command::SetAssignees { .. } => "SetAssignees",
+                        pilot_ipc::Command::SetLabels { .. } => "SetLabels",
+                        pilot_ipc::Command::FetchRepoLabels { .. } => "FetchRepoLabels",
                         pilot_ipc::Command::SetSessionLayout { .. } => "SetSessionLayout",
                         pilot_ipc::Command::StartAgentRun { .. } => "StartAgentRun",
                         pilot_ipc::Command::SendAgentInput { .. } => "SendAgentInput",
@@ -830,6 +832,18 @@ impl Server {
                             let cfg = self.config.clone();
                             tokio::spawn(async move {
                                 polling::handle_set_assignees(&cfg, workspace_key, logins).await;
+                            });
+                        }
+                        pilot_ipc::Command::SetLabels { workspace_key, names } => {
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_set_labels(&cfg, workspace_key, names).await;
+                            });
+                        }
+                        pilot_ipc::Command::FetchRepoLabels { workspace_key } => {
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_fetch_repo_labels(&cfg, workspace_key).await;
                             });
                         }
                         pilot_ipc::Command::CleanWorktrees => {

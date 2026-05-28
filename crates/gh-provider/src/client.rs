@@ -2254,6 +2254,102 @@ impl GhClient {
         Ok(())
     }
 
+    /// Fetch the repository's full label set (id + name + color +
+    /// description). Cached by the caller — every repo's label
+    /// set is small (typically under 50 entries) and changes
+    /// rarely, so re-querying per picker open is fine.
+    ///
+    /// Named with the `_for_repo` suffix so this inherent method
+    /// doesn't shadow the trait-side `TaskProvider::list_repo_labels`
+    /// (which takes a `&Workspace` and delegates here).
+    pub async fn list_labels_for_repo(
+        &self,
+        owner: &str,
+        name: &str,
+    ) -> Result<Vec<graphql::GqlRepoLabelNode>, GhError> {
+        self.acquire_or_block("repository.labels query")?;
+        let body = graphql::repo_labels_body(owner, name);
+        let response: graphql::GqlRepoLabelsResponse = self.post_graphql_with_retry(&body).await?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(joined));
+        }
+        let data = response
+            .data
+            .ok_or_else(|| GhError::Graphql("list_repo_labels: no data".into()))?;
+        if let Some(rl) = &data.rate_limit {
+            self.observe_rate_limit(rl);
+        }
+        let nodes = data.repository.map(|r| r.labels.nodes).unwrap_or_default();
+        Ok(nodes)
+    }
+
+    /// Add labels (by GraphQL node id) to any `Labelable` (PR or
+    /// Issue). Empty `label_ids` returns Ok immediately.
+    pub async fn add_labels(
+        &self,
+        labelable_node_id: &str,
+        label_ids: &[String],
+    ) -> Result<(), GhError> {
+        if label_ids.is_empty() {
+            return Ok(());
+        }
+        self.acquire_or_block("addLabelsToLabelable mutation")?;
+        let body = graphql::add_labels_body(labelable_node_id, label_ids);
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
+        if let Some(data) = &response.data
+            && let Some(rl) = &data.rate_limit
+        {
+            self.observe_rate_limit(rl);
+        }
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::error!("addLabelsToLabelable errors: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        Ok(())
+    }
+
+    /// Sibling mutation for removing labels. Counterpart to
+    /// `add_labels` — the `SetLabels` path fires both with the diff
+    /// `existing − desired` after firing the add mutation with
+    /// `desired − existing`.
+    pub async fn remove_labels(
+        &self,
+        labelable_node_id: &str,
+        label_ids: &[String],
+    ) -> Result<(), GhError> {
+        if label_ids.is_empty() {
+            return Ok(());
+        }
+        self.acquire_or_block("removeLabelsFromLabelable mutation")?;
+        let body = graphql::remove_labels_body(labelable_node_id, label_ids);
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
+        if let Some(data) = &response.data
+            && let Some(rl) = &data.rate_limit
+        {
+            self.observe_rate_limit(rl);
+        }
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::error!("removeLabelsFromLabelable errors: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        Ok(())
+    }
+
     pub async fn merge_pr(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("mergePullRequest mutation")?;
         let body = graphql::merge_pr_body(pull_request_node_id);
@@ -2483,6 +2579,136 @@ impl pilot_core::TaskProvider for GhClient {
         self.post_issue_comment(repo, number, body)
             .await
             .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))
+    }
+
+    /// List the labels defined on the workspace's repository. Both
+    /// PRs and issues live under a single repo; we resolve via the
+    /// primary task's `repo` field.
+    async fn list_repo_labels(
+        &self,
+        workspace: &pilot_core::Workspace,
+    ) -> Result<Vec<pilot_core::Label>, pilot_core::ProviderError> {
+        let primary = workspace.primary_task().ok_or_else(|| {
+            pilot_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no primary task", workspace.key),
+            )
+        })?;
+        let Some(repo) = primary.repo.as_deref() else {
+            return Err(pilot_core::ProviderError::permanent(
+                "github",
+                "primary task has no repo",
+            ));
+        };
+        let Some((owner, name)) = repo.split_once('/') else {
+            return Err(pilot_core::ProviderError::permanent(
+                "github",
+                format!("can't parse owner/name from `{repo}`"),
+            ));
+        };
+        let nodes = self
+            .list_labels_for_repo(owner, name)
+            .await
+            .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+        Ok(nodes
+            .into_iter()
+            .map(|n| pilot_core::Label {
+                name: n.name,
+                color: n.color.unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    /// Replace the label set on the workspace's PR or issue. Looks
+    /// up the repo's labels (to resolve names → GraphQL node ids),
+    /// diffs against the task's persisted labels, and fires
+    /// `addLabelsToLabelable` + `removeLabelsFromLabelable` as
+    /// needed. Empty `names` clears every label.
+    async fn set_labels(
+        &self,
+        workspace: &pilot_core::Workspace,
+        names: &[String],
+    ) -> Result<(), pilot_core::ProviderError> {
+        // Find the labelable node — prefer the PR, fall back to the
+        // first issue. Same shape as set_assignees: both PRs and
+        // issues implement the `Labelable` interface. We borrow the
+        // existing label slice (no per-name clone) and just remember
+        // the node id we'll mutate against.
+        let (node_id, existing) = workspace
+            .pr
+            .as_ref()
+            .and_then(|p| p.node_id.as_deref().map(|n| (n, p.labels.as_slice())))
+            .or_else(|| {
+                workspace
+                    .gh_issues
+                    .first()
+                    .and_then(|i| i.node_id.as_deref().map(|n| (n, i.labels.as_slice())))
+            })
+            .ok_or_else(|| {
+                pilot_core::ProviderError::permanent(
+                    "github",
+                    format!(
+                        "workspace {} has neither a PR nor an issue with a node_id",
+                        workspace.key
+                    ),
+                )
+            })?;
+
+        // Need the repo's labels to map names → ids. Pull them once;
+        // anything the user picked that isn't in the repo's set is
+        // silently dropped (can't apply a label that doesn't exist).
+        let repo = workspace
+            .primary_task()
+            .and_then(|t| t.repo.as_deref())
+            .ok_or_else(|| {
+                pilot_core::ProviderError::permanent("github", "primary task has no repo")
+            })?;
+        let (owner, name) = repo.split_once('/').ok_or_else(|| {
+            pilot_core::ProviderError::permanent("github", format!("bad repo string `{repo}`"))
+        })?;
+        let repo_labels = self
+            .list_labels_for_repo(owner, name)
+            .await
+            .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+        // Hash lookup keeps the typical 0-50 repo-labels × 0-10 picks
+        // case constant-time without the two extra HashSet allocs the
+        // prior diff path used.
+        let id_by_name: std::collections::HashMap<&str, &str> = repo_labels
+            .iter()
+            .map(|l| (l.name.as_str(), l.id.as_str()))
+            .collect();
+        // Linear diff: `to_add` = names ∈ desired \ existing,
+        // `to_remove` = names ∈ existing \ desired. At ≤10 entries
+        // on each side the inner `.any()` scan beats the cost of
+        // building two HashSets.
+        let to_add: Vec<String> = names
+            .iter()
+            .filter(|n| !existing.iter().any(|l| &l.name == *n))
+            .filter_map(|n| id_by_name.get(n.as_str()).map(|id| (*id).to_string()))
+            .collect();
+        let to_remove: Vec<String> = existing
+            .iter()
+            .filter(|l| !names.iter().any(|n| n == &l.name))
+            .filter_map(|l| id_by_name.get(l.name.as_str()).map(|id| (*id).to_string()))
+            .collect();
+        if to_add.is_empty() && to_remove.is_empty() {
+            tracing::debug!(
+                workspace = %workspace.key,
+                "set_labels: no-op (desired matches existing)"
+            );
+            return Ok(());
+        }
+        if !to_add.is_empty() {
+            self.add_labels(node_id, &to_add)
+                .await
+                .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+        }
+        if !to_remove.is_empty() {
+            self.remove_labels(node_id, &to_remove)
+                .await
+                .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+        }
+        Ok(())
     }
 }
 

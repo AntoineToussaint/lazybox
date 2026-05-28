@@ -82,9 +82,10 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///
 /// 0. Prefix — `  ▸ ` (cursor) / `    ` (no cursor).
 /// 1. Type glyph — `⇄` / `○` / `◆` (or ASCII `p`/`i`/`l`) / blank.
-///    Exactly 1 cell so it sits flush against the `#NNN` to its right
+///    Exactly 1 cell so it sits flush against the `NNN` to its right
 ///    — see issue #42.
-/// 2. PR number — `#NNN`, padded to `max_pr_num_width`.
+/// 2. PR number — `NNN` (no `#` prefix; the glyph carries the type —
+///    issue #67), padded to `max_pr_num_width`.
 /// 3. Role badge — ` R` colored marker, or blank.
 /// 4. Asking glyph — ` ? ` warn-colored, or blank — reserved width so
 ///    the kind/title to the right don't jitter between asking /
@@ -114,7 +115,7 @@ impl<'a> WorkspaceRowCtx<'a> {
 pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     vec![
         Column::fixed(4),                        // 0: prefix
-        Column::fixed(1),                        // 1: type glyph (single cell, flush against #N)
+        Column::fixed(1),                        // 1: type glyph (single cell, flush against num)
         Column::fixed(max_pr_num_width).right(), // 2: pr_num (right-aligned so digits line up)
         Column::fixed(2),                        // 3: role (" R" or blank)
         Column::fixed(3),                        // 4: asking (" ? " reserved)
@@ -174,9 +175,10 @@ fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .add_modifier(Modifier::BOLD)
     };
     // Single cell, no trailing space — the glyph sits flush against
-    // the `#NNN` cell that follows so the row reads `⇄#312` instead
-    // of `[PR]   #312` (issue #42). `glyph` is `&'static str` so the
-    // Span borrows it without allocating on the per-frame hot path.
+    // the `NNN` cell that follows so the row reads `⇄312` instead
+    // of `[PR]   #312` (issues #42, #67). `glyph` is `&'static str`
+    // so the Span borrows it without allocating on the per-frame hot
+    // path.
     Cell::from_span(Span::styled(glyph, style))
 }
 
@@ -184,7 +186,7 @@ fn cell_pr_num(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let Some(n) = ctx.task.and_then(crate::components::task_label::pr_number) else {
         return Cell::empty();
     };
-    let label = format!("#{n}");
+    let label = format!("{n}");
     let style = if ctx.is_cursor {
         ctx.row_style()
     } else {
@@ -192,13 +194,12 @@ fn cell_pr_num(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .fg(crate::components::task_label::pr_number_color(n))
             .add_modifier(Modifier::BOLD)
     };
-    // Padding to `max_pr_num_width` happens here (not in the column)
-    // because the trailing space should inherit the colored
-    // background of the PR number row — but in practice the
-    // `pr_number_color` only colors the digits, so the padding is
-    // row-style spaces. The Table column is Fixed(max_pr_num_width),
-    // so any deficit is auto-padded by the renderer using the row's
-    // fill_style. We emit just the `#NNN` span here.
+    // No `#` prefix: the type glyph in the column to the left already
+    // says "issue" (`○`) or "PR" (`⇄`), so the `#` was redundant and
+    // cost a column on every row (issue #67). The Table column is
+    // Fixed(max_pr_num_width), so any width deficit is auto-padded by
+    // the renderer using the row's fill_style. We emit just the
+    // `NNN` span here; `pr_number_color` colors the digits.
     Cell::from_span(Span::styled(label, style))
 }
 
@@ -213,7 +214,7 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         Style::default().fg(color).add_modifier(Modifier::BOLD)
     };
     // " R" — leading space separator + colored letter. Reads
-    // cleaner than `#7204R` (which scanned as one weird token).
+    // cleaner than `7204R` (which scanned as one weird token).
     Cell::new(vec![
         Span::styled(" ".to_string(), ctx.row_style()),
         Span::styled(letter.to_string(), style),
@@ -550,17 +551,19 @@ mod tests {
         }
     }
 
-    /// PR-number cell prints `#NNN` with no padding — column width
-    /// supplies the padding so every row aligns.
+    /// PR-number cell prints `NNN` (no `#` prefix — issue #67) with no
+    /// padding; the column width supplies the padding so every row
+    /// aligns. The type glyph to the left now carries the
+    /// issue-vs-PR signal the `#` used to.
     #[test]
-    fn cell_pr_num_emits_hash_number_only() {
+    fn cell_pr_num_emits_bare_number_only() {
         let task = make_task("owner/repo#42", "x");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
         let cell = cell_pr_num(&ctx);
         assert_eq!(cell.spans.len(), 1);
-        assert_eq!(cell.spans[0].content.as_ref(), "#42");
+        assert_eq!(cell.spans[0].content.as_ref(), "42");
     }
 
     /// Asking glyph: when not asking, cell is empty so the column's

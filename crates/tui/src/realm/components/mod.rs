@@ -15,6 +15,7 @@ pub mod loading;
 pub mod polling;
 pub mod right;
 pub mod sidebar;
+pub mod snippet_picker;
 pub mod splash;
 pub mod terminals;
 pub mod textarea;

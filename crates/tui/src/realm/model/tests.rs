@@ -415,6 +415,115 @@ mod effects_tests {
         let cmds = m.handle_choice_picked(vec![]);
         assert!(cmds.is_empty());
     }
+
+    /// Helper: load a snippets collection from an inline YAML
+    /// string via the tmpfile path. Lets per-test fixtures stay
+    /// self-contained without each one re-deriving a tmp path.
+    fn snippets_from_yaml(label: &str, yaml: &str) -> pilot_config::Snippets {
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "pilot-snippets-test-{}-{label}",
+            std::process::id(),
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let tmp = tmp_dir.join("snippets.yaml");
+        std::fs::write(&tmp, yaml).unwrap();
+        pilot_config::Snippets::load_from(&tmp, pilot_config::SnippetOrigin::Global).unwrap()
+    }
+
+    /// Snippet picker: picking a row with NO active terminal drops
+    /// silently (the warning lands in the footer hint, not the
+    /// command stream). The modal still pops + slot clears.
+    #[test]
+    fn choice_picked_on_snippet_picker_without_terminal_returns_no_commands() {
+        let mut m = build_model();
+        m.snippets = snippets_from_yaml(
+            "no-terminal",
+            r#"
+snippets:
+  rev:
+    description: Review
+    body: review body
+"#,
+        );
+        // Stash the picker's view of "row 0 → key `rev`" directly.
+        // The handler reads from `snippet_choices` to recover the
+        // chosen key, then looks up the snippet via `self.snippets`.
+        m.snippet_choices = vec!["rev".into()];
+        m.modal_stack.push(Id::SnippetPicker);
+        let cmds = m.handle_choice_picked(vec![0]);
+        // No active terminal → no Write emitted. Snippet stash +
+        // modal both clear regardless of dispatch outcome.
+        assert!(cmds.is_empty(), "no command without an active terminal");
+        assert!(m.snippet_choices.is_empty(), "snippet stash cleared");
+        assert!(
+            !matches!(m.modal_stack.last(), Some(Id::SnippetPicker)),
+            "modal popped"
+        );
+    }
+
+    /// apply_snippets seeds the model collection. Sanity check
+    /// that the lookup path resolves.
+    #[test]
+    fn apply_snippets_makes_entries_visible_to_lookup() {
+        let loaded = snippets_from_yaml(
+            "apply",
+            r#"
+snippets:
+  rev:
+    description: Review the diff
+    body: please review
+"#,
+        );
+        let mut m = build_model();
+        m.apply_snippets(loaded);
+        assert!(!m.snippets.is_empty());
+        assert_eq!(m.snippets.len(), 1);
+        let rev = m.snippets.get("rev").expect("rev exists");
+        assert_eq!(rev.description, "Review the diff");
+        assert_eq!(rev.body, "please review");
+    }
+
+    /// mount_snippet_picker with an empty collection flashes a hint
+    /// and refuses to mount — no Id::SnippetPicker on the stack.
+    /// This is the "user typed `]<key>` but never configured any
+    /// snippets" UX.
+    #[test]
+    fn mount_snippet_picker_with_empty_collection_skips_mount() {
+        let mut m = build_model();
+        m.mount_snippet_picker(String::new());
+        assert!(
+            !matches!(m.modal_stack.last(), Some(Id::SnippetPicker)),
+            "empty snippet library shouldn't open a picker"
+        );
+        assert!(
+            m.snippet_choices.is_empty(),
+            "no snippets configured → no choice slot",
+        );
+    }
+
+    /// mount_snippet_picker populates `snippet_choices` with the
+    /// picker's row keys, in the same order the picker rendered
+    /// them (alphabetical via the underlying BTreeMap). This is
+    /// the contract `handle_choice_picked` relies on.
+    #[test]
+    fn mount_snippet_picker_stashes_keys_in_render_order() {
+        let mut m = build_model();
+        m.apply_snippets(snippets_from_yaml(
+            "render-order",
+            r#"
+snippets:
+  zeta:
+    description: last
+    body: z
+  alpha:
+    description: first
+    body: a
+"#,
+        ));
+        m.mount_snippet_picker(String::new());
+        assert!(matches!(m.modal_stack.last(), Some(Id::SnippetPicker)));
+        assert_eq!(m.snippet_choices, vec!["alpha".to_string(), "zeta".into()]);
+    }
 }
 
 #[cfg(test)]

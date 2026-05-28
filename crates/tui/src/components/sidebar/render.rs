@@ -199,17 +199,19 @@ impl Sidebar {
         };
 
         let row_budget = inner_width as usize;
-        // Pre-pass: compute the widest `#NNN` across visible workspace
+        // Pre-pass: compute the widest `NNN` across visible workspace
         // rows so every row pads to the same column. Without this,
         // `#7204 R` and `#31 R` had different role-letter positions
         // and the whole column visibly jittered.
         //
-        // Width is `1` (the `#`) + digit count of `n`, computed via
-        // `ilog10` so the hot path doesn't allocate a String per row.
-        // The natural width is the floor — no extra "separator"
-        // padding — so the glyph in column 1 sits flush against the
-        // number (`⇄#18`, not `⇄  #18`); see issue #42. The role
-        // cell that follows brings its own leading space.
+        // Width is the digit count of `n` (no `#` prefix — issue #67;
+        // the type glyph in column 1 now carries the issue-vs-PR
+        // signal), computed via `ilog10` so the hot path doesn't
+        // allocate a String per row. The natural width is the floor —
+        // no extra "separator" padding — so the glyph in column 1 sits
+        // flush against the number (`⇄18`, not `⇄  18`); see issues
+        // #42, #67. The role cell that follows brings its own leading
+        // space.
         let max_pr_num_width = self
             .visible
             .iter()
@@ -219,11 +221,11 @@ impl Sidebar {
                     .get(k)
                     .and_then(|w| w.primary_task())
                     .and_then(crate::components::task_label::pr_number)
-                    .map(|n| 2 + n.checked_ilog10().unwrap_or(0) as usize),
+                    .map(|n| 1 + n.checked_ilog10().unwrap_or(0) as usize),
                 _ => None,
             })
             .max()
-            .unwrap_or(2);
+            .unwrap_or(1);
         // Column spec for workspace rows — built once per render
         // (max_pr_num_width is fixed across rows in this pass).
         let workspace_columns = crate::components::workspace_row::build_columns(max_pr_num_width);

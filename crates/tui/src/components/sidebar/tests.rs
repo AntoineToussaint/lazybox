@@ -498,7 +498,7 @@ mod workspace_type_label_tests {
 
     #[test]
     fn all_workspace_type_labels_are_one_cell() {
-        // Column alignment invariant — the `#NNN` number sits
+        // Column alignment invariant — the `NNN` number sits
         // immediately after the glyph, so the type column is
         // exactly one cell wide on every row. See issue #42.
         for ascii in [false, true] {

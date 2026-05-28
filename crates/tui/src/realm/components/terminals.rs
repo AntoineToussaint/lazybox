@@ -53,6 +53,13 @@ impl Terminals {
     }
 
     /// Set which session's terminals to display.
+    /// The session whose terminals are currently visible, if any.
+    /// Lets the model anchor relative-path / same-repo `#N` resolution
+    /// to the focused workspace.
+    pub fn active_session(&self) -> Option<&SessionKey> {
+        self.inner.active_session()
+    }
+
     pub fn set_active_session(&mut self, session: Option<SessionKey>) {
         self.inner.set_active_session(session);
     }
@@ -136,18 +143,18 @@ impl Terminals {
         self.inner.extract_text(rect, start, end)
     }
 
-    /// Return the URL the focused terminal's grid shows at the
-    /// frame-space cell `(col, row)`, if any. Used by the
-    /// right-click handler to detect "the user clicked on a link"
-    /// and route to the system browser before falling through to
-    /// PTY mouse forwarding.
-    pub fn url_at(
+    /// Classify whatever the focused terminal's grid shows at the
+    /// frame-space cell `(col, row)` — a URL, file path, or issue
+    /// reference. Used by the right-click handler to detect "the user
+    /// clicked on something openable" and route it before falling
+    /// through to PTY mouse forwarding.
+    pub fn target_at(
         &mut self,
         rect: tuirealm::ratatui::layout::Rect,
         col: u16,
         row: u16,
-    ) -> Option<String> {
-        self.inner.url_at(rect, col, row)
+    ) -> Option<crate::components::terminal_stack::ClickTarget> {
+        self.inner.target_at(rect, col, row)
     }
 
     /// Human-readable scrollbar diagnostic for the focused

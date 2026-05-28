@@ -180,6 +180,89 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     cmd.spawn().map(|_| ())
 }
 
+/// Build the argv (everything after the command) for opening `file`
+/// at an optional `line[:col]` in `template`. Pure so it can be
+/// tested without spawning a process.
+///
+/// The target is `file`, with `:line` / `:line:col` appended when
+/// present. VS Code-family editors only honor that suffix after a
+/// `--goto` flag, so we prepend it for them. The target is then
+/// substituted into the template's `{path}` placeholder (matching
+/// [`launch`]); templates with no placeholder get the target
+/// appended as a trailing positional argument.
+fn open_file_args(
+    template: &EditorTemplate,
+    file: &str,
+    line: Option<u32>,
+    col: Option<u32>,
+) -> Vec<String> {
+    let mut target = file.to_string();
+    if let Some(l) = line {
+        target.push(':');
+        target.push_str(&l.to_string());
+        if let Some(c) = col {
+            target.push(':');
+            target.push_str(&c.to_string());
+        }
+    }
+
+    let mut out = Vec::new();
+    let vscode_family = matches!(
+        template.id.as_str(),
+        "code" | "cursor" | "windsurf" | "codium" | "vscodium"
+    );
+    if line.is_some() && vscode_family {
+        out.push("--goto".to_string());
+    }
+
+    let mut substituted = false;
+    for arg in &template.args {
+        if arg.contains("{path}") {
+            out.push(arg.replace("{path}", &target));
+            substituted = true;
+        } else {
+            out.push(arg.clone());
+        }
+    }
+    if !substituted {
+        out.push(target);
+    }
+    out
+}
+
+/// Open a single `file` in `template`, optionally jumping to
+/// `line[:col]`. Used by the terminal right-click handler when the
+/// user clicks a file path in the agent transcript.
+///
+/// Most modern editors accept a positional `file:line:col` argument;
+/// the VS Code family needs a `--goto` flag to interpret it, so we
+/// special-case those by `id`. The file target is substituted into
+/// the template's `{path}` placeholder (or appended when the template
+/// has none), reusing the same argv shape as [`launch`]. Detached so
+/// the editor outlives pilot.
+pub fn open_file(
+    template: &EditorTemplate,
+    file: &Path,
+    line: Option<u32>,
+    col: Option<u32>,
+) -> std::io::Result<()> {
+    let mut cmd = std::process::Command::new(&template.command);
+    cmd.args(open_file_args(template, &file.to_string_lossy(), line, col));
+
+    // Run from the file's directory when it exists so editors that
+    // infer a project root from cwd land somewhere sensible.
+    if let Some(parent) = file.parent()
+        && parent.is_dir()
+    {
+        cmd.current_dir(parent);
+    }
+    crate::platform::detach_child_process(&mut cmd);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    cmd.spawn().map(|_| ())
+}
+
 pub fn launch(template: &EditorTemplate, worktree: &Path) -> std::io::Result<()> {
     let path_str = worktree.to_string_lossy().into_owned();
     let mut cmd = std::process::Command::new(&template.command);
@@ -241,5 +324,55 @@ mod tests {
         };
         let t: EditorTemplate = raw.into();
         assert_eq!(t.args, vec!["{path}".to_string()]);
+    }
+
+    fn tpl(id: &str, args: &[&str]) -> EditorTemplate {
+        EditorTemplate {
+            id: id.into(),
+            display: id.into(),
+            command: id.into(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn open_file_args_substitutes_plain_path() {
+        let t = tpl("zed", &["{path}"]);
+        assert_eq!(open_file_args(&t, "/a/b.rs", None, None), vec!["/a/b.rs"]);
+    }
+
+    #[test]
+    fn open_file_args_appends_line_col_suffix() {
+        let t = tpl("zed", &["{path}"]);
+        assert_eq!(
+            open_file_args(&t, "/a/b.rs", Some(12), Some(3)),
+            vec!["/a/b.rs:12:3"]
+        );
+        assert_eq!(
+            open_file_args(&t, "/a/b.rs", Some(12), None),
+            vec!["/a/b.rs:12"]
+        );
+    }
+
+    #[test]
+    fn open_file_args_prepends_goto_for_vscode_family() {
+        let t = tpl("code", &["{path}"]);
+        assert_eq!(
+            open_file_args(&t, "/a/b.rs", Some(7), None),
+            vec!["--goto", "/a/b.rs:7"]
+        );
+        // No line → no --goto (a plain open).
+        assert_eq!(open_file_args(&t, "/a/b.rs", None, None), vec!["/a/b.rs"]);
+    }
+
+    #[test]
+    fn open_file_args_appends_target_when_no_placeholder() {
+        // A template whose args don't mention {path} still gets the
+        // file appended so the editor receives something to open.
+        let t = tpl("myedit", &["--flag"]);
+        assert_eq!(
+            open_file_args(&t, "/a/b.rs", None, None),
+            vec!["--flag", "/a/b.rs"]
+        );
     }
 }

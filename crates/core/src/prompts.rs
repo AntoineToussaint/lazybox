@@ -138,6 +138,28 @@ mod tests {
     }
 
     #[test]
+    fn preamble_keeps_every_principle_section() {
+        // The markdown is the agent's behavioral spec; an accidental
+        // edit that drops a section would silently weaken every run.
+        // Guard each section header so that regression fails CI.
+        for header in [
+            "## Scope",
+            "## Correctness over breadth",
+            "## Defensive coding hygiene",
+            "## Comments and docs",
+            "## Tests",
+            "## PR hygiene",
+            "## Reversibility and safety",
+            "## Workflow",
+        ] {
+            assert!(
+                AGENT_WORK_PREAMBLE.contains(header),
+                "missing principle section: {header}"
+            );
+        }
+    }
+
+    #[test]
     fn body_block_only_when_non_empty() {
         let with_body =
             build_implement_issue_prompt(&issue("o/r", 7, "X", Some("Steps to repro: …")));

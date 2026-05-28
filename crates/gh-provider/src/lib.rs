@@ -9,6 +9,7 @@ mod poller;
 pub mod rate_budget;
 
 pub use client::GhClient;
+pub use graphql::PrDetails;
 pub use poller::GhPoller;
 pub use rate_budget::{AcquireError, RateBudget, RemoteRateLimit, Snapshot as RateSnapshot};
 

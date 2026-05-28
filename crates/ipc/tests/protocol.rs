@@ -361,7 +361,9 @@ fn all_events() -> Vec<Event> {
             removed: 3,
             skipped: 1,
         },
-        Event::WorktreesInspected { inspections: vec![] },
+        Event::WorktreesInspected {
+            inspections: vec![],
+        },
         Event::WorktreesInspected {
             inspections: vec![pilot_ipc::WorktreeInspectionDto {
                 path: std::path::PathBuf::from("/tmp/wt"),

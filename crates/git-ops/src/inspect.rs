@@ -309,24 +309,23 @@ async fn inspect_one(
             format!("refs/remotes/origin/{b}"),
         )
     });
-    let (local_exists, remote_exists, size_pair, has_uncommitted_changes, has_unpushed_commits) =
-        tokio::join!(
-            async {
-                match (bare_path.as_ref(), branch_refs.as_ref()) {
-                    (Some(bare), Some((local_ref, _))) => ref_exists(bare, local_ref).await,
-                    _ => false,
-                }
-            },
-            async {
-                match (bare_path.as_ref(), branch_refs.as_ref()) {
-                    (Some(bare), Some((_, remote_ref))) => ref_exists(bare, remote_ref).await,
-                    _ => false,
-                }
-            },
-            size_and_mtime(path),
-            uncommitted(path),
-            unpushed(path),
-        );
+    let (local_exists, remote_exists, size_pair, has_uncommitted_changes, has_unpushed_commits) = tokio::join!(
+        async {
+            match (bare_path.as_ref(), branch_refs.as_ref()) {
+                (Some(bare), Some((local_ref, _))) => ref_exists(bare, local_ref).await,
+                _ => false,
+            }
+        },
+        async {
+            match (bare_path.as_ref(), branch_refs.as_ref()) {
+                (Some(bare), Some((_, remote_ref))) => ref_exists(bare, remote_ref).await,
+                _ => false,
+            }
+        },
+        size_and_mtime(path),
+        uncommitted(path),
+        unpushed(path),
+    );
     let (size_bytes, last_modified) = size_pair;
 
     // Branch-existence reasons only fire when we knew the branch +
@@ -341,8 +340,10 @@ async fn inspect_one(
         }
     }
 
-    let is_safe_to_delete =
-        !locked && !has_uncommitted_changes && !has_unpushed_commits && reasons.iter().any(|r| {
+    let is_safe_to_delete = !locked
+        && !has_uncommitted_changes
+        && !has_unpushed_commits
+        && reasons.iter().any(|r| {
             matches!(
                 r,
                 OrphanReason::Untracked
@@ -386,11 +387,7 @@ async fn discover_bare_clones(repos_root: &Path) -> Vec<PathBuf> {
         while let Ok(Some(repo)) = repos.next_entry().await {
             let path = repo.path();
             if path.extension().and_then(|s| s.to_str()) == Some("git")
-                && repo
-                    .file_type()
-                    .await
-                    .map(|t| t.is_dir())
-                    .unwrap_or(false)
+                && repo.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
             {
                 out.push(path);
             }
@@ -404,11 +401,11 @@ async fn discover_bare_clones(repos_root: &Path) -> Vec<PathBuf> {
 /// the keys we care about and ignore the rest so future git versions
 /// adding new keys don't break parsing.
 async fn list_porcelain(bare: &Path) -> Result<Vec<PorcelainEntry>, GitError> {
-    let output = apply_git_env(
-        Command::new("git")
-            .current_dir(bare)
-            .args(["worktree", "list", "--porcelain"]),
-    )
+    let output = apply_git_env(Command::new("git").current_dir(bare).args([
+        "worktree",
+        "list",
+        "--porcelain",
+    ]))
     .output()
     .await?;
     if !output.status.success() {
@@ -487,11 +484,11 @@ async fn unpushed(worktree: &Path) -> bool {
     // commits to worry about" because the cleanup path assumes a
     // pilot-created worktree where the branch either tracks origin or
     // was never published.
-    let Ok(output) = apply_git_env(
-        Command::new("git")
-            .current_dir(worktree)
-            .args(["rev-list", "--count", "@{u}..HEAD"]),
-    )
+    let Ok(output) = apply_git_env(Command::new("git").current_dir(worktree).args([
+        "rev-list",
+        "--count",
+        "@{u}..HEAD",
+    ]))
     .output()
     .await
     else {

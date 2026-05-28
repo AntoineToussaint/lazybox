@@ -753,9 +753,7 @@ pub(crate) async fn inspect_worktrees_with(
             Vec::new()
         }
     };
-    let _ = config
-        .bus
-        .send(Event::WorktreesInspected { inspections });
+    let _ = config.bus.send(Event::WorktreesInspected { inspections });
 }
 
 /// Delete a single worktree by path. Re-runs a fresh inspection of
@@ -1107,7 +1105,10 @@ mod inspect_tests {
         let session_key: SessionKey = "github:o/r#1".into();
         let workspace_key: WorkspaceKey = WorkspaceKey::new(session_key.as_str().to_string());
         let task = Task {
-            id: TaskId { source: "github".into(), key: "o/r#1".into() },
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
             title: "test".into(),
             body: None,
             state: TaskState::Open,
@@ -1270,7 +1271,10 @@ mod inspect_tests {
 
         delete_orphaned_worktree_with(&config, &mgr, wt.clone(), /*force=*/ false).await;
 
-        let evt = drain_until(&mut rx, |e| matches!(e, Event::OrphanedWorktreeDeleted { .. })).await;
+        let evt = drain_until(&mut rx, |e| {
+            matches!(e, Event::OrphanedWorktreeDeleted { .. })
+        })
+        .await;
         let Event::OrphanedWorktreeDeleted { path, ok, error } = evt else {
             unreachable!()
         };
@@ -1293,7 +1297,10 @@ mod inspect_tests {
         let mut rx = config.bus.subscribe();
 
         delete_orphaned_worktree_with(&config, &mgr, wt.clone(), /*force=*/ false).await;
-        let evt = drain_until(&mut rx, |e| matches!(e, Event::OrphanedWorktreeDeleted { .. })).await;
+        let evt = drain_until(&mut rx, |e| {
+            matches!(e, Event::OrphanedWorktreeDeleted { .. })
+        })
+        .await;
         let Event::OrphanedWorktreeDeleted { ok, error, .. } = evt else {
             unreachable!()
         };
@@ -1317,7 +1324,10 @@ mod inspect_tests {
         let mut rx = config.bus.subscribe();
 
         delete_orphaned_worktree_with(&config, &mgr, wt.clone(), /*force=*/ true).await;
-        let evt = drain_until(&mut rx, |e| matches!(e, Event::OrphanedWorktreeDeleted { .. })).await;
+        let evt = drain_until(&mut rx, |e| {
+            matches!(e, Event::OrphanedWorktreeDeleted { .. })
+        })
+        .await;
         let Event::OrphanedWorktreeDeleted { ok, .. } = evt else {
             unreachable!()
         };
@@ -1343,7 +1353,10 @@ mod inspect_tests {
             false,
         )
         .await;
-        let evt = drain_until(&mut rx, |e| matches!(e, Event::OrphanedWorktreeDeleted { .. })).await;
+        let evt = drain_until(&mut rx, |e| {
+            matches!(e, Event::OrphanedWorktreeDeleted { .. })
+        })
+        .await;
         let Event::OrphanedWorktreeDeleted { ok, error, .. } = evt else {
             unreachable!()
         };

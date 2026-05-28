@@ -122,9 +122,11 @@ fn mgr(fx: &Fixture) -> WorktreeManager {
 async fn add_wt(fx: &Fixture, name: &str, branch: &str, upstream_branch: &str) -> PathBuf {
     // Make sure the upstream actually has this branch — needed so
     // the fetch refspec resolves.
-    let upstream_has =
-        run_capture(&fx.upstream_path, &["rev-parse", "--verify", "--quiet", upstream_branch])
-            .await;
+    let upstream_has = run_capture(
+        &fx.upstream_path,
+        &["rev-parse", "--verify", "--quiet", upstream_branch],
+    )
+    .await;
     if upstream_has.trim().is_empty() {
         run(&fx.upstream_path, &["branch", upstream_branch]).await;
     }
@@ -179,7 +181,10 @@ async fn tracked_active_worktree_has_no_reasons() {
         .expect("feat row");
     assert!(row.reasons.is_empty(), "got reasons: {:?}", row.reasons);
     assert_eq!(row.session_id.as_deref(), Some("s1"));
-    assert!(!row.is_safe_to_delete, "healthy rows are never bulk-deletable");
+    assert!(
+        !row.is_safe_to_delete,
+        "healthy rows are never bulk-deletable"
+    );
 }
 
 /// On-disk dir with no tracked session → Untracked + safe to delete.
@@ -310,7 +315,11 @@ async fn branch_deleted_upstream_is_flagged() {
     // PR merged → upstream deletes the branch + the bare loses the
     // remote-tracking ref on the next prune-style fetch.
     run(&fx.upstream_path, &["branch", "-D", "feature"]).await;
-    run(&fx.bare, &["update-ref", "-d", "refs/remotes/origin/feature"]).await;
+    run(
+        &fx.bare,
+        &["update-ref", "-d", "refs/remotes/origin/feature"],
+    )
+    .await;
 
     let report = mgr(&fx).inspect_worktrees(&[]).await.unwrap();
     let row = report

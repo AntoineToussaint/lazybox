@@ -22,7 +22,9 @@ use tuirealm::terminal::TerminalAdapter;
 pub(super) enum InspectRow {
     /// First slot in the list (when there is at least one safe-to-
     /// delete orphan). Triggers `bulk_delete_safe_inspected`.
-    BulkSafe { count: usize },
+    BulkSafe {
+        count: usize,
+    },
     Inspection(pilot_ipc::WorktreeInspectionDto),
 }
 
@@ -597,7 +599,9 @@ impl<T: TerminalAdapter> Model<T> {
         rows.sort_by(|a, b| {
             let a_orphaned = !a.reasons.is_empty();
             let b_orphaned = !b.reasons.is_empty();
-            b_orphaned.cmp(&a_orphaned).then_with(|| a.path.cmp(&b.path))
+            b_orphaned
+                .cmp(&a_orphaned)
+                .then_with(|| a.path.cmp(&b.path))
         });
         let safe_count = rows
             .iter()
@@ -642,23 +646,28 @@ impl<T: TerminalAdapter> Model<T> {
     /// target so `Msg::Confirmed(true)` knows what to dispatch. Copy
     /// changes when the row has local work so the user sees a clear
     /// "FORCE" warning before they say yes.
-    pub(super) fn mount_inspect_confirm(
-        &mut self,
-        target: pilot_ipc::WorktreeInspectionDto,
-    ) {
+    pub(super) fn mount_inspect_confirm(&mut self, target: pilot_ipc::WorktreeInspectionDto) {
         use crate::realm::components::confirm::Confirm;
         let dirty = target.has_uncommitted_changes || target.has_unpushed_commits;
         let prompt = if dirty {
             format!(
                 "Delete worktree {} ? It has {}{}{} — this overrides safety.",
                 target.path.display(),
-                if target.has_uncommitted_changes { "uncommitted changes" } else { "" },
+                if target.has_uncommitted_changes {
+                    "uncommitted changes"
+                } else {
+                    ""
+                },
                 if target.has_uncommitted_changes && target.has_unpushed_commits {
                     " AND "
                 } else {
                     ""
                 },
-                if target.has_unpushed_commits { "unpushed commits" } else { "" },
+                if target.has_unpushed_commits {
+                    "unpushed commits"
+                } else {
+                    ""
+                },
             )
         } else {
             format!("Delete worktree {} ?", target.path.display())
@@ -839,7 +848,12 @@ impl<T: TerminalAdapter> Model<T> {
 mod tests {
     use super::*;
 
-    fn dto_with(reasons: &[&str], dirty: bool, unpushed: bool, size: u64) -> pilot_ipc::WorktreeInspectionDto {
+    fn dto_with(
+        reasons: &[&str],
+        dirty: bool,
+        unpushed: bool,
+        size: u64,
+    ) -> pilot_ipc::WorktreeInspectionDto {
         pilot_ipc::WorktreeInspectionDto {
             path: std::path::PathBuf::from("/tmp/worktrees/o-r-feat"),
             bare_path: None,

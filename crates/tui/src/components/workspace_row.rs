@@ -13,7 +13,7 @@
 //! sidebar.
 
 use crate::components::sidebar::{
-    badge_pill_style, role_badge, status_pills, workspace_type_label,
+    StatusPill, badge_pill_style, role_badge, status_pills, workspace_type_label,
 };
 use crate::components::table::{Cell, Column, Row};
 use crate::theme::Theme;
@@ -317,33 +317,35 @@ fn badge_slot_cell(ctx: &WorkspaceRowCtx<'_>, badge: Option<(char, usize)>) -> C
     }
 }
 
+/// Width of each status pill slot — review (9) + CI (9), matching the
+/// label widths in `status_pills`. Lifted to a `const` so the
+/// blank-slot span doesn't have to `" ".repeat(9)` on every call.
+const BLANK_PILL: &str = "         ";
+
 fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let Some(task) = ctx.task else {
         return Cell::empty();
     };
     let (primary, secondary) = status_pills(task);
     // Empty cell when there's nothing to show — `Column::max(0)`
-    // collapses the column to 0 cells across the whole table when
-    // NO row in the visible list has a pill, handing the slack back
-    // to the title flex. When ANY row has a pill, the column expands
-    // to 19 cells (9 review + 1 gutter + 9 CI) and rows without
-    // pills get padded by the table renderer.
+    // collapses the column across the whole table when NO row has
+    // a pill, handing the slack back to the title flex. When ANY
+    // row has a pill, the column expands to 19 cells (9 review + 1
+    // gutter + 9 CI) and pill-less rows get padded by the table
+    // renderer.
     if primary.is_none() && secondary.is_none() {
         return Cell::empty();
     }
-    let blank_pill =
-        |spans: &mut Vec<Span<'static>>| spans.push(Span::styled(" ".repeat(9), ctx.row_style()));
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(3);
-    match primary {
-        Some(p) => spans.push(Span::styled(p.label.to_string(), p.style)),
-        None => blank_pill(&mut spans),
-    }
-    spans.push(Span::styled(" ".to_string(), ctx.row_style()));
-    match secondary {
-        Some(p) => spans.push(Span::styled(p.label.to_string(), p.style)),
-        None => blank_pill(&mut spans),
-    }
-    Cell::new(spans)
+    let row_style = ctx.row_style();
+    let pill_span = |pill: Option<StatusPill>| match pill {
+        Some(p) => Span::styled(p.label, p.style),
+        None => Span::styled(BLANK_PILL, row_style),
+    };
+    Cell::new(vec![
+        pill_span(primary),
+        Span::styled(" ", row_style),
+        pill_span(secondary),
+    ])
 }
 
 fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -362,7 +364,7 @@ fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // left (status pill, or — when status collapses to 0 — the
     // title flex padding).
     Cell::new(vec![
-        Span::styled(" ".to_string(), ctx.row_style()),
+        Span::styled(" ", ctx.row_style()),
         Span::styled(text, style),
     ])
 }

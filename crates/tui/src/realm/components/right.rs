@@ -91,15 +91,14 @@ impl Right {
         self.focused = focused;
     }
 
-    /// Forward to the inner pane's keymap so the help panel can list
-    /// the same bindings the legacy hint bar showed.
-    pub fn keymap(&self) -> &'static [crate::pane::Binding] {
-        self.inner.keymap()
-    }
-
-    /// State-aware short list for the footer hint bar.
-    pub fn contextual_bindings(&self) -> Vec<crate::pane::Binding> {
-        self.inner.contextual_bindings()
+    /// State-aware short list for the footer hint bar. Catalog-driven;
+    /// `overrides` carries the user's `ui.action_keys` map (empty when
+    /// untouched) and flows into the catalog's `effective_keys_display`.
+    pub fn contextual_bindings(
+        &self,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<crate::pane::Binding> {
+        self.inner.contextual_bindings(overrides)
     }
 
     /// Apply resolved `UiDefaults` (auto-mark delay, task body cap,

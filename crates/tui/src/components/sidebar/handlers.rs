@@ -25,12 +25,15 @@ impl Sidebar {
 
         match (key.code, key.modifiers) {
             // ── Navigation ────────────────────────────────────────────
+            // `FocusWorkspace` emission is centralized in
+            // `Model::sync_panes` (called after every key dispatch);
+            // local handlers only mutate the cursor.
             (KeyCode::Down, m) if !m.contains(KeyModifiers::SHIFT) => {
-                self.move_cursor_and_emit_focus(1, cmds);
+                self.move_cursor_by(1);
                 PaneOutcome::Consumed
             }
             (KeyCode::Up, m) if !m.contains(KeyModifiers::SHIFT) => {
-                self.move_cursor_and_emit_focus(-1, cmds);
+                self.move_cursor_by(-1);
                 PaneOutcome::Consumed
             }
             // ── Collapse / expand the cursor's repo group ─────────────

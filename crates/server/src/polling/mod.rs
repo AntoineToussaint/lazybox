@@ -26,7 +26,9 @@ mod handlers;
 mod mutate;
 mod scheduler;
 
-pub use scheduler::{RoundRobinPick, default_round_robin_n, pick_repos_for_tick};
+pub use scheduler::{
+    CURSOR_TTL, DEFAULT_ROUND_ROBIN_N, RoundRobinPick, RoundRobinState, pick_repos_for_tick,
+};
 
 pub use handlers::{
     ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_fetch_pr_details,
@@ -716,39 +718,43 @@ pub async fn sources_for(
                         if mention_allowed.is_empty() && !viewer.is_empty() {
                             mention_allowed.insert(viewer.clone());
                         }
-                        // Pick this tick's round-robin slice BEFORE
-                        // incrementing the counter — the scheduler's
-                        // K-th-tick rule uses the value passed in.
-                        // `default_round_robin_n` is the issue's
-                        // baseline N=3; raise via a future setting if
-                        // dogfood numbers justify it.
+                        // Round-robin scheduling. Pre-fetch we:
+                        //   1. Prune stale cursor entries so repos
+                        //      the user stopped touching age out
+                        //      (otherwise the cursor would grow with
+                        //      every new involvement, never shrink).
+                        //   2. Pick the per-tick slice from the
+                        //      remaining cursor.
+                        //   3. Bump the cursor for repos we're about
+                        //      to query (even a 0-result query
+                        //      advances the rotation — without it, an
+                        //      empty repo stays "stalest" forever).
+                        //   4. Increment the tick counter AFTER the
+                        //      pick so the scheduler's K-th-tick rule
+                        //      observes the value we passed in.
+                        let now = std::time::Instant::now();
+                        state.round_robin.prune(now);
                         let scheduling = pick_repos_for_tick(
-                            &state.repo_sync_cursor,
-                            state.focused_repo.as_deref(),
-                            state.global_sweep_tick,
-                            default_round_robin_n(),
+                            &state.round_robin.cursor,
+                            state.round_robin.focused_repo.as_deref(),
+                            state.round_robin.tick,
+                            DEFAULT_ROUND_ROBIN_N,
                         );
                         if scheduling.run_global || !scheduling.repos.is_empty() {
                             tracing::info!(
-                                source = "github",
-                                tick = state.global_sweep_tick,
+                                source = pilot_gh::SOURCE,
+                                tick = state.round_robin.tick,
                                 run_global = scheduling.run_global,
                                 round_robin = ?scheduling.repos,
-                                known_repos = state.repo_sync_cursor.len(),
-                                focused = state.focused_repo.as_deref().unwrap_or(""),
+                                known_repos = state.round_robin.cursor.len(),
+                                focused = state.round_robin.focused_repo.as_deref().unwrap_or(""),
                                 "round-robin scheduling decision"
                             );
                         }
-                        // Bump cursor for repos we're about to query
-                        // (even if the query returns zero PRs — without
-                        // this, an empty repo would never lose its
-                        // "stalest" badge and the rotation would burn
-                        // every tick on the same dead slot).
-                        let now = std::time::Instant::now();
                         for repo in &scheduling.repos {
-                            state.repo_sync_cursor.insert(repo.clone(), now);
+                            state.round_robin.record_sync(repo, now);
                         }
-                        state.global_sweep_tick = state.global_sweep_tick.wrapping_add(1);
+                        state.round_robin.tick = state.round_robin.tick.wrapping_add(1);
                         sources.push(Box::new(GhSource {
                             client,
                             filter,
@@ -869,30 +875,12 @@ pub struct TickState {
     /// PR — once is enough; the TUI's lazy-fetch refreshes on focus
     /// for users who want explicit re-pull.
     pub(crate) prefetched_pr_details: std::collections::HashSet<String>,
-    /// Per-repo last-sync timestamp. Drives the per-repo round-robin
-    /// in `pick_repos_for_tick`: on a warm tick we issue PR searches
-    /// only for the N stalest repos instead of one giant
-    /// `involves:USER` sweep across every repo the user touches.
-    /// Repos enter the cursor the first time they appear in a global
-    /// sweep's result set; entries refresh whenever we (re)query the
-    /// repo so the stalest-first ordering reflects what's actually
-    /// been pulled.
-    pub repo_sync_cursor: std::collections::HashMap<String, std::time::Instant>,
-    /// Repo of the workspace the user is currently looking at,
-    /// surfaced by `Command::FocusWorkspace` (and as a fallback by
-    /// `Command::MarkRead`). When non-empty, the scheduler bumps this
-    /// repo to the front of the round-robin so a comment landing on
-    /// the visible PR shows up next cycle — the inbox stays snappy
-    /// where the user's attention is, even when the rest of the
-    /// rotation cools off.
-    pub focused_repo: Option<String>,
-    /// Monotonic poll-tick counter. Increments once per
-    /// `sources_for` call. The scheduler runs the global
-    /// `involves:USER` sweep on tick 0 (cold start, no cursor yet)
-    /// and again every `K` ticks, where `K ≈ ceil(known/N)` so the
-    /// per-repo branch and the global branch each cover the user's
-    /// inbox at the same average rate.
-    pub global_sweep_tick: u64,
+    /// Per-repo round-robin bookkeeping: cursor, focused repo, and
+    /// monotonic tick counter. Co-located in `RoundRobinState` so
+    /// the scheduling-related logic stays inside `polling::scheduler`
+    /// — adding TTL pruning or a dynamic-N knob doesn't touch this
+    /// struct.
+    pub round_robin: RoundRobinState,
 }
 
 pub async fn tick_with_state(
@@ -957,23 +945,31 @@ pub async fn tick_with_state(
                     std::time::Duration::from_secs(15);
                 let upsert_started = std::time::Instant::now();
                 let total = tasks.len();
-                // Repos surfaced by THIS poll. Used to seed the
-                // round-robin cursor with repos we may not have
-                // queried directly (the global sweep finds repos
-                // the user just got pulled into; per-repo queries
-                // confirm coverage of the rotation slot). Recorded
-                // here — before upsert — so a slow upsert can't
-                // race the cursor update.
+                // Seed the round-robin cursor with repos we
+                // observed in the result set. Borrowed `&str` dedup
+                // keeps allocation cost proportional to unique repos
+                // (typically <10), not total task count (often >30).
+                // Done BEFORE `tasks.into_iter()` so the dedup set's
+                // borrow lifetime ends cleanly; the cursor write
+                // itself owns the small handful of unique strings.
+                // Combined with the pre-fetch bump in `sources_for`,
+                // this captures both "we queried this repo" and "the
+                // global sweep turned up a new repo we now want to
+                // round-robin through" — the rotation expands
+                // automatically as the user's involvement set grows.
                 let now = std::time::Instant::now();
-                let mut seen_repos: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                if source.name() == "github" {
+                if source.name() == pilot_gh::SOURCE {
+                    let mut seen_repos: std::collections::HashSet<&str> =
+                        std::collections::HashSet::new();
                     for task in &tasks {
-                        if let Some(repo) = task.repo.as_deref() {
-                            if !repo.is_empty() {
-                                seen_repos.insert(repo.to_string());
-                            }
+                        if let Some(repo) = task.repo.as_deref()
+                            && !repo.is_empty()
+                        {
+                            seen_repos.insert(repo);
                         }
+                    }
+                    for repo in &seen_repos {
+                        state.round_robin.record_sync(repo, now);
                     }
                 }
                 for (i, task) in tasks.into_iter().enumerate() {
@@ -1017,16 +1013,6 @@ pub async fn tick_with_state(
                     "tick: upserted {total} tasks in {}ms",
                     upsert_started.elapsed().as_millis()
                 );
-                // Seed the round-robin cursor with repos we
-                // observed in the result set. Combined with the
-                // pre-fetch bump in `sources_for`, this captures
-                // both "we queried this repo" and "the global sweep
-                // turned up a new repo we now want to round-robin
-                // through" — so the rotation expands automatically
-                // as the user's involvement set grows.
-                for repo in seen_repos {
-                    state.repo_sync_cursor.insert(repo, now);
-                }
                 // Clear the debounce slot — the next failure should
                 // broadcast even if it carries the same message as a
                 // previous run.
@@ -2313,42 +2299,42 @@ pub(super) fn load_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Optio
     serde_json::from_str::<Workspace>(&json).ok()
 }
 
-/// Record the user's "I'm looking at this workspace" hint into the
-/// poll state's `focused_repo`. The next `pick_repos_for_tick` call
-/// reads this and bumps the repo to the front of the round-robin
-/// queue so a comment landing on the visible PR shows up next cycle.
+/// Record the user's "I'm looking at this workspace" hint on the
+/// round-robin scheduler. The next `pick_repos_for_tick` call reads
+/// it and bumps the repo to the front of the rotation so a comment
+/// landing on the visible PR shows up next cycle instead of waiting
+/// its turn.
 ///
 /// No-op when:
 /// - the workspace is missing from the store (race with a delete);
 /// - the workspace has no primary task (locally-created pre-PR
 ///   sandbox);
-/// - the primary task has no repo (Linear's free-form items
-///   sometimes lack one).
+/// - the primary task isn't a GitHub item (Linear doesn't share the
+///   per-repo fan-out model);
+/// - the primary task has no usable repo string.
 ///
 /// The hint is *replaced*, not accumulated — only the most-recent
-/// focus matters; older selections age out by stalest-first ordering.
-pub async fn record_workspace_focus(config: &ServerConfig, key: &WorkspaceKey) {
+/// focus matters; older selections age out via stalest-first ordering.
+pub async fn set_focused_workspace(config: &ServerConfig, key: &WorkspaceKey) {
     let Some(workspace) = load_workspace(config, key) else {
         return;
     };
     let Some(task) = workspace.primary_task() else {
         return;
     };
-    // Only GitHub repos drive the round-robin today — Linear's poll
-    // path doesn't share the per-repo fan-out model. Skip silently
-    // for other sources to avoid stamping a non-actionable hint.
-    if task.id.source != "github" {
+    if task.id.source != pilot_gh::SOURCE {
         return;
     }
-    let Some(repo) = task.repo.as_deref() else {
+    let Some(repo) = task
+        .repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
         return;
     };
-    let repo = repo.trim();
-    if repo.is_empty() {
-        return;
-    }
     let mut state = config.poll_state.lock().await;
-    let prev = state.focused_repo.replace(repo.to_string());
+    let prev = state.round_robin.focused_repo.replace(repo.to_string());
     if prev.as_deref() != Some(repo) {
         tracing::debug!(
             workspace_key = %key.as_str(),

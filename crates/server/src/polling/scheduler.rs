@@ -13,23 +13,80 @@
 //! - hit a small batch of the **stalest** known repos directly with
 //!   `repo:owner/name`-scoped searches.
 //!
-//! The repo set lives in `TickState::repo_sync_cursor` and grows
-//! whenever a global sweep returns PRs from a repo the cursor hadn't
-//! seen yet. A focused repo (from `TickState::focused_repo`,
-//! populated by `Command::FocusWorkspace`/`MarkRead`) is bumped to
-//! the front so the workspace the user is staring at refreshes on
-//! the very next tick instead of waiting its turn.
+//! The repo set lives in [`RoundRobinState::cursor`] (a field on
+//! `TickState::round_robin`) and grows whenever a global sweep
+//! returns PRs from a repo the cursor hadn't seen yet. A focused
+//! repo ([`RoundRobinState::focused_repo`], populated by
+//! `Command::FocusWorkspace` / `MarkRead`) is bumped to the front so
+//! the workspace the user is staring at refreshes on the very next
+//! tick instead of waiting its turn. Stale entries are pruned by
+//! [`RoundRobinState::prune`] so the cursor stays bounded by the
+//! user's *current* involvement set rather than their lifetime one.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Default fan-out per warm tick. Three is the issue's recommended
 /// starting point: enough that 9 known repos fully refresh inside a
 /// 3-tick (≈3-minute) window, small enough that each tick stays
 /// well under the 25s octocrab per-request cap even when paired
 /// with the merged-sweep and review-requested companions.
-pub fn default_round_robin_n() -> usize {
-    3
+pub const DEFAULT_ROUND_ROBIN_N: usize = 3;
+
+/// How long a repo's cursor entry survives without being re-synced.
+/// Past this window the entry is pruned, dropping the repo out of
+/// the round-robin rotation entirely. Without this the cursor would
+/// grow unbounded over a long-running daemon — a user who roams
+/// across 200 repos over a quarter would end up paying a per-tick
+/// sort cost proportional to their lifetime involvement set instead
+/// of their CURRENT one.
+pub const CURSOR_TTL: Duration = Duration::from_secs(60 * 60 * 24 * 7);
+
+/// Per-repo round-robin state. Owns the cursor map, the user's
+/// current focus, and the monotonic tick counter the scheduler
+/// reads. Lives inside `TickState` as a single field so the
+/// scheduling-related bookkeeping stays co-located with the logic
+/// in this module — adding TTL pruning or a dynamic-N knob doesn't
+/// require touching the parent `TickState`.
+#[derive(Debug, Default)]
+pub struct RoundRobinState {
+    /// Per-repo last-sync timestamp. Drives stalest-first ordering
+    /// in [`pick_repos_for_tick`]. Pruned by [`Self::prune`] so a
+    /// stale repo (no longer touched by polls) falls out of the
+    /// rotation instead of being burned on every tick.
+    pub cursor: HashMap<String, Instant>,
+    /// Repo of the workspace the user is currently looking at,
+    /// surfaced via `Command::FocusWorkspace`. Bumped to the front
+    /// of the rotation by [`pick_repos_for_tick`].
+    pub focused_repo: Option<String>,
+    /// Monotonic poll-tick counter. Increments once per
+    /// `sources_for` call. The scheduler runs the global
+    /// `involves:USER` sweep on tick 0 (cold start) and again every
+    /// `K` ticks, where `K ≈ ceil(cursor.len() / N)` so the per-repo
+    /// branch and the global branch each cover the user's inbox at
+    /// the same average rate.
+    pub tick: u64,
+}
+
+impl RoundRobinState {
+    /// Drop cursor entries older than [`CURSOR_TTL`]. Called once
+    /// per tick from `sources_for` — cheaper than a separate task
+    /// since we already hold the lock there, and the cursor is
+    /// usually small (tens of entries).
+    pub fn prune(&mut self, now: Instant) {
+        self.cursor.retain(|_, last| {
+            now.checked_duration_since(*last)
+                .is_none_or(|d| d < CURSOR_TTL)
+        });
+    }
+
+    /// Stamp `repo` as just-synced. Used both pre-fetch (for repos
+    /// we're about to query — even a 0-result query advances the
+    /// rotation) and post-fetch (for repos newly discovered in the
+    /// global sweep's result set).
+    pub fn record_sync(&mut self, repo: &str, at: Instant) {
+        self.cursor.insert(repo.to_string(), at);
+    }
 }
 
 /// The scheduler's per-tick verdict: which repos (if any) to query
@@ -61,7 +118,7 @@ pub struct RoundRobinPick {
 ///   `run_global` on its own.
 /// - `tick` — monotonic counter incremented per `sources_for` call.
 ///   Used to determine the K-th refresh tick.
-/// - `n` — fan-out budget. `0` is treated as `default_round_robin_n()`
+/// - `n` — fan-out budget. `0` is treated as [`DEFAULT_ROUND_ROBIN_N`]
 ///   so a misconfigured caller still gets something sensible.
 ///
 /// Output rules, in order:
@@ -87,7 +144,7 @@ pub fn pick_repos_for_tick(
     tick: u64,
     n: usize,
 ) -> RoundRobinPick {
-    let n = if n == 0 { default_round_robin_n() } else { n };
+    let n = if n == 0 { DEFAULT_ROUND_ROBIN_N } else { n };
 
     if known.is_empty() {
         return RoundRobinPick {
@@ -252,6 +309,41 @@ mod tests {
     fn zero_n_falls_back_to_default() {
         let known = cursor(&[("a/a", 10), ("b/b", 20), ("c/c", 30), ("d/d", 40)]);
         let pick = pick_repos_for_tick(&known, None, 1, 0);
-        assert_eq!(pick.repos.len(), default_round_robin_n());
+        assert_eq!(pick.repos.len(), DEFAULT_ROUND_ROBIN_N);
+    }
+
+    /// Prune removes entries older than `CURSOR_TTL` and leaves the
+    /// rest. Without the prune, a long-running daemon's cursor would
+    /// grow unbounded as the user touches more repos over time.
+    #[test]
+    fn prune_drops_entries_past_ttl() {
+        let mut state = RoundRobinState::default();
+        let now = Instant::now();
+        // `fresh` synced just now; `stale` synced past the TTL.
+        state.cursor.insert("fresh/repo".to_string(), now);
+        state.cursor.insert(
+            "stale/repo".to_string(),
+            now - CURSOR_TTL - Duration::from_secs(1),
+        );
+        state.prune(now);
+        assert!(state.cursor.contains_key("fresh/repo"));
+        assert!(
+            !state.cursor.contains_key("stale/repo"),
+            "entries older than CURSOR_TTL must be evicted"
+        );
+    }
+
+    /// Prune is a no-op when every entry is within the window — must
+    /// not accidentally drop the freshly-synced rotation.
+    #[test]
+    fn prune_leaves_fresh_entries_alone() {
+        let mut state = RoundRobinState::default();
+        let now = Instant::now();
+        state.cursor.insert("a/a".to_string(), now);
+        state
+            .cursor
+            .insert("b/b".to_string(), now - Duration::from_secs(60));
+        state.prune(now);
+        assert_eq!(state.cursor.len(), 2);
     }
 }

@@ -369,6 +369,15 @@ pub struct Model<T: TerminalAdapter> {
     /// Cleared when a workspace is removed (`Event::WorkspaceRemoved`)
     /// so a re-added workspace gets a fresh fetch.
     pr_details_fetched: std::collections::HashSet<pilot_core::WorkspaceKey>,
+    /// Last `SessionKey` we sent a `Command::FocusWorkspace` for.
+    /// Single source of truth for "did the cursor leave the previous
+    /// workspace?". `sync_panes` reads it after every key/mouse
+    /// dispatch and emits a fresh `FocusWorkspace` when the selected
+    /// workspace key has changed. Centralizing here means every
+    /// cursor-mutating path (j/k, mouse click, programmatic
+    /// preselect) feeds the daemon's round-robin scheduler without
+    /// each call site needing its own emit hook.
+    last_focused_session_key: Option<pilot_core::SessionKey>,
     /// Active sidebar right-click context menu state: the workspace
     /// row the menu was raised over plus the ordered list of catalog
     /// `Action`s the picker is offering. `Msg::ChoicePicked` indexes
@@ -534,6 +543,7 @@ impl<T: TerminalAdapter> Model<T> {
             status: StatusCtx::new(),
             ui_defaults: pilot_config::UiDefaults::default(),
             pr_details_fetched: std::collections::HashSet::new(),
+            last_focused_session_key: None,
             pending_sidebar_context: None,
             action_key_overrides: std::collections::BTreeMap::new(),
             pending_action_confirm: None,

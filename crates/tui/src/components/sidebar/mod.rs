@@ -919,29 +919,6 @@ impl Sidebar {
         self.cursor = selectable[target];
     }
 
-    /// `move_cursor_by` followed by a `Command::FocusWorkspace` emit
-    /// when the cursor's owning workspace actually changed. Plumbs
-    /// the daemon's round-robin scheduler so the workspace under the
-    /// user's attention is bumped to the front of the per-repo sync
-    /// rotation — a comment on the visible PR refreshes on the very
-    /// next tick instead of waiting its turn.
-    ///
-    /// No-op when the cursor stays on the same workspace (e.g.
-    /// j-then-k inside a single session list, or movement onto a
-    /// repo header above the same workspace). We compare workspace
-    /// keys, not visible-row indices, so navigating between sub-
-    /// sessions of the same workspace doesn't spam re-focus events.
-    fn move_cursor_and_emit_focus(&mut self, delta: isize, cmds: &mut Vec<Command>) {
-        let before = self.selected_session_key().cloned();
-        self.move_cursor_by(delta);
-        let after = self.selected_session_key().cloned();
-        if let Some(key) = after
-            && before.as_ref() != Some(&key)
-        {
-            cmds.push(Command::FocusWorkspace { session_key: key });
-        }
-    }
-
     /// Total unread activity items across all VISIBLE workspaces. Used
     /// by the top header's `N new` badge — only the current mailbox's
     /// unread is counted, so cycling Inbox→Snoozed shows different

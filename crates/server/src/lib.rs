@@ -652,14 +652,14 @@ impl Server {
                             // doesn't fire a separate
                             // `FocusWorkspace` (older clients, the
                             // auto-mark-on-hover path).
-                            polling::record_workspace_focus(&self.config, &key).await;
+                            polling::set_focused_workspace(&self.config, &key).await;
                             polling::mark_workspace_read(&self.config, &key);
                         }
                         pilot_ipc::Command::FocusWorkspace { session_key } => {
                             let key = pilot_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
-                            polling::record_workspace_focus(&self.config, &key).await;
+                            polling::set_focused_workspace(&self.config, &key).await;
                         }
                         pilot_ipc::Command::MarkActivityRead { session_key, index } => {
                             let key = pilot_core::WorkspaceKey::new(

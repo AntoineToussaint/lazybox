@@ -13,6 +13,7 @@
 //!   pilot server api              foreground JSON HTTP API gateway
 //!   pilot slack init              interactive Slack token setup wizard
 //!   pilot slack doctor            read-only validation of an existing setup
+//!   pilot slack prune             archive stale per-(session, agent) channels
 //!
 //! All arg parsing is intentionally stupid — see `take_flag`.
 
@@ -462,8 +463,17 @@ async fn slack_subcommand(args: &[String]) -> anyhow::Result<()> {
                 slack_init::DoctorOutcome::Failed => std::process::exit(1),
             }
         }
+        Some("prune") => {
+            use pilot_tui::slack_prune;
+            let outcome = slack_prune::run(&args[1..]).await?;
+            match outcome {
+                slack_prune::PruneOutcome::Done { .. } => Ok(()),
+                slack_prune::PruneOutcome::Failed => std::process::exit(1),
+                slack_prune::PruneOutcome::BadArgs => std::process::exit(2),
+            }
+        }
         _ => {
-            println!("usage: pilot slack [init|doctor]");
+            println!("usage: pilot slack [init|doctor|prune]");
             std::process::exit(2);
         }
     }

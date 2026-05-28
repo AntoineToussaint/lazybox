@@ -178,7 +178,7 @@ pub const BUS_CAPACITY: usize = 1024;
 /// reader never sees a terminals entry without a matching meta).
 ///
 /// The only co-holding site today is
-/// [`spawn_handler::freeze_runners_in_session`]; that's why this
+/// `spawn_handler::freeze_runners_in_session`; that's why this
 /// constant exists, as a discoverable name future callers can grep.
 pub const TERMINAL_MAP_LOCK_ORDER: &str =
     "terminals → terminal_meta → terminal_sessions → agent_states";

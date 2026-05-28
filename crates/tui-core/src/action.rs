@@ -151,7 +151,7 @@ pub enum ScrollDirection {
 /// Static definition of an action's user-facing surface.
 ///
 /// One per `Action` variant — looked up via [`ActionDef::for_action`]
-/// or iterated whole via [`ActionDef::ALL`].
+/// or iterated whole via [`ActionDef::all`].
 #[derive(Debug, Clone, Copy)]
 pub struct ActionDef {
     /// What the action does, abstractly.

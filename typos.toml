@@ -1,0 +1,42 @@
+# typos config — used by the `typos` job in CI (crate-ci/typos
+# action) and runnable locally with `typos`.
+#
+# Default behavior catches a lot of real typos in code + comments.
+# This file only encodes the things typos.dev gets *wrong* for this
+# repo: crate names it thinks are misspellings, GraphQL/JSON
+# identifiers, and English spelling variants we've consciously
+# picked.
+
+[default]
+extend-ignore-identifiers-re = [
+    # GraphQL filter operator (Linear API): `nin` = "not in".
+    "nin",
+]
+
+[default.extend-words]
+# `ratatui` is the Rust TUI crate — not a misspelling of
+# "ratatouille". Apply to lowercase + titlecase occurrences.
+ratatui = "ratatui"
+Ratatui = "Ratatui"
+
+# Domain-specific identifiers and idioms we've settled on.
+sluggify = "sluggify"     # internal helper name; renaming is churn-only
+unparseable = "unparseable"  # accepted English variant
+unmergable = "unmergable"    # accepted English variant
+clonable = "clonable"        # accepted English variant
+activit = "activit"          # format-string fragment: "activit{}"
+mis = "mis"                  # hyphenated prefix: "mis-decode" etc.
+fo = "fo"                    # RFC 4648 base64 test vector (b"fo")
+
+[files]
+extend-exclude = [
+    # cargo-machete / vendored bindgen output / snapshot files have
+    # their own conventions and shouldn't gate on prose typos.
+    "**/snapshots/**",
+    "**/*.snap",
+    "**/*.snap.new",
+    "Cargo.lock",
+    # The vendored libghostty crates carry upstream comments/names.
+    "crates/libghostty-vt/**",
+    "crates/libghostty-vt-sys/**",
+]

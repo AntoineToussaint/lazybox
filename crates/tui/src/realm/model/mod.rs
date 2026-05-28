@@ -854,7 +854,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal_boxed(id, Box::new(component));
     }
 
-    /// Same as [`mount_modal`] but accepts an already-boxed
+    /// Same as [`Self::mount_modal`] but accepts an already-boxed
     /// component. Use this when the caller has a
     /// `Box<dyn AppComponent>` (e.g. setup-flow runners that
     /// dispatch on a polymorphic boxed step).

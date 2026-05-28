@@ -60,7 +60,7 @@ pub struct AgentSpawnConfig {
 }
 
 /// Upstream + provider for the proxy. `upstream` is the real URL
-/// (https://api.anthropic.com, https://api.openai.com).
+/// (`https://api.anthropic.com`, `https://api.openai.com`).
 #[derive(Debug, Clone)]
 pub struct ProxyTarget {
     pub provider: ProxyProvider,

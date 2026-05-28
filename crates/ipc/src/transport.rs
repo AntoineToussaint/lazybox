@@ -2,7 +2,7 @@
 //! Unix domain sockets (current implementation) and Windows named
 //! pipes / TCP loopback (future) behind two functions:
 //!
-//! - [`bind`]: server-side — open a listener at `path` and yield
+//! - [`Listener::bind`]: server-side — open a listener at `path` and yield
 //!   `(read, write)` halves for each accepted connection.
 //! - [`connect`]: client-side — open a client connection to `path`
 //!   and return a streaming `(read, write)` pair.

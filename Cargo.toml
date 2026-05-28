@@ -81,6 +81,13 @@ rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/AntoineToussaint/pilot"
 readme = "README.md"
+# Pilot ships as a single binary built by cargo-dist (see
+# `[workspace.metadata.dist]`); the individual workspace crates are
+# internal and not published to crates.io. Marking them
+# `publish = false` keeps an accidental `cargo publish` from
+# uploading them and lets cargo-deny treat the path-based wildcards
+# between sibling crates as "private", not real wildcard pins.
+publish = false
 
 [workspace.dependencies]
 # ── Shared library crates ──────────────────────────────────────────────

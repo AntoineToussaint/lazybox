@@ -115,7 +115,7 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     ]
 }
 
-/// Build the Row<Cell> for a single workspace row. Fill style is
+/// Build the `Row<Cell>` for a single workspace row. Fill style is
 /// the row's cursor highlight (or unstyled when not under cursor),
 /// applied via `Row::fill` so every column's padding inherits the
 /// row's bg.

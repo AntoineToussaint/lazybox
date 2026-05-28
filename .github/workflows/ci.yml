@@ -1,5 +1,11 @@
 # Build + test on every PR / main push. Catches regressions before
 # they hit a release tag.
+#
+# The "branch must be up-to-date with main" merge gate is OFF, so a
+# PR can merge without re-running CI against the latest main. To
+# compensate, CI runs a broader set of checks here: build/test/clippy
+# (matrix), fmt, rustdoc with -D warnings, cargo-deny, typos, and
+# cargo-machete (soft-fail).
 
 name: CI
 
@@ -10,6 +16,7 @@ on:
 
 jobs:
   test:
+    name: test
     strategy:
       fail-fast: false
       matrix:
@@ -38,8 +45,6 @@ jobs:
           sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
 
       - uses: Swatinem/rust-cache@v2
 
@@ -49,10 +54,32 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+  clippy:
+    name: clippy
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Install C toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   fmt:
+    name: fmt
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -60,3 +87,62 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  rustdoc:
+    # Broken intra-doc links / bad rustdoc references fail CI. Linux
+    # only — rustdoc behavior doesn't differ across the matrix and
+    # matrixing would just double the build time of a slow job.
+    name: rustdoc
+    runs-on: ubuntu-22.04
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+
+      - name: Install C toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo doc --no-deps --workspace
+
+  deny:
+    # cargo-deny gates on RustSec advisories, banned/duplicated deps,
+    # license policy, and source allowlists. Config lives in
+    # `deny.toml` at the repo root. No Rust toolchain or build of the
+    # workspace needed — cargo-deny only reads Cargo.lock.
+    name: deny
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
+  typos:
+    name: typos
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: crate-ci/typos@master
+
+  machete:
+    # cargo-machete surfaces unused workspace dependencies. Soft-fail
+    # initially because the noise/value ratio isn't known yet on this
+    # workspace. Promote `continue-on-error` to false (and add to
+    # branch protection) once the signal proves clean.
+    name: machete
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bnjbvr/cargo-machete@main

@@ -272,8 +272,13 @@ impl GhSource {
     async fn fetch_full(&self) -> Result<Vec<Task>, pilot_core::ProviderError> {
         let want_prs = self.filter.pr_enabled();
         let want_issues = self.filter.issue_enabled();
+        // The issue query also runs to scan for `@pilot` mentions even
+        // when issue *display* is off (the GitHub default is PR-only) —
+        // see `GhClient::should_query_issues` (issue #50). Mirror that
+        // here so the full sweep doesn't early-return before the scan.
+        let scan_issues = want_issues || !self.mention_allowed_logins.is_empty();
 
-        let plan = match (want_prs, want_issues) {
+        let plan = match (want_prs, scan_issues) {
             (true, true) => "PRs + Issues",
             (true, false) => "PRs",
             (false, true) => "Issues",
@@ -306,7 +311,7 @@ impl GhSource {
                 ));
             }
         }
-        if want_issues {
+        if scan_issues {
             self.emit_progress(format!("Issue query: {}", self.client.issue_search_query()));
         }
 
@@ -375,6 +380,14 @@ impl GhSource {
         // separately so the async pass owns it (the loop below moves
         // mentions into the queue).
         let mut react_targets: Vec<String> = Vec::with_capacity(mentions.len());
+        // Issues an allowed user `@pilot`-tagged this sweep. Re-admitted
+        // into `kept` below so the auto-spawn always lands in a real
+        // issue workspace/worktree, even when the display filter (role /
+        // scope / issue-display-off) would drop the row — otherwise
+        // `handle_spawn` finds no workspace and spawns the agent in
+        // pilot's own cwd with no branch (issue #50). See
+        // `readmit_mentioned_tasks`.
+        let mut mentioned_tasks: Vec<Task> = Vec::new();
         {
             let mut pending = self
                 .pending_actions
@@ -401,6 +414,7 @@ impl GhSource {
                 };
                 let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(task));
                 let prompt = Some(pilot_core::prompts::build_implement_issue_prompt(task));
+                mentioned_tasks.push(task.clone());
                 let reason = format!(
                     "@pilot mention by {} on {}#{} ({})",
                     mention.triggered_by_login,
@@ -445,7 +459,10 @@ impl GhSource {
         }
 
         self.emit_progress(format!("Got {} raw items, applying filters…", raw.len()));
-        let kept = filter_github_tasks(raw, &self.filter, &self.scopes);
+        let kept = readmit_mentioned_tasks(
+            filter_github_tasks(raw, &self.filter, &self.scopes),
+            mentioned_tasks,
+        );
         self.emit_progress(format!("{} tasks kept after filter", kept.len()));
 
         // Mark sweep complete BEFORE returning so the next tick's
@@ -949,6 +966,25 @@ pub fn filter_github_tasks(
             false
         })
         .collect()
+}
+
+/// Re-admit `@pilot`-mentioned issue tasks that `filter_github_tasks`
+/// dropped, so an auto-spawn lands in a real workspace/worktree.
+///
+/// The `@pilot` mention is an explicit, high-intent trigger: the user
+/// asked pilot to work on this exact issue. The passive display filter
+/// (role / scope / issue-display-off) must not prevent the issue's
+/// workspace from being created — otherwise `dispatch_action` →
+/// `handle_spawn` finds no workspace and spawns the agent in pilot's
+/// own cwd with no branch (the issue #50 symptom). Tasks already in
+/// `kept` are left as-is (dedup on `TaskId`); the rest are appended.
+pub fn readmit_mentioned_tasks(mut kept: Vec<Task>, mentioned: Vec<Task>) -> Vec<Task> {
+    for task in mentioned {
+        if !kept.iter().any(|k| k.id == task.id) {
+            kept.push(task);
+        }
+    }
+    kept
 }
 
 /// Drop Linear tasks whose role isn't enabled. Linear has no

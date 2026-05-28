@@ -397,6 +397,20 @@ pub struct GqlComment {
     #[serde(default)]
     pub id: Option<String>,
     pub author: Option<GqlAuthor>,
+    /// Comment body. `#[serde(default)]` (empty string when absent)
+    /// because the inbox-scan `SEARCH_QUERY` deliberately omits it:
+    /// `comments(last: 1)` there selects only `author` + `createdAt`
+    /// to drive the sidebar's `last_commenter` line and the
+    /// `unread_count` proxy — the bodies live on the lazy
+    /// `PR_DETAILS_QUERY`. Without the default, a PR carrying even one
+    /// comment fails to deserialize `GqlComment`, which fails the
+    /// whole `Vec<GqlPr>` page and silently drops *every* PR from the
+    /// inbox (regression from `3c019af`; issues were unaffected
+    /// because `ISSUES_QUERY` still selects the body). The eager
+    /// queries (`ISSUES_QUERY`, `PR_DETAILS_QUERY`, `SINGLE_PR_QUERY`)
+    /// all still select `body`, so this default only kicks in on the
+    /// inbox-scan path where the body genuinely isn't fetched.
+    #[serde(default)]
     pub body: String,
     #[serde(rename = "createdAt")]
     pub created_at: DateTime<Utc>,
@@ -3066,6 +3080,110 @@ mod tests {
         let task = pr_to_task(&pr, "alice");
         assert_eq!(task.unread_count, 17);
         assert!(task.recent_activity.is_empty());
+    }
+
+    /// A realistic inbox-scan (`SEARCH_QUERY`) wire response, built
+    /// to mirror exactly what GitHub returns for the *trimmed* query:
+    /// the `comments(last: 1)` selection carries only `author` +
+    /// `createdAt` — NO `body`, NO `id` (those moved to the lazy
+    /// `PR_DETAILS_QUERY`). This is the fixture that guards against
+    /// the `3c019af` regression where every PR with at least one
+    /// comment failed to deserialize (`GqlComment.body` was a
+    /// required `String`), failing the whole `Vec<GqlPr>` page and
+    /// silently dropping ALL PRs from the `[all]` list while issues
+    /// (a separate query that still selects `body`) rendered fine.
+    ///
+    /// If a future query trim drops another field whose struct
+    /// counterpart isn't `Option`/`#[serde(default)]`, this test
+    /// fails instead of the PR side silently disappearing in prod.
+    fn search_query_wire_response() -> &'static str {
+        r#"{
+          "data": {
+            "search": {
+              "pageInfo": { "hasNextPage": false, "endCursor": null },
+              "nodes": [
+                {
+                  "id": "PR_kwDOabc123",
+                  "number": 42,
+                  "title": "Add foo to bar",
+                  "body": "Closes #1.",
+                  "url": "https://github.com/owner/repo/pull/42",
+                  "updatedAt": "2026-05-28T12:00:00Z",
+                  "createdAt": "2026-05-27T09:00:00Z",
+                  "isDraft": false,
+                  "state": "OPEN",
+                  "merged": false,
+                  "additions": 10,
+                  "deletions": 2,
+                  "headRefName": "feature/foo",
+                  "baseRefName": "main",
+                  "mergeable": "MERGEABLE",
+                  "mergeStateStatus": "CLEAN",
+                  "reviewDecision": "REVIEW_REQUIRED",
+                  "autoMergeRequest": null,
+                  "isInMergeQueue": false,
+                  "author": { "login": "carol" },
+                  "commits": {
+                    "nodes": [
+                      { "commit": { "statusCheckRollup": { "state": "SUCCESS" } } }
+                    ]
+                  },
+                  "labels": { "nodes": [ { "name": "bug", "color": "d73a4a" } ] },
+                  "assignees": { "nodes": [ { "login": "dave" } ] },
+                  "reviewRequests": {
+                    "nodes": [
+                      { "requestedReviewer": { "login": "alice" } }
+                    ]
+                  },
+                  "comments": {
+                    "totalCount": 3,
+                    "nodes": [
+                      { "author": { "login": "carol" }, "createdAt": "2026-05-28T11:00:00Z" }
+                    ]
+                  }
+                }
+              ]
+            },
+            "rateLimit": { "limit": 5000, "remaining": 4999, "resetAt": "2026-05-28T13:00:00Z" }
+          },
+          "errors": null
+        }"#
+    }
+
+    #[test]
+    fn search_query_response_with_bodiless_comment_deserializes() {
+        let resp: GqlResponse = serde_json::from_str(search_query_wire_response())
+            .expect("trimmed SEARCH_QUERY response must deserialize even when a PR has comments");
+        let data = resp.data.expect("data present");
+        assert_eq!(
+            data.search.nodes.len(),
+            1,
+            "the PR must survive deserialization — a bodiless comment must not drop the page",
+        );
+        let pr = &data.search.nodes[0];
+        assert_eq!(pr.number, 42);
+        // The comment node has no `body` — it must default to empty,
+        // not abort the parse.
+        assert_eq!(pr.comments.nodes.len(), 1);
+        assert_eq!(pr.comments.nodes[0].body, "");
+        assert_eq!(pr.comments.total_count, Some(3));
+    }
+
+    #[test]
+    fn search_query_response_converts_to_pr_task() {
+        let resp: GqlResponse = serde_json::from_str(search_query_wire_response()).unwrap();
+        let pr = &resp.data.unwrap().search.nodes[0];
+        let task = pr_to_task(pr, "alice");
+        assert_eq!(task.id.key, "owner/repo#42");
+        assert_eq!(task.title, "Add foo to bar");
+        assert_eq!(task.branch.as_deref(), Some("feature/foo"));
+        assert_eq!(task.state, TaskState::Open);
+        // `unread_count` rides on the server-side totalCount even
+        // though the body (and thus the activity) isn't fetched.
+        assert_eq!(task.unread_count, 3);
+        // Last commenter still lights up from the bodiless comment's
+        // author so the sidebar's "from $login" line works pre-lazy.
+        assert_eq!(task.last_commenter.as_deref(), Some("carol"));
     }
 
     /// Last commenter falls through from `comments.nodes[0]` even

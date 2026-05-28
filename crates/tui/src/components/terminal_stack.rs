@@ -1821,9 +1821,7 @@ impl TerminalStack {
             } else {
                 rect
             };
-            if show_recap
-                && let Some(msg) = slot.last_user_message.as_deref()
-            {
+            if show_recap && let Some(msg) = slot.last_user_message.as_deref() {
                 let header_rect = Rect {
                     x: rect.x,
                     y: rect.y,

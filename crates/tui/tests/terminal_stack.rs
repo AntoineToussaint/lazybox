@@ -1022,7 +1022,10 @@ fn render_truncates_long_recap_with_ellipsis() {
     );
     t.handle_key(code(KeyCode::Enter), &mut cmds);
     let out = render_to_string(&mut t, 30, 10, true);
-    assert!(out.contains("…"), "ellipsis present on overflow; got:\n{out}");
+    assert!(
+        out.contains("…"),
+        "ellipsis present on overflow; got:\n{out}"
+    );
 }
 
 #[test]

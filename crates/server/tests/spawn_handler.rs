@@ -302,6 +302,85 @@ async fn recover_sessions_reattaches_survivors() {
     .expect("deadline");
 }
 
+/// Regression / smoke check for the **ingest-into-agent** path
+/// (issue #50). When work is handed to an agent — either by the user
+/// pressing `w` or by the `@pilot`-mention auto-spawn — the agent is
+/// `Spawn`ed with an `initial_prompt`. The daemon must actually
+/// deliver that prompt to the agent's terminal once it's ready to
+/// receive input; if it doesn't, the agent starts but never learns
+/// what work to do (exactly the "ingest is broken" symptom).
+///
+/// This drives the full path through `handle_spawn`: spawn a Claude
+/// agent with an initial prompt, drive the synthetic "input box is
+/// ready" output so the inject task fires, then assert the prompt
+/// bytes (and the separate submit keystroke) reached the backend.
+#[tokio::test]
+async fn spawn_with_initial_prompt_delivers_work_to_agent() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+
+        const WORK: &str = "Implement GitHub issue #50: ingest is broken.";
+        client
+            .send(Command::Spawn {
+                session_key: "test:ws-ingest".into(),
+                session_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                initial_prompt: Some(WORK.into()),
+            })
+            .unwrap();
+        let _ = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("TerminalSpawned arrived");
+
+        // One mocked session: the Claude agent we just spawned.
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        // Drive Claude's "ready for a pasted prompt" screen: the input
+        // box footer (the paired `Esc to cancel` / `Tab to amend`
+        // markers `detect_ready_for_prompt` keys on) with no permission
+        // gate up. Without it the inject only fires on the slow
+        // settle/hard-deadline fallback.
+        mock.emit(&key, b"Esc to cancel  Tab to amend").await;
+
+        // Poll the backend's write log until the work prompt shows up
+        // (the inject task runs on its own tokio task).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let joined = loop {
+            let joined = mock
+                .writes_for(&key)
+                .await
+                .into_iter()
+                .flatten()
+                .collect::<Vec<u8>>();
+            let done = String::from_utf8_lossy(&joined).contains(WORK) && joined.contains(&b'\r');
+            if done || tokio::time::Instant::now() >= deadline {
+                break joined;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let text = String::from_utf8_lossy(&joined);
+        assert!(
+            text.contains(WORK),
+            "agent never received the work prompt; backend writes = {text:?}"
+        );
+        // Claude's prompt is committed by a separate `\r` submit after
+        // the paste settles — without it the prompt sits unsent in the
+        // input box.
+        assert!(
+            joined.contains(&b'\r'),
+            "work prompt was pasted but never submitted (no Enter keystroke); writes = {text:?}"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
 /// Regression: stale `terminal_id` in `InjectPrompt` falls back to
 /// Spawn when `fallback_spawn` is supplied. Symptom pre-fix: user
 /// presses `w` (work) right after the agent crashed, the TUI's

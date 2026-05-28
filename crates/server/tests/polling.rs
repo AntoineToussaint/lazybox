@@ -2288,3 +2288,43 @@ async fn tick_dispatches_auto_spawn_action_after_upsert() {
         "AutoSpawnAgent action must trigger TerminalSpawned"
     );
 }
+
+// ── @pilot ingest: mentioned issues survive the display filter ──────
+//
+// Regression for issue #50. The `@pilot` auto-spawn targets the
+// mentioned issue's workspace key, so that issue's Task must be
+// upserted even when the user's display filter would drop it (PR-only
+// inbox, role/scope mismatch). Otherwise `handle_spawn` finds no
+// workspace and spawns the agent in pilot's own cwd with no branch.
+
+#[test]
+fn readmit_keeps_mentioned_issue_dropped_by_filter() {
+    // Display filter kept only a PR; the `@pilot`-mentioned issue was
+    // dropped. It must be re-admitted so its workspace gets created.
+    let kept = vec![make_task("o/r#1")]; // a PR that passed the filter
+    let mentioned = vec![make_issue_task("o/r#42")];
+    let out = polling::readmit_mentioned_tasks(kept, mentioned);
+    assert_eq!(out.len(), 2, "mentioned issue must be re-admitted");
+    assert!(
+        out.iter().any(|t| t.id.key == "o/r#42"),
+        "the @pilot-mentioned issue is present so its workspace gets built"
+    );
+}
+
+#[test]
+fn readmit_does_not_duplicate_already_kept_mention() {
+    // The mentioned issue ALSO passed the display filter (issues are
+    // enabled). Re-admitting must not create a duplicate workspace.
+    let issue = make_issue_task("o/r#42");
+    let kept = vec![issue.clone()];
+    let out = polling::readmit_mentioned_tasks(kept, vec![issue]);
+    assert_eq!(out.len(), 1, "no duplicate task for an already-kept issue");
+}
+
+#[test]
+fn readmit_is_noop_without_mentions() {
+    let kept = vec![make_task("o/r#1")];
+    let out = polling::readmit_mentioned_tasks(kept.clone(), vec![]);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].id.key, kept[0].id.key);
+}

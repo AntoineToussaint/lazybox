@@ -1559,7 +1559,10 @@ impl GhClient {
         want_issues: bool,
         allowed_logins: &std::collections::BTreeSet<String>,
     ) -> Result<(Vec<Task>, Option<String>, Vec<crate::PilotMention>), GhError> {
-        if !want_prs && !want_issues {
+        // Issues are queried for `@pilot` mentions even when issue
+        // *display* is off — see `should_query_issues` (issue #50).
+        let want_issue_side = should_query_issues(want_issues, allowed_logins);
+        if !want_prs && !want_issue_side {
             return Ok((Vec::new(), None, Vec::new()));
         }
         let do_pr_side = want_prs && (run_global || !repos.is_empty());
@@ -1577,7 +1580,7 @@ impl GhClient {
             }
         };
         let issue_fut = async {
-            if want_issues {
+            if want_issue_side {
                 self.fetch_all_issues_with_mentions(allowed_logins).await
             } else {
                 Ok((Vec::new(), Vec::new()))
@@ -1627,7 +1630,11 @@ impl GhClient {
         want_issues: bool,
         allowed_logins: &std::collections::BTreeSet<String>,
     ) -> Result<(Vec<Task>, Option<String>, Vec<crate::PilotMention>), GhError> {
-        if !want_prs && !want_issues {
+        // Same decoupling as the round-robin variant: scan issues for
+        // `@pilot` mentions whenever the feature is active, even on a
+        // PR-only inbox (issue #50).
+        let want_issue_side = should_query_issues(want_issues, allowed_logins);
+        if !want_prs && !want_issue_side {
             return Ok((Vec::new(), None, Vec::new()));
         }
         let pr_fut = async {
@@ -1638,7 +1645,7 @@ impl GhClient {
             }
         };
         let issue_fut = async {
-            if want_issues {
+            if want_issue_side {
                 self.fetch_all_issues_with_mentions(allowed_logins).await
             } else {
                 Ok((Vec::new(), Vec::new()))
@@ -2153,11 +2160,56 @@ impl pilot_core::TaskProvider for GhClient {
     }
 }
 
+/// Whether the issue-side GraphQL query should run on a poll tick.
+///
+/// Runs when EITHER:
+///   - the user wants issues displayed in the inbox (`want_issues`), OR
+///   - the `@pilot` mention feature is active (a non-empty allowlist).
+///
+/// The second clause is the fix for issue #50: the `@pilot` auto-spawn
+/// trigger lives on the issues side, but the GitHub default filter is
+/// PR-only (`issue.*` keys unset → `want_issues == false`). Tying the
+/// mention scan to `want_issues` meant a default/PR-only inbox silently
+/// never ingested `@pilot` work. The non-mention issues pulled by a
+/// mention-only scan are dropped downstream by `filter_github_tasks`,
+/// so they don't leak into the displayed inbox.
+pub(crate) fn should_query_issues(
+    want_issues: bool,
+    allowed_logins: &std::collections::BTreeSet<String>,
+) -> bool {
+    want_issues || !allowed_logins.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    fn logins(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn issue_query_runs_when_issues_displayed() {
+        assert!(should_query_issues(true, &logins(&[])));
+        assert!(should_query_issues(true, &logins(&["alice"])));
+    }
+
+    #[test]
+    fn issue_query_runs_for_mentions_even_when_issue_display_off() {
+        // Regression (issue #50): PR-only inbox must still scan issues
+        // for `@pilot` mentions when the allowlist is non-empty.
+        assert!(
+            should_query_issues(false, &logins(&["alice"])),
+            "@pilot scan must run even when issue display is off"
+        );
+    }
+
+    #[test]
+    fn issue_query_skipped_when_neither_display_nor_mentions() {
+        assert!(!should_query_issues(false, &logins(&[])));
+    }
 
     /// Spin up a tiny TCP server that answers every request with the
     /// same canned HTTP response. Returns the `http://addr` base URI

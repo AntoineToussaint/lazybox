@@ -304,6 +304,14 @@ impl TaskSource for GhSource {
                     mentions.len()
                 ));
             }
+            // Issues an allowed user `@pilot`-tagged this tick. We
+            // re-admit these into the kept set below so the auto-spawn
+            // always lands in a real issue workspace/worktree — even
+            // when the display filter (role / scope / issue-display-off)
+            // would otherwise drop the row. Without it, `handle_spawn`
+            // finds no workspace and spawns the agent in pilot's own
+            // cwd with no branch (issue #50). See `readmit_mentioned_tasks`.
+            let mut mentioned_tasks: Vec<Task> = Vec::new();
             for mention in mentions {
                 if let Err(e) = self.client.react_eyes(&mention.target_node_id).await {
                     tracing::warn!(
@@ -337,6 +345,7 @@ impl TaskSource for GhSource {
                 };
                 let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(task));
                 let prompt = Some(pilot_core::prompts::build_implement_issue_prompt(task));
+                mentioned_tasks.push(task.clone());
                 let reason = format!(
                     "@pilot mention by {} on {}#{} ({})",
                     mention.triggered_by_login,
@@ -360,7 +369,10 @@ impl TaskSource for GhSource {
             }
 
             self.emit_progress(format!("Got {} raw items, applying filters…", raw.len()));
-            let kept = filter_github_tasks(raw, &self.filter, &self.scopes);
+            let kept = readmit_mentioned_tasks(
+                filter_github_tasks(raw, &self.filter, &self.scopes),
+                mentioned_tasks,
+            );
             self.emit_progress(format!("{} tasks kept after filter", kept.len()));
 
             // Log a per-rate-budget summary too. Cheap, super useful
@@ -611,6 +623,25 @@ pub fn filter_github_tasks(
             false
         })
         .collect()
+}
+
+/// Re-admit `@pilot`-mentioned issue tasks that `filter_github_tasks`
+/// dropped, so an auto-spawn lands in a real workspace/worktree.
+///
+/// The `@pilot` mention is an explicit, high-intent trigger: the user
+/// asked pilot to work on this exact issue. The passive display filter
+/// (role / scope / issue-display-off) must not prevent the issue's
+/// workspace from being created — otherwise `dispatch_action` →
+/// `handle_spawn` finds no workspace and spawns the agent in pilot's
+/// own cwd with no branch (the issue #50 symptom). Tasks already in
+/// `kept` are left as-is (dedup on `TaskId`); the rest are appended.
+pub fn readmit_mentioned_tasks(mut kept: Vec<Task>, mentioned: Vec<Task>) -> Vec<Task> {
+    for task in mentioned {
+        if !kept.iter().any(|k| k.id == task.id) {
+            kept.push(task);
+        }
+    }
+    kept
 }
 
 /// Drop Linear tasks whose role isn't enabled. Linear has no

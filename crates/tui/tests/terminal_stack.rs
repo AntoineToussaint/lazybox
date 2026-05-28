@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pilot_core::SessionKey;
 use pilot_ipc::{Command, Event, TerminalId, TerminalKind, TerminalSnapshot};
 use pilot_tui::components::TerminalStack;
-use pilot_tui::components::terminal_stack::{RECENT_OUTPUT_CAP, strip_ansi};
+use pilot_tui::components::terminal_stack::{COMPOSING_CAP, RECENT_OUTPUT_CAP, strip_ansi};
 use pilot_tui::{PaneId, PaneOutcome};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -706,6 +706,354 @@ fn ctrl_w_arms_consumes_only_the_prefix() {
         "untouched keys go to the active terminal"
     );
 }
+
+// ── Pinned "you ▸ …" recap ─────────────────────────────────────────────
+//
+// The recap header shows the latest message the user submitted to an
+// agent, pinned above the agent's terminal grid. Tracking lives at
+// keystroke level — the user types into the PTY, we mirror chars into
+// our own buffer, commit on Enter, and render that as a one-line
+// summary above the agent.
+
+fn type_str(t: &mut TerminalStack, s: &str) {
+    let mut cmds = Vec::new();
+    for c in s.chars() {
+        t.handle_key(ch(c), &mut cmds);
+    }
+}
+
+#[test]
+fn enter_commits_typed_text_as_last_user_message() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    type_str(&mut t, "fix the bug");
+    // Not yet committed — Enter is what marks the message as sent.
+    assert_eq!(t.last_user_message_of(TerminalId(1)), None);
+
+    let mut cmds = Vec::new();
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    assert_eq!(t.last_user_message_of(TerminalId(1)), Some("fix the bug"));
+    // Composing buffer is wiped so the next message starts fresh.
+    assert_eq!(t.composing_of(TerminalId(1)), Some(""));
+}
+
+#[test]
+fn second_enter_replaces_the_recap() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let mut cmds = Vec::new();
+    type_str(&mut t, "first");
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    type_str(&mut t, "second");
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    assert_eq!(t.last_user_message_of(TerminalId(1)), Some("second"));
+}
+
+#[test]
+fn empty_enter_does_not_overwrite_previous_recap() {
+    // Pressing Enter on an empty buffer (just a CR with nothing
+    // typed) is meaningless as "the latest message" — the previous
+    // recap should stay. Avoids the pin going blank every time the
+    // user mashes Enter to dismiss a Claude approval prompt.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let mut cmds = Vec::new();
+    type_str(&mut t, "look at this");
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    assert_eq!(t.last_user_message_of(TerminalId(1)), Some("look at this"));
+}
+
+#[test]
+fn shift_enter_appends_newline_and_does_not_commit() {
+    // Claude binds Shift-Enter to "newline in the prompt without
+    // submit". The composing buffer mirrors that: the line keeps
+    // building until a plain Enter arrives.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let mut cmds = Vec::new();
+    type_str(&mut t, "line 1");
+    t.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+        &mut cmds,
+    );
+    type_str(&mut t, "line 2");
+    assert_eq!(t.last_user_message_of(TerminalId(1)), None);
+    assert_eq!(t.composing_of(TerminalId(1)), Some("line 1\nline 2"));
+
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    assert_eq!(
+        t.last_user_message_of(TerminalId(1)),
+        Some("line 1\nline 2")
+    );
+}
+
+#[test]
+fn backspace_pops_from_composing() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    type_str(&mut t, "hello");
+    let mut cmds = Vec::new();
+    t.handle_key(code(KeyCode::Backspace), &mut cmds);
+    t.handle_key(code(KeyCode::Backspace), &mut cmds);
+    assert_eq!(t.composing_of(TerminalId(1)), Some("hel"));
+}
+
+#[test]
+fn ctrl_c_clears_composing_without_commit() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    type_str(&mut t, "draft");
+    let mut cmds = Vec::new();
+    t.handle_key(ctrl('c'), &mut cmds);
+    assert_eq!(t.composing_of(TerminalId(1)), Some(""));
+    // No prior submit → still None, not a phantom committed "draft".
+    assert_eq!(t.last_user_message_of(TerminalId(1)), None);
+}
+
+#[test]
+fn esc_clears_composing_without_commit() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    type_str(&mut t, "abandon");
+    let mut cmds = Vec::new();
+    t.handle_key(code(KeyCode::Esc), &mut cmds);
+    assert_eq!(t.composing_of(TerminalId(1)), Some(""));
+    assert_eq!(t.last_user_message_of(TerminalId(1)), None);
+}
+
+#[test]
+fn shell_terminals_are_not_tracked() {
+    // Shells don't have a single semantic "user prompt" the way an
+    // agent does — every `cd`, `ls`, `grep` would otherwise commit
+    // as the latest recap. Skip them entirely.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    type_str(&mut t, "ls");
+    let mut cmds = Vec::new();
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    assert_eq!(t.last_user_message_of(TerminalId(1)), None);
+    assert_eq!(t.composing_of(TerminalId(1)), Some(""));
+}
+
+#[test]
+fn recap_is_per_agent_terminal() {
+    // Two agents in the same session each track their own message.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.on_event(&spawned(2, "o/r#1", TerminalKind::Agent("codex".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    // Submit a message into the Claude tab (active by default — idx 0).
+    let mut cmds = Vec::new();
+    type_str(&mut t, "ask claude");
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+
+    // Switch to codex and submit a different message.
+    t.cycle_tab_forward();
+    type_str(&mut t, "ask codex");
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+
+    assert_eq!(t.last_user_message_of(TerminalId(1)), Some("ask claude"));
+    assert_eq!(t.last_user_message_of(TerminalId(2)), Some("ask codex"));
+}
+
+#[test]
+fn record_paste_appends_to_focused_agent_composing() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    type_str(&mut t, "review ");
+    t.record_paste("this snippet");
+    let mut cmds = Vec::new();
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    assert_eq!(
+        t.last_user_message_of(TerminalId(1)),
+        Some("review this snippet")
+    );
+}
+
+#[test]
+fn record_paste_truncates_at_composing_cap() {
+    // Pathological paste — way larger than the cap. The buffer
+    // should clamp to COMPOSING_CAP rather than grow unbounded.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let blob = "a".repeat(COMPOSING_CAP * 2);
+    t.record_paste(&blob);
+    assert_eq!(
+        t.composing_of(TerminalId(1)).map(|s| s.len()),
+        Some(COMPOSING_CAP),
+        "paste clamped to cap"
+    );
+}
+
+#[test]
+fn record_paste_keeps_utf8_char_boundaries_on_clamp() {
+    // The clamp must land on a UTF-8 char boundary — splitting a
+    // multi-byte codepoint would produce an invalid String. Build a
+    // buffer that already sits one byte short of the cap, then paste
+    // a 4-byte emoji that would straddle the boundary.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let near_full = "x".repeat(COMPOSING_CAP - 1);
+    t.record_paste(&near_full);
+    t.record_paste("🚀");
+    let composing = t.composing_of(TerminalId(1)).expect("agent slot");
+    assert!(
+        composing.is_char_boundary(composing.len()),
+        "result is a valid UTF-8 string"
+    );
+    assert!(composing.len() <= COMPOSING_CAP);
+}
+
+#[test]
+fn record_paste_is_noop_on_shell() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    t.record_paste("should be ignored");
+    let mut cmds = Vec::new();
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    assert_eq!(t.last_user_message_of(TerminalId(1)), None);
+}
+
+#[test]
+fn render_pins_recap_above_agent_grid() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    type_str(&mut t, "fix the bug");
+    let mut cmds = Vec::new();
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+
+    let out = render_to_string(&mut t, 60, 10, true);
+    assert!(
+        out.contains("you ▸ fix the bug"),
+        "recap visible; got:\n{out}"
+    );
+}
+
+#[test]
+fn render_does_not_pin_recap_when_no_message_yet() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let out = render_to_string(&mut t, 60, 10, true);
+    assert!(
+        !out.contains("you ▸"),
+        "no recap before first submit; got:\n{out}"
+    );
+}
+
+#[test]
+fn render_does_not_pin_recap_on_shell() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    // Even if we (hypothetically) had a message buffered, shells
+    // should never render the recap — the field is `None` for
+    // shells by construction.
+    type_str(&mut t, "ls");
+    let mut cmds = Vec::new();
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    let out = render_to_string(&mut t, 60, 10, true);
+    assert!(!out.contains("you ▸"), "no recap on shell; got:\n{out}");
+}
+
+#[test]
+fn render_updates_recap_to_latest_message() {
+    // Acceptance criterion: "Pin updates on every new user message sent."
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let mut cmds = Vec::new();
+    type_str(&mut t, "first ask");
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    let out_a = render_to_string(&mut t, 60, 10, true);
+    assert!(out_a.contains("you ▸ first ask"), "got:\n{out_a}");
+
+    type_str(&mut t, "second ask");
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    let out_b = render_to_string(&mut t, 60, 10, true);
+    assert!(out_b.contains("you ▸ second ask"), "got:\n{out_b}");
+    assert!(!out_b.contains("first ask"), "stale recap; got:\n{out_b}");
+}
+
+#[test]
+fn render_truncates_long_recap_with_ellipsis() {
+    // Acceptance criterion: "Long messages are summarized / truncated
+    // cleanly." Render into a narrow pane and check we get a `…`.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let mut cmds = Vec::new();
+    type_str(
+        &mut t,
+        "this is a very long prompt that will not fit inside a narrow pane",
+    );
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    let out = render_to_string(&mut t, 30, 10, true);
+    assert!(
+        out.contains("…"),
+        "ellipsis present on overflow; got:\n{out}"
+    );
+}
+
+#[test]
+fn render_summary_collapses_internal_newlines() {
+    // Shift-Enter inserts a literal `\n` in the composing buffer.
+    // The pinned line is single-row, so the renderer should collapse
+    // those newlines (and runs of whitespace) to single spaces.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let mut cmds = Vec::new();
+    type_str(&mut t, "line one");
+    t.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+        &mut cmds,
+    );
+    type_str(&mut t, "line two");
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+
+    let out = render_to_string(&mut t, 60, 10, true);
+    assert!(
+        out.contains("you ▸ line one line two"),
+        "newline collapsed to space; got:\n{out}"
+    );
+}
+
+// ── Footer hint bar (from #25) ─────────────────────────────────────────
 
 #[test]
 fn footer_drops_all_keys_to_pty_noise() {

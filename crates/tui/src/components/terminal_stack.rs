@@ -53,6 +53,35 @@ const DEFAULT_ROWS: u16 = 32;
 /// 4 KiB is enough to span any prompt the agents have shipped so far.
 pub const RECENT_OUTPUT_CAP: usize = 4 * 1024;
 
+/// Cap for the per-terminal composing buffer (the in-flight user
+/// message that will commit on the next Enter). Practical agent
+/// prompts fit in a few KB; this bound exists to keep a pathological
+/// paste (a multi-MB blob dropped into the terminal) from sitting in
+/// memory unbounded until the user finally hits Enter or abandons.
+pub const COMPOSING_CAP: usize = 8 * 1024;
+
+/// Visible prefix on the pinned "latest user message" recap row.
+/// Whitespace + the box-drawing wedge reads as "input direction"
+/// without being visually loud.
+const RECAP_PREFIX: &str = "you ▸ ";
+
+/// Collapse a possibly multi-line user message down to a single
+/// line of plain text for the pinned recap row. Newlines and runs
+/// of whitespace become single spaces so multi-line prompts
+/// (Shift-Enter inside Claude) render as `fix bug in foo.rs and
+/// retry` instead of `fix bug in foo.rs⏎and retry` with a visible
+/// gap. Single-pass; no intermediate Vec.
+fn summarize_message(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len());
+    for word in msg.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
+}
+
 /// Outcome of a scroll attempt on the focused terminal. Used by the
 /// orchestrator's mouse-wheel handler to surface why a scroll might
 /// have looked like nothing happened — without this, "no scrollback
@@ -255,6 +284,90 @@ struct TerminalSlot {
     /// the original spawn size never gets written and the user sees
     /// a frozen-looking pane).
     last_rendered_size: Option<(u16, u16)>,
+    /// Characters the user has typed since the last submit. Only
+    /// tracked on Agent terminals — the pinned recap is meaningless
+    /// for shells. Cleared when the user hits Enter, Ctrl-C, Ctrl-U,
+    /// or Esc (the same keys that wipe the prompt buffer in Claude
+    /// Code / a shell prompt).
+    composing: String,
+    /// Most recently submitted user message. Rendered as a one-line
+    /// recap above the agent's terminal grid so it's obvious "what
+    /// you just asked the model" even after pages of tool output
+    /// scroll the prompt off-screen. `None` until the user has
+    /// submitted at least one message in this terminal.
+    last_user_message: Option<String>,
+}
+
+impl TerminalSlot {
+    /// Apply a user keystroke to the composing buffer + last-message
+    /// state. Mirrors how the agent's own prompt-line reads keys:
+    ///   - printable Char → append
+    ///   - Backspace → pop
+    ///   - Enter → commit (Shift-Enter inserts a newline instead,
+    ///     matching Claude Code's "newline-without-submit" binding)
+    ///   - Ctrl-C / Ctrl-U / Esc → clear the line
+    ///
+    /// Other keys (arrows, function keys, Tab) leave both buffers
+    /// untouched — they don't change the literal text the user is
+    /// composing. Per-char appends respect [`COMPOSING_CAP`] so a
+    /// rogue auto-typer can't grow the buffer unbounded.
+    fn apply_user_key(&mut self, key: &KeyEvent) {
+        use KeyCode::*;
+        let mods = key.modifiers;
+        match key.code {
+            Char(c) => {
+                if mods.contains(KeyModifiers::CONTROL) {
+                    if c == 'c' || c == 'u' {
+                        self.composing.clear();
+                    }
+                } else if self.composing.len() + c.len_utf8() <= COMPOSING_CAP {
+                    self.composing.push(c);
+                }
+            }
+            Enter => {
+                if mods.contains(KeyModifiers::SHIFT) {
+                    if self.composing.len() < COMPOSING_CAP {
+                        self.composing.push('\n');
+                    }
+                } else {
+                    let trimmed = self.composing.trim();
+                    if !trimmed.is_empty() {
+                        self.last_user_message = Some(trimmed.to_string());
+                    }
+                    self.composing.clear();
+                }
+            }
+            Backspace => {
+                self.composing.pop();
+            }
+            Esc => {
+                self.composing.clear();
+            }
+            _ => {}
+        }
+    }
+
+    /// Append `text` to the composing buffer, truncated to stay
+    /// within [`COMPOSING_CAP`]. Used by the bracketed-paste path
+    /// where the payload arrives as one chunk, so a single check at
+    /// the boundary is enough to defend against pathological pastes.
+    fn append_paste(&mut self, text: &str) {
+        let remaining = COMPOSING_CAP.saturating_sub(self.composing.len());
+        if remaining == 0 {
+            return;
+        }
+        if text.len() <= remaining {
+            self.composing.push_str(text);
+            return;
+        }
+        // Find the largest UTF-8 char boundary ≤ `remaining` so we
+        // don't split a multi-byte codepoint.
+        let mut cut = remaining;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        self.composing.push_str(&text[..cut]);
+    }
 }
 
 /// libghostty-vt state for one terminal.
@@ -958,6 +1071,46 @@ impl TerminalStack {
             recent: Vec::new(),
             agent_state: pilot_ipc::AgentState::Active,
             last_rendered_size: None,
+            composing: String::new(),
+            last_user_message: None,
+        }
+    }
+
+    /// The last full user message committed to the given terminal
+    /// (the bytes between two Enter presses), or `None` if no
+    /// message has been committed — including for shells, where the
+    /// composing buffer is intentionally left dormant. Drives the
+    /// pinned "you ▸ …" recap line at the top of the agent view.
+    pub fn last_user_message_of(&self, id: TerminalId) -> Option<&str> {
+        self.terminals
+            .get(&id)
+            .and_then(|s| s.last_user_message.as_deref())
+    }
+
+    /// In-flight characters the user has typed but not yet
+    /// submitted to the given terminal. Exposed primarily for tests
+    /// so they can verify buffer management (commit on Enter, clear
+    /// on Ctrl-C, etc.) without having to drive a full render, but
+    /// also usable by future surfaces that want a live "draft"
+    /// indicator.
+    pub fn composing_of(&self, id: TerminalId) -> Option<&str> {
+        self.terminals.get(&id).map(|s| s.composing.as_str())
+    }
+
+    /// Record a bracketed-paste payload as part of the focused
+    /// agent terminal's composing buffer. Pastes don't flow through
+    /// `handle_key` (they arrive as a single `Event::Paste` and the
+    /// realm forwards them straight to the PTY), so without this
+    /// hook a long pasted prompt would commit on Enter as a blank
+    /// recap. No-op for non-Agent terminals.
+    pub fn record_paste(&mut self, text: &str) {
+        let Some(id) = self.focused_terminal_id() else {
+            return;
+        };
+        if let Some(slot) = self.terminals.get_mut(&id)
+            && matches!(slot.kind, TerminalKind::Agent(_))
+        {
+            slot.append_paste(text);
         }
     }
 
@@ -1109,6 +1262,16 @@ impl TerminalStack {
         let Some(bytes) = key_to_bytes(&key) else {
             return PaneOutcome::Consumed;
         };
+        // Mirror the keystroke into our own composing buffer so the
+        // pinned "you ▸ …" recap reflects the latest submitted
+        // message. Scoped to Agent terminals — shells don't have a
+        // single semantic "user prompt", so the recap would be noisy
+        // (every cd, every grep) and surprising.
+        if let Some(slot) = self.terminals.get_mut(&id)
+            && matches!(slot.kind, TerminalKind::Agent(_))
+        {
+            slot.apply_user_key(&key);
+        }
         cmds.push(Command::Write {
             terminal_id: id,
             bytes,
@@ -1630,6 +1793,27 @@ impl TerminalStack {
         });
     }
 
+    /// Render the "you ▸ <recap>" pin into `area`. Dim styling so
+    /// the line reads as chrome / recap, not as fresh agent output
+    /// the user has to parse. Truncates with `…` when the message
+    /// overflows the row width — same affordance the empty-state
+    /// hint uses elsewhere in this pane.
+    fn render_user_message_recap(frame: &mut Frame, area: Rect, msg: &str) {
+        let theme = crate::theme::current();
+        let summary = summarize_message(msg);
+        let line = ratatui::text::Line::from(vec![
+            Span::styled(
+                RECAP_PREFIX,
+                Style::default()
+                    .fg(theme.text_dim)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(summary, Style::default().fg(theme.text_dim)),
+        ]);
+        let line = crate::components::table::truncate_line(line, area.width as usize);
+        frame.render_widget(Paragraph::new(line), area);
+    }
+
     /// Render a single terminal slot full-rect. Used by both the
     /// tabs path and the splits path's leaf case.
     fn render_one_terminal(
@@ -1641,15 +1825,42 @@ impl TerminalStack {
     ) {
         let _ = focused; // ghostty-vt doesn't render focus chrome itself
         if let Some(slot) = self.terminals.get_mut(&id) {
-            slot.vt.ensure_size(rect.width, rect.height);
+            // Carve off one row for the pinned "you ▸ <recap>" line
+            // when this is an agent terminal with a remembered last
+            // user message. Refuses to take the row at h ≤ 1 — leaves
+            // every cell for the agent grid rather than blank-out the
+            // pane entirely on a 1-row split.
+            let show_recap = matches!(slot.kind, TerminalKind::Agent(_))
+                && slot.last_user_message.is_some()
+                && rect.height >= 2;
+            let body = if show_recap {
+                Rect {
+                    x: rect.x,
+                    y: rect.y + 1,
+                    width: rect.width,
+                    height: rect.height - 1,
+                }
+            } else {
+                rect
+            };
+            if show_recap && let Some(msg) = slot.last_user_message.as_deref() {
+                let header_rect = Rect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: 1,
+                };
+                Self::render_user_message_recap(frame, header_rect, msg);
+            }
+            slot.vt.ensure_size(body.width, body.height);
             // Backend PTY also needs to know the new size — otherwise
             // the shell process keeps writing at its spawn dimensions
             // and the bottom rows go blank as soon as the user scrolls
             // past them. Queue a resize for the App to ship.
-            let new_size = (rect.width, rect.height);
-            if rect.width > 0 && rect.height > 0 && slot.last_rendered_size != Some(new_size) {
+            let new_size = (body.width, body.height);
+            if body.width > 0 && body.height > 0 && slot.last_rendered_size != Some(new_size) {
                 slot.last_rendered_size = Some(new_size);
-                self.pending_resizes.push((id, rect.width, rect.height));
+                self.pending_resizes.push((id, body.width, body.height));
             }
             if let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) {
                 let widget = GhosttyTerminal::new(
@@ -1658,7 +1869,7 @@ impl TerminalStack {
                     &mut slot.vt.cell_iter,
                     &mut slot.vt.shadow,
                 );
-                frame.render_widget(widget, rect);
+                frame.render_widget(widget, body);
             }
         }
     }

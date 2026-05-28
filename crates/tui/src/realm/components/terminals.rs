@@ -198,6 +198,16 @@ impl Terminals {
         self.inner.focused_terminal_id()
     }
 
+    /// Mirror a bracketed-paste payload into the focused terminal's
+    /// user-message tracker so the pinned recap line picks up text
+    /// that arrives via paste (not just key-by-key typing). No-op
+    /// when the focused terminal isn't an Agent. The caller is still
+    /// responsible for sending the paste bytes to the PTY — this
+    /// only updates pilot's own composing buffer.
+    pub fn record_paste(&mut self, text: &str) {
+        self.inner.record_paste(text);
+    }
+
     /// Encode a mouse event for the focused terminal. Returns the
     /// bytes to `Write` to the PTY (paired with the target terminal
     /// id), or None when the terminal isn't tracking mouse or the

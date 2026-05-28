@@ -1383,9 +1383,9 @@ mod tests;
 // Re-export pills.rs items so callers in the rest of the crate
 // keep their `crate::components::sidebar::*` import paths.
 pub(crate) use pills::{
-    AttentionSignal, BADGE_COL_W, STATUS_COL_W, TIME_COL_W, UNREAD_COL_W, badge_pill_style,
-    mailbox_membership, relative_time, role_badge, status_pills, truncate_ellipsis,
-    workspace_attention_signals, workspace_needs_attention, workspace_type_label,
+    AttentionSignal, badge_pill_style, mailbox_membership, relative_time, role_badge, status_pills,
+    truncate_ellipsis, workspace_attention_signals, workspace_needs_attention,
+    workspace_type_label,
 };
 #[cfg(test)]
 pub(crate) use pills::{pill_for_tag, status_pill};

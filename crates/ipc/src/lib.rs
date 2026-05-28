@@ -340,6 +340,20 @@ pub enum Command {
     MarkRead {
         session_key: SessionKey,
     },
+    /// Hint to the daemon: the user is now looking at this
+    /// workspace. The polling layer uses it to bump the workspace's
+    /// repo to the front of the round-robin sync cursor so a
+    /// comment landing on the visible PR shows up next cycle
+    /// instead of waiting the rest of the rotation. No store
+    /// mutation, no broadcast — pure scheduling hint.
+    ///
+    /// Sent on sidebar cursor moves alongside the existing
+    /// `MarkRead`. The daemon silently ignores it if the workspace
+    /// has no upstream repo (e.g. a locally-created pre-PR
+    /// sandbox).
+    FocusWorkspace {
+        session_key: SessionKey,
+    },
     /// Mark exactly one activity row as read. The auto-mark-on-hover
     /// flow uses this so a brief glance at one comment doesn't flip
     /// the whole workspace's unread badge to zero. `index` is the

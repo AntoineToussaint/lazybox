@@ -16,25 +16,6 @@ use super::Mailbox;
 use pilot_core::{SessionKey, Workspace};
 use ratatui::style::{Color, Modifier, Style};
 
-/// Visible width of the status column — now TWO side-by-side pills:
-/// review (9 cells) + a 1-cell gutter + CI (9 cells) = 19 cells.
-/// Lifecycle / blocker pills (`MERGED`, `CONFLICT`, `READY`, …)
-/// also use 9 cells and the CI half stays empty for those rows.
-pub(crate) const STATUS_COL_W: usize = 19;
-/// Visible width of the time column. `now`/`Xm`/`Xh`/`Xd`/`Xmo` all
-/// fit in 4 cells (max is `12mo`).
-pub(crate) const TIME_COL_W: usize = 4;
-/// Visible width of the unread-pill column. ` ●99+` is the worst
-/// case (5 cells). Rows without unread render 5 row-styled spaces
-/// so the badge / status / time columns to its right don't shift.
-pub(crate) const UNREAD_COL_W: usize = 5;
-/// Visible width of the agent-badge column. Sized to fit the common
-/// "one agent + one shell" case ( ` C ` + space + ` S ` = 7 cells);
-/// a single badge gets right-aligned padding, more than two get
-/// truncated. Rows without any badge render this many row-styled
-/// spaces so the status / time columns to the right stay anchored.
-pub(crate) const BADGE_COL_W: usize = 7;
-
 /// Right-side status pill showing the most actionable problem on the
 /// PR. One pill at a time, ordered by severity: merge conflict beats
 /// CI failure beats CI mixed beats CI running beats CI ok beats

@@ -175,10 +175,15 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         _ => TaskState::Open,
     };
 
-    let labels: Vec<String> = issue
+    let labels: Vec<pilot_core::Label> = issue
         .labels
         .as_ref()
-        .map(|l| l.nodes.iter().map(|n| n.name.clone()).collect())
+        .map(|l| {
+            l.nodes
+                .iter()
+                .map(|n| pilot_core::Label::new(n.name.clone()))
+                .collect()
+        })
         .unwrap_or_default();
 
     let assignees = issue

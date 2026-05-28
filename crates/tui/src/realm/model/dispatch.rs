@@ -367,6 +367,33 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                 }
             }
+            Action::ManageLabels => {
+                // Labels require a `Labelable` node id — same as
+                // assignees. Pre-PR scratch workspaces don't qualify.
+                if let Some(ws) = self.sidebar.selected_workspace() {
+                    let has_target = ws.pr.as_ref().map(|p| p.node_id.is_some()).unwrap_or(false)
+                        || ws
+                            .gh_issues
+                            .first()
+                            .map(|i| i.node_id.is_some())
+                            .unwrap_or(false);
+                    if !has_target {
+                        self.flash_info("no PR / issue to label");
+                        return cmds;
+                    }
+                    let ws_key = ws.key.clone();
+                    // Two-step: ask the daemon for the repo's label
+                    // set, then mount the picker when
+                    // `IpcEvent::RepoLabels` arrives. Stash the
+                    // workspace key so the event handler knows
+                    // whether the response is still relevant.
+                    self.pending_labels_request = Some(ws_key.clone());
+                    cmds.push(IpcCommand::FetchRepoLabels {
+                        workspace_key: ws_key,
+                    });
+                    self.flash_hint("loading repo labels…");
+                }
+            }
             Action::OpenInBrowser => {
                 // Read the primary task's URL and hand it to the
                 // platform launcher. Surfaces a footer notice on

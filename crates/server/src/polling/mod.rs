@@ -32,8 +32,8 @@ pub use scheduler::{
 
 pub use handlers::{
     ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_fetch_pr_details,
-    handle_merge_pr, handle_request_reviewers, handle_set_assignees, post_reply,
-    prefetch_top_pr_details,
+    handle_fetch_repo_labels, handle_merge_pr, handle_request_reviewers, handle_set_assignees,
+    handle_set_labels, post_reply, prefetch_top_pr_details,
 };
 pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 
@@ -48,6 +48,21 @@ use pilot_store::WorkspaceRecord;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
+
+/// Did the last `fetch` return ALL in-scope tasks, or a subset?
+///
+/// `Full` is the historical behavior — the source ran an exhaustive
+/// `involves:USER` query and the tick can trust "anything not in this
+/// list is out of scope, drop it" semantics (rescope). `Incremental`
+/// is the new mode introduced for the notifications-driven fast path:
+/// the source fetched only the tasks GitHub flagged as recently
+/// changed, and the tick MUST NOT rescope against this list — doing so
+/// would drop every workspace not touched in the last 30 seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchMode {
+    Full,
+    Incremental,
+}
 
 /// Anything that can produce a flat list of `Task`s. Implementations
 /// should be cheap to construct and cheap to call repeatedly: they're
@@ -68,6 +83,25 @@ pub trait TaskSource: Send + Sync + 'static {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>;
 
+    /// What this source authoritatively covered in the most recent
+    /// `fetch`. Drives the `rescope` deletion guard: only workspaces
+    /// owned by a source whose scope this tick is authoritative for
+    /// are candidates for removal.
+    ///
+    /// Default is [`PolledScope::Repos(Vec::new())`] — "I covered no
+    /// repos authoritatively this tick", so `rescope` preserves every
+    /// stored workspace owned by this source. The destructive choice
+    /// ([`PolledScope::Exhaustive`]) requires an explicit override so
+    /// a forgetful source author can't silently re-introduce the
+    /// issue #34 bug: a new partial-coverage source (Jira polling one
+    /// project at a time, GitHub round-robining repos, …) that omits
+    /// the override gets the safe answer.
+    ///
+    /// `GhSource` and `LinearSource` both override below.
+    fn polled_scope(&self) -> PolledScope {
+        PolledScope::Repos(Vec::new())
+    }
+
     /// Drain side-effect actions accumulated during the most recent
     /// `fetch`. The polling tick calls this after each fetch and
     /// dispatches the resulting [`ProviderAction`]s with full
@@ -78,6 +112,43 @@ pub trait TaskSource: Send + Sync + 'static {
     fn drain_actions(&self) -> Vec<ProviderAction> {
         Vec::new()
     }
+
+    /// Mode of the most-recent successful `fetch`. Sources that ALWAYS
+    /// return the complete in-scope set (Linear, every test fixture)
+    /// can leave this as the default `Full`. Sources that may return a
+    /// subset (notifications-driven `GhSource`) override to record the
+    /// mode of the call they just made.
+    ///
+    /// Read AFTER `fetch` resolves. The tick driver consults it to
+    /// decide whether rescope can run for this tick — see
+    /// `TickOutcome::all_full`.
+    fn last_fetch_kind(&self) -> FetchMode {
+        FetchMode::Full
+    }
+}
+
+/// What a [`TaskSource`] authoritatively covered in its most recent
+/// `fetch`. The polling tick captures this per-source into
+/// [`TickOutcome::source_scopes`] so `rescope` can tell the
+/// difference between "this workspace fell out of upstream scope"
+/// (delete) and "we just didn't query its repo this tick" (preserve).
+///
+/// Issue #34: pre-fix `GhSource`'s round-robin scheduler would poll
+/// 3 of N repos per tick, but `rescope` treated every stored
+/// workspace not in `polled` as out-of-scope. Result: every minute,
+/// PRs from the other (N - 3) repos disappeared from the sidebar
+/// until the next global sweep re-discovered them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolledScope {
+    /// This source covered everything it owns this tick. Any stored
+    /// workspace tagged with this source but not in `polled` is a
+    /// genuine out-of-scope candidate.
+    Exhaustive,
+    /// This source only queried these specific repos. Workspaces
+    /// tagged with this source whose `task.repo` is NOT in this list
+    /// must be preserved — we have no information about them this
+    /// tick.
+    Repos(Vec<String>),
 }
 
 /// `GhClient` adapter. The filter narrows the upstream result by
@@ -85,34 +156,44 @@ pub trait TaskSource: Send + Sync + 'static {
 /// disabled roles / types never become Workspaces. `scopes` further
 /// narrows by repo / org: when non-empty, only tasks whose
 /// `task.repo` matches a selected scope id pass through.
+///
+/// Fields are private + constructed through [`GhSource::new`]: the
+/// `last_kind` cache has an invariant (initialized to `Full`) that a
+/// struct literal could trivially break. Use `new`.
 pub struct GhSource {
-    pub client: GhClient,
-    pub filter: ProviderConfig,
-    pub scopes: std::collections::BTreeSet<String>,
+    client: GhClient,
+    filter: ProviderConfig,
+    scopes: std::collections::BTreeSet<String>,
     /// Bus handle so the source can emit `PollProgress` events
     /// during its fetch. The polling layer doesn't pass `&ServerConfig`
     /// to `TaskSource::fetch` (would couple them), so each source
     /// keeps a clone of just the broadcast sender.
-    pub bus: tokio::sync::broadcast::Sender<Event>,
+    bus: tokio::sync::broadcast::Sender<Event>,
     /// GitHub logins that may trigger auto-spawn via a `@pilot`
     /// mention. Resolved by `sources_for` from
     /// `config.yaml::mention.allowed_logins`, with the authenticated
     /// viewer's login added as a default when the YAML list is
     /// empty. Empty here disables the feature entirely.
-    pub mention_allowed_logins: std::collections::BTreeSet<String>,
+    mention_allowed_logins: std::collections::BTreeSet<String>,
     /// Side channel for actions the source wants the polling tick to
     /// take after `fetch()` returns — today, auto-spawn requests
     /// triggered by `@pilot` mentions. Populated inside `fetch` and
     /// drained by `tick_with_state` after the upsert pass so the
     /// freshly-created issue workspace exists before we spawn into it.
-    pub pending_actions: std::sync::Arc<std::sync::Mutex<Vec<ProviderAction>>>,
+    pending_actions: std::sync::Arc<std::sync::Mutex<Vec<ProviderAction>>>,
     /// Per-tick scheduling decision from `pick_repos_for_tick`.
     /// `sources_for` computes this against the cursor in
     /// `TickState::repo_sync_cursor` and writes it here so the
     /// `TaskSource::fetch` impl knows whether to fan out per-repo or
     /// to fire the global sweep. Held by value (not Arc) — each
     /// `sources_for` call produces a fresh source.
-    pub scheduling: RoundRobinPick,
+    scheduling: RoundRobinPick,
+    /// Mode of the last successful fetch — read after `fetch` resolves
+    /// by [`TaskSource::last_fetch_kind`]. `std::sync::Mutex` is fine:
+    /// trait methods take `&self` and the polling driver writes/reads
+    /// strictly in sequence (fetch resolves, THEN last_fetch_kind), so
+    /// there's no contention.
+    last_kind: std::sync::Mutex<FetchMode>,
 }
 
 /// Out-of-band action a `TaskSource` may surface alongside the
@@ -139,6 +220,35 @@ pub enum ProviderAction {
 }
 
 impl GhSource {
+    pub fn new(
+        client: GhClient,
+        filter: ProviderConfig,
+        scopes: std::collections::BTreeSet<String>,
+        bus: tokio::sync::broadcast::Sender<Event>,
+        mention_allowed_logins: std::collections::BTreeSet<String>,
+        scheduling: RoundRobinPick,
+    ) -> Self {
+        Self {
+            client,
+            filter,
+            scopes,
+            bus,
+            mention_allowed_logins,
+            pending_actions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            scheduling,
+            // Default to Full so a never-fetched source doesn't
+            // accidentally block rescope.
+            last_kind: std::sync::Mutex::new(FetchMode::Full),
+        }
+    }
+
+    fn set_last_kind(&self, kind: FetchMode) {
+        *self
+            .last_kind
+            .lock()
+            .expect("GhSource.last_kind mutex poisoned") = kind;
+    }
+
     fn emit_progress(&self, message: impl Into<String>) {
         let message = message.into();
         tracing::info!(source = "github", %message, "poll progress");
@@ -146,6 +256,340 @@ impl GhSource {
             source: "github".into(),
             message,
         });
+    }
+
+    /// Heavy `involves:USER` GraphQL sweep — the historical fetch path,
+    /// extracted from `TaskSource::fetch` so the new tick logic can
+    /// fire it conditionally (every ~10 minutes, when notifications
+    /// haven't given us a fast path, or as fallback on heartbeat
+    /// failure).
+    ///
+    /// `@pilot` mention scanning lives here (NOT in `fetch_incremental`)
+    /// because the scan walks the full `involves:USER` response — the
+    /// targeted single-PR/issue queries on the incremental path don't
+    /// surface fresh issue bodies/comments anyway. A `@pilot` mention
+    /// will surface within the slow-sweep cadence (≤10 min default).
+    async fn fetch_full(&self) -> Result<Vec<Task>, pilot_core::ProviderError> {
+        let want_prs = self.filter.pr_enabled();
+        let want_issues = self.filter.issue_enabled();
+        // The issue query also runs to scan for `@pilot` mentions even
+        // when issue *display* is off (the GitHub default is PR-only) —
+        // see `GhClient::should_query_issues` (issue #50). Mirror that
+        // here so the full sweep doesn't early-return before the scan.
+        let scan_issues = want_issues || !self.mention_allowed_logins.is_empty();
+
+        let plan = match (want_prs, scan_issues) {
+            (true, true) => "PRs + Issues",
+            (true, false) => "PRs",
+            (false, true) => "Issues",
+            (false, false) => {
+                self.emit_progress("nothing to fetch (no PR or Issue keys enabled)");
+                return Ok(Vec::new());
+            }
+        };
+        self.emit_progress(format!("Querying GitHub for {plan} (full sweep)…"));
+        // Surface the rendered queries so a user debugging "filter
+        // returned 0 results" can paste them into github.com/search.
+        // Round-robin path adds the per-repo subset on top.
+        if want_prs {
+            if self.scheduling.run_global {
+                self.emit_progress(format!(
+                    "PR query (global): {}",
+                    self.client.pr_search_query()
+                ));
+            }
+            if !self.scheduling.repos.is_empty() {
+                self.emit_progress(format!(
+                    "PR query (round-robin {} repo{}): {}",
+                    self.scheduling.repos.len(),
+                    if self.scheduling.repos.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
+                    self.scheduling.repos.join(", "),
+                ));
+            }
+        }
+        if scan_issues {
+            self.emit_progress(format!("Issue query: {}", self.client.issue_search_query()));
+        }
+
+        let (raw, partial_warning, mentions) = self
+            .client
+            .fetch_round_robin_with_status_and_mentions(
+                want_prs,
+                &self.scheduling.repos,
+                self.scheduling.run_global,
+                want_issues,
+                &self.mention_allowed_logins,
+            )
+            .await
+            .map_err(pilot_core::ProviderError::from)?;
+        // Surface partial sync failures to the user — one side
+        // succeeded, the other errored, we kept the inbox alive but
+        // the visible row set is incomplete. Without this notice the
+        // user silently loses half their inbox until the next tick
+        // maybe recovers.
+        if let Some(msg) = partial_warning {
+            let _ = self.bus.send(Event::ProviderError {
+                source: "github".into(),
+                message: format!("partial sync — {msg}"),
+                detail: "see /tmp/pilot.log for the full error".into(),
+                kind: "retryable".into(),
+            });
+        }
+
+        // Process `@pilot` mention triggers BEFORE returning the task
+        // list. Two passes:
+        //
+        // 1. **Sync pass — queue spawns.** Walk every mention, look up
+        //    its task in the freshly-polled set, and push the
+        //    AutoSpawnAgent into `pending_actions`. No `.await`, no
+        //    cancellation point. The polling tick will drain + dispatch
+        //    after upsert (workspace must exist on disk before spawn).
+        //
+        // 2. **Async pass — react with 👀.** Fire `react_eyes`
+        //    concurrently (bounded by 5 in-flight, matching the
+        //    targeted-fetch fan-out). The reaction is the dedup marker
+        //    for the next sweep's mention scan via `viewerHasReacted`.
+        //
+        // **Why queue first.** A cancel point between react_eyes
+        // returning Ok and a subsequent push would strand the mention
+        // with the emoji on the issue (committed remote state) and no
+        // queued spawn (dropped local state). Next sweep would see
+        // `viewerHasReacted=true` and skip — agent never starts.
+        // Queueing first means the reverse failure mode: spawn fires
+        // without an emoji, which the next sweep would re-trigger,
+        // but `handle_spawn`'s singleton check (per `(session_key, kind)`)
+        // collapses to a no-op. Idempotent.
+        //
+        // Reaction failures are LOGGED but do NOT block the spawn —
+        // the queue is already populated. A failed react means we
+        // re-spawn next tick; `handle_spawn`'s singleton makes that a
+        // no-op too.
+        if !mentions.is_empty() {
+            self.emit_progress(format!(
+                "Found {} @pilot mention(s); queueing auto-spawn + reacting",
+                mentions.len()
+            ));
+        }
+
+        // Pass 1: build the spawn queue + pair off (mention, react-target)
+        // for the parallel pass. We carry the `target_node_id` String
+        // separately so the async pass owns it (the loop below moves
+        // mentions into the queue).
+        let mut react_targets: Vec<String> = Vec::with_capacity(mentions.len());
+        // Issues an allowed user `@pilot`-tagged this sweep. Re-admitted
+        // into `kept` below so the auto-spawn always lands in a real
+        // issue workspace/worktree, even when the display filter (role /
+        // scope / issue-display-off) would drop the row — otherwise
+        // `handle_spawn` finds no workspace and spawns the agent in
+        // pilot's own cwd with no branch (issue #50). See
+        // `readmit_mentioned_tasks`.
+        let mut mentioned_tasks: Vec<Task> = Vec::new();
+        {
+            let mut pending = self
+                .pending_actions
+                .lock()
+                .expect("GhSource.pending_actions poisoned");
+            for mention in mentions {
+                // Look up the matching task in the freshly-polled set so
+                // we use the real title/body for the prompt + the
+                // canonical workspace key derivation. If we can't find it
+                // (shouldn't happen — the scan ran on the same response
+                // that produced `raw`), skip rather than spawn against a
+                // synthetic task.
+                let Some(task) = raw.iter().find(|t| {
+                    t.id.source == "github"
+                        && t.repo.as_deref() == Some(mention.repo.as_str())
+                        && task_number_from_key(&t.id.key) == Some(mention.issue_number)
+                }) else {
+                    tracing::warn!(
+                        repo = %mention.repo,
+                        issue = mention.issue_number,
+                        "mention scan returned a target with no matching Task — skipping auto-spawn"
+                    );
+                    continue;
+                };
+                let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(task));
+                let prompt = Some(pilot_core::prompts::build_implement_issue_prompt(task));
+                mentioned_tasks.push(task.clone());
+                let reason = format!(
+                    "@pilot mention by {} on {}#{} ({})",
+                    mention.triggered_by_login,
+                    mention.repo,
+                    mention.issue_number,
+                    match &mention.source {
+                        pilot_gh::MentionSource::Body => "issue body",
+                        pilot_gh::MentionSource::Comment { .. } => "comment",
+                    },
+                );
+                tracing::info!(%reason, target = %mention.target_node_id, "queued auto-spawn");
+                pending.push(ProviderAction::AutoSpawnAgent {
+                    session_key,
+                    agent_id: DEFAULT_AGENT_ID.to_string(),
+                    prompt,
+                    reason,
+                });
+                react_targets.push(mention.target_node_id);
+            }
+        }
+
+        // Pass 2: fire reactions concurrently. 5 in flight matches
+        // `fetch_incremental`'s targeted-fetch concurrency — same rate
+        // budget shared, so this is the most parallelism we can give
+        // without competing with ourselves. The collect() drives the
+        // stream to completion; cancellation here only loses emoji
+        // posts, the queued spawns survive.
+        if !react_targets.is_empty() {
+            use futures::stream::{self, StreamExt};
+            const REACT_CONCURRENCY: usize = 5;
+            stream::iter(react_targets)
+                .for_each_concurrent(REACT_CONCURRENCY, |target_node_id| async move {
+                    if let Err(e) = self.client.react_eyes(&target_node_id).await {
+                        tracing::warn!(
+                            target = %target_node_id,
+                            "react_eyes failed (spawn still queued; next tick may re-fire — \
+                             handle_spawn singleton makes that a no-op): {e}",
+                        );
+                    }
+                })
+                .await;
+        }
+
+        self.emit_progress(format!("Got {} raw items, applying filters…", raw.len()));
+        let kept = readmit_mentioned_tasks(
+            filter_github_tasks(raw, &self.filter, &self.scopes),
+            mentioned_tasks,
+        );
+        self.emit_progress(format!("{} tasks kept after filter", kept.len()));
+
+        // Mark sweep complete BEFORE returning so the next tick's
+        // `should_full_sweep` check sees fresh data.
+        self.client.mark_full_sweep_done();
+        log_rate_budget(&self.client);
+        Ok(kept)
+    }
+
+    /// Notifications-driven incremental fetch. Returns `Ok(None)` when
+    /// no targeted fetch should follow this tick (304 from GitHub or
+    /// heartbeat failure that we want to swallow) — caller treats that
+    /// as a no-op tick. Returns `Ok(Some(tasks))` with the targeted
+    /// deep-fetched PRs/issues otherwise.
+    async fn fetch_incremental(&self) -> Result<Option<Vec<Task>>, pilot_core::ProviderError> {
+        self.emit_progress("Checking GitHub notifications…");
+        let poll = match self.client.fetch_notifications().await {
+            Ok(p) => p,
+            Err(e) => {
+                // Heartbeat failure isn't fatal: signal "no
+                // incremental data" so the outer `fetch` promotes to
+                // a full sweep this tick. The full sweep also re-arms
+                // the slow-sweep clock so a chronically-broken
+                // heartbeat doesn't trap us in a loop.
+                tracing::warn!("notifications heartbeat failed: {e} — promoting to full sweep");
+                return Ok(None);
+            }
+        };
+        let entries = match poll {
+            pilot_gh::NotificationsPoll::NotModified => {
+                self.emit_progress("No new GitHub notifications (304)");
+                return Ok(Some(Vec::new()));
+            }
+            pilot_gh::NotificationsPoll::Modified { entries } => entries,
+        };
+        self.emit_progress(format!(
+            "{} GitHub notification(s) — fetching changed PRs/issues",
+            entries.len()
+        ));
+
+        // Dedup at the source: GitHub fires several notifications per
+        // PR within a window (one per comment + one per CI status flip),
+        // and we want exactly one targeted fetch per distinct PR/issue.
+        // `BTreeSet<NotificationTarget>` collapses duplicates and gives
+        // deterministic iteration order — useful for stable logs.
+        let targets: std::collections::BTreeSet<pilot_gh::NotificationTarget> = entries
+            .iter()
+            .filter_map(pilot_gh::NotificationEntry::target)
+            .collect();
+
+        // Bounded-concurrent fan-out, mirroring the watched-repo
+        // pattern in `GhClient::fetch_all_prs`. 5 in flight is the
+        // same compromise: large enough to compress the latency of 10+
+        // targets into two batches, small enough that the local rate
+        // budget (capacity 30) doesn't get fully drained by a single
+        // tick. Failures are logged per-target — one bad fetch never
+        // poisons the rest of the batch.
+        use futures::stream::{self, StreamExt};
+        const TARGETED_FETCH_CONCURRENCY: usize = 5;
+        let tasks: Vec<Task> = stream::iter(targets)
+            .map(|target| async move {
+                let result = match target.kind {
+                    pilot_gh::NotificationTargetKind::PullRequest => {
+                        self.client
+                            .fetch_single_pr(&target.owner, &target.repo, target.number)
+                            .await
+                    }
+                    pilot_gh::NotificationTargetKind::Issue => {
+                        self.client
+                            .fetch_single_issue(&target.owner, &target.repo, target.number)
+                            .await
+                    }
+                };
+                (target, result)
+            })
+            .buffer_unordered(TARGETED_FETCH_CONCURRENCY)
+            .filter_map(|(target, result)| async move {
+                match result {
+                    Ok(Some(t)) => Some(t),
+                    Ok(None) => {
+                        tracing::debug!(
+                            "incremental: {}/{}#{} not visible — skipping",
+                            target.owner,
+                            target.repo,
+                            target.number,
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        // Per-target failure is non-fatal: log and move on.
+                        // The next tick's heartbeat will re-deliver the
+                        // notification if it's still relevant; the full
+                        // sweep timer eventually catches anything stuck.
+                        tracing::warn!(
+                            "incremental: fetch failed for {}/{}#{}: {e}",
+                            target.owner,
+                            target.repo,
+                            target.number,
+                        );
+                        None
+                    }
+                }
+            })
+            .collect()
+            .await;
+
+        let kept = filter_github_tasks(tasks, &self.filter, &self.scopes);
+        self.emit_progress(format!(
+            "{} task(s) refreshed via notifications",
+            kept.len()
+        ));
+        log_rate_budget(&self.client);
+        Ok(Some(kept))
+    }
+}
+
+fn log_rate_budget(client: &GhClient) {
+    let snap = client.rate_snapshot();
+    if let Some(remote) = snap.remote {
+        tracing::info!(
+            source = "github",
+            remote_remaining = remote.remaining,
+            remote_limit = remote.limit,
+            local_available = snap.local_available,
+            local_capacity = snap.local_capacity,
+            "rate budget snapshot"
+        );
     }
 }
 
@@ -155,8 +599,14 @@ impl GhSource {
 /// the issue. Lives here (not behind a config lookup) because the
 /// polling layer doesn't get a `&PersistedSetup` at fetch time —
 /// the source is constructed once per tick and `fetch` is async.
-fn default_agent_id() -> String {
-    "claude".to_string()
+const DEFAULT_AGENT_ID: &str = "claude";
+
+/// Extract the trailing PR/issue number from a GitHub `TaskId::key`
+/// (e.g. `"acme/widget#186" → 186`). Centralized so future callers
+/// don't reinvent the rsplit-and-parse chain; today both the mention
+/// loop and `TaskProvider::post_reply` (in `gh-provider`) need it.
+fn task_number_from_key(key: &str) -> Option<u64> {
+    key.rsplit_once('#').and_then(|(_, n)| n.parse().ok())
 }
 
 /// Dispatch one [`ProviderAction`] surfaced by a [`TaskSource`]
@@ -204,6 +654,19 @@ impl TaskSource for GhSource {
     fn name(&self) -> &str {
         "github"
     }
+    /// GH's per-tick coverage mirrors `RoundRobinPick`:
+    /// `run_global=true` → exhaustive (the global involves:USER sweep
+    /// hit every repo the user touches); otherwise → only the
+    /// scheduler's `repos` slice was authoritatively queried. Issue
+    /// #34: without this, `rescope` would treat unpolled repos as
+    /// "fell out of scope" and delete their workspaces every warm tick.
+    fn polled_scope(&self) -> PolledScope {
+        if self.scheduling.run_global {
+            PolledScope::Exhaustive
+        } else {
+            PolledScope::Repos(self.scheduling.repos.clone())
+        }
+    }
     fn drain_actions(&self) -> Vec<ProviderAction> {
         let mut guard = self
             .pending_actions
@@ -211,185 +674,58 @@ impl TaskSource for GhSource {
             .expect("GhSource.pending_actions poisoned");
         std::mem::take(&mut *guard)
     }
+    /// Tiered fetch (issue #19):
+    ///
+    /// 1. **Slow full sweep** — heavy `involves:USER` GraphQL search,
+    ///    fires every [`GhClient::FULL_SWEEP_INTERVAL`] (default 10 min)
+    ///    and on the first tick after daemon start. Rescope runs.
+    ///    `@pilot` mention scanning ONLY happens on this path (the
+    ///    full search response is what mention scanning walks).
+    /// 2. **Fast notifications heartbeat** — `GET /notifications` with
+    ///    `If-Modified-Since`; 304 → return empty `Vec`, no rescope.
+    /// 3. **Targeted deep-fetch** — for each modified notification,
+    ///    fetch only that one PR/issue via the single-node GraphQL
+    ///    query (~85 cost units total, vs. 1000s for the full search).
+    ///
+    /// `last_fetch_kind` is updated each call so the tick driver can
+    /// gate rescope on whether ALL sources reported `Full` this tick.
     fn fetch<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
     {
         Box::pin(async move {
-            let want_prs = self.filter.pr_enabled();
-            let want_issues = self.filter.issue_enabled();
-
-            // Surface what we're about to do so the polling modal
-            // can show "Querying PRs from github…" instead of just
-            // a bare spinner. Each step also lands in /tmp/pilot.log
-            // for free, easing debugging.
-            let plan = match (want_prs, want_issues) {
-                (true, true) => "PRs + Issues",
-                (true, false) => "PRs",
-                (false, true) => "Issues",
-                (false, false) => {
-                    self.emit_progress("nothing to fetch (no PR or Issue keys enabled)");
-                    return Ok(Vec::new());
+            // `last_kind` is only consulted by the tick driver in the
+            // `Ok` arm (errored sources never reach the all_full
+            // check), so we set it inside `Ok` branches only — the
+            // value held during an Err is unobservable.
+            if self.client.should_full_sweep() {
+                let tasks = self.fetch_full().await?;
+                self.set_last_kind(FetchMode::Full);
+                return Ok(tasks);
+            }
+            match self.fetch_incremental().await? {
+                Some(tasks) => {
+                    self.set_last_kind(FetchMode::Incremental);
+                    Ok(tasks)
                 }
-            };
-            self.emit_progress(format!("Querying GitHub for {plan}…"));
-            // Emit the EXACT rendered query strings so the user can
-            // see what's being asked. This is the single most useful
-            // data point when debugging "filter returned 0 results" —
-            // they can paste the query into github.com/search and
-            // verify what GitHub itself thinks is in scope.
-            if want_prs {
-                if self.scheduling.run_global {
-                    self.emit_progress(format!(
-                        "PR query (global): {}",
-                        self.client.pr_search_query()
-                    ));
-                }
-                if !self.scheduling.repos.is_empty() {
-                    self.emit_progress(format!(
-                        "PR query (round-robin {} repo{}): {}",
-                        self.scheduling.repos.len(),
-                        if self.scheduling.repos.len() == 1 {
-                            ""
-                        } else {
-                            "s"
-                        },
-                        self.scheduling.repos.join(", "),
-                    ));
+                None => {
+                    // Heartbeat failed quietly — fall back to full sweep
+                    // rather than silently freezing the inbox. The full
+                    // sweep also re-arms the slow-sweep clock so we
+                    // don't loop on the same broken heartbeat.
+                    tracing::info!("incremental returned None; promoting to full sweep");
+                    let tasks = self.fetch_full().await?;
+                    self.set_last_kind(FetchMode::Full);
+                    Ok(tasks)
                 }
             }
-            if want_issues {
-                self.emit_progress(format!("Issue query: {}", self.client.issue_search_query()));
-            }
-
-            let (raw, partial_warning, mentions) = self
-                .client
-                .fetch_round_robin_with_status_and_mentions(
-                    want_prs,
-                    &self.scheduling.repos,
-                    self.scheduling.run_global,
-                    want_issues,
-                    &self.mention_allowed_logins,
-                )
-                .await
-                .map_err(pilot_core::ProviderError::from)?;
-            // Surface partial sync failures to the user — one side
-            // succeeded, the other errored, we kept the inbox alive
-            // but the visible row set is incomplete. Without this
-            // notice the user silently loses half their inbox until
-            // the next tick maybe recovers.
-            if let Some(msg) = partial_warning {
-                let _ = self.bus.send(Event::ProviderError {
-                    source: "github".into(),
-                    message: format!("partial sync — {msg}"),
-                    detail: "see /tmp/pilot.log for the full error".into(),
-                    kind: "retryable".into(),
-                });
-            }
-
-            // Process `@pilot` mention triggers BEFORE returning the
-            // task list. For each mention we (1) post the 👀
-            // reaction so the next poll sees `viewerHasReacted=true`
-            // and skips, then (2) queue an AutoSpawnAgent action the
-            // polling tick will dispatch after upsert (the issue
-            // workspace must exist on disk before we spawn into it).
-            //
-            // Reaction failures are LOGGED but do NOT block the
-            // spawn — better to act on the mention than to silently
-            // ignore it. A failed react means we might re-spawn next
-            // tick; that's noisy but recoverable (user can Shift-X).
-            if !mentions.is_empty() {
-                self.emit_progress(format!(
-                    "Found {} @pilot mention(s); reacting + queueing auto-spawn",
-                    mentions.len()
-                ));
-            }
-            // Issues an allowed user `@pilot`-tagged this tick. We
-            // re-admit these into the kept set below so the auto-spawn
-            // always lands in a real issue workspace/worktree — even
-            // when the display filter (role / scope / issue-display-off)
-            // would otherwise drop the row. Without it, `handle_spawn`
-            // finds no workspace and spawns the agent in pilot's own
-            // cwd with no branch (issue #50). See `readmit_mentioned_tasks`.
-            let mut mentioned_tasks: Vec<Task> = Vec::new();
-            for mention in mentions {
-                if let Err(e) = self.client.react_eyes(&mention.target_node_id).await {
-                    tracing::warn!(
-                        repo = %mention.repo,
-                        issue = mention.issue_number,
-                        target = %mention.target_node_id,
-                        "react_eyes failed (will still queue auto-spawn): {e}",
-                    );
-                }
-                // Look up the matching task in the freshly-polled
-                // set so we can use the real title/body for the
-                // prompt + the canonical workspace key derivation.
-                // If we can't find it (shouldn't happen — the scan
-                // ran on the same response that produced `raw`),
-                // skip rather than spawn against a synthetic task.
-                let Some(task) = raw.iter().find(|t| {
-                    t.id.source == "github"
-                        && t.repo.as_deref() == Some(mention.repo.as_str())
-                        && t.id
-                            .key
-                            .rsplit_once('#')
-                            .and_then(|(_, n)| n.parse::<u64>().ok())
-                            == Some(mention.issue_number)
-                }) else {
-                    tracing::warn!(
-                        repo = %mention.repo,
-                        issue = mention.issue_number,
-                        "mention scan returned a target with no matching Task — skipping auto-spawn"
-                    );
-                    continue;
-                };
-                let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(task));
-                let prompt = Some(pilot_core::prompts::build_implement_issue_prompt(task));
-                mentioned_tasks.push(task.clone());
-                let reason = format!(
-                    "@pilot mention by {} on {}#{} ({})",
-                    mention.triggered_by_login,
-                    mention.repo,
-                    mention.issue_number,
-                    match &mention.source {
-                        pilot_gh::MentionSource::Body => "issue body",
-                        pilot_gh::MentionSource::Comment { .. } => "comment",
-                    },
-                );
-                tracing::info!(%reason, target = %mention.target_node_id, "queued auto-spawn");
-                self.pending_actions
-                    .lock()
-                    .expect("GhSource.pending_actions poisoned")
-                    .push(ProviderAction::AutoSpawnAgent {
-                        session_key,
-                        agent_id: default_agent_id(),
-                        prompt,
-                        reason,
-                    });
-            }
-
-            self.emit_progress(format!("Got {} raw items, applying filters…", raw.len()));
-            let kept = readmit_mentioned_tasks(
-                filter_github_tasks(raw, &self.filter, &self.scopes),
-                mentioned_tasks,
-            );
-            self.emit_progress(format!("{} tasks kept after filter", kept.len()));
-
-            // Log a per-rate-budget summary too. Cheap, super useful
-            // when debugging "why is polling slow / failing".
-            let snap = self.client.rate_snapshot();
-            if let Some(remote) = snap.remote {
-                tracing::info!(
-                    source = "github",
-                    remote_remaining = remote.remaining,
-                    remote_limit = remote.limit,
-                    local_available = snap.local_available,
-                    local_capacity = snap.local_capacity,
-                    "rate budget snapshot"
-                );
-            }
-            Ok(kept)
         })
+    }
+    fn last_fetch_kind(&self) -> FetchMode {
+        *self
+            .last_kind
+            .lock()
+            .expect("GhSource.last_kind mutex poisoned")
     }
 }
 
@@ -414,6 +750,13 @@ impl LinearSource {
 impl TaskSource for LinearSource {
     fn name(&self) -> &str {
         "linear"
+    }
+    /// Linear's `fetch_all` paginates through every issue the user
+    /// has access to with no per-team round-robin — one successful
+    /// fetch covers everything Linear owns this tick, so a workspace
+    /// not in `polled` genuinely fell out of upstream scope.
+    fn polled_scope(&self) -> PolledScope {
+        PolledScope::Exhaustive
     }
     fn fetch<'a>(
         &'a self,
@@ -736,11 +1079,11 @@ pub async fn sources_for(
                             }
                         }
                         state.gh_client = Some(client.clone());
-                        // Resolve the `@pilot` allowlist. Empty
-                        // YAML list → fall back to "just the
-                        // authenticated viewer", which mirrors the
-                        // design doc's MVP scope (only the local
-                        // pilot user's own issues + comments count).
+                        // Resolve the `@pilot` allowlist. Empty YAML
+                        // list → fall back to "just the authenticated
+                        // viewer", which mirrors the design doc's MVP
+                        // scope (only the local pilot user's own
+                        // issues + comments count).
                         let mut mention_allowed: std::collections::BTreeSet<String> =
                             pilot_config::Config::load()
                                 .ok()
@@ -794,6 +1137,9 @@ pub async fn sources_for(
                             mention_allowed_logins: mention_allowed,
                             pending_actions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                             scheduling,
+                            // Default to Full so a never-fetched
+                            // source doesn't accidentally block rescope.
+                            last_kind: std::sync::Mutex::new(FetchMode::Full),
                         }));
                     }
                     Err(e) => tracing::warn!("github client init failed: {e}"),
@@ -934,10 +1280,27 @@ pub async fn tick_with_state(
     // and watch the budget stay pegged.
     let mut max_retry_after_secs: Option<u64> = None;
     let mut saw_unknown_mergeable = false;
+    // Per-source authoritative coverage for this tick. Only successful
+    // sources land here — a failed source has no authority to delete
+    // stored workspaces this cycle, so omitting it lets `rescope`
+    // preserve them. (Issue #34: a round-robin GH tick only polls 3
+    // of N repos; without per-source scope, `rescope` would delete
+    // workspaces from the unpolled (N - 3) repos.)
+    let mut source_scopes: std::collections::HashMap<String, PolledScope> =
+        std::collections::HashMap::new();
+    // Default to true: empty `sources` (no providers configured) is a
+    // legitimate "no work, but rescope cleanly" path. The loop below
+    // flips to false the moment any successful source returns an
+    // incremental fetch.
+    let mut all_full = true;
     for source in sources {
         match source.fetch().await {
             Ok(tasks) => {
                 any_source_succeeded = true;
+                source_scopes.insert(source.name().to_string(), source.polled_scope());
+                if source.last_fetch_kind() == FetchMode::Incremental {
+                    all_full = false;
+                }
                 let count = tasks.len();
                 tracing::info!(source = source.name(), count, "poll succeeded");
                 // 0-result polls are almost always misconfiguration —
@@ -1055,11 +1418,18 @@ pub async fn tick_with_state(
                     source: source.name().to_string(),
                     count,
                 });
-                // Drain + dispatch any side-effect actions the
-                // source queued during `fetch` (today: auto-spawn
-                // requests from `@pilot` mentions). Runs AFTER the
-                // upsert loop so the freshly-created issue
-                // workspaces exist before we spawn into them.
+                // Drain + dispatch any side-effect actions the source
+                // queued during `fetch` (today: auto-spawn requests
+                // from `@pilot` mentions).
+                //
+                // ORDERING INVARIANT: this MUST run after the upsert
+                // loop AND before rescope. `dispatch_action` calls
+                // `handle_spawn`, which expects the freshly-upserted
+                // workspace to exist on disk; rescope may delete
+                // out-of-scope workspaces. Moving this below rescope
+                // would silently break auto-spawn — the workspace
+                // gets deleted before the spawn dispatches and the
+                // agent starts in a sandbox.
                 let actions = source.drain_actions();
                 if !actions.is_empty() {
                     tracing::info!(
@@ -1120,6 +1490,8 @@ pub async fn tick_with_state(
         any_source_succeeded,
         retry_after_secs: max_retry_after_secs,
         saw_unknown_mergeable,
+        source_scopes,
+        all_full,
     }
 }
 
@@ -1127,7 +1499,7 @@ pub async fn tick_with_state(
 /// keys polled into the store, plus a "did anyone actually report?"
 /// flag so callers (rescope) can distinguish "filter genuinely
 /// matches nothing today" from "every source failed".
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TickOutcome {
     pub polled: Vec<WorkspaceKey>,
     pub any_source_succeeded: bool,
@@ -1145,6 +1517,45 @@ pub struct TickOutcome {
     /// one extra wake at +5s so the next poll picks up the real
     /// value instead of waiting out the full interval.
     pub saw_unknown_mergeable: bool,
+    /// Per-source authoritative coverage for this tick. Populated for
+    /// every source whose `fetch` returned `Ok` — failed sources are
+    /// omitted so `rescope` preserves their workspaces (we don't know
+    /// which ones are still in upstream scope after a transient
+    /// error). Empty when no source succeeded OR when callers
+    /// (legacy tests) construct an outcome manually; in those cases
+    /// `rescope` falls back to its pre-#34 behavior of treating every
+    /// stored workspace as exhaustively covered.
+    ///
+    /// A `HashMap` (not a `Vec`) because each source appears at most
+    /// once per tick — duplicates would be a bug, and the rescope
+    /// lookup is point-query by source name.
+    pub source_scopes: std::collections::HashMap<String, PolledScope>,
+    /// True when EVERY successful source reported `FetchMode::Full`.
+    /// Rescope is conditional on this — an incremental
+    /// (notifications-driven) source only returns the tasks GitHub
+    /// flagged as recently changed, so trusting "anything not polled
+    /// is out of scope" would delete every workspace the user didn't
+    /// touch in the last 30 seconds. See `rescope_with_state`.
+    pub all_full: bool,
+}
+
+// INVARIANT: `all_full` defaults to `true`, NOT `bool::default()`.
+// The "no sources configured" rescope path constructs a default
+// outcome and then runs rescope — leaving `all_full: false` would
+// silently disable rescope cleanup for that path. Hand-rolled
+// `Default` impl rather than derive so the override is impossible
+// to miss in code review.
+impl Default for TickOutcome {
+    fn default() -> Self {
+        Self {
+            polled: Vec::new(),
+            any_source_succeeded: false,
+            retry_after_secs: None,
+            saw_unknown_mergeable: false,
+            source_scopes: std::collections::HashMap::new(),
+            all_full: true,
+        }
+    }
 }
 
 /// Compare `polled` against the persisted workspace set; remove
@@ -1172,6 +1583,20 @@ pub async fn rescope_with_state(
     // hiccup and skip the rescope; otherwise a single bad minute
     // would wipe the whole sidebar.
     if !outcome.any_source_succeeded {
+        return;
+    }
+    // Incremental ticks (notifications-driven fast path, issue #19)
+    // only return the tasks GitHub flagged as recently changed. The
+    // workspaces NOT in `polled` are the ones nobody mentioned this
+    // window — almost always "still in scope, just quiet." Trusting
+    // rescope here would delete every untouched workspace; wait for
+    // the next FULL sweep (≤ 10 min by default) which gives us the
+    // complete in-scope picture.
+    if !outcome.all_full {
+        tracing::debug!(
+            polled = outcome.polled.len(),
+            "rescope: skipping (incremental tick — waiting for next full sweep)"
+        );
         return;
     }
     // CRITICAL data-loss guard: a 0-result poll wipes the entire
@@ -1205,6 +1630,21 @@ pub async fn rescope_with_state(
     state
         .prompted_out_of_scope
         .retain(|k| !polled_set.contains(k.as_str()));
+
+    // Per-source coverage map. A workspace is only a deletion
+    // candidate when its source ran successfully this tick AND
+    // (the source ran exhaustively OR the workspace's repo is in
+    // the source's polled-repos slice). Issue #34: pre-fix, a
+    // round-robin GH tick polled 3 of N repos, but every stored
+    // workspace not in `polled` got deleted — so PRs from the
+    // unpolled (N - 3) repos disappeared every warm tick.
+    //
+    // An empty map (legacy callers, test fixtures, the no-sources
+    // path) signals "no per-source info this tick" — we fall back
+    // to the pre-#34 behavior of treating every unpolled workspace
+    // as a deletion candidate. The production poll loop always
+    // populates this.
+    let scope_by_source = &outcome.source_scopes;
 
     let records = match config.store.list_workspaces() {
         Ok(r) => r,
@@ -1256,6 +1696,38 @@ pub async fn rescope_with_state(
                 && w.project_key.is_some()
         }) {
             continue;
+        }
+        // Per-source scope guard (issue #34). Only authoritative
+        // sources can authorize a delete. A workspace whose source
+        // didn't run this tick (transient error, source not enabled)
+        // or whose repo wasn't in the polled slice (round-robin)
+        // must be preserved — we have no fresh information about it.
+        //
+        // Empty `scope_by_source` keeps legacy behavior (every
+        // unpolled workspace is a candidate); orphans with no
+        // primary task fall through to the existing locally-created
+        // guard above.
+        if !scope_by_source.is_empty()
+            && let Some(task) = stored_ws.as_ref().and_then(|w| w.primary_task())
+        {
+            let source = task.id.source.as_str();
+            let in_authoritative_scope = match scope_by_source.get(source) {
+                None => false,
+                Some(PolledScope::Exhaustive) => true,
+                Some(PolledScope::Repos(repos)) => task
+                    .repo
+                    .as_deref()
+                    .is_some_and(|r| repos.iter().any(|x| x == r)),
+            };
+            if !in_authoritative_scope {
+                tracing::debug!(
+                    workspace_key = %r.key,
+                    source,
+                    repo = task.repo.as_deref().unwrap_or(""),
+                    "rescope: preserving (out of this tick's authoritative scope)"
+                );
+                continue;
+            }
         }
         match active_counts.get(r.key.as_str()).copied() {
             None | Some(0) => {
@@ -1586,11 +2058,16 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
         // disappear from the sidebar. Without this, unchecking
         // every provider leaves the inbox frozen with stale
         // rows that no current poll source could produce.
+        // No-sources path counts as a complete view of "what should be
+        // here" — leave `all_full = true` so rescope removes orphaned
+        // workspaces from the disabled providers.
         let outcome = TickOutcome {
             polled: vec![],
             any_source_succeeded: true,
             retry_after_secs: None,
             saw_unknown_mergeable: false,
+            source_scopes: std::collections::HashMap::new(),
+            all_full: true,
         };
         rescope_with_state(config, &outcome, &mut state).await;
         return TickSummary::default();
@@ -1627,11 +2104,15 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
                     .into(),
                 kind: "retryable".into(),
             });
+            // Hard-timeout path: NOT a clean view of scope, so leave
+            // `all_full = false` to keep rescope conservative.
             TickOutcome {
                 polled: vec![],
                 any_source_succeeded: false,
                 retry_after_secs: Some(30),
                 saw_unknown_mergeable: false,
+                source_scopes: std::collections::HashMap::new(),
+                all_full: false,
             }
         }
     };

@@ -71,6 +71,61 @@ impl Client {
         .await
     }
 
+    /// Paginated `conversations.list`. Used by `pilot slack prune`,
+    /// which needs to walk the whole workspace (including archived
+    /// channels — so it can skip ones already archived) and which
+    /// can't rely on a single 1000-channel page. `cursor` is the
+    /// `response_metadata.next_cursor` from the previous call; pass
+    /// an empty string for the first page.
+    pub async fn conversations_list_page(
+        &self,
+        limit: u32,
+        cursor: &str,
+        include_archived: bool,
+    ) -> Result<ConversationsListResponse, SlackError> {
+        #[derive(Serialize)]
+        struct Args<'a> {
+            limit: u32,
+            exclude_archived: bool,
+            types: &'static str,
+            #[serde(skip_serializing_if = "str::is_empty")]
+            cursor: &'a str,
+        }
+        self.call::<_, ConversationsListResponse>(
+            "conversations.list",
+            &Args {
+                limit,
+                exclude_archived: !include_archived,
+                types: "public_channel,private_channel",
+                cursor,
+            },
+        )
+        .await
+    }
+
+    /// `conversations.archive` — archive a channel by id. Slack
+    /// doesn't expose a delete-channel endpoint; archiving is the
+    /// closest pilot can get. Idempotent-ish: re-archiving a channel
+    /// that's already archived returns `already_archived`, which
+    /// callers should treat as success.
+    pub async fn conversations_archive(&self, channel_id: &str) -> Result<(), SlackError> {
+        #[derive(Serialize)]
+        struct Args<'a> {
+            channel: &'a str,
+        }
+        // `conversations.archive` returns just `{ok: true}` on
+        // success — no typed body to deserialize, so accept the
+        // empty envelope through `serde_json::Value`.
+        self.call::<_, serde_json::Value>(
+            "conversations.archive",
+            &Args {
+                channel: channel_id,
+            },
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// `conversations.create` — create a public channel by name.
     /// Returns the channel id; pilot stashes that for the
     /// `channel_id → workspace_key` reverse map.
@@ -201,6 +256,13 @@ pub struct Channel {
     pub is_archived: bool,
     #[serde(default)]
     pub is_private: bool,
+    /// Unix timestamp (seconds) the channel was created. Used by
+    /// `pilot slack prune --older-than` to age-out stale per-(session,
+    /// agent) channels. Slack always sends this; the `default` keeps
+    /// the deserializer permissive against legacy fixtures / mock
+    /// payloads that omit it.
+    #[serde(default)]
+    pub created: i64,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -296,7 +358,11 @@ pub fn channel_name_for_terminal(
 /// Slug a string into a valid Slack channel name: lowercase letters,
 /// digits, hyphens, underscores, periods. Caps at 80 chars and trims
 /// trailing punctuation Slack rejects.
-fn sluggify(input: &str) -> String {
+///
+/// `pub` so `pilot slack prune --workspace` can normalize the user's
+/// input (e.g. `acme/widget#186`) the same way before matching it
+/// against parsed channel names.
+pub fn sluggify(input: &str) -> String {
     let mut s = String::with_capacity(input.len());
     for c in input.chars() {
         if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {

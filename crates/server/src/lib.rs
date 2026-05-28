@@ -446,6 +446,7 @@ impl Server {
                         pilot_ipc::Command::Resize { .. } => "Resize",
                         pilot_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
                         pilot_ipc::Command::MarkRead { .. } => "MarkRead",
+                        pilot_ipc::Command::FocusWorkspace { .. } => "FocusWorkspace",
                         pilot_ipc::Command::MarkActivityRead { .. } => "MarkActivityRead",
                         pilot_ipc::Command::UnmarkActivityRead { .. } => "UnmarkActivityRead",
                         pilot_ipc::Command::FetchPrDetails { .. } => "FetchPrDetails",
@@ -644,7 +645,21 @@ impl Server {
                             let key = pilot_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
+                            // MarkRead is the user's "I just looked
+                            // at this workspace" signal — treat it
+                            // as a focus hint too so the round-robin
+                            // sync cursor bumps even when the TUI
+                            // doesn't fire a separate
+                            // `FocusWorkspace` (older clients, the
+                            // auto-mark-on-hover path).
+                            polling::record_workspace_focus(&self.config, &key).await;
                             polling::mark_workspace_read(&self.config, &key);
+                        }
+                        pilot_ipc::Command::FocusWorkspace { session_key } => {
+                            let key = pilot_core::WorkspaceKey::new(
+                                session_key.as_str().to_string(),
+                            );
+                            polling::record_workspace_focus(&self.config, &key).await;
                         }
                         pilot_ipc::Command::MarkActivityRead { session_key, index } => {
                             let key = pilot_core::WorkspaceKey::new(

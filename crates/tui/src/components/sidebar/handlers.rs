@@ -26,11 +26,11 @@ impl Sidebar {
         match (key.code, key.modifiers) {
             // ── Navigation ────────────────────────────────────────────
             (KeyCode::Down, m) if !m.contains(KeyModifiers::SHIFT) => {
-                self.move_cursor_by(1);
+                self.move_cursor_and_emit_focus(1, cmds);
                 PaneOutcome::Consumed
             }
             (KeyCode::Up, m) if !m.contains(KeyModifiers::SHIFT) => {
-                self.move_cursor_by(-1);
+                self.move_cursor_and_emit_focus(-1, cmds);
                 PaneOutcome::Consumed
             }
             // ── Collapse / expand the cursor's repo group ─────────────

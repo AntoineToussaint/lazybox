@@ -479,8 +479,29 @@ impl Server {
                     tracing::info!("daemon ← {label}");
                     match cmd {
                         pilot_ipc::Command::Subscribe => {
-                            let workspaces = load_workspaces(&*self.config.store);
-                            let projects = load_projects(&*self.config.store);
+                            // Offload the SQLite scans (issue #34: pre-fix
+                            // `list_workspaces` + `list_projects` ran on
+                            // the daemon's IPC event-loop task, holding
+                            // up bus-event forwarding for the duration —
+                            // up to several hundred ms on a populated
+                            // store, perceived in the UI as "frozen
+                            // during sync"). `spawn_blocking` moves the
+                            // blocking parking_lot mutex acquisition +
+                            // row iteration off the runtime worker so
+                            // `select!` stays responsive to bus events
+                            // while the snapshot loads.
+                            let store_for_ws = self.config.store.clone();
+                            let store_for_proj = self.config.store.clone();
+                            let workspaces = tokio::task::spawn_blocking(move || {
+                                load_workspaces(&*store_for_ws)
+                            })
+                            .await
+                            .unwrap_or_default();
+                            let projects = tokio::task::spawn_blocking(move || {
+                                load_projects(&*store_for_proj)
+                            })
+                            .await
+                            .unwrap_or_default();
                             let terminals = spawn_handler::snapshot_terminals(&self.config).await;
                             let _ = conn.tx.send(Event::Snapshot {
                                 workspaces,

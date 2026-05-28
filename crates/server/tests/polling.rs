@@ -1189,6 +1189,7 @@ async fn rescope_removes_workspaces_with_no_active_session() {
         any_source_succeeded: true,
         retry_after_secs: None,
         saw_unknown_mergeable: false,
+        source_scopes: Vec::new(),
     };
     polling::rescope(&config, &outcome).await;
 
@@ -1234,6 +1235,7 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
         any_source_succeeded: true,
         retry_after_secs: None,
         saw_unknown_mergeable: false,
+        source_scopes: Vec::new(),
     };
     let mut state = polling::TickState::default();
     polling::rescope_with_state(&config, &outcome, &mut state).await;
@@ -1291,6 +1293,7 @@ async fn rescope_with_empty_but_successful_poll_keeps_workspaces() {
         any_source_succeeded: true,
         retry_after_secs: None,
         saw_unknown_mergeable: false,
+        source_scopes: Vec::new(),
     };
     polling::rescope(&config, &outcome).await;
     let after: Vec<String> = config
@@ -1319,6 +1322,7 @@ async fn rescope_with_all_sources_failed_skips_cleanup() {
         any_source_succeeded: false,
         retry_after_secs: None,
         saw_unknown_mergeable: false,
+        source_scopes: Vec::new(),
     };
     polling::rescope(&config, &outcome).await;
     let after: Vec<String> = config
@@ -1333,6 +1337,286 @@ async fn rescope_with_all_sources_failed_skips_cleanup() {
         "all-failed poll must not remove anything: got {after:?}"
     );
 }
+#[tokio::test]
+async fn rescope_preserves_workspaces_from_unpolled_repos() {
+    // Regression for issue #34: round-robin polling polls a slice
+    // of the user's repos per tick (e.g. 3 of 10). Pre-fix, rescope
+    // treated every stored workspace not in `polled` as out-of-
+    // scope and deleted it — so PRs from the 7 unpolled repos
+    // disappeared every warm tick and reappeared on the next global
+    // sweep (~K minutes later).
+    //
+    // Fix: TickOutcome carries per-source `PolledScope`. When a
+    // source reports `Repos(...)`, workspaces in repos NOT in that
+    // list are preserved — we have no information about them this
+    // tick and silently dropping them is data loss.
+    use pilot_core::{Task, TaskId, WorkspaceKey};
+    let config = ServerConfig::in_memory();
+
+    // Seed three workspaces across three different GitHub repos.
+    let mut polled_task = make_task("owner/polled#1");
+    polled_task.id = TaskId {
+        source: "github".into(),
+        key: "owner/polled#1".into(),
+    };
+    polled_task.repo = Some("owner/polled".into());
+    polled_task.url = "https://github.com/owner/polled/pull/1".into();
+
+    let mut unpolled_task: Task = make_task("owner/unpolled#2");
+    unpolled_task.id = TaskId {
+        source: "github".into(),
+        key: "owner/unpolled#2".into(),
+    };
+    unpolled_task.repo = Some("owner/unpolled".into());
+    unpolled_task.url = "https://github.com/owner/unpolled/pull/2".into();
+
+    let mut other_repo_task: Task = make_task("owner/other#3");
+    other_repo_task.id = TaskId {
+        source: "github".into(),
+        key: "owner/other#3".into(),
+    };
+    other_repo_task.repo = Some("owner/other".into());
+    other_repo_task.url = "https://github.com/owner/other/pull/3".into();
+
+    polling::upsert(&config, polled_task.clone()).await;
+    polling::upsert(&config, unpolled_task.clone()).await;
+    polling::upsert(&config, other_repo_task.clone()).await;
+
+    // Simulate a round-robin tick: only `owner/polled` was queried;
+    // the GhSource reports `Repos(["owner/polled"])` as its
+    // authoritative scope. The other two repos are intentionally
+    // outside this tick's coverage.
+    let outcome = polling::TickOutcome {
+        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+            &polled_task,
+        ))],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: vec![(
+            "github".into(),
+            polling::PolledScope::Repos(vec!["owner/polled".into()]),
+        )],
+    };
+    polling::rescope(&config, &outcome).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+
+    // The polled repo's workspace stays (it was in `polled`).
+    assert!(
+        after.iter().any(|k| k.contains("polled")),
+        "polled workspace should remain: {after:?}",
+    );
+    // CRITICAL: workspaces from unpolled repos must be preserved.
+    // Pre-fix, both would have been deleted here — that's the bug.
+    assert!(
+        after.iter().any(|k| k.contains("unpolled")),
+        "unpolled-repo workspace MUST be preserved (issue #34): {after:?}",
+    );
+    assert!(
+        after.iter().any(|k| k.contains("other")),
+        "other-repo workspace MUST be preserved (issue #34): {after:?}",
+    );
+}
+
+#[tokio::test]
+async fn rescope_with_exhaustive_scope_still_deletes_stale() {
+    // Counterpart to `rescope_preserves_workspaces_from_unpolled_repos`:
+    // when the GH source reports `Exhaustive` (the global sweep ran),
+    // the legacy behavior is intact — stale workspaces still get
+    // cleaned up. Without this assertion, a regression that flipped
+    // the new guard to "always preserve" would silently leave the
+    // sidebar full of stale rows forever.
+    use pilot_core::WorkspaceKey;
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_task("o/r#stale")).await;
+    polling::upsert(&config, make_task("o/r#current")).await;
+
+    let outcome = polling::TickOutcome {
+        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+            &make_task("o/r#current"),
+        ))],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: vec![("github".into(), polling::PolledScope::Exhaustive)],
+    };
+    polling::rescope(&config, &outcome).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(
+        !after.iter().any(|k| k.contains("stale")),
+        "Exhaustive scope must still delete stale workspaces: {after:?}",
+    );
+    assert!(after.iter().any(|k| k.contains("current")));
+}
+
+#[tokio::test]
+async fn rescope_preserves_workspaces_from_unreported_sources() {
+    // When one source succeeds and another fails (or isn't enabled),
+    // only the succeeding source's workspaces are deletion candidates.
+    // Pre-fix, a Linear-only successful tick would have wiped every
+    // GitHub workspace (since none were in `polled`) — silently
+    // destructive whenever GH had a transient failure.
+    use pilot_core::{Task, TaskId};
+    let config = ServerConfig::in_memory();
+
+    // Seed a GH workspace and a Linear workspace.
+    let mut gh_task = make_task("o/r#1");
+    gh_task.repo = Some("o/r".into());
+
+    let mut linear_task: Task = make_task("team-x-42");
+    linear_task.id = TaskId {
+        source: "linear".into(),
+        key: "team-x-42".into(),
+    };
+    linear_task.repo = Some("team-x".into());
+    linear_task.url = "https://linear.app/team/issue/team-x-42".into();
+
+    polling::upsert(&config, gh_task.clone()).await;
+    polling::upsert(&config, linear_task.clone()).await;
+
+    // Only Linear reported this tick — GH errored out.
+    let outcome = polling::TickOutcome {
+        polled: vec![],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: vec![("linear".into(), polling::PolledScope::Exhaustive)],
+    };
+    // `polled` is empty so the existing "empty polled, refuse to
+    // wipe" guard fires before our new scope guard — assert the
+    // store is intact through that path as well. The scope-guard's
+    // own coverage lives in the previous two tests.
+    polling::rescope(&config, &outcome).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert_eq!(
+        after.len(),
+        2,
+        "both workspaces must survive: {after:?}",
+    );
+}
+
+#[tokio::test]
+async fn rescope_round_robin_tick_after_global_keeps_unpolled() {
+    // End-to-end-ish: simulate the exact issue #34 sequence using
+    // real `TickState` + `tick_with_state`.
+    //
+    // 1. First tick: a fake source returns three PRs spanning three
+    //    repos and reports `Exhaustive` (mimics a cold-start
+    //    global GH sweep). All three workspaces land in the store.
+    // 2. Second tick: a fake source returns ONLY `owner/a#1` and
+    //    reports `Repos(["owner/a"])` (mimics a warm round-robin
+    //    tick where only `owner/a` was queried).
+    //
+    // Expectation: after step 2, `owner/b#2` and `owner/c#3` are
+    // still in the store — they belong to repos we didn't query
+    // this tick, not repos that fell out of upstream scope.
+    use pilot_core::{Task, TaskId};
+    use std::pin::Pin;
+
+    struct ScopedSource {
+        name: String,
+        tasks: Vec<Task>,
+        scope: polling::PolledScope,
+    }
+    impl polling::TaskSource for ScopedSource {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn fetch<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+        {
+            let tasks = self.tasks.clone();
+            Box::pin(async move { Ok(tasks) })
+        }
+        fn polled_scope(&self) -> polling::PolledScope {
+            self.scope.clone()
+        }
+    }
+
+    fn gh_task(repo: &str, num: u32) -> Task {
+        let mut t = make_task(&format!("{repo}#{num}"));
+        t.id = TaskId {
+            source: "github".into(),
+            key: format!("{repo}#{num}"),
+        };
+        t.repo = Some(repo.into());
+        t.url = format!("https://github.com/{repo}/pull/{num}");
+        t
+    }
+
+    let config = ServerConfig::in_memory();
+    let mut state = polling::TickState::default();
+
+    // Step 1: global tick, three repos in scope.
+    let sources: Vec<Box<dyn polling::TaskSource>> = vec![Box::new(ScopedSource {
+        name: "github".into(),
+        tasks: vec![
+            gh_task("owner/a", 1),
+            gh_task("owner/b", 2),
+            gh_task("owner/c", 3),
+        ],
+        scope: polling::PolledScope::Exhaustive,
+    })];
+    let outcome = polling::tick_with_state(&config, &sources, &mut state).await;
+    polling::rescope_with_state(&config, &outcome, &mut state).await;
+    assert_eq!(
+        config.store.list_workspaces().unwrap().len(),
+        3,
+        "global tick seeds all three workspaces",
+    );
+
+    // Step 2: warm round-robin tick, only `owner/a` queried.
+    let sources: Vec<Box<dyn polling::TaskSource>> = vec![Box::new(ScopedSource {
+        name: "github".into(),
+        tasks: vec![gh_task("owner/a", 1)],
+        scope: polling::PolledScope::Repos(vec!["owner/a".into()]),
+    })];
+    let outcome = polling::tick_with_state(&config, &sources, &mut state).await;
+    polling::rescope_with_state(&config, &outcome, &mut state).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(
+        after.iter().any(|k| k.contains("owner-a")),
+        "the queried repo stays: {after:?}",
+    );
+    assert!(
+        after.iter().any(|k| k.contains("owner-b")),
+        "unpolled repo MUST be preserved (issue #34): {after:?}",
+    );
+    assert!(
+        after.iter().any(|k| k.contains("owner-c")),
+        "unpolled repo MUST be preserved (issue #34): {after:?}",
+    );
+}
+
 #[tokio::test]
 async fn delete_workspace_kills_terminals_via_terminal_meta() {
     // Regression: an earlier implementation parsed the backend_key

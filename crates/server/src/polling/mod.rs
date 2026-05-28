@@ -68,6 +68,26 @@ pub trait TaskSource: Send + Sync + 'static {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>;
 
+    /// What this source authoritatively covered in the most recent
+    /// `fetch`. Drives the `rescope` deletion guard: only workspaces
+    /// owned by a source whose scope this tick is authoritative for
+    /// are candidates for removal.
+    ///
+    /// Default is [`PolledScope::Exhaustive`] — "I covered everything
+    /// I own this tick." Sources that fan out across repos and only
+    /// query a slice per tick (e.g. `GhSource` with round-robin
+    /// scheduling) must override to return [`PolledScope::Repos`]
+    /// when they didn't run the global sweep.
+    ///
+    /// Without this override, a round-robin tick that only polled 3
+    /// of the user's 10 repos would let `rescope` delete every
+    /// workspace from the other 7 — they aren't in `polled` because
+    /// they weren't queried this tick, not because they fell out of
+    /// scope upstream. (Issue #34.)
+    fn polled_scope(&self) -> PolledScope {
+        PolledScope::Exhaustive
+    }
+
     /// Drain side-effect actions accumulated during the most recent
     /// `fetch`. The polling tick calls this after each fetch and
     /// dispatches the resulting [`ProviderAction`]s with full
@@ -78,6 +98,30 @@ pub trait TaskSource: Send + Sync + 'static {
     fn drain_actions(&self) -> Vec<ProviderAction> {
         Vec::new()
     }
+}
+
+/// What a [`TaskSource`] authoritatively covered in its most recent
+/// `fetch`. The polling tick captures this per-source into
+/// [`TickOutcome::source_scopes`] so `rescope` can tell the
+/// difference between "this workspace fell out of upstream scope"
+/// (delete) and "we just didn't query its repo this tick" (preserve).
+///
+/// Issue #34: pre-fix `GhSource`'s round-robin scheduler would poll
+/// 3 of N repos per tick, but `rescope` treated every stored
+/// workspace not in `polled` as out-of-scope. Result: every minute,
+/// PRs from the other (N - 3) repos disappeared from the sidebar
+/// until the next global sweep re-discovered them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolledScope {
+    /// This source covered everything it owns this tick. Any stored
+    /// workspace tagged with this source but not in `polled` is a
+    /// genuine out-of-scope candidate.
+    Exhaustive,
+    /// This source only queried these specific repos. Workspaces
+    /// tagged with this source whose `task.repo` is NOT in this list
+    /// must be preserved — we have no information about them this
+    /// tick.
+    Repos(Vec<String>),
 }
 
 /// `GhClient` adapter. The filter narrows the upstream result by
@@ -203,6 +247,19 @@ async fn dispatch_action(config: &ServerConfig, source_name: &str, action: Provi
 impl TaskSource for GhSource {
     fn name(&self) -> &str {
         "github"
+    }
+    /// GH's per-tick coverage mirrors `RoundRobinPick`:
+    /// `run_global=true` → exhaustive (the global involves:USER sweep
+    /// hit every repo the user touches); otherwise → only the
+    /// scheduler's `repos` slice was authoritatively queried. Issue
+    /// #34: without this, `rescope` would treat unpolled repos as
+    /// "fell out of scope" and delete their workspaces every warm tick.
+    fn polled_scope(&self) -> PolledScope {
+        if self.scheduling.run_global {
+            PolledScope::Exhaustive
+        } else {
+            PolledScope::Repos(self.scheduling.repos.clone())
+        }
     }
     fn drain_actions(&self) -> Vec<ProviderAction> {
         let mut guard = self
@@ -903,10 +960,18 @@ pub async fn tick_with_state(
     // and watch the budget stay pegged.
     let mut max_retry_after_secs: Option<u64> = None;
     let mut saw_unknown_mergeable = false;
+    // Per-source authoritative coverage for this tick. Only successful
+    // sources land here — a failed source has no authority to delete
+    // stored workspaces this cycle, so omitting it lets `rescope`
+    // preserve them. (Issue #34: a round-robin GH tick only polls 3
+    // of N repos; without per-source scope, `rescope` would delete
+    // workspaces from the unpolled (N - 3) repos.)
+    let mut source_scopes: Vec<(String, PolledScope)> = Vec::new();
     for source in sources {
         match source.fetch().await {
             Ok(tasks) => {
                 any_source_succeeded = true;
+                source_scopes.push((source.name().to_string(), source.polled_scope()));
                 let count = tasks.len();
                 tracing::info!(source = source.name(), count, "poll succeeded");
                 // 0-result polls are almost always misconfiguration —
@@ -1089,6 +1154,7 @@ pub async fn tick_with_state(
         any_source_succeeded,
         retry_after_secs: max_retry_after_secs,
         saw_unknown_mergeable,
+        source_scopes,
     }
 }
 
@@ -1114,6 +1180,15 @@ pub struct TickOutcome {
     /// one extra wake at +5s so the next poll picks up the real
     /// value instead of waiting out the full interval.
     pub saw_unknown_mergeable: bool,
+    /// Per-source authoritative coverage for this tick. Populated for
+    /// every source whose `fetch` returned `Ok` — failed sources are
+    /// omitted so `rescope` preserves their workspaces (we don't know
+    /// which ones are still in upstream scope after a transient
+    /// error). Empty when no source succeeded OR when callers
+    /// (legacy tests) construct an outcome manually; in those cases
+    /// `rescope` falls back to its pre-#34 behavior of treating every
+    /// stored workspace as exhaustively covered.
+    pub source_scopes: Vec<(String, PolledScope)>,
 }
 
 /// Compare `polled` against the persisted workspace set; remove
@@ -1175,6 +1250,25 @@ pub async fn rescope_with_state(
         .prompted_out_of_scope
         .retain(|k| !polled_set.contains(k.as_str()));
 
+    // Per-source coverage map. A workspace is only a deletion
+    // candidate when its source ran successfully this tick AND
+    // (the source ran exhaustively OR the workspace's repo is in
+    // the source's polled-repos slice). Issue #34: pre-fix, a
+    // round-robin GH tick polled 3 of N repos, but every stored
+    // workspace not in `polled` got deleted — so PRs from the
+    // unpolled (N - 3) repos disappeared every warm tick.
+    //
+    // Empty `source_scopes` (legacy callers, test fixtures, the
+    // no-sources path) falls back to the pre-#34 behavior: every
+    // unpolled workspace is a deletion candidate. The production
+    // poll loop always populates this.
+    let scope_by_source: std::collections::HashMap<&str, &PolledScope> = outcome
+        .source_scopes
+        .iter()
+        .map(|(name, scope)| (name.as_str(), scope))
+        .collect();
+    let scope_aware = !scope_by_source.is_empty();
+
     let records = match config.store.list_workspaces() {
         Ok(r) => r,
         Err(e) => {
@@ -1225,6 +1319,38 @@ pub async fn rescope_with_state(
                 && w.project_key.is_some()
         }) {
             continue;
+        }
+        // Per-source scope guard (issue #34). Only authoritative
+        // sources can authorize a delete. A workspace whose source
+        // didn't run this tick (transient error, source not enabled)
+        // or whose repo wasn't in the polled slice (round-robin)
+        // must be preserved — we have no fresh information about it.
+        //
+        // Workspaces with no primary task fall through to the
+        // existing locally-created guard above; orphans without
+        // project_key (shouldn't happen but defensive) are treated
+        // as in-scope so a corrupt row doesn't survive forever.
+        if scope_aware
+            && let Some(task) = stored_ws.as_ref().and_then(|w| w.primary_task())
+        {
+            let source = task.id.source.as_str();
+            let in_authoritative_scope = match scope_by_source.get(source) {
+                None => false,
+                Some(PolledScope::Exhaustive) => true,
+                Some(PolledScope::Repos(repos)) => task
+                    .repo
+                    .as_deref()
+                    .is_some_and(|r| repos.iter().any(|x| x == r)),
+            };
+            if !in_authoritative_scope {
+                tracing::debug!(
+                    workspace_key = %r.key,
+                    source,
+                    repo = task.repo.as_deref().unwrap_or(""),
+                    "rescope: preserving (out of this tick's authoritative scope)"
+                );
+                continue;
+            }
         }
         match active_counts.get(r.key.as_str()).copied() {
             None | Some(0) => {
@@ -1560,6 +1686,7 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
             any_source_succeeded: true,
             retry_after_secs: None,
             saw_unknown_mergeable: false,
+            source_scopes: Vec::new(),
         };
         rescope_with_state(config, &outcome, &mut state).await;
         return TickSummary::default();
@@ -1601,6 +1728,7 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
                 any_source_succeeded: false,
                 retry_after_secs: Some(30),
                 saw_unknown_mergeable: false,
+                source_scopes: Vec::new(),
             }
         }
     };

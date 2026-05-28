@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pilot_core::SessionKey;
 use pilot_ipc::{Command, Event, TerminalId, TerminalKind, TerminalSnapshot};
 use pilot_tui::components::TerminalStack;
-use pilot_tui::components::terminal_stack::{RECENT_OUTPUT_CAP, strip_ansi};
+use pilot_tui::components::terminal_stack::{COMPOSING_CAP, RECENT_OUTPUT_CAP, strip_ansi};
 use pilot_tui::{PaneId, PaneOutcome};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -889,6 +889,44 @@ fn record_paste_appends_to_focused_agent_composing() {
         t.last_user_message_of(TerminalId(1)),
         Some("review this snippet")
     );
+}
+
+#[test]
+fn record_paste_truncates_at_composing_cap() {
+    // Pathological paste — way larger than the cap. The buffer
+    // should clamp to COMPOSING_CAP rather than grow unbounded.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let blob = "a".repeat(COMPOSING_CAP * 2);
+    t.record_paste(&blob);
+    assert_eq!(
+        t.composing_of(TerminalId(1)).map(|s| s.len()),
+        Some(COMPOSING_CAP),
+        "paste clamped to cap"
+    );
+}
+
+#[test]
+fn record_paste_keeps_utf8_char_boundaries_on_clamp() {
+    // The clamp must land on a UTF-8 char boundary — splitting a
+    // multi-byte codepoint would produce an invalid String. Build a
+    // buffer that already sits one byte short of the cap, then paste
+    // a 4-byte emoji that would straddle the boundary.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let near_full = "x".repeat(COMPOSING_CAP - 1);
+    t.record_paste(&near_full);
+    t.record_paste("🚀");
+    let composing = t.composing_of(TerminalId(1)).expect("agent slot");
+    assert!(
+        composing.is_char_boundary(composing.len()),
+        "result is a valid UTF-8 string"
+    );
+    assert!(composing.len() <= COMPOSING_CAP);
 }
 
 #[test]

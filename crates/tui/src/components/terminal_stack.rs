@@ -53,6 +53,35 @@ const DEFAULT_ROWS: u16 = 32;
 /// 4 KiB is enough to span any prompt the agents have shipped so far.
 pub const RECENT_OUTPUT_CAP: usize = 4 * 1024;
 
+/// Cap for the per-terminal composing buffer (the in-flight user
+/// message that will commit on the next Enter). Practical agent
+/// prompts fit in a few KB; this bound exists to keep a pathological
+/// paste (a multi-MB blob dropped into the terminal) from sitting in
+/// memory unbounded until the user finally hits Enter or abandons.
+pub const COMPOSING_CAP: usize = 8 * 1024;
+
+/// Visible prefix on the pinned "latest user message" recap row.
+/// Whitespace + the box-drawing wedge reads as "input direction"
+/// without being visually loud.
+const RECAP_PREFIX: &str = "you ▸ ";
+
+/// Collapse a possibly multi-line user message down to a single
+/// line of plain text for the pinned recap row. Newlines and runs
+/// of whitespace become single spaces so multi-line prompts
+/// (Shift-Enter inside Claude) render as `fix bug in foo.rs and
+/// retry` instead of `fix bug in foo.rs⏎and retry` with a visible
+/// gap. Single-pass; no intermediate Vec.
+fn summarize_message(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len());
+    for word in msg.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
+}
+
 /// Outcome of a scroll attempt on the focused terminal. Used by the
 /// orchestrator's mouse-wheel handler to surface why a scroll might
 /// have looked like nothing happened — without this, "no scrollback
@@ -267,6 +296,78 @@ struct TerminalSlot {
     /// scroll the prompt off-screen. `None` until the user has
     /// submitted at least one message in this terminal.
     last_user_message: Option<String>,
+}
+
+impl TerminalSlot {
+    /// Apply a user keystroke to the composing buffer + last-message
+    /// state. Mirrors how the agent's own prompt-line reads keys:
+    ///   - printable Char → append
+    ///   - Backspace → pop
+    ///   - Enter → commit (Shift-Enter inserts a newline instead,
+    ///     matching Claude Code's "newline-without-submit" binding)
+    ///   - Ctrl-C / Ctrl-U / Esc → clear the line
+    ///
+    /// Other keys (arrows, function keys, Tab) leave both buffers
+    /// untouched — they don't change the literal text the user is
+    /// composing. Per-char appends respect [`COMPOSING_CAP`] so a
+    /// rogue auto-typer can't grow the buffer unbounded.
+    fn apply_user_key(&mut self, key: &KeyEvent) {
+        use KeyCode::*;
+        let mods = key.modifiers;
+        match key.code {
+            Char(c) => {
+                if mods.contains(KeyModifiers::CONTROL) {
+                    if c == 'c' || c == 'u' {
+                        self.composing.clear();
+                    }
+                } else if self.composing.len() + c.len_utf8() <= COMPOSING_CAP {
+                    self.composing.push(c);
+                }
+            }
+            Enter => {
+                if mods.contains(KeyModifiers::SHIFT) {
+                    if self.composing.len() < COMPOSING_CAP {
+                        self.composing.push('\n');
+                    }
+                } else {
+                    let trimmed = self.composing.trim();
+                    if !trimmed.is_empty() {
+                        self.last_user_message = Some(trimmed.to_string());
+                    }
+                    self.composing.clear();
+                }
+            }
+            Backspace => {
+                self.composing.pop();
+            }
+            Esc => {
+                self.composing.clear();
+            }
+            _ => {}
+        }
+    }
+
+    /// Append `text` to the composing buffer, truncated to stay
+    /// within [`COMPOSING_CAP`]. Used by the bracketed-paste path
+    /// where the payload arrives as one chunk, so a single check at
+    /// the boundary is enough to defend against pathological pastes.
+    fn append_paste(&mut self, text: &str) {
+        let remaining = COMPOSING_CAP.saturating_sub(self.composing.len());
+        if remaining == 0 {
+            return;
+        }
+        if text.len() <= remaining {
+            self.composing.push_str(text);
+            return;
+        }
+        // Find the largest UTF-8 char boundary ≤ `remaining` so we
+        // don't split a multi-byte codepoint.
+        let mut cut = remaining;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        self.composing.push_str(&text[..cut]);
+    }
 }
 
 /// libghostty-vt state for one terminal.
@@ -975,11 +1076,11 @@ impl TerminalStack {
         }
     }
 
-    /// The last full user message submitted to the given agent
-    /// terminal (the bytes between two Enter presses), or `None` if
-    /// the user hasn't sent anything yet or the terminal isn't an
-    /// agent. Drives the pinned "you ▸ …" recap line at the top of
-    /// the agent view.
+    /// The last full user message committed to the given terminal
+    /// (the bytes between two Enter presses), or `None` if no
+    /// message has been committed — including for shells, where the
+    /// composing buffer is intentionally left dormant. Drives the
+    /// pinned "you ▸ …" recap line at the top of the agent view.
     pub fn last_user_message_of(&self, id: TerminalId) -> Option<&str> {
         self.terminals
             .get(&id)
@@ -1009,52 +1110,7 @@ impl TerminalStack {
         if let Some(slot) = self.terminals.get_mut(&id)
             && matches!(slot.kind, TerminalKind::Agent(_))
         {
-            slot.composing.push_str(text);
-        }
-    }
-
-    /// Update the composing buffer + last-submitted message in
-    /// response to a key the user just sent to an Agent terminal.
-    /// Mirrors how the agent's own prompt-line reads keys:
-    ///   - printable Char → append
-    ///   - Backspace → pop
-    ///   - Enter → commit (Shift-Enter inserts a newline instead,
-    ///     matching Claude Code's "newline-without-submit" binding)
-    ///   - Ctrl-C / Ctrl-U / Esc → clear the line
-    /// Other keys (arrows, function keys, Tab) are intentionally
-    /// ignored — they don't change the literal text the user is
-    /// composing.
-    fn record_key_for_message(slot: &mut TerminalSlot, key: &KeyEvent) {
-        use KeyCode::*;
-        let mods = key.modifiers;
-        match key.code {
-            Char(c) => {
-                if mods.contains(KeyModifiers::CONTROL) {
-                    if c == 'c' || c == 'u' {
-                        slot.composing.clear();
-                    }
-                } else {
-                    slot.composing.push(c);
-                }
-            }
-            Enter => {
-                if mods.contains(KeyModifiers::SHIFT) {
-                    slot.composing.push('\n');
-                } else {
-                    let trimmed = slot.composing.trim();
-                    if !trimmed.is_empty() {
-                        slot.last_user_message = Some(trimmed.to_string());
-                    }
-                    slot.composing.clear();
-                }
-            }
-            Backspace => {
-                slot.composing.pop();
-            }
-            Esc => {
-                slot.composing.clear();
-            }
-            _ => {}
+            slot.append_paste(text);
         }
     }
 
@@ -1192,7 +1248,7 @@ impl TerminalStack {
         if let Some(slot) = self.terminals.get_mut(&id)
             && matches!(slot.kind, TerminalKind::Agent(_))
         {
-            Self::record_key_for_message(slot, &key);
+            slot.apply_user_key(&key);
         }
         cmds.push(Command::Write {
             terminal_id: id,
@@ -1715,6 +1771,27 @@ impl TerminalStack {
         });
     }
 
+    /// Render the "you ▸ <recap>" pin into `area`. Dim styling so
+    /// the line reads as chrome / recap, not as fresh agent output
+    /// the user has to parse. Truncates with `…` when the message
+    /// overflows the row width — same affordance the empty-state
+    /// hint uses elsewhere in this pane.
+    fn render_user_message_recap(frame: &mut Frame, area: Rect, msg: &str) {
+        let theme = crate::theme::current();
+        let summary = summarize_message(msg);
+        let line = ratatui::text::Line::from(vec![
+            Span::styled(
+                RECAP_PREFIX,
+                Style::default()
+                    .fg(theme.text_dim)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(summary, Style::default().fg(theme.text_dim)),
+        ]);
+        let line = crate::components::table::truncate_line(line, area.width as usize);
+        frame.render_widget(Paragraph::new(line), area);
+    }
+
     /// Render a single terminal slot full-rect. Used by both the
     /// tabs path and the splits path's leaf case.
     fn render_one_terminal(
@@ -1753,7 +1830,7 @@ impl TerminalStack {
                     width: rect.width,
                     height: 1,
                 };
-                render_user_message_recap(frame, header_rect, msg);
+                Self::render_user_message_recap(frame, header_rect, msg);
             }
             slot.vt.ensure_size(body.width, body.height);
             // Backend PTY also needs to know the new size — otherwise
@@ -2004,46 +2081,6 @@ pub fn strip_ansi(input: &[u8]) -> Vec<u8> {
 /// for keys we don't know how to encode yet. Public so the app-level
 /// escape-latch can flush buffered keystrokes through the same
 /// encoding path the live key dispatch uses.
-/// Visible prefix on the pinned recap row. Whitespace + the
-/// box-drawing wedge `▸` reads as "input direction" without being
-/// visually loud. Kept here as a const so tests can assert against
-/// it without duplicating the literal.
-pub(crate) const RECAP_PREFIX: &str = "you ▸ ";
-
-/// Collapse a possibly multi-line user message down to a single
-/// line of plain text for the pinned recap row. Newlines and runs
-/// of whitespace become single spaces so multi-line prompts
-/// (Shift-Enter inside Claude) render as "fix bug in foo.rs and
-/// retry" instead of "fix bug in foo.rs⏎and retry" with a visible
-/// gap.
-pub(crate) fn summarize_message(msg: &str) -> String {
-    msg.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Render the "you ▸ <recap>" line into `area`. Dim styling so the
-/// pin reads as chrome / recap, not as fresh agent output the user
-/// has to parse. Truncates with `…` when the message overflows the
-/// row width — matches what `crate::components::table::truncate_line`
-/// does for the empty-state hint elsewhere in this pane.
-fn render_user_message_recap(frame: &mut Frame, area: Rect, msg: &str) {
-    let theme = crate::theme::current();
-    let summary = summarize_message(msg);
-    let spans = vec![
-        Span::styled(
-            RECAP_PREFIX.to_string(),
-            Style::default()
-                .fg(theme.text_dim)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(summary, Style::default().fg(theme.text_dim)),
-    ];
-    let line = crate::components::table::truncate_line(
-        ratatui::text::Line::from(spans),
-        area.width as usize,
-    );
-    frame.render_widget(Paragraph::new(line), area);
-}
-
 pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
     use KeyCode::*;
     match key.code {

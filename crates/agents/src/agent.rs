@@ -197,18 +197,18 @@ pub mod detect {
         /// Lowercase. Some entries carry a trailing space to avoid
         /// matching inside longer words ("should i " won't fire on
         /// "shoulder"); the `?`-terminated forms ("Should I?") are
-        /// caught by the ends-with-`?` rule instead.
+        /// caught by the ends-with-`?` rule instead. Entries are the
+        /// shortest distinctive stem of each shape — "would you like"
+        /// also catches "would you like me to …", "let me know" also
+        /// catches "let me know if / whether / how / your thoughts" —
+        /// so we don't carry redundant longer variants.
         pub const CONVERSATIONAL_ASK_PHRASES: &[&str] = &[
             "want me to",
             "should i ",
             "shall i ",
             "do you want",
-            "would you like me to",
             "would you like",
-            "let me know if",
-            "let me know whether",
-            "let me know which",
-            "let me know what",
+            "let me know",
             "which one",
             "which would you prefer",
             "ok to ",

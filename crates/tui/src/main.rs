@@ -14,6 +14,7 @@
 //!   pilot slack init              interactive Slack token setup wizard
 //!   pilot slack doctor            read-only validation of an existing setup
 //!   pilot slack prune             archive stale per-(session, agent) channels
+//!   pilot doctor worktrees        inspect + clean up orphaned worktrees
 //!
 //! All arg parsing is intentionally stupid — see `take_flag`.
 
@@ -140,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("server") => server_subcommand(&args[1..]).await,
         Some("slack") => slack_subcommand(&args[1..]).await,
+        Some("doctor") => doctor_subcommand(&args[1..]).await,
         Some("--connect") => {
             let socket_path = args
                 .get(1)
@@ -474,6 +476,28 @@ async fn slack_subcommand(args: &[String]) -> anyhow::Result<()> {
         }
         _ => {
             println!("usage: pilot slack [init|doctor|prune]");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// `pilot doctor <subject>` — diagnostics + cleanup tooling.
+/// Today: `worktrees`. Sized as a subcommand-of-subcommands so we
+/// have room to add `doctor sessions`, `doctor cache`, etc. without
+/// reshuffling argv.
+async fn doctor_subcommand(args: &[String]) -> anyhow::Result<()> {
+    use pilot_tui::doctor;
+    match args.first().map(String::as_str) {
+        Some("worktrees") => {
+            let outcome = doctor::run(&args[1..]).await?;
+            match outcome {
+                doctor::DoctorOutcome::Ok => Ok(()),
+                doctor::DoctorOutcome::PartialFailure => std::process::exit(1),
+                doctor::DoctorOutcome::BadArgs => std::process::exit(2),
+            }
+        }
+        _ => {
+            println!("usage: pilot doctor worktrees [--json|--delete-safe|--yes [--force]]");
             std::process::exit(2);
         }
     }

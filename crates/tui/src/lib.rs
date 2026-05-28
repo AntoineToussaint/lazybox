@@ -26,6 +26,7 @@
 )]
 
 pub mod components;
+pub mod doctor;
 pub mod latch_set;
 pub mod pane;
 pub mod pilot_theme;

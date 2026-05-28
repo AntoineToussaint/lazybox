@@ -6,6 +6,9 @@
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+mod inspect;
+pub use inspect::{OrphanReason, TrackedSession, WorktreeInspection};
+
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
     #[error("git command failed: {0}")]
@@ -88,6 +91,15 @@ impl WorktreeManager {
         Self {
             base_dir: base_dir.into(),
         }
+    }
+
+    /// The directory this manager was constructed against — typically
+    /// `<state_root>/`, with `repos/` (bare clones) and `worktrees/`
+    /// (per-task checkouts) as siblings underneath. Exposed for
+    /// inspector / doctor tooling that needs to compose paths without
+    /// rebuilding the manager's layout knowledge from scratch.
+    pub fn base_dir(&self) -> &Path {
+        &self.base_dir
     }
 
     /// Default base dir: `<PILOT_HOME>/v2/` (default `~/.pilot/v2/`).
@@ -633,7 +645,7 @@ async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
 /// and the subprocess just hangs forever, freezing whatever async
 /// task awaited it (worktree migration, session restore, etc.).
 /// Disabling the prompt makes git fail fast with a clean error.
-fn git_env() -> [(&'static str, &'static str); 2] {
+pub(crate) fn git_env() -> [(&'static str, &'static str); 2] {
     [
         ("GIT_TERMINAL_PROMPT", "0"),
         // Suppress git's progress bar to keep `output()` from

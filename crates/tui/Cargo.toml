@@ -37,6 +37,7 @@ libghostty-vt    = { workspace = true }
 pilot-ipc     = { workspace = true }
 pilot-agents  = { workspace = true }
 pilot-server  = { path = "../server" }
+pilot-git-ops = { workspace = true }
 
 tokio            = { workspace = true }
 anyhow           = { workspace = true }

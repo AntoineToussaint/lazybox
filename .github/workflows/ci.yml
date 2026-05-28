@@ -6,6 +6,10 @@
 # compensate, CI runs a broader set of checks here: build/test/clippy
 # (matrix), fmt, rustdoc with -D warnings, cargo-deny, typos, and
 # cargo-machete (soft-fail).
+#
+# Jobs that compile workspace code share `.github/actions/rust-build-env`
+# (Zig + C toolchain + Rust stable + cache) so the install step
+# doesn't drift across jobs.
 
 name: CI
 
@@ -24,29 +28,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Zig 0.15.2
-        uses: mlugg/setup-zig@v2
-        with:
-          version: "0.15.2"
-
-      - name: Install C toolchain (Linux)
-        if: runner.os == 'Linux'
-        # The Zig-built ghostty static archive vendors simdutf /
-        # highway / std::optional from libc++ (LLVM's C++ stdlib,
-        # symbols namespaced `std::__1::`), NOT libstdc++ (GNU's,
-        # `std::__cxx11::`). Linking with -lstdc++ leaves every
-        # libc++ symbol unresolved (`std::__1::basic_string`,
-        # `typeinfo for std::bad_optional_access`, `hwy::Abort`,
-        # …). Install libc++ + libc++abi so the build script can
-        # link them.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-build-env
 
       - name: Build
         run: cargo build --workspace --all-targets
@@ -59,23 +41,9 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Zig 0.15.2
-        uses: mlugg/setup-zig@v2
+      - uses: ./.github/actions/rust-build-env
         with:
-          version: "0.15.2"
-
-      - name: Install C toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - uses: Swatinem/rust-cache@v2
-
+          rust-components: clippy
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   fmt:
@@ -98,21 +66,7 @@ jobs:
       RUSTDOCFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Zig 0.15.2
-        uses: mlugg/setup-zig@v2
-        with:
-          version: "0.15.2"
-
-      - name: Install C toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
+      - uses: ./.github/actions/rust-build-env
       - run: cargo doc --no-deps --workspace
 
   deny:
@@ -133,7 +87,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - uses: crate-ci/typos@master
+      # Pinned to a tagged release rather than `@master` so CI is
+      # reproducible across re-runs and a silent upstream change
+      # can't flip behavior. Bump when typos.dev cuts a new release.
+      - uses: crate-ci/typos@v1.46.3
 
   machete:
     # cargo-machete surfaces unused workspace dependencies. Soft-fail
@@ -145,4 +102,6 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - uses: bnjbvr/cargo-machete@main
+      # Pinned to a tagged release rather than `@main` so CI is
+      # reproducible. Bump when bnjbvr/cargo-machete cuts a new release.
+      - uses: bnjbvr/cargo-machete@v0.9.2

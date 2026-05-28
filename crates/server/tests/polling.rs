@@ -1523,6 +1523,105 @@ async fn rescope_with_exhaustive_scope_still_deletes_stale() {
     assert!(after.iter().any(|k| k.contains("current")));
 }
 
+#[test]
+fn gh_polled_scope_downgrades_to_preserve_all_on_partial_sweep() {
+    use polling::{PolledScope, gh_polled_scope};
+    // Clean global sweep → Exhaustive (rescope may delete stale rows).
+    assert_eq!(
+        gh_polled_scope(true, &[], false),
+        PolledScope::Exhaustive,
+        "a clean global sweep authoritatively covers everything",
+    );
+    // Clean round-robin tick → only the queried repos are authoritative.
+    assert_eq!(
+        gh_polled_scope(false, &["owner/a".into()], false),
+        PolledScope::Repos(vec!["owner/a".into()]),
+    );
+    // PARTIAL sweep (e.g. PR query errored, issues OK) → empty
+    // coverage so rescope preserves EVERY github workspace this tick.
+    // This is the guard against a PR vanishing because one poll
+    // hiccupped rather than because it merged/closed. The `run_global`
+    // flag is irrelevant once the sweep is partial.
+    assert_eq!(
+        gh_polled_scope(true, &[], true),
+        PolledScope::Repos(Vec::new()),
+        "a partial global sweep must NOT claim exhaustive coverage",
+    );
+    assert_eq!(
+        gh_polled_scope(false, &["owner/a".into()], true),
+        PolledScope::Repos(Vec::new()),
+        "a partial round-robin tick must preserve all, not just unqueried repos",
+    );
+}
+
+#[tokio::test]
+async fn rescope_preserves_prs_when_pr_fetch_partially_failed() {
+    // End-to-end guard for the "PRs disappear on a flaky poll" bug.
+    // When the PR query errors but the issue query succeeds, the
+    // GitHub client returns issues-only `Ok(..)` to keep the inbox
+    // alive — so the freshly-polled set contains NO PRs. If the
+    // source reported `Exhaustive`, rescope would read every stored
+    // PR as "fell out of scope" and delete it. The partial-sweep
+    // guard makes the source report empty coverage
+    // (`gh_polled_scope(.., partial=true)` → `Repos([])`), so the PR
+    // survives until a clean sweep can speak to its real state.
+    use pilot_core::{TaskId, WorkspaceKey};
+    let config = ServerConfig::in_memory();
+
+    let mut pr_task = make_task("owner/repo#7");
+    pr_task.id = TaskId {
+        source: "github".into(),
+        key: "owner/repo#7".into(),
+    };
+    pr_task.repo = Some("owner/repo".into());
+    pr_task.url = "https://github.com/owner/repo/pull/7".into();
+
+    let mut issue_task = make_task("owner/repo#8");
+    issue_task.id = TaskId {
+        source: "github".into(),
+        key: "owner/repo#8".into(),
+    };
+    issue_task.repo = Some("owner/repo".into());
+    issue_task.url = "https://github.com/owner/repo/issues/8".into();
+
+    polling::upsert(&config, pr_task.clone()).await;
+    polling::upsert(&config, issue_task.clone()).await;
+
+    // The partial sweep returned only the issue; the PR query failed.
+    // The source reports the downgraded scope it would compute via
+    // `gh_polled_scope(run_global=true, repos=[], partial=true)`.
+    let outcome = polling::TickOutcome {
+        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+            &issue_task,
+        ))],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::from([(
+            "github".into(),
+            polling::gh_polled_scope(true, &[], true),
+        )]),
+        all_full: true,
+    };
+    polling::rescope(&config, &outcome).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(
+        after.iter().any(|k| k.contains("repo-7")),
+        "PR workspace MUST survive a partial sweep where the PR query failed: {after:?}",
+    );
+    assert!(
+        after.iter().any(|k| k.contains("repo-8")),
+        "issue workspace should also be preserved on a partial sweep: {after:?}",
+    );
+}
+
 #[tokio::test]
 async fn rescope_preserves_workspaces_from_unreported_sources() {
     // When one source succeeds and another fails (or isn't enabled),

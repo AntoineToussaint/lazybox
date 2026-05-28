@@ -136,7 +136,9 @@ pub enum TerminalTarget {
     AnchorThread(String),
     /// No chat surface for this terminal — the dispatcher silently
     /// drops outbound events and never tries to ensure a channel.
-    None,
+    /// (Named `NoSurface` rather than `None` so `match` arms don't
+    /// shadow [`Option::None`] at a glance.)
+    NoSurface,
 }
 
 /// What pilot needs from a chat backend.
@@ -228,6 +230,29 @@ impl RouterState {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Test helper — record a terminal as living on a dedicated
+    /// channel. Asserting tests use this so they don't reach into
+    /// the internal map layout.
+    #[cfg(test)]
+    fn record_dedicated(&mut self, terminal_id: TerminalId, channel_id: &str) {
+        self.terminal_to_channel
+            .insert(terminal_id, channel_id.to_string());
+        self.channel_to_terminal
+            .insert(channel_id.to_string(), terminal_id);
+    }
+
+    /// Test helper — record a terminal as living in a thread inside
+    /// a (shared) anchor channel.
+    #[cfg(test)]
+    fn record_thread(&mut self, terminal_id: TerminalId, channel_id: &str, thread_ts: &str) {
+        self.terminal_to_channel
+            .insert(terminal_id, channel_id.to_string());
+        self.terminal_to_thread
+            .insert(terminal_id, thread_ts.to_string());
+        self.thread_to_terminal
+            .insert(thread_ts.to_string(), terminal_id);
+    }
 }
 
 /// Decide which terminal an inbound message routes to, given a
@@ -240,7 +265,7 @@ impl RouterState {
 /// terminal (dedicated mode), and `status` from an unknown thread in
 /// the anchor channel still gets a global reply (handler caller
 /// short-circuits on the command before requiring `Some(tid)`).
-fn route_inbound(
+pub(crate) fn route_inbound(
     state: &RouterState,
     channel: &str,
     thread_ts: Option<&str>,
@@ -248,6 +273,22 @@ fn route_inbound(
     thread_ts
         .and_then(|t| state.thread_to_terminal.get(t).copied())
         .or_else(|| state.channel_to_terminal.get(channel).copied())
+}
+
+/// Post `body` either as a thread reply (when `thread_ts` is `Some`)
+/// or as a fresh top-level message. Drops the message id from the
+/// `post` path — callers that need the id (thread anchoring) call
+/// `provider.post` directly.
+async fn post_into(
+    provider: &dyn ChatProvider,
+    channel: &str,
+    thread_ts: Option<&str>,
+    body: &str,
+) -> Result<(), ChatError> {
+    match thread_ts {
+        Some(t) => provider.post_to_thread(channel, t, body).await,
+        None => provider.post(channel, body).await.map(|_| ()),
+    }
 }
 
 /// Inbound chat commands pilot responds to instead of forwarding to
@@ -304,7 +345,7 @@ pub async fn handle_inbound(
         } => (channel, text, thread_ts),
         ChatInbound::Connected | ChatInbound::Disconnected { .. } => return,
     };
-    let text = provider.strip_self_mention(&raw_text).trim().to_string();
+    let text = provider.strip_self_mention(&raw_text).trim();
     if text.is_empty() {
         return;
     }
@@ -322,13 +363,9 @@ pub async fn handle_inbound(
     // in an unmapped channel (e.g. anchor / DMs) still gets a reply.
     // Status replies post in the same thread as the query so the
     // anchor channel doesn't fill with top-level status lines.
-    if let Some(cmd) = parse_command(&text) {
+    if let Some(cmd) = parse_command(text) {
         let body = build_status_reply(server, state, terminal_id, cmd).await;
-        let post_result = match in_thread_ts.as_deref() {
-            Some(t) => provider.post_to_thread(&channel, t, &body).await,
-            None => provider.post(&channel, &body).await.map(|_| ()),
-        };
-        if let Err(e) = post_result {
+        if let Err(e) = post_into(provider, &channel, in_thread_ts.as_deref(), &body).await {
             tracing::warn!(
                 provider = provider.id(),
                 channel = %channel,
@@ -352,7 +389,7 @@ pub async fn handle_inbound(
     // line-by-line and triggering a separate inference per line.
     // The submit-cr lives outside the paste markers so claude
     // actually dispatches the assembled prompt.
-    let bytes = encode_for_pty(&text);
+    let bytes = encode_for_pty(text);
     let backend_key = {
         let terminals = server.terminals.lock().await;
         terminals.get(&terminal_id).cloned()
@@ -458,11 +495,7 @@ pub async fn handle_bus_event(
             } else {
                 format!("{label} · {reply_hint}\n```\n{context}\n```")
             };
-            let post_result = match thread_ts.as_deref() {
-                Some(t) => provider.post_to_thread(&channel_id, t, &body).await,
-                None => provider.post(&channel_id, &body).await.map(|_| ()),
-            };
-            if let Err(e) = post_result {
+            if let Err(e) = post_into(provider, &channel_id, thread_ts.as_deref(), &body).await {
                 tracing::warn!(provider = provider.id(), "chat: post failed: {e}");
             }
         }
@@ -496,7 +529,7 @@ pub async fn handle_bus_event(
 /// (channel or thread anchor), populate the route maps, post a
 /// header. Extracted so the surface-strategy split stays linear
 /// instead of nesting matches inside `handle_bus_event`.
-async fn on_terminal_spawned(
+pub(crate) async fn on_terminal_spawned(
     provider: &dyn ChatProvider,
     store: &dyn Store,
     state: &Arc<Mutex<RouterState>>,
@@ -507,7 +540,7 @@ async fn on_terminal_spawned(
 ) {
     let header = workspace_header(store, workspace_key, agent_id);
     match target {
-        TerminalTarget::None => {}
+        TerminalTarget::NoSurface => {}
         TerminalTarget::DedicatedChannel(name) => {
             let channel_id = match provider.ensure_channel(&name).await {
                 Ok(id) => id,
@@ -539,14 +572,14 @@ async fn on_terminal_spawned(
             // Post the header first to obtain its ts — that ts becomes
             // the thread anchor for every subsequent notification and
             // for inbound routing.
-            let thread_ts = match provider.post(&channel_id, &header).await {
-                Ok(ts) if !ts.is_empty() => ts,
+            let thread_ts: Option<String> = match provider.post(&channel_id, &header).await {
+                Ok(ts) if !ts.is_empty() => Some(ts),
                 Ok(_) => {
                     tracing::warn!(
                         provider = provider.id(),
                         "chat: provider returned empty thread anchor id; falling back to channel-only routing"
                     );
-                    String::new()
+                    None
                 }
                 Err(e) => {
                     tracing::warn!(provider = provider.id(), "chat: anchor post failed: {e}");
@@ -554,11 +587,10 @@ async fn on_terminal_spawned(
                 }
             };
             let mut s = state.lock().await;
-            s.terminal_to_channel
-                .insert(terminal_id, channel_id.clone());
-            if !thread_ts.is_empty() {
-                s.terminal_to_thread.insert(terminal_id, thread_ts.clone());
-                s.thread_to_terminal.insert(thread_ts, terminal_id);
+            s.terminal_to_channel.insert(terminal_id, channel_id);
+            if let Some(ts) = thread_ts {
+                s.thread_to_terminal.insert(ts.clone(), terminal_id);
+                s.terminal_to_thread.insert(terminal_id, ts);
             }
             s.last_output_at.insert(terminal_id, Instant::now());
         }
@@ -1087,10 +1119,8 @@ mod tests {
     #[test]
     fn route_inbound_picks_thread_match_first() {
         let mut state = RouterState::new();
-        state.channel_to_terminal.insert("C1".into(), TerminalId(1));
-        state
-            .thread_to_terminal
-            .insert("t-99".into(), TerminalId(7));
+        state.record_dedicated(TerminalId(1), "C1");
+        state.record_thread(TerminalId(7), "C-anchor", "t-99");
         // Thread anchor wins over channel mapping — in thread-mode
         // both terminals share the channel id and only thread_ts
         // disambiguates.
@@ -1103,7 +1133,7 @@ mod tests {
     #[test]
     fn route_inbound_falls_back_to_channel_when_thread_unknown() {
         let mut state = RouterState::new();
-        state.channel_to_terminal.insert("C1".into(), TerminalId(1));
+        state.record_dedicated(TerminalId(1), "C1");
         // Unknown thread_ts → fall through to channel lookup. Lets a
         // user start a brand-new thread in a tracked channel and
         // still reach the terminal in dedicated mode.
@@ -1116,7 +1146,7 @@ mod tests {
     #[test]
     fn route_inbound_no_thread_uses_channel() {
         let mut state = RouterState::new();
-        state.channel_to_terminal.insert("C1".into(), TerminalId(1));
+        state.record_dedicated(TerminalId(1), "C1");
         assert_eq!(route_inbound(&state, "C1", None), Some(TerminalId(1)));
     }
 
@@ -1131,26 +1161,28 @@ mod tests {
 
     /// Minimal in-memory provider that records calls and serves
     /// rigged responses. Lets us drive `on_terminal_spawned` without
-    /// HTTP and assert on state-map population.
+    /// HTTP and assert on state-map population. Recorders are
+    /// `std::sync::Mutex` — guards never span an `.await` so the
+    /// async-aware tokio variant would be overkill.
     struct MockProvider {
         target: TerminalTarget,
         /// Posts go here as `(channel, body)`. `post()` returns the
         /// next ts from `anchor_ts` (popped in order) so a test can
         /// preset a known thread anchor.
-        posts: Mutex<Vec<(String, String)>>,
-        thread_posts: Mutex<Vec<(String, String, String)>>,
-        anchor_ts: Mutex<Vec<String>>,
-        ensured: Mutex<Vec<String>>,
+        posts: std::sync::Mutex<Vec<(String, String)>>,
+        thread_posts: std::sync::Mutex<Vec<(String, String, String)>>,
+        anchor_ts: std::sync::Mutex<Vec<String>>,
+        ensured: std::sync::Mutex<Vec<String>>,
     }
 
     impl MockProvider {
         fn new(target: TerminalTarget, anchor_ts: Vec<String>) -> Self {
             Self {
                 target,
-                posts: Mutex::new(vec![]),
-                thread_posts: Mutex::new(vec![]),
-                anchor_ts: Mutex::new(anchor_ts),
-                ensured: Mutex::new(vec![]),
+                posts: std::sync::Mutex::new(vec![]),
+                thread_posts: std::sync::Mutex::new(vec![]),
+                anchor_ts: std::sync::Mutex::new(anchor_ts),
+                ensured: std::sync::Mutex::new(vec![]),
             }
         }
     }
@@ -1173,12 +1205,12 @@ mod tests {
             Box::pin(async move {
                 self.posts
                     .lock()
-                    .await
+                    .unwrap()
                     .push((channel.to_string(), body.to_string()));
                 Ok(self
                     .anchor_ts
                     .lock()
-                    .await
+                    .unwrap()
                     .pop()
                     .unwrap_or_else(|| "ts-default".to_string()))
             })
@@ -1190,7 +1222,7 @@ mod tests {
             body: &'a str,
         ) -> Pin<Box<dyn Future<Output = Result<(), ChatError>> + Send + 'a>> {
             Box::pin(async move {
-                self.thread_posts.lock().await.push((
+                self.thread_posts.lock().unwrap().push((
                     channel.to_string(),
                     thread_ts.to_string(),
                     body.to_string(),
@@ -1203,7 +1235,7 @@ mod tests {
             name: &'a str,
         ) -> Pin<Box<dyn Future<Output = Result<String, ChatError>> + Send + 'a>> {
             Box::pin(async move {
-                self.ensured.lock().await.push(name.to_string());
+                self.ensured.lock().unwrap().push(name.to_string());
                 Ok(format!("C-{name}"))
             })
         }
@@ -1341,7 +1373,7 @@ mod tests {
 
     #[tokio::test]
     async fn on_terminal_spawned_none_target_is_silent_noop() {
-        let provider = MockProvider::new(TerminalTarget::None, vec![]);
+        let provider = MockProvider::new(TerminalTarget::NoSurface, vec![]);
         let state = Arc::new(Mutex::new(RouterState::new()));
         let store = EmptyStore;
         on_terminal_spawned(
@@ -1358,7 +1390,7 @@ mod tests {
         assert!(s.terminal_to_channel.is_empty());
         assert!(s.terminal_to_thread.is_empty());
         // and no post was attempted
-        assert!(provider.posts.try_lock().unwrap().is_empty());
-        assert!(provider.ensured.try_lock().unwrap().is_empty());
+        assert!(provider.posts.lock().unwrap().is_empty());
+        assert!(provider.ensured.lock().unwrap().is_empty());
     }
 }

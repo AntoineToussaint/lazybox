@@ -24,18 +24,28 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
+/// Provider-only slice of [`SlackConfig`] — just the routing knobs
+/// the dispatcher needs. Built from the full config at construction
+/// so the provider never holds the bot/app tokens after the
+/// credential resolver is done with them.
+#[derive(Debug, Clone)]
+struct ProviderCfg {
+    channel_prefix: String,
+    per_workspace_channels: bool,
+}
 
 /// Slack-specific provider state. Wraps the API client + a name→id
 /// channel cache + the resolved bot identity.
 pub struct SlackProvider {
     api: ApiClient,
-    cfg: SlackConfig,
+    cfg: ProviderCfg,
     bot_user_id: String,
     /// `channel_name → channel_id` cache. Populated at boot from
     /// `conversations.list`; updated when pilot creates a new
-    /// channel.
-    name_to_id: Mutex<HashMap<String, String>>,
+    /// channel. Plain `std::sync::Mutex` — guards never span an
+    /// `.await`, so the async-aware variant would be overkill.
+    name_to_id: std::sync::Mutex<HashMap<String, String>>,
     /// Pre-resolved id of `cfg.anchor_channel`. Set when the channel
     /// is visible to the bot at boot. Required for thread-fallback
     /// mode (`per_workspace_channels: false`); when missing, the
@@ -54,9 +64,12 @@ impl SlackProvider {
         let anchor_channel_id = seed.get(&cfg.anchor_channel).cloned();
         Self {
             api,
-            cfg,
+            cfg: ProviderCfg {
+                channel_prefix: cfg.channel_prefix,
+                per_workspace_channels: cfg.per_workspace_channels,
+            },
             bot_user_id,
-            name_to_id: Mutex::new(seed),
+            name_to_id: std::sync::Mutex::new(seed),
             anchor_channel_id,
         }
     }
@@ -125,7 +138,7 @@ impl ChatProvider for SlackProvider {
         // surface rather than fail every notification with a 404.
         match self.anchor_channel_id.as_ref() {
             Some(id) => TerminalTarget::AnchorThread(id.clone()),
-            None => TerminalTarget::None,
+            None => TerminalTarget::NoSurface,
         }
     }
 
@@ -134,7 +147,7 @@ impl ChatProvider for SlackProvider {
         name: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ChatError>> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(id) = self.name_to_id.lock().await.get(name).cloned() {
+            if let Some(id) = self.name_to_id.lock().unwrap().get(name).cloned() {
                 return Ok(id);
             }
             match self.api.conversations_create(name).await {
@@ -142,7 +155,7 @@ impl ChatProvider for SlackProvider {
                     let id = resp.channel.id.clone();
                     self.name_to_id
                         .lock()
-                        .await
+                        .unwrap()
                         .insert(name.to_string(), id.clone());
                     tracing::info!(channel = %resp.channel.name, "slack: created channel");
                     Ok(id)
@@ -154,7 +167,7 @@ impl ChatProvider for SlackProvider {
                     tracing::debug!(name = %name, "slack: channel exists, looking up id");
                     match self.api.conversations_list(1000).await {
                         Ok(listing) => {
-                            let mut s = self.name_to_id.lock().await;
+                            let mut s = self.name_to_id.lock().unwrap();
                             for c in &listing.channels {
                                 s.insert(c.name.clone(), c.id.clone());
                             }
@@ -242,7 +255,7 @@ async fn run(
     // ── Plumbing ──────────────────────────────────────────────────
     let provider: Arc<dyn ChatProvider> =
         Arc::new(SlackProvider::new(api, slack, auth.user_id.clone(), seed));
-    let state = Arc::new(Mutex::new(RouterState::new()));
+    let state = Arc::new(tokio::sync::Mutex::new(RouterState::new()));
 
     // ── Inbound socket ────────────────────────────────────────────
     let (mut inbound_rx, _socket_handle) = SocketModeClient::new(app_token).start();
@@ -444,6 +457,6 @@ mod tests {
             HashMap::new(),
         );
         let target = p.terminal_target("ws", "sess", "claude");
-        assert!(matches!(target, TerminalTarget::None));
+        assert!(matches!(target, TerminalTarget::NoSurface));
     }
 }

@@ -120,6 +120,50 @@ impl<T: TerminalAdapter> Model<T> {
     /// the directly-visible IPC commands land in the Vec.
     pub fn handle_choice_picked(&mut self, picks: Vec<usize>) -> Vec<IpcCommand> {
         let mut cmds = Vec::new();
+        // Snippet picker — pick → write the snippet body to the
+        // active terminal followed by `\r` (auto-submit). The
+        // "expand AND submit" combo is the whole point of the
+        // feature: the user gets to the agent's input in a single
+        // keystroke chord, no intermediate "review then send" step.
+        if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
+            let key = picks
+                .first()
+                .and_then(|i| self.snippet_choices.get(*i).cloned());
+            self.snippet_choices.clear();
+            self.pop_modal();
+            let Some(key) = key else {
+                return cmds;
+            };
+            let Some(snippet) = self.snippets.get(&key) else {
+                // Picker resolved to a key the live snippet set
+                // doesn't recognise — possible only if the
+                // collection was swapped between mount and submit
+                // (no in-process path does that today).
+                tracing::warn!(
+                    "snippet picker: picked key {key:?} but no entry in snippets — stale modal?",
+                );
+                return cmds;
+            };
+            let Some(terminal_id) = self.terminals.active_terminal_id() else {
+                self.flash_info("no active terminal — open a session first");
+                return cmds;
+            };
+            // Append `\r` so the agent submits. The body itself
+            // may contain embedded newlines (multi-line prompts);
+            // those land verbatim in the input. The trailing `\r`
+            // is what the agent treats as Enter / submit.
+            let mut bytes = Vec::with_capacity(snippet.body.len() + 1);
+            bytes.extend_from_slice(snippet.body.as_bytes());
+            bytes.push(b'\r');
+            // Mirror the snippet into the recap tracker — it's a full
+            // command submitted in one shot, so without this the
+            // pinned "you ▸ …" line would keep showing the previous
+            // message.
+            self.terminals.record_pty_write(terminal_id, &bytes);
+            cmds.push(IpcCommand::Write { terminal_id, bytes });
+            self.flash_info(format!("sent snippet ]{key}"));
+            return cmds;
+        }
         // Sidebar right-click context menu. Pick → dispatch the
         // same IpcCommand the matching keyboard shortcut would.
         // Empty pick (Esc) clears the stash silently.

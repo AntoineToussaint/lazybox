@@ -1523,6 +1523,105 @@ async fn rescope_with_exhaustive_scope_still_deletes_stale() {
     assert!(after.iter().any(|k| k.contains("current")));
 }
 
+#[test]
+fn gh_polled_scope_downgrades_to_preserve_all_on_partial_sweep() {
+    use polling::{PolledScope, gh_polled_scope};
+    // Clean global sweep → Exhaustive (rescope may delete stale rows).
+    assert_eq!(
+        gh_polled_scope(true, &[], false),
+        PolledScope::Exhaustive,
+        "a clean global sweep authoritatively covers everything",
+    );
+    // Clean round-robin tick → only the queried repos are authoritative.
+    assert_eq!(
+        gh_polled_scope(false, &["owner/a".into()], false),
+        PolledScope::Repos(vec!["owner/a".into()]),
+    );
+    // PARTIAL sweep (e.g. PR query errored, issues OK) → empty
+    // coverage so rescope preserves EVERY github workspace this tick.
+    // This is the guard against a PR vanishing because one poll
+    // hiccupped rather than because it merged/closed. The `run_global`
+    // flag is irrelevant once the sweep is partial.
+    assert_eq!(
+        gh_polled_scope(true, &[], true),
+        PolledScope::Repos(Vec::new()),
+        "a partial global sweep must NOT claim exhaustive coverage",
+    );
+    assert_eq!(
+        gh_polled_scope(false, &["owner/a".into()], true),
+        PolledScope::Repos(Vec::new()),
+        "a partial round-robin tick must preserve all, not just unqueried repos",
+    );
+}
+
+#[tokio::test]
+async fn rescope_preserves_prs_when_pr_fetch_partially_failed() {
+    // End-to-end guard for the "PRs disappear on a flaky poll" bug.
+    // When the PR query errors but the issue query succeeds, the
+    // GitHub client returns issues-only `Ok(..)` to keep the inbox
+    // alive — so the freshly-polled set contains NO PRs. If the
+    // source reported `Exhaustive`, rescope would read every stored
+    // PR as "fell out of scope" and delete it. The partial-sweep
+    // guard makes the source report empty coverage
+    // (`gh_polled_scope(.., partial=true)` → `Repos([])`), so the PR
+    // survives until a clean sweep can speak to its real state.
+    use pilot_core::{TaskId, WorkspaceKey};
+    let config = ServerConfig::in_memory();
+
+    let mut pr_task = make_task("owner/repo#7");
+    pr_task.id = TaskId {
+        source: "github".into(),
+        key: "owner/repo#7".into(),
+    };
+    pr_task.repo = Some("owner/repo".into());
+    pr_task.url = "https://github.com/owner/repo/pull/7".into();
+
+    let mut issue_task = make_task("owner/repo#8");
+    issue_task.id = TaskId {
+        source: "github".into(),
+        key: "owner/repo#8".into(),
+    };
+    issue_task.repo = Some("owner/repo".into());
+    issue_task.url = "https://github.com/owner/repo/issues/8".into();
+
+    polling::upsert(&config, pr_task.clone()).await;
+    polling::upsert(&config, issue_task.clone()).await;
+
+    // The partial sweep returned only the issue; the PR query failed.
+    // The source reports the downgraded scope it would compute via
+    // `gh_polled_scope(run_global=true, repos=[], partial=true)`.
+    let outcome = polling::TickOutcome {
+        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+            &issue_task,
+        ))],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::from([(
+            "github".into(),
+            polling::gh_polled_scope(true, &[], true),
+        )]),
+        all_full: true,
+    };
+    polling::rescope(&config, &outcome).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(
+        after.iter().any(|k| k.contains("repo-7")),
+        "PR workspace MUST survive a partial sweep where the PR query failed: {after:?}",
+    );
+    assert!(
+        after.iter().any(|k| k.contains("repo-8")),
+        "issue workspace should also be preserved on a partial sweep: {after:?}",
+    );
+}
+
 #[tokio::test]
 async fn rescope_preserves_workspaces_from_unreported_sources() {
     // When one source succeeds and another fails (or isn't enabled),
@@ -2697,4 +2796,44 @@ async fn tick_dispatches_auto_spawn_action_after_upsert() {
         saw_spawn,
         "AutoSpawnAgent action must trigger TerminalSpawned"
     );
+}
+
+// ── @pilot ingest: mentioned issues survive the display filter ──────
+//
+// Regression for issue #50. The `@pilot` auto-spawn targets the
+// mentioned issue's workspace key, so that issue's Task must be
+// upserted even when the user's display filter would drop it (PR-only
+// inbox, role/scope mismatch). Otherwise `handle_spawn` finds no
+// workspace and spawns the agent in pilot's own cwd with no branch.
+
+#[test]
+fn readmit_keeps_mentioned_issue_dropped_by_filter() {
+    // Display filter kept only a PR; the `@pilot`-mentioned issue was
+    // dropped. It must be re-admitted so its workspace gets created.
+    let kept = vec![make_task("o/r#1")]; // a PR that passed the filter
+    let mentioned = vec![make_issue_task("o/r#42")];
+    let out = polling::readmit_mentioned_tasks(kept, mentioned);
+    assert_eq!(out.len(), 2, "mentioned issue must be re-admitted");
+    assert!(
+        out.iter().any(|t| t.id.key == "o/r#42"),
+        "the @pilot-mentioned issue is present so its workspace gets built"
+    );
+}
+
+#[test]
+fn readmit_does_not_duplicate_already_kept_mention() {
+    // The mentioned issue ALSO passed the display filter (issues are
+    // enabled). Re-admitting must not create a duplicate workspace.
+    let issue = make_issue_task("o/r#42");
+    let kept = vec![issue.clone()];
+    let out = polling::readmit_mentioned_tasks(kept, vec![issue]);
+    assert_eq!(out.len(), 1, "no duplicate task for an already-kept issue");
+}
+
+#[test]
+fn readmit_is_noop_without_mentions() {
+    let kept = vec![make_task("o/r#1")];
+    let out = polling::readmit_mentioned_tasks(kept.clone(), vec![]);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].id.key, kept[0].id.key);
 }

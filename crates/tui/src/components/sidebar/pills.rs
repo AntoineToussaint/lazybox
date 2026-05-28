@@ -32,10 +32,11 @@ pub(crate) struct StatusPill {
 /// the "needs attention" counter on the collapsed repo header.
 /// Each signal (unread / CI / review / agent-asking / mentioned)
 /// is independently toggleable via `~/.pilot/config.yaml::attention`.
-/// Single-cell type marker rendered immediately before the `#number`
+/// Single-cell type marker rendered immediately before the number
 /// on each workspace row. The glyph sits flush against the number
-/// (`⇄#312`, not `[PR]   #312`) so the title column gets the cells
-/// back — see issue #42.
+/// (`⇄312`, not `[PR]   #312`) so the title column gets the cells
+/// back — see issue #42. The `#` prefix was dropped once the glyph
+/// alone carried the issue-vs-PR signal — see issue #67.
 ///
 /// Variants (default unicode):
 /// - `⇄` — workspaces holding a pull request.

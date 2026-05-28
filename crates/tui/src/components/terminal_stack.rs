@@ -324,51 +324,98 @@ struct TerminalSlot {
 }
 
 impl TerminalSlot {
-    /// Apply a user keystroke to the composing buffer + last-message
-    /// state. Mirrors how the agent's own prompt-line reads keys:
-    ///   - printable Char → append
-    ///   - Backspace → pop
-    ///   - Enter → commit (Shift-Enter inserts a newline instead,
-    ///     matching Claude Code's "newline-without-submit" binding)
-    ///   - Ctrl-C / Ctrl-U / Esc → clear the line
+    /// Feed the *exact bytes* that are about to be written to this
+    /// terminal's PTY into the composing buffer + last-message state.
+    /// Every submit path — raw keystrokes, bracketed paste, snippet
+    /// expansion, programmatic sends — funnels its payload through a
+    /// `Command::Write`, so parsing that byte stream is the one place
+    /// the recap can't drift from what the agent actually received.
     ///
-    /// Other keys (arrows, function keys, Tab) leave both buffers
-    /// untouched — they don't change the literal text the user is
-    /// composing. Per-char appends respect [`COMPOSING_CAP`] so a
-    /// rogue auto-typer can't grow the buffer unbounded.
-    fn apply_user_key(&mut self, key: &KeyEvent) {
-        use KeyCode::*;
-        let mods = key.modifiers;
-        match key.code {
-            Char(c) => {
-                if mods.contains(KeyModifiers::CONTROL) {
-                    if c == 'c' || c == 'u' {
-                        self.composing.clear();
+    /// Interprets the stream the way the agent's own line editor sees
+    /// it:
+    ///   - printable text → append (respecting [`COMPOSING_CAP`])
+    ///   - CR (`\r`) → commit the trimmed buffer as the latest message
+    ///   - LF (`\n`) → soft newline (kept in the buffer, no submit) —
+    ///     this is how multi-line pastes / snippet bodies arrive
+    ///   - `ESC \r` / `ESC \n` (Shift-Enter) → soft newline, no submit
+    ///   - DEL / BS → erase one char
+    ///   - Ctrl-C / Ctrl-U → clear the line
+    ///   - lone ESC → clear the line (prompt reset)
+    ///   - other CSI / SS3 sequences (arrows, mouse reports, Delete,
+    ///     bracketed-paste markers) → skipped; they aren't literal
+    ///     text the user is composing
+    ///
+    /// Decoding is lossy UTF-8: the recap is display-only, so a stray
+    /// invalid byte degrades to U+FFFD rather than dropping the write.
+    fn record_pty_bytes(&mut self, bytes: &[u8]) {
+        let text = String::from_utf8_lossy(bytes);
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\x1b' => match chars.peek() {
+                    // CSI: `ESC [ … final`. Consume up to and
+                    // including the final byte (0x40..=0x7e). This
+                    // also swallows bracketed-paste markers
+                    // (`ESC [ 200~` / `201~`) and the Delete key.
+                    Some('[') => {
+                        chars.next();
+                        while let Some(&n) = chars.peek() {
+                            chars.next();
+                            if ('@'..='~').contains(&n) {
+                                break;
+                            }
+                        }
                     }
-                } else if self.composing.len() + c.len_utf8() <= COMPOSING_CAP {
-                    self.composing.push(c);
-                }
-            }
-            Enter => {
-                if mods.contains(KeyModifiers::SHIFT) {
-                    if self.composing.len() < COMPOSING_CAP {
-                        self.composing.push('\n');
+                    // SS3: `ESC O <final>` (cursor keys in app mode).
+                    Some('O') => {
+                        chars.next();
+                        chars.next();
                     }
-                } else {
+                    // Shift-Enter arrives as `ESC \r` (see
+                    // `key_to_bytes`): a newline in the prompt without
+                    // a submit.
+                    Some('\r') | Some('\n') => {
+                        chars.next();
+                        if self.composing.len() < COMPOSING_CAP {
+                            self.composing.push('\n');
+                        }
+                    }
+                    // Lone Esc → reset the line.
+                    _ => self.composing.clear(),
+                },
+                // CR is the submit. LF is only ever a soft newline
+                // here (Enter maps to CR, never LF), so a multi-line
+                // paste / snippet body commits once, on its trailing
+                // CR, not at each embedded newline.
+                '\r' => {
                     let trimmed = self.composing.trim();
                     if !trimmed.is_empty() {
                         self.last_user_message = Some(trimmed.to_string());
                     }
                     self.composing.clear();
                 }
+                '\n' => {
+                    if self.composing.len() < COMPOSING_CAP {
+                        self.composing.push('\n');
+                    }
+                }
+                // DEL / Backspace.
+                '\x7f' | '\x08' => {
+                    self.composing.pop();
+                }
+                // Ctrl-C / Ctrl-U wipe the in-flight line.
+                '\x03' | '\x15' => {
+                    self.composing.clear();
+                }
+                // Other control chars (Tab, etc.) don't change the
+                // literal text being composed.
+                c if c.is_control() => {}
+                c => {
+                    if self.composing.len() + c.len_utf8() <= COMPOSING_CAP {
+                        self.composing.push(c);
+                    }
+                }
             }
-            Backspace => {
-                self.composing.pop();
-            }
-            Esc => {
-                self.composing.clear();
-            }
-            _ => {}
         }
     }
 
@@ -1139,6 +1186,20 @@ impl TerminalStack {
         }
     }
 
+    /// Mirror bytes written straight to a terminal's PTY — bypassing
+    /// the per-keystroke `handle_key` path — into the recap state.
+    /// Used by callers that synthesise a full command and submit it in
+    /// one shot (snippet expansion writes the body + a trailing `\r`),
+    /// which would otherwise leave the "you ▸ …" recap showing the
+    /// previous message. No-op for non-Agent terminals.
+    pub fn record_pty_write(&mut self, id: TerminalId, bytes: &[u8]) {
+        if let Some(slot) = self.terminals.get_mut(&id)
+            && matches!(slot.kind, TerminalKind::Agent(_))
+        {
+            slot.record_pty_bytes(bytes);
+        }
+    }
+
     fn tab_label(kind: &TerminalKind) -> String {
         match kind {
             TerminalKind::Agent(name) => name.clone(),
@@ -1207,6 +1268,16 @@ impl TerminalStack {
             Binding {
                 keys: std::borrow::Cow::Borrowed("Ctrl-c"),
                 label: std::borrow::Cow::Borrowed("interrupt"),
+            },
+            // Snippet picker entry point (issue #40). `]<key>` opens
+            // the picker pre-filled with the typed char; typing a
+            // full snippet key auto-submits its body to the agent.
+            // The leading `]` is shared with the LeaveTerminal escape
+            // (`]]`) — the second `]` wins, anything else opens the
+            // picker.
+            Binding {
+                keys: std::borrow::Cow::Borrowed("]<key>"),
+                label: std::borrow::Cow::Borrowed("snippets"),
             },
         ]
     }
@@ -1287,15 +1358,17 @@ impl TerminalStack {
         let Some(bytes) = key_to_bytes(&key) else {
             return PaneOutcome::Consumed;
         };
-        // Mirror the keystroke into our own composing buffer so the
-        // pinned "you ▸ …" recap reflects the latest submitted
-        // message. Scoped to Agent terminals — shells don't have a
-        // single semantic "user prompt", so the recap would be noisy
-        // (every cd, every grep) and surprising.
+        // Mirror the exact bytes we're about to ship into our own
+        // composing buffer so the pinned "you ▸ …" recap reflects the
+        // latest submitted message. Parsing the byte stream (rather
+        // than the `KeyEvent`) keeps the recap in lock-step with what
+        // the agent receives. Scoped to Agent terminals — shells don't
+        // have a single semantic "user prompt", so the recap would be
+        // noisy (every cd, every grep) and surprising.
         if let Some(slot) = self.terminals.get_mut(&id)
             && matches!(slot.kind, TerminalKind::Agent(_))
         {
-            slot.apply_user_key(&key);
+            slot.record_pty_bytes(&bytes);
         }
         cmds.push(Command::Write {
             terminal_id: id,
@@ -1850,20 +1923,23 @@ impl TerminalStack {
     ) {
         let _ = focused; // ghostty-vt doesn't render focus chrome itself
         if let Some(slot) = self.terminals.get_mut(&id) {
-            // Carve off one row for the pinned "you ▸ <recap>" line
-            // when this is an agent terminal with a remembered last
-            // user message. Refuses to take the row at h ≤ 1 — leaves
-            // every cell for the agent grid rather than blank-out the
-            // pane entirely on a 1-row split.
+            // Carve off two rows for the pinned "you ▸ <recap>" line
+            // plus a blank spacer below it, when this is an agent
+            // terminal with a remembered last user message. The recap
+            // sits on row 0, row 1 stays blank so the agent output
+            // doesn't visually run into it, and the body starts at row
+            // 2. Refuses to take the rows at h < 3 — leaves every cell
+            // for the agent grid rather than crowd out the pane on a
+            // tiny split.
             let show_recap = matches!(slot.kind, TerminalKind::Agent(_))
                 && slot.last_user_message.is_some()
-                && rect.height >= 2;
+                && rect.height >= 3;
             let body = if show_recap {
                 Rect {
                     x: rect.x,
-                    y: rect.y + 1,
+                    y: rect.y + 2,
                     width: rect.width,
-                    height: rect.height - 1,
+                    height: rect.height - 2,
                 }
             } else {
                 rect

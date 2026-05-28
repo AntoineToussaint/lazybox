@@ -86,14 +86,14 @@ pub enum RoleFilter {
 /// How the sidebar orders workspaces within each repo group.
 /// `Recent` is the legacy `updated_at desc` order; `ByRole` puts
 /// authored PRs first then reviews-requested etc.; `ByRoleSplit`
-/// keeps the same order but interleaves role-section headers
-/// between groups (Author / Reviewer / Assignee / Mentioned).
+/// (chip label `split`) splits each repo into a `PRs` and an
+/// `Issues` section, preserving role ordering within each section.
 /// Cycled via `o` in the sidebar.
 ///
-/// Default is `ByRoleSplit` — feedback after a day of real use:
-/// the role-grouped view with section headers is the natural way
-/// to scan ("what's mine vs what's blocked on me?"). Recency is
-/// one `o` press away.
+/// Default is `ByRoleSplit` — most repos surface a mix of PRs and
+/// issues, and the visual split is the natural way to scan ("what's
+/// review-blocked vs what's still scoped as an issue?"). Recency
+/// is one `o` press away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortMode {
     Recent,
@@ -116,6 +116,53 @@ impl SortMode {
             SortMode::Recent => "recent",
             SortMode::ByRole => "by-role",
             SortMode::ByRoleSplit => "split",
+        }
+    }
+}
+
+/// Which kind of work a workspace primarily represents. Used by the
+/// `[split]` sort mode to bucket each repo into a `PRs` section
+/// and an `Issues` section. A workspace with an attached PR is a
+/// `Pr` regardless of whether it also links issues — the PR is what
+/// the user typically interacts with first; everything else
+/// (GitHub issues, Linear tickets, empty workspaces) falls under
+/// `Issue`.
+///
+/// Variant order matters: `Pr` is declared first so the derived
+/// `Ord` puts PRs ahead of issues — same intent the `[split]` mode
+/// needs when partitioning the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WorkspaceKind {
+    Pr,
+    Issue,
+}
+
+impl WorkspaceKind {
+    /// Classify a workspace. Anything with a PR slot filled wins;
+    /// otherwise the workspace is treated as an issue bucket.
+    pub fn classify(w: &pilot_core::Workspace) -> Self {
+        if w.pr.is_some() {
+            WorkspaceKind::Pr
+        } else {
+            WorkspaceKind::Issue
+        }
+    }
+
+    /// Header label rendered in the sidebar list.
+    pub fn header_label(self) -> &'static str {
+        match self {
+            WorkspaceKind::Pr => "PRs",
+            WorkspaceKind::Issue => "Issues",
+        }
+    }
+
+    /// Single-letter marker rendered before the header label —
+    /// mirrors the per-row `[PR]` / `[I]` pill colouring so the
+    /// section header lines up visually with the rows under it.
+    pub fn header_marker(self) -> char {
+        match self {
+            WorkspaceKind::Pr => 'P',
+            WorkspaceKind::Issue => 'I',
         }
     }
 }
@@ -197,13 +244,14 @@ pub enum VisibleRow {
     /// (`"owner/name"` for GitHub, the project key for Linear, or
     /// `"(no repo)"` for unattached workspaces).
     RepoHeader(String),
-    /// Role group header — only emitted in `SortMode::ByRoleSplit`,
-    /// nested under each repo header. Splits the workspaces of one
-    /// repo into Author / Reviewer / Assignee / Mentioned sections
-    /// so the visual hierarchy is `repo > role > workspace`.
-    /// Non-selectable like `RepoHeader`; the cursor skips past on
-    /// j/k just like any other header.
-    RoleHeader(pilot_core::TaskRole),
+    /// Item-kind group header — only emitted in
+    /// `SortMode::ByRoleSplit`, nested under each repo header.
+    /// Splits the workspaces of one repo into `PRs` and `Issues`
+    /// sections so the visual hierarchy is `repo > kind > workspace`.
+    /// Non-selectable like `RepoHeader`; j/k navigation walks
+    /// straight past it (cursor still parks on it for click /
+    /// collapse interactions, same as a repo header).
+    KindHeader(WorkspaceKind),
     /// A workspace under whichever repo header most recently appeared.
     Workspace(SessionKey),
     /// A session sub-row (workspace key + session id). Only emitted
@@ -531,7 +579,7 @@ impl Sidebar {
         match self.visible.get(self.cursor)? {
             VisibleRow::Workspace(k) => Some(k),
             VisibleRow::Session { workspace, .. } => Some(workspace),
-            VisibleRow::RepoHeader(_) | VisibleRow::RoleHeader(_) => None,
+            VisibleRow::RepoHeader(_) | VisibleRow::KindHeader(_) => None,
         }
     }
 
@@ -655,7 +703,7 @@ impl Sidebar {
             Some(VisibleRow::Workspace(_))
             | Some(VisibleRow::Session { .. })
             | Some(VisibleRow::RepoHeader(_))
-            | Some(VisibleRow::RoleHeader(_)) => {
+            | Some(VisibleRow::KindHeader(_)) => {
                 self.cursor = idx;
                 true
             }
@@ -845,10 +893,11 @@ impl Sidebar {
                 .values()
                 .find(|p| &p.name == name)
                 .map(|p| p.key.clone()),
-            // Role headers don't belong to a single project — they
-            // partition workspaces within a project, so the parent
-            // project is whichever RepoHeader came above. Walk back.
-            VisibleRow::RoleHeader(_) => {
+            // Kind headers (PRs / Issues) don't belong to a single
+            // project — they partition workspaces within a project,
+            // so the parent project is whichever RepoHeader came
+            // above. Walk back.
+            VisibleRow::KindHeader(_) => {
                 self.visible
                     .iter()
                     .take(self.cursor)
@@ -1029,7 +1078,7 @@ impl Sidebar {
             Some(VisibleRow::RepoHeader(name)) => Some(name),
             Some(VisibleRow::Workspace(_))
             | Some(VisibleRow::Session { .. })
-            | Some(VisibleRow::RoleHeader(_)) => self
+            | Some(VisibleRow::KindHeader(_)) => self
                 .visible
                 .iter()
                 .take(self.cursor + 1)
@@ -1161,7 +1210,7 @@ impl Sidebar {
                         workspace,
                         session_id,
                     } => *workspace == key && Some(*session_id) == prior_session,
-                    VisibleRow::RepoHeader(_) | VisibleRow::RoleHeader(_) => false,
+                    VisibleRow::RepoHeader(_) | VisibleRow::KindHeader(_) => false,
                 };
                 if matched {
                     self.cursor = i;
@@ -1310,7 +1359,7 @@ impl Sidebar {
                 layout: "workspace",
                 args: vec!["--workspace".to_string(), k.as_str().to_string()],
             }),
-            VisibleRow::RepoHeader(_) | VisibleRow::RoleHeader(_) => None,
+            VisibleRow::RepoHeader(_) | VisibleRow::KindHeader(_) => None,
         }
     }
 }

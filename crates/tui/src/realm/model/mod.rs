@@ -141,6 +141,12 @@ pub enum Id {
     /// modals (MergePrConfirm, the kill latch, …) — one modal id,
     /// one Yes-handler, one place to remember.
     ActionConfirm,
+    /// Snippet picker mounted from the terminal pane on `]<key>`.
+    /// Filter input + scrollable snippet list. `Msg::ChoicePicked`
+    /// resolves the picked row to a snippet body, which the
+    /// dispatcher writes to the active terminal followed by `\r`
+    /// (auto-submit). See `realm::components::snippet_picker`.
+    SnippetPicker,
 }
 
 /// App-level message vocabulary for modals + globals.
@@ -422,6 +428,18 @@ pub struct Model<T: TerminalAdapter> {
     /// j/k (RepoHeader rows are skipped by `move_cursor_by`) and the
     /// user has no clear next step.
     pending_focus_project_name: Option<String>,
+    /// Loaded + merged snippet collection (`<pilot_home>/snippets.yaml`
+    /// + `<cwd>/.pilot/snippets.yaml`). Populated at startup by
+    /// `apply_snippets`; the terminal-pane `]` latch reads this to
+    /// decide whether to mount the picker. Empty when neither file
+    /// exists (the typical first-run state).
+    pub(crate) snippets: pilot_config::Snippets,
+    /// Snapshot of the snippet keys the active SnippetPicker is
+    /// showing — indexed by `Msg::ChoicePicked` to recover the
+    /// underlying entry via `self.snippets.get(...)`. Cleared on
+    /// mount/unmount. Storing keys (not full rows) avoids cloning
+    /// the snippet body twice on every picker mount.
+    pub(crate) snippet_choices: Vec<String>,
     /// Inertia damper for trackpad scroll. macOS sends ~20-50 wheel
     /// events per flick (the OS inertia phase); each one moves the
     /// viewport `STEP` rows, so a single gesture scrolls hundreds of
@@ -566,6 +584,8 @@ impl<T: TerminalAdapter> Model<T> {
             pending_action_confirm: None,
             pending_new_workspace_project: None,
             pending_focus_project_name: None,
+            snippets: pilot_config::Snippets::default(),
+            snippet_choices: Vec::new(),
             scroll_inertia: None,
         }
     }
@@ -776,6 +796,43 @@ impl<T: TerminalAdapter> Model<T> {
         // hardcoded consts.
         self.ui_defaults = ui.clone();
         self.right.apply_ui_defaults(ui);
+    }
+
+    /// Install the loaded snippet collection. Called from the
+    /// startup path in `main.rs` after `Snippets::load_merged`. The
+    /// terminal-pane `]<key>` latch reads from `self.snippets`
+    /// directly, so this is the only handoff needed.
+    pub fn apply_snippets(&mut self, snippets: pilot_config::Snippets) {
+        self.snippets = snippets;
+    }
+
+    /// Mount the snippet picker with an initial filter (typically
+    /// the single char the user typed after `]`). Picker rows are
+    /// derived from the model's snippet collection; their keys are
+    /// stashed in `self.snippet_choices` so `handle_choice_picked`
+    /// can resolve a picked index back to a snippet via
+    /// `self.snippets.get(...)` without re-running the filter.
+    pub(crate) fn mount_snippet_picker(&mut self, initial_filter: String) {
+        use crate::realm::components::snippet_picker::{PickerRow, SnippetPicker};
+        if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
+            return;
+        }
+        if self.snippets.is_empty() {
+            // The user typed `]<key>` expecting a snippet and there
+            // are none. Flash a hint pointing at the snippets file
+            // so they know how to configure one.
+            self.flash_info("no snippets configured — add some to ~/.pilot/snippets.yaml");
+            return;
+        }
+        let mut rows = Vec::with_capacity(self.snippets.len());
+        let mut keys = Vec::with_capacity(self.snippets.len());
+        for (k, v) in self.snippets.all() {
+            rows.push(PickerRow::new(k, v));
+            keys.push(k.to_string());
+        }
+        self.snippet_choices = keys;
+        let picker = SnippetPicker::new(rows, initial_filter);
+        self.mount_modal(Id::SnippetPicker, picker);
     }
 
     /// Apply catalog-driven action key overrides (`ui.action_keys`).
@@ -996,7 +1053,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal_boxed(id, Box::new(component));
     }
 
-    /// Same as [`mount_modal`] but accepts an already-boxed
+    /// Same as [`Self::mount_modal`] but accepts an already-boxed
     /// component. Use this when the caller has a
     /// `Box<dyn AppComponent>` (e.g. setup-flow runners that
     /// dispatch on a polymorphic boxed step).
@@ -1112,7 +1169,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::Editor, modal);
     }
 
-    /// Route a [`ClickTarget`] produced by a right-click in the agent
+    /// Route a [`crate::components::terminal_stack::ClickTarget`] produced by a right-click in the agent
     /// view to the right opener: URLs and `#N` / `owner/repo#N` issue
     /// references go to the system browser; file paths open in the
     /// configured editor (jumping to `line:col` when present).

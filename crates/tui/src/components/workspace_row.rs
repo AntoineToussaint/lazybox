@@ -82,14 +82,15 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///
 /// 0. Prefix — `  ▸ ` (cursor) / `    ` (no cursor).
 /// 1. Type glyph — `⇄` / `○` / `◆` (or ASCII `p`/`i`/`l`) / blank.
-///    Exactly 1 cell so it sits flush against the `#NNN` to its right
+///    Exactly 1 cell so it sits flush against the `NNN` to its right
 ///    — see issue #42.
-/// 2. PR number — `#NNN`, left-aligned and padded to `max_pr_num_width`
-///    so the digits sit FLUSH against the type glyph (`⇄#312`, `○#7`)
-///    on every row. Right-aligning instead pushed shorter numbers off
-///    the glyph with leading padding (`⇄#312` vs `○  #7`) — the
-///    inconsistent post-glyph spacing of issue #65. Trailing padding
-///    still aligns the role column to a fixed x across rows.
+/// 2. PR number — `NNN` (no `#` prefix; the glyph carries the type —
+///    issue #67), left-aligned and padded to `max_pr_num_width` so the
+///    digits sit FLUSH against the type glyph (`⇄312`, `○7`) on every
+///    row. Right-aligning instead pushed shorter numbers off the glyph
+///    with leading padding (`⇄312` vs `○  7`) — the inconsistent
+///    post-glyph spacing of issue #65. Trailing padding still aligns
+///    the role column to a fixed x across rows.
 /// 3. Role badge — ` R` colored marker, or blank.
 /// 4. Asking glyph — ` ? ` warn-colored, or blank — reserved width so
 ///    the kind/title to the right don't jitter between asking /
@@ -119,7 +120,7 @@ impl<'a> WorkspaceRowCtx<'a> {
 pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     vec![
         Column::fixed(4),                // 0: prefix
-        Column::fixed(1),                // 1: type glyph (single cell, flush against #N)
+        Column::fixed(1),                // 1: type glyph (single cell, flush against num)
         Column::fixed(max_pr_num_width), // 2: pr_num (left-aligned, flush against the glyph)
         Column::fixed(2),                // 3: role (" R" or blank)
         Column::fixed(3),                // 4: asking (" ? " reserved)
@@ -135,7 +136,7 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     ]
 }
 
-/// Build the Row<Cell> for a single workspace row. Fill style is
+/// Build the `Row<Cell>` for a single workspace row. Fill style is
 /// the row's cursor highlight (or unstyled when not under cursor),
 /// applied via `Row::fill` so every column's padding inherits the
 /// row's bg.
@@ -179,9 +180,10 @@ fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .add_modifier(Modifier::BOLD)
     };
     // Single cell, no trailing space — the glyph sits flush against
-    // the `#NNN` cell that follows so the row reads `⇄#312` instead
-    // of `[PR]   #312` (issue #42). `glyph` is `&'static str` so the
-    // Span borrows it without allocating on the per-frame hot path.
+    // the `NNN` cell that follows so the row reads `⇄312` instead
+    // of `[PR]   #312` (issues #42, #67). `glyph` is `&'static str`
+    // so the Span borrows it without allocating on the per-frame hot
+    // path.
     Cell::from_span(Span::styled(glyph, style))
 }
 
@@ -189,7 +191,7 @@ fn cell_pr_num(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let Some(n) = ctx.task.and_then(crate::components::task_label::pr_number) else {
         return Cell::empty();
     };
-    let label = format!("#{n}");
+    let label = format!("{n}");
     let style = if ctx.is_cursor {
         ctx.row_style()
     } else {
@@ -197,12 +199,15 @@ fn cell_pr_num(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .fg(crate::components::task_label::pr_number_color(n))
             .add_modifier(Modifier::BOLD)
     };
-    // We emit just the `#NNN` span; the column is
-    // Fixed(max_pr_num_width) and LEFT-aligned, so the renderer pads
-    // the deficit on the RIGHT with the row's fill_style. Left
-    // alignment keeps the number flush against the type glyph on every
-    // row (issue #65) — a right-aligned column padded shorter numbers
-    // on the left, opening an inconsistent gap after the glyph.
+    // No `#` prefix: the type glyph in the column to the left already
+    // says "issue" (`○`) or "PR" (`⇄`), so the `#` was redundant and
+    // cost a column on every row (issue #67). We emit just the `NNN`
+    // span; the column is Fixed(max_pr_num_width) and LEFT-aligned, so
+    // the renderer pads the deficit on the RIGHT with the row's
+    // fill_style. Left alignment keeps the number flush against the
+    // type glyph on every row (issue #65) — a right-aligned column
+    // padded shorter numbers on the left, opening an inconsistent gap
+    // after the glyph. `pr_number_color` colors the digits.
     Cell::from_span(Span::styled(label, style))
 }
 
@@ -217,7 +222,7 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         Style::default().fg(color).add_modifier(Modifier::BOLD)
     };
     // " R" — leading space separator + colored letter. Reads
-    // cleaner than `#7204R` (which scanned as one weird token).
+    // cleaner than `7204R` (which scanned as one weird token).
     Cell::new(vec![
         Span::styled(" ".to_string(), ctx.row_style()),
         Span::styled(letter.to_string(), style),
@@ -554,17 +559,19 @@ mod tests {
         }
     }
 
-    /// PR-number cell prints `#NNN` with no padding — column width
-    /// supplies the padding so every row aligns.
+    /// PR-number cell prints `NNN` (no `#` prefix — issue #67) with no
+    /// padding; the column width supplies the padding so every row
+    /// aligns. The type glyph to the left now carries the
+    /// issue-vs-PR signal the `#` used to.
     #[test]
-    fn cell_pr_num_emits_hash_number_only() {
+    fn cell_pr_num_emits_bare_number_only() {
         let task = make_task("owner/repo#42", "x");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
         let cell = cell_pr_num(&ctx);
         assert_eq!(cell.spans.len(), 1);
-        assert_eq!(cell.spans[0].content.as_ref(), "#42");
+        assert_eq!(cell.spans[0].content.as_ref(), "42");
     }
 
     /// Asking glyph: when not asking, cell is empty so the column's
@@ -993,25 +1000,26 @@ mod tests {
     }
 
     /// Regression for issue #65: the type glyph must sit FLUSH against
-    /// the `#NNN` on every row, regardless of how wide that row's
+    /// the `NNN` on every row, regardless of how wide that row's
     /// number is. The bug was a right-aligned pr-number column: it
-    /// padded shorter numbers on the LEFT, so `⇄#312` rendered flush
-    /// while `○#7` picked up leading spaces (`○  #7`) — inconsistent
+    /// padded shorter numbers on the LEFT, so `⇄312` rendered flush
+    /// while `○7` picked up leading spaces (`○  7`) — inconsistent
     /// post-glyph spacing across rows. Left alignment moves the
     /// padding to the right, keeping the glyph→number gap a constant
-    /// zero cells everywhere.
+    /// zero cells everywhere. (The `#` prefix itself was dropped in
+    /// issue #67; the glyph now carries the issue-vs-PR signal.)
     #[test]
     fn type_glyph_is_flush_against_number_for_mixed_widths() {
         let theme = theme();
         // Mixed glyph types AND mixed number widths (1/2/3 digits) so
-        // `max_pr_num_width` is driven by `#312` (4 cells). The narrower
+        // `max_pr_num_width` is driven by `312` (3 cells). The narrower
         // rows are the ones the old right-align padded on the left; the
         // issue (`○`) row exercises the non-PR glyph path too, so a
         // regression can't hide on one glyph variant.
         let cases: [(Task, &str); 3] = [
-            (make_task("owner/repo#7", "x"), "○#7"), // issue, 1 digit
-            (pr_task("owner/repo", 42), "⇄#42"),     // PR, 2 digits
-            (pr_task("owner/repo", 312), "⇄#312"),   // PR, 3 digits
+            (make_task("owner/repo#7", "x"), "○7"), // issue, 1 digit
+            (pr_task("owner/repo", 42), "⇄42"),     // PR, 2 digits
+            (pr_task("owner/repo", 312), "⇄312"),   // PR, 3 digits
         ];
         let workspaces: Vec<Workspace> = cases
             .iter()
@@ -1022,7 +1030,7 @@ mod tests {
             .zip(cases.iter())
             .map(|(ws, (task, _))| ctx_for(ws, task, &theme))
             .collect();
-        let columns = build_columns(4); // width of "#312"
+        let columns = build_columns(3); // width of "312"
         let rows: Vec<Row> = ctxs.iter().map(build_row).collect();
         let lines = crate::components::table::render_table(&rows, &columns, 80);
         for (line, (_, expected)) in lines.iter().zip(cases.iter()) {

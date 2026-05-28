@@ -212,9 +212,10 @@ fn merged_workspace_hidden() {
 fn rows_are_grouped_by_repo_with_headers() {
     let mut s = Sidebar::new(PaneId::new(1));
     // Flip to Recent sort so the visible list has only RepoHeader
-    // rows + Workspace rows (no RoleHeader interleaving). The
-    // default ByRoleSplit injects RoleHeader rows between groups,
-    // which shifts the expected index assertions in this test.
+    // rows + Workspace rows (no KindHeader interleaving). The
+    // default ByRoleSplit injects KindHeader rows between PR and
+    // issue groups, which shifts the expected index assertions in
+    // this test.
     while s.sort_mode() != pilot_tui::components::sidebar::SortMode::Recent {
         s.cycle_sort_mode();
     }
@@ -253,7 +254,7 @@ fn cursor_walks_through_repo_headers() {
     // no session key (selected_session_key is None on them).
     //
     // Flip to Recent sort so the layout is just headers + workspaces
-    // (no RoleHeader interleaving from the default ByRoleSplit mode).
+    // (no KindHeader interleaving from the default ByRoleSplit mode).
     let mut s = Sidebar::new(PaneId::new(1));
     while s.sort_mode() != pilot_tui::components::sidebar::SortMode::Recent {
         s.cycle_sort_mode();
@@ -596,8 +597,8 @@ fn render_smoke_has_mailbox_label_and_grouped_rows() {
     assert!(rendered.contains('2'), "row count in title");
     assert!(rendered.contains("owner/repo"), "repo header rendered");
     assert!(rendered.contains("task: o/r#1"), "first workspace visible");
-    // The PR (`⇄`) sits flush against the `#NNN` cell — `⇄#1` /
-    // `○#1`, see issue #42.
+    // The PR (`⇄`) sits flush against the number cell — `⇄1` /
+    // `○1` (no `#` prefix), see issues #42, #67.
     assert!(
         rendered.contains('⇄') || rendered.contains('○'),
         "rows carry a single-cell type glyph",
@@ -944,7 +945,7 @@ fn action_keys_on_repo_header_are_silent_noops() {
     // hide the bindings, but the handlers are the safety net.
     //
     // Flip to Recent so cursor lands cleanly on a RepoHeader at
-    // row 0 (rather than going through a RoleHeader in the default
+    // row 0 (rather than going through a KindHeader in the default
     // ByRoleSplit mode).
     let mut s = Sidebar::new(PaneId::new(1));
     while s.sort_mode() != pilot_tui::components::sidebar::SortMode::Recent {

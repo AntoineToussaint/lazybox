@@ -113,34 +113,38 @@ pub trait TaskSource: Send + Sync + 'static {
 /// disabled roles / types never become Workspaces. `scopes` further
 /// narrows by repo / org: when non-empty, only tasks whose
 /// `task.repo` matches a selected scope id pass through.
+///
+/// Fields are private + constructed through [`GhSource::new`]: the
+/// `last_kind` cache has an invariant (initialized to `Full`) that a
+/// struct literal could trivially break. Use `new`.
 pub struct GhSource {
-    pub client: GhClient,
-    pub filter: ProviderConfig,
-    pub scopes: std::collections::BTreeSet<String>,
+    client: GhClient,
+    filter: ProviderConfig,
+    scopes: std::collections::BTreeSet<String>,
     /// Bus handle so the source can emit `PollProgress` events
     /// during its fetch. The polling layer doesn't pass `&ServerConfig`
     /// to `TaskSource::fetch` (would couple them), so each source
     /// keeps a clone of just the broadcast sender.
-    pub bus: tokio::sync::broadcast::Sender<Event>,
+    bus: tokio::sync::broadcast::Sender<Event>,
     /// GitHub logins that may trigger auto-spawn via a `@pilot`
     /// mention. Resolved by `sources_for` from
     /// `config.yaml::mention.allowed_logins`, with the authenticated
     /// viewer's login added as a default when the YAML list is
     /// empty. Empty here disables the feature entirely.
-    pub mention_allowed_logins: std::collections::BTreeSet<String>,
+    mention_allowed_logins: std::collections::BTreeSet<String>,
     /// Side channel for actions the source wants the polling tick to
     /// take after `fetch()` returns — today, auto-spawn requests
     /// triggered by `@pilot` mentions. Populated inside `fetch` and
     /// drained by `tick_with_state` after the upsert pass so the
     /// freshly-created issue workspace exists before we spawn into it.
-    pub pending_actions: std::sync::Arc<std::sync::Mutex<Vec<ProviderAction>>>,
+    pending_actions: std::sync::Arc<std::sync::Mutex<Vec<ProviderAction>>>,
     /// Per-tick scheduling decision from `pick_repos_for_tick`.
     /// `sources_for` computes this against the cursor in
     /// `TickState::repo_sync_cursor` and writes it here so the
     /// `TaskSource::fetch` impl knows whether to fan out per-repo or
     /// to fire the global sweep. Held by value (not Arc) — each
     /// `sources_for` call produces a fresh source.
-    pub scheduling: RoundRobinPick,
+    scheduling: RoundRobinPick,
     /// Mode of the last successful fetch — read after `fetch` resolves
     /// by [`TaskSource::last_fetch_kind`]. `std::sync::Mutex` is fine:
     /// trait methods take `&self` and the polling driver writes/reads
@@ -396,53 +400,78 @@ impl GhSource {
                 self.emit_progress("No new GitHub notifications (304)");
                 return Ok(Some(Vec::new()));
             }
-            pilot_gh::NotificationsPoll::Modified { entries, .. } => entries,
+            pilot_gh::NotificationsPoll::Modified { entries } => entries,
         };
         self.emit_progress(format!(
             "{} GitHub notification(s) — fetching changed PRs/issues",
             entries.len()
         ));
 
-        // Targeted deep-fetch fan-out. Dedup by (kind, owner, repo,
-        // number) since GitHub can emit multiple notifications for the
-        // same PR (one per comment, one per CI status change, …) in a
-        // single window. Without dedup we'd re-fetch the same PR 5x.
-        let mut targets: std::collections::BTreeSet<(
-            pilot_gh::NotificationTargetKind,
-            String,
-            String,
-            u64,
-        )> = std::collections::BTreeSet::new();
-        for entry in &entries {
-            if let Some(t) = entry.target() {
-                targets.insert((t.kind, t.owner, t.repo, t.number));
-            }
-        }
+        // Dedup at the source: GitHub fires several notifications per
+        // PR within a window (one per comment + one per CI status flip),
+        // and we want exactly one targeted fetch per distinct PR/issue.
+        // `BTreeSet<NotificationTarget>` collapses duplicates and gives
+        // deterministic iteration order — useful for stable logs.
+        let targets: std::collections::BTreeSet<pilot_gh::NotificationTarget> = entries
+            .iter()
+            .filter_map(pilot_gh::NotificationEntry::target)
+            .collect();
 
-        let mut tasks: Vec<Task> = Vec::with_capacity(targets.len());
-        for (kind, owner, repo, number) in targets {
-            let fetched = match kind {
-                pilot_gh::NotificationTargetKind::PullRequest => {
-                    self.client.fetch_single_pr(&owner, &repo, number).await
+        // Bounded-concurrent fan-out, mirroring the watched-repo
+        // pattern in `GhClient::fetch_all_prs`. 5 in flight is the
+        // same compromise: large enough to compress the latency of 10+
+        // targets into two batches, small enough that the local rate
+        // budget (capacity 30) doesn't get fully drained by a single
+        // tick. Failures are logged per-target — one bad fetch never
+        // poisons the rest of the batch.
+        use futures::stream::{self, StreamExt};
+        const TARGETED_FETCH_CONCURRENCY: usize = 5;
+        let tasks: Vec<Task> = stream::iter(targets)
+            .map(|target| async move {
+                let result = match target.kind {
+                    pilot_gh::NotificationTargetKind::PullRequest => {
+                        self.client
+                            .fetch_single_pr(&target.owner, &target.repo, target.number)
+                            .await
+                    }
+                    pilot_gh::NotificationTargetKind::Issue => {
+                        self.client
+                            .fetch_single_issue(&target.owner, &target.repo, target.number)
+                            .await
+                    }
+                };
+                (target, result)
+            })
+            .buffer_unordered(TARGETED_FETCH_CONCURRENCY)
+            .filter_map(|(target, result)| async move {
+                match result {
+                    Ok(Some(t)) => Some(t),
+                    Ok(None) => {
+                        tracing::debug!(
+                            "incremental: {}/{}#{} not visible — skipping",
+                            target.owner,
+                            target.repo,
+                            target.number,
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        // Per-target failure is non-fatal: log and move on.
+                        // The next tick's heartbeat will re-deliver the
+                        // notification if it's still relevant; the full
+                        // sweep timer eventually catches anything stuck.
+                        tracing::warn!(
+                            "incremental: fetch failed for {}/{}#{}: {e}",
+                            target.owner,
+                            target.repo,
+                            target.number,
+                        );
+                        None
+                    }
                 }
-                pilot_gh::NotificationTargetKind::Issue => {
-                    self.client.fetch_single_issue(&owner, &repo, number).await
-                }
-            };
-            match fetched {
-                Ok(Some(t)) => tasks.push(t),
-                Ok(None) => {
-                    tracing::debug!("incremental: {owner}/{repo}#{number} not visible — skipping");
-                }
-                Err(e) => {
-                    // Per-target failure is non-fatal: log and move on.
-                    // The next tick's heartbeat will re-deliver the
-                    // notification if it's still relevant; the full
-                    // sweep timer eventually catches anything stuck.
-                    tracing::warn!("incremental: fetch failed for {owner}/{repo}#{number}: {e}");
-                }
-            }
-        }
+            })
+            .collect()
+            .await;
 
         let kept = filter_github_tasks(tasks, &self.filter, &self.scopes);
         self.emit_progress(format!(
@@ -550,36 +579,30 @@ impl TaskSource for GhSource {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
     {
         Box::pin(async move {
+            // `last_kind` is only consulted by the tick driver in the
+            // `Ok` arm (errored sources never reach the all_full
+            // check), so we set it inside `Ok` branches only — the
+            // value held during an Err is unobservable.
             if self.client.should_full_sweep() {
-                let result = self.fetch_full().await;
-                // Record AFTER the call: on error we want rescope to
-                // still be gated by "was the last successful fetch
-                // full?" — and `last_kind` already reflects that, so
-                // leave it untouched on Err. On Ok we mark Full so the
-                // tick driver lets rescope run.
-                if result.is_ok() {
-                    self.set_last_kind(FetchMode::Full);
-                }
-                return result;
+                let tasks = self.fetch_full().await?;
+                self.set_last_kind(FetchMode::Full);
+                return Ok(tasks);
             }
-            match self.fetch_incremental().await {
-                Ok(Some(tasks)) => {
+            match self.fetch_incremental().await? {
+                Some(tasks) => {
                     self.set_last_kind(FetchMode::Incremental);
                     Ok(tasks)
                 }
-                Ok(None) => {
+                None => {
                     // Heartbeat failed quietly — fall back to full sweep
                     // rather than silently freezing the inbox. The full
                     // sweep also re-arms the slow-sweep clock so we
                     // don't loop on the same broken heartbeat.
                     tracing::info!("incremental returned None; promoting to full sweep");
-                    let result = self.fetch_full().await;
-                    if result.is_ok() {
-                        self.set_last_kind(FetchMode::Full);
-                    }
-                    result
+                    let tasks = self.fetch_full().await?;
+                    self.set_last_kind(FetchMode::Full);
+                    Ok(tasks)
                 }
-                Err(e) => Err(e),
             }
         })
     }
@@ -1345,6 +1368,12 @@ pub struct TickOutcome {
     pub all_full: bool,
 }
 
+// INVARIANT: `all_full` defaults to `true`, NOT `bool::default()`.
+// The "no sources configured" rescope path constructs a default
+// outcome and then runs rescope — leaving `all_full: false` would
+// silently disable rescope cleanup for that path. Hand-rolled
+// `Default` impl rather than derive so the override is impossible
+// to miss in code review.
 impl Default for TickOutcome {
     fn default() -> Self {
         Self {
@@ -1352,9 +1381,6 @@ impl Default for TickOutcome {
             any_source_succeeded: false,
             retry_after_secs: None,
             saw_unknown_mergeable: false,
-            // Default to true so a Default::default() outcome — used by
-            // a "no sources configured, just rescope" path — doesn't
-            // accidentally skip rescope.
             all_full: true,
         }
     }

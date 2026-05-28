@@ -6,7 +6,7 @@
 mod client;
 mod graphql;
 pub mod mentions;
-pub mod notifications;
+mod notifications;
 mod poller;
 pub mod rate_budget;
 
@@ -15,6 +15,7 @@ pub use graphql::PrDetails;
 pub use mentions::{MentionSource, PilotMention, scan_issue};
 pub use notifications::{
     NotificationEntry, NotificationTarget, NotificationTargetKind, NotificationsPoll,
+    NotificationsSnapshot, NotificationsState,
 };
 pub use poller::GhPoller;
 pub use rate_budget::{AcquireError, RateBudget, RemoteRateLimit, Snapshot as RateSnapshot};

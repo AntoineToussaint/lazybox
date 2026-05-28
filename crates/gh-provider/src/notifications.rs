@@ -31,13 +31,10 @@ pub enum NotificationsPoll {
     /// The polling driver can return immediately; the tick is a no-op.
     NotModified,
     /// `200 OK` with a (possibly empty) list of notification entries.
-    /// `last_modified` is the response's `Last-Modified` header — the
-    /// caller should round-trip it as `If-Modified-Since` on the next
-    /// call so GitHub can answer 304 once activity quiets down.
-    Modified {
-        entries: Vec<NotificationEntry>,
-        last_modified: Option<String>,
-    },
+    /// The response's `Last-Modified` header is captured into
+    /// [`NotificationsState`] for the next call's `If-Modified-Since`;
+    /// callers don't need it directly.
+    Modified { entries: Vec<NotificationEntry> },
 }
 
 /// Subset of the notification fields we actually use.
@@ -90,7 +87,12 @@ pub struct NotificationRepo {
 /// Resolved `(owner, repo, number, kind)` derived from a notification
 /// subject. Parsing centralizes here so the polling layer doesn't
 /// have to know about the GitHub REST URL shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Ord` is derived so callers can dedup notifications via a
+/// `BTreeSet<NotificationTarget>` — GitHub fires multiple notifications
+/// per PR within a single window (one per comment, one per CI status
+/// change) and the targeted-fetch fan-out would otherwise issue
+/// redundant single-PR queries.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NotificationTarget {
     pub owner: String,
     pub repo: String,
@@ -98,7 +100,7 @@ pub struct NotificationTarget {
     pub kind: NotificationTargetKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NotificationTargetKind {
     PullRequest,
     Issue,
@@ -125,30 +127,34 @@ impl NotificationEntry {
 /// dereference `latest_comment_url` — that points to a comment, not the
 /// underlying PR/issue, and the single-PR deep-fetch only needs the
 /// canonical number anyway.
-pub fn parse_subject_url(url: &str) -> Option<NotificationTarget> {
+///
+/// `pub(crate)` instead of `pub`: production callers go through
+/// [`NotificationEntry::target`]; the only out-of-module consumer is
+/// the test suite below. Two parallel public entry points would invite
+/// drift between them.
+pub(crate) fn parse_subject_url(url: &str) -> Option<NotificationTarget> {
     let stripped = url.split_once("/repos/").map(|(_, rest)| rest)?;
     // Drop any trailing `?query` / `#fragment` — keeps the segment
-    // parser focused on the path-only shape we expect.
+    // parser focused on the path-only shape we expect. `str::split`
+    // always yields at least one element, so the `expect` is a
+    // contract reminder, not a fallible branch.
     let path = stripped
         .split(['?', '#'])
         .next()
-        .unwrap_or(stripped)
+        .expect("str::split yields at least one element")
         .trim_end_matches('/');
-    let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() < 4 {
-        return None;
-    }
-    let owner = parts[0].to_string();
-    let repo = parts[1].to_string();
-    let kind = match parts[2] {
+    let mut segments = path.split('/');
+    let owner = segments.next()?;
+    let repo = segments.next()?;
+    let kind = match segments.next()? {
         "pulls" => NotificationTargetKind::PullRequest,
         "issues" => NotificationTargetKind::Issue,
         _ => return None,
     };
-    let number: u64 = parts[3].parse().ok()?;
+    let number: u64 = segments.next()?.parse().ok()?;
     Some(NotificationTarget {
-        owner,
-        repo,
+        owner: owner.to_string(),
+        repo: repo.to_string(),
         number,
         kind,
     })
@@ -171,18 +177,14 @@ pub struct NotificationsState {
     /// value (rather than locally-formatted `now`) keeps the round-trip
     /// byte-for-byte consistent — GitHub matches on the literal value
     /// when deciding 304 vs 200.
-    pub last_modified: Option<String>,
+    pub(crate) last_modified: Option<String>,
     /// When the last full sweep completed. `None` means "never" — the
     /// first tick after daemon start always runs a full sweep to
     /// bootstrap the inbox.
-    pub last_full_sweep_at: Option<std::time::Instant>,
+    pub(crate) last_full_sweep_at: Option<std::time::Instant>,
 }
 
 impl NotificationsState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Is the slow-sweep cadence due?
     ///
     /// True when no sweep has run yet (bootstrap case — first tick
@@ -196,24 +198,36 @@ impl NotificationsState {
             Some(t) => t.elapsed() >= threshold,
         }
     }
+
+    /// Construct a fresh `Arc<Mutex<NotificationsState>>` — the shape
+    /// `GhClient` keeps so `with_filters` clones can share one bucket
+    /// of conditional-GET state. `pub(crate)` because this is an
+    /// implementation detail of the client, not part of the public
+    /// notifications API.
+    pub(crate) fn shared() -> SharedNotificationsState {
+        std::sync::Arc::new(Mutex::new(Self::default()))
+    }
 }
 
-/// Thread-safe wrapper used by `GhClient`. `Arc<Mutex<>>` so multiple
-/// `GhClient` clones (made by `with_filters`) share one bucket of
-/// state — same pattern as the rate budget.
-pub type SharedNotificationsState = std::sync::Arc<Mutex<NotificationsState>>;
+/// Thread-safe handle on shared notifications state. `pub(crate)`
+/// because only `GhClient` and its module construct or hold one;
+/// callers observe state via [`NotificationsSnapshot`].
+pub(crate) type SharedNotificationsState = std::sync::Arc<Mutex<NotificationsState>>;
 
-pub fn shared() -> SharedNotificationsState {
-    std::sync::Arc::new(Mutex::new(NotificationsState::new()))
+/// Read-only view of the notifications heartbeat state, returned by
+/// [`super::client::GhClient::notifications_snapshot`]. Tests and a
+/// future status indicator observe whether the slow-sweep timer is
+/// armed without holding the lock or learning the storage shape.
+#[derive(Debug, Clone)]
+pub struct NotificationsSnapshot {
+    pub has_last_modified: bool,
+    pub last_full_sweep_elapsed: Option<std::time::Duration>,
 }
 
 /// Format a `DateTime<Utc>` as an HTTP-date (RFC 7231 IMF-fixdate),
-/// e.g. `"Sun, 06 Nov 2026 08:49:37 GMT"`.
-///
-/// Used for synthesizing an `If-Modified-Since` after a full sweep,
-/// when we don't yet have an authoritative `Last-Modified` from the
-/// notifications endpoint to echo back.
-pub fn format_http_date(dt: DateTime<Utc>) -> String {
+/// e.g. `"Sun, 06 Nov 2026 08:49:37 GMT"`. `pub(crate)` because the
+/// only producer in non-test code is `GhClient::mark_full_sweep_done`.
+pub(crate) fn format_http_date(dt: DateTime<Utc>) -> String {
     dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string()
 }
 
@@ -320,7 +334,7 @@ mod tests {
         // Bootstrap case — daemon just started, no sweep has run.
         // Must report due so the first tick fans out the heavy
         // `involves:USER` search and seeds the inbox.
-        let s = NotificationsState::new();
+        let s = NotificationsState::default();
         assert!(s.is_full_sweep_due(std::time::Duration::from_secs(600)));
     }
 
@@ -329,8 +343,10 @@ mod tests {
         // The slow-sweep cadence is what makes notifications-driven
         // sync cheap: between sweeps, every tick takes the cheap
         // notifications-heartbeat path. Verify the timer does its job.
-        let mut s = NotificationsState::new();
-        s.last_full_sweep_at = Some(std::time::Instant::now());
+        let s = NotificationsState {
+            last_full_sweep_at: Some(std::time::Instant::now()),
+            ..Default::default()
+        };
         assert!(!s.is_full_sweep_due(std::time::Duration::from_secs(600)));
         // A zero threshold means "always sweep" — degenerate but the
         // arithmetic should still hold.

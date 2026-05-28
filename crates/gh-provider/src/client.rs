@@ -3,7 +3,10 @@ use pilot_auth::Credential;
 use pilot_core::*;
 
 use crate::graphql;
-use crate::notifications::{self, NotificationEntry, NotificationsPoll, SharedNotificationsState};
+use crate::notifications::{
+    self, NotificationEntry, NotificationsPoll, NotificationsSnapshot, NotificationsState,
+    SharedNotificationsState,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum GhError {
@@ -323,15 +326,6 @@ impl From<GhError> for pilot_core::ProviderError {
     }
 }
 
-/// Read-only view of notifications heartbeat state, returned by
-/// [`GhClient::notifications_snapshot`]. Tests and logs use this to
-/// observe whether the slow-sweep cadence is armed.
-#[derive(Debug, Clone)]
-pub struct NotificationsSnapshot {
-    pub has_last_modified: bool,
-    pub last_full_sweep_elapsed: Option<std::time::Duration>,
-}
-
 #[derive(Clone)]
 pub struct GhClient {
     inner: Octocrab,
@@ -381,7 +375,7 @@ impl GhClient {
             budget: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::rate_budget::RateBudget::default_for_pilot(),
             )),
-            notifications_state: notifications::shared(),
+            notifications_state: NotificationsState::shared(),
         })
     }
 
@@ -848,21 +842,26 @@ impl GhClient {
             .is_full_sweep_due(Self::FULL_SWEEP_INTERVAL)
     }
 
-    /// Mark a full sweep complete *now*. Resets the heartbeat baseline
-    /// too: future incremental ticks send an `If-Modified-Since` of
-    /// "right after the sweep" so GitHub answers 304 until activity
-    /// genuinely lands. Without this reset, the first incremental tick
-    /// after a sweep would re-fan-out to every notification that piled
-    /// up DURING the sweep and double-count work the sweep already did.
+    /// Mark a full sweep complete *now*. Seeds the heartbeat baseline
+    /// when one isn't already set so the very next incremental tick
+    /// has an `If-Modified-Since` to send — without it the first
+    /// post-bootstrap heartbeat would unconditionally pull every
+    /// notification GitHub holds for the user.
+    ///
+    /// We do NOT overwrite an existing `last_modified`: an authoritative
+    /// header from the notifications endpoint is always preferable to
+    /// a locally-synthesized timestamp (clock skew can make our `now`
+    /// *earlier* than GitHub's, which would re-deliver entries the
+    /// heartbeat already covered).
     pub fn mark_full_sweep_done(&self) {
         let mut state = self
             .notifications_state
             .lock()
             .expect("notifications state mutex poisoned");
         state.last_full_sweep_at = Some(std::time::Instant::now());
-        // Reset the conditional baseline to "now" — drop any stale
-        // `Last-Modified` echo from a pre-sweep notifications call.
-        state.last_modified = Some(notifications::format_http_date(chrono::Utc::now()));
+        if state.last_modified.is_none() {
+            state.last_modified = Some(notifications::format_http_date(chrono::Utc::now()));
+        }
     }
 
     /// Snapshot of the current notifications heartbeat state. Read-only;
@@ -913,10 +912,22 @@ impl GhClient {
             .clone();
 
         let mut headers = HeaderMap::new();
-        if let Some(ims) = if_modified_since.as_ref()
-            && let Ok(v) = HeaderValue::from_str(ims)
-        {
-            headers.insert(IF_MODIFIED_SINCE, v);
+        if let Some(ims) = if_modified_since.as_ref() {
+            match HeaderValue::from_str(ims) {
+                Ok(v) => {
+                    headers.insert(IF_MODIFIED_SINCE, v);
+                }
+                Err(e) => {
+                    // Stored value isn't header-valid (CR/LF, non-ASCII).
+                    // Skipping the conditional forces a 200, costing a
+                    // body parse — surface loudly so the regression is
+                    // observable instead of just slower.
+                    tracing::warn!(
+                        "dropping invalid stored If-Modified-Since `{ims}`: {e} — \
+                         next notifications call will fetch unconditional 200"
+                    );
+                }
+            }
         }
         // `participating=false` — match #19's recommendation. Returns
         // every notification the user can see, not just ones they're
@@ -981,17 +992,16 @@ impl GhClient {
         // conditional. Skip the write when GitHub didn't send one
         // (rare; happens on test fixtures) — leaving the old value
         // alone is safer than clearing it and re-pulling the world.
-        if let Some(lm) = new_last_modified.as_ref() {
+        // `take`-into-the-Mutex avoids the double-copy a `clone` +
+        // move return would have paid for.
+        if let Some(lm) = new_last_modified {
             self.notifications_state
                 .lock()
                 .expect("notifications state mutex poisoned")
-                .last_modified = Some(lm.clone());
+                .last_modified = Some(lm);
         }
 
-        Ok(NotificationsPoll::Modified {
-            entries,
-            last_modified: new_last_modified,
-        })
+        Ok(NotificationsPoll::Modified { entries })
     }
 
     /// Targeted deep-fetch: pull one PR by `(owner, repo, number)` via
@@ -2469,6 +2479,7 @@ mod tests {
             budget: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::rate_budget::RateBudget::default_for_pilot(),
             )),
+            notifications_state: NotificationsState::shared(),
         }
     }
 

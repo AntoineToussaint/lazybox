@@ -788,6 +788,68 @@ impl TerminalStack {
         out
     }
 
+    /// If the cell at frame-space `(col, row)` lies inside an
+    /// `http(s)://…` token on its row, return the URL. Otherwise
+    /// `None`. Drives right-click-to-open: the click coordinates
+    /// arrive in the same frame-space the renderer used, so we
+    /// translate the same way `extract_text` does (skip the pane
+    /// border + tab strip via `inner_x = rect.x + 1`, `inner_y =
+    /// rect.y + 3`). Single-row only — wrapped URLs aren't
+    /// detected (per the issue: "stay simple, terminal URLs are
+    /// virtually always on one row").
+    pub fn url_at(
+        &mut self,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<String> {
+        let id = self.focused_terminal_id()?;
+        let slot = self.terminals.get_mut(&id)?;
+        let inner_x = rect.x.saturating_add(1);
+        let inner_y = rect.y.saturating_add(3);
+        if col < inner_x || row < inner_y {
+            return None;
+        }
+        let cell_col = col - inner_x;
+        let target_row = row - inner_y;
+        let snapshot = slot.vt.render_state.update(&slot.vt.terminal).ok()?;
+        let mut row_iter = slot.vt.row_iter.update(&snapshot).ok()?;
+        // Walk graphemes — wide-glyph cells contribute one grapheme
+        // on cell N and an empty cell N+1, so we record the byte
+        // offset at the START of each cell's contribution into
+        // `row_text`. `cell_byte_starts[cell_col]` then maps the
+        // clicked cell back to a byte position in the row's text.
+        let mut y: u16 = 0;
+        let mut row_text = String::new();
+        let mut cell_byte_starts: Vec<usize> = Vec::new();
+        let mut found = false;
+        while let Some(row) = row_iter.next() {
+            if y == target_row {
+                if let Ok(mut cell_iter) = slot.vt.cell_iter.update(row) {
+                    while let Some(cell) = cell_iter.next() {
+                        cell_byte_starts.push(row_text.len());
+                        let graphemes = cell.graphemes().unwrap_or_default();
+                        if graphemes.is_empty() {
+                            row_text.push(' ');
+                        } else {
+                            for g in graphemes {
+                                row_text.push(g);
+                            }
+                        }
+                    }
+                }
+                found = true;
+                break;
+            }
+            y += 1;
+        }
+        if !found {
+            return None;
+        }
+        let byte_pos = *cell_byte_starts.get(cell_col as usize)?;
+        find_url_at_byte(&row_text, byte_pos).map(|s| s.to_string())
+    }
+
     pub fn scroll_active(&mut self, delta: isize) -> ScrollOutcome {
         if delta == 0 {
             return ScrollOutcome::NoTerminal;
@@ -1838,6 +1900,131 @@ pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
         End => Some(b"\x1b[F".to_vec()),
         Delete => Some(b"\x1b[3~".to_vec()),
         _ => None,
+    }
+}
+
+/// Scan `row_text` for an `http(s)://…` token whose byte range
+/// contains `byte_pos`. Returns the URL as a borrowed slice when
+/// found. URL terminates at the first whitespace; trailing
+/// punctuation that's almost never part of the URL (`.,;:!?` plus
+/// the closing brackets and quotes) is trimmed so a sentence like
+/// `see https://example.com.` opens `https://example.com`.
+pub(crate) fn find_url_at_byte(row_text: &str, byte_pos: usize) -> Option<&str> {
+    let mut search_start = 0;
+    while search_start < row_text.len() {
+        let rest = &row_text[search_start..];
+        let http = rest.find("http://");
+        let https = rest.find("https://");
+        let off = match (http, https) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }?;
+        let url_start = search_start + off;
+        let after_scheme = &row_text[url_start..];
+        let raw_end_off = after_scheme
+            .char_indices()
+            .find(|(_, c)| c.is_whitespace())
+            .map(|(i, _)| i)
+            .unwrap_or(after_scheme.len());
+        let mut url_end = url_start + raw_end_off;
+        // Trim trailing punctuation that's almost never part of a
+        // URL. Stop once we hit something URL-valid.
+        loop {
+            let slice = &row_text[url_start..url_end];
+            let Some(last) = slice.chars().next_back() else {
+                break;
+            };
+            if matches!(
+                last,
+                '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '\'' | '"'
+            ) {
+                url_end -= last.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if byte_pos >= url_start && byte_pos < url_end {
+            return Some(&row_text[url_start..url_end]);
+        }
+        // Advance past this URL match (or the leading whitespace if
+        // url_end == url_start after trimming) to look for the next.
+        search_start = url_end.max(url_start + 1);
+    }
+    None
+}
+
+#[cfg(test)]
+mod find_url_at_byte_tests {
+    use super::find_url_at_byte;
+
+    #[test]
+    fn returns_url_when_click_inside_https() {
+        let row = "see https://example.com here";
+        // Click on the 'h' of https (column 4).
+        assert_eq!(find_url_at_byte(row, 4), Some("https://example.com"));
+        // Click on the 'm' of .com (column 22).
+        assert_eq!(find_url_at_byte(row, 22), Some("https://example.com"));
+    }
+
+    #[test]
+    fn returns_url_when_click_inside_http() {
+        let row = "go http://example.com/foo done";
+        assert_eq!(find_url_at_byte(row, 3), Some("http://example.com/foo"));
+    }
+
+    #[test]
+    fn returns_none_when_click_outside_url() {
+        let row = "see https://example.com here";
+        // Click on space before URL.
+        assert_eq!(find_url_at_byte(row, 3), None);
+        // Click on space after URL.
+        assert_eq!(find_url_at_byte(row, 23), None);
+        // Click on 'h' of "here".
+        assert_eq!(find_url_at_byte(row, 24), None);
+    }
+
+    #[test]
+    fn trims_trailing_punctuation() {
+        // Sentence-ending period must NOT be part of the URL.
+        let row = "visit https://example.com.";
+        assert_eq!(find_url_at_byte(row, 6), Some("https://example.com"));
+        // Click on the trailing period itself returns None — the
+        // period isn't part of the URL anymore.
+        assert_eq!(find_url_at_byte(row, 25), None);
+    }
+
+    #[test]
+    fn trims_closing_bracket() {
+        let row = "see (https://example.com)";
+        assert_eq!(find_url_at_byte(row, 5), Some("https://example.com"));
+    }
+
+    #[test]
+    fn returns_none_when_no_url() {
+        let row = "plain text with no link here";
+        assert_eq!(find_url_at_byte(row, 0), None);
+        assert_eq!(find_url_at_byte(row, 10), None);
+    }
+
+    #[test]
+    fn picks_correct_url_when_multiple_on_row() {
+        let row = "first https://a.example.com then http://b.example.com end";
+        // Inside first URL.
+        assert_eq!(find_url_at_byte(row, 10), Some("https://a.example.com"));
+        // Inside second URL.
+        assert_eq!(find_url_at_byte(row, 40), Some("http://b.example.com"));
+        // Between them.
+        assert_eq!(find_url_at_byte(row, 28), None);
+    }
+
+    #[test]
+    fn url_at_end_of_row() {
+        let row = "tail https://example.com";
+        // Last char of URL.
+        let last = row.len() - 1;
+        assert_eq!(find_url_at_byte(row, last), Some("https://example.com"));
     }
 }
 

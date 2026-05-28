@@ -8,10 +8,20 @@
 
 use crate::Task;
 
+/// The role/preamble + engineering principles every agent run is
+/// prefixed with. Versioned as a reviewable artifact at the repo
+/// root (`prompts/agent-work.md`) rather than inlined here so the
+/// principles can evolve through PRs, auditable on their own.
+pub const AGENT_WORK_PREAMBLE: &str = include_str!("../../../prompts/agent-work.md");
+
 /// Prompt for "implement this GitHub issue". Same string the
 /// sidebar's `w` shortcut builds when the focused workspace is an
 /// issue, so a press-`w` spawn and a `@pilot`-mention auto-spawn
 /// land the agent in identical context.
+///
+/// Structure: role/preamble + principles ([`AGENT_WORK_PREAMBLE`]),
+/// then the concrete task last so the issue is the freshest thing in
+/// context.
 pub fn build_implement_issue_prompt(issue: &Task) -> String {
     let issue_number = issue
         .id
@@ -29,22 +39,14 @@ pub fn build_implement_issue_prompt(issue: &Task) -> String {
         None => String::new(),
     };
     format!(
-        "Implement GitHub issue #{issue_number} in {repo}: {title}.\
+        "{preamble}\n\n---\n\n\
+         ## Task\n\n\
+         Implement GitHub issue #{issue_number} in {repo}: {title}.\
          {body_block}\
-         \nWalk through it: create a fresh branch from the repo's default base, \
-         implement the change end-to-end (code + tests), run the project's local \
-         checks until they pass, then open the PR with `gh pr create`. \
-         Reference the issue both ways so it links cleanly and collapses to a \
-         single row in pilot:\
-         \n- Title: derive a concise PR title (don't copy the issue title \
-         verbatim) and append the issue number as a trailing suffix, e.g. \
-         `Add foo to bar (#{issue_number})`.\
-         \n- Body: put a closing keyword on its own line so GitHub auto-closes \
-         the issue on merge — start the body with `Closes #{issue_number}.` \
-         followed by a `## Summary` section. If the PR addresses more than one \
-         issue, give each its own `Closes #N.` line; for an issue in a different \
-         repo use the full `Closes owner/repo#N.` form.\
-         \nReply with the PR URL when it's open.",
+         \nTitle the PR `… (#{issue_number})` and start its body with \
+         `Closes #{issue_number}.` so the issue and PR collapse to a single \
+         row in pilot.",
+        preamble = AGENT_WORK_PREAMBLE.trim_end(),
         title = issue.title,
     )
 }
@@ -105,8 +107,7 @@ mod tests {
         let prompt = build_implement_issue_prompt(&issue("acme/widget", 42, "Add dark mode", None));
         // Title guidance: trailing `(#N)` suffix, derived (not verbatim) title.
         assert!(prompt.contains("(#42)"));
-        assert!(prompt.contains("trailing suffix"));
-        assert!(prompt.contains("don't copy the issue title"));
+        assert!(prompt.contains("Don't copy the issue title verbatim"));
         // Body guidance: closing keyword on its own line for auto-close.
         assert!(prompt.contains("Closes #42."));
         assert!(prompt.contains("auto-close"));
@@ -119,6 +120,21 @@ mod tests {
         assert!(prompt.contains("its own `Closes #N.` line"));
         // Cross-repo issues use the full owner/repo#N form.
         assert!(prompt.contains("owner/repo#N"));
+    }
+
+    #[test]
+    fn embeds_principles_preamble_before_the_task() {
+        let prompt = build_implement_issue_prompt(&issue("acme/widget", 42, "Add dark mode", None));
+        // The versioned principles file is prepended verbatim.
+        assert!(prompt.contains(AGENT_WORK_PREAMBLE.trim_end()));
+        // A representative principle from each major section is present.
+        assert!(prompt.contains("Do only what the work item asks"));
+        assert!(prompt.contains("Find the root cause before you patch"));
+        assert!(prompt.contains("Default to no comments"));
+        // Structure: principles come first, the concrete task last.
+        let task_at = prompt.find("## Task").expect("task section present");
+        let scope_at = prompt.find("## Scope").expect("scope section present");
+        assert!(scope_at < task_at, "principles must precede the task");
     }
 
     #[test]

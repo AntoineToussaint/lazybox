@@ -550,10 +550,7 @@ pub mod builtins {
     /// multi-byte UTF-8 sequence.
     fn has_ascii_chooser_arrow(s: &str) -> bool {
         s.as_bytes().windows(4).any(|w| {
-            w[0] == b'>'
-                && w[1] == b' '
-                && w[2].is_ascii_digit()
-                && (w[3] == b'.' || w[3] == b')')
+            w[0] == b'>' && w[1] == b' ' && w[2].is_ascii_digit() && (w[3] == b'.' || w[3] == b')')
         })
     }
 

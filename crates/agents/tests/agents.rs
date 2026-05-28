@@ -719,7 +719,6 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
         ),
         expected: AgentState::Asking,
     },
-
     // ── Active controls — must NOT fire as Asking ────────────────
     PromptFixture {
         // Plain build output. No prompt markers, no `?`. Belt-

@@ -14,6 +14,94 @@
 use super::{Id, Model};
 use tuirealm::terminal::TerminalAdapter;
 
+/// Choice-modal item wrapper for the worktree inspector. Picker
+/// returns indices; we store one of these per row so the
+/// `ChoicePicked` handler knows whether the user hit the bulk
+/// shortcut or a specific worktree.
+#[derive(Debug, Clone)]
+pub(super) enum InspectRow {
+    /// First slot in the list (when there is at least one safe-to-
+    /// delete orphan). Triggers `bulk_delete_safe_inspected`.
+    BulkSafe {
+        count: usize,
+    },
+    Inspection(pilot_ipc::WorktreeInspectionDto),
+}
+
+/// Tabular label for one inspector row. Single-line — the Choice
+/// modal truncates with an ellipsis when it overflows. Pack the
+/// signal-dense bits first: name, reasons, size, age, flags.
+fn format_inspect_row(row: &InspectRow) -> String {
+    match row {
+        InspectRow::BulkSafe { count } => {
+            format!("▶ Delete all {count} clearly-safe worktrees")
+        }
+        InspectRow::Inspection(dto) => {
+            let name = dto
+                .path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| dto.path.to_string_lossy().into_owned());
+            let reasons = if dto.reasons.is_empty() {
+                "ok".to_string()
+            } else {
+                dto.reasons.join(",")
+            };
+            let mut flags = Vec::<&str>::new();
+            if dto.has_uncommitted_changes {
+                flags.push("DIRTY");
+            }
+            if dto.has_unpushed_commits {
+                flags.push("UNPUSHED");
+            }
+            let flag_str = if flags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", flags.join(","))
+            };
+            let branch = dto.branch.as_deref().unwrap_or("(detached)");
+            let size = format_size(dto.size_bytes);
+            let age = format_age_short(dto.last_modified_unix);
+            format!("[{reasons}] {name} · {branch} · {size} · {age}{flag_str}")
+        }
+    }
+}
+
+fn format_size(n: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if n >= GB {
+        format!("{:.1}G", n as f64 / GB as f64)
+    } else if n >= MB {
+        format!("{:.1}M", n as f64 / MB as f64)
+    } else if n >= KB {
+        format!("{:.1}K", n as f64 / KB as f64)
+    } else {
+        format!("{n}B")
+    }
+}
+
+fn format_age_short(unix_secs: Option<u64>) -> String {
+    let Some(t) = unix_secs else {
+        return "—".into();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(t);
+    let secs = now.saturating_sub(t);
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
+}
+
 impl<T: TerminalAdapter> Model<T> {
     /// Mount the reply textarea targeted at `workspace_key`. Submit
     /// → `Msg::TextareaSubmitted(body)` → orchestrator builds a
@@ -480,6 +568,115 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::ActionConfirm, modal);
     }
 
+    /// Kick off the in-app worktree inspector. Dispatches the IPC
+    /// `InspectWorktrees` command and flashes a hint so the user
+    /// knows the click registered. `Event::WorktreesInspected`
+    /// arriving later calls [`Self::mount_inspect_list`] with the
+    /// payload.
+    pub(super) fn start_inspect_worktrees(&mut self) {
+        self.send_cmd(pilot_ipc::Command::InspectWorktrees);
+        self.flash_info("inspecting worktrees…");
+    }
+
+    /// Mount the inspector list. Called from the
+    /// `Event::WorktreesInspected` handler. Stashes the report in
+    /// `pending_inspect_rows` so the choice handler can index back.
+    ///
+    /// Row layout:
+    /// - sentinel "delete all N safe" row (only when N > 0)
+    /// - one row per flagged orphan, with bracketed reason tags
+    ///   + DIRTY/UNPUSHED markers
+    /// - one row per healthy worktree, rendered non-selectable so
+    ///   the user has full visibility but can't accidentally delete
+    pub(super) fn mount_inspect_list(
+        &mut self,
+        inspections: Vec<pilot_ipc::WorktreeInspectionDto>,
+    ) {
+        use crate::realm::components::choice::Choice;
+
+        // Sort: orphans first (sorted by path), then healthy.
+        let mut rows = inspections;
+        rows.sort_by(|a, b| {
+            let a_orphaned = !a.reasons.is_empty();
+            let b_orphaned = !b.reasons.is_empty();
+            b_orphaned
+                .cmp(&a_orphaned)
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        let safe_count = rows
+            .iter()
+            .filter(|r| !r.reasons.is_empty() && r.is_safe_to_delete)
+            .count();
+
+        // Wrap each entry in `InspectRow` so the Choice picker can
+        // distinguish the bulk shortcut from a real worktree row.
+        // The bulk row is only inserted when there's something to
+        // bulk-delete — otherwise it would be a misleading no-op.
+        let mut items: Vec<InspectRow> = Vec::with_capacity(rows.len() + 1);
+        if safe_count > 0 {
+            items.push(InspectRow::BulkSafe { count: safe_count });
+        }
+        for row in &rows {
+            items.push(InspectRow::Inspection(row.clone()));
+        }
+
+        // Stash the full list so the pick handler can resolve indices
+        // back to inspections (skipping the sentinel as needed).
+        self.pending_inspect_rows = rows;
+
+        if items.is_empty() {
+            self.flash_info("no worktrees found under <state_root>/worktrees/");
+            return;
+        }
+
+        let modal = Choice::single("Worktree inspector", items)
+            .title("Worktree inspector")
+            .label(format_inspect_row)
+            .selectable(|row: &InspectRow| match row {
+                InspectRow::BulkSafe { .. } => true,
+                InspectRow::Inspection(dto) => !dto.reasons.is_empty(),
+            });
+        // Replace the previous instance (if any) so the modal stack
+        // doesn't pile up after a delete + re-inspect.
+        self.modal_stack.retain(|id| id != &Id::InspectList);
+        self.mount_modal(Id::InspectList, modal);
+    }
+
+    /// Confirm-modal step in front of an actual delete. Stashes the
+    /// target so `Msg::Confirmed(true)` knows what to dispatch. Copy
+    /// changes when the row has local work so the user sees a clear
+    /// "FORCE" warning before they say yes.
+    pub(super) fn mount_inspect_confirm(&mut self, target: pilot_ipc::WorktreeInspectionDto) {
+        use crate::realm::components::confirm::Confirm;
+        let dirty = target.has_uncommitted_changes || target.has_unpushed_commits;
+        let prompt = if dirty {
+            format!(
+                "Delete worktree {} ? It has {}{}{} — this overrides safety.",
+                target.path.display(),
+                if target.has_uncommitted_changes {
+                    "uncommitted changes"
+                } else {
+                    ""
+                },
+                if target.has_uncommitted_changes && target.has_unpushed_commits {
+                    " AND "
+                } else {
+                    ""
+                },
+                if target.has_unpushed_commits {
+                    "unpushed commits"
+                } else {
+                    ""
+                },
+            )
+        } else {
+            format!("Delete worktree {} ?", target.path.display())
+        };
+        let modal = Confirm::new(&prompt).default_no();
+        self.pending_inspect_target = Some(target);
+        self.mount_modal(Id::InspectConfirm, modal);
+    }
+
     /// Confirm prompt before dispatching `Command::CleanWorktrees`.
     /// The destructive bit is on disk — sessions + their worktrees
     /// are gone after this. PR/issue rows stay because we only
@@ -644,5 +841,105 @@ impl<T: TerminalAdapter> Model<T> {
             let _ = self.app.active(top);
         }
         self.redraw = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dto_with(
+        reasons: &[&str],
+        dirty: bool,
+        unpushed: bool,
+        size: u64,
+    ) -> pilot_ipc::WorktreeInspectionDto {
+        pilot_ipc::WorktreeInspectionDto {
+            path: std::path::PathBuf::from("/tmp/worktrees/o-r-feat"),
+            bare_path: None,
+            branch: Some("feat".into()),
+            session_id: None,
+            reasons: reasons.iter().map(|s| s.to_string()).collect(),
+            size_bytes: size,
+            // Fixed Unix epoch so the age field is deterministic
+            // relative to wall-clock at test time.
+            last_modified_unix: Some(0),
+            has_uncommitted_changes: dirty,
+            has_unpushed_commits: unpushed,
+            is_safe_to_delete: false,
+        }
+    }
+
+    /// The bulk-shortcut row renders as a single distinctive line so
+    /// users spot it instantly at the top of the picker.
+    #[test]
+    fn bulk_safe_row_label() {
+        let label = format_inspect_row(&InspectRow::BulkSafe { count: 7 });
+        assert_eq!(label, "▶ Delete all 7 clearly-safe worktrees");
+    }
+
+    /// Healthy worktree → "[ok] name · branch · size · age" with no
+    /// status flags.
+    #[test]
+    fn healthy_row_label_uses_ok_tag() {
+        let dto = dto_with(&[], false, false, 2048);
+        let label = format_inspect_row(&InspectRow::Inspection(dto));
+        // age depends on `now`, so only assert the stable prefix.
+        assert!(label.starts_with("[ok] o-r-feat · feat · 2.0K · "));
+        assert!(!label.contains("DIRTY"));
+        assert!(!label.contains("UNPUSHED"));
+    }
+
+    /// Multi-reason orphan: tags joined with comma, no spaces, in
+    /// the order the inspector pushed them.
+    #[test]
+    fn multi_reason_label_joins_with_comma() {
+        let dto = dto_with(&["untracked", "branch-deleted-upstream"], false, false, 0);
+        let label = format_inspect_row(&InspectRow::Inspection(dto));
+        assert!(
+            label.starts_with("[untracked,branch-deleted-upstream] o-r-feat ·"),
+            "got: {label}"
+        );
+    }
+
+    /// Dirty + unpushed row carries both flags in a single trailing
+    /// bracket so the user sees the "needs FORCE" signal at a glance.
+    #[test]
+    fn dirty_and_unpushed_show_both_flags() {
+        let dto = dto_with(&["untracked"], true, true, 0);
+        let label = format_inspect_row(&InspectRow::Inspection(dto));
+        assert!(label.ends_with(" [DIRTY,UNPUSHED]"), "got: {label}");
+    }
+
+    /// Only-dirty and only-unpushed each render exactly one flag,
+    /// not both.
+    #[test]
+    fn single_flag_rows_render_one_flag() {
+        let dirty_only = dto_with(&["untracked"], true, false, 0);
+        let unpushed_only = dto_with(&["untracked"], false, true, 0);
+        assert!(format_inspect_row(&InspectRow::Inspection(dirty_only)).ends_with(" [DIRTY]"));
+        assert!(
+            format_inspect_row(&InspectRow::Inspection(unpushed_only)).ends_with(" [UNPUSHED]")
+        );
+    }
+
+    /// Size formatter scales across the unit boundaries the user
+    /// will actually see in the wild — a healthy worktree of ~200MB
+    /// (one cargo target), a fresh checkout (~kilobytes), and a
+    /// neglected one in gigabytes.
+    #[test]
+    fn size_formatter_picks_units() {
+        assert_eq!(format_size(0), "0B");
+        assert_eq!(format_size(512), "512B");
+        assert_eq!(format_size(2 * 1024), "2.0K");
+        assert_eq!(format_size(200 * 1024 * 1024), "200.0M");
+        assert_eq!(format_size(3 * 1024 * 1024 * 1024), "3.0G");
+    }
+
+    /// `None` mtime is the "vanished dir" case — render an em-dash
+    /// so the column lines up with real ages.
+    #[test]
+    fn age_formatter_handles_missing_mtime() {
+        assert_eq!(format_age_short(None), "—");
     }
 }

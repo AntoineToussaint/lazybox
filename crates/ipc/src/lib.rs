@@ -244,6 +244,27 @@ pub struct SpawnFallback {
     pub cwd: Option<String>,
 }
 
+/// One row of `Event::WorktreesInspected`. Mirrors
+/// `pilot_git_ops::WorktreeInspection` as a wire-friendly value type
+/// (no `SystemTime`, no library-specific enum). `reasons` carries the
+/// short tags from `OrphanReason::tag()` so clients can render
+/// without needing to depend on `pilot-git-ops`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorktreeInspectionDto {
+    pub path: std::path::PathBuf,
+    pub bare_path: Option<std::path::PathBuf>,
+    pub branch: Option<String>,
+    pub session_id: Option<String>,
+    pub reasons: Vec<String>,
+    pub size_bytes: u64,
+    /// Most-recent mtime in the worktree, as seconds since the Unix
+    /// epoch. `None` when the directory is gone (prunable entries).
+    pub last_modified_unix: Option<u64>,
+    pub has_uncommitted_changes: bool,
+    pub has_unpushed_commits: bool,
+    pub is_safe_to_delete: bool,
+}
+
 /// TUI → daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
@@ -514,6 +535,24 @@ pub enum Command {
     /// A final `CleanWorktreesCompleted` lets the TUI surface
     /// "cleaned N worktrees, freed N GB" in the footer.
     CleanWorktrees,
+    /// Walk `<state_root>/worktrees/` + every bare clone, classify
+    /// each entry (orphan reasons, size, last modified, uncommitted /
+    /// unpushed work), and reply with `Event::WorktreesInspected`.
+    /// Read-only — no deletes happen until the TUI follows up with
+    /// per-row `DeleteOrphanedWorktree` calls.
+    InspectWorktrees,
+    /// Delete a single worktree the inspector flagged.
+    ///
+    /// `force = false` makes the daemon re-check safety on its side
+    /// (uncommitted / unpushed / locked) and refuse if anything looks
+    /// risky. `force = true` overrides that gate — only sent after an
+    /// explicit user confirm for a row with local work. Reply arrives
+    /// as `Event::OrphanedWorktreeDeleted`.
+    DeleteOrphanedWorktree {
+        path: std::path::PathBuf,
+        #[serde(default)]
+        force: bool,
+    },
     /// Lazy-fetch the workspace's PR-detail activity (review-thread
     /// comments). The inbox-scan query intentionally skips
     /// `reviewThreads` for cost reasons; this command back-fills
@@ -797,6 +836,22 @@ pub enum Event {
     CleanWorktreesCompleted {
         removed: usize,
         skipped: usize,
+    },
+    /// `Command::InspectWorktrees` finished. `inspections` is the
+    /// full report — both flagged orphans and healthy entries — in
+    /// path-sorted order. Drives the in-app inspector modal.
+    WorktreesInspected {
+        inspections: Vec<WorktreeInspectionDto>,
+    },
+    /// `Command::DeleteOrphanedWorktree` finished. `ok = false` means
+    /// the daemon refused (safety gate) or the underlying `git
+    /// worktree remove` failed; `error` carries the human-readable
+    /// reason in that case.
+    OrphanedWorktreeDeleted {
+        path: std::path::PathBuf,
+        ok: bool,
+        #[serde(default)]
+        error: Option<String>,
     },
     /// Structured telemetry from the LLM proxy: one record per
     /// request/response the agent made through the daemon-injected

@@ -133,6 +133,19 @@ pub enum Id {
     /// Confirm dialog before firing `Command::CleanWorktrees`.
     /// Picked from the Settings palette; Yes → dispatch.
     CleanWorktreesConfirm,
+    /// Loading screen mounted while we wait for the daemon to reply
+    /// to `Command::InspectWorktrees`. Swapped out for `InspectList`
+    /// when `Event::WorktreesInspected` arrives.
+    InspectLoading,
+    /// Choice modal listing every worktree the inspector reported,
+    /// with a special first row for "Delete all N safe worktrees".
+    /// Picking a row routes through `pending_inspect_rows` →
+    /// `InspectConfirm` for a final per-row destructive prompt.
+    InspectList,
+    /// Confirm for the per-row delete picked from `InspectList`.
+    /// The target row lives in `pending_inspect_target`;
+    /// `Msg::Confirmed(true)` dispatches `DeleteOrphanedWorktree`.
+    InspectConfirm,
     /// Unified confirm modal for any destructive catalog action.
     /// `Model::dispatch_action` routes here when
     /// `ActionDef::is_destructive()` is true; the pending `Action`
@@ -416,6 +429,13 @@ pub struct Model<T: TerminalAdapter> {
     /// the `Msg::Confirmed` handler. None when no destructive
     /// confirm is currently up.
     pending_action_confirm: Option<pilot_tui_core::action::Action>,
+    /// Latest inspector report driving the `InspectList` modal. The
+    /// first slot in the Choice modal is the "delete all safe"
+    /// shortcut, hence the wrapper enum on indices.
+    pending_inspect_rows: Vec<pilot_ipc::WorktreeInspectionDto>,
+    /// Row picked from `InspectList`, waiting on the `InspectConfirm`
+    /// confirm modal. Consumed by `Msg::Confirmed(true)`.
+    pending_inspect_target: Option<pilot_ipc::WorktreeInspectionDto>,
     /// Project the next `Id::NewWorkspace` submit should land the
     /// new workspace under. Set by `mount_new_workspace_input(pk)`
     /// from the focused-project resolver, consumed by
@@ -582,6 +602,8 @@ impl<T: TerminalAdapter> Model<T> {
             pending_sidebar_context: None,
             action_key_overrides: std::collections::BTreeMap::new(),
             pending_action_confirm: None,
+            pending_inspect_rows: Vec::new(),
+            pending_inspect_target: None,
             pending_new_workspace_project: None,
             pending_focus_project_name: None,
             snippets: pilot_config::Snippets::default(),
@@ -1372,6 +1394,7 @@ impl<T: TerminalAdapter> Model<T> {
         }
         actions.push(SettingsAction::EditProviders);
         actions.push(SettingsAction::EditAgents);
+        actions.push(SettingsAction::InspectWorktrees);
         actions.push(SettingsAction::CleanWorktrees);
         actions.push(SettingsAction::FullSetup);
         actions
@@ -1400,6 +1423,10 @@ impl<T: TerminalAdapter> Model<T> {
             }
             SettingsAction::CleanWorktrees => {
                 self.mount_clean_worktrees_confirm();
+                return;
+            }
+            SettingsAction::InspectWorktrees => {
+                self.start_inspect_worktrees();
                 return;
             }
         };

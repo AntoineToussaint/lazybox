@@ -483,6 +483,8 @@ impl Server {
                         pilot_ipc::Command::RemoveProviderCredential { .. } => "RemoveProviderCredential",
                         pilot_ipc::Command::ListProviderCredentials { .. } => "ListProviderCredentials",
                         pilot_ipc::Command::CleanWorktrees => "CleanWorktrees",
+                        pilot_ipc::Command::InspectWorktrees => "InspectWorktrees",
+                        pilot_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
                         pilot_ipc::Command::Shutdown => "Shutdown",
                     };
                     tracing::info!("daemon ← {label}");
@@ -898,6 +900,18 @@ impl Server {
                             let cfg = self.config.clone();
                             tokio::spawn(async move {
                                 polling::handle_clean_worktrees(&cfg).await;
+                            });
+                        }
+                        pilot_ipc::Command::InspectWorktrees => {
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_inspect_worktrees(&cfg).await;
+                            });
+                        }
+                        pilot_ipc::Command::DeleteOrphanedWorktree { path, force } => {
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_delete_orphaned_worktree(&cfg, path, force).await;
                             });
                         }
                     }

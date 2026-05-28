@@ -129,6 +129,52 @@ fn claude_active_when_just_streaming() {
     );
 }
 
+/// `detect_ready_for_prompt` is true when Claude's input box is
+/// drawn AND no permission / chooser gate is up. Distinct from
+/// `detect_state` (which would flag both as `Asking`). This is
+/// the gate the spawn-time injector uses so a fresh `w` press
+/// lands the prompt the moment Claude is ready, no false-positive
+/// 60s wait.
+#[test]
+fn claude_ready_for_prompt_when_input_box_visible_and_no_chooser() {
+    let agent = Claude;
+    let idle = "│ > \n│ \n\n\
+                Esc to cancel · Tab to amend · ctrl+e to explain\n";
+    assert!(agent.detect_ready_for_prompt(idle.as_bytes()));
+}
+
+#[test]
+fn claude_not_ready_during_permission_chooser() {
+    // Same footer marker AS WELL AS the chooser arrow + numbered
+    // options. The chooser must veto the "ready" signal.
+    let agent = Claude;
+    let permission = "Trust this folder? \n\
+                      ❯ 1. Yes, proceed\n\
+                        2. No, exit\n\
+                      Esc to cancel · Tab to amend\n";
+    assert!(!agent.detect_ready_for_prompt(permission.as_bytes()));
+}
+
+#[test]
+fn claude_not_ready_when_input_box_absent() {
+    // Boot banner with no input markers — claude isn't ready yet.
+    let agent = Claude;
+    let booting = b"Welcome to Claude Code\nLoading...\n";
+    assert!(!agent.detect_ready_for_prompt(booting));
+}
+
+/// Trust-folder prompt without the chooser arrow (older claude
+/// builds, alt phrasings) still blocks the "ready" signal —
+/// otherwise the original `y eats my prompt` race comes back.
+#[test]
+fn claude_not_ready_during_trust_folder_prompt() {
+    let agent = Claude;
+    let trust = "Do you trust the files in this folder?\n\
+                 \n\
+                 Esc to cancel · Tab to amend\n";
+    assert!(!agent.detect_ready_for_prompt(trust.as_bytes()));
+}
+
 #[test]
 fn claude_detects_choice_arrow() {
     // Claude's permission / tool-approval / multi-choice UI renders

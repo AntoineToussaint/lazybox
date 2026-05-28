@@ -278,6 +278,16 @@ pub async fn handle_spawn(
     let first_output_signal = std::sync::Arc::new(tokio::sync::Notify::new());
     let first_output_signal_for_pump = first_output_signal.clone();
     let first_output_signal_for_inject = first_output_signal.clone();
+    // Fired the first time the pump's detector sees the agent's
+    // input box drawn AND no permission gate up — i.e. the agent
+    // is *actually* ready to receive a pasted prompt. The inject
+    // task waits on this so we no longer settle blindly past a
+    // permission gate (the original "y eats my prompt" race) NOR
+    // wait the full ASKING_DEADLINE on Claude's normal idle screen
+    // (the "60s before inject" symptom from dogfood).
+    let ready_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let ready_signal_for_pump = ready_signal.clone();
+    let ready_signal_for_inject = ready_signal.clone();
     let session_key_for_pump = session_key.clone();
     // Broadcast BEFORE spawning the pump task. Otherwise a
     // fast-exiting terminal (e.g. a command that immediately
@@ -452,6 +462,30 @@ pub async fn handle_spawn(
         // `.notified()` registration — the permit is consumed when
         // the inject task starts waiting, even if pump runs first.
         let mut signaled_first_output = false;
+        // `detect_ready_for_prompt` is the tight "agent's input box
+        // is drawn AND no permission gate is up" signal. Fire it
+        // ONCE — extra notifications are harmless but redundant
+        // (`Notify` permits stack). The inject task only needs to
+        // know "we reached ready at least once."
+        let mut signaled_ready = false;
+        let check_ready =
+            |state_buf: &Vec<u8>, signaled: &mut bool, signal: &tokio::sync::Notify| {
+                if *signaled {
+                    return;
+                }
+                let Some(agent) = agent_for_pump.as_ref() else {
+                    return;
+                };
+                // Same DETECT_WINDOW the pump's state detector uses —
+                // covers the visible-screen tail without scanning
+                // long-stale boot output.
+                const DETECT_WINDOW: usize = 16 * 1024;
+                let tail = &state_buf[state_buf.len().saturating_sub(DETECT_WINDOW)..];
+                if agent.detect_ready_for_prompt(tail) {
+                    signal.notify_waiters();
+                    *signaled = true;
+                }
+            };
         if !sub.replay.is_empty() {
             maybe_emit_state_change(
                 agent_for_pump.as_ref(),
@@ -472,6 +506,7 @@ pub async fn handle_spawn(
             });
             first_output_signal_for_pump.notify_waiters();
             signaled_first_output = true;
+            check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
         }
         while let Some(chunk) = sub.live.recv().await {
             maybe_emit_state_change(
@@ -490,6 +525,7 @@ pub async fn handle_spawn(
                 first_output_signal_for_pump.notify_one();
                 signaled_first_output = true;
             }
+            check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
             let _ = bus.send(Event::TerminalOutput {
                 terminal_id: id_for_pump,
                 bytes: chunk.bytes,
@@ -532,90 +568,63 @@ pub async fn handle_spawn(
         let backend_key = backend_key.clone();
         let id = terminal_id;
         let first_output = first_output_signal_for_inject;
-        let agent_states = config.agent_states.clone();
+        let ready_signal = ready_signal_for_inject;
         tokio::spawn(async move {
-            // Readiness check: wait until the pump task signals it
-            // saw the first byte of output, then a brief settle so
-            // the banner finishes drawing before we paste. Previously
-            // this was a 50ms-poll loop on `agent_states.lock()` that
-            // competed with the pump task's state-detection writes
-            // (~100 lock acquires per spawn under load). Notify is
-            // zero-overhead: the pump fires it once, the wait wakes
-            // immediately, no lock involved.
+            // Wait for the agent's input box to be drawn AND no
+            // permission gate to be up — i.e. "claude is genuinely
+            // ready to receive a pasted prompt." The pump task fires
+            // `ready_signal` exactly once when `Agent::
+            // detect_ready_for_prompt` first returns true. This is
+            // strictly tighter than the previous "wait for not-
+            // Asking" approach: the loose Asking detector matched
+            // claude's normal idle screen and made the wait spin
+            // the full deadline before every inject.
             //
-            // 5s hard cap for cold starts that block on auth/npm;
-            // 600ms settle is empirically when Claude's banner
-            // finishes drawing.
-            const HARD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+            // Fallback ladder (each step has its own deadline):
+            //   1. ready_signal — preferred path, fires within
+            //      seconds of claude finishing its banner.
+            //   2. first_output + SETTLE — if no agent override
+            //      for detect_ready_for_prompt, or claude renders
+            //      the input box without our detector matching,
+            //      we still write after 600ms past first byte.
+            //   3. HARD_DEADLINE — last resort, inject blindly so
+            //      a cold-start hang doesn't silently lose the
+            //      user's prompt.
+            const HARD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
             const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
-            // Maximum time we'll wait for the agent to leave an
-            // initial `Asking` state (Claude's "trust this folder?
-            // y/n" permission prompt) before injecting. If the user
-            // genuinely stares at the prompt for over a minute,
-            // we give up and inject anyway — at that point pushing
-            // the queued instruction past the prompt is the only
-            // way it doesn't get silently dropped.
-            // 3s, not 60s: the Asking detector matches claude's
-            // normal idle main prompt (last-line-ends-with-? plus
-            // the `?` pill heuristic), so a generous deadline made
-            // every fresh spawn block for the FULL 60s before
-            // injecting — pilot felt broken. 3s is enough for a
-            // user to clear a real permission prompt with `y` (the
-            // case we're actually protecting against), short enough
-            // that idle-prompt false positives don't make `w` feel
-            // dead.
-            const ASKING_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
-            const ASKING_POLL: std::time::Duration = std::time::Duration::from_millis(200);
             tracing::info!(
                 terminal_id = ?id,
                 paste_len = paste.len(),
-                "initial_prompt: waiting for first output before injecting",
+                "initial_prompt: waiting for agent ready signal",
             );
-            let notified = first_output.notified();
-            let got_output = tokio::time::timeout(HARD_DEADLINE, notified).await.is_ok();
-            if !got_output {
-                tracing::warn!(
-                    terminal_id = ?id,
-                    "initial_prompt: agent produced no output in {:?} — \
-                     writing anyway (cold start / agent hung?)",
-                    HARD_DEADLINE,
-                );
-            } else {
-                tracing::info!(
-                    terminal_id = ?id,
-                    "initial_prompt: first output seen — settling then writing",
-                );
-            }
-            tokio::time::sleep(SETTLE).await;
-            // Don't write into a startup permission prompt
-            // ("Trust this folder? y/n"). The agent state pump
-            // flips to Asking when one's on screen; if we paste
-            // the instruction now, the first char becomes the y/n
-            // answer and the rest gets typed afterwards as a
-            // soft-line response — both halves silently corrupt.
-            // Poll the cached state and wait until it leaves
-            // Asking (user pressed y, OR pump cleared it). The
-            // outer deadline keeps the inject task from leaking
-            // if the user walks away.
-            let asking_started = std::time::Instant::now();
-            loop {
-                let state = agent_states.lock().await.get(&id).copied();
-                if state != Some(pilot_ipc::AgentState::Asking) {
-                    break;
-                }
-                if asking_started.elapsed() >= ASKING_DEADLINE {
-                    tracing::warn!(
+
+            // Race the tight ready_signal against the broad
+            // first_output + settle fallback. Whichever fires
+            // first wins; if neither, HARD_DEADLINE caps the wait.
+            let ready_notify = ready_signal.notified();
+            let first_output_notify = first_output.notified();
+            tokio::select! {
+                _ = tokio::time::timeout(HARD_DEADLINE, ready_notify) => {
+                    tracing::info!(
                         terminal_id = ?id,
-                        "initial_prompt: agent still Asking after {:?} — injecting anyway",
-                        ASKING_DEADLINE,
+                        "initial_prompt: ready signal fired — writing immediately",
                     );
-                    break;
                 }
-                tracing::debug!(
-                    terminal_id = ?id,
-                    "initial_prompt: agent is Asking — waiting before paste",
-                );
-                tokio::time::sleep(ASKING_POLL).await;
+                _ = async {
+                    // Fallback: wait for first output, then SETTLE.
+                    // This catches agents without a
+                    // detect_ready_for_prompt override AND covers
+                    // detector misses (e.g. Claude renders the
+                    // input box in a way our pattern doesn't
+                    // match yet).
+                    let _ = tokio::time::timeout(HARD_DEADLINE, first_output_notify).await;
+                    tokio::time::sleep(SETTLE).await;
+                } => {
+                    tracing::info!(
+                        terminal_id = ?id,
+                        "initial_prompt: first-output + settle path — writing now",
+                    );
+                }
             }
             tracing::info!(
                 terminal_id = ?id,

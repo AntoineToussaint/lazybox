@@ -125,6 +125,9 @@ struct PorcelainEntry {
     branch: Option<String>,
     locked: bool,
     prunable: bool,
+    /// `bare` keyword — the entry IS the bare clone itself, not a
+    /// worktree we should report. Skipped after parsing.
+    is_bare: bool,
 }
 
 impl WorktreeManager {
@@ -293,22 +296,50 @@ async fn inspect_one(
         reasons.push(OrphanReason::SessionStopped);
     }
 
-    // Branch existence — only meaningful when we know which bare
-    // repo to ask. Empty branch ⇒ detached HEAD; we don't flag.
-    if let (Some(bare), Some(branch_name)) = (bare_path.as_ref(), branch.as_ref()) {
-        let local = ref_exists(bare, &format!("refs/heads/{branch_name}")).await;
-        let remote = ref_exists(bare, &format!("refs/remotes/origin/{branch_name}")).await;
-        if !remote && local {
+    // Five independent probes per worktree: two ref lookups against
+    // the bare clone (cheap stat calls), `git status --porcelain` and
+    // `git rev-list @{u}..HEAD` against the worktree (each ~5-15ms),
+    // and a recursive disk walk. They share no inputs, so fan them
+    // out together — wall-clock drops from sum to max. Each helper
+    // already converts failures to a defaulted value, so `join!`
+    // never fails the surrounding future.
+    let branch_refs: Option<(String, String)> = branch.as_ref().map(|b| {
+        (
+            format!("refs/heads/{b}"),
+            format!("refs/remotes/origin/{b}"),
+        )
+    });
+    let (local_exists, remote_exists, size_pair, has_uncommitted_changes, has_unpushed_commits) =
+        tokio::join!(
+            async {
+                match (bare_path.as_ref(), branch_refs.as_ref()) {
+                    (Some(bare), Some((local_ref, _))) => ref_exists(bare, local_ref).await,
+                    _ => false,
+                }
+            },
+            async {
+                match (bare_path.as_ref(), branch_refs.as_ref()) {
+                    (Some(bare), Some((_, remote_ref))) => ref_exists(bare, remote_ref).await,
+                    _ => false,
+                }
+            },
+            size_and_mtime(path),
+            uncommitted(path),
+            unpushed(path),
+        );
+    let (size_bytes, last_modified) = size_pair;
+
+    // Branch-existence reasons only fire when we knew the branch +
+    // bare in the first place; otherwise the lookups defaulted to
+    // `false` and would spuriously flag detached HEADs.
+    if bare_path.is_some() && branch.is_some() {
+        if !remote_exists && local_exists {
             reasons.push(OrphanReason::BranchDeletedUpstream);
         }
-        if !local {
+        if !local_exists {
             reasons.push(OrphanReason::BranchMissingLocally);
         }
     }
-
-    let (size_bytes, last_modified) = size_and_mtime(path).await;
-    let has_uncommitted_changes = uncommitted(path).await;
-    let has_unpushed_commits = unpushed(path).await;
 
     let is_safe_to_delete =
         !locked && !has_uncommitted_changes && !has_unpushed_commits && reasons.iter().any(|r| {
@@ -405,15 +436,21 @@ async fn list_porcelain(bare: &Path) -> Result<Vec<PorcelainEntry>, GitError> {
             entry.locked = true;
         } else if line == "prunable" || line.starts_with("prunable ") {
             entry.prunable = true;
+        } else if line == "bare" {
+            entry.is_bare = true;
         }
     }
     if let Some(e) = cur {
         out.push(e);
     }
-    // Drop the bare clone's own row — `git worktree list` always
-    // includes the main checkout (the bare repo itself in pilot's
-    // setup) which we don't want to inspect.
-    out.retain(|e| e.path != bare && !e.path.as_os_str().is_empty());
+    // Drop the bare clone's own row. Two checks because the path
+    // form alone is unreliable: macOS canonicalizes `/var/folders/X`
+    // to `/private/var/folders/X` inside `git worktree list`, but the
+    // bare path we hold was never canonicalized. The `bare` keyword
+    // in the porcelain output is what we actually want — `e.path !=
+    // bare` is kept as a belt-and-suspenders for the (very rare)
+    // case where git omits the keyword.
+    out.retain(|e| !e.is_bare && e.path != bare && !e.path.as_os_str().is_empty());
     Ok(out)
 }
 

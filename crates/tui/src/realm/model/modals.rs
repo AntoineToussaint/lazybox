@@ -767,3 +767,98 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dto_with(reasons: &[&str], dirty: bool, unpushed: bool, size: u64) -> pilot_ipc::WorktreeInspectionDto {
+        pilot_ipc::WorktreeInspectionDto {
+            path: std::path::PathBuf::from("/tmp/worktrees/o-r-feat"),
+            bare_path: None,
+            branch: Some("feat".into()),
+            session_id: None,
+            reasons: reasons.iter().map(|s| s.to_string()).collect(),
+            size_bytes: size,
+            // Fixed Unix epoch so the age field is deterministic
+            // relative to wall-clock at test time.
+            last_modified_unix: Some(0),
+            has_uncommitted_changes: dirty,
+            has_unpushed_commits: unpushed,
+            is_safe_to_delete: false,
+        }
+    }
+
+    /// The bulk-shortcut row renders as a single distinctive line so
+    /// users spot it instantly at the top of the picker.
+    #[test]
+    fn bulk_safe_row_label() {
+        let label = format_inspect_row(&InspectRow::BulkSafe { count: 7 });
+        assert_eq!(label, "▶ Delete all 7 clearly-safe worktrees");
+    }
+
+    /// Healthy worktree → "[ok] name · branch · size · age" with no
+    /// status flags.
+    #[test]
+    fn healthy_row_label_uses_ok_tag() {
+        let dto = dto_with(&[], false, false, 2048);
+        let label = format_inspect_row(&InspectRow::Inspection(dto));
+        // age depends on `now`, so only assert the stable prefix.
+        assert!(label.starts_with("[ok] o-r-feat · feat · 2.0K · "));
+        assert!(!label.contains("DIRTY"));
+        assert!(!label.contains("UNPUSHED"));
+    }
+
+    /// Multi-reason orphan: tags joined with comma, no spaces, in
+    /// the order the inspector pushed them.
+    #[test]
+    fn multi_reason_label_joins_with_comma() {
+        let dto = dto_with(&["untracked", "branch-deleted-upstream"], false, false, 0);
+        let label = format_inspect_row(&InspectRow::Inspection(dto));
+        assert!(
+            label.starts_with("[untracked,branch-deleted-upstream] o-r-feat ·"),
+            "got: {label}"
+        );
+    }
+
+    /// Dirty + unpushed row carries both flags in a single trailing
+    /// bracket so the user sees the "needs FORCE" signal at a glance.
+    #[test]
+    fn dirty_and_unpushed_show_both_flags() {
+        let dto = dto_with(&["untracked"], true, true, 0);
+        let label = format_inspect_row(&InspectRow::Inspection(dto));
+        assert!(label.ends_with(" [DIRTY,UNPUSHED]"), "got: {label}");
+    }
+
+    /// Only-dirty and only-unpushed each render exactly one flag,
+    /// not both.
+    #[test]
+    fn single_flag_rows_render_one_flag() {
+        let dirty_only = dto_with(&["untracked"], true, false, 0);
+        let unpushed_only = dto_with(&["untracked"], false, true, 0);
+        assert!(format_inspect_row(&InspectRow::Inspection(dirty_only)).ends_with(" [DIRTY]"));
+        assert!(
+            format_inspect_row(&InspectRow::Inspection(unpushed_only)).ends_with(" [UNPUSHED]")
+        );
+    }
+
+    /// Size formatter scales across the unit boundaries the user
+    /// will actually see in the wild — a healthy worktree of ~200MB
+    /// (one cargo target), a fresh checkout (~kilobytes), and a
+    /// neglected one in gigabytes.
+    #[test]
+    fn size_formatter_picks_units() {
+        assert_eq!(format_size(0), "0B");
+        assert_eq!(format_size(512), "512B");
+        assert_eq!(format_size(2 * 1024), "2.0K");
+        assert_eq!(format_size(200 * 1024 * 1024), "200.0M");
+        assert_eq!(format_size(3 * 1024 * 1024 * 1024), "3.0G");
+    }
+
+    /// `None` mtime is the "vanished dir" case — render an em-dash
+    /// so the column lines up with real ages.
+    #[test]
+    fn age_formatter_handles_missing_mtime() {
+        assert_eq!(format_age_short(None), "—");
+    }
+}

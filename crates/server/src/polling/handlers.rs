@@ -646,7 +646,16 @@ fn to_dto(row: pilot_git_ops::WorktreeInspection) -> pilot_ipc::WorktreeInspecti
 /// Read-only — pair with [`handle_delete_orphaned_worktree`] for
 /// destructive follow-up.
 pub async fn handle_inspect_worktrees(config: &ServerConfig) {
-    let mgr = pilot_git_ops::WorktreeManager::default_base();
+    inspect_worktrees_with(config, &pilot_git_ops::WorktreeManager::default_base()).await
+}
+
+/// Test seam for [`handle_inspect_worktrees`]. Production callers
+/// use the default base; tests pass an explicit manager rooted at a
+/// tempdir so they don't have to mutate `PILOT_HOME`.
+pub(crate) async fn inspect_worktrees_with(
+    config: &ServerConfig,
+    mgr: &pilot_git_ops::WorktreeManager,
+) {
     let tracked = collect_tracked_sessions(config);
     let inspections = match mgr.inspect_worktrees(&tracked).await {
         Ok(rows) => rows.into_iter().map(to_dto).collect::<Vec<_>>(),
@@ -672,7 +681,23 @@ pub async fn handle_delete_orphaned_worktree(
     path: std::path::PathBuf,
     force: bool,
 ) {
-    let mgr = pilot_git_ops::WorktreeManager::default_base();
+    delete_orphaned_worktree_with(
+        config,
+        &pilot_git_ops::WorktreeManager::default_base(),
+        path,
+        force,
+    )
+    .await
+}
+
+/// Test seam for [`handle_delete_orphaned_worktree`]. Same contract,
+/// explicit manager.
+pub(crate) async fn delete_orphaned_worktree_with(
+    config: &ServerConfig,
+    mgr: &pilot_git_ops::WorktreeManager,
+    path: std::path::PathBuf,
+    force: bool,
+) {
     let tracked = collect_tracked_sessions(config);
 
     // Re-inspect, then look up this path in the report. Cheap: one
@@ -856,4 +881,391 @@ pub async fn prefetch_top_pr_details(
         "prefetch_top_pr_details: {total} PRs prefetched in {}ms, {merged} activities merged",
         started.elapsed().as_millis()
     );
+}
+
+#[cfg(test)]
+mod inspect_tests {
+    //! Integration tests for `handle_inspect_worktrees` +
+    //! `handle_delete_orphaned_worktree`. The handlers depend on a
+    //! `WorktreeManager` plus the workspace store; both are wired up
+    //! against a tempdir + an in-memory store here so the tests are
+    //! hermetic (no `PILOT_HOME` env mutation, no shared on-disk
+    //! state with other tests).
+
+    use super::*;
+    use crate::ServerConfig;
+    use pilot_core::{SessionId, SessionKind, SessionRunState, WorkspaceSession};
+    use pilot_ipc::Event;
+    use pilot_store::{MemoryStore, Store, WorkspaceRecord};
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    struct Fixture {
+        base: TempDir,
+        _upstream: TempDir,
+        upstream_path: PathBuf,
+        bare: PathBuf,
+    }
+
+    async fn run(cwd: &Path, args: &[&str]) {
+        let out = tokio::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+
+    async fn setup_fixture() -> Fixture {
+        let upstream = TempDir::new().unwrap();
+        run(upstream.path(), &["init", "-q", "-b", "main"]).await;
+        run(upstream.path(), &["config", "user.email", "t@e.st"]).await;
+        run(upstream.path(), &["config", "user.name", "tester"]).await;
+        std::fs::write(upstream.path().join("README.md"), "hi\n").unwrap();
+        run(upstream.path(), &["add", "."]).await;
+        run(upstream.path(), &["commit", "-q", "-m", "init"]).await;
+
+        let base = TempDir::new().unwrap();
+        let bare = base.path().join("repos").join("o").join("r.git");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        run(
+            base.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        )
+        .await;
+        // Pilot-style remote-tracking refspec so `@{u}` resolves
+        // from worktrees (matches `WorktreeManager::checkout_at`).
+        run(
+            &bare,
+            &[
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
+        )
+        .await;
+
+        Fixture {
+            base,
+            upstream_path: upstream.path().to_path_buf(),
+            _upstream: upstream,
+            bare,
+        }
+    }
+
+    /// Mirror of `WorktreeManager::checkout_at`: ensure a remote-
+    /// tracking ref exists, then `worktree add -B` off it. The fixture
+    /// produces a worktree shape identical to what the daemon creates
+    /// at runtime.
+    async fn add_wt(fx: &Fixture, name: &str, branch: &str) -> PathBuf {
+        let has_branch = std::process::Command::new("git")
+            .current_dir(&fx.upstream_path)
+            .args(["rev-parse", "--verify", "--quiet", branch])
+            .status()
+            .unwrap()
+            .success();
+        if !has_branch {
+            run(&fx.upstream_path, &["branch", branch]).await;
+        }
+        run(
+            &fx.bare,
+            &[
+                "fetch",
+                "-q",
+                "origin",
+                &format!("+{branch}:refs/remotes/origin/{branch}"),
+            ],
+        )
+        .await;
+        let wt = fx.base.path().join("worktrees").join(name);
+        std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+        run(
+            &fx.bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                branch,
+                &wt.to_string_lossy(),
+                &format!("refs/remotes/origin/{branch}"),
+            ],
+        )
+        .await;
+        run(&wt, &["config", "user.email", "t@e.st"]).await;
+        run(&wt, &["config", "user.name", "tester"]).await;
+        wt
+    }
+
+    fn fresh_config(store: Arc<MemoryStore>) -> ServerConfig {
+        ServerConfig::with_store(store)
+    }
+
+    /// Stash a workspace record so `collect_tracked_sessions` picks
+    /// up its sessions when the inspector asks the store.
+    fn seed_workspace(store: &MemoryStore, worktree_path: PathBuf, stopped: bool) -> SessionId {
+        use pilot_core::{SessionKey, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey};
+        let session_key: SessionKey = "github:o/r#1".into();
+        let workspace_key: WorkspaceKey = WorkspaceKey::new(session_key.as_str().to_string());
+        let task = Task {
+            id: TaskId { source: "github".into(), key: "o/r#1".into() },
+            title: "test".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: pilot_core::CiStatus::None,
+            review: pilot_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/1".into(),
+            repo: Some("o/r".into()),
+            branch: Some("feat".into()),
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: pilot_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+        let mut workspace = Workspace::from_task(task, chrono::Utc::now());
+        let mut session = WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Shell,
+            worktree_path,
+            chrono::Utc::now(),
+        );
+        if stopped {
+            session.state = SessionRunState::Stopped;
+        }
+        let session_id = session.id;
+        workspace.sessions.push(session);
+        let json = serde_json::to_string(&workspace).unwrap();
+        store
+            .save_workspace(&WorkspaceRecord {
+                key: workspace_key.as_str().into(),
+                created_at: chrono::Utc::now(),
+                workspace_json: Some(json),
+            })
+            .unwrap();
+        session_id
+    }
+
+    async fn drain_until<F>(rx: &mut tokio::sync::broadcast::Receiver<Event>, pred: F) -> Event
+    where
+        F: Fn(&Event) -> bool,
+    {
+        loop {
+            let evt = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+                .await
+                .expect("event timeout")
+                .expect("event");
+            if pred(&evt) {
+                return evt;
+            }
+        }
+    }
+
+    /// Healthy inspector path: one bare clone + one tracked active
+    /// session → exactly one inspection row, untagged, with the
+    /// session id attached.
+    #[tokio::test]
+    async fn inspect_emits_tracked_active_worktree() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "ok", "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        seed_workspace(&store, wt.clone(), /*stopped=*/ false);
+
+        let config = fresh_config(store);
+        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        inspect_worktrees_with(&config, &mgr).await;
+
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::WorktreesInspected { .. })).await;
+        let Event::WorktreesInspected { inspections } = evt else {
+            unreachable!("filtered above")
+        };
+        assert_eq!(inspections.len(), 1);
+        assert_eq!(inspections[0].path, wt);
+        assert!(
+            inspections[0].reasons.is_empty(),
+            "active tracked worktree should not be flagged: {:?}",
+            inspections[0].reasons
+        );
+        assert!(inspections[0].session_id.is_some());
+    }
+
+    /// Stopped session shows up as `session-stopped` so the modal
+    /// can offer to reap the worktree.
+    #[tokio::test]
+    async fn inspect_flags_stopped_session() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "stopped", "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        seed_workspace(&store, wt.clone(), /*stopped=*/ true);
+
+        let config = fresh_config(store);
+        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        inspect_worktrees_with(&config, &mgr).await;
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::WorktreesInspected { .. })).await;
+        let Event::WorktreesInspected { inspections } = evt else {
+            unreachable!()
+        };
+        assert_eq!(inspections.len(), 1);
+        assert!(
+            inspections[0]
+                .reasons
+                .iter()
+                .any(|r| r == "session-stopped"),
+            "expected session-stopped tag, got {:?}",
+            inspections[0].reasons,
+        );
+    }
+
+    /// Untracked worktree (no matching session record) gets the
+    /// `untracked` tag and is safe-to-delete.
+    #[tokio::test]
+    async fn inspect_flags_untracked_worktree() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "ghost", "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let config = fresh_config(store);
+        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        inspect_worktrees_with(&config, &mgr).await;
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::WorktreesInspected { .. })).await;
+        let Event::WorktreesInspected { inspections } = evt else {
+            unreachable!()
+        };
+        let row = inspections
+            .iter()
+            .find(|r| r.path == wt)
+            .expect("ghost row");
+        assert!(row.reasons.iter().any(|r| r == "untracked"));
+        assert!(row.is_safe_to_delete);
+    }
+
+    /// Delete happy path: untracked worktree → safety gate passes →
+    /// directory removed → ok=true event on the bus.
+    #[tokio::test]
+    async fn delete_removes_safe_worktree_and_emits_ok() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "safe", "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let config = fresh_config(store);
+        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        delete_orphaned_worktree_with(&config, &mgr, wt.clone(), /*force=*/ false).await;
+
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::OrphanedWorktreeDeleted { .. })).await;
+        let Event::OrphanedWorktreeDeleted { path, ok, error } = evt else {
+            unreachable!()
+        };
+        assert_eq!(path, wt);
+        assert!(ok, "delete should succeed: {error:?}");
+        assert!(!wt.exists(), "worktree dir should be gone");
+    }
+
+    /// Delete refusal: uncommitted changes block the non-force path.
+    /// Daemon emits ok=false with the reason; the dir stays put so
+    /// the user can recover.
+    #[tokio::test]
+    async fn delete_refuses_dirty_worktree_without_force() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "dirty", "feat").await;
+        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let config = fresh_config(store);
+        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        delete_orphaned_worktree_with(&config, &mgr, wt.clone(), /*force=*/ false).await;
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::OrphanedWorktreeDeleted { .. })).await;
+        let Event::OrphanedWorktreeDeleted { ok, error, .. } = evt else {
+            unreachable!()
+        };
+        assert!(!ok);
+        let msg = error.unwrap_or_default();
+        assert!(msg.contains("uncommitted"), "got: {msg}");
+        assert!(wt.exists(), "dirty worktree must be preserved");
+    }
+
+    /// Force=true overrides the safety gate even when the worktree
+    /// has uncommitted changes. The directory is removed and the
+    /// event reports ok=true.
+    #[tokio::test]
+    async fn delete_force_overrides_safety() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "dirty-force", "feat").await;
+        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let config = fresh_config(store);
+        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        delete_orphaned_worktree_with(&config, &mgr, wt.clone(), /*force=*/ true).await;
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::OrphanedWorktreeDeleted { .. })).await;
+        let Event::OrphanedWorktreeDeleted { ok, .. } = evt else {
+            unreachable!()
+        };
+        assert!(ok);
+        assert!(!wt.exists());
+    }
+
+    /// Path not under management → ok=false with a clear message.
+    /// Prevents a stale TUI from accidentally removing something
+    /// outside `<state_root>/worktrees/`.
+    #[tokio::test]
+    async fn delete_rejects_unknown_path() {
+        let fx = setup_fixture().await;
+        let store = Arc::new(MemoryStore::new());
+        let config = fresh_config(store);
+        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        delete_orphaned_worktree_with(
+            &config,
+            &mgr,
+            PathBuf::from("/tmp/this-was-never-a-worktree"),
+            false,
+        )
+        .await;
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::OrphanedWorktreeDeleted { .. })).await;
+        let Event::OrphanedWorktreeDeleted { ok, error, .. } = evt else {
+            unreachable!()
+        };
+        assert!(!ok);
+        assert!(
+            error
+                .unwrap_or_default()
+                .contains("no longer under management")
+        );
+    }
 }

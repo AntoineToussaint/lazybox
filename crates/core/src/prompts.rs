@@ -34,9 +34,18 @@ pub fn build_implement_issue_prompt(issue: &Task) -> String {
          {body_block}\
          \nWalk through it: create a fresh branch from the repo's default base, \
          implement the change end-to-end (code + tests), run the project's local \
-         checks until they pass, then `gh pr create` with a body that includes \
-         `Closes #{issue_number}` so this issue and the resulting PR collapse to \
-         a single row in pilot. Reply with the PR URL when it's open.",
+         checks until they pass, then open the PR with `gh pr create`. \
+         Reference the issue both ways so it links cleanly and collapses to a \
+         single row in pilot:\
+         \n- Title: derive a concise PR title (don't copy the issue title \
+         verbatim) and append the issue number as a trailing suffix, e.g. \
+         `Add foo to bar (#{issue_number})`.\
+         \n- Body: put a closing keyword on its own line so GitHub auto-closes \
+         the issue on merge — start the body with `Closes #{issue_number}.` \
+         followed by a `## Summary` section. If the PR addresses more than one \
+         issue, give each its own `Closes #N.` line; for an issue in a different \
+         repo use the full `Closes owner/repo#N.` form.\
+         \nReply with the PR URL when it's open.",
         title = issue.title,
     )
 }
@@ -90,6 +99,27 @@ mod tests {
         assert!(prompt.contains("acme/widget"));
         assert!(prompt.contains("Add dark mode"));
         assert!(prompt.contains("Closes #42"));
+    }
+
+    #[test]
+    fn instructs_title_suffix_and_closing_body() {
+        let prompt = build_implement_issue_prompt(&issue("acme/widget", 42, "Add dark mode", None));
+        // Title guidance: trailing `(#N)` suffix, derived (not verbatim) title.
+        assert!(prompt.contains("(#42)"));
+        assert!(prompt.contains("trailing suffix"));
+        assert!(prompt.contains("don't copy the issue title"));
+        // Body guidance: closing keyword on its own line for auto-close.
+        assert!(prompt.contains("Closes #42."));
+        assert!(prompt.contains("auto-close"));
+    }
+
+    #[test]
+    fn covers_multi_issue_and_cross_repo_forms() {
+        let prompt = build_implement_issue_prompt(&issue("acme/widget", 42, "Add dark mode", None));
+        // Multiple linked issues each get their own line.
+        assert!(prompt.contains("its own `Closes #N.` line"));
+        // Cross-repo issues use the full owner/repo#N form.
+        assert!(prompt.contains("owner/repo#N"));
     }
 
     #[test]

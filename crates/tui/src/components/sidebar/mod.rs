@@ -296,6 +296,11 @@ pub struct Sidebar {
     /// mailbox owns the history. Wired from
     /// `~/.pilot/config.yaml::display.show_inactive_in_inbox`.
     show_inactive_in_inbox: bool,
+    /// Render row type indicators as plain ASCII (`p`/`i`/`l`) rather
+    /// than the default unicode glyphs (`⇄`/`○`/`◆`). Wired from
+    /// `~/.pilot/config.yaml::display.ascii_glyphs` — the escape
+    /// hatch for fonts that don't render the glyphs as a single cell.
+    ascii_glyphs: bool,
     /// Notifications queued in response to "any agent → Asking"
     /// transitions. The library NEVER fires an OS-level
     /// `osascript` / `notify-send` itself — that would break tests
@@ -366,6 +371,7 @@ impl Sidebar {
             projects: BTreeMap::new(),
             default_agent: "claude".to_string(),
             show_inactive_in_inbox: false,
+            ascii_glyphs: false,
             pending_notifications: Vec::new(),
             pending_asking_notices: Vec::new(),
             agents_asking: std::collections::HashSet::new(),
@@ -499,6 +505,7 @@ impl Sidebar {
         self.short_snooze = ui.short_snooze;
         self.long_snooze = ui.long_snooze;
         self.set_show_inactive_in_inbox(display.show_inactive_in_inbox);
+        self.ascii_glyphs = display.ascii_glyphs;
     }
 
     /// Override the default c→claude / C→codex mapping. Keys are
@@ -1195,16 +1202,23 @@ impl Sidebar {
         "Inbox"
     }
 
-    /// Bindings advertised in the hint bar.
     /// State-aware short list for the footer hint bar.
     ///
-    /// Catalog-driven: the actions worth surfacing right now are
-    /// pushed as `pilot_tui_core::action::Action`s, then converted
-    /// to `Binding`s through `ActionDef::for_action` + the centralized
-    /// `contextual_label` helper. Adding a new sidebar action means
-    /// landing it in the catalog and pushing it here — the footer,
-    /// `?` help, and right-click menu all pick it up automatically.
-    pub fn contextual_bindings(&self) -> Vec<crate::Binding> {
+    /// Catalog-driven: this method only decides *which* actions to
+    /// surface right now. The catalog's `ActionDef::effective_keys_display`
+    /// resolves the actual chord (honoring `~/.pilot/config.yaml::ui.
+    /// action_keys` overrides), and `contextual_label` resolves the
+    /// state-aware verb. Adding a new sidebar action means landing it
+    /// in the catalog and pushing it here — the footer, `?` help, and
+    /// right-click menu all pick it up automatically, and a user
+    /// rebind shows up in the footer without any extra plumbing.
+    ///
+    /// `overrides` is the parsed `ui.action_keys` map (empty when the
+    /// user hasn't customized anything).
+    pub fn contextual_bindings(
+        &self,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<crate::Binding> {
         use crate::Binding;
         use pilot_tui_core::action::{Action, ActionDef, contextual_label};
 
@@ -1251,9 +1265,6 @@ impl Sidebar {
         actions.push(Action::NewProject);
         actions.push(Action::NewWorkspace);
 
-        // Convert to Binding rows. `default_keys` flows through
-        // unchanged today; user rebinding will override here once
-        // the config layer lands.
         actions
             .into_iter()
             .map(|a| {
@@ -1265,85 +1276,16 @@ impl Sidebar {
                 // launch claude. Switching to "agent" matches the
                 // catalog's static `def.label` and removes the
                 // ambiguity.
-                let label = match &a {
-                    Action::SpawnAgent(_) => def.label,
-                    _ => contextual_label(&a, workspace),
+                let label: std::borrow::Cow<'static, str> = match &a {
+                    Action::SpawnAgent(_) => std::borrow::Cow::Borrowed(def.label),
+                    _ => std::borrow::Cow::Borrowed(contextual_label(&a, workspace)),
                 };
                 Binding {
-                    keys: def.default_keys,
+                    keys: def.effective_keys_display(overrides),
                     label,
                 }
             })
             .collect()
-    }
-
-    pub fn keymap(&self) -> &'static [crate::Binding] {
-        use crate::Binding;
-        // Pane-local bindings only — Tab / q-q / ? / Shift-arrows /
-        // Ctrl-Shift-D etc. live in the Global section of the Help
-        // modal so they don't duplicate across every pane's hint bar.
-        &[
-            Binding {
-                keys: "↑/↓",
-                label: "navigate",
-            },
-            Binding {
-                keys: "Enter",
-                label: "focus activity",
-            },
-            Binding {
-                keys: "n",
-                label: "new workspace",
-            },
-            Binding {
-                keys: "e",
-                label: "open editor",
-            },
-            Binding {
-                keys: "Space",
-                label: "fold repo",
-            },
-            Binding {
-                keys: "s",
-                label: "shell",
-            },
-            Binding {
-                keys: "c",
-                label: "claude",
-            },
-            Binding {
-                keys: "x",
-                label: "codex",
-            },
-            Binding {
-                keys: "u",
-                label: "cursor",
-            },
-            Binding {
-                keys: "w",
-                label: "work on this",
-            },
-            Binding {
-                keys: "Shift-M",
-                label: "merge PR (when READY)",
-            },
-            Binding {
-                keys: "Shift-A",
-                label: "adopt sessions",
-            },
-            Binding {
-                keys: "m",
-                label: "mark all read",
-            },
-            Binding {
-                keys: "f",
-                label: "filter role",
-            },
-            Binding {
-                keys: "o",
-                label: "order/sort",
-            },
-        ]
     }
 
     pub fn detachable(&self) -> Option<crate::DetachSpec> {

@@ -2,14 +2,17 @@
 //!
 //! Three zones, all on one row:
 //!
-//! - **Left**: keymap hints from the currently focused pane. Same
-//!   bindings the help modal lists; this is the always-on quick
-//!   reference.
-//! - **Center**: background polling status — spinner + "Pulling
-//!   tasks from github · PR query: …". Empty when no poll is in
-//!   flight.
-//! - **Right**: most recent notice / error. Retryable hiccups
-//!   auto-fade; permanent + auth errors stay until dismissed.
+//! - **Left**: contextual hints for the focused pane — only actions
+//!   that are actually wired up *right now*. The list is built by
+//!   each pane from the action catalog (`pilot_tui_core::action`),
+//!   so a binding shown here is — by construction — a binding the
+//!   pane will dispatch. Universal shortcuts (`?` help, `q q` quit,
+//!   etc.) live in the onboarding tour and the `?` help modal, not
+//!   here.
+//! - **Right**: background polling status — spinner + "Pulling
+//!   tasks from github · PR query: …" — OR the most recent notice /
+//!   error if one is set. Retryable hiccups auto-fade; permanent +
+//!   auth errors stay until dismissed.
 //!
 //! Pure render — state lives on `Model` and gets passed in.
 
@@ -130,23 +133,16 @@ pub fn render(
         height: 1,
     };
 
-    // Left zone: focused-pane contextual bindings on the left, then
-    // a separator, then the always-on globals. Globals are the two
-    // keys users always need an escape hatch for — `?` help to see
-    // the full alphabet, `q q` to quit. `,` (settings) used to be
-    // here too but it isn't an emergency the way `?` / `q q` are.
-    const GLOBALS: &[Binding] = &[
-        Binding {
-            keys: "?",
-            label: "help",
-        },
-        Binding {
-            keys: "q q",
-            label: "quit",
-        },
-    ];
-
-    let mut spans: Vec<Span> = Vec::with_capacity((keymap.len() + GLOBALS.len()) * 4 + 2);
+    // Left zone: focused-pane contextual bindings only. Universal
+    // shortcuts (`?` help, `q q` quit, `,` settings, `Tab` cycle,
+    // resize, detach) used to be hardcoded into a separate "globals"
+    // block on the right side of the line — that's now in the
+    // onboarding tour + the `?` help modal, where it gets shown once
+    // instead of cluttering every screen. Keeping the footer to
+    // contextual actions only is the structural guarantee from
+    // issue #25: every hint here is, by construction, an action the
+    // pane will actually dispatch.
+    let mut spans: Vec<Span> = Vec::with_capacity(keymap.len() * 4 + 2);
     spans.push(Span::styled(" ", bg));
     let key_style = Style::default()
         .bg(theme.surface)
@@ -154,28 +150,13 @@ pub fn render(
         .add_modifier(Modifier::BOLD);
     let label_style = Style::default().bg(theme.surface).fg(theme.text_dim);
     let sep_style = Style::default().bg(theme.surface).fg(theme.chrome);
-    let global_key_style = Style::default()
-        .bg(theme.surface)
-        .fg(theme.warn)
-        .add_modifier(Modifier::BOLD);
     for (i, b) in keymap.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled("  ·  ", sep_style));
         }
-        spans.push(Span::styled(compact_key(b.keys), key_style));
+        spans.push(Span::styled(compact_key(&b.keys), key_style));
         spans.push(Span::styled(" ", bg));
-        spans.push(Span::styled(b.label, label_style));
-    }
-    if !keymap.is_empty() {
-        spans.push(Span::styled("    ║    ", sep_style));
-    }
-    for (i, b) in GLOBALS.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled("  ·  ", sep_style));
-        }
-        spans.push(Span::styled(compact_key(b.keys), global_key_style));
-        spans.push(Span::styled(" ", bg));
-        spans.push(Span::styled(b.label, label_style));
+        spans.push(Span::styled(b.label.clone(), label_style));
     }
     f.render_widget(Paragraph::new(Line::from(spans)).style(bg), left_rect);
 
@@ -189,20 +170,28 @@ pub fn render(
 /// of truth for binding specs stays explicit (so the `?` help modal
 /// shows the full chord); the footer renderer just chooses a tighter
 /// display form so the line doesn't get jagged with `Shift-` prefixes.
-fn compact_key(keys: &'static str) -> std::borrow::Cow<'static, str> {
+///
+/// Returns `Cow` so the pass-through case (most rows) doesn't
+/// allocate — the footer redraws on every state change and this is a
+/// hot path.
+fn compact_key(keys: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     if let Some(rest) = keys.strip_prefix("Shift-") {
         // `Shift-X` where X is one ASCII letter → uppercase letter
         // alone (standard Unix convention: uppercase = shifted).
-        let chars: Vec<char> = rest.chars().collect();
-        if chars.len() == 1 && chars[0].is_ascii_alphabetic() {
-            return Cow::Owned(chars[0].to_ascii_uppercase().to_string());
+        let mut iter = rest.chars();
+        if let (Some(c), None) = (iter.next(), iter.next())
+            && c.is_ascii_alphabetic()
+        {
+            return Cow::Owned(c.to_ascii_uppercase().to_string());
         }
     }
     if let Some(rest) = keys.strip_prefix("Ctrl-") {
-        let chars: Vec<char> = rest.chars().collect();
-        if chars.len() == 1 && chars[0].is_ascii_alphabetic() {
-            return Cow::Owned(format!("^{}", chars[0].to_ascii_uppercase()));
+        let mut iter = rest.chars();
+        if let (Some(c), None) = (iter.next(), iter.next())
+            && c.is_ascii_alphabetic()
+        {
+            return Cow::Owned(format!("^{}", c.to_ascii_uppercase()));
         }
     }
     Cow::Borrowed(keys)

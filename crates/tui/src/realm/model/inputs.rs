@@ -287,6 +287,32 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return cmds;
         }
+        // Labels picker (Id::ManageLabels) — picker is pre-checked
+        // with the currently-applied labels, so submitting the
+        // current selection is the *full desired set*. Empty pick
+        // is meaningful ("clear all labels") — don't drop it.
+        if matches!(self.modal_stack.last(), Some(Id::ManageLabels)) {
+            let names: Vec<String> = picks
+                .iter()
+                .filter_map(|i| self.labels_choices.get(*i).cloned())
+                .collect();
+            self.labels_choices.clear();
+            self.pop_modal();
+            if let Some(workspace_key) = self.pending_labels_request.take() {
+                let count = names.len();
+                let msg = if count == 0 {
+                    "cleared labels".to_string()
+                } else {
+                    format!("set labels ({count})")
+                };
+                cmds.push(IpcCommand::SetLabels {
+                    workspace_key,
+                    names,
+                });
+                self.flash_info(msg);
+            }
+            return cmds;
+        }
         // Assignees picker (Id::AddAssignees) — picker is pre-
         // checked with existing assignees, so submitting the current
         // selection is the *full desired set*. Fire SetAssignees;
@@ -428,6 +454,10 @@ impl<T: TerminalAdapter> Model<T> {
             Some(Id::AddAssignees) => {
                 self.pending_assignees_request = None;
                 self.assignees_choices.clear();
+            }
+            Some(Id::ManageLabels) => {
+                self.pending_labels_request = None;
+                self.labels_choices.clear();
             }
             Some(Id::SnoozeDuration) => {
                 self.pending_snooze_workspace = None;

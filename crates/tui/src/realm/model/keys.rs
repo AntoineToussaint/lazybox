@@ -265,6 +265,7 @@ impl<T: TerminalAdapter> Model<T> {
                     Some(Action::RequestReviewers)
                 }
                 pilot_tui_core::action::ActionKind::AddAssignees => Some(Action::AddAssignees),
+                pilot_tui_core::action::ActionKind::ManageLabels => Some(Action::ManageLabels),
                 pilot_tui_core::action::ActionKind::OpenInBrowser => Some(Action::OpenInBrowser),
                 pilot_tui_core::action::ActionKind::OpenHelp => Some(Action::OpenHelp),
                 pilot_tui_core::action::ActionKind::OpenSettings => Some(Action::OpenSettings),
@@ -518,6 +519,11 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(terminal_id) = self.terminals.active_terminal_id() else {
             return;
         };
+        // Update the pinned-recap composing buffer for agent
+        // terminals; without this, a pasted prompt would commit on
+        // Enter as a blank recap (the keystroke tracker only sees the
+        // CR, not the paste payload).
+        self.terminals.record_paste(text);
         let mut bytes = Vec::with_capacity(text.len() + 12);
         bytes.extend_from_slice(b"\x1b[200~");
         bytes.extend_from_slice(text.as_bytes());
@@ -580,12 +586,13 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                     return;
                 }
-                // Right-click on a URL inside the terminal pane →
-                // open the URL in the system browser. We intercept
-                // BEFORE the PTY-forwarding path below so a
-                // right-click on a link works the same regardless
-                // of whether the inner program (claude, vim, …)
-                // would otherwise grab the event. If no URL is
+                // Right-click on a URL, file path, or issue reference
+                // inside the terminal pane → open it (browser for URLs
+                // and `#N` refs, the configured editor for paths). We
+                // intercept BEFORE the PTY-forwarding path below so a
+                // right-click on a link works the same regardless of
+                // whether the inner program (claude, vim, …) would
+                // otherwise grab the event. If nothing openable is
                 // under the cursor we fall through to the normal
                 // routing — the PTY still gets the right-click for
                 // its own context menus.
@@ -595,17 +602,10 @@ impl<T: TerminalAdapter> Model<T> {
                         .layout
                         .hit_test_splitter(m.column, m.row, sidebar_rect, right_top_rect)
                         .is_none()
-                    && let Some(url) = self.terminals.url_at(right_bottom_rect, m.column, m.row)
+                    && let Some(target) =
+                        self.terminals.target_at(right_bottom_rect, m.column, m.row)
                 {
-                    match pilot_tui_core::editors::open_url(&url) {
-                        Ok(()) => {
-                            self.flash_hint(format!("opened {url}"));
-                        }
-                        Err(e) => {
-                            tracing::warn!(%url, "open_url failed: {e}");
-                            self.flash_hint(format!("open_url failed: {e}"));
-                        }
-                    }
+                    self.open_click_target(target);
                     return;
                 }
                 // A left-click in the terminal pane ALWAYS starts a

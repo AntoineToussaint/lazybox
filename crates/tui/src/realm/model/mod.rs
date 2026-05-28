@@ -108,6 +108,12 @@ pub enum Id {
     /// → `Command::AddAssignees { workspace_key, logins }`. Works
     /// on issues too (both PRs and issues are `Assignable`).
     AddAssignees,
+    /// Multi-select picker mounted on Shift-L (`ManageLabels`).
+    /// Lists the repository's full label set with the currently-
+    /// applied labels pre-checked; submit → `Command::SetLabels`.
+    /// Works on issues too — both PRs and issues implement GraphQL's
+    /// `Labelable` interface.
+    ManageLabels,
     /// Duration picker mounted on `z` (ToggleSnooze) when the
     /// workspace is NOT currently snoozed. Single-pick choice
     /// modal with several common snooze durations (1h, today,
@@ -318,6 +324,15 @@ pub struct Model<T: TerminalAdapter> {
     pending_assignees_request: Option<pilot_core::WorkspaceKey>,
     /// Candidate logins shown in the `AddAssignees` picker.
     assignees_choices: Vec<String>,
+    /// Workspace key the `ManageLabels` picker is targeting. Stashed
+    /// at mount time so when `Event::RepoLabels` lands the picker
+    /// can re-mount with the repo's labels. Cleared on submit /
+    /// dismiss.
+    pending_labels_request: Option<pilot_core::WorkspaceKey>,
+    /// Repo-label names rendered in the `ManageLabels` picker. Order
+    /// matches the picker's row indices so `Msg::ChoicePicked(indices)`
+    /// indexes back into this list. Cleared on submit / dismiss.
+    labels_choices: Vec<String>,
     /// Workspace currently waiting on the `SnoozeDuration` picker's
     /// result. `Msg::ChoicePicked` reads this + `snooze_choices` to
     /// turn the picked index into a `Command::Snooze`.
@@ -550,6 +565,8 @@ impl<T: TerminalAdapter> Model<T> {
             review_choices: Vec::new(),
             pending_assignees_request: None,
             assignees_choices: Vec::new(),
+            pending_labels_request: None,
+            labels_choices: Vec::new(),
             pending_snooze_workspace: None,
             snooze_choices: Vec::new(),
             pending_removal_prompts: std::collections::VecDeque::new(),
@@ -899,13 +916,14 @@ impl<T: TerminalAdapter> Model<T> {
     /// Behaviour:
     /// - Fresh burst (no prior scroll, or > `BURST_IDLE` since the
     ///   last event): full STEP, count starts at 1.
-    /// - Sustained same-direction burst: STEP decays — 5 → 3 after
-    ///   5 events, → 1 after 15.
-    /// - Direction reversal mid-burst: drop the event (return 0) and
-    ///   arm a short refractory window so the OS's queued inertia
-    ///   from the prior gesture doesn't immediately keep firing.
-    ///   Caller's next event in the NEW direction starts a fresh
-    ///   burst.
+    /// - Sustained same-direction burst: STEP decays — 5 → 3 at
+    ///   event 5, → 1 at event 8, then events past `STOP_AT` are
+    ///   dropped entirely so the OS momentum tail stops the view
+    ///   within ~200 ms instead of trickling for the full 1–2 s.
+    /// - Direction reversal mid-burst: real momentum never reverses,
+    ///   so a reverse-flick is unambiguous user intent. Admit
+    ///   immediately at full STEP (starting a fresh opposite-direction
+    ///   burst) instead of swallowing the press.
     ///
     /// The returned isize is always the **magnitude** (positive) of
     /// the scroll step; sign is applied by the caller using
@@ -923,19 +941,27 @@ impl<T: TerminalAdapter> Model<T> {
         /// gesture. macOS inertia events arrive ~16ms apart; 250ms
         /// is a generous gap that survives a brief stall.
         const BURST_IDLE: std::time::Duration = std::time::Duration::from_millis(250);
-        /// Within a burst, after this many events the step drops.
+        /// Within a burst, the step drops at these counts.
         const DECAY_AT: u32 = 5;
-        const TAIL_AT: u32 = 15;
+        const TAIL_AT: u32 = 8;
+        /// Hard stop. At ~16 ms per event, dropping past event 12
+        /// puts the visible scroll-stop ~190 ms after the user's last
+        /// physical input — inside the issue's 100–200 ms acceptance
+        /// window with one frame of slack.
+        const STOP_AT: u32 = 12;
 
         let now = Instant::now();
         let new_dir: i8 = if is_up { -1 } else { 1 };
 
-        // Stale state → fresh burst.
-        let burst = self.scroll_inertia.filter(|s| now - s.last_at < BURST_IDLE);
+        // Stale state → fresh burst. `saturating_duration_since`
+        // belts-and-braces against a non-monotonic clock; with
+        // `std::time::Instant` it never actually saturates.
+        let burst = self
+            .scroll_inertia
+            .filter(|s| now.saturating_duration_since(s.last_at) < BURST_IDLE);
 
         match burst {
             None => {
-                // Fresh gesture — full step.
                 self.scroll_inertia = Some(ScrollInertia {
                     dir: new_dir,
                     count: 1,
@@ -944,18 +970,23 @@ impl<T: TerminalAdapter> Model<T> {
                 STEP_INITIAL
             }
             Some(s) if s.dir != new_dir => {
-                // Direction flip mid-burst. Drop this event AND wipe
-                // the burst so the next event (in the new direction)
-                // starts fresh. The user's intent is "stop / go the
-                // other way" — eating one event is the cheapest way
-                // to cancel the OS-queued inertia.
-                self.scroll_inertia = None;
-                0
+                // Real momentum never reverses — a reverse-flick is
+                // unambiguous user intent. Start a fresh burst in
+                // the new direction and admit immediately at full
+                // step instead of swallowing the press.
+                self.scroll_inertia = Some(ScrollInertia {
+                    dir: new_dir,
+                    count: 1,
+                    last_at: now,
+                });
+                STEP_INITIAL
             }
             Some(mut s) => {
                 s.count = s.count.saturating_add(1);
                 s.last_at = now;
-                let step = if s.count >= TAIL_AT {
+                let step = if s.count >= STOP_AT {
+                    0
+                } else if s.count >= TAIL_AT {
                     STEP_TAIL
                 } else if s.count >= DECAY_AT {
                     STEP_MID
@@ -1138,6 +1169,133 @@ impl<T: TerminalAdapter> Model<T> {
             .title("Open editor")
             .label(|s: &String| s.clone());
         self.mount_modal(Id::Editor, modal);
+    }
+
+    /// Route a [`ClickTarget`] produced by a right-click in the agent
+    /// view to the right opener: URLs and `#N` / `owner/repo#N` issue
+    /// references go to the system browser; file paths open in the
+    /// configured editor (jumping to `line:col` when present).
+    pub fn open_click_target(&mut self, target: crate::components::terminal_stack::ClickTarget) {
+        use crate::components::terminal_stack::ClickTarget;
+        match target {
+            ClickTarget::Url(url) => self.open_external_url(&url),
+            ClickTarget::Issue { repo, number } => self.open_issue_ref(repo, number),
+            ClickTarget::Path { path, line, col } => self.open_path_in_editor(&path, line, col),
+        }
+    }
+
+    /// Hand `url` to the platform browser launcher and surface the
+    /// outcome in the footer.
+    fn open_external_url(&mut self, url: &str) {
+        match crate::editors::open_url(url) {
+            Ok(()) => {
+                tracing::info!(%url, "opened url from terminal");
+                self.flash_hint(format!("opened {url}"));
+            }
+            Err(e) => {
+                tracing::warn!(%url, "open_url failed: {e}");
+                self.flash_error(format!("open failed: {e}"));
+            }
+        }
+    }
+
+    /// Resolve an issue reference to a GitHub URL and open it. A bare
+    /// `#N` borrows the focused workspace's repo; `owner/repo#N`
+    /// carries its own. GitHub redirects `/issues/N` to `/pull/N`
+    /// when the number is a PR, so this one URL shape covers both.
+    fn open_issue_ref(&mut self, repo: Option<String>, number: u64) {
+        let repo = repo.or_else(|| self.focused_repo());
+        let Some(repo) = repo else {
+            self.flash_info(format!("no repo to resolve #{number}"));
+            return;
+        };
+        if !repo.contains('/') {
+            self.flash_info(format!("can't resolve #{number} — repo is '{repo}'"));
+            return;
+        }
+        let url = format!("https://github.com/{repo}/issues/{number}");
+        self.open_external_url(&url);
+    }
+
+    /// The `owner/repo` of the workspace whose terminals are focused,
+    /// falling back to the sidebar selection. `None` when neither has
+    /// a repo-bearing task (e.g. a from-scratch workspace).
+    fn focused_repo(&self) -> Option<String> {
+        let from_active = self
+            .terminals
+            .active_session()
+            .and_then(|sk| self.sidebar.workspace_by_key(sk));
+        from_active
+            .or_else(|| self.sidebar.selected_workspace())
+            .and_then(|w| w.primary_task())
+            .and_then(|t| t.repo.clone())
+    }
+
+    /// The on-disk worktree of the workspace whose terminals are
+    /// focused. Used to resolve `./` and bare-relative paths clicked
+    /// in the transcript.
+    fn focused_worktree(&self) -> Option<std::path::PathBuf> {
+        self.terminals
+            .active_session()
+            .and_then(|sk| self.sidebar.workspace_by_key(sk))
+            .or_else(|| self.sidebar.selected_workspace())
+            .and_then(|w| w.sessions.first().map(|s| s.worktree_path.clone()))
+    }
+
+    /// Expand a clicked path token to an absolute path: `~` → home,
+    /// relative → joined onto the focused session's worktree (or left
+    /// as-is when there's no worktree to anchor against).
+    fn resolve_clicked_path(&self, raw: &str) -> std::path::PathBuf {
+        use std::path::PathBuf;
+        if raw == "~" {
+            if let Some(home) = home_dir() {
+                return home;
+            }
+        } else if let Some(rest) = raw.strip_prefix("~/") {
+            if let Some(home) = home_dir() {
+                return home.join(rest);
+            }
+        }
+        let p = PathBuf::from(raw);
+        if p.is_absolute() {
+            return p;
+        }
+        match self.focused_worktree() {
+            Some(worktree) => worktree.join(raw),
+            None => p,
+        }
+    }
+
+    /// Open a clicked file path in the configured editor. With one
+    /// detected editor we launch directly; with several we use the
+    /// first (the workspace `E` picker remains the place to choose).
+    /// A `line[:col]` suffix is forwarded so the editor jumps there.
+    fn open_path_in_editor(&mut self, raw: &str, line: Option<u32>, col: Option<u32>) {
+        if self.setup.editors.is_empty() {
+            let path = pilot_core::paths::config_yaml();
+            self.flash_info(format!(
+                "no editor detected — add one under `editors:` in {}",
+                path.display(),
+            ));
+            return;
+        }
+        let resolved = self.resolve_clicked_path(raw);
+        let editor = self.setup.editors[0].clone();
+        match crate::editors::open_file(&editor, &resolved, line, col) {
+            Ok(()) => {
+                tracing::info!(path = %resolved.display(), editor = %editor.id, "opened file from terminal");
+                let where_ = match (line, col) {
+                    (Some(l), Some(c)) => format!("{}:{l}:{c}", resolved.display()),
+                    (Some(l), None) => format!("{}:{l}", resolved.display()),
+                    _ => resolved.display().to_string(),
+                };
+                self.flash_hint(format!("opened {where_} in {}", editor.display));
+            }
+            Err(e) => {
+                tracing::warn!(path = %resolved.display(), "open_file failed: {e}");
+                self.flash_error(format!("failed to open {raw}: {e}"));
+            }
+        }
     }
 
     fn launch_editor(
@@ -1330,9 +1488,11 @@ impl<T: TerminalAdapter> Model<T> {
         // actionable right now, not a generic alphabet. The full
         // keymap stays in `?` help.
         let keymap: Vec<crate::pane::Binding> = match self.focus {
-            PaneFocus::Sidebar => self.sidebar.contextual_bindings(),
-            PaneFocus::Right => self.right.contextual_bindings(),
-            PaneFocus::Terminals => self.terminals.contextual_bindings(),
+            PaneFocus::Sidebar => self.sidebar.contextual_bindings(&self.action_key_overrides),
+            PaneFocus::Right => self.right.contextual_bindings(&self.action_key_overrides),
+            PaneFocus::Terminals => self
+                .terminals
+                .contextual_bindings(&self.action_key_overrides),
         };
         let notice = self.status.notice.clone();
         let mut captured_area = Rect::default();
@@ -1483,4 +1643,15 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
     }
+}
+
+/// The user's home directory, for expanding `~`-prefixed paths
+/// clicked in the terminal. Honors `$HOME` (and `%USERPROFILE%` on
+/// Windows); returns `None` when neither is set so callers fall back
+/// to leaving the path unexpanded.
+fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
 }

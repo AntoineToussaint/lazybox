@@ -53,6 +53,35 @@ const DEFAULT_ROWS: u16 = 32;
 /// 4 KiB is enough to span any prompt the agents have shipped so far.
 pub const RECENT_OUTPUT_CAP: usize = 4 * 1024;
 
+/// Cap for the per-terminal composing buffer (the in-flight user
+/// message that will commit on the next Enter). Practical agent
+/// prompts fit in a few KB; this bound exists to keep a pathological
+/// paste (a multi-MB blob dropped into the terminal) from sitting in
+/// memory unbounded until the user finally hits Enter or abandons.
+pub const COMPOSING_CAP: usize = 8 * 1024;
+
+/// Visible prefix on the pinned "latest user message" recap row.
+/// Whitespace + the box-drawing wedge reads as "input direction"
+/// without being visually loud.
+const RECAP_PREFIX: &str = "you ▸ ";
+
+/// Collapse a possibly multi-line user message down to a single
+/// line of plain text for the pinned recap row. Newlines and runs
+/// of whitespace become single spaces so multi-line prompts
+/// (Shift-Enter inside Claude) render as `fix bug in foo.rs and
+/// retry` instead of `fix bug in foo.rs⏎and retry` with a visible
+/// gap. Single-pass; no intermediate Vec.
+fn summarize_message(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len());
+    for word in msg.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
+}
+
 /// Outcome of a scroll attempt on the focused terminal. Used by the
 /// orchestrator's mouse-wheel handler to surface why a scroll might
 /// have looked like nothing happened — without this, "no scrollback
@@ -70,6 +99,31 @@ pub enum ScrollOutcome {
     NoScrollback { alternate: bool },
     /// Scroll succeeded. Carries the post-state for the footer notice.
     Moved { offset: u64, total: u64, len: u64 },
+}
+
+/// What the user right-clicked on inside the terminal grid. Returned
+/// by [`TerminalStack::target_at`] so the model can route each kind
+/// to the right opener: URLs and issue references go to the browser,
+/// file paths to the configured editor. Detection is passive — any
+/// matching token rendered in the transcript is clickable, no markup
+/// required.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClickTarget {
+    /// `http(s)://…` — open in the system browser.
+    Url(String),
+    /// A filesystem path, exactly as it appeared on screen (possibly
+    /// still `~`- or `.`-relative). The model resolves it against the
+    /// focused session's worktree before opening in the editor.
+    /// `line`/`col` come from an optional `:line[:col]` suffix.
+    Path {
+        path: String,
+        line: Option<u32>,
+        col: Option<u32>,
+    },
+    /// `#42` or `owner/repo#42` — open the GitHub issue/PR page.
+    /// `repo` is `None` for a bare `#42`, which the model resolves
+    /// against the focused workspace's repo.
+    Issue { repo: Option<String>, number: u64 },
 }
 
 pub struct TerminalStack {
@@ -255,6 +309,90 @@ struct TerminalSlot {
     /// the original spawn size never gets written and the user sees
     /// a frozen-looking pane).
     last_rendered_size: Option<(u16, u16)>,
+    /// Characters the user has typed since the last submit. Only
+    /// tracked on Agent terminals — the pinned recap is meaningless
+    /// for shells. Cleared when the user hits Enter, Ctrl-C, Ctrl-U,
+    /// or Esc (the same keys that wipe the prompt buffer in Claude
+    /// Code / a shell prompt).
+    composing: String,
+    /// Most recently submitted user message. Rendered as a one-line
+    /// recap above the agent's terminal grid so it's obvious "what
+    /// you just asked the model" even after pages of tool output
+    /// scroll the prompt off-screen. `None` until the user has
+    /// submitted at least one message in this terminal.
+    last_user_message: Option<String>,
+}
+
+impl TerminalSlot {
+    /// Apply a user keystroke to the composing buffer + last-message
+    /// state. Mirrors how the agent's own prompt-line reads keys:
+    ///   - printable Char → append
+    ///   - Backspace → pop
+    ///   - Enter → commit (Shift-Enter inserts a newline instead,
+    ///     matching Claude Code's "newline-without-submit" binding)
+    ///   - Ctrl-C / Ctrl-U / Esc → clear the line
+    ///
+    /// Other keys (arrows, function keys, Tab) leave both buffers
+    /// untouched — they don't change the literal text the user is
+    /// composing. Per-char appends respect [`COMPOSING_CAP`] so a
+    /// rogue auto-typer can't grow the buffer unbounded.
+    fn apply_user_key(&mut self, key: &KeyEvent) {
+        use KeyCode::*;
+        let mods = key.modifiers;
+        match key.code {
+            Char(c) => {
+                if mods.contains(KeyModifiers::CONTROL) {
+                    if c == 'c' || c == 'u' {
+                        self.composing.clear();
+                    }
+                } else if self.composing.len() + c.len_utf8() <= COMPOSING_CAP {
+                    self.composing.push(c);
+                }
+            }
+            Enter => {
+                if mods.contains(KeyModifiers::SHIFT) {
+                    if self.composing.len() < COMPOSING_CAP {
+                        self.composing.push('\n');
+                    }
+                } else {
+                    let trimmed = self.composing.trim();
+                    if !trimmed.is_empty() {
+                        self.last_user_message = Some(trimmed.to_string());
+                    }
+                    self.composing.clear();
+                }
+            }
+            Backspace => {
+                self.composing.pop();
+            }
+            Esc => {
+                self.composing.clear();
+            }
+            _ => {}
+        }
+    }
+
+    /// Append `text` to the composing buffer, truncated to stay
+    /// within [`COMPOSING_CAP`]. Used by the bracketed-paste path
+    /// where the payload arrives as one chunk, so a single check at
+    /// the boundary is enough to defend against pathological pastes.
+    fn append_paste(&mut self, text: &str) {
+        let remaining = COMPOSING_CAP.saturating_sub(self.composing.len());
+        if remaining == 0 {
+            return;
+        }
+        if text.len() <= remaining {
+            self.composing.push_str(text);
+            return;
+        }
+        // Find the largest UTF-8 char boundary ≤ `remaining` so we
+        // don't split a multi-byte codepoint.
+        let mut cut = remaining;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        self.composing.push_str(&text[..cut]);
+    }
 }
 
 /// libghostty-vt state for one terminal.
@@ -788,21 +926,21 @@ impl TerminalStack {
         out
     }
 
-    /// If the cell at frame-space `(col, row)` lies inside an
-    /// `http(s)://…` token on its row, return the URL. Otherwise
-    /// `None`. Drives right-click-to-open: the click coordinates
-    /// arrive in the same frame-space the renderer used, so we
-    /// translate the same way `extract_text` does (skip the pane
-    /// border + tab strip via `inner_x = rect.x + 1`, `inner_y =
-    /// rect.y + 3`). Single-row only — wrapped URLs aren't
-    /// detected (per the issue: "stay simple, terminal URLs are
-    /// virtually always on one row").
-    pub fn url_at(
+    /// If the cell at frame-space `(col, row)` lies inside a URL,
+    /// file path, or `#N` / `owner/repo#N` issue reference on its
+    /// row, return the matching [`ClickTarget`]. Otherwise `None`.
+    /// Drives right-click-to-open: the click coordinates arrive in
+    /// the same frame-space the renderer used, so we translate the
+    /// same way `extract_text` does (skip the pane border + tab strip
+    /// via `inner_x = rect.x + 1`, `inner_y = rect.y + 3`). Single-row
+    /// only — wrapped tokens aren't detected (per the issue: "stay
+    /// simple, terminal URLs/paths are virtually always on one row").
+    pub fn target_at(
         &mut self,
         rect: tuirealm::ratatui::layout::Rect,
         col: u16,
         row: u16,
-    ) -> Option<String> {
+    ) -> Option<ClickTarget> {
         let id = self.focused_terminal_id()?;
         let slot = self.terminals.get_mut(&id)?;
         let inner_x = rect.x.saturating_add(1);
@@ -847,7 +985,7 @@ impl TerminalStack {
             return None;
         }
         let byte_pos = *cell_byte_starts.get(cell_col as usize)?;
-        find_url_at_byte(&row_text, byte_pos).map(|s| s.to_string())
+        detect_target(&row_text, byte_pos)
     }
 
     pub fn scroll_active(&mut self, delta: isize) -> ScrollOutcome {
@@ -958,6 +1096,46 @@ impl TerminalStack {
             recent: Vec::new(),
             agent_state: pilot_ipc::AgentState::Active,
             last_rendered_size: None,
+            composing: String::new(),
+            last_user_message: None,
+        }
+    }
+
+    /// The last full user message committed to the given terminal
+    /// (the bytes between two Enter presses), or `None` if no
+    /// message has been committed — including for shells, where the
+    /// composing buffer is intentionally left dormant. Drives the
+    /// pinned "you ▸ …" recap line at the top of the agent view.
+    pub fn last_user_message_of(&self, id: TerminalId) -> Option<&str> {
+        self.terminals
+            .get(&id)
+            .and_then(|s| s.last_user_message.as_deref())
+    }
+
+    /// In-flight characters the user has typed but not yet
+    /// submitted to the given terminal. Exposed primarily for tests
+    /// so they can verify buffer management (commit on Enter, clear
+    /// on Ctrl-C, etc.) without having to drive a full render, but
+    /// also usable by future surfaces that want a live "draft"
+    /// indicator.
+    pub fn composing_of(&self, id: TerminalId) -> Option<&str> {
+        self.terminals.get(&id).map(|s| s.composing.as_str())
+    }
+
+    /// Record a bracketed-paste payload as part of the focused
+    /// agent terminal's composing buffer. Pastes don't flow through
+    /// `handle_key` (they arrive as a single `Event::Paste` and the
+    /// realm forwards them straight to the PTY), so without this
+    /// hook a long pasted prompt would commit on Enter as a blank
+    /// recap. No-op for non-Agent terminals.
+    pub fn record_paste(&mut self, text: &str) {
+        let Some(id) = self.focused_terminal_id() else {
+            return;
+        };
+        if let Some(slot) = self.terminals.get_mut(&id)
+            && matches!(slot.kind, TerminalKind::Agent(_))
+        {
+            slot.append_paste(text);
         }
     }
 
@@ -992,25 +1170,53 @@ impl TerminalStack {
         None
     }
 
-    /// Bindings shown in the hint bar.
-    pub fn keymap(&self) -> &'static [crate::Binding] {
+    /// Bindings shown in the hint bar. Drops the legacy
+    /// `all keys → PTY` entry — that describes an implementation mode
+    /// rather than an actionable shortcut, so it was noise in the
+    /// footer. The user always knows their typing reaches the inner
+    /// program; what they need surfaced is *escape hatches*: scroll
+    /// the scrollback, leave the pane, send SIGINT. Keys are sourced
+    /// from the catalog where possible so a rebind / rename in
+    /// `ActionDef` flows through automatically.
+    ///
+    /// Associated function (no `&self`) because the bindings don't
+    /// depend on terminal-stack state — they're the same whether the
+    /// pane has zero terminals or twenty. The pane wrapper still
+    /// takes `&self` for symmetry with the other panes (Sidebar /
+    /// Right both inspect state to decide what to surface), but
+    /// reaches through to this stateless implementation.
+    pub fn contextual_bindings(
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<crate::Binding> {
         use crate::Binding;
-        &[
+        use pilot_tui_core::action::{ActionDef, ActionKind};
+        // `Shift-PgUp/Dn scroll` removed in #11 — the mouse wheel
+        // is the primary scroll path and the keyboard fallback
+        // wasn't worth its slot in the hint bar. Leave + interrupt
+        // are the only escape hatches that need surfacing here.
+        let leave = ActionDef::for_kind(ActionKind::LeaveTerminal);
+        vec![
             Binding {
-                keys: "all keys",
-                label: "→ PTY",
+                keys: leave.effective_keys_display(overrides),
+                label: std::borrow::Cow::Borrowed(leave.label),
             },
+            // `Ctrl-c` is forwarded straight to the PTY rather than
+            // being a catalog action — but it's actionable knowledge
+            // for the user (escape a hung process), so it stays in
+            // the hint bar as a hand-curated entry.
             Binding {
-                keys: "]]",
-                label: "exit to sidebar",
+                keys: std::borrow::Cow::Borrowed("Ctrl-c"),
+                label: std::borrow::Cow::Borrowed("interrupt"),
             },
+            // Snippet picker entry point (issue #40). `]<key>` opens
+            // the picker pre-filled with the typed char; typing a
+            // full snippet key auto-submits its body to the agent.
+            // The leading `]` is shared with the LeaveTerminal escape
+            // (`]]`) — the second `]` wins, anything else opens the
+            // picker.
             Binding {
-                keys: "]<key>",
-                label: "snippets",
-            },
-            Binding {
-                keys: "Ctrl-c",
-                label: "interrupt",
+                keys: std::borrow::Cow::Borrowed("]<key>"),
+                label: std::borrow::Cow::Borrowed("snippets"),
             },
         ]
     }
@@ -1091,6 +1297,16 @@ impl TerminalStack {
         let Some(bytes) = key_to_bytes(&key) else {
             return PaneOutcome::Consumed;
         };
+        // Mirror the keystroke into our own composing buffer so the
+        // pinned "you ▸ …" recap reflects the latest submitted
+        // message. Scoped to Agent terminals — shells don't have a
+        // single semantic "user prompt", so the recap would be noisy
+        // (every cd, every grep) and surprising.
+        if let Some(slot) = self.terminals.get_mut(&id)
+            && matches!(slot.kind, TerminalKind::Agent(_))
+        {
+            slot.apply_user_key(&key);
+        }
         cmds.push(Command::Write {
             terminal_id: id,
             bytes,
@@ -1612,6 +1828,27 @@ impl TerminalStack {
         });
     }
 
+    /// Render the "you ▸ <recap>" pin into `area`. Dim styling so
+    /// the line reads as chrome / recap, not as fresh agent output
+    /// the user has to parse. Truncates with `…` when the message
+    /// overflows the row width — same affordance the empty-state
+    /// hint uses elsewhere in this pane.
+    fn render_user_message_recap(frame: &mut Frame, area: Rect, msg: &str) {
+        let theme = crate::theme::current();
+        let summary = summarize_message(msg);
+        let line = ratatui::text::Line::from(vec![
+            Span::styled(
+                RECAP_PREFIX,
+                Style::default()
+                    .fg(theme.text_dim)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(summary, Style::default().fg(theme.text_dim)),
+        ]);
+        let line = crate::components::table::truncate_line(line, area.width as usize);
+        frame.render_widget(Paragraph::new(line), area);
+    }
+
     /// Render a single terminal slot full-rect. Used by both the
     /// tabs path and the splits path's leaf case.
     fn render_one_terminal(
@@ -1623,15 +1860,42 @@ impl TerminalStack {
     ) {
         let _ = focused; // ghostty-vt doesn't render focus chrome itself
         if let Some(slot) = self.terminals.get_mut(&id) {
-            slot.vt.ensure_size(rect.width, rect.height);
+            // Carve off one row for the pinned "you ▸ <recap>" line
+            // when this is an agent terminal with a remembered last
+            // user message. Refuses to take the row at h ≤ 1 — leaves
+            // every cell for the agent grid rather than blank-out the
+            // pane entirely on a 1-row split.
+            let show_recap = matches!(slot.kind, TerminalKind::Agent(_))
+                && slot.last_user_message.is_some()
+                && rect.height >= 2;
+            let body = if show_recap {
+                Rect {
+                    x: rect.x,
+                    y: rect.y + 1,
+                    width: rect.width,
+                    height: rect.height - 1,
+                }
+            } else {
+                rect
+            };
+            if show_recap && let Some(msg) = slot.last_user_message.as_deref() {
+                let header_rect = Rect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: 1,
+                };
+                Self::render_user_message_recap(frame, header_rect, msg);
+            }
+            slot.vt.ensure_size(body.width, body.height);
             // Backend PTY also needs to know the new size — otherwise
             // the shell process keeps writing at its spawn dimensions
             // and the bottom rows go blank as soon as the user scrolls
             // past them. Queue a resize for the App to ship.
-            let new_size = (rect.width, rect.height);
-            if rect.width > 0 && rect.height > 0 && slot.last_rendered_size != Some(new_size) {
+            let new_size = (body.width, body.height);
+            if body.width > 0 && body.height > 0 && slot.last_rendered_size != Some(new_size) {
                 slot.last_rendered_size = Some(new_size);
-                self.pending_resizes.push((id, rect.width, rect.height));
+                self.pending_resizes.push((id, body.width, body.height));
             }
             if let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) {
                 let widget = GhosttyTerminal::new(
@@ -1640,7 +1904,7 @@ impl TerminalStack {
                     &mut slot.vt.cell_iter,
                     &mut slot.vt.shadow,
                 );
-                frame.render_widget(widget, rect);
+                frame.render_widget(widget, body);
             }
         }
     }
@@ -1959,6 +2223,153 @@ pub(crate) fn find_url_at_byte(row_text: &str, byte_pos: usize) -> Option<&str> 
     None
 }
 
+/// Classify the token at `byte_pos` in `row_text`. Tries detectors
+/// in specificity order: a URL (begins with a scheme) wins over an
+/// issue reference, which wins over a bare file path. Returns `None`
+/// when the click landed on whitespace or an unrecognized token.
+pub(crate) fn detect_target(row_text: &str, byte_pos: usize) -> Option<ClickTarget> {
+    if let Some(url) = find_url_at_byte(row_text, byte_pos) {
+        return Some(ClickTarget::Url(url.to_string()));
+    }
+    if let Some(issue) = find_issue_ref_at_byte(row_text, byte_pos) {
+        return Some(issue);
+    }
+    find_path_at_byte(row_text, byte_pos)
+}
+
+/// Return the byte span of the whitespace-delimited token containing
+/// `pos`. `None` when `pos` is out of range, not on a char boundary,
+/// or sits on whitespace (no token under the cursor).
+fn token_at_byte(s: &str, pos: usize) -> Option<(usize, usize)> {
+    if pos >= s.len() || !s.is_char_boundary(pos) {
+        return None;
+    }
+    let here = s[pos..].chars().next()?;
+    if here.is_whitespace() {
+        return None;
+    }
+    let mut start = pos;
+    while start > 0 {
+        let prev = s[..start].chars().next_back()?;
+        if prev.is_whitespace() {
+            break;
+        }
+        start -= prev.len_utf8();
+    }
+    let mut end = pos;
+    while end < s.len() {
+        let next = s[end..].chars().next()?;
+        if next.is_whitespace() {
+            break;
+        }
+        end += next.len_utf8();
+    }
+    Some((start, end))
+}
+
+/// Strip a single layer of wrapping brackets / quotes and trailing
+/// sentence punctuation so `(./foo.rs),` becomes `./foo.rs`. A
+/// trailing `:` is preserved — it's significant for `path:line`
+/// suffixes. Leading openers are only stripped when the matching
+/// closer is present so we don't eat a real leading char.
+fn trim_token(tok: &str) -> &str {
+    let mut t = tok;
+    loop {
+        let trimmed = t
+            .strip_suffix(['.', ',', ';', '!', '?', ')', ']', '}', '>', '"', '\''])
+            .unwrap_or(t);
+        let trimmed = trimmed
+            .strip_prefix(['(', '[', '{', '<', '"', '\''])
+            .unwrap_or(trimmed);
+        if trimmed == t {
+            return t;
+        }
+        t = trimmed;
+    }
+}
+
+/// Detect a `#42` or `owner/repo#42` issue reference under `byte_pos`.
+fn find_issue_ref_at_byte(row_text: &str, byte_pos: usize) -> Option<ClickTarget> {
+    let (start, end) = token_at_byte(row_text, byte_pos)?;
+    let tok = trim_token(&row_text[start..end]);
+
+    // Same-repo: `#42`.
+    if let Some(rest) = tok.strip_prefix('#') {
+        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+            return Some(ClickTarget::Issue {
+                repo: None,
+                number: rest.parse().ok()?,
+            });
+        }
+        return None;
+    }
+
+    // Cross-repo: `owner/repo#42`. Mirrors the validation in
+    // `pilot_core::issue_links`: the repo part must contain a `/` and
+    // only owner/repo-legal characters.
+    let hash = tok.find('#')?;
+    let repo = &tok[..hash];
+    let rest = &tok[hash + 1..];
+    if repo.contains('/')
+        && repo
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+        && !rest.is_empty()
+        && rest.chars().all(|c| c.is_ascii_digit())
+    {
+        return Some(ClickTarget::Issue {
+            repo: Some(repo.to_string()),
+            number: rest.parse().ok()?,
+        });
+    }
+    None
+}
+
+/// Detect a file path under `byte_pos`. To avoid treating every bare
+/// word as a file, a candidate must start with an unambiguous path
+/// prefix (`/`, `~`, `./`, `../`). A trailing `:line` or `:line:col`
+/// suffix is split off and parsed.
+fn find_path_at_byte(row_text: &str, byte_pos: usize) -> Option<ClickTarget> {
+    let (start, end) = token_at_byte(row_text, byte_pos)?;
+    let tok = trim_token(&row_text[start..end]);
+    let looks_like_path = tok.starts_with('/')
+        || tok == "~"
+        || tok.starts_with("~/")
+        || tok.starts_with("./")
+        || tok.starts_with("../");
+    if !looks_like_path {
+        return None;
+    }
+    let (path, line, col) = split_line_col(tok);
+    Some(ClickTarget::Path {
+        path: path.to_string(),
+        line,
+        col,
+    })
+}
+
+/// Split a trailing `:line` or `:line:col` suffix off a path. Both
+/// suffix segments must be all-ASCII-digit runs; anything else leaves
+/// the path untouched (so a colon inside a filename isn't mistaken
+/// for a line number).
+fn split_line_col(s: &str) -> (&str, Option<u32>, Option<u32>) {
+    let Some((rest, last)) = s.rsplit_once(':') else {
+        return (s, None, None);
+    };
+    if last.is_empty() || !last.chars().all(|c| c.is_ascii_digit()) {
+        return (s, None, None);
+    }
+    if let Some((rest2, mid)) = rest.rsplit_once(':')
+        && !mid.is_empty()
+        && mid.chars().all(|c| c.is_ascii_digit())
+    {
+        // path:line:col
+        return (rest2, mid.parse().ok(), last.parse().ok());
+    }
+    // path:line
+    (rest, last.parse().ok(), None)
+}
+
 #[cfg(test)]
 mod find_url_at_byte_tests {
     use super::find_url_at_byte;
@@ -2029,6 +2440,170 @@ mod find_url_at_byte_tests {
         // Last char of URL.
         let last = row.len() - 1;
         assert_eq!(find_url_at_byte(row, last), Some("https://example.com"));
+    }
+}
+
+#[cfg(test)]
+mod detect_target_tests {
+    use super::{ClickTarget, detect_target, split_line_col};
+
+    #[test]
+    fn url_wins_over_everything() {
+        let row = "open https://github.com/o/r/issues/9 now";
+        assert_eq!(
+            detect_target(row, 6),
+            Some(ClickTarget::Url("https://github.com/o/r/issues/9".into()))
+        );
+    }
+
+    #[test]
+    fn detects_absolute_path() {
+        let row = "see /etc/hosts for config";
+        assert_eq!(
+            detect_target(row, 5),
+            Some(ClickTarget::Path {
+                path: "/etc/hosts".into(),
+                line: None,
+                col: None,
+            })
+        );
+    }
+
+    #[test]
+    fn detects_home_relative_path() {
+        let row = "edit ~/.config/pilot.yaml please";
+        assert_eq!(
+            detect_target(row, 6),
+            Some(ClickTarget::Path {
+                path: "~/.config/pilot.yaml".into(),
+                line: None,
+                col: None,
+            })
+        );
+    }
+
+    #[test]
+    fn detects_dot_relative_path() {
+        let row = "open ./src/main.rs here";
+        assert_eq!(
+            detect_target(row, 5),
+            Some(ClickTarget::Path {
+                path: "./src/main.rs".into(),
+                line: None,
+                col: None,
+            })
+        );
+    }
+
+    #[test]
+    fn detects_path_with_line() {
+        let row = "at ./src/main.rs:42 boom";
+        assert_eq!(
+            detect_target(row, 4),
+            Some(ClickTarget::Path {
+                path: "./src/main.rs".into(),
+                line: Some(42),
+                col: None,
+            })
+        );
+    }
+
+    #[test]
+    fn detects_path_with_line_and_col() {
+        let row = "panic at /abs/file.rs:12:3 here";
+        assert_eq!(
+            detect_target(row, 10),
+            Some(ClickTarget::Path {
+                path: "/abs/file.rs".into(),
+                line: Some(12),
+                col: Some(3),
+            })
+        );
+    }
+
+    #[test]
+    fn trims_wrapping_punctuation_on_path() {
+        let row = "see (./README.md).";
+        assert_eq!(
+            detect_target(row, 6),
+            Some(ClickTarget::Path {
+                path: "./README.md".into(),
+                line: None,
+                col: None,
+            })
+        );
+    }
+
+    #[test]
+    fn bare_word_is_not_a_path() {
+        let row = "the quick brown fox";
+        assert_eq!(detect_target(row, 5), None);
+    }
+
+    #[test]
+    fn relative_without_dot_prefix_is_not_a_path() {
+        // `src/main.rs` (no leading ./) is too ambiguous — could be
+        // prose — so we require an explicit prefix.
+        let row = "src/main.rs changed";
+        assert_eq!(detect_target(row, 2), None);
+    }
+
+    #[test]
+    fn detects_same_repo_issue() {
+        let row = "fixed in #42 today";
+        assert_eq!(
+            detect_target(row, 10),
+            Some(ClickTarget::Issue {
+                repo: None,
+                number: 42,
+            })
+        );
+    }
+
+    #[test]
+    fn detects_cross_repo_issue() {
+        let row = "see acme/widgets#7 upstream";
+        assert_eq!(
+            detect_target(row, 4),
+            Some(ClickTarget::Issue {
+                repo: Some("acme/widgets".into()),
+                number: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn issue_with_trailing_punctuation() {
+        let row = "closes #99.";
+        assert_eq!(
+            detect_target(row, 7),
+            Some(ClickTarget::Issue {
+                repo: None,
+                number: 99,
+            })
+        );
+    }
+
+    #[test]
+    fn hash_without_digits_is_not_an_issue() {
+        let row = "a #section heading";
+        assert_eq!(detect_target(row, 2), None);
+    }
+
+    #[test]
+    fn whitespace_click_returns_none() {
+        let row = "see /etc/hosts here";
+        // Column 3 is the space before the path.
+        assert_eq!(detect_target(row, 3), None);
+    }
+
+    #[test]
+    fn split_line_col_variants() {
+        assert_eq!(split_line_col("/a/b.rs"), ("/a/b.rs", None, None));
+        assert_eq!(split_line_col("/a/b.rs:7"), ("/a/b.rs", Some(7), None));
+        assert_eq!(split_line_col("/a/b.rs:7:3"), ("/a/b.rs", Some(7), Some(3)));
+        // A non-numeric trailing segment is part of the path.
+        assert_eq!(split_line_col("/a/b:c"), ("/a/b:c", None, None));
     }
 }
 

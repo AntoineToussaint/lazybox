@@ -651,6 +651,11 @@ pub struct DisplayConfig {
     /// you want to track "everything I touched recently" without
     /// switching mailboxes.
     pub show_inactive_in_inbox: bool,
+    /// Fall back to plain ASCII letters (`p` / `i` / `l`) for the
+    /// row type indicator instead of the default unicode glyphs
+    /// (`⇄` PR / `○` issue / `◆` linear). Enable for fonts that
+    /// don't render the unicode glyphs reliably as a single cell.
+    pub ascii_glyphs: bool,
 }
 
 impl Default for DisplayConfig {
@@ -662,6 +667,7 @@ impl Default for DisplayConfig {
             hide_approved_by_me: true,
             assignee_is_reviewer: false,
             show_inactive_in_inbox: false,
+            ascii_glyphs: false,
         }
     }
 }

@@ -1019,7 +1019,12 @@ async fn ensure_worktree_present(
 /// kind has the same singleton identity as `kind`. Returns the
 /// wire-side `TerminalId` so the caller can broadcast a focus
 /// request. None when nothing matches OR the kind isn't singleton.
-async fn find_existing_singleton(
+///
+/// `pub(crate)` so the polling layer's auto-fix dispatcher can ask
+/// "is an agent already running on this PR?" and skip re-acting,
+/// using the SAME definition of "already running" that `handle_spawn`
+/// uses to collapse duplicate spawns.
+pub(crate) async fn find_existing_singleton(
     config: &ServerConfig,
     session_key: &SessionKey,
     kind: &TerminalKind,

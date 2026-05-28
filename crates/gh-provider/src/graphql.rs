@@ -63,7 +63,12 @@ query($query: String!, $first: Int!, $after: String) {
             commit {
               statusCheckRollup {
                 state
-                contexts(first: 20) {
+                # Trimmed from 20 → 5. The vast majority of PRs have
+                # 1-3 contexts; 20 was burning cost on padding. If a
+                # PR with >5 contexts hits the Mixed/Pending state
+                # detection, the `any_in_flight` heuristic at
+                # pr_to_task still has the first 5 to inspect.
+                contexts(first: 5) {
                   nodes {
                     __typename
                     ... on CheckRun {
@@ -93,7 +98,15 @@ query($query: String!, $first: Int!, $after: String) {
             }
           }
         }
-        comments(first: 15) {
+        # Trimmed comments 15 → 5 and reviews 10 → 3. The inbox scan
+        # only needs enough history to compute `needs_reply` (uses
+        # author + timestamp of the latest few) + seed the activity
+        # feed's tip. On opening a workspace, `handle_fetch_pr_details`
+        # lazy-fetches the full thread history via PR_DETAILS_QUERY.
+        # Pre-trim each PR pulled ~85 sub-objects (15 + 10 + 20 + …);
+        # post-trim ~33. ~60% per-PR cost reduction across a 100-PR
+        # page. See #17 for the full audit.
+        comments(first: 5) {
           nodes {
             id
             author { login }
@@ -101,7 +114,7 @@ query($query: String!, $first: Int!, $after: String) {
             createdAt
           }
         }
-        reviews(first: 10) {
+        reviews(first: 3) {
           nodes {
             author { login }
             body
@@ -109,7 +122,10 @@ query($query: String!, $first: Int!, $after: String) {
             submittedAt
           }
         }
-        closingIssuesReferences(first: 10) {
+        # Trimmed 10 → 5: PRs rarely close more than 1-2 issues.
+        # Needed at search time so the issue↔PR collapse fires on
+        # first sight of the PR.
+        closingIssuesReferences(first: 5) {
           nodes {
             number
             repository {
@@ -2135,22 +2151,31 @@ mod tests {
 
     #[test]
     fn pr_query_other_connection_sizes_are_pinned_low() {
+        // Post-trim values (see comment in SEARCH_QUERY). The
+        // original 15 / 10 / 20 were sized for ~80 graphql units
+        // per PR; with 100 PRs/page that overran budget on a
+        // multi-repo user. New caps: comments 5, reviews 3,
+        // contexts 5. Pre-trim totals re-pinned below as
+        // regression guards — they MUST NOT come back.
         assert!(
-            SEARCH_QUERY.contains("comments(first: 15)"),
-            "top-level comments cap drifted",
+            SEARCH_QUERY.contains("comments(first: 5)"),
+            "top-level comments cap drifted (expected 5 — see #17 trim)",
         );
         assert!(
-            SEARCH_QUERY.contains("reviews(first: 10)"),
-            "reviews cap drifted",
+            SEARCH_QUERY.contains("reviews(first: 3)"),
+            "reviews cap drifted (expected 3 — see #17 trim)",
         );
         assert!(
-            SEARCH_QUERY.contains("contexts(first: 20)"),
-            "check contexts cap drifted",
+            SEARCH_QUERY.contains("contexts(first: 5)"),
+            "check contexts cap drifted (expected 5 — see #17 trim)",
         );
-        // Hard guard: the previous bloated numbers must NOT come
+        // Hard guards: the pre-trim bloated numbers must NOT come
         // back accidentally.
         assert!(!SEARCH_QUERY.contains("comments(first: 30)"));
+        assert!(!SEARCH_QUERY.contains("comments(first: 15)"));
         assert!(!SEARCH_QUERY.contains("reviews(first: 20)"));
+        assert!(!SEARCH_QUERY.contains("reviews(first: 10)"));
+        assert!(!SEARCH_QUERY.contains("contexts(first: 20)"));
     }
 
     #[test]

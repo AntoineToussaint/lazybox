@@ -95,10 +95,10 @@ impl WorktreeManager {
 
     /// The directory this manager was constructed against — typically
     /// `<state_root>/`, with `repos/` (bare clones) and `worktrees/`
-    /// (per-task checkouts) as siblings underneath. Exposed for
-    /// inspector / doctor tooling that needs to compose paths without
-    /// rebuilding the manager's layout knowledge from scratch.
-    pub fn base_dir(&self) -> &Path {
+    /// (per-task checkouts) as siblings underneath. Crate-private so
+    /// the inspector can compose paths without leaking the layout to
+    /// every downstream caller.
+    pub(crate) fn base_dir(&self) -> &Path {
         &self.base_dir
     }
 

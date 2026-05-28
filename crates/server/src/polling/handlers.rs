@@ -586,6 +586,137 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
         .send(Event::CleanWorktreesCompleted { removed, skipped });
 }
 
+/// Snapshot every persisted session into the inspector's
+/// `TrackedSession` shape. Walks `Store::list_workspaces` once, pulls
+/// each session out, marks ones in `SessionRunState::Stopped` so the
+/// inspector can surface the "session ended but worktree still here"
+/// orphan category. Live (`Active`/`Idle`/`Asking`) sessions don't
+/// move the orphan needle on their own.
+fn collect_tracked_sessions(config: &ServerConfig) -> Vec<pilot_git_ops::TrackedSession> {
+    let records = match config.store.list_workspaces() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("inspect_worktrees: list_workspaces failed: {e}");
+            return Vec::new();
+        }
+    };
+    let mut out: Vec<pilot_git_ops::TrackedSession> = Vec::with_capacity(records.len() * 2);
+    for record in records {
+        let Some(json) = record.workspace_json else {
+            continue;
+        };
+        let Ok(workspace) = serde_json::from_str::<pilot_core::Workspace>(&json) else {
+            continue;
+        };
+        for session in workspace.sessions {
+            let is_stopped = matches!(session.state, pilot_core::SessionRunState::Stopped);
+            // First 8 chars of the UUID — enough to identify a row
+            // in the modal without leaking the whole id into the UI.
+            let raw = session.id.to_string();
+            let session_id = raw.get(..8).unwrap_or(&raw).to_string();
+            out.push(pilot_git_ops::TrackedSession {
+                session_id,
+                worktree_path: session.worktree_path,
+                is_stopped,
+            });
+        }
+    }
+    out
+}
+
+fn to_dto(row: pilot_git_ops::WorktreeInspection) -> pilot_ipc::WorktreeInspectionDto {
+    pilot_ipc::WorktreeInspectionDto {
+        path: row.path,
+        bare_path: row.bare_path,
+        branch: row.branch,
+        session_id: row.session_id,
+        reasons: row.reasons.iter().map(|r| r.tag().to_string()).collect(),
+        size_bytes: row.size_bytes,
+        last_modified_unix: row
+            .last_modified
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs()),
+        has_uncommitted_changes: row.has_uncommitted_changes,
+        has_unpushed_commits: row.has_unpushed_commits,
+        is_safe_to_delete: row.is_safe_to_delete,
+    }
+}
+
+/// Run the worktree inspector and emit the result on the bus.
+/// Read-only — pair with [`handle_delete_orphaned_worktree`] for
+/// destructive follow-up.
+pub async fn handle_inspect_worktrees(config: &ServerConfig) {
+    let mgr = pilot_git_ops::WorktreeManager::default_base();
+    let tracked = collect_tracked_sessions(config);
+    let inspections = match mgr.inspect_worktrees(&tracked).await {
+        Ok(rows) => rows.into_iter().map(to_dto).collect::<Vec<_>>(),
+        Err(e) => {
+            tracing::warn!("inspect_worktrees failed: {e}");
+            // Empty result is better than no reply — the modal would
+            // hang forever waiting on `WorktreesInspected`. The
+            // tracing line carries the diagnostic.
+            Vec::new()
+        }
+    };
+    let _ = config
+        .bus
+        .send(Event::WorktreesInspected { inspections });
+}
+
+/// Delete a single worktree by path. Re-runs a fresh inspection of
+/// that one row so the safety check uses live state (the inspector
+/// result the TUI is acting on may be seconds old). `force = true`
+/// bypasses uncommitted / unpushed / locked refusal.
+pub async fn handle_delete_orphaned_worktree(
+    config: &ServerConfig,
+    path: std::path::PathBuf,
+    force: bool,
+) {
+    let mgr = pilot_git_ops::WorktreeManager::default_base();
+    let tracked = collect_tracked_sessions(config);
+
+    // Re-inspect, then look up this path in the report. Cheap: one
+    // walk under `worktrees/` + a few git calls — far less work than
+    // a full inspection-from-scratch on the TUI side.
+    let inspections = match mgr.inspect_worktrees(&tracked).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            let _ = config.bus.send(Event::OrphanedWorktreeDeleted {
+                path,
+                ok: false,
+                error: Some(format!("inspect failed: {e}")),
+            });
+            return;
+        }
+    };
+    let target = inspections.iter().find(|row| row.path == path).cloned();
+    let Some(target) = target else {
+        let _ = config.bus.send(Event::OrphanedWorktreeDeleted {
+            path,
+            ok: false,
+            error: Some("path is no longer under management".into()),
+        });
+        return;
+    };
+
+    match mgr.delete_inspected(&target, force).await {
+        Ok(()) => {
+            let _ = config.bus.send(Event::OrphanedWorktreeDeleted {
+                path: target.path,
+                ok: true,
+                error: None,
+            });
+        }
+        Err(e) => {
+            let _ = config.bus.send(Event::OrphanedWorktreeDeleted {
+                path: target.path,
+                ok: false,
+                error: Some(e.to_string()),
+            });
+        }
+    }
+}
+
 /// Post-tick prefetch: after a successful poll, pick the top-N PRs
 /// most likely to be clicked next and concurrently fetch their
 /// review-thread details so the right pane is hot when the user

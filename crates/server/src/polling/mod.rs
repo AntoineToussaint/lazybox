@@ -31,7 +31,8 @@ pub use scheduler::{
 };
 
 pub use handlers::{
-    ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_fetch_pr_details,
+    ProviderHandle, handle_add_assignees, handle_clean_worktrees,
+    handle_delete_orphaned_worktree, handle_fetch_pr_details, handle_inspect_worktrees,
     handle_merge_pr, handle_request_reviewers, handle_set_assignees, post_reply,
     prefetch_top_pr_details,
 };

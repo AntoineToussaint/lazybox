@@ -10,7 +10,7 @@
 //! mouse-capture toggle and pane-focus sync helpers round out
 //! the "things the run loop calls between keystrokes" surface.
 
-use super::{Model, Msg, PaneFocus};
+use super::{Id, Model, Msg, PaneFocus};
 use pilot_ipc::{Command as IpcCommand, Event as IpcEvent};
 use tuirealm::terminal::TerminalAdapter;
 
@@ -301,6 +301,36 @@ impl<T: TerminalAdapter> Model<T> {
                 format!("cleaned {removed} worktree(s) · kept {skipped} (active)")
             };
             self.flash_hint(msg);
+        }
+        // Worktree inspector replied. Swap the placeholder for the
+        // real list. `mount_inspect_list` is idempotent — calling it
+        // again after a delete re-renders the now-shorter list, so
+        // the inspector stays open across edits.
+        if let IpcEvent::WorktreesInspected { inspections } = &event {
+            self.mount_inspect_list(inspections.clone());
+        }
+        // One row removed (or refused). Surface the outcome in the
+        // footer and re-inspect so the modal's list drops the row
+        // (on success) or shows fresh safety state (on refusal).
+        if let IpcEvent::OrphanedWorktreeDeleted { path, ok, error } = &event {
+            let name = path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            if *ok {
+                self.flash_hint(format!("removed {name}"));
+            } else {
+                let why = error.as_deref().unwrap_or("refused");
+                self.flash_error(format!("✗ {name}: {why}"));
+            }
+            // Only re-inspect when the inspector modal is open —
+            // outside that flow the user doesn't expect a list to
+            // appear unprompted.
+            if self.modal_stack.contains(&Id::InspectList)
+                || self.modal_stack.contains(&Id::InspectConfirm)
+            {
+                self.send_cmd(pilot_ipc::Command::InspectWorktrees);
+            }
         }
         if is_snapshot && self.preselect.is_some() {
             self.apply_preselect();

@@ -2030,7 +2030,6 @@ dependencies = [
  "pilot-config",
  "pilot-core",
  "pilot-gh",
- "pilot-git-ops",
  "pilot-ipc",
  "pilot-linear",
  "pilot-server",

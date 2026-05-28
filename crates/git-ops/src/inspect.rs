@@ -59,9 +59,6 @@ pub enum OrphanReason {
     /// `git worktree list --porcelain` reports the entry as locked —
     /// the user explicitly froze it; we surface but never auto-delete.
     Locked,
-    /// `git worktree` can't parse the entry — broken metadata, dangling
-    /// gitdir, mismatched HEAD. Surface so the user can decide.
-    Broken,
 }
 
 impl OrphanReason {
@@ -74,7 +71,6 @@ impl OrphanReason {
             OrphanReason::BranchMissingLocally => "branch-missing-locally",
             OrphanReason::Prunable => "prunable",
             OrphanReason::Locked => "locked",
-            OrphanReason::Broken => "broken",
         }
     }
 }
@@ -90,8 +86,9 @@ pub struct WorktreeInspection {
     /// manually, or sandbox-style scratch dirs the inspector still
     /// surfaces for completeness.
     pub bare_path: Option<PathBuf>,
-    /// Branch name reported by `git worktree list --porcelain`, or
-    /// "(detached)" / "(unknown)" when we can't determine it.
+    /// Branch reported by `git worktree list --porcelain`. `None`
+    /// when the HEAD is detached or git couldn't tell us (rare for
+    /// pilot-created worktrees, common for hand-managed ones).
     pub branch: Option<String>,
     /// Session id from the tracked list, if any. None means the dir
     /// is untracked.

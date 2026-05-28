@@ -219,38 +219,68 @@ mod effects_tests {
         assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 5);
     }
 
-    /// Sustained same-direction burst decays the step. First 4
-    /// events stay at 5, events 5-14 drop to 3, event 15+ → 1.
+    /// Sustained same-direction burst decays the step. Events 1-4
+    /// stay at full STEP (5), events 5-7 drop to MID (3), events
+    /// 8-11 drop to TAIL (1), event 12+ is dropped entirely (0).
     #[test]
     fn dampen_scroll_step_decays_within_sustained_burst() {
         let mut m = build_model();
         for _ in 0..4 {
             assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 5);
         }
-        // Event 5 onwards: mid step.
-        assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 3);
-        // Bump count up to 14 (still mid).
-        for _ in 0..9 {
+        for _ in 0..3 {
             assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 3);
         }
-        // Event 15+: tail step.
-        assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 1);
+        for _ in 0..4 {
+            assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 1);
+        }
     }
 
-    /// Direction reversal mid-burst returns 0 (drop the event) AND
-    /// clears the burst, so the next event in the new direction
-    /// starts fresh at full STEP. This is what cancels macOS's
-    /// queued inertia from the prior gesture.
+    /// Past `STOP_AT` (event 12) the dampener returns 0, killing the
+    /// OS momentum tail so the view actually stops within the
+    /// issue's 100–200 ms acceptance window instead of trickling
+    /// onward at STEP=1 for the full 1–2 s tail.
     #[test]
-    fn dampen_scroll_step_direction_reversal_drops_event_and_resets_burst() {
+    fn dampen_scroll_step_hard_stops_past_stop_at() {
         let mut m = build_model();
-        // Build up a downward burst.
+        // Saturate the burst (11 events still admit at TAIL=1).
+        for _ in 0..11 {
+            let _ = m.dampen_scroll_step(false, dummy_wheel());
+        }
+        // Event 12 onwards: dropped.
+        for _ in 0..30 {
+            assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 0);
+        }
+    }
+
+    /// Direction reversal admits immediately at full STEP — real
+    /// trackpad momentum never reverses, so a reverse-flick is
+    /// unambiguous user intent. Swallowing the first reverse press
+    /// would feel unresponsive when the user is course-correcting
+    /// after an overshoot.
+    #[test]
+    fn dampen_scroll_step_direction_reversal_admits_immediately() {
+        let mut m = build_model();
         for _ in 0..6 {
             let _ = m.dampen_scroll_step(false, dummy_wheel());
         }
-        // Reverse: drop + reset.
-        assert_eq!(m.dampen_scroll_step(true, dummy_wheel()), 0);
-        // Next upward event: fresh burst → full step.
+        // Reverse: admit at full step (no dropped event).
+        assert_eq!(m.dampen_scroll_step(true, dummy_wheel()), 5);
+        // The reversal also restarts the burst, so the next
+        // same-direction event stays at full step.
+        assert_eq!(m.dampen_scroll_step(true, dummy_wheel()), 5);
+    }
+
+    /// Reverse-flick rescues a saturated burst — after the hard stop
+    /// kicks in for the downward direction, a reverse-direction event
+    /// must still get through. Otherwise a user correcting an
+    /// overshoot would feel like the trackpad froze.
+    #[test]
+    fn dampen_scroll_step_reverse_admits_after_hard_stop() {
+        let mut m = build_model();
+        for _ in 0..20 {
+            let _ = m.dampen_scroll_step(false, dummy_wheel());
+        }
         assert_eq!(m.dampen_scroll_step(true, dummy_wheel()), 5);
     }
 

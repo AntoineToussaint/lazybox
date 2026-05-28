@@ -97,17 +97,15 @@ impl Terminals {
         self.focused = focused;
     }
 
-    /// Forward to the inner pane's keymap so the help panel can list
-    /// the same bindings the legacy hint bar showed.
-    pub fn keymap(&self) -> &'static [crate::pane::Binding] {
-        self.inner.keymap()
-    }
-
-    /// State-aware short list for the footer hint bar. The terminal
-    /// pane's static keymap is already tight (3 entries) so we just
-    /// reuse it — most keys forward to the PTY anyway.
-    pub fn contextual_bindings(&self) -> Vec<crate::pane::Binding> {
-        self.inner.keymap().to_vec()
+    /// State-aware short list for the footer hint bar. Catalog-driven
+    /// (scroll + leave-terminal) plus the hand-curated `Ctrl-c`
+    /// interrupt hint — see `TerminalStack::contextual_bindings_static`
+    /// for the per-row rationale.
+    pub fn contextual_bindings(
+        &self,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<crate::pane::Binding> {
+        crate::components::terminal_stack::TerminalStack::contextual_bindings(overrides)
     }
 
     /// Detach spec for the focused tile, if any (delegates to the

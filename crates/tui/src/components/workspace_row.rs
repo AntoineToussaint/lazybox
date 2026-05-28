@@ -13,7 +13,7 @@
 //! sidebar.
 
 use crate::components::sidebar::{
-    badge_pill_style, role_badge, status_pills, workspace_type_label,
+    StatusPill, badge_pill_style, role_badge, status_pills, workspace_type_label,
 };
 use crate::components::table::{Cell, Column, Row};
 use crate::theme::Theme;
@@ -44,6 +44,10 @@ pub struct WorkspaceRowCtx<'a> {
     pub asking: bool,
     /// `Sidebar::runner_badges(key)` — `[('C', n), ('S', m)]` etc.
     pub badges: Vec<(char, usize)>,
+    /// Render the type indicator as plain ASCII (`p`/`i`/`l`) instead
+    /// of the default unicode glyphs (`⇄`/`○`/`◆`). Wired from
+    /// `display.ascii_glyphs` in `~/.pilot/config.yaml`.
+    pub ascii_glyphs: bool,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -77,7 +81,9 @@ impl<'a> WorkspaceRowCtx<'a> {
 /// Order (left → right):
 ///
 /// 0. Prefix — `  ▸ ` (cursor) / `    ` (no cursor).
-/// 1. Type label — `[PR] ` / `[I]  ` / `[L]  ` / blank.
+/// 1. Type glyph — `⇄` / `○` / `◆` (or ASCII `p`/`i`/`l`) / blank.
+///    Exactly 1 cell so it sits flush against the `#NNN` to its right
+///    — see issue #42.
 /// 2. PR number — `#NNN`, padded to `max_pr_num_width`.
 /// 3. Role badge — ` R` colored marker, or blank.
 /// 4. Asking glyph — ` ? ` warn-colored, or blank — reserved width so
@@ -105,7 +111,7 @@ impl<'a> WorkspaceRowCtx<'a> {
 pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     vec![
         Column::fixed(4),                        // 0: prefix
-        Column::fixed(5),                        // 1: type label (incl. trailing space)
+        Column::fixed(1),                        // 1: type glyph (single cell, flush against #N)
         Column::fixed(max_pr_num_width).right(), // 2: pr_num (right-aligned so digits line up)
         Column::fixed(2),                        // 3: role (" R" or blank)
         Column::fixed(3),                        // 4: asking (" ? " reserved)
@@ -149,7 +155,10 @@ fn cell_prefix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 }
 
 fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let Some(tag) = ctx.workspace.and_then(workspace_type_label) else {
+    let Some(glyph) = ctx
+        .workspace
+        .and_then(|w| workspace_type_label(w, ctx.ascii_glyphs))
+    else {
         return Cell::empty();
     };
     let style = if ctx.is_cursor {
@@ -159,11 +168,10 @@ fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .fg(ctx.theme.text_dim)
             .add_modifier(Modifier::BOLD)
     };
-    // `tag` is already 5 cells (`[PR] ` / `[I]  ` / `[L]  `) — the
-    // trailing whitespace is part of the label itself so the
-    // `#NNN` number after it lands at the same x-position on
-    // every row.
-    Cell::from_span(Span::styled(tag.to_string(), style))
+    // Single cell, no trailing space — the glyph sits flush against
+    // the `#NNN` cell that follows so the row reads `⇄#312` instead
+    // of `[PR]   #312` (issue #42).
+    Cell::from_span(Span::styled(glyph.to_string(), style))
 }
 
 fn cell_pr_num(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -317,33 +325,35 @@ fn badge_slot_cell(ctx: &WorkspaceRowCtx<'_>, badge: Option<(char, usize)>) -> C
     }
 }
 
+/// Width of each status pill slot — review (9) + CI (9), matching the
+/// label widths in `status_pills`. Lifted to a `const` so the
+/// blank-slot span doesn't have to `" ".repeat(9)` on every call.
+const BLANK_PILL: &str = "         ";
+
 fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let Some(task) = ctx.task else {
         return Cell::empty();
     };
     let (primary, secondary) = status_pills(task);
     // Empty cell when there's nothing to show — `Column::max(0)`
-    // collapses the column to 0 cells across the whole table when
-    // NO row in the visible list has a pill, handing the slack back
-    // to the title flex. When ANY row has a pill, the column expands
-    // to 19 cells (9 review + 1 gutter + 9 CI) and rows without
-    // pills get padded by the table renderer.
+    // collapses the column across the whole table when NO row has
+    // a pill, handing the slack back to the title flex. When ANY
+    // row has a pill, the column expands to 19 cells (9 review + 1
+    // gutter + 9 CI) and pill-less rows get padded by the table
+    // renderer.
     if primary.is_none() && secondary.is_none() {
         return Cell::empty();
     }
-    let blank_pill =
-        |spans: &mut Vec<Span<'static>>| spans.push(Span::styled(" ".repeat(9), ctx.row_style()));
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(3);
-    match primary {
-        Some(p) => spans.push(Span::styled(p.label.to_string(), p.style)),
-        None => blank_pill(&mut spans),
-    }
-    spans.push(Span::styled(" ".to_string(), ctx.row_style()));
-    match secondary {
-        Some(p) => spans.push(Span::styled(p.label.to_string(), p.style)),
-        None => blank_pill(&mut spans),
-    }
-    Cell::new(spans)
+    let row_style = ctx.row_style();
+    let pill_span = |pill: Option<StatusPill>| match pill {
+        Some(p) => Span::styled(p.label, p.style),
+        None => Span::styled(BLANK_PILL, row_style),
+    };
+    Cell::new(vec![
+        pill_span(primary),
+        Span::styled(" ", row_style),
+        pill_span(secondary),
+    ])
 }
 
 fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -362,7 +372,7 @@ fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // left (status pill, or — when status collapses to 0 — the
     // title flex padding).
     Cell::new(vec![
-        Span::styled(" ".to_string(), ctx.row_style()),
+        Span::styled(" ", ctx.row_style()),
         Span::styled(text, style),
     ])
 }
@@ -429,6 +439,7 @@ mod tests {
             long_snooze_armed: false,
             asking: false,
             badges: vec![],
+            ascii_glyphs: false,
         }
     }
 
@@ -612,6 +623,7 @@ mod tests {
             long_snooze_armed: false,
             asking: false,
             badges: vec![],
+            ascii_glyphs: false,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -737,10 +749,26 @@ mod tests {
             "rows must render to the same total width or trailing columns drift: {row_a:?} vs {row_b:?}",
         );
         // Find the `C` glyph in row A; row B must have a space at
-        // the SAME byte/cell offset, not anything else. (Both rows
-        // share the prefix layout so cell == char counting is safe
-        // here.)
-        let c_pos = row_a.find(" C ").expect("row A should have a ` C ` badge");
+        // the SAME char/cell offset, not anything else. The type
+        // glyph (`⇄` / `○`) is multi-byte UTF-8, so anchor by char
+        // index — `String::find` is byte-based and would drift.
+        let c_pos = row_a
+            .char_indices()
+            .scan(0usize, |i, (_byte, ch)| {
+                let start = *i;
+                *i += 1;
+                Some((start, ch))
+            })
+            .collect::<Vec<_>>()
+            .windows(3)
+            .find_map(|w| {
+                if w[0].1 == ' ' && w[1].1 == 'C' && w[2].1 == ' ' {
+                    Some(w[0].0)
+                } else {
+                    None
+                }
+            })
+            .expect("row A should have a ` C ` badge");
         let same_window: String = row_b.chars().skip(c_pos).take(3).collect();
         assert_eq!(
             same_window, "   ",

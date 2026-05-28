@@ -256,6 +256,11 @@ pub struct Model<T: TerminalAdapter> {
     pub projects: std::collections::BTreeMap<pilot_core::ProjectKey, pilot_core::Project>,
     /// IPC client for forwarding pane-emitted commands to the daemon.
     pub client: Client,
+    /// Watches the inbound daemon-event channel depth after each
+    /// drain. A backlog that climbs tick-over-tick means the TUI is
+    /// consuming slower than the daemon produces — the signature of a
+    /// runaway producer or a leak. See `helpers::BacklogMonitor`.
+    event_backlog: helpers::BacklogMonitor,
     pub redraw: bool,
     pub quit: bool,
     /// Setup wizard / settings palette / editor-open state — see
@@ -567,6 +572,7 @@ impl<T: TerminalAdapter> Model<T> {
             terminals: Terminals::new(TERMINALS_PID),
             projects: std::collections::BTreeMap::new(),
             client,
+            event_backlog: helpers::BacklogMonitor::default(),
             redraw: true,
             quit: false,
             setup: SetupCtx::new(),

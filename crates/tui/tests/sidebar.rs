@@ -596,8 +596,8 @@ fn render_smoke_has_mailbox_label_and_grouped_rows() {
     assert!(rendered.contains('2'), "row count in title");
     assert!(rendered.contains("owner/repo"), "repo header rendered");
     assert!(rendered.contains("task: o/r#1"), "first workspace visible");
-    // The PR (`⇄`) sits flush against the `#NNN` cell — `⇄#1` /
-    // `○#1`, see issue #42.
+    // The PR (`⇄`) sits flush against the number cell — `⇄1` /
+    // `○1` (no `#` prefix), see issues #42, #67.
     assert!(
         rendered.contains('⇄') || rendered.contains('○'),
         "rows carry a single-cell type glyph",

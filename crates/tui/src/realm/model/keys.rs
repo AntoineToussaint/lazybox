@@ -494,6 +494,11 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(terminal_id) = self.terminals.active_terminal_id() else {
             return;
         };
+        // Update the pinned-recap composing buffer for agent
+        // terminals; without this, a pasted prompt would commit on
+        // Enter as a blank recap (the keystroke tracker only sees the
+        // CR, not the paste payload).
+        self.terminals.record_paste(text);
         let mut bytes = Vec::with_capacity(text.len() + 12);
         bytes.extend_from_slice(b"\x1b[200~");
         bytes.extend_from_slice(text.as_bytes());

@@ -255,6 +255,18 @@ struct TerminalSlot {
     /// the original spawn size never gets written and the user sees
     /// a frozen-looking pane).
     last_rendered_size: Option<(u16, u16)>,
+    /// Characters the user has typed since the last submit. Only
+    /// tracked on Agent terminals — the pinned recap is meaningless
+    /// for shells. Cleared when the user hits Enter, Ctrl-C, Ctrl-U,
+    /// or Esc (the same keys that wipe the prompt buffer in Claude
+    /// Code / a shell prompt).
+    composing: String,
+    /// Most recently submitted user message. Rendered as a one-line
+    /// recap above the agent's terminal grid so it's obvious "what
+    /// you just asked the model" even after pages of tool output
+    /// scroll the prompt off-screen. `None` until the user has
+    /// submitted at least one message in this terminal.
+    last_user_message: Option<String>,
 }
 
 /// libghostty-vt state for one terminal.
@@ -958,6 +970,91 @@ impl TerminalStack {
             recent: Vec::new(),
             agent_state: pilot_ipc::AgentState::Active,
             last_rendered_size: None,
+            composing: String::new(),
+            last_user_message: None,
+        }
+    }
+
+    /// The last full user message submitted to the given agent
+    /// terminal (the bytes between two Enter presses), or `None` if
+    /// the user hasn't sent anything yet or the terminal isn't an
+    /// agent. Drives the pinned "you ▸ …" recap line at the top of
+    /// the agent view.
+    pub fn last_user_message_of(&self, id: TerminalId) -> Option<&str> {
+        self.terminals
+            .get(&id)
+            .and_then(|s| s.last_user_message.as_deref())
+    }
+
+    /// In-flight characters the user has typed but not yet
+    /// submitted to the given terminal. Exposed primarily for tests
+    /// so they can verify buffer management (commit on Enter, clear
+    /// on Ctrl-C, etc.) without having to drive a full render, but
+    /// also usable by future surfaces that want a live "draft"
+    /// indicator.
+    pub fn composing_of(&self, id: TerminalId) -> Option<&str> {
+        self.terminals.get(&id).map(|s| s.composing.as_str())
+    }
+
+    /// Record a bracketed-paste payload as part of the focused
+    /// agent terminal's composing buffer. Pastes don't flow through
+    /// `handle_key` (they arrive as a single `Event::Paste` and the
+    /// realm forwards them straight to the PTY), so without this
+    /// hook a long pasted prompt would commit on Enter as a blank
+    /// recap. No-op for non-Agent terminals.
+    pub fn record_paste(&mut self, text: &str) {
+        let Some(id) = self.focused_terminal_id() else {
+            return;
+        };
+        if let Some(slot) = self.terminals.get_mut(&id)
+            && matches!(slot.kind, TerminalKind::Agent(_))
+        {
+            slot.composing.push_str(text);
+        }
+    }
+
+    /// Update the composing buffer + last-submitted message in
+    /// response to a key the user just sent to an Agent terminal.
+    /// Mirrors how the agent's own prompt-line reads keys:
+    ///   - printable Char → append
+    ///   - Backspace → pop
+    ///   - Enter → commit (Shift-Enter inserts a newline instead,
+    ///     matching Claude Code's "newline-without-submit" binding)
+    ///   - Ctrl-C / Ctrl-U / Esc → clear the line
+    /// Other keys (arrows, function keys, Tab) are intentionally
+    /// ignored — they don't change the literal text the user is
+    /// composing.
+    fn record_key_for_message(slot: &mut TerminalSlot, key: &KeyEvent) {
+        use KeyCode::*;
+        let mods = key.modifiers;
+        match key.code {
+            Char(c) => {
+                if mods.contains(KeyModifiers::CONTROL) {
+                    if c == 'c' || c == 'u' {
+                        slot.composing.clear();
+                    }
+                } else {
+                    slot.composing.push(c);
+                }
+            }
+            Enter => {
+                if mods.contains(KeyModifiers::SHIFT) {
+                    slot.composing.push('\n');
+                } else {
+                    let trimmed = slot.composing.trim();
+                    if !trimmed.is_empty() {
+                        slot.last_user_message = Some(trimmed.to_string());
+                    }
+                    slot.composing.clear();
+                }
+            }
+            Backspace => {
+                slot.composing.pop();
+            }
+            Esc => {
+                slot.composing.clear();
+            }
+            _ => {}
         }
     }
 
@@ -1087,6 +1184,16 @@ impl TerminalStack {
         let Some(bytes) = key_to_bytes(&key) else {
             return PaneOutcome::Consumed;
         };
+        // Mirror the keystroke into our own composing buffer so the
+        // pinned "you ▸ …" recap reflects the latest submitted
+        // message. Scoped to Agent terminals — shells don't have a
+        // single semantic "user prompt", so the recap would be noisy
+        // (every cd, every grep) and surprising.
+        if let Some(slot) = self.terminals.get_mut(&id)
+            && matches!(slot.kind, TerminalKind::Agent(_))
+        {
+            Self::record_key_for_message(slot, &key);
+        }
         cmds.push(Command::Write {
             terminal_id: id,
             bytes,
@@ -1619,15 +1726,44 @@ impl TerminalStack {
     ) {
         let _ = focused; // ghostty-vt doesn't render focus chrome itself
         if let Some(slot) = self.terminals.get_mut(&id) {
-            slot.vt.ensure_size(rect.width, rect.height);
+            // Carve off one row for the pinned "you ▸ <recap>" line
+            // when this is an agent terminal with a remembered last
+            // user message. Refuses to take the row at h ≤ 1 — leaves
+            // every cell for the agent grid rather than blank-out the
+            // pane entirely on a 1-row split.
+            let show_recap = matches!(slot.kind, TerminalKind::Agent(_))
+                && slot.last_user_message.is_some()
+                && rect.height >= 2;
+            let body = if show_recap {
+                Rect {
+                    x: rect.x,
+                    y: rect.y + 1,
+                    width: rect.width,
+                    height: rect.height - 1,
+                }
+            } else {
+                rect
+            };
+            if show_recap
+                && let Some(msg) = slot.last_user_message.as_deref()
+            {
+                let header_rect = Rect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: 1,
+                };
+                render_user_message_recap(frame, header_rect, msg);
+            }
+            slot.vt.ensure_size(body.width, body.height);
             // Backend PTY also needs to know the new size — otherwise
             // the shell process keeps writing at its spawn dimensions
             // and the bottom rows go blank as soon as the user scrolls
             // past them. Queue a resize for the App to ship.
-            let new_size = (rect.width, rect.height);
-            if rect.width > 0 && rect.height > 0 && slot.last_rendered_size != Some(new_size) {
+            let new_size = (body.width, body.height);
+            if body.width > 0 && body.height > 0 && slot.last_rendered_size != Some(new_size) {
                 slot.last_rendered_size = Some(new_size);
-                self.pending_resizes.push((id, rect.width, rect.height));
+                self.pending_resizes.push((id, body.width, body.height));
             }
             if let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) {
                 let widget = GhosttyTerminal::new(
@@ -1636,7 +1772,7 @@ impl TerminalStack {
                     &mut slot.vt.cell_iter,
                     &mut slot.vt.shadow,
                 );
-                frame.render_widget(widget, rect);
+                frame.render_widget(widget, body);
             }
         }
     }
@@ -1868,6 +2004,46 @@ pub fn strip_ansi(input: &[u8]) -> Vec<u8> {
 /// for keys we don't know how to encode yet. Public so the app-level
 /// escape-latch can flush buffered keystrokes through the same
 /// encoding path the live key dispatch uses.
+/// Visible prefix on the pinned recap row. Whitespace + the
+/// box-drawing wedge `▸` reads as "input direction" without being
+/// visually loud. Kept here as a const so tests can assert against
+/// it without duplicating the literal.
+pub(crate) const RECAP_PREFIX: &str = "you ▸ ";
+
+/// Collapse a possibly multi-line user message down to a single
+/// line of plain text for the pinned recap row. Newlines and runs
+/// of whitespace become single spaces so multi-line prompts
+/// (Shift-Enter inside Claude) render as "fix bug in foo.rs and
+/// retry" instead of "fix bug in foo.rs⏎and retry" with a visible
+/// gap.
+pub(crate) fn summarize_message(msg: &str) -> String {
+    msg.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Render the "you ▸ <recap>" line into `area`. Dim styling so the
+/// pin reads as chrome / recap, not as fresh agent output the user
+/// has to parse. Truncates with `…` when the message overflows the
+/// row width — matches what `crate::components::table::truncate_line`
+/// does for the empty-state hint elsewhere in this pane.
+fn render_user_message_recap(frame: &mut Frame, area: Rect, msg: &str) {
+    let theme = crate::theme::current();
+    let summary = summarize_message(msg);
+    let spans = vec![
+        Span::styled(
+            RECAP_PREFIX.to_string(),
+            Style::default()
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(summary, Style::default().fg(theme.text_dim)),
+    ];
+    let line = crate::components::table::truncate_line(
+        ratatui::text::Line::from(spans),
+        area.width as usize,
+    );
+    frame.render_widget(Paragraph::new(line), area);
+}
+
 pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
     use KeyCode::*;
     match key.code {

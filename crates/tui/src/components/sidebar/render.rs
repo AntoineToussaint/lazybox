@@ -208,10 +208,13 @@ impl Sidebar {
         // the type glyph in column 1 now carries the issue-vs-PR
         // signal), computed via `ilog10` so the hot path doesn't
         // allocate a String per row. The natural width is the floor —
-        // no extra "separator" padding — so the glyph in column 1 sits
-        // flush against the number (`⇄18`, not `⇄  18`); see issues
-        // #42, #67. The role cell that follows brings its own leading
-        // space.
+        // no extra "separator" padding (issue #42). Flush spacing on
+        // EVERY row (`⇄18`, not `⇄  18`) is then a property of the
+        // column being LEFT-aligned: the deficit pads on the right,
+        // after the number, so the glyph never gets a leading gap
+        // regardless of digit count. A right-aligned column padded the
+        // short rows on the left and reopened that gap — issue #65. The
+        // role cell that follows brings its own leading space.
         let max_pr_num_width = self
             .visible
             .iter()

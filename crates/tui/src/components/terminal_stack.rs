@@ -324,10 +324,32 @@ struct TerminalSlot {
 }
 
 impl TerminalSlot {
+    /// Append one char to the composing buffer when it fits within
+    /// [`COMPOSING_CAP`]; silently drop it otherwise. The bound is the
+    /// whole point — a runaway auto-typer (or a pathological paste)
+    /// can't grow the buffer without limit.
+    fn push_composing(&mut self, c: char) {
+        if self.composing.len() + c.len_utf8() <= COMPOSING_CAP {
+            self.composing.push(c);
+        }
+    }
+
+    /// Commit the trimmed composing buffer as the latest user message
+    /// and reset it for the next prompt. An all-whitespace buffer is
+    /// ignored, so mashing Enter on an empty prompt (e.g. dismissing
+    /// an agent approval) doesn't blank out the recap.
+    fn commit_composing(&mut self) {
+        let trimmed = self.composing.trim();
+        if !trimmed.is_empty() {
+            self.last_user_message = Some(trimmed.to_string());
+        }
+        self.composing.clear();
+    }
+
     /// Feed the *exact bytes* that are about to be written to this
     /// terminal's PTY into the composing buffer + last-message state.
-    /// Every submit path — raw keystrokes, bracketed paste, snippet
-    /// expansion, programmatic sends — funnels its payload through a
+    /// Every submit path — raw keystrokes, snippet expansion,
+    /// programmatic sends — funnels its payload through a
     /// `Command::Write`, so parsing that byte stream is the one place
     /// the recap can't drift from what the agent actually received.
     ///
@@ -336,32 +358,46 @@ impl TerminalSlot {
     ///   - printable text → append (respecting [`COMPOSING_CAP`])
     ///   - CR (`\r`) → commit the trimmed buffer as the latest message
     ///   - LF (`\n`) → soft newline (kept in the buffer, no submit) —
-    ///     this is how multi-line pastes / snippet bodies arrive
+    ///     this is how a multi-line snippet body arrives
     ///   - `ESC \r` / `ESC \n` (Shift-Enter) → soft newline, no submit
     ///   - DEL / BS → erase one char
     ///   - Ctrl-C / Ctrl-U → clear the line
-    ///   - lone ESC → clear the line (prompt reset)
-    ///   - other CSI / SS3 sequences (arrows, mouse reports, Delete,
-    ///     bracketed-paste markers) → skipped; they aren't literal
-    ///     text the user is composing
+    ///   - lone ESC (no following byte) → clear the line (prompt reset)
+    ///   - `ESC [ … ` (CSI) / `ESC O …` (SS3) sequences — arrows,
+    ///     mouse reports, Delete — are skipped; they aren't literal
+    ///     composed text. Any other `ESC`-prefixed meta sequence drops
+    ///     just the `ESC` and keeps parsing, so a stray escape can
+    ///     never silently wipe an in-flight prompt.
     ///
-    /// Decoding is lossy UTF-8: the recap is display-only, so a stray
-    /// invalid byte degrades to U+FFFD rather than dropping the write.
+    /// **Contract:** each call must carry one *complete* logical write
+    /// (a single keystroke's bytes, or a full one-shot command).
+    /// Sequences are not buffered across calls, so an escape sequence
+    /// or multi-byte codepoint split between two invocations would be
+    /// mis-framed. Bracketed-paste *payloads* must not be routed here —
+    /// they are captured separately via [`Self::append_paste`], so this
+    /// never sees an `ESC[200~ … ESC[201~` body. Decoding is lossy
+    /// UTF-8: the recap is display-only, so a stray invalid byte
+    /// degrades to U+FFFD rather than dropping the write.
     fn record_pty_bytes(&mut self, bytes: &[u8]) {
+        // ECMA-48: a CSI sequence runs until its final byte, which
+        // lies in 0x40..=0x7e. Intermediate / parameter bytes are all
+        // below that range, so the first byte in it terminates.
+        const CSI_FINAL: std::ops::RangeInclusive<char> = '@'..='~';
+
         let text = String::from_utf8_lossy(bytes);
         let mut chars = text.chars().peekable();
         while let Some(c) = chars.next() {
             match c {
                 '\x1b' => match chars.peek() {
                     // CSI: `ESC [ … final`. Consume up to and
-                    // including the final byte (0x40..=0x7e). This
-                    // also swallows bracketed-paste markers
-                    // (`ESC [ 200~` / `201~`) and the Delete key.
+                    // including the final byte. This also swallows
+                    // bracketed-paste markers (`ESC[200~`/`201~`),
+                    // the Delete key, and mouse reports.
                     Some('[') => {
                         chars.next();
                         while let Some(&n) = chars.peek() {
                             chars.next();
-                            if ('@'..='~').contains(&n) {
+                            if CSI_FINAL.contains(&n) {
                                 break;
                             }
                         }
@@ -374,47 +410,34 @@ impl TerminalSlot {
                     // Shift-Enter arrives as `ESC \r` (see
                     // `key_to_bytes`): a newline in the prompt without
                     // a submit.
-                    Some('\r') | Some('\n') => {
+                    Some('\r' | '\n') => {
                         chars.next();
-                        if self.composing.len() < COMPOSING_CAP {
-                            self.composing.push('\n');
-                        }
+                        self.push_composing('\n');
                     }
-                    // Lone Esc → reset the line.
-                    _ => self.composing.clear(),
+                    // Lone Esc (the real Esc key is a single 0x1b) →
+                    // reset the line.
+                    None => self.composing.clear(),
+                    // Unrecognised `ESC`-prefixed meta sequence: drop
+                    // only the ESC and let the next char be parsed
+                    // normally, rather than nuking the buffer.
+                    Some(_) => {}
                 },
                 // CR is the submit. LF is only ever a soft newline
                 // here (Enter maps to CR, never LF), so a multi-line
-                // paste / snippet body commits once, on its trailing
-                // CR, not at each embedded newline.
-                '\r' => {
-                    let trimmed = self.composing.trim();
-                    if !trimmed.is_empty() {
-                        self.last_user_message = Some(trimmed.to_string());
-                    }
-                    self.composing.clear();
-                }
-                '\n' => {
-                    if self.composing.len() < COMPOSING_CAP {
-                        self.composing.push('\n');
-                    }
-                }
+                // snippet body commits once, on its trailing CR, not
+                // at each embedded newline.
+                '\r' => self.commit_composing(),
+                '\n' => self.push_composing('\n'),
                 // DEL / Backspace.
                 '\x7f' | '\x08' => {
                     self.composing.pop();
                 }
                 // Ctrl-C / Ctrl-U wipe the in-flight line.
-                '\x03' | '\x15' => {
-                    self.composing.clear();
-                }
+                '\x03' | '\x15' => self.composing.clear(),
                 // Other control chars (Tab, etc.) don't change the
                 // literal text being composed.
                 c if c.is_control() => {}
-                c => {
-                    if self.composing.len() + c.len_utf8() <= COMPOSING_CAP {
-                        self.composing.push(c);
-                    }
-                }
+                c => self.push_composing(c),
             }
         }
     }

@@ -992,6 +992,35 @@ fn record_pty_write_skips_escape_sequences() {
 }
 
 #[test]
+fn record_pty_write_unknown_meta_escape_does_not_wipe_buffer() {
+    // A stray `ESC`-prefixed sequence that isn't CSI/SS3 (e.g. an
+    // Alt-combo) must drop only the ESC and keep parsing — it must
+    // never silently clear an in-flight prompt. Only a *lone* ESC
+    // (the real Esc key) resets the line.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    // "a", ESC+x (meta), "b", submit → the ESC is dropped, the rest
+    // composes normally.
+    t.record_pty_write(TerminalId(1), b"a\x1bxb\r");
+    assert_eq!(t.last_user_message_of(TerminalId(1)), Some("axb"));
+}
+
+#[test]
+fn ctrl_u_clears_composing_without_commit() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    type_str(&mut t, "scratch");
+    let mut cmds = Vec::new();
+    t.handle_key(ctrl('u'), &mut cmds);
+    assert_eq!(t.composing_of(TerminalId(1)), Some(""));
+    assert_eq!(t.last_user_message_of(TerminalId(1)), None);
+}
+
+#[test]
 fn record_pty_write_is_noop_on_shell() {
     let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));

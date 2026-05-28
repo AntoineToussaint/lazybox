@@ -23,7 +23,7 @@ use pilot_core::{
     TaskState,
 };
 use pilot_ipc::{Command, Event, channel};
-use pilot_server::polling::{self, TaskSource};
+use pilot_server::polling::{self, FetchMode, TaskSource};
 use pilot_server::{Server, ServerConfig};
 use pilot_store::WorkspaceRecord;
 use std::future::Future;
@@ -160,6 +160,85 @@ impl TaskSource for CountingSource {
             counter.fetch_add(1, Ordering::SeqCst);
             Ok(vec![])
         })
+    }
+}
+
+/// Source that returns a fixed task set AND queues an
+/// `AutoSpawnAgent` action to be drained after the upsert pass. The
+/// in-process equivalent of `GhSource`'s `@pilot`-mention path
+/// without the network round-trip — used to verify that
+/// `tick_with_state` runs `drain_actions` and routes the spawn
+/// through `handle_spawn` end-to-end.
+struct ActionEmittingSource {
+    name: String,
+    tasks: Vec<Task>,
+    actions: std::sync::Mutex<Vec<polling::ProviderAction>>,
+}
+
+impl TaskSource for ActionEmittingSource {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn fetch<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    {
+        let tasks = self.tasks.clone();
+        Box::pin(async move { Ok(tasks) })
+    }
+    fn drain_actions(&self) -> Vec<polling::ProviderAction> {
+        std::mem::take(&mut *self.actions.lock().unwrap())
+    }
+}
+
+/// Fake source that returns a fixed task set AND advertises a
+/// caller-specified `PolledScope`. Used by rescope tests that want
+/// to exercise partial-coverage behavior end-to-end through
+/// `tick_with_state` instead of building `TickOutcome` by hand.
+struct ScopedSource {
+    name: String,
+    tasks: Vec<Task>,
+    scope: polling::PolledScope,
+}
+
+impl TaskSource for ScopedSource {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn fetch<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    {
+        let tasks = self.tasks.clone();
+        Box::pin(async move { Ok(tasks) })
+    }
+    fn polled_scope(&self) -> polling::PolledScope {
+        self.scope.clone()
+    }
+}
+
+/// A source that returns its task list AND reports the fetch as
+/// incremental. Stand-in for `GhSource`'s notifications-driven fast
+/// path in tests that exercise the rescope-skip behavior without
+/// needing a real GitHub token.
+struct IncrementalSource {
+    name: String,
+    tasks: Vec<Task>,
+}
+
+impl TaskSource for IncrementalSource {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn fetch<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    {
+        let tasks = self.tasks.clone();
+        Box::pin(async move { Ok(tasks) })
+    }
+    fn last_fetch_kind(&self) -> FetchMode {
+        FetchMode::Incremental
     }
 }
 
@@ -1161,6 +1240,8 @@ async fn rescope_removes_workspaces_with_no_active_session() {
         any_source_succeeded: true,
         retry_after_secs: None,
         saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::new(),
+        all_full: true,
     };
     polling::rescope(&config, &outcome).await;
 
@@ -1206,6 +1287,8 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
         any_source_succeeded: true,
         retry_after_secs: None,
         saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::new(),
+        all_full: true,
     };
     let mut state = polling::TickState::default();
     polling::rescope_with_state(&config, &outcome, &mut state).await;
@@ -1263,6 +1346,8 @@ async fn rescope_with_empty_but_successful_poll_keeps_workspaces() {
         any_source_succeeded: true,
         retry_after_secs: None,
         saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::new(),
+        all_full: true,
     };
     polling::rescope(&config, &outcome).await;
     let after: Vec<String> = config
@@ -1291,6 +1376,8 @@ async fn rescope_with_all_sources_failed_skips_cleanup() {
         any_source_succeeded: false,
         retry_after_secs: None,
         saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::new(),
+        all_full: true,
     };
     polling::rescope(&config, &outcome).await;
     let after: Vec<String> = config
@@ -1305,6 +1392,269 @@ async fn rescope_with_all_sources_failed_skips_cleanup() {
         "all-failed poll must not remove anything: got {after:?}"
     );
 }
+#[tokio::test]
+async fn rescope_preserves_workspaces_from_unpolled_repos() {
+    // Regression for issue #34: round-robin polling polls a slice
+    // of the user's repos per tick (e.g. 3 of 10). Pre-fix, rescope
+    // treated every stored workspace not in `polled` as out-of-
+    // scope and deleted it — so PRs from the 7 unpolled repos
+    // disappeared every warm tick and reappeared on the next global
+    // sweep (~K minutes later).
+    //
+    // Fix: TickOutcome carries per-source `PolledScope`. When a
+    // source reports `Repos(...)`, workspaces in repos NOT in that
+    // list are preserved — we have no information about them this
+    // tick and silently dropping them is data loss.
+    use pilot_core::{Task, TaskId, WorkspaceKey};
+    let config = ServerConfig::in_memory();
+
+    // Seed three workspaces across three different GitHub repos.
+    let mut polled_task = make_task("owner/polled#1");
+    polled_task.id = TaskId {
+        source: "github".into(),
+        key: "owner/polled#1".into(),
+    };
+    polled_task.repo = Some("owner/polled".into());
+    polled_task.url = "https://github.com/owner/polled/pull/1".into();
+
+    let mut unpolled_task: Task = make_task("owner/unpolled#2");
+    unpolled_task.id = TaskId {
+        source: "github".into(),
+        key: "owner/unpolled#2".into(),
+    };
+    unpolled_task.repo = Some("owner/unpolled".into());
+    unpolled_task.url = "https://github.com/owner/unpolled/pull/2".into();
+
+    let mut other_repo_task: Task = make_task("owner/other#3");
+    other_repo_task.id = TaskId {
+        source: "github".into(),
+        key: "owner/other#3".into(),
+    };
+    other_repo_task.repo = Some("owner/other".into());
+    other_repo_task.url = "https://github.com/owner/other/pull/3".into();
+
+    polling::upsert(&config, polled_task.clone()).await;
+    polling::upsert(&config, unpolled_task.clone()).await;
+    polling::upsert(&config, other_repo_task.clone()).await;
+
+    // Simulate a round-robin tick: only `owner/polled` was queried;
+    // the GhSource reports `Repos(["owner/polled"])` as its
+    // authoritative scope. The other two repos are intentionally
+    // outside this tick's coverage.
+    let outcome = polling::TickOutcome {
+        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+            &polled_task,
+        ))],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::from([(
+            "github".into(),
+            polling::PolledScope::Repos(vec!["owner/polled".into()]),
+        )]),
+        all_full: true,
+    };
+    polling::rescope(&config, &outcome).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+
+    // The polled repo's workspace stays (it was in `polled`).
+    assert!(
+        after.iter().any(|k| k.contains("polled")),
+        "polled workspace should remain: {after:?}",
+    );
+    // CRITICAL: workspaces from unpolled repos must be preserved.
+    // Pre-fix, both would have been deleted here — that's the bug.
+    assert!(
+        after.iter().any(|k| k.contains("unpolled")),
+        "unpolled-repo workspace MUST be preserved (issue #34): {after:?}",
+    );
+    assert!(
+        after.iter().any(|k| k.contains("other")),
+        "other-repo workspace MUST be preserved (issue #34): {after:?}",
+    );
+}
+
+#[tokio::test]
+async fn rescope_with_exhaustive_scope_still_deletes_stale() {
+    // Counterpart to `rescope_preserves_workspaces_from_unpolled_repos`:
+    // when the GH source reports `Exhaustive` (the global sweep ran),
+    // the legacy behavior is intact — stale workspaces still get
+    // cleaned up. Without this assertion, a regression that flipped
+    // the new guard to "always preserve" would silently leave the
+    // sidebar full of stale rows forever.
+    use pilot_core::WorkspaceKey;
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_task("o/r#stale")).await;
+    polling::upsert(&config, make_task("o/r#current")).await;
+
+    let outcome = polling::TickOutcome {
+        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+            &make_task("o/r#current"),
+        ))],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::from([(
+            "github".into(),
+            polling::PolledScope::Exhaustive,
+        )]),
+        all_full: true,
+    };
+    polling::rescope(&config, &outcome).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(
+        !after.iter().any(|k| k.contains("stale")),
+        "Exhaustive scope must still delete stale workspaces: {after:?}",
+    );
+    assert!(after.iter().any(|k| k.contains("current")));
+}
+
+#[tokio::test]
+async fn rescope_preserves_workspaces_from_unreported_sources() {
+    // When one source succeeds and another fails (or isn't enabled),
+    // only the succeeding source's workspaces are deletion candidates.
+    // Pre-fix, a Linear-only successful tick would have wiped every
+    // GitHub workspace (since none were in `polled`) — silently
+    // destructive whenever GH had a transient failure.
+    use pilot_core::{Task, TaskId};
+    let config = ServerConfig::in_memory();
+
+    // Seed a GH workspace and a Linear workspace.
+    let mut gh_task = make_task("o/r#1");
+    gh_task.repo = Some("o/r".into());
+
+    let mut linear_task: Task = make_task("team-x-42");
+    linear_task.id = TaskId {
+        source: "linear".into(),
+        key: "team-x-42".into(),
+    };
+    linear_task.repo = Some("team-x".into());
+    linear_task.url = "https://linear.app/team/issue/team-x-42".into();
+
+    polling::upsert(&config, gh_task.clone()).await;
+    polling::upsert(&config, linear_task.clone()).await;
+
+    // Only Linear reported this tick — GH errored out.
+    let outcome = polling::TickOutcome {
+        polled: vec![],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::from([(
+            "linear".into(),
+            polling::PolledScope::Exhaustive,
+        )]),
+        all_full: true,
+    };
+    // `polled` is empty so the existing "empty polled, refuse to
+    // wipe" guard fires before our new scope guard — assert the
+    // store is intact through that path as well. The scope-guard's
+    // own coverage lives in the previous two tests.
+    polling::rescope(&config, &outcome).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert_eq!(after.len(), 2, "both workspaces must survive: {after:?}",);
+}
+
+#[tokio::test]
+async fn rescope_round_robin_tick_after_global_keeps_unpolled() {
+    // End-to-end-ish: simulate the exact issue #34 sequence using
+    // real `TickState` + `tick_with_state`.
+    //
+    // 1. First tick: a fake source returns three PRs spanning three
+    //    repos and reports `Exhaustive` (mimics a cold-start
+    //    global GH sweep). All three workspaces land in the store.
+    // 2. Second tick: a fake source returns ONLY `owner/a#1` and
+    //    reports `Repos(["owner/a"])` (mimics a warm round-robin
+    //    tick where only `owner/a` was queried).
+    //
+    // Expectation: after step 2, `owner/b#2` and `owner/c#3` are
+    // still in the store — they belong to repos we didn't query
+    // this tick, not repos that fell out of upstream scope.
+    use pilot_core::{Task, TaskId};
+
+    fn gh_task(repo: &str, num: u32) -> Task {
+        let mut t = make_task(&format!("{repo}#{num}"));
+        t.id = TaskId {
+            source: "github".into(),
+            key: format!("{repo}#{num}"),
+        };
+        t.repo = Some(repo.into());
+        t.url = format!("https://github.com/{repo}/pull/{num}");
+        t
+    }
+
+    let config = ServerConfig::in_memory();
+    let mut state = polling::TickState::default();
+
+    // Step 1: global tick, three repos in scope.
+    let sources: Vec<Box<dyn polling::TaskSource>> = vec![Box::new(ScopedSource {
+        name: "github".into(),
+        tasks: vec![
+            gh_task("owner/a", 1),
+            gh_task("owner/b", 2),
+            gh_task("owner/c", 3),
+        ],
+        scope: polling::PolledScope::Exhaustive,
+    })];
+    let outcome = polling::tick_with_state(&config, &sources, &mut state).await;
+    polling::rescope_with_state(&config, &outcome, &mut state).await;
+    assert_eq!(
+        config.store.list_workspaces().unwrap().len(),
+        3,
+        "global tick seeds all three workspaces",
+    );
+
+    // Step 2: warm round-robin tick, only `owner/a` queried.
+    let sources: Vec<Box<dyn polling::TaskSource>> = vec![Box::new(ScopedSource {
+        name: "github".into(),
+        tasks: vec![gh_task("owner/a", 1)],
+        scope: polling::PolledScope::Repos(vec!["owner/a".into()]),
+    })];
+    let outcome = polling::tick_with_state(&config, &sources, &mut state).await;
+    polling::rescope_with_state(&config, &outcome, &mut state).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(
+        after.iter().any(|k| k.contains("owner-a")),
+        "the queried repo stays: {after:?}",
+    );
+    assert!(
+        after.iter().any(|k| k.contains("owner-b")),
+        "unpolled repo MUST be preserved (issue #34): {after:?}",
+    );
+    assert!(
+        after.iter().any(|k| k.contains("owner-c")),
+        "unpolled repo MUST be preserved (issue #34): {after:?}",
+    );
+}
+
 #[tokio::test]
 async fn delete_workspace_kills_terminals_via_terminal_meta() {
     // Regression: an earlier implementation parsed the backend_key
@@ -1973,6 +2323,94 @@ async fn tick_outcome_does_not_flag_unknown_when_all_tasks_are_resolved() {
     assert!(!outcome.saw_unknown_mergeable);
 }
 
+// ── FetchMode plumbing (issue #19: notifications-driven sync) ───────
+
+#[tokio::test]
+async fn tick_outcome_all_full_default_is_true_when_only_full_sources_present() {
+    // Default impl of `TaskSource::last_fetch_kind` returns Full, and
+    // every existing source (Linear, all test fakes) inherits it. A
+    // tick with only such sources must report `all_full = true` so
+    // rescope runs normally — anything else would silently freeze the
+    // sidebar.
+    let config = ServerConfig::in_memory();
+    let source: Box<dyn TaskSource> = Box::new(FakeSource {
+        name: "github".into(),
+        tasks: vec![make_task("o/r#1")],
+    });
+    let mut state = polling::TickState::default();
+    let outcome = polling::tick_with_state(&config, &[source], &mut state).await;
+    assert!(
+        outcome.all_full,
+        "all-Full sources should not block rescope"
+    );
+}
+
+#[tokio::test]
+async fn tick_outcome_all_full_flips_false_when_any_source_is_incremental() {
+    // A single incremental source (the notifications-driven fast path)
+    // is enough to disable rescope for the whole tick — incremental
+    // results are by definition a subset of in-scope tasks, so trusting
+    // them for rescope would delete every untouched workspace.
+    let config = ServerConfig::in_memory();
+    let sources: Vec<Box<dyn TaskSource>> = vec![
+        Box::new(FakeSource {
+            name: "linear".into(),
+            tasks: vec![],
+        }),
+        Box::new(IncrementalSource {
+            name: "github".into(),
+            tasks: vec![make_task("o/r#1")],
+        }),
+    ];
+    let mut state = polling::TickState::default();
+    let outcome = polling::tick_with_state(&config, &sources, &mut state).await;
+    assert!(
+        !outcome.all_full,
+        "any incremental source must clear all_full"
+    );
+}
+
+#[tokio::test]
+async fn rescope_skipped_for_incremental_tick_so_untouched_workspaces_survive() {
+    // The whole point of `all_full`: an incremental tick that returns
+    // only the recently-changed workspaces must NOT cause every other
+    // workspace to get deleted. This is the symmetric counterpart to
+    // `rescope_with_empty_but_successful_poll_keeps_workspaces` — same
+    // shape (some workspaces missing from `polled`) but for the
+    // notifications-driven cadence rather than a transient empty
+    // response.
+    use pilot_core::WorkspaceKey;
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_task("o/r#untouched-1")).await;
+    polling::upsert(&config, make_task("o/r#untouched-2")).await;
+    polling::upsert(&config, make_task("o/r#touched")).await;
+
+    let outcome = polling::TickOutcome {
+        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+            &make_task("o/r#touched"),
+        ))],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::new(),
+        all_full: false,
+    };
+    polling::rescope(&config, &outcome).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert_eq!(
+        after.len(),
+        3,
+        "incremental tick must not delete untouched workspaces — got {after:?}"
+    );
+}
+
 /// `delete_project` cascades: every workspace whose `project_key`
 /// matches is deleted, then the project record itself. `ProjectRemoved`
 /// fires last so a TUI client doesn't drop the project before its
@@ -2201,4 +2639,62 @@ async fn delete_project_with_no_workspaces_still_removes_project() {
         }
     }
     assert!(saw, "ProjectRemoved must fire even with no workspaces");
+}
+
+// ── ProviderAction dispatch ────────────────────────────────────────
+//
+// The polling tick must drain side-effect actions surfaced by a
+// source after `fetch()` and route them through `handle_spawn`. The
+// `@pilot`-mention auto-spawn path depends on this glue — without
+// `drain_actions` running, the eyes-reacted comment never produces
+// a terminal.
+
+#[tokio::test]
+async fn tick_dispatches_auto_spawn_action_after_upsert() {
+    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let mut bus_rx = config.bus.subscribe();
+
+    // Build a synthetic task + matching auto-spawn action. The
+    // session key MUST match `workspace_key_for(task)` because
+    // `handle_spawn` uses it to find / create the workspace.
+    let task = make_task("o/r#101");
+    let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(&task));
+    let action = polling::ProviderAction::AutoSpawnAgent {
+        session_key: session_key.clone(),
+        agent_id: "claude".to_string(),
+        prompt: Some("Implement issue".to_string()),
+        reason: "@pilot mention by alice on o/r#101 (issue body)".to_string(),
+    };
+
+    let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
+        name: "github".into(),
+        tasks: vec![task],
+        actions: std::sync::Mutex::new(vec![action]),
+    });
+    polling::tick(&config, &[source]).await;
+
+    // Walk the bus and collect events. `TerminalSpawned` proves the
+    // dispatch ran — the action flowed source → drain → handle_spawn.
+    let mut saw_spawn = false;
+    let mut saw_upsert = false;
+    while let Ok(evt) = bus_rx.try_recv() {
+        match evt {
+            Event::TerminalSpawned {
+                session_key: sk, ..
+            } => {
+                assert_eq!(sk, session_key, "spawned in the right workspace");
+                saw_spawn = true;
+            }
+            Event::WorkspaceUpserted(_) => saw_upsert = true,
+            _ => {}
+        }
+    }
+    assert!(
+        saw_upsert,
+        "task upsert ran before action dispatch — required so spawn lands in an existing workspace"
+    );
+    assert!(
+        saw_spawn,
+        "AutoSpawnAgent action must trigger TerminalSpawned"
+    );
 }

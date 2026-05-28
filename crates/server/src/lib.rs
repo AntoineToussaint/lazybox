@@ -446,6 +446,7 @@ impl Server {
                         pilot_ipc::Command::Resize { .. } => "Resize",
                         pilot_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
                         pilot_ipc::Command::MarkRead { .. } => "MarkRead",
+                        pilot_ipc::Command::FocusWorkspace { .. } => "FocusWorkspace",
                         pilot_ipc::Command::MarkActivityRead { .. } => "MarkActivityRead",
                         pilot_ipc::Command::UnmarkActivityRead { .. } => "UnmarkActivityRead",
                         pilot_ipc::Command::FetchPrDetails { .. } => "FetchPrDetails",
@@ -463,6 +464,8 @@ impl Server {
                         pilot_ipc::Command::RequestReviewers { .. } => "RequestReviewers",
                         pilot_ipc::Command::AddAssignees { .. } => "AddAssignees",
                         pilot_ipc::Command::SetAssignees { .. } => "SetAssignees",
+                        pilot_ipc::Command::SetLabels { .. } => "SetLabels",
+                        pilot_ipc::Command::FetchRepoLabels { .. } => "FetchRepoLabels",
                         pilot_ipc::Command::SetSessionLayout { .. } => "SetSessionLayout",
                         pilot_ipc::Command::StartAgentRun { .. } => "StartAgentRun",
                         pilot_ipc::Command::SendAgentInput { .. } => "SendAgentInput",
@@ -478,8 +481,40 @@ impl Server {
                     tracing::info!("daemon ← {label}");
                     match cmd {
                         pilot_ipc::Command::Subscribe => {
-                            let workspaces = load_workspaces(&*self.config.store);
-                            let projects = load_projects(&*self.config.store);
+                            // Offload the SQLite scans (issue #34: pre-fix
+                            // `list_workspaces` + `list_projects` ran on
+                            // the daemon's IPC event-loop task, holding
+                            // up bus-event forwarding for the duration —
+                            // up to several hundred ms on a populated
+                            // store, perceived in the UI as "frozen
+                            // during sync"). `spawn_blocking` moves the
+                            // blocking parking_lot mutex acquisition +
+                            // row iteration off the runtime worker so
+                            // `select!` stays responsive to bus events
+                            // while the snapshot loads.
+                            //
+                            // Both scans share one task so the daemon
+                            // only pays the spawn/handoff cost once and
+                            // doesn't sequentially await two dispatches.
+                            // A panic inside the task (poisoned mutex,
+                            // corrupt JSON) is logged loudly — sending
+                            // an empty Snapshot silently would render a
+                            // blank sidebar with no breadcrumb in the
+                            // log.
+                            let store = self.config.store.clone();
+                            let (workspaces, projects) = match tokio::task::spawn_blocking(
+                                move || (load_workspaces(&*store), load_projects(&*store)),
+                            )
+                            .await
+                            {
+                                Ok(pair) => pair,
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Subscribe snapshot load task failed: {e} — sending empty snapshot",
+                                    );
+                                    (Vec::new(), Vec::new())
+                                }
+                            };
                             let terminals = spawn_handler::snapshot_terminals(&self.config).await;
                             let _ = conn.tx.send(Event::Snapshot {
                                 workspaces,
@@ -644,7 +679,21 @@ impl Server {
                             let key = pilot_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
+                            // MarkRead is the user's "I just looked
+                            // at this workspace" signal — treat it
+                            // as a focus hint too so the round-robin
+                            // sync cursor bumps even when the TUI
+                            // doesn't fire a separate
+                            // `FocusWorkspace` (older clients, the
+                            // auto-mark-on-hover path).
+                            polling::set_focused_workspace(&self.config, &key).await;
                             polling::mark_workspace_read(&self.config, &key);
+                        }
+                        pilot_ipc::Command::FocusWorkspace { session_key } => {
+                            let key = pilot_core::WorkspaceKey::new(
+                                session_key.as_str().to_string(),
+                            );
+                            polling::set_focused_workspace(&self.config, &key).await;
                         }
                         pilot_ipc::Command::MarkActivityRead { session_key, index } => {
                             let key = pilot_core::WorkspaceKey::new(
@@ -815,6 +864,18 @@ impl Server {
                             let cfg = self.config.clone();
                             tokio::spawn(async move {
                                 polling::handle_set_assignees(&cfg, workspace_key, logins).await;
+                            });
+                        }
+                        pilot_ipc::Command::SetLabels { workspace_key, names } => {
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_set_labels(&cfg, workspace_key, names).await;
+                            });
+                        }
+                        pilot_ipc::Command::FetchRepoLabels { workspace_key } => {
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_fetch_repo_labels(&cfg, workspace_key).await;
                             });
                         }
                         pilot_ipc::Command::CleanWorktrees => {

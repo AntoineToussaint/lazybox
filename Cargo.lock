@@ -1853,6 +1853,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "uuid",
 ]
@@ -1873,13 +1874,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "futures",
+ "http",
  "octocrab",
  "pilot-auth",
  "pilot-core",
  "pilot-events",
  "serde",
  "serde_json",
- "snafu",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2034,6 +2035,7 @@ dependencies = [
  "pilot-ipc",
  "pilot-linear",
  "pilot-server",
+ "pilot-slack",
  "pilot-store",
  "pilot-tui-core",
  "pilot-tui-term",

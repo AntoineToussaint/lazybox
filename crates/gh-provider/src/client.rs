@@ -3,6 +3,10 @@ use pilot_auth::Credential;
 use pilot_core::*;
 
 use crate::graphql;
+use crate::notifications::{
+    self, NotificationEntry, NotificationsPoll, NotificationsSnapshot, NotificationsState,
+    SharedNotificationsState,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum GhError {
@@ -10,6 +14,24 @@ pub enum GhError {
     Api(#[from] octocrab::Error),
     #[error("GraphQL error: {0}")]
     Graphql(String),
+    /// Non-success HTTP response from GitHub, OR a 2xx response we
+    /// couldn't parse as JSON. Carries the actual status + content-
+    /// type + a body excerpt so the user sees "HTTP 502 Bad Gateway"
+    /// instead of the opaque "Serde Error" `octocrab::Error::Serde`
+    /// produces on the typed deserialize path. This is the variant
+    /// emitted by `post_graphql_with_retry`; it replaces the previous
+    /// "expected value at line 1 column 1 — likely 502" guess.
+    #[error("github HTTP {status}{reason}: {body_excerpt}")]
+    HttpStatus {
+        status: u16,
+        /// Canonical status reason ("Bad Gateway") rendered as
+        /// " (Bad Gateway)" so the Display string reads naturally
+        /// when present; empty string when GitHub returned an
+        /// unknown / out-of-range status code.
+        reason: String,
+        content_type: String,
+        body_excerpt: String,
+    },
     /// Pagination safety cap hit — typically means the user's filter
     /// is too loose (>2000 matching PRs). Tail truncated.
     #[error("GraphQL paged out: returned {count} PRs across {pages} pages, hit safety cap")]
@@ -33,32 +55,136 @@ pub enum GhError {
     },
 }
 
-/// Render a `GhError` as a useful string. The Display impl on
-/// `octocrab::Error::GitHub` *only prints `"GitHub"`* — it drops the
-/// inner status / message / errors entirely. We unwrap to the
-/// underlying `GitHubError` (or other variants) so the message
-/// actually reaches logs + the error modal.
-/// Is this octocrab error worth retrying? Used by
-/// `post_graphql_with_retry` to decide between sleep-and-retry and
-/// fail-fast. The cutoff matches `From<GhError> for ProviderError`'s
-/// retryable classification — anything that maps to `Retryable`
-/// there is fair game here too.
-fn is_transient(e: &octocrab::Error) -> bool {
+/// Is this error worth retrying? Used by `post_graphql_with_retry`
+/// to decide between sleep-and-retry and fail-fast.
+///
+/// Transport variants (Hyper/Service/Http/Json/Io) are always
+/// transient — the request never reached GitHub's app layer.
+/// `HttpStatus` retries on 502/503/504 + 429 + any 2xx with a
+/// non-JSON content-type (proxy/CDN serving a maintenance page),
+/// matching what `From<GhError> for ProviderError` classifies as
+/// `Retryable`. Auth (401/403), other 4xx, and 2xx-JSON parse
+/// failures (real schema mismatches) are not retried.
+fn is_transient(e: &GhError) -> bool {
     match e {
-        octocrab::Error::Hyper { .. }
-        | octocrab::Error::Service { .. }
-        | octocrab::Error::Http { .. }
-        | octocrab::Error::Json { .. }
-        | octocrab::Error::Serde { .. } => true,
-        octocrab::Error::GitHub { source, .. } => {
-            // 502/503/504 — server-side hiccup. NOT 429: rate
-            // limit is for the budget layer, not retry-loops.
-            // NOT 5xx in general: e.g. a 500 with a deterministic
-            // error message won't change on retry.
+        GhError::Api(octocrab::Error::Hyper { .. })
+        | GhError::Api(octocrab::Error::Service { .. })
+        | GhError::Api(octocrab::Error::Http { .. })
+        | GhError::Api(octocrab::Error::Json { .. })
+        | GhError::Api(octocrab::Error::Serde { .. }) => true,
+        GhError::Api(octocrab::Error::GitHub { source, .. }) => {
             matches!(source.status_code.as_u16(), 502..=504)
+        }
+        GhError::Api(_) => false,
+        GhError::HttpStatus {
+            status,
+            content_type,
+            ..
+        } => {
+            if matches!(*status, 502..=504) || *status == 429 {
+                return true;
+            }
+            // 2xx with a non-JSON body — usually a proxy/CDN
+            // maintenance page that won the race with GitHub.
+            // Worth one retry, mirroring how octocrab's typed
+            // `Serde` failure used to be classified.
+            (200..=299).contains(status) && !content_type_is_json(content_type)
         }
         _ => false,
     }
+}
+
+/// `true` when the content-type header looks like JSON. GitHub uses
+/// `application/json; charset=utf-8` so we substring-match rather
+/// than equality-check. Empty / missing content-type counts as
+/// "not JSON" — we don't want to attempt JSON parse on bytes whose
+/// type the server didn't advertise.
+fn content_type_is_json(ct: &str) -> bool {
+    ct.to_ascii_lowercase().contains("application/json")
+}
+
+/// Excerpt of a body for inclusion in error messages. Trims
+/// whitespace and caps at 200 chars so a maintenance-page HTML blob
+/// doesn't blow up logs / the footer.
+fn body_excerpt(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.chars().count() <= 200 {
+        trimmed.to_string()
+    } else {
+        // char_indices respects UTF-8 boundaries — a naïve
+        // `&trimmed[..200]` would panic on a multi-byte char.
+        let cutoff = trimmed
+            .char_indices()
+            .nth(200)
+            .map(|(i, _)| i)
+            .unwrap_or(trimmed.len());
+        format!("{}…", &trimmed[..cutoff])
+    }
+}
+
+/// Construct a `GhError::HttpStatus` from a status + content-type +
+/// body. Centralised so the canonical-reason lookup and the body
+/// excerpting stay in sync between the raw-HTTP path and any future
+/// callers (e.g. REST handlers that drop to `_get` similarly).
+fn http_status_error(status: u16, content_type: &str, body: &str) -> GhError {
+    // Canonical reason ("Bad Gateway" for 502, "Unauthorized" for
+    // 401, …) wrapped in " (…)" so the Display string reads naturally.
+    // Open-coded instead of pulling the `http` crate just to call
+    // `StatusCode::canonical_reason()` — the list is short and stable.
+    let reason_word = match status {
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        413 => "Payload Too Large",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "",
+    };
+    let reason = if reason_word.is_empty() {
+        String::new()
+    } else {
+        format!(" ({reason_word})")
+    };
+    GhError::HttpStatus {
+        status,
+        reason,
+        content_type: content_type.to_string(),
+        body_excerpt: body_excerpt(body),
+    }
+}
+
+/// Strip snafu's location + backtrace dump from an error's
+/// `Display` output. Octocrab's `Error` variants (Serde, Hyper,
+/// etc.) use snafu, whose Display includes `Found at 0: ...` and a
+/// trail of `/rustc/...` source paths — totally illegible to a
+/// user, and our footer pipes it straight in. Take only what
+/// comes before the first snafu marker and the first newline,
+/// trim trailing whitespace.
+///
+/// Still in use for the remaining typed-octocrab call sites
+/// (`/user`, `list_org_memberships`, repo listings, REST issue
+/// comment). The new raw GraphQL path on issue #13 emits
+/// `GhError::HttpStatus` directly and bypasses this entirely.
+fn strip_error_backtrace(s: &str) -> String {
+    // snafu's backtrace prelude is "Found at" on the line right
+    // after the message. Cut everything from "Found at" onward.
+    // Some snafu versions use "Caused by:" — handle both.
+    let cut_at = s
+        .find("\nFound at")
+        .or_else(|| s.find("Found at"))
+        .or_else(|| s.find("\nCaused by:"))
+        .unwrap_or(s.len());
+    let head = &s[..cut_at];
+    head.lines().next().unwrap_or("").trim_end().to_string()
 }
 
 fn detail_of(err: &GhError) -> String {
@@ -75,13 +201,23 @@ fn detail_of(err: &GhError) -> String {
         GhError::WatchAllFailed { count } => {
             format!("all {count} configured watched-repo queries failed (network or auth issue)")
         }
+        GhError::HttpStatus { .. } => format!("{err}"),
         GhError::Api(octo) => match octo {
             octocrab::Error::GitHub { source, .. } => {
                 // GitHubError's Display does the right thing —
                 // includes status, message, docs URL, errors.
                 format!("GitHub API ({}): {}", source.status_code, source)
             }
-            other => format!("{other}"),
+            // Serde / Json failures usually mean GitHub returned a
+            // non-JSON body (502 page, redirect to login). Add a
+            // hint to the technical message so the user knows
+            // what's likely going on without us having to plumb
+            // the raw response status through octocrab.
+            octocrab::Error::Serde { .. } | octocrab::Error::Json { .. } => {
+                let s = strip_error_backtrace(&format!("{other}", other = octo));
+                format!("{s} (likely GitHub returned a non-JSON page — 502 / login redirect)")
+            }
+            other => strip_error_backtrace(&format!("{other}")),
         },
     }
 }
@@ -122,6 +258,29 @@ impl From<GhError> for pilot_core::ProviderError {
                 return pilot_core::ProviderError::auth(SOURCE, detail);
             }
             if status == 429 || (500..=599).contains(&status) {
+                return pilot_core::ProviderError::retryable(SOURCE, detail);
+            }
+            return pilot_core::ProviderError::permanent(SOURCE, detail);
+        }
+
+        // Same status-aware classification for `HttpStatus`, the
+        // variant emitted by the raw GraphQL path. 2xx + non-JSON
+        // is treated as retryable: it almost always means a proxy /
+        // CDN intercepted the call with an HTML maintenance page
+        // even though the upstream eventually came back.
+        if let GhError::HttpStatus {
+            status,
+            content_type,
+            ..
+        } = &err
+        {
+            if *status == 401 || *status == 403 {
+                return pilot_core::ProviderError::auth(SOURCE, detail);
+            }
+            if *status == 429 || (500..=599).contains(status) {
+                return pilot_core::ProviderError::retryable(SOURCE, detail);
+            }
+            if (200..=299).contains(status) && !content_type_is_json(content_type) {
                 return pilot_core::ProviderError::retryable(SOURCE, detail);
             }
             return pilot_core::ProviderError::permanent(SOURCE, detail);
@@ -184,6 +343,10 @@ pub struct GhClient {
     /// (currently we only construct one, but cheap insurance against
     /// future "spawn a worker pool" ideas).
     budget: std::sync::Arc<std::sync::Mutex<crate::rate_budget::RateBudget>>,
+    /// Notifications heartbeat state — `Last-Modified` echo + slow-sweep
+    /// timer. Shared across clones so `with_filters` doesn't reset the
+    /// 304-conditional or trigger a redundant full sweep.
+    notifications_state: SharedNotificationsState,
 }
 
 impl GhClient {
@@ -212,6 +375,7 @@ impl GhClient {
             budget: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::rate_budget::RateBudget::default_for_pilot(),
             )),
+            notifications_state: NotificationsState::shared(),
         })
     }
 
@@ -261,31 +425,39 @@ impl GhClient {
     }
 
     /// POST to `/graphql` with bounded exponential backoff on
-    /// transient errors. The body is borrowed (octocrab takes
-    /// `Option<&B>`), so the SAME body bytes go out on every
-    /// attempt — no risk of the body-clone bug that made us
-    /// disable octocrab's built-in retry. The caller has already
-    /// spent a rate-budget token via `acquire_or_block`; we do
-    /// NOT re-acquire per retry (a single 502-then-retry-success
-    /// is one logical call from GitHub's perspective).
+    /// transient errors.
+    ///
+    /// Drops to octocrab's raw `_post` API so we can inspect the
+    /// HTTP status + content-type BEFORE attempting to parse. With
+    /// the typed `post::<_, T>` path, a non-JSON response (502
+    /// maintenance page, login redirect when the token has expired,
+    /// gateway error) surfaced as the opaque
+    /// `Serde Error: expected value at line 1 column 1` —
+    /// users had no idea what actually went wrong. Now we
+    /// classify on the actual status code and the body excerpt
+    /// reaches the footer / logs.
+    ///
+    /// The body is borrowed (octocrab takes `Option<&B>`), so the
+    /// SAME body bytes go out on every attempt — no risk of the
+    /// body-clone bug that made us disable octocrab's built-in
+    /// retry. The caller has already spent a rate-budget token via
+    /// `acquire_or_block`; we do NOT re-acquire per retry (a
+    /// single 502-then-retry-success is one logical call from
+    /// GitHub's perspective).
     ///
     /// Retry policy:
-    /// - Transport variants (Hyper, Service, Http, Json, Serde,
-    ///   Io) → retry. Always transient.
-    /// - 502 / 503 / 504 → retry. GitHub serves these under load.
-    /// - Anything else (4xx including auth and 429, 5xx other
-    ///   than the three above, deserialization mismatches in
-    ///   typed `T`) → return immediately. Retrying wouldn't change
-    ///   the answer.
+    /// - Transport variants (Hyper, Service, Http, Json, Io) →
+    ///   retry. Always transient.
+    /// - 502 / 503 / 504, 429 → retry.
+    /// - 2xx with a non-JSON body → retry (proxy/CDN bait).
+    /// - Anything else (auth, validation, 2xx-JSON schema mismatch)
+    ///   → return immediately. Retrying wouldn't change the answer.
     ///
     /// Backoff sequence: 200ms → 800ms. Two retries after the
     /// initial attempt = 3 attempts total. Tight enough that a
     /// 60s poll cycle still has headroom; long enough that the
     /// usual <1s blip resolves itself.
-    async fn post_graphql_with_retry<T>(
-        &self,
-        body: &serde_json::Value,
-    ) -> Result<T, octocrab::Error>
+    async fn post_graphql_with_retry<T>(&self, body: &serde_json::Value) -> Result<T, GhError>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -297,7 +469,7 @@ impl GhClient {
         // breaks 5s) but well under the 90s spinner guard so a hung
         // call surfaces as an error before the UI gives up.
         const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
-        let mut last_err: Option<octocrab::Error> = None;
+        let mut last_err: Option<GhError> = None;
         // `0..=DELAYS_MS.len()` is intentional: we try once at
         // attempt=0 (no delay yet), then once per entry of
         // `DELAYS_MS`. The index is used both as the sleep offset
@@ -308,16 +480,50 @@ impl GhClient {
             reason = "the index is the attempt count; see comment above"
         )]
         for attempt in 0..=DELAYS_MS.len() {
-            let req = self.inner.post::<_, T>("/graphql", Some(body));
-            match tokio::time::timeout(REQUEST_TIMEOUT, req).await {
-                Ok(Ok(v)) => {
+            let outcome = match tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                self.post_graphql_once::<T>(body),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        "graphql request exceeded {}s wall-clock; \
+                             attempt {}/{} will retry",
+                        REQUEST_TIMEOUT.as_secs(),
+                        attempt + 1,
+                        DELAYS_MS.len() + 1,
+                    );
+                    // Synthesise an HttpStatus error so retry +
+                    // classification share the same shape as the
+                    // rest of this loop. status=0 is the "no
+                    // response" sentinel — it lands as
+                    // `Retryable` in `From<GhError>` via the
+                    // 2xx-non-JSON branch (status=0 isn't 2xx,
+                    // so we explicitly retry it here too).
+                    Err(GhError::HttpStatus {
+                        status: 0,
+                        reason: String::new(),
+                        content_type: String::new(),
+                        body_excerpt: format!(
+                            "graphql request timed out after {}s",
+                            REQUEST_TIMEOUT.as_secs()
+                        ),
+                    })
+                }
+            };
+            match outcome {
+                Ok(v) => {
                     if attempt > 0 {
                         tracing::info!("graphql request succeeded on retry {attempt}");
                     }
                     return Ok(v);
                 }
-                Ok(Err(e)) => {
-                    if !is_transient(&e) {
+                Err(e) => {
+                    let transient =
+                        is_transient(&e) || matches!(&e, GhError::HttpStatus { status: 0, .. });
+                    if !transient {
                         return Err(e);
                     }
                     if attempt < DELAYS_MS.len() {
@@ -331,36 +537,55 @@ impl GhClient {
                     }
                     last_err = Some(e);
                 }
-                Err(_elapsed) => {
-                    // Wall-clock timeout. Treat as transient so the
-                    // retry loop gets a chance, but log loudly — a
-                    // 25s request is unusual enough to investigate.
-                    tracing::warn!(
-                        "graphql request exceeded {}s wall-clock; \
-                         attempt {}/{} will retry",
-                        REQUEST_TIMEOUT.as_secs(),
-                        attempt + 1,
-                        DELAYS_MS.len() + 1,
-                    );
-                    if attempt < DELAYS_MS.len() {
-                        tokio::time::sleep(std::time::Duration::from_millis(DELAYS_MS[attempt]))
-                            .await;
-                    }
-                    // No octocrab::Error to stash — synthesize one
-                    // by making a clearly-labelled HTTP error.
-                    use snafu::GenerateImplicitData;
-                    last_err = Some(octocrab::Error::Other {
-                        source: format!(
-                            "graphql request timed out after {}s",
-                            REQUEST_TIMEOUT.as_secs()
-                        )
-                        .into(),
-                        backtrace: snafu::Backtrace::generate(),
-                    });
-                }
             }
         }
         Err(last_err.expect("loop runs at least once"))
+    }
+
+    /// One round-trip to `/graphql` with status-aware error
+    /// surfacing. Bypasses octocrab's typed `post::<_, T>` because
+    /// that path swallows the HTTP status on non-JSON responses
+    /// (returns `octocrab::Error::Serde` with no access to the raw
+    /// body), which is the bug in #13.
+    async fn post_graphql_once<T>(&self, body: &serde_json::Value) -> Result<T, GhError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let response = self
+            .inner
+            ._post("/graphql", Some(body))
+            .await
+            .map_err(GhError::Api)?;
+        let status = response.status().as_u16();
+        // `HeaderMap::get` is case-insensitive, so lowercase here is
+        // both the canonical form and what octocrab uses internally.
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let raw_body = self
+            .inner
+            .body_to_string(response)
+            .await
+            .map_err(GhError::Api)?;
+        // Non-2xx or non-JSON: never attempt to parse — the body is
+        // an HTML page / login redirect / GitHub error JSON we'd
+        // rather surface verbatim than mis-deserialise.
+        if !(200..=299).contains(&status) || !content_type_is_json(&content_type) {
+            return Err(http_status_error(status, &content_type, &raw_body));
+        }
+        // 2xx + JSON content-type: this is the success path. A parse
+        // failure here is a real schema mismatch between our types
+        // and GitHub's response — surface it with status + content-
+        // type intact instead of dropping to `Serde`.
+        serde_json::from_str::<T>(&raw_body).map_err(|e| GhError::HttpStatus {
+            status,
+            reason: " (json parse failed)".to_string(),
+            content_type,
+            body_excerpt: format!("{e} — body: {}", body_excerpt(&raw_body)),
+        })
     }
 
     /// Gate-or-fail: spend one rate-budget token and convert the
@@ -591,6 +816,330 @@ impl GhClient {
         &self.user
     }
 
+    /// Default cadence for the slow full-sweep. The notifications
+    /// heartbeat runs every poll tick (cheap); the heavy `involves:USER`
+    /// search runs at most once every `FULL_SWEEP_INTERVAL`. Picks the
+    /// 10-minute number from #19 — long enough to keep GraphQL cost
+    /// down by an order of magnitude, short enough that the long-tail
+    /// gap (a PR notifications didn't tell us about, e.g. a silent
+    /// `closed` with no comment) closes within a coffee break.
+    pub const FULL_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+
+    /// Should the next sync cycle run a heavy full sweep, or is the
+    /// notifications-driven incremental path safe to use? Returns true
+    /// when no sweep has run yet (first tick after daemon start) or
+    /// when the last one was ≥ `FULL_SWEEP_INTERVAL` ago.
+    ///
+    /// The polling layer calls this BEFORE deciding which fetch to fire
+    /// — so a true response means "the rescope-eligible source is in
+    /// play this tick" and the tick driver knows to honor rescoping;
+    /// false means the tick is an incremental refresh and rescope
+    /// must be skipped (covered by `FetchMode::Incremental`).
+    pub fn should_full_sweep(&self) -> bool {
+        self.notifications_state
+            .lock()
+            .expect("notifications state mutex poisoned")
+            .is_full_sweep_due(Self::FULL_SWEEP_INTERVAL)
+    }
+
+    /// Mark a full sweep complete *now*. Seeds the heartbeat baseline
+    /// when one isn't already set so the very next incremental tick
+    /// has an `If-Modified-Since` to send — without it the first
+    /// post-bootstrap heartbeat would unconditionally pull every
+    /// notification GitHub holds for the user.
+    ///
+    /// We do NOT overwrite an existing `last_modified`: an authoritative
+    /// header from the notifications endpoint is always preferable to
+    /// a locally-synthesized timestamp (clock skew can make our `now`
+    /// *earlier* than GitHub's, which would re-deliver entries the
+    /// heartbeat already covered).
+    pub fn mark_full_sweep_done(&self) {
+        let mut state = self
+            .notifications_state
+            .lock()
+            .expect("notifications state mutex poisoned");
+        state.last_full_sweep_at = Some(std::time::Instant::now());
+        if state.last_modified.is_none() {
+            state.last_modified = Some(notifications::format_http_date(chrono::Utc::now()));
+        }
+    }
+
+    /// Snapshot of the current notifications heartbeat state. Read-only;
+    /// exists so tests (and a future status indicator) can observe
+    /// whether the slow-sweep timer is armed.
+    pub fn notifications_snapshot(&self) -> NotificationsSnapshot {
+        let s = self
+            .notifications_state
+            .lock()
+            .expect("notifications state mutex poisoned");
+        NotificationsSnapshot {
+            has_last_modified: s.last_modified.is_some(),
+            last_full_sweep_elapsed: s.last_full_sweep_at.map(|i| i.elapsed()),
+            heartbeat_backed_off: s.heartbeat_backed_off(),
+        }
+    }
+
+    /// How long to skip the notifications heartbeat after a failure.
+    /// Matched to [`Self::FULL_SWEEP_INTERVAL`] so a single chronic
+    /// auth/rate-limit problem costs at most one extra round-trip per
+    /// sweep cycle — and clears itself the moment the user fixes
+    /// their token. Shorter would re-fire the broken heartbeat
+    /// repeatedly during an outage; longer would mask a transient
+    /// blip.
+    const HEARTBEAT_BACK_OFF: std::time::Duration = std::time::Duration::from_secs(600);
+
+    /// Record a heartbeat success — clears any prior back-off so the
+    /// next tick uses the cheap incremental path again.
+    fn note_heartbeat_succeeded(&self) {
+        let mut state = self
+            .notifications_state
+            .lock()
+            .expect("notifications state mutex poisoned");
+        if state.heartbeat_back_off_until.is_some() {
+            tracing::info!("notifications heartbeat recovered — clearing back-off");
+            state.heartbeat_back_off_until = None;
+        }
+    }
+
+    /// Arm the heartbeat back-off window. The polling layer's
+    /// `should_full_sweep` honors this and bypasses the heartbeat
+    /// round-trip until the deadline passes. Idempotent — re-arming
+    /// while already backed off just extends the window.
+    fn note_heartbeat_failed(&self) {
+        let mut state = self
+            .notifications_state
+            .lock()
+            .expect("notifications state mutex poisoned");
+        let deadline = std::time::Instant::now() + Self::HEARTBEAT_BACK_OFF;
+        let was_armed = state.heartbeat_back_off_until.is_some();
+        state.heartbeat_back_off_until = Some(deadline);
+        if !was_armed {
+            tracing::warn!(
+                back_off_secs = Self::HEARTBEAT_BACK_OFF.as_secs(),
+                "notifications heartbeat failed — backing off; full sweeps continue",
+            );
+        }
+    }
+
+    /// Cheap heartbeat against `GET /notifications` with
+    /// `If-Modified-Since` set to the previously-observed `Last-Modified`.
+    ///
+    /// - **304 No Content** → returns `NotificationsPoll::NotModified`;
+    ///   caller can skip the deep-fetch entirely. This is the steady
+    ///   state — most ticks land here.
+    /// - **200 OK** → deserializes the body into `NotificationEntry`s
+    ///   and captures the response's `Last-Modified` header for echo
+    ///   on the next call. Caller fans out to single-PR / single-issue
+    ///   deep-fetches keyed off each entry's `subject.url`.
+    /// - Anything else → bubbled as `GhError`.
+    ///
+    /// Notifications are rate-budgeted SEPARATELY from GraphQL (REST has
+    /// its own 5000-req/hr quota), but we still gate through the local
+    /// bucket so a runaway loop can't hammer this endpoint either.
+    pub async fn fetch_notifications(&self) -> Result<NotificationsPoll, GhError> {
+        // Bookkeeping wrapper: on success, clear any prior back-off
+        // window so the next tick uses the heartbeat again; on failure,
+        // arm the back-off so chronic auth/rate-limit problems don't
+        // pay the failed REST round-trip on every tick. We could push
+        // this into the polling layer, but the heartbeat invariant
+        // ("after one call, the back-off state is consistent") belongs
+        // with the call itself — callers don't have to remember to
+        // bookkeep.
+        let result = self.fetch_notifications_inner().await;
+        match &result {
+            Ok(_) => self.note_heartbeat_succeeded(),
+            Err(_) => self.note_heartbeat_failed(),
+        }
+        result
+    }
+
+    /// Inner implementation of [`Self::fetch_notifications`]. Pure I/O;
+    /// the wrapper handles back-off bookkeeping so this method can use
+    /// `?` freely without forgetting to record the failure.
+    async fn fetch_notifications_inner(&self) -> Result<NotificationsPoll, GhError> {
+        use http::StatusCode;
+        use http::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, LAST_MODIFIED};
+
+        self.acquire_or_block("notifications heartbeat")?;
+
+        // Capture the saved header BEFORE the request, so the lock is
+        // released before we await the network call. The Mutex is a
+        // std::sync::Mutex (not tokio's), so holding it across `.await`
+        // would risk a hang if any other code path tried to lock during
+        // the request. Clone-and-drop is the right pattern.
+        let if_modified_since = self
+            .notifications_state
+            .lock()
+            .expect("notifications state mutex poisoned")
+            .last_modified
+            .clone();
+
+        let mut headers = HeaderMap::new();
+        if let Some(ims) = if_modified_since.as_ref() {
+            match HeaderValue::from_str(ims) {
+                Ok(v) => {
+                    headers.insert(IF_MODIFIED_SINCE, v);
+                }
+                Err(e) => {
+                    // Stored value isn't header-valid (CR/LF, non-ASCII).
+                    // Skipping the conditional forces a 200, costing a
+                    // body parse — surface loudly so the regression is
+                    // observable instead of just slower.
+                    tracing::warn!(
+                        "dropping invalid stored If-Modified-Since `{ims}`: {e} — \
+                         next notifications call will fetch unconditional 200"
+                    );
+                }
+            }
+        }
+        // `participating=false` — match #19's recommendation. Returns
+        // every notification the user can see, not just ones they're
+        // explicitly mentioned in. That's what we want: pilot's job is
+        // to surface activity on rows already in the inbox.
+        // `all=false` (default) — only unread items. Read notifications
+        // wouldn't add information since we already saw them.
+        let uri = "/notifications?participating=false";
+        let response = self
+            .inner
+            ._get_with_headers(uri, Some(headers))
+            .await
+            .map_err(GhError::Api)?;
+
+        let status = response.status();
+        // 304 = nothing new since If-Modified-Since. The endpoint also
+        // sends an empty body in that case; don't try to deserialize.
+        if status == StatusCode::NOT_MODIFIED {
+            tracing::debug!("notifications: 304 Not Modified");
+            return Ok(NotificationsPoll::NotModified);
+        }
+
+        // Capture `Last-Modified` before consuming the body — once we
+        // hand the response to `body_to_string`, the headers go with it.
+        let new_last_modified = response
+            .headers()
+            .get(LAST_MODIFIED)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        if !status.is_success() {
+            // 401/403/5xx — surface as a typed GhError so the normal
+            // ProviderError classification (auth vs retryable) kicks in.
+            // We synthesize a GhError::Graphql with the status because
+            // the REST body shape isn't a GqlResponse; the caller logs
+            // it and the next tick retries naturally.
+            //
+            // Bound the snippet to ~512 bytes: GitHub's 502/503
+            // maintenance pages are multi-MB HTML, and this string
+            // ends up duplicated through `GhError::Graphql` →
+            // `ProviderError::Retryable` → `Event::ProviderError` on
+            // the broadcast bus. A bad upstream hour would otherwise
+            // churn tens of MB of identical body strings through the
+            // event channel.
+            let body = self
+                .inner
+                .body_to_string(response)
+                .await
+                .unwrap_or_else(|_| "<unreadable body>".to_string());
+            let cap = body.len().min(512);
+            let snippet = &body[..body.floor_char_boundary(cap)];
+            return Err(GhError::Graphql(format!(
+                "notifications HTTP {}: {snippet}",
+                status.as_u16(),
+            )));
+        }
+
+        let body = self
+            .inner
+            .body_to_string(response)
+            .await
+            .map_err(GhError::Api)?;
+        let entries: Vec<NotificationEntry> = serde_json::from_str(&body).map_err(|e| {
+            GhError::Graphql(format!(
+                "notifications response did not match schema: {e}; body prefix: {}",
+                body.chars().take(200).collect::<String>()
+            ))
+        })?;
+
+        // Persist the new `Last-Modified` for the next call's
+        // conditional. Skip the write when GitHub didn't send one
+        // (rare; happens on test fixtures) — leaving the old value
+        // alone is safer than clearing it and re-pulling the world.
+        // `take`-into-the-Mutex avoids the double-copy a `clone` +
+        // move return would have paid for.
+        if let Some(lm) = new_last_modified {
+            self.notifications_state
+                .lock()
+                .expect("notifications state mutex poisoned")
+                .last_modified = Some(lm);
+        }
+
+        Ok(NotificationsPoll::Modified { entries })
+    }
+
+    /// Targeted deep-fetch: pull one PR by `(owner, repo, number)` via
+    /// the single-node GraphQL query. ~85 cost units total (vs. the
+    /// 1000s the inbox-scan query burns when re-walking every PR).
+    /// Returns `Ok(None)` when GitHub can't find / no longer exposes
+    /// the PR (deleted, scope changed, transferred); the caller treats
+    /// that as "skip this entry."
+    pub async fn fetch_single_pr(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<Task>, GhError> {
+        self.acquire_or_block("single-PR notification deep-fetch")?;
+        let body = graphql::single_pr_body(owner, repo, number);
+        let response: graphql::GqlSinglePrResponse = self.post_graphql_with_retry(&body).await?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::warn!("fetch_single_pr {owner}/{repo}#{number}: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        let Some(data) = response.data else {
+            return Ok(None);
+        };
+        if let Some(rl) = &data.rate_limit {
+            self.observe_rate_limit(rl);
+        }
+        let pr = data.repository.and_then(|r| r.pull_request);
+        Ok(pr.map(|pr| graphql::pr_to_task(&pr, &self.user)))
+    }
+
+    /// Sibling of `fetch_single_pr` for Issue-typed notifications.
+    /// Same Ok(None) "not visible" semantics.
+    pub async fn fetch_single_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<Task>, GhError> {
+        self.acquire_or_block("single-issue notification deep-fetch")?;
+        let body = graphql::single_issue_body(owner, repo, number);
+        let response: graphql::GqlSingleIssueResponse = self.post_graphql_with_retry(&body).await?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::warn!("fetch_single_issue {owner}/{repo}#{number}: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        let Some(data) = response.data else {
+            return Ok(None);
+        };
+        if let Some(rl) = &data.rate_limit {
+            self.observe_rate_limit(rl);
+        }
+        let issue = data.repository.and_then(|r| r.issue);
+        Ok(issue.map(|i| graphql::issue_to_task(&i, &self.user)))
+    }
+
     pub async fn fetch_all_prs(&self) -> Result<Vec<Task>, GhError> {
         // Per-call wall-clock timer so the log can quantify the
         // parallelization win and so a regression jumps out in
@@ -772,6 +1321,155 @@ impl GhClient {
         Ok(tasks)
     }
 
+    /// Round-robin variant of `fetch_all_prs`. Instead of one big
+    /// `involves:USER` paginated sweep across every repo the user
+    /// touches, this fires a small batch of `repo:owner/name`-scoped
+    /// PR searches in parallel — driven by the polling layer's
+    /// `pick_repos_for_tick` scheduler.
+    ///
+    /// Always runs the cheap, role-narrowing companions alongside:
+    /// - `review-requested:USER` (GitHub's `involves:` qualifier
+    ///   misses requested reviewers, same as `fetch_all_prs`).
+    /// - The 7-day `is:merged` sweep so a PR landing right after a
+    ///   sync still gets the final MERGED state on the next tick.
+    ///
+    /// The full watched-repo fan-out from `fetch_all_prs` is *not*
+    /// duplicated here — that path already has its own pacing,
+    /// and the round-robin's whole point is to keep per-tick cost
+    /// low.
+    ///
+    /// Returns `Ok([])` when `repos` is empty (`pick_repos_for_tick`
+    /// returns an empty list during cold start). Caller is
+    /// responsible for also running `fetch_all_prs` on global-sweep
+    /// ticks (`RoundRobinPick::run_global`).
+    pub async fn fetch_prs_for_repos(&self, repos: &[String]) -> Result<Vec<Task>, GhError> {
+        let started = std::time::Instant::now();
+        use futures::stream::{self, StreamExt};
+
+        // Same bounded-concurrent fan-out shape as the watched-repo
+        // branch in `fetch_all_prs`. 5 in flight keeps the local
+        // rate budget breathable when 3 repos + reviewer + merged
+        // all dispatch on the same tick.
+        const PER_REPO_CONCURRENCY: usize = 5;
+        let per_repo_fut = stream::iter(repos.iter().cloned())
+            .map(|repo| async move {
+                let query = format!("is:open is:pr repo:{repo} archived:false");
+                let result = self.fetch_pr_single_query("round-robin-repo", query).await;
+                (repo, result)
+            })
+            .buffer_unordered(PER_REPO_CONCURRENCY)
+            .collect::<Vec<_>>();
+
+        // Reviewer companion — same logic as `fetch_all_prs`. Without
+        // it, repos where the user is ONLY a requested reviewer would
+        // never enter the inbox via the round-robin path either.
+        let want_reviewer_pass = self.pr_filters.is_empty()
+            || self
+                .pr_filters
+                .iter()
+                .any(|q| q.contains("review-requested") || q.contains("involves:"));
+        let reviewer_query = if want_reviewer_pass {
+            let mut q = graphql::default_search_qualifiers();
+            q.push(format!("review-requested:{}", self.user));
+            Some(graphql::build_query(&q))
+        } else {
+            None
+        };
+        let reviewer_fut = async {
+            if let Some(q) = reviewer_query {
+                self.fetch_pr_single_query("review-requested", q).await
+            } else {
+                Ok(Vec::new())
+            }
+        };
+
+        // Merged sweep — global, cheap, identical to `fetch_all_prs`.
+        // Skipping this would mean PRs that merged between our last
+        // sync of their repo and now stay stuck on `OPEN`.
+        let week_ago = (chrono::Utc::now() - chrono::Duration::days(7))
+            .format("%Y-%m-%d")
+            .to_string();
+        let mut merged_quals = vec![
+            "is:pr".to_string(),
+            "is:merged".to_string(),
+            "archived:false".to_string(),
+            format!("merged:>={week_ago}"),
+        ];
+        if self.pr_filters.is_empty() {
+            merged_quals.push(format!("involves:{}", self.user));
+        } else {
+            merged_quals.extend(self.pr_filters.iter().cloned());
+        }
+        let merged_query = graphql::build_query(&merged_quals);
+        let merged_fut = self.fetch_pr_single_query("merged-sweep", merged_query);
+
+        let (per_repo_results, reviewer_res, merged_res) =
+            tokio::join!(per_repo_fut, reviewer_fut, merged_fut);
+
+        // Same dedup-by-task-id assembly as `fetch_all_prs`. Per-repo
+        // results win first (they're the freshest, scoped exactly to
+        // the repos we asked about); reviewer + merged back-fill the
+        // gaps. A repo-scoped query failure does NOT fail the whole
+        // tick — the next round-robin slot picks it up.
+        let mut tasks: Vec<Task> = Vec::new();
+        let mut existing: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut repo_failures = 0usize;
+        for (repo, result) in per_repo_results {
+            match result {
+                Ok(repo_tasks) => {
+                    for t in repo_tasks {
+                        if existing.insert(t.id.key.clone()) {
+                            tasks.push(t);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("round-robin repo query failed for {repo}: {e}");
+                    repo_failures += 1;
+                }
+            }
+        }
+        match reviewer_res {
+            Ok(rev_tasks) => {
+                for t in rev_tasks {
+                    if existing.insert(t.id.key.clone()) {
+                        tasks.push(t);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("round-robin review-requested branch failed: {e}"),
+        }
+        match merged_res {
+            Ok(merged_tasks) => {
+                for t in merged_tasks {
+                    if existing.insert(t.id.key.clone()) {
+                        tasks.push(t);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("round-robin merged-sweep failed: {e}"),
+        }
+
+        let elapsed_ms = started.elapsed().as_millis();
+        tracing::info!(
+            "fetch_prs_for_repos: completed in {elapsed_ms}ms — {} PRs across {} repos \
+             ({repo_failures} repo-query failure(s))",
+            tasks.len(),
+            repos.len(),
+        );
+        // Mirror `fetch_all_prs`'s "everything failed" defensive
+        // check: if EVERY repo we asked about failed, surface the
+        // error so the tick doesn't silently wipe focus repo's PRs
+        // from the inbox on the next rescope.
+        if !repos.is_empty() && repo_failures == repos.len() {
+            return Err(GhError::Graphql(format!(
+                "all {} round-robin repo queries failed",
+                repos.len()
+            )));
+        }
+        Ok(tasks)
+    }
+
     /// Run the main paginated PR search (cursor pages run
     /// sequentially because each page's `endCursor` is the next
     /// page's input). Extracted so the parallel-branches outer
@@ -795,7 +1493,7 @@ impl GhClient {
                         "GraphQL request body was: {}",
                         serde_json::to_string_pretty(&body).unwrap_or_default()
                     );
-                    GhError::Api(e)
+                    e
                 })?;
             let response: graphql::GqlResponse = match serde_json::from_value(raw.clone()) {
                 Ok(r) => r,
@@ -879,10 +1577,7 @@ impl GhClient {
             });
         }
         let body = graphql::query_body(&query);
-        let resp: graphql::GqlResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let resp: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = resp.errors {
             let joined: String = errors
                 .iter()
@@ -907,8 +1602,30 @@ impl GhClient {
 
     /// Fetch all open GitHub Issues involving the authenticated user,
     /// paginated. Separate from `fetch_all_prs` so callers opt in
-    /// explicitly.
+    /// explicitly. Thin wrapper over `fetch_all_issues_with_mentions`
+    /// that discards the mention side-channel — use the underlying
+    /// method when you want the `@pilot` triggers too.
     pub async fn fetch_all_issues(&self) -> Result<Vec<Task>, GhError> {
+        let (tasks, _mentions) = self
+            .fetch_all_issues_with_mentions(&std::collections::BTreeSet::new())
+            .await?;
+        Ok(tasks)
+    }
+
+    /// Same as `fetch_all_issues` but also scans each raw issue for
+    /// `@pilot` mentions from `allowed_logins` and returns the
+    /// resulting [`crate::PilotMention`] list. Done in one pass so we
+    /// don't pay the issue search twice; the GraphQL response already
+    /// carries `reactions(content: EYES) { viewerHasReacted }` for
+    /// idempotency.
+    ///
+    /// An empty `allowed_logins` set yields no mentions (the gate is
+    /// "allow nobody by default"), so production callers always pass
+    /// at least the authenticated viewer's login.
+    pub async fn fetch_all_issues_with_mentions(
+        &self,
+        allowed_logins: &std::collections::BTreeSet<String>,
+    ) -> Result<(Vec<Task>, Vec<crate::PilotMention>), GhError> {
         let started = std::time::Instant::now();
         // Same assembly as `fetch_all_prs` — see notes there.
         let mut quals = graphql::default_issues_qualifiers();
@@ -921,6 +1638,7 @@ impl GhClient {
         tracing::info!("GraphQL issues search: {search_query}");
 
         let mut tasks: Vec<Task> = Vec::new();
+        let mut mentions: Vec<crate::PilotMention> = Vec::new();
         let mut cursor: Option<String> = None;
         let mut page = 0usize;
         loop {
@@ -930,7 +1648,7 @@ impl GhClient {
             let response: graphql::GqlIssueResponse =
                 self.post_graphql_with_retry(&body).await.map_err(|e| {
                     tracing::error!("Issues HTTP error (page {page}): {e}\n{e:?}");
-                    GhError::Api(e)
+                    e
                 })?;
 
             if let Some(errors) = &response.errors {
@@ -956,12 +1674,12 @@ impl GhClient {
                 self.observe_rate_limit(rl);
             }
 
-            tasks.extend(
-                data.search
-                    .nodes
-                    .iter()
-                    .map(|issue| graphql::issue_to_task(issue, &self.user)),
-            );
+            for issue in &data.search.nodes {
+                tasks.push(graphql::issue_to_task(issue, &self.user));
+                if !allowed_logins.is_empty() {
+                    mentions.extend(crate::mentions::scan_issue(issue, allowed_logins));
+                }
+            }
 
             let page_info = data.search.page_info.unwrap_or_default();
             if !page_info.has_next_page {
@@ -987,10 +1705,11 @@ impl GhClient {
 
         let elapsed_ms = started.elapsed().as_millis();
         tracing::info!(
-            "fetch_all_issues: completed in {elapsed_ms}ms — {} issues",
-            tasks.len()
+            "fetch_all_issues_with_mentions: completed in {elapsed_ms}ms — {} issues, {} mentions",
+            tasks.len(),
+            mentions.len(),
         );
-        Ok(tasks)
+        Ok((tasks, mentions))
     }
 
     /// Fetch PRs + Issues in parallel, combine into one `Vec<Task>`.
@@ -1147,6 +1866,147 @@ impl GhClient {
         }
     }
 
+    /// Round-robin variant of
+    /// [`fetch_selected_with_status_and_mentions`]: runs the PR side
+    /// as a per-repo fan-out instead of a global `involves:USER`
+    /// sweep, optionally OR'd with the global sweep on K-th refresh
+    /// ticks. Same partial-failure semantics as the non-round-robin
+    /// variant — a failed PR side keeps issues + mentions and vice
+    /// versa.
+    ///
+    /// Caller is the polling layer: it consults
+    /// [`crate::polling::pick_repos_for_tick`][polling]'s
+    /// `RoundRobinPick` and passes `pick.repos` + `pick.run_global`
+    /// through here.
+    ///
+    /// When BOTH `repos` is empty AND `run_global` is false (shouldn't
+    /// happen given the scheduler's cold-start rule, but defensive),
+    /// the PR side is skipped entirely.
+    ///
+    /// [polling]: ../../../pilot_server/polling/fn.pick_repos_for_tick.html
+    pub async fn fetch_round_robin_with_status_and_mentions(
+        &self,
+        want_prs: bool,
+        repos: &[String],
+        run_global: bool,
+        want_issues: bool,
+        allowed_logins: &std::collections::BTreeSet<String>,
+    ) -> Result<(Vec<Task>, Option<String>, Vec<crate::PilotMention>), GhError> {
+        if !want_prs && !want_issues {
+            return Ok((Vec::new(), None, Vec::new()));
+        }
+        let do_pr_side = want_prs && (run_global || !repos.is_empty());
+        let pr_fut = async {
+            if !do_pr_side {
+                return Ok(Vec::new());
+            }
+            if run_global {
+                // Global sweep on this tick — same payload as the
+                // pre-round-robin path. The per-repo fan-out is
+                // skipped because the global already covers it.
+                self.fetch_all_prs().await
+            } else {
+                self.fetch_prs_for_repos(repos).await
+            }
+        };
+        let issue_fut = async {
+            if want_issues {
+                self.fetch_all_issues_with_mentions(allowed_logins).await
+            } else {
+                Ok((Vec::new(), Vec::new()))
+            }
+        };
+        let (prs, issues) = tokio::join!(pr_fut, issue_fut);
+        match (prs, issues) {
+            (Ok(mut p), Ok((i, m))) => {
+                p.extend(i);
+                Ok((p, None, m))
+            }
+            (Ok(p), Err(e)) => {
+                if want_issues && p.is_empty() {
+                    Err(e)
+                } else {
+                    let msg = format!("issues sync failed (PRs OK): {e}");
+                    tracing::warn!("{msg}");
+                    Ok((p, Some(msg), Vec::new()))
+                }
+            }
+            (Err(e), Ok((i, m))) => {
+                if do_pr_side && i.is_empty() {
+                    Err(e)
+                } else {
+                    let msg = format!("PRs sync failed (issues OK): {e}");
+                    tracing::warn!("{msg}");
+                    Ok((i, Some(msg), m))
+                }
+            }
+            (Err(pr_err), Err(issue_err)) => Err(GhError::Graphql(format!(
+                "both PR and issue fetches failed: PRs={pr_err}; issues={issue_err}"
+            ))),
+        }
+    }
+
+    /// Like `fetch_selected_with_status` but also runs the
+    /// `@pilot`-mention scan on the issues side. The returned
+    /// [`PilotMention`](crate::PilotMention) list is empty when
+    /// `allowed_logins` is empty (the mention feature is opt-in via
+    /// config) or when no allowed user has written `@pilot` on an
+    /// unreacted body / comment. Errors fall back to the same
+    /// partial-failure shape as the underlying call — a failed
+    /// PR side keeps issues + mentions, and vice versa.
+    pub async fn fetch_selected_with_status_and_mentions(
+        &self,
+        want_prs: bool,
+        want_issues: bool,
+        allowed_logins: &std::collections::BTreeSet<String>,
+    ) -> Result<(Vec<Task>, Option<String>, Vec<crate::PilotMention>), GhError> {
+        if !want_prs && !want_issues {
+            return Ok((Vec::new(), None, Vec::new()));
+        }
+        let pr_fut = async {
+            if want_prs {
+                self.fetch_all_prs().await
+            } else {
+                Ok(Vec::new())
+            }
+        };
+        let issue_fut = async {
+            if want_issues {
+                self.fetch_all_issues_with_mentions(allowed_logins).await
+            } else {
+                Ok((Vec::new(), Vec::new()))
+            }
+        };
+        let (prs, issues) = tokio::join!(pr_fut, issue_fut);
+        match (prs, issues) {
+            (Ok(mut p), Ok((i, m))) => {
+                p.extend(i);
+                Ok((p, None, m))
+            }
+            (Ok(p), Err(e)) => {
+                if want_issues && p.is_empty() {
+                    Err(e)
+                } else {
+                    let msg = format!("issues sync failed (PRs OK): {e}");
+                    tracing::warn!("{msg}");
+                    Ok((p, Some(msg), Vec::new()))
+                }
+            }
+            (Err(e), Ok((i, m))) => {
+                if want_prs && i.is_empty() {
+                    Err(e)
+                } else {
+                    let msg = format!("PRs sync failed (issues OK): {e}");
+                    tracing::warn!("{msg}");
+                    Ok((i, Some(msg), m))
+                }
+            }
+            (Err(pr_err), Err(issue_err)) => Err(GhError::Graphql(format!(
+                "both PR and issue fetches failed: PRs={pr_err}; issues={issue_err}"
+            ))),
+        }
+    }
+
     /// Post a top-level comment on an issue or PR. PRs ARE issues in
     /// the REST API, so the same `issues/{n}/comments` endpoint works
     /// for both. `repo` is the `owner/name` shorthand the rest of the
@@ -1173,15 +2033,37 @@ impl GhClient {
         Ok(())
     }
 
+    /// Post a 👀 (`:eyes:`) reaction on any Reactable — typically an
+    /// Issue body or an IssueComment for the `@pilot`-mention
+    /// auto-spawn flow. The reaction is the canonical idempotency
+    /// marker for that flow: subsequent polls select
+    /// `viewerHasReacted` and skip already-acknowledged surfaces, so
+    /// pilot doesn't re-spawn every cycle.
+    ///
+    /// Re-posting an existing reaction is a no-op on GitHub's side,
+    /// so retrying on transient failure is safe.
+    pub async fn react_eyes(&self, reactable_node_id: &str) -> Result<(), GhError> {
+        self.acquire_or_block("addReaction(EYES) mutation")?;
+        let body = graphql::add_reaction_eyes_body(reactable_node_id);
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::error!("addReaction(EYES) errors for {reactable_node_id}: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        Ok(())
+    }
+
     /// Merge the base branch into this PR's head — same as the "Update
     /// branch" button on github.com. Requires the PR's GraphQL node ID.
     pub async fn update_branch(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("updatePullRequestBranch mutation")?;
         let body = graphql::update_branch_body(pull_request_node_id);
-        let response: graphql::GqlResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
         // Observe rate-limit if the mutation response includes it
         // (currently it doesn't — the mutation body doesn't select
         // `rateLimit` — but if a future query body change pulls it
@@ -1203,31 +2085,22 @@ impl GhClient {
         Ok(())
     }
 
-    /// Merge a PR — same as clicking "Merge pull request" on
-    /// github.com. Requires the PR's GraphQL node ID. We don't pin
-    /// the merge method; GitHub will use whatever the repo's
-    /// settings allow / require.
-    /// Lazy-fetch one PR's heavy fields (review threads — inline code
-    /// comments). The inbox-scan query trades these off for cost; this
-    /// method back-fills them when the user actually opens a PR.
+    /// Lazy-fetch one PR's heavy fields — every field the inbox-scan
+    /// `SEARCH_QUERY` deliberately omits to cut per-poll cost. Returns
+    /// a `PrDetails` payload ready for the caller to splice into the
+    /// workspace via `merge_pr_details` (or the equivalent inline
+    /// fold in `handle_fetch_pr_details` / `prefetch_top_pr_details`).
     ///
-    /// Returns the merged `Activity` list ready to splice into the
-    /// workspace's existing activity collection. Caller is responsible
-    /// for dedup (by `node_id`) since this re-fetches data the eager
-    /// path might still be loading. Both paths produce the same shape
-    /// — same kind, same body formatting, same path/line/diff_hunk
-    /// extraction — so the merged list is indistinguishable from a
-    /// purely-eager fetch.
+    /// `Ok(None)` means the node lookup returned null — the PR was
+    /// deleted or the token lost visibility between the inbox search
+    /// and this call. Caller should treat that as "no update."
     pub async fn fetch_pr_details(
         &self,
         pull_request_node_id: &str,
-    ) -> Result<Vec<pilot_core::Activity>, GhError> {
+    ) -> Result<Option<graphql::PrDetails>, GhError> {
         self.acquire_or_block("PR details lazy-fetch")?;
         let body = graphql::pr_details_body(pull_request_node_id);
-        let response: graphql::GqlPrDetailsResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlPrDetailsResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -1244,16 +2117,13 @@ impl GhClient {
             self.observe_rate_limit(rl);
         }
         let Some(node) = data.node else {
-            // PR was deleted / not visible to this token between the
-            // inbox search and the lazy fetch. Not retryable — return
-            // an empty activity list so the caller can clean up.
             tracing::info!(
                 "fetch_pr_details: node {} not found (deleted or scope changed)",
                 pull_request_node_id,
             );
-            return Ok(Vec::new());
+            return Ok(None);
         };
-        Ok(graphql::pr_details_to_activities(&node))
+        Ok(Some(graphql::pr_details_to_details(&node, &self.user)))
     }
 
     /// Resolve a GitHub login to its node ID via GraphQL. Used as
@@ -1262,10 +2132,7 @@ impl GhClient {
     pub async fn lookup_user_id(&self, login: &str) -> Result<String, GhError> {
         self.acquire_or_block("user lookup query")?;
         let body = graphql::user_id_body(login);
-        let response: graphql::GqlUserIdResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlUserIdResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -1299,10 +2166,7 @@ impl GhClient {
         }
         self.acquire_or_block("requestReviews mutation")?;
         let body = graphql::request_reviews_body(pull_request_node_id, &user_ids);
-        let response: graphql::GqlResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(data) = &response.data
             && let Some(rl) = &data.rate_limit
         {
@@ -1336,10 +2200,7 @@ impl GhClient {
         }
         self.acquire_or_block("addAssigneesToAssignable mutation")?;
         let body = graphql::add_assignees_body(assignable_node_id, &user_ids);
-        let response: graphql::GqlResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(data) = &response.data
             && let Some(rl) = &data.rate_limit
         {
@@ -1375,10 +2236,7 @@ impl GhClient {
         }
         self.acquire_or_block("removeAssigneesFromAssignable mutation")?;
         let body = graphql::remove_assignees_body(assignable_node_id, &user_ids);
-        let response: graphql::GqlResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(data) = &response.data
             && let Some(rl) = &data.rate_limit
         {
@@ -1396,13 +2254,106 @@ impl GhClient {
         Ok(())
     }
 
+    /// Fetch the repository's full label set (id + name + color +
+    /// description). Cached by the caller — every repo's label
+    /// set is small (typically under 50 entries) and changes
+    /// rarely, so re-querying per picker open is fine.
+    ///
+    /// Named with the `_for_repo` suffix so this inherent method
+    /// doesn't shadow the trait-side `TaskProvider::list_repo_labels`
+    /// (which takes a `&Workspace` and delegates here).
+    pub async fn list_labels_for_repo(
+        &self,
+        owner: &str,
+        name: &str,
+    ) -> Result<Vec<graphql::GqlRepoLabelNode>, GhError> {
+        self.acquire_or_block("repository.labels query")?;
+        let body = graphql::repo_labels_body(owner, name);
+        let response: graphql::GqlRepoLabelsResponse = self.post_graphql_with_retry(&body).await?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(joined));
+        }
+        let data = response
+            .data
+            .ok_or_else(|| GhError::Graphql("list_repo_labels: no data".into()))?;
+        if let Some(rl) = &data.rate_limit {
+            self.observe_rate_limit(rl);
+        }
+        let nodes = data.repository.map(|r| r.labels.nodes).unwrap_or_default();
+        Ok(nodes)
+    }
+
+    /// Add labels (by GraphQL node id) to any `Labelable` (PR or
+    /// Issue). Empty `label_ids` returns Ok immediately.
+    pub async fn add_labels(
+        &self,
+        labelable_node_id: &str,
+        label_ids: &[String],
+    ) -> Result<(), GhError> {
+        if label_ids.is_empty() {
+            return Ok(());
+        }
+        self.acquire_or_block("addLabelsToLabelable mutation")?;
+        let body = graphql::add_labels_body(labelable_node_id, label_ids);
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
+        if let Some(data) = &response.data
+            && let Some(rl) = &data.rate_limit
+        {
+            self.observe_rate_limit(rl);
+        }
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::error!("addLabelsToLabelable errors: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        Ok(())
+    }
+
+    /// Sibling mutation for removing labels. Counterpart to
+    /// `add_labels` — the `SetLabels` path fires both with the diff
+    /// `existing − desired` after firing the add mutation with
+    /// `desired − existing`.
+    pub async fn remove_labels(
+        &self,
+        labelable_node_id: &str,
+        label_ids: &[String],
+    ) -> Result<(), GhError> {
+        if label_ids.is_empty() {
+            return Ok(());
+        }
+        self.acquire_or_block("removeLabelsFromLabelable mutation")?;
+        let body = graphql::remove_labels_body(labelable_node_id, label_ids);
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
+        if let Some(data) = &response.data
+            && let Some(rl) = &data.rate_limit
+        {
+            self.observe_rate_limit(rl);
+        }
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::error!("removeLabelsFromLabelable errors: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        Ok(())
+    }
+
     pub async fn merge_pr(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("mergePullRequest mutation")?;
         let body = graphql::merge_pr_body(pull_request_node_id);
-        let response: graphql::GqlResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(data) = &response.data
             && let Some(rl) = &data.rate_limit
         {
@@ -1628,5 +2579,344 @@ impl pilot_core::TaskProvider for GhClient {
         self.post_issue_comment(repo, number, body)
             .await
             .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))
+    }
+
+    /// List the labels defined on the workspace's repository. Both
+    /// PRs and issues live under a single repo; we resolve via the
+    /// primary task's `repo` field.
+    async fn list_repo_labels(
+        &self,
+        workspace: &pilot_core::Workspace,
+    ) -> Result<Vec<pilot_core::Label>, pilot_core::ProviderError> {
+        let primary = workspace.primary_task().ok_or_else(|| {
+            pilot_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no primary task", workspace.key),
+            )
+        })?;
+        let Some(repo) = primary.repo.as_deref() else {
+            return Err(pilot_core::ProviderError::permanent(
+                "github",
+                "primary task has no repo",
+            ));
+        };
+        let Some((owner, name)) = repo.split_once('/') else {
+            return Err(pilot_core::ProviderError::permanent(
+                "github",
+                format!("can't parse owner/name from `{repo}`"),
+            ));
+        };
+        let nodes = self
+            .list_labels_for_repo(owner, name)
+            .await
+            .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+        Ok(nodes
+            .into_iter()
+            .map(|n| pilot_core::Label {
+                name: n.name,
+                color: n.color.unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    /// Replace the label set on the workspace's PR or issue. Looks
+    /// up the repo's labels (to resolve names → GraphQL node ids),
+    /// diffs against the task's persisted labels, and fires
+    /// `addLabelsToLabelable` + `removeLabelsFromLabelable` as
+    /// needed. Empty `names` clears every label.
+    async fn set_labels(
+        &self,
+        workspace: &pilot_core::Workspace,
+        names: &[String],
+    ) -> Result<(), pilot_core::ProviderError> {
+        // Find the labelable node — prefer the PR, fall back to the
+        // first issue. Same shape as set_assignees: both PRs and
+        // issues implement the `Labelable` interface. We borrow the
+        // existing label slice (no per-name clone) and just remember
+        // the node id we'll mutate against.
+        let (node_id, existing) = workspace
+            .pr
+            .as_ref()
+            .and_then(|p| p.node_id.as_deref().map(|n| (n, p.labels.as_slice())))
+            .or_else(|| {
+                workspace
+                    .gh_issues
+                    .first()
+                    .and_then(|i| i.node_id.as_deref().map(|n| (n, i.labels.as_slice())))
+            })
+            .ok_or_else(|| {
+                pilot_core::ProviderError::permanent(
+                    "github",
+                    format!(
+                        "workspace {} has neither a PR nor an issue with a node_id",
+                        workspace.key
+                    ),
+                )
+            })?;
+
+        // Need the repo's labels to map names → ids. Pull them once;
+        // anything the user picked that isn't in the repo's set is
+        // silently dropped (can't apply a label that doesn't exist).
+        let repo = workspace
+            .primary_task()
+            .and_then(|t| t.repo.as_deref())
+            .ok_or_else(|| {
+                pilot_core::ProviderError::permanent("github", "primary task has no repo")
+            })?;
+        let (owner, name) = repo.split_once('/').ok_or_else(|| {
+            pilot_core::ProviderError::permanent("github", format!("bad repo string `{repo}`"))
+        })?;
+        let repo_labels = self
+            .list_labels_for_repo(owner, name)
+            .await
+            .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+        // Hash lookup keeps the typical 0-50 repo-labels × 0-10 picks
+        // case constant-time without the two extra HashSet allocs the
+        // prior diff path used.
+        let id_by_name: std::collections::HashMap<&str, &str> = repo_labels
+            .iter()
+            .map(|l| (l.name.as_str(), l.id.as_str()))
+            .collect();
+        // Linear diff: `to_add` = names ∈ desired \ existing,
+        // `to_remove` = names ∈ existing \ desired. At ≤10 entries
+        // on each side the inner `.any()` scan beats the cost of
+        // building two HashSets.
+        let to_add: Vec<String> = names
+            .iter()
+            .filter(|n| !existing.iter().any(|l| &l.name == *n))
+            .filter_map(|n| id_by_name.get(n.as_str()).map(|id| (*id).to_string()))
+            .collect();
+        let to_remove: Vec<String> = existing
+            .iter()
+            .filter(|l| !names.iter().any(|n| n == &l.name))
+            .filter_map(|l| id_by_name.get(l.name.as_str()).map(|id| (*id).to_string()))
+            .collect();
+        if to_add.is_empty() && to_remove.is_empty() {
+            tracing::debug!(
+                workspace = %workspace.key,
+                "set_labels: no-op (desired matches existing)"
+            );
+            return Ok(());
+        }
+        if !to_add.is_empty() {
+            self.add_labels(node_id, &to_add)
+                .await
+                .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+        }
+        if !to_remove.is_empty() {
+            self.remove_labels(node_id, &to_remove)
+                .await
+                .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Spin up a tiny TCP server that answers every request with the
+    /// same canned HTTP response. Returns the `http://addr` base URI
+    /// to feed into `Octocrab::builder().base_uri(…)`. We hand-roll
+    /// the response instead of pulling in `wiremock` because we need
+    /// only one canned answer per test and want zero new deps.
+    async fn spawn_canned_response_server(
+        status_line: &'static str,
+        content_type: &'static str,
+        body: &'static str,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => continue,
+                };
+                tokio::spawn(async move {
+                    // Read until we see the end of the HTTP request
+                    // headers (\r\n\r\n) so the client doesn't see
+                    // a premature close before its write completes.
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    let response = format!(
+                        "HTTP/1.1 {status_line}\r\n\
+                         Content-Type: {content_type}\r\n\
+                         Content-Length: {}\r\n\
+                         Connection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn make_client(base_uri: &str) -> GhClient {
+        // Bypass `from_credential` (which calls `/user`) — we want
+        // a `GhClient` that talks to the mock server directly.
+        let inner = octocrab::Octocrab::builder()
+            .base_uri(base_uri)
+            .unwrap()
+            .build()
+            .unwrap();
+        GhClient {
+            inner,
+            user: "test-user".to_string(),
+            credential_source: "test".to_string(),
+            pr_filters: vec![],
+            issue_filters: vec![],
+            watch_repos: vec![],
+            budget: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::rate_budget::RateBudget::default_for_pilot(),
+            )),
+            notifications_state: NotificationsState::shared(),
+        }
+    }
+
+    /// Regression test for issue #13: GitHub returns a 502 HTML
+    /// maintenance page; we used to surface the opaque
+    /// "Serde Error: expected value at line 1 column 1". Now the
+    /// error includes the actual HTTP status and the canonical reason.
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_502_html_surfaces_actual_status() {
+        let base_uri = spawn_canned_response_server(
+            "502 Bad Gateway",
+            "text/html",
+            "<html><body><h1>502 Bad Gateway</h1></body></html>",
+        )
+        .await;
+        let client = make_client(&base_uri);
+        let body = serde_json::json!({"query": "{}"});
+        let err = client
+            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .await
+            .expect_err("502 response should produce an error");
+        let msg = err.to_string();
+        assert!(msg.contains("502"), "expected '502' in error: {msg}");
+        assert!(
+            msg.contains("Bad Gateway"),
+            "expected canonical reason 'Bad Gateway' in error: {msg}"
+        );
+        assert!(
+            !msg.contains("Serde Error"),
+            "must NOT regress to the opaque serde wording: {msg}"
+        );
+        assert!(
+            matches!(err, GhError::HttpStatus { status: 502, .. }),
+            "expected HttpStatus variant, got: {err:?}"
+        );
+    }
+
+    /// 401 should surface as `HttpStatus { status: 401, .. }` and
+    /// classify as `ProviderError::Auth` via the `From` impl —
+    /// previously we relied on `octocrab::Error::GitHub`, which the
+    /// raw path doesn't produce.
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_401_classifies_as_auth() {
+        let base_uri = spawn_canned_response_server(
+            "401 Unauthorized",
+            "application/json",
+            r#"{"message":"Bad credentials"}"#,
+        )
+        .await;
+        let client = make_client(&base_uri);
+        let body = serde_json::json!({"query": "{}"});
+        let err = client
+            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .await
+            .expect_err("401 should produce an error");
+        assert!(
+            matches!(err, GhError::HttpStatus { status: 401, .. }),
+            "expected HttpStatus(401), got: {err:?}"
+        );
+        let pe: pilot_core::ProviderError = err.into();
+        assert!(
+            matches!(pe, pilot_core::ProviderError::Auth { .. }),
+            "401 should map to ProviderError::Auth, got: {pe:?}"
+        );
+    }
+
+    /// A 2xx response whose body fails JSON parsing surfaces with
+    /// the status + content-type intact, plus the parse-failure
+    /// detail in the body excerpt.
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_200_with_invalid_json_surfaces_parse_failure() {
+        let base_uri =
+            spawn_canned_response_server("200 OK", "application/json", "not actually json").await;
+        let client = make_client(&base_uri);
+        let body = serde_json::json!({"query": "{}"});
+        let err = client
+            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .await
+            .expect_err("unparseable 2xx body should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("json parse failed"),
+            "expected parse-failure marker in error: {msg}"
+        );
+        assert!(
+            matches!(err, GhError::HttpStatus { status: 200, .. }),
+            "expected HttpStatus(200), got: {err:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod backtrace_strip_tests {
+    use super::strip_error_backtrace;
+
+    /// Plain one-line message passes through unchanged.
+    #[test]
+    fn passes_short_message_through() {
+        assert_eq!(
+            strip_error_backtrace("expected value at line 1 column 1"),
+            "expected value at line 1 column 1"
+        );
+    }
+
+    /// snafu's "Found at 0: ..." prelude marks the backtrace —
+    /// cut everything from there. This is the actual format octocrab
+    /// uses; the user's footer was dumping the rest verbatim.
+    #[test]
+    fn cuts_snafu_found_at_prelude() {
+        let raw = "Serde Error: expected value at line 1 column 1\n\
+                   Found at 0: std::backtrace_rs::backtrace::libunwind::trace\n\
+                              at /rustc/59807616e1fa2540724bfbac14d7c0d/library/std/src/backtrace_rs.rs:66";
+        assert_eq!(
+            strip_error_backtrace(raw),
+            "Serde Error: expected value at line 1 column 1"
+        );
+    }
+
+    /// Some snafu versions / wrappers use "Caused by:" instead.
+    #[test]
+    fn cuts_caused_by_prelude() {
+        let raw = "outer error\nCaused by: deeper error\nfurther frame";
+        assert_eq!(strip_error_backtrace(raw), "outer error");
+    }
+
+    /// "Found at" run together with the message (no newline) — still
+    /// cut. The user's screenshot showed "...column 1Found at 0:..."
+    /// where the newline didn't render because the footer is a
+    /// single line.
+    #[test]
+    fn cuts_inline_found_at_marker() {
+        let raw = "expected value at line 1 column 1Found at 0: trace";
+        assert_eq!(
+            strip_error_backtrace(raw),
+            "expected value at line 1 column 1"
+        );
+    }
+
+    /// Trailing whitespace gets trimmed — keeps the footer flush.
+    #[test]
+    fn trims_trailing_whitespace() {
+        assert_eq!(strip_error_backtrace("oh no   "), "oh no");
     }
 }

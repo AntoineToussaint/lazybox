@@ -271,6 +271,31 @@ pub trait TaskProvider: Send + Sync {
         let _ = (workspace, body);
         Err(ProviderError::unsupported(self.name(), "post_reply"))
     }
+
+    /// List the repository labels available for the workspace's
+    /// task. Used to populate the label picker. Returns a vector of
+    /// `(name, color)` pairs; the daemon caches them per repo and
+    /// the picker pre-checks the task's currently-applied set.
+    async fn list_repo_labels(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<Vec<crate::Label>, ProviderError> {
+        let _ = workspace;
+        Err(ProviderError::unsupported(self.name(), "list_repo_labels"))
+    }
+
+    /// Replace the label set on the workspace's PR or issue. The
+    /// provider computes its own diff against the task's persisted
+    /// labels and runs add/remove mutations as needed. Empty
+    /// `names` clears every label.
+    async fn set_labels(
+        &self,
+        workspace: &Workspace,
+        names: &[String],
+    ) -> Result<(), ProviderError> {
+        let _ = (workspace, names);
+        Err(ProviderError::unsupported(self.name(), "set_labels"))
+    }
 }
 
 /// Pick the provider whose [`name`](TaskProvider::name) matches a

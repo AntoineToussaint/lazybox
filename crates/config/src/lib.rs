@@ -59,6 +59,9 @@ pub struct Config {
     pub hooks: HooksConfig,
     pub worktree: WorktreeConfig,
     pub terminal: TerminalSection,
+    /// Auto-spawn-on-`@pilot`-mention settings. See [`MentionConfig`].
+    #[serde(default)]
+    pub mention: MentionConfig,
 }
 
 /// `setup:` block — wizard-driven user config. Mirrors
@@ -524,6 +527,31 @@ impl Config {
     }
 }
 
+// ─── Mention auto-spawn ────────────────────────────────────────────────────
+
+/// Auto-spawn-on-`@pilot`-mention settings. When an allowed user
+/// writes `@pilot` in an issue body or comment, pilot reacts 👀 on
+/// that surface and spawns the default agent with the implement-issue
+/// prompt — same end-state as the user pressing `w` on the issue row.
+///
+/// Default: empty `allowed_logins` → pilot falls back to "just the
+/// authenticated user's own issues + comments." Add teammates' logins
+/// to extend the allowlist:
+///
+/// ```yaml
+/// mention:
+///   allowed_logins: [alice, bob]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct MentionConfig {
+    /// GitHub logins whose `@pilot` mentions auto-spawn. Empty (the
+    /// default) means "just the authenticated viewer" — the polling
+    /// layer resolves that fallback at runtime so daemon restarts
+    /// pick up token rotations without a config edit.
+    pub allowed_logins: Vec<String>,
+}
+
 // ─── Provider configs ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -619,6 +647,11 @@ pub struct DisplayConfig {
     /// you want to track "everything I touched recently" without
     /// switching mailboxes.
     pub show_inactive_in_inbox: bool,
+    /// Fall back to plain ASCII letters (`p` / `i` / `l`) for the
+    /// row type indicator instead of the default unicode glyphs
+    /// (`⇄` PR / `○` issue / `◆` linear). Enable for fonts that
+    /// don't render the unicode glyphs reliably as a single cell.
+    pub ascii_glyphs: bool,
 }
 
 impl Default for DisplayConfig {
@@ -630,6 +663,7 @@ impl Default for DisplayConfig {
             hide_approved_by_me: true,
             assignee_is_reviewer: false,
             show_inactive_in_inbox: false,
+            ascii_glyphs: false,
         }
     }
 }

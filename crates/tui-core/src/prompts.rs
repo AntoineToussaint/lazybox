@@ -30,7 +30,10 @@ pub fn build_work_prompt(workspace: &Workspace) -> Option<(SessionKey, String)> 
     }
     let issue = workspace.gh_issues.first()?;
     let session_key = SessionKey::from(&workspace.key);
-    Some((session_key, build_implement_issue_prompt(issue)))
+    Some((
+        session_key,
+        pilot_core::prompts::build_implement_issue_prompt(issue),
+    ))
 }
 
 /// Pure helper: produce a (session_key, resolve-conflict-prompt)
@@ -100,38 +103,4 @@ pub fn build_fix_ci_prompt(workspace: &Workspace) -> Option<(SessionKey, String)
          then commit and `git push`. Reply when CI is green again."
     );
     Some((session_key, prompt))
-}
-
-/// Build the agent prompt for `w` ("work on this") when the focused
-/// task is a GitHub issue. The agent lands in the issue workspace's
-/// worktree with `gh` + `git` available, so the prompt frames the
-/// work (issue context + acceptance criteria) and lets the agent
-/// handle the branch + PR mechanics.
-fn build_implement_issue_prompt(issue: &pilot_core::Task) -> String {
-    let issue_number = issue
-        .id
-        .key
-        .rsplit_once('#')
-        .map(|(_, n)| n)
-        .unwrap_or(&issue.id.key);
-    let repo = issue.repo.as_deref().unwrap_or("the repository");
-    let body_block = match issue
-        .body
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(body) => format!("\n\nIssue body:\n{body}\n"),
-        None => String::new(),
-    };
-    format!(
-        "Implement GitHub issue #{issue_number} in {repo}: {title}.\
-         {body_block}\
-         \nWalk through it: create a fresh branch from the repo's default base, \
-         implement the change end-to-end (code + tests), run the project's local \
-         checks until they pass, then `gh pr create` with a body that includes \
-         `Closes #{issue_number}` so this issue and the resulting PR collapse to \
-         a single row in pilot. Reply with the PR URL when it's open.",
-        title = issue.title,
-    )
 }

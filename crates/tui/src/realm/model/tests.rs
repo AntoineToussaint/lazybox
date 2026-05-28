@@ -198,6 +198,107 @@ mod effects_tests {
         assert!(m.active_removal_prompt.is_none());
     }
 
+    /// Helper for the scroll damper tests: build a dummy mouse
+    /// event. The damper only inspects `is_up` (passed separately)
+    /// + the timestamps it reads via `Instant::now()`, so the
+    /// per-event mouse data doesn't matter.
+    fn dummy_wheel() -> crossterm::event::MouseEvent {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Fresh gesture (no prior scroll) returns the full STEP.
+    #[test]
+    fn dampen_scroll_step_fresh_gesture_returns_initial_step() {
+        let mut m = build_model();
+        assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 5);
+    }
+
+    /// Sustained same-direction burst decays the step. Events 1-4
+    /// stay at full STEP (5), events 5-7 drop to MID (3), events
+    /// 8-11 drop to TAIL (1), event 12+ is dropped entirely (0).
+    #[test]
+    fn dampen_scroll_step_decays_within_sustained_burst() {
+        let mut m = build_model();
+        for _ in 0..4 {
+            assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 5);
+        }
+        for _ in 0..3 {
+            assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 3);
+        }
+        for _ in 0..4 {
+            assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 1);
+        }
+    }
+
+    /// Past `STOP_AT` (event 12) the dampener returns 0, killing the
+    /// OS momentum tail so the view actually stops within the
+    /// issue's 100–200 ms acceptance window instead of trickling
+    /// onward at STEP=1 for the full 1–2 s tail.
+    #[test]
+    fn dampen_scroll_step_hard_stops_past_stop_at() {
+        let mut m = build_model();
+        // Saturate the burst (11 events still admit at TAIL=1).
+        for _ in 0..11 {
+            let _ = m.dampen_scroll_step(false, dummy_wheel());
+        }
+        // Event 12 onwards: dropped.
+        for _ in 0..30 {
+            assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 0);
+        }
+    }
+
+    /// Direction reversal admits immediately at full STEP — real
+    /// trackpad momentum never reverses, so a reverse-flick is
+    /// unambiguous user intent. Swallowing the first reverse press
+    /// would feel unresponsive when the user is course-correcting
+    /// after an overshoot.
+    #[test]
+    fn dampen_scroll_step_direction_reversal_admits_immediately() {
+        let mut m = build_model();
+        for _ in 0..6 {
+            let _ = m.dampen_scroll_step(false, dummy_wheel());
+        }
+        // Reverse: admit at full step (no dropped event).
+        assert_eq!(m.dampen_scroll_step(true, dummy_wheel()), 5);
+        // The reversal also restarts the burst, so the next
+        // same-direction event stays at full step.
+        assert_eq!(m.dampen_scroll_step(true, dummy_wheel()), 5);
+    }
+
+    /// Reverse-flick rescues a saturated burst — after the hard stop
+    /// kicks in for the downward direction, a reverse-direction event
+    /// must still get through. Otherwise a user correcting an
+    /// overshoot would feel like the trackpad froze.
+    #[test]
+    fn dampen_scroll_step_reverse_admits_after_hard_stop() {
+        let mut m = build_model();
+        for _ in 0..20 {
+            let _ = m.dampen_scroll_step(false, dummy_wheel());
+        }
+        assert_eq!(m.dampen_scroll_step(true, dummy_wheel()), 5);
+    }
+
+    /// After `BURST_IDLE` of inactivity, the next event is treated
+    /// as a fresh gesture. We can't time-travel without injecting a
+    /// clock, but we can prove the freshness path indirectly: a
+    /// burst built up then explicitly cleared (None) returns to
+    /// full step on the next event.
+    #[test]
+    fn dampen_scroll_step_after_explicit_clear_starts_fresh() {
+        let mut m = build_model();
+        for _ in 0..10 {
+            let _ = m.dampen_scroll_step(false, dummy_wheel());
+        }
+        m.scroll_inertia = None;
+        assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 5);
+    }
+
     /// Adopt picker: source + target workspace keys flow into an
     /// `AdoptSessions` command. The picks index resolves into the
     /// `adopt_choices` slot we set up.

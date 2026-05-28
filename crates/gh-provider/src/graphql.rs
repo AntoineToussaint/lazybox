@@ -4,34 +4,55 @@ use chrono::{DateTime, Utc};
 use pilot_core::*;
 use serde::Deserialize;
 
-/// The single GraphQL query that fetches all PR data.
+/// The inbox-scan GraphQL query. Pulls **only** what the sidebar
+/// renders — every other field has been pushed to `PR_DETAILS_QUERY`
+/// (lazy-fetch on PR open + post-poll prefetch for high-attention rows).
 ///
 /// ## Connection sizes (`first: N`) are the rate-limit budget
 ///
 /// GitHub's GraphQL cost is dominated by `nodes × Σ first` across
-/// every connection. The earlier query was generous to the point
-/// of self-DOSing on busy inboxes:
+/// every connection. The original query pulled ~85 sub-objects per
+/// PR (`labels(10) + assignees(10) + reviewRequests(10) +
+/// comments(15) + reviews(10) + closes(10) + checks(20) = 85`),
+/// which at 100 PRs per page and 3-5 parallel branches
+/// (`involves:USER`, `review-requested:USER`, per-watched-repo)
+/// burned through GitHub's 5000-cost-units-per-resource hourly
+/// budget in 1-2 polls.
 ///
-///   reviewThreads(50) × comments(10) = 500 review-thread items / PR
-///   comments(30) + reviews(20) + checks(30)              = 80 / PR
-///   labels(10) + assignees(10) + reviewRequests(10) + closes(10) = 40 / PR
-///                                                          ───────
-///   = ~620 sub-objects per PR × 100 PRs per page = 62k / page
+/// Symptoms of that: slow polls (each page took seconds to
+/// deserialize), per-poll cost overrun (subsequent ticks hit
+/// secondary rate limits and timed out), and the dreaded
+/// "no PRs in the inbox" loop where octocrab's 25s timeout fired
+/// before any page completed.
 ///
-/// Trimmed numbers below land at roughly 1/5 the cost while still
-/// covering the realistic case (a PR with 20 review threads of 5
-/// comments each is already past the "you should resolve some of
-/// these" point, and the activity feed truncates anyway). The tail
-/// is recoverable: opening a PR can lazy-fetch the rest in a
-/// follow-up `pull-requests/N` query (TODO — separate task).
+/// New shape pulls **15 sub-objects per PR** (`labels(3) +
+/// assignees(5) + reviewRequests(5) + comments(last:1) + commits(1)
+/// = 15`), roughly 1/6 the cost. The fields the sidebar doesn't
+/// render directly — review history, per-check details, closing
+/// issue refs, full comment threads — live in `PR_DETAILS_QUERY`
+/// and only fire when the user opens a PR (or via the post-tick
+/// `prefetch_top_pr_details` for high-attention rows).
 ///
-/// Two-sided trade-off:
-///   - Too low → users with many comments/reviews lose history in
-///     the activity feed until lazy-fetch lands.
-///   - Too high → query cost blows the rate budget again.
+/// Trade-offs the lazy split accepts:
+///   - `closes_issues` is empty on first sight (until lazy-fetch).
+///     `Workspace::attach_task` preserves the lazy-populated value
+///     across subsequent polls so re-polls don't clear it.
+///   - `checks` (per-check names) is empty until lazy-fetch — only
+///     the aggregate `pr.ci` (from `statusCheckRollup.state`) is
+///     available at inbox-scan time.
+///   - `role = Mentioned` (I approved) requires the full reviews
+///     list; without it we fall back to "any approval" via
+///     `reviewDecision: APPROVED`. Edge case: PR approved by
+///     someone else where I haven't reviewed yet shows
+///     `Mentioned` instead of `Reviewer` until lazy-fetch. The
+///     sidebar treats both badge states as "no action needed";
+///     correctness is restored on workspace open.
+///   - `needs_reply` is approximate (last comment from someone
+///     else) until lazy-fetch back-fills reviews + review threads.
 ///
-/// Current numbers are deliberately conservative; bump them if a
-/// real workflow shows missing content, and add a regression test.
+/// If the cost ever needs to go up again, raise the numbers AND
+/// the `pr_query_omits_*` regression assertions together so the
+/// budget can't drift silently.
 const SEARCH_QUERY: &str = r#"
 query($query: String!, $first: Int!, $after: String) {
   search(query: $query, type: ISSUE, first: $first, after: $after) {
@@ -63,29 +84,13 @@ query($query: String!, $first: Int!, $after: String) {
             commit {
               statusCheckRollup {
                 state
-                contexts(first: 20) {
-                  nodes {
-                    __typename
-                    ... on CheckRun {
-                      name
-                      conclusion
-                      status
-                      permalink
-                    }
-                    ... on StatusContext {
-                      context
-                      state
-                      targetUrl
-                    }
-                  }
-                }
               }
             }
           }
         }
-        labels(first: 10) { nodes { name } }
-        assignees(first: 10) { nodes { login } }
-        reviewRequests(first: 10) {
+        labels(first: 10) { nodes { name color } }
+        assignees(first: 5) { nodes { login } }
+        reviewRequests(first: 5) {
           nodes {
             requestedReviewer {
               ... on User { login }
@@ -93,28 +98,11 @@ query($query: String!, $first: Int!, $after: String) {
             }
           }
         }
-        comments(first: 15) {
+        comments(last: 1) {
+          totalCount
           nodes {
-            id
             author { login }
-            body
             createdAt
-          }
-        }
-        reviews(first: 10) {
-          nodes {
-            author { login }
-            body
-            state
-            submittedAt
-          }
-        }
-        closingIssuesReferences(first: 10) {
-          nodes {
-            number
-            repository {
-              nameWithOwner
-            }
           }
         }
       }
@@ -254,19 +242,27 @@ pub struct GqlPr {
     #[serde(rename = "reviewRequests")]
     pub review_requests: GqlReviewRequests,
     pub comments: GqlComments,
+    /// Reviews list — populated by the lazy `PR_DETAILS_QUERY`, NOT
+    /// by the inbox-scan `SEARCH_QUERY`. The inbox query dropped this
+    /// field (every poll was pulling 10 reviews × every PR — the
+    /// fattest single contributor to per-PR cost after reviewThreads).
+    /// `#[serde(default)]` so the inbox response deserializes with an
+    /// empty list; `pr_details_to_details` fills it in on workspace
+    /// open or via the post-tick prefetch.
+    #[serde(default)]
     pub reviews: GqlReviews,
-    /// Inline review-thread comments. Now lazy-fetched per PR via
+    /// Inline review-thread comments. Lazy-fetched per PR via
     /// `Command::FetchPrDetails` (see `PR_DETAILS_QUERY`) instead of
-    /// being pulled on every poll cycle — the eager fetch was the
-    /// single biggest contributor to GraphQL query cost. `#[serde(default)]`
-    /// because the inbox-scan query no longer requests this field.
+    /// being pulled on every poll cycle.
     #[serde(default, rename = "reviewThreads")]
     pub review_threads: GqlReviewThreads,
     pub commits: GqlCommits,
-    /// Issues this PR will close on merge (linked via "Closes #N" in
-    /// body, GitHub keyword variants, or the PR sidebar's "Development"
-    /// linker). Populated from GitHub's `closingIssuesReferences` —
-    /// the canonical link, not title heuristics.
+    /// Issues this PR will close on merge. Lazy-fetched: `SEARCH_QUERY`
+    /// dropped this field to cut per-poll cost. On first sight the PR's
+    /// `closes_issues` is empty (or title-derived only); once the user
+    /// opens the workspace OR `prefetch_top_pr_details` picks the row,
+    /// `PR_DETAILS_QUERY` back-fills the canonical `closingIssuesReferences`
+    /// and `Workspace::attach_task` preserves it across subsequent polls.
     #[serde(default, rename = "closingIssuesReferences")]
     pub closing_issues_references: Option<GqlClosingIssues>,
 }
@@ -282,7 +278,7 @@ pub struct GqlClosingIssue {
     pub repository: GqlIssueRepo,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default)]
 pub struct GqlCommits {
     pub nodes: Vec<GqlCommitNode>,
 }
@@ -302,10 +298,14 @@ pub struct GqlCommit {
 pub struct GqlStatusRollup {
     /// SUCCESS, FAILURE, ERROR, PENDING, EXPECTED
     pub state: String,
-    pub contexts: GqlCheckContexts,
+    /// Per-check details. Only fetched by `PR_DETAILS_QUERY`; the
+    /// inbox-scan query just reads the rolled-up `state`. Optional so
+    /// the inbox response deserializes when `contexts` isn't present.
+    #[serde(default)]
+    pub contexts: Option<GqlCheckContexts>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default)]
 pub struct GqlCheckContexts {
     pub nodes: Vec<GqlCheckContext>,
 }
@@ -344,6 +344,11 @@ pub struct GqlLabels {
 #[derive(Deserialize, Debug)]
 pub struct GqlLabel {
     pub name: String,
+    /// GitHub returns the label's hex color (e.g. `"d73a4a"`) without
+    /// the leading `#`. Optional so an older response shape (or a
+    /// query that doesn't ask for the field) deserializes cleanly.
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -376,9 +381,15 @@ pub enum GqlRequestedReviewer {
     Team { name: String },
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default)]
 pub struct GqlComments {
     pub nodes: Vec<GqlComment>,
+    /// Server-side count of *all* comments on the PR/issue. Optional
+    /// because not every query selects it (lazy `PR_DETAILS_QUERY`
+    /// just pulls the bodies; only `SEARCH_QUERY` needs the count
+    /// for the `unread_count` proxy on inbox-scan).
+    #[serde(default, rename = "totalCount")]
+    pub total_count: Option<u32>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -397,9 +408,26 @@ pub struct GqlComment {
     pub original_line: Option<u32>,
     #[serde(default, rename = "diffHunk")]
     pub diff_hunk: Option<String>,
+    /// Eyes-reaction state for the authenticated viewer. Populated
+    /// by the issues-search query (which selects `reactions(content:
+    /// EYES) { viewerHasReacted }`); other queries leave it `None`.
+    /// Drives `@pilot` mention idempotency: pilot reacts 👀 on first
+    /// sight, then skips comments where this is `Some(true)`.
+    #[serde(default)]
+    pub reactions: Option<GqlReactionView>,
 }
 
-#[derive(Deserialize, Debug)]
+/// Tiny projection of a `ReactionConnection` filtered to one content
+/// kind (currently `EYES`). True when the authenticated viewer has
+/// reacted with that content. Used by the `@pilot`-mention path to
+/// decide whether pilot has already acknowledged a comment.
+#[derive(Deserialize, Debug, Clone, Copy, Default)]
+pub struct GqlReactionView {
+    #[serde(default, rename = "viewerHasReacted")]
+    pub viewer_has_reacted: bool,
+}
+
+#[derive(Deserialize, Debug, Default)]
 pub struct GqlReviews {
     pub nodes: Vec<GqlReview>,
 }
@@ -463,6 +491,20 @@ pub fn query_body(search_query: &str) -> serde_json::Value {
     query_body_after(search_query, None)
 }
 
+/// Per-page size for the PR search. Was 100 (GraphQL's maximum)
+/// but with the heavy SEARCH_QUERY payload, GitHub's GraphQL
+/// gateway timed out (HTTP 502 / 504 "We couldn't respond to your
+/// request in time") on every attempt — user logs from
+/// 2026-05-28 showed PR sync failing every cycle while the
+/// lighter issues query (still on 100/page) succeeded fine.
+///
+/// 25 gives GitHub's gateway 4× the per-request compute budget to
+/// resolve our connections, at the cost of 4× the page count for
+/// users with 100+ involved PRs. Empirically GitHub's gateway
+/// budget is closer to the per-request side than the per-result
+/// side, so smaller pages win.
+const PR_PAGE_SIZE: u32 = 25;
+
 pub fn query_body_after(search_query: &str, after: Option<&str>) -> serde_json::Value {
     // Omit `after` entirely when None — sending `"after": null` in the
     // variables block trips GitHub's GraphQL with a misleading
@@ -472,12 +514,12 @@ pub fn query_body_after(search_query: &str, after: Option<&str>) -> serde_json::
     let variables = match after {
         Some(cursor) => serde_json::json!({
             "query": search_query,
-            "first": 100,
+            "first": PR_PAGE_SIZE,
             "after": cursor,
         }),
         None => serde_json::json!({
             "query": search_query,
-            "first": 100,
+            "first": PR_PAGE_SIZE,
         }),
     };
     serde_json::json!({
@@ -629,22 +671,197 @@ pub fn merge_pr_body(pull_request_node_id: &str) -> serde_json::Value {
     })
 }
 
-/// Per-PR "give me everything heavy" query. Pulls full review-thread
-/// data (50 threads × 10 comments) for a single PR by node id. Used
-/// by the lazy-fetch path: the inbox search returns lightweight
-/// metadata, and `fetch_pr_details` only fires when the user opens
-/// a PR's activity pane.
+/// GraphQL mutation: add a 👀 reaction to any `Reactable` (Issue body
+/// or IssueComment, in pilot's case). Posting this reaction is the
+/// authoritative idempotency marker for the `@pilot`-mention
+/// auto-spawn path — subsequent polls see `viewerHasReacted: true`
+/// and skip the trigger. Re-adding an existing reaction is a no-op
+/// on GitHub's side, so retrying is safe.
+const ADD_REACTION_MUTATION: &str = r#"
+mutation($id: ID!) {
+  addReaction(input: { subjectId: $id, content: EYES }) {
+    reaction { content }
+  }
+}
+"#;
+
+pub fn add_reaction_eyes_body(reactable_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": ADD_REACTION_MUTATION,
+        "variables": { "id": reactable_node_id },
+    })
+}
+
+/// GraphQL mutations for label add/remove on any `Labelable` (PR or
+/// Issue — both implement the interface). Mutations take GraphQL node
+/// IDs, not names, so the daemon resolves names → IDs via
+/// `list_repo_labels` (which returns both) before calling the mutation.
+const ADD_LABELS_MUTATION: &str = r#"
+mutation($id: ID!, $labelIds: [ID!]!) {
+  addLabelsToLabelable(input: { labelableId: $id, labelIds: $labelIds }) {
+    labelable { __typename }
+  }
+}
+"#;
+
+pub fn add_labels_body(labelable_node_id: &str, label_node_ids: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "query": ADD_LABELS_MUTATION,
+        "variables": {
+            "id": labelable_node_id,
+            "labelIds": label_node_ids,
+        },
+    })
+}
+
+const REMOVE_LABELS_MUTATION: &str = r#"
+mutation($id: ID!, $labelIds: [ID!]!) {
+  removeLabelsFromLabelable(input: { labelableId: $id, labelIds: $labelIds }) {
+    labelable { __typename }
+  }
+}
+"#;
+
+pub fn remove_labels_body(labelable_node_id: &str, label_node_ids: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "query": REMOVE_LABELS_MUTATION,
+        "variables": {
+            "id": labelable_node_id,
+            "labelIds": label_node_ids,
+        },
+    })
+}
+
+/// Fetch the full label set on a repository. Returns up to 100
+/// labels — enough for any real repo (typical projects sit well
+/// under 50). Pagination would matter for monorepos with hundreds
+/// of labels; we'll cross that bridge if it bites.
+const REPO_LABELS_QUERY: &str = r#"
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    labels(first: 100) {
+      nodes { id name color description }
+    }
+  }
+  rateLimit {
+    limit
+    remaining
+    resetAt
+  }
+}
+"#;
+
+pub fn repo_labels_body(owner: &str, name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": REPO_LABELS_QUERY,
+        "variables": { "owner": owner, "name": name },
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlRepoLabelsResponse {
+    pub data: Option<GqlRepoLabelsData>,
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlRepoLabelsData {
+    pub repository: Option<GqlRepoLabels>,
+    #[serde(rename = "rateLimit", default)]
+    pub rate_limit: Option<GqlRateLimit>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlRepoLabels {
+    pub labels: GqlRepoLabelsConn,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlRepoLabelsConn {
+    pub nodes: Vec<GqlRepoLabelNode>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct GqlRepoLabelNode {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Per-PR "give me everything heavy" query. Pulls every field the
+/// inbox-scan `SEARCH_QUERY` dropped: full review-thread data, the
+/// full reviews list, top-level comment bodies, status-check
+/// contexts, and the closing-issue refs.
 ///
-/// Cost trade-off: GitHub charges this at roughly `1 + 50×(1 + 10)`
-/// ≈ 550 cost units, but only WHEN the user asks. The inbox search,
-/// which fires every poll cycle for every PR, is correspondingly
-/// cheaper without these fields.
+/// Fires:
+///   - When the user opens a PR's workspace (`handle_fetch_pr_details`).
+///   - Post-tick for the top-N high-attention PRs
+///     (`prefetch_top_pr_details`).
+///
+/// Cost trade-off: roughly `1 + 50×(1 + 10) + 15 + 10 + 20 + 10`
+/// ≈ 605 cost units per call. Only fires WHEN the user asks (or
+/// for a small N per tick), so it doesn't compound across the
+/// inbox the way the eager `SEARCH_QUERY` did.
 const PR_DETAILS_QUERY: &str = r#"
 query($id: ID!) {
   node(id: $id) {
     ... on PullRequest {
       id
       updatedAt
+      reviewDecision
+      author { login }
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              state
+              contexts(first: 20) {
+                nodes {
+                  __typename
+                  ... on CheckRun {
+                    name
+                    conclusion
+                    status
+                    permalink
+                  }
+                  ... on StatusContext {
+                    context
+                    state
+                    targetUrl
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      comments(first: 15) {
+        nodes {
+          id
+          author { login }
+          body
+          createdAt
+        }
+      }
+      reviews(first: 10) {
+        nodes {
+          author { login }
+          body
+          state
+          submittedAt
+        }
+      }
+      closingIssuesReferences(first: 10) {
+        nodes {
+          number
+          repository {
+            nameWithOwner
+          }
+        }
+      }
       reviewThreads(first: 50) {
         nodes {
           id
@@ -701,10 +918,380 @@ pub struct GqlPrDetailsData {
     pub rate_limit: Option<GqlRateLimit>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default)]
 pub struct GqlPrDetailsNode {
-    #[serde(rename = "reviewThreads")]
+    #[serde(default, rename = "reviewDecision")]
+    pub review_decision: Option<String>,
+    #[serde(default)]
+    pub author: Option<GqlAuthor>,
+    #[serde(default)]
+    pub commits: GqlCommits,
+    #[serde(default)]
+    pub comments: GqlComments,
+    #[serde(default)]
+    pub reviews: GqlReviews,
+    #[serde(default, rename = "closingIssuesReferences")]
+    pub closing_issues_references: Option<GqlClosingIssues>,
+    #[serde(default, rename = "reviewThreads")]
     pub review_threads: GqlReviewThreads,
+}
+
+/// What the lazy-fetch path returns, ready for the server-side
+/// merge to splice into the workspace's PR. Captures every field
+/// the inbox-scan `SEARCH_QUERY` deliberately omits, so a workspace
+/// open (or post-tick prefetch) brings the PR to full fidelity.
+#[derive(Debug, Clone)]
+pub struct PrDetails {
+    /// Merged activity from comments + reviews + review-threads.
+    /// Deduped against the workspace's existing activity by
+    /// `Workspace::merge_activity`.
+    pub activities: Vec<Activity>,
+    /// `closingIssuesReferences` re-keyed as `TaskId`s. Empty list
+    /// means GitHub knows of no closing refs — caller should NOT
+    /// fall through to title heuristics here (those already ran on
+    /// the inbox-scan path).
+    pub closes_issues: Vec<TaskId>,
+    /// Per-check details (names + status). Empty when the PR has no
+    /// status-check rollup at all.
+    pub checks: Vec<CheckRun>,
+    /// Refined CI status using both rollup state AND per-context
+    /// in-flight detection (catches the "rollup=PENDING but no
+    /// context running" branch-protection-stub case).
+    pub ci: CiStatus,
+    /// `reviewDecision`-derived review status with reviews-list
+    /// fallback for the no-required-reviewer case.
+    pub review: ReviewStatus,
+    /// Role derived from the full reviews list — corrects the
+    /// inbox-scan approximation (which had to use `reviewDecision`
+    /// as a proxy for "I approved").
+    pub role: TaskRole,
+    /// Full `needs_reply` over comments + reviews + threads.
+    pub needs_reply: bool,
+    /// Last commenter other than self, computed from the merged
+    /// activity list. `None` means either no activity, or self
+    /// is the latest contributor.
+    pub last_commenter: Option<String>,
+}
+
+/// Project a `GqlPrDetailsNode` into a `PrDetails` ready for
+/// `merge_pr_details_into_workspace`. Builds the activity list using
+/// the same formatting rules as `pr_to_task` (so the spliced result
+/// is indistinguishable from a fully-eager fetch) and re-derives the
+/// PR-level fields the inbox-scan path could only approximate.
+pub fn pr_details_to_details(node: &GqlPrDetailsNode, my_username: &str) -> PrDetails {
+    let is_author = node
+        .author
+        .as_ref()
+        .map(|a| a.login == my_username)
+        .unwrap_or(false);
+
+    // Activities: top-level comments, review-thread comments
+    // (via `pr_details_to_activities`), and submitted reviews
+    // with bodies. Same ordering + dedup downstream as
+    // `pr_to_task`.
+    let mut activities = activities_from_comments(&node.comments);
+    activities.extend(pr_details_to_activities(node));
+    let fallback_when = node
+        .reviews
+        .nodes
+        .iter()
+        .filter_map(|r| r.submitted_at)
+        .max()
+        .unwrap_or_else(chrono::Utc::now);
+    for r in &node.reviews.nodes {
+        let body = r.body.as_deref().unwrap_or("");
+        if body.is_empty() && r.state != "APPROVED" && r.state != "CHANGES_REQUESTED" {
+            continue;
+        }
+        let display = if !body.is_empty() {
+            body.to_string()
+        } else {
+            format!("✓ {}", r.state)
+        };
+        activities.push(Activity {
+            author: r
+                .author
+                .as_ref()
+                .map(|a| a.login.clone())
+                .unwrap_or_else(|| "?".into()),
+            body: display,
+            created_at: r.submitted_at.unwrap_or(fallback_when),
+            kind: ActivityKind::Review,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        });
+    }
+    activities.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+
+    let last_commenter = activities
+        .iter()
+        .find(|a| a.author != my_username)
+        .map(|a| a.author.clone());
+
+    let closes_issues: Vec<TaskId> = node
+        .closing_issues_references
+        .as_ref()
+        .map(|c| {
+            let mut out: Vec<TaskId> = Vec::new();
+            for ci in &c.nodes {
+                let id = TaskId {
+                    source: "github".into(),
+                    key: format!("{}#{}", ci.repository.name_with_owner, ci.number),
+                };
+                if !out.contains(&id) {
+                    out.push(id);
+                }
+            }
+            out
+        })
+        .unwrap_or_default();
+
+    PrDetails {
+        activities,
+        closes_issues,
+        checks: extract_check_runs_inner(&node.commits),
+        ci: extract_ci_status_inner(&node.commits),
+        review: derive_review_status_inner(&node.reviews.nodes, node.review_decision.as_deref()),
+        role: derive_role_inner(
+            &node.reviews.nodes,
+            node.review_decision.as_deref(),
+            my_username,
+            is_author,
+        ),
+        needs_reply: needs_reply_check_inner(
+            &node.review_threads.nodes,
+            &node.comments.nodes,
+            &node.reviews.nodes,
+            my_username,
+        ),
+        last_commenter,
+    }
+}
+
+/// Helper extracted from `pr_to_task` — turn a `comments` connection
+/// into Activity items, skipping blank-body entries.
+fn activities_from_comments(comments: &GqlComments) -> Vec<Activity> {
+    comments
+        .nodes
+        .iter()
+        .filter(|c| !c.body.trim().is_empty())
+        .map(|c| Activity {
+            author: c
+                .author
+                .as_ref()
+                .map(|a| a.login.clone())
+                .unwrap_or_else(|| "?".into()),
+            body: c.body.clone(),
+            created_at: c.created_at,
+            kind: ActivityKind::Comment,
+            node_id: c.id.clone(),
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        })
+        .collect()
+}
+
+/// Single-node PR fetch. Used by the notifications-driven incremental
+/// path: when `/notifications` reports activity on `repo/N`, we fetch
+/// exactly that one PR (rather than re-running the heavy `involves:USER`
+/// SEARCH that returns the same 100 PRs we already have).
+///
+/// Field set MUST mirror what [`SEARCH_QUERY`] selects per PR so the
+/// reused [`pr_to_task`] conversion produces the same shape — anything
+/// added there should be mirrored here, or the targeted refresh will
+/// silently drop fields on the row it just touched. Connection sizes
+/// (`first: N`) match the search query for the same reason.
+const SINGLE_PR_QUERY: &str = r#"
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id
+      number
+      title
+      body
+      url
+      updatedAt
+      createdAt
+      isDraft
+      state
+      merged
+      additions
+      deletions
+      headRefName
+      baseRefName
+      mergeable
+      mergeStateStatus
+      reviewDecision
+      autoMergeRequest { enabledAt }
+      isInMergeQueue
+      author { login }
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              state
+              contexts(first: 20) {
+                nodes {
+                  __typename
+                  ... on CheckRun {
+                    name
+                    conclusion
+                    status
+                    permalink
+                  }
+                  ... on StatusContext {
+                    context
+                    state
+                    targetUrl
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      labels(first: 10) { nodes { name } }
+      assignees(first: 10) { nodes { login } }
+      reviewRequests(first: 10) {
+        nodes {
+          requestedReviewer {
+            ... on User { login }
+            ... on Team { name }
+          }
+        }
+      }
+      comments(first: 15) {
+        nodes {
+          id
+          author { login }
+          body
+          createdAt
+        }
+      }
+      reviews(first: 10) {
+        nodes {
+          author { login }
+          body
+          state
+          submittedAt
+        }
+      }
+      closingIssuesReferences(first: 10) {
+        nodes {
+          number
+          repository { nameWithOwner }
+        }
+      }
+    }
+  }
+  rateLimit {
+    limit
+    remaining
+    resetAt
+  }
+}
+"#;
+
+pub fn single_pr_body(owner: &str, name: &str, number: u64) -> serde_json::Value {
+    serde_json::json!({
+        "query": SINGLE_PR_QUERY,
+        "variables": {
+            "owner": owner,
+            "name": name,
+            // GraphQL `Int` is i32 — PR numbers fit comfortably.
+            "number": number,
+        },
+    })
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSinglePrResponse {
+    pub data: Option<GqlSinglePrData>,
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSinglePrData {
+    pub repository: Option<GqlSinglePrRepository>,
+    #[serde(rename = "rateLimit")]
+    pub rate_limit: Option<GqlRateLimit>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSinglePrRepository {
+    #[serde(rename = "pullRequest")]
+    pub pull_request: Option<GqlPr>,
+}
+
+/// Single-node Issue fetch. Symmetric to `SINGLE_PR_QUERY` for issue
+/// notifications. Field set mirrors `ISSUES_QUERY` so `issue_to_task`
+/// reuses without modification.
+const SINGLE_ISSUE_QUERY: &str = r#"
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      id
+      number
+      title
+      body
+      url
+      updatedAt
+      createdAt
+      state
+      author { login }
+      labels(first: 10) { nodes { name } }
+      assignees(first: 10) { nodes { login } }
+      comments(first: 15) {
+        nodes {
+          id
+          author { login }
+          body
+          createdAt
+        }
+      }
+      repository { nameWithOwner }
+    }
+  }
+  rateLimit {
+    limit
+    remaining
+    resetAt
+  }
+}
+"#;
+
+pub fn single_issue_body(owner: &str, name: &str, number: u64) -> serde_json::Value {
+    serde_json::json!({
+        "query": SINGLE_ISSUE_QUERY,
+        "variables": {
+            "owner": owner,
+            "name": name,
+            "number": number,
+        },
+    })
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSingleIssueResponse {
+    pub data: Option<GqlSingleIssueData>,
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSingleIssueData {
+    pub repository: Option<GqlSingleIssueRepository>,
+    #[serde(rename = "rateLimit")]
+    pub rate_limit: Option<GqlRateLimit>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSingleIssueRepository {
+    pub issue: Option<GqlIssue>,
 }
 
 /// Convert the lazy-fetched review-thread data into the same
@@ -771,31 +1358,31 @@ pub fn pr_details_to_activities(node: &GqlPrDetailsNode) -> Vec<Activity> {
 }
 
 /// Convert GraphQL PR data to our Task type.
+///
+/// This runs on **inbox-scan** results from `SEARCH_QUERY`, which
+/// deliberately omits `reviews`, `reviewThreads`, `closingIssuesReferences`,
+/// and `statusCheckRollup.contexts` to cut per-poll cost. Fields that
+/// depend on those (per-reviewer role detection, `closes_issues`,
+/// per-check details, full `needs_reply`) are derived from the
+/// reduced shape here; `pr_details_to_details` + `merge_pr_details`
+/// back-fill the canonical values on workspace open and via the
+/// post-tick prefetch.
 pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
     let repo = extract_repo_from_url(&pr.url);
 
-    // Determine role.
+    // Role from author + reviewDecision. Pre-trim we used the
+    // reviews list to detect "I approved → Mentioned"; without
+    // reviews in the inbox query we rely on the rolled-up
+    // reviewDecision as a proxy. Edge case (PR approved by someone
+    // else, I haven't reviewed) shows `Mentioned` instead of
+    // `Reviewer` until lazy-fetch — both badges read as "no action",
+    // and `merge_pr_details` fixes the role on workspace open.
     let is_author = pr
         .author
         .as_ref()
         .map(|a| a.login == my_username)
         .unwrap_or(false);
-    // Did I already approve this PR?
-    let i_approved = pr.reviews.nodes.iter().any(|r| {
-        r.state == "APPROVED"
-            && r.author
-                .as_ref()
-                .map(|a| a.login == my_username)
-                .unwrap_or(false)
-    });
-    let role = if is_author {
-        TaskRole::Author
-    } else if i_approved {
-        // I've approved — treat as Mentioned (low priority, done my part).
-        TaskRole::Mentioned
-    } else {
-        TaskRole::Reviewer
-    };
+    let role = derive_role(pr, my_username, is_author);
 
     // State.
     let state = if pr.merged {
@@ -808,52 +1395,13 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         TaskState::Open
     };
 
-    // Review status from reviewDecision, with a fallback that
-    // walks the reviews list. GitHub returns `reviewDecision: null`
-    // when no review is REQUIRED (no branch protection, no
-    // CODEOWNERS) — even if reviewers have explicitly approved.
-    // In that case the sidebar previously showed REVIEW (pending)
-    // forever even on PRs the user knew were approved. Fall back
-    // to "any latest-per-reviewer APPROVED submission" so the
-    // APPROVED pill actually surfaces.
-    let review = match pr.review_decision.as_deref() {
-        Some("APPROVED") => ReviewStatus::Approved,
-        Some("CHANGES_REQUESTED") => ReviewStatus::ChangesRequested,
-        Some("REVIEW_REQUIRED") => ReviewStatus::Pending,
-        _ => {
-            // No required review — derive from actual submissions.
-            // Each reviewer's latest non-COMMENT/PENDING/DISMISSED
-            // state is what counts: APPROVED or CHANGES_REQUESTED.
-            // The reviews array is in submitted-order so a later
-            // CHANGES_REQUESTED supersedes an earlier APPROVED from
-            // the same author.
-            use std::collections::HashMap;
-            let mut latest: HashMap<String, &str> = HashMap::new();
-            for r in &pr.reviews.nodes {
-                let Some(author) = r.author.as_ref() else {
-                    continue;
-                };
-                match r.state.as_str() {
-                    "APPROVED" | "CHANGES_REQUESTED" => {
-                        latest.insert(author.login.clone(), r.state.as_str());
-                    }
-                    // COMMENT / PENDING / DISMISSED — ignore. A dismissed
-                    // review doesn't count; a comment-only review is
-                    // signal-less for approval status.
-                    _ => {}
-                }
-            }
-            if latest.values().any(|s| *s == "CHANGES_REQUESTED") {
-                ReviewStatus::ChangesRequested
-            } else if latest.values().any(|s| *s == "APPROVED") {
-                ReviewStatus::Approved
-            } else {
-                ReviewStatus::None
-            }
-        }
-    };
+    let review = derive_review_status(pr);
 
-    // Build activity from all sources, sorted by time.
+    // Build activity from all sources, sorted by time. On inbox
+    // scans `pr.comments.nodes` is just the last comment (used to
+    // light up `last_commenter`); `reviews` and `review_threads`
+    // are empty by construction. The lazy-fetch path back-fills
+    // the full activity via `merge_pr_details`.
     let mut activities: Vec<Activity> = Vec::new();
 
     // Issue comments.
@@ -970,15 +1518,30 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
 
     activities.sort_by_key(|a| std::cmp::Reverse(a.created_at));
 
-    // Needs reply: check three signals.
     let needs_reply = needs_reply_check(pr, my_username);
 
+    // last_commenter: prefer the freshly-built activity list. When
+    // it's empty (inbox-scan path on a PR with the last comment from
+    // us), fall back to comments.nodes[0] author so the sidebar's
+    // "from $login" line lights up immediately rather than waiting
+    // for lazy-fetch.
     let last_commenter = activities
         .first()
         .filter(|a| a.author != my_username)
-        .map(|a| a.author.clone());
+        .map(|a| a.author.clone())
+        .or_else(|| {
+            pr.comments
+                .nodes
+                .first()
+                .and_then(|c| c.author.as_ref())
+                .map(|a| a.login.clone())
+                .filter(|l| l != my_username)
+        });
 
-    let unread_count = activities.len() as u32;
+    // unread_count: prefer comments.totalCount when the query
+    // selected it (inbox-scan); fall back to the built activity
+    // count for fully-eager callers (tests + lazy-fetch).
+    let unread_count = pr.comments.total_count.unwrap_or(activities.len() as u32);
 
     Task {
         id: TaskId {
@@ -1002,7 +1565,15 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
             Some(pr.base_ref_name.clone())
         },
         updated_at: pr.updated_at,
-        labels: pr.labels.nodes.iter().map(|l| l.name.clone()).collect(),
+        labels: pr
+            .labels
+            .nodes
+            .iter()
+            .map(|l| pilot_core::Label {
+                name: l.name.clone(),
+                color: l.color.clone().unwrap_or_default(),
+            })
+            .collect(),
         reviewers: pr
             .review_requests
             .nodes
@@ -1164,8 +1735,40 @@ pub(crate) fn parse_closes_from_title(title: &str) -> Vec<u64> {
 /// and latest review. If the most recent communication on any channel is from
 /// someone else and you haven't responded, you owe a reply.
 fn needs_reply_check(pr: &GqlPr, my_username: &str) -> bool {
+    needs_reply_check_inner(
+        &pr.review_threads.nodes,
+        &pr.comments.nodes,
+        &pr.reviews.nodes,
+        my_username,
+    )
+}
+
+fn needs_reply_check_inner(
+    review_threads: &[GqlReviewThread],
+    comments: &[GqlComment],
+    reviews: &[GqlReview],
+    my_username: &str,
+) -> bool {
+    // Re-package the args into a synthetic-feeling shape just for
+    // the existing closure body below. Kept as one function so the
+    // three-branch logic stays co-located.
+    let pr = NeedsReplyView {
+        review_threads,
+        comments,
+        reviews,
+    };
+    needs_reply_view(&pr, my_username)
+}
+
+struct NeedsReplyView<'a> {
+    review_threads: &'a [GqlReviewThread],
+    comments: &'a [GqlComment],
+    reviews: &'a [GqlReview],
+}
+
+fn needs_reply_view(pr: &NeedsReplyView<'_>, my_username: &str) -> bool {
     // 1. Unresolved review threads where the LAST comment is from someone else.
-    for t in &pr.review_threads.nodes {
+    for t in pr.review_threads {
         if t.is_resolved || t.is_outdated {
             continue;
         }
@@ -1180,7 +1783,6 @@ fn needs_reply_check(pr: &GqlPr, my_username: &str) -> bool {
     // 2. Latest issue comment is from someone else (and after our last response).
     let my_last_comment = pr
         .comments
-        .nodes
         .iter()
         .filter(|c| {
             c.author
@@ -1192,7 +1794,6 @@ fn needs_reply_check(pr: &GqlPr, my_username: &str) -> bool {
         .max();
     let last_others_comment = pr
         .comments
-        .nodes
         .iter()
         .filter(|c| {
             c.author
@@ -1211,7 +1812,6 @@ fn needs_reply_check(pr: &GqlPr, my_username: &str) -> bool {
     // 3. Latest review with body from someone else (after our last review/comment).
     let last_others_review = pr
         .reviews
-        .nodes
         .iter()
         .filter(|r| {
             r.author
@@ -1228,7 +1828,6 @@ fn needs_reply_check(pr: &GqlPr, my_username: &str) -> bool {
         // and got falsely flagged as owing a reply.
         let my_last_review = pr
             .reviews
-            .nodes
             .iter()
             .filter(|r| {
                 r.author
@@ -1253,7 +1852,11 @@ fn needs_reply_check(pr: &GqlPr, my_username: &str) -> bool {
 }
 
 fn extract_ci_status(pr: &GqlPr) -> CiStatus {
-    let Some(commit_node) = pr.commits.nodes.first() else {
+    extract_ci_status_inner(&pr.commits)
+}
+
+fn extract_ci_status_inner(commits: &GqlCommits) -> CiStatus {
+    let Some(commit_node) = commits.nodes.first() else {
         return CiStatus::None;
     };
     let Some(rollup) = &commit_node.commit.status_check_rollup else {
@@ -1263,32 +1866,41 @@ fn extract_ci_status(pr: &GqlPr) -> CiStatus {
         "SUCCESS" => CiStatus::Success,
         "FAILURE" | "ERROR" => CiStatus::Failure,
         // PENDING = the rollup is genuinely in flight (queued or
-        // running). Walk the contexts to distinguish "actually
-        // running" from "branch protection declared a required
-        // check that nobody has triggered" — the latter renders
-        // as `CI RUN` today which misleads the user into thinking
-        // a job is in progress when it isn't.
-        "PENDING" => {
-            let any_in_flight = rollup.contexts.nodes.iter().any(|ctx| match ctx {
-                GqlCheckContext::CheckRun { status, .. } => matches!(
-                    status.as_deref(),
-                    Some("IN_PROGRESS" | "QUEUED" | "WAITING" | "PENDING" | "REQUESTED")
-                ),
-                GqlCheckContext::StatusContext { state, .. } => {
-                    matches!(state.as_str(), "PENDING")
+        // running). When `contexts` is present (lazy-fetch path)
+        // walk them to distinguish "actually running" from
+        // "branch protection declared a required check that nobody
+        // has triggered" — the latter renders as `CI RUN` today
+        // which misleads the user into thinking a job is in
+        // progress when it isn't.
+        //
+        // The inbox-scan query omits `contexts` to cut cost; in
+        // that case we trust the rollup's `PENDING` verbatim (small
+        // false-positive risk on the "expected but unstarted" case,
+        // corrected by the next lazy-fetch).
+        "PENDING" => match rollup.contexts.as_ref() {
+            Some(ctxs) => {
+                let any_in_flight = ctxs.nodes.iter().any(|ctx| match ctx {
+                    GqlCheckContext::CheckRun { status, .. } => matches!(
+                        status.as_deref(),
+                        Some("IN_PROGRESS" | "QUEUED" | "WAITING" | "PENDING" | "REQUESTED")
+                    ),
+                    GqlCheckContext::StatusContext { state, .. } => {
+                        matches!(state.as_str(), "PENDING")
+                    }
+                });
+                if any_in_flight {
+                    CiStatus::Pending
+                } else {
+                    // Rollup says PENDING but every context is
+                    // EXPECTED / COMPLETED — required check exists
+                    // in branch protection but no job is running.
+                    // Surface as None so the sidebar doesn't pretend
+                    // something is in flight.
+                    CiStatus::None
                 }
-            });
-            if any_in_flight {
-                CiStatus::Pending
-            } else {
-                // Rollup says PENDING but every context is
-                // EXPECTED / COMPLETED — required check exists in
-                // branch protection but no job is running. Surface
-                // as None so the sidebar doesn't pretend something
-                // is in flight.
-                CiStatus::None
             }
-        }
+            None => CiStatus::Pending,
+        },
         // Top-level `EXPECTED` is the same "required but unstarted"
         // case GitHub uses when branch protection lists a check
         // that hasn't been triggered. Don't lie that it's running.
@@ -1297,16 +1909,123 @@ fn extract_ci_status(pr: &GqlPr) -> CiStatus {
     }
 }
 
+/// Role derivation. Author check is up top because it always wins.
+/// `reviewDecision == APPROVED` is a proxy for "I approved →
+/// Mentioned" — without the reviews list in the inbox query, we
+/// can't tell whose approval it was, so we err on the side of
+/// "no action needed" (matches what the user would see on a
+/// fully-approved PR). `merge_pr_details` re-runs this against the
+/// full reviews list on workspace open and corrects any
+/// misclassification.
+fn derive_role(pr: &GqlPr, my_username: &str, is_author: bool) -> TaskRole {
+    derive_role_inner(
+        &pr.reviews.nodes,
+        pr.review_decision.as_deref(),
+        my_username,
+        is_author,
+    )
+}
+
+fn derive_role_inner(
+    reviews: &[GqlReview],
+    review_decision: Option<&str>,
+    my_username: &str,
+    is_author: bool,
+) -> TaskRole {
+    if is_author {
+        return TaskRole::Author;
+    }
+    // Lazy path: if we have the full reviews list, prefer "did I
+    // explicitly approve" — that's the exact signal the pre-trim
+    // code used and the one the user expects.
+    if !reviews.is_empty() {
+        let i_approved = reviews.iter().any(|r| {
+            r.state == "APPROVED"
+                && r.author
+                    .as_ref()
+                    .map(|a| a.login == my_username)
+                    .unwrap_or(false)
+        });
+        if i_approved {
+            return TaskRole::Mentioned;
+        }
+        return TaskRole::Reviewer;
+    }
+    // Inbox-scan path: fall back to reviewDecision.
+    if matches!(review_decision, Some("APPROVED")) {
+        TaskRole::Mentioned
+    } else {
+        TaskRole::Reviewer
+    }
+}
+
+/// Review-status derivation. `reviewDecision` covers the common case
+/// (branch protection / CODEOWNERS); when it's null (no required
+/// review configured) we fall back to walking the reviews list — but
+/// only if it's populated. The inbox-scan path returns an empty
+/// reviews list, so a null `reviewDecision` collapses to `None` on
+/// inbox scans; lazy-fetch back-fills the canonical status.
+fn derive_review_status(pr: &GqlPr) -> ReviewStatus {
+    derive_review_status_inner(&pr.reviews.nodes, pr.review_decision.as_deref())
+}
+
+fn derive_review_status_inner(
+    reviews: &[GqlReview],
+    review_decision: Option<&str>,
+) -> ReviewStatus {
+    match review_decision {
+        Some("APPROVED") => ReviewStatus::Approved,
+        Some("CHANGES_REQUESTED") => ReviewStatus::ChangesRequested,
+        Some("REVIEW_REQUIRED") => ReviewStatus::Pending,
+        _ => {
+            // No required review — derive from actual submissions.
+            // Each reviewer's latest non-COMMENT/PENDING/DISMISSED
+            // state is what counts: APPROVED or CHANGES_REQUESTED.
+            // The reviews array is in submitted-order so a later
+            // CHANGES_REQUESTED supersedes an earlier APPROVED from
+            // the same author.
+            use std::collections::HashMap;
+            let mut latest: HashMap<String, &str> = HashMap::new();
+            for r in reviews {
+                let Some(author) = r.author.as_ref() else {
+                    continue;
+                };
+                match r.state.as_str() {
+                    "APPROVED" | "CHANGES_REQUESTED" => {
+                        latest.insert(author.login.clone(), r.state.as_str());
+                    }
+                    _ => {}
+                }
+            }
+            if latest.values().any(|s| *s == "CHANGES_REQUESTED") {
+                ReviewStatus::ChangesRequested
+            } else if latest.values().any(|s| *s == "APPROVED") {
+                ReviewStatus::Approved
+            } else {
+                ReviewStatus::None
+            }
+        }
+    }
+}
+
 fn extract_check_runs(pr: &GqlPr) -> Vec<CheckRun> {
-    let Some(commit_node) = pr.commits.nodes.first() else {
+    extract_check_runs_inner(&pr.commits)
+}
+
+fn extract_check_runs_inner(commits: &GqlCommits) -> Vec<CheckRun> {
+    let Some(commit_node) = commits.nodes.first() else {
         return vec![];
     };
     let Some(rollup) = &commit_node.commit.status_check_rollup else {
         return vec![];
     };
-    rollup
-        .contexts
-        .nodes
+    let Some(ctxs) = rollup.contexts.as_ref() else {
+        // Inbox-scan path: contexts are dropped from `SEARCH_QUERY`
+        // to cut cost. `pr.checks` stays empty until lazy-fetch
+        // (`PR_DETAILS_QUERY`) populates it via `merge_pr_details`.
+        return vec![];
+    };
+    ctxs.nodes
         .iter()
         .map(|ctx| match ctx {
             GqlCheckContext::CheckRun {
@@ -1380,14 +2099,16 @@ query($query: String!, $first: Int!, $after: String) {
         createdAt
         state
         author { login }
-        labels(first: 10) { nodes { name } }
+        labels(first: 10) { nodes { name color } }
         assignees(first: 10) { nodes { login } }
+        reactions(content: EYES) { viewerHasReacted }
         comments(first: 15) {
           nodes {
             id
             author { login }
             body
             createdAt
+            reactions(content: EYES) { viewerHasReacted }
           }
         }
         repository {
@@ -1421,6 +2142,12 @@ pub struct GqlIssue {
     pub comments: GqlComments,
     #[serde(default)]
     pub repository: Option<GqlIssueRepo>,
+    /// Eyes-reaction state for the authenticated viewer on the issue
+    /// BODY (separate from per-comment reactions on
+    /// `comments.nodes[].reactions`). See [`GqlReactionView`] for the
+    /// semantics + why pilot uses 👀 as an idempotency marker.
+    #[serde(default)]
+    pub reactions: Option<GqlReactionView>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -1561,7 +2288,15 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         branch: None,
         base_branch: None,
         updated_at: issue.updated_at,
-        labels: issue.labels.nodes.iter().map(|l| l.name.clone()).collect(),
+        labels: issue
+            .labels
+            .nodes
+            .iter()
+            .map(|l| pilot_core::Label {
+                name: l.name.clone(),
+                color: l.color.clone().unwrap_or_default(),
+            })
+            .collect(),
         reviewers: vec![],
         assignees: issue
             .assignees
@@ -1657,10 +2392,14 @@ mod tests {
                     .map(|l| GqlAuthor { login: (*l).into() })
                     .collect(),
             },
-            comments: GqlComments { nodes: vec![] },
+            comments: GqlComments {
+                nodes: vec![],
+                total_count: None,
+            },
             repository: Some(GqlIssueRepo {
                 name_with_owner: "o/r".into(),
             }),
+            reactions: None,
         }
     }
 
@@ -1735,6 +2474,7 @@ mod tests {
                     line: None,
                     original_line: None,
                     diff_hunk: None,
+                    reactions: None,
                 },
                 GqlComment {
                     id: Some("c2".into()),
@@ -1747,8 +2487,10 @@ mod tests {
                     line: None,
                     original_line: None,
                     diff_hunk: None,
+                    reactions: None,
                 },
             ],
+            total_count: None,
         };
         let task = issue_to_task(&issue, "alice");
         assert_eq!(task.recent_activity.len(), 2);
@@ -1773,7 +2515,9 @@ mod tests {
                 line: None,
                 original_line: None,
                 diff_hunk: None,
+                reactions: None,
             }],
+            total_count: None,
         };
         let task = issue_to_task(&issue, "alice");
         assert!(task.needs_reply);
@@ -1806,7 +2550,10 @@ mod tests {
             labels: GqlLabels { nodes: vec![] },
             assignees: GqlAssignees { nodes: vec![] },
             review_requests: GqlReviewRequests { nodes: vec![] },
-            comments: GqlComments { nodes: vec![] },
+            comments: GqlComments {
+                nodes: vec![],
+                total_count: None,
+            },
             reviews: GqlReviews { nodes: vec![] },
             review_threads: GqlReviewThreads { nodes: vec![] },
             commits: GqlCommits { nodes: vec![] },
@@ -2065,42 +2812,90 @@ mod tests {
     // doesn't immediately re-trip RemoteLow.
 
     #[test]
-    fn pr_query_omits_review_threads_entirely() {
-        // `reviewThreads × comments` was the dominant cost
-        // (50 × 10 = 500 items per PR per inbox scan, every poll).
-        // The lazy-fetch path (`PR_DETAILS_QUERY`) now back-fills
-        // these on PR open, so the inbox-scan query MUST NOT
-        // request them. Hard regression guard — a re-introduction
-        // would silently undo the entire lazy split.
-        assert!(
-            !SEARCH_QUERY.contains("reviewThreads"),
-            "reviewThreads must not appear in the inbox-scan query — see PR_DETAILS_QUERY",
-        );
-        // Sanity-check the lazy query still has them.
-        assert!(
-            PR_DETAILS_QUERY.contains("reviewThreads(first: 50)"),
-            "PR_DETAILS_QUERY is the new home for reviewThreads",
-        );
+    fn pr_query_omits_heavy_fields_entirely() {
+        // The whole point of the lazy split — every field below
+        // is exclusively the lazy `PR_DETAILS_QUERY`'s. Re-adding
+        // any of them to the inbox scan would silently re-introduce
+        // the rate-budget blowup that motivated the trim (see the
+        // long comment on `SEARCH_QUERY`).
+        for field in [
+            "reviewThreads",
+            "closingIssuesReferences",
+            "reviews(",
+            "contexts(",
+        ] {
+            assert!(
+                !SEARCH_QUERY.contains(field),
+                "`{field}` must not appear in the inbox-scan query — see PR_DETAILS_QUERY",
+            );
+        }
+        // Sanity-check the lazy query still has the back-fill fields.
+        for field in [
+            "reviewThreads(first: 50)",
+            "closingIssuesReferences",
+            "reviews(first: 10)",
+            "contexts(first: 20)",
+        ] {
+            assert!(
+                PR_DETAILS_QUERY.contains(field),
+                "PR_DETAILS_QUERY is the new home for `{field}`",
+            );
+        }
     }
 
     #[test]
-    fn pr_query_other_connection_sizes_are_pinned_low() {
+    fn pr_query_connection_sizes_are_pinned_low() {
+        // Sidebar-rendering fields stay in the inbox query but
+        // shrunk so 100 PRs/page × N fields doesn't compound.
+        // First label / first few assignees / reviewers is all the
+        // sidebar renders.
         assert!(
-            SEARCH_QUERY.contains("comments(first: 15)"),
-            "top-level comments cap drifted",
+            SEARCH_QUERY.contains("labels(first: 10)"),
+            "labels cap drifted",
         );
         assert!(
-            SEARCH_QUERY.contains("reviews(first: 10)"),
-            "reviews cap drifted",
+            SEARCH_QUERY.contains("assignees(first: 5)"),
+            "assignees cap drifted",
         );
         assert!(
-            SEARCH_QUERY.contains("contexts(first: 20)"),
-            "check contexts cap drifted",
+            SEARCH_QUERY.contains("reviewRequests(first: 5)"),
+            "reviewRequests cap drifted",
         );
-        // Hard guard: the previous bloated numbers must NOT come
-        // back accidentally.
-        assert!(!SEARCH_QUERY.contains("comments(first: 30)"));
-        assert!(!SEARCH_QUERY.contains("reviews(first: 20)"));
+        // `comments(last: 1)` + `totalCount` replaces the eager
+        // `comments(first: 15)`. We just need the last commenter
+        // for the sidebar's "from $login" line and the count for
+        // the unread proxy; the bodies live on the lazy path.
+        assert!(
+            SEARCH_QUERY.contains("comments(last: 1)"),
+            "comments switched away from last:1 — sidebar would lose `last_commenter`",
+        );
+        assert!(
+            SEARCH_QUERY.contains("totalCount"),
+            "comments.totalCount disappeared — `unread_count` would collapse to 0 on inbox-scan",
+        );
+        // Hard guards: previous bloated numbers (both pre-trim AND
+        // the intermediate #17 band-aid trim) must NOT come back.
+        // The band-aid (`comments(first: 5)` etc.) was superseded
+        // by the lazy-fetch split — any return to *any* eager
+        // `comments(first: N)` or `reviews(first: N)` in the
+        // inbox-scan query regresses the cost fix.
+        for stale in [
+            "comments(first: 5)",
+            "comments(first: 15)",
+            "comments(first: 30)",
+            "reviews(first: 3)",
+            "reviews(first: 10)",
+            "reviews(first: 20)",
+            "assignees(first: 10)",
+            "reviewRequests(first: 10)",
+            "contexts(first: 5)",
+            "contexts(first: 20)",
+        ] {
+            assert!(
+                !SEARCH_QUERY.contains(stale),
+                "regressed back to bloated `{stale}` — keep the trim",
+            );
+        }
     }
 
     #[test]
@@ -2158,6 +2953,7 @@ mod tests {
                                 line: Some(42),
                                 original_line: None,
                                 diff_hunk: Some("@@ -1 +1 @@".into()),
+                                reactions: None,
                             },
                             GqlComment {
                                 id: Some("C_reply".into()),
@@ -2170,11 +2966,14 @@ mod tests {
                                 line: None,
                                 original_line: None,
                                 diff_hunk: None,
+                                reactions: None,
                             },
                         ],
+                        total_count: None,
                     },
                 }],
             },
+            ..Default::default()
         };
         let acts = pr_details_to_activities(&node);
         assert_eq!(acts.len(), 2, "two thread comments → two activities");
@@ -2208,6 +3007,7 @@ mod tests {
     fn pr_details_to_activities_empty_threads_is_empty() {
         let node = GqlPrDetailsNode {
             review_threads: GqlReviewThreads { nodes: vec![] },
+            ..Default::default()
         };
         assert!(pr_details_to_activities(&node).is_empty());
     }
@@ -2239,11 +3039,188 @@ mod tests {
                             line: None,
                             original_line: None,
                             diff_hunk: None,
+                            reactions: None,
                         }],
+                        total_count: None,
                     },
                 }],
             },
+            ..Default::default()
         };
         assert!(pr_details_to_activities(&node).is_empty());
+    }
+
+    // ── Inbox-scan trim shape ──────────────────────────────────────
+
+    /// `unread_count` on inbox-scan rides on `comments.totalCount`
+    /// (the bodies are gone from `SEARCH_QUERY`). Verify the wire
+    /// reads it back correctly and that the count survives even
+    /// when the activity list is empty.
+    #[test]
+    fn pr_to_task_uses_total_count_for_unread() {
+        let mut pr = make_pr(1, "bob");
+        pr.comments = GqlComments {
+            nodes: vec![],
+            total_count: Some(17),
+        };
+        let task = pr_to_task(&pr, "alice");
+        assert_eq!(task.unread_count, 17);
+        assert!(task.recent_activity.is_empty());
+    }
+
+    /// Last commenter falls through from `comments.nodes[0]` even
+    /// when the activity list is empty (inbox-scan path with a
+    /// non-self last commenter).
+    #[test]
+    fn pr_to_task_last_commenter_falls_back_to_comments_node() {
+        let mut pr = make_pr(2, "bob");
+        pr.comments = GqlComments {
+            nodes: vec![GqlComment {
+                id: None,
+                author: Some(GqlAuthor {
+                    login: "carol".into(),
+                }),
+                body: "".into(), // blank → not in activities
+                created_at: chrono::Utc::now(),
+                path: None,
+                line: None,
+                original_line: None,
+                diff_hunk: None,
+                reactions: None,
+            }],
+            total_count: Some(3),
+        };
+        let task = pr_to_task(&pr, "alice");
+        assert_eq!(task.last_commenter.as_deref(), Some("carol"));
+    }
+
+    /// Inbox-scan + non-author + reviewDecision=APPROVED → Mentioned.
+    /// Exercises the rolled-up proxy that replaces the dropped
+    /// reviews-list `i_approved` check.
+    #[test]
+    fn pr_to_task_role_uses_review_decision_when_reviews_empty() {
+        let mut pr = make_pr(3, "bob");
+        pr.review_decision = Some("APPROVED".into());
+        pr.reviews = GqlReviews::default(); // inbox-scan: no reviews
+        let task = pr_to_task(&pr, "alice");
+        assert_eq!(
+            task.role,
+            TaskRole::Mentioned,
+            "approved PR → role downgrades to Mentioned via reviewDecision proxy",
+        );
+    }
+
+    /// Inverse: reviewDecision != APPROVED + no reviews → Reviewer.
+    #[test]
+    fn pr_to_task_role_is_reviewer_when_inbox_scan_not_approved() {
+        let mut pr = make_pr(4, "bob");
+        pr.review_decision = Some("REVIEW_REQUIRED".into());
+        pr.reviews = GqlReviews::default();
+        let task = pr_to_task(&pr, "alice");
+        assert_eq!(task.role, TaskRole::Reviewer);
+    }
+
+    /// Lazy path: with the full reviews list, prefer "did I
+    /// approve" over the reviewDecision proxy. PR may be approved
+    /// overall by someone else; my role is still Reviewer until
+    /// I've approved myself.
+    #[test]
+    fn pr_to_task_role_prefers_i_approved_when_reviews_present() {
+        let mut pr = make_pr(5, "bob");
+        pr.review_decision = Some("APPROVED".into());
+        pr.reviews = GqlReviews {
+            nodes: vec![GqlReview {
+                author: Some(GqlAuthor {
+                    login: "carol".into(), // someone ELSE approved
+                }),
+                body: None,
+                state: "APPROVED".into(),
+                submitted_at: Some(chrono::Utc::now()),
+            }],
+        };
+        let task = pr_to_task(&pr, "alice");
+        assert_eq!(
+            task.role,
+            TaskRole::Reviewer,
+            "lazy path prefers 'did I approve' over reviewDecision proxy",
+        );
+    }
+
+    // ── Lazy-fetch projection ──────────────────────────────────────
+
+    /// `pr_details_to_details` re-derives everything `merge_pr_details_into_workspace`
+    /// needs from the lazy-fetch response. Spot-check the pieces
+    /// the inbox-scan path could only approximate.
+    #[test]
+    fn pr_details_to_details_derives_role_review_closes_checks() {
+        let when = chrono::Utc::now();
+        let node = GqlPrDetailsNode {
+            review_decision: Some("APPROVED".into()),
+            author: Some(GqlAuthor {
+                login: "bob".into(),
+            }),
+            commits: GqlCommits {
+                nodes: vec![GqlCommitNode {
+                    commit: GqlCommit {
+                        status_check_rollup: Some(GqlStatusRollup {
+                            state: "SUCCESS".into(),
+                            contexts: Some(GqlCheckContexts {
+                                nodes: vec![GqlCheckContext::CheckRun {
+                                    name: "lint".into(),
+                                    conclusion: Some("SUCCESS".into()),
+                                    status: Some("COMPLETED".into()),
+                                    permalink: None,
+                                }],
+                            }),
+                        }),
+                    },
+                }],
+            },
+            comments: GqlComments::default(),
+            reviews: GqlReviews {
+                nodes: vec![GqlReview {
+                    author: Some(GqlAuthor {
+                        login: "alice".into(),
+                    }),
+                    body: Some("lgtm".into()),
+                    state: "APPROVED".into(),
+                    submitted_at: Some(when),
+                }],
+            },
+            closing_issues_references: Some(GqlClosingIssues {
+                nodes: vec![GqlClosingIssue {
+                    number: 42,
+                    repository: GqlIssueRepo {
+                        name_with_owner: "acme/widget".into(),
+                    },
+                }],
+            }),
+            review_threads: GqlReviewThreads { nodes: vec![] },
+        };
+        let details = pr_details_to_details(&node, "alice");
+        // alice approved → Mentioned (lazy path uses the full
+        // reviews list, not the reviewDecision proxy).
+        assert_eq!(details.role, TaskRole::Mentioned);
+        assert_eq!(details.review, ReviewStatus::Approved);
+        assert_eq!(details.ci, CiStatus::Success);
+        assert_eq!(details.checks.len(), 1);
+        assert_eq!(details.checks[0].name, "lint");
+        assert_eq!(details.closes_issues.len(), 1);
+        assert_eq!(details.closes_issues[0].key, "acme/widget#42");
+        // The review activity made it into the merged feed.
+        assert!(details.activities.iter().any(|a| a.body.contains("lgtm")));
+    }
+
+    /// Lazy node with no closing refs returns an empty
+    /// `closes_issues` — the workspace merge keeps the existing
+    /// list (so re-fetch on the same workspace doesn't clobber
+    /// it). Tested at the workspace level in pilot-core.
+    #[test]
+    fn pr_details_to_details_empty_closes_when_no_refs() {
+        let node = GqlPrDetailsNode::default();
+        let details = pr_details_to_details(&node, "alice");
+        assert!(details.closes_issues.is_empty());
+        assert!(details.checks.is_empty());
+        assert_eq!(details.ci, CiStatus::None);
     }
 }

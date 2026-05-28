@@ -16,25 +16,6 @@ use super::Mailbox;
 use pilot_core::{SessionKey, Workspace};
 use ratatui::style::{Color, Modifier, Style};
 
-/// Visible width of the status column — now TWO side-by-side pills:
-/// review (9 cells) + a 1-cell gutter + CI (9 cells) = 19 cells.
-/// Lifecycle / blocker pills (`MERGED`, `CONFLICT`, `READY`, …)
-/// also use 9 cells and the CI half stays empty for those rows.
-pub(crate) const STATUS_COL_W: usize = 19;
-/// Visible width of the time column. `now`/`Xm`/`Xh`/`Xd`/`Xmo` all
-/// fit in 4 cells (max is `12mo`).
-pub(crate) const TIME_COL_W: usize = 4;
-/// Visible width of the unread-pill column. ` ●99+` is the worst
-/// case (5 cells). Rows without unread render 5 row-styled spaces
-/// so the badge / status / time columns to its right don't shift.
-pub(crate) const UNREAD_COL_W: usize = 5;
-/// Visible width of the agent-badge column. Sized to fit the common
-/// "one agent + one shell" case ( ` C ` + space + ` S ` = 7 cells);
-/// a single badge gets right-aligned padding, more than two get
-/// truncated. Rows without any badge render this many row-styled
-/// spaces so the status / time columns to the right stay anchored.
-pub(crate) const BADGE_COL_W: usize = 7;
-
 /// Right-side status pill showing the most actionable problem on the
 /// PR. One pill at a time, ordered by severity: merge conflict beats
 /// CI failure beats CI mixed beats CI running beats CI ok beats
@@ -51,28 +32,30 @@ pub(crate) struct StatusPill {
 /// the "needs attention" counter on the collapsed repo header.
 /// Each signal (unread / CI / review / agent-asking / mentioned)
 /// is independently toggleable via `~/.pilot/config.yaml::attention`.
-/// Short type marker rendered before the `#number` on each workspace
-/// row. Each label is exactly 5 cells (`[PR] `, `[I]  `, `[L]  `)
-/// so the `#NNN` number after the label always lands at the same
-/// x-position — the eye can scan the column without the brackets
-/// wandering left-right between rows.
+/// Single-cell type marker rendered immediately before the `#number`
+/// on each workspace row. The glyph sits flush against the number
+/// (`⇄#312`, not `[PR]   #312`) so the title column gets the cells
+/// back — see issue #42.
 ///
-/// Variants:
-/// - `[PR] ` — workspaces holding a pull request.
-/// - `[I]  ` — github-issue-only workspaces.
-/// - `[L]  ` — linear-ticket-only workspaces. Distinguished from
-///   `[I]` because they're a different source (different keymaps
-///   later, no review threads, no PRs, …).
-/// - `None`  — empty scratch workspaces (no PR, no issues).
-pub(crate) fn workspace_type_label(workspace: &Workspace) -> Option<&'static str> {
+/// Variants (default unicode):
+/// - `⇄` — workspaces holding a pull request.
+/// - `○` — github-issue-only workspaces.
+/// - `◆` — linear-ticket-only workspaces. Distinct source (different
+///   keymaps later, no review threads, no PRs, …).
+/// - `None` — empty scratch workspaces (no PR, no issues).
+///
+/// `ascii` toggles the fallback letters (`p` / `i` / `l`) for fonts
+/// that don't render the unicode glyphs reliably as a single cell.
+/// Wired from `display.ascii_glyphs` in `~/.pilot/config.yaml`.
+pub(crate) fn workspace_type_label(workspace: &Workspace, ascii: bool) -> Option<&'static str> {
     if workspace.pr.is_some() {
-        return Some("[PR] ");
+        return Some(if ascii { "p" } else { "⇄" });
     }
     if !workspace.gh_issues.is_empty() {
-        return Some("[I]  ");
+        return Some(if ascii { "i" } else { "○" });
     }
     if !workspace.linear_issues.is_empty() {
-        return Some("[L]  ");
+        return Some(if ascii { "l" } else { "◆" });
     }
     None
 }

@@ -16,7 +16,7 @@
 //!    [`crate::chat`].
 
 use crate::ServerConfig;
-use crate::chat::{self, ChatError, ChatInbound, ChatProvider, RouterState};
+use crate::chat::{self, ChatError, ChatInbound, ChatProvider, RouterState, TerminalTarget};
 use pilot_config::SlackConfig;
 use pilot_slack::api::{Client as ApiClient, Message, channel_name_for_terminal};
 use pilot_slack::socket::{InboundEvent, SocketModeClient};
@@ -24,18 +24,34 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
+/// Provider-only slice of [`SlackConfig`] — just the routing knobs
+/// the dispatcher needs. Built from the full config at construction
+/// so the provider never holds the bot/app tokens after the
+/// credential resolver is done with them.
+#[derive(Debug, Clone)]
+struct ProviderCfg {
+    channel_prefix: String,
+    per_workspace_channels: bool,
+}
 
 /// Slack-specific provider state. Wraps the API client + a name→id
 /// channel cache + the resolved bot identity.
 pub struct SlackProvider {
     api: ApiClient,
-    cfg: SlackConfig,
+    cfg: ProviderCfg,
     bot_user_id: String,
     /// `channel_name → channel_id` cache. Populated at boot from
     /// `conversations.list`; updated when pilot creates a new
-    /// channel.
-    name_to_id: Mutex<HashMap<String, String>>,
+    /// channel. Plain `std::sync::Mutex` — guards never span an
+    /// `.await`, so the async-aware variant would be overkill.
+    name_to_id: std::sync::Mutex<HashMap<String, String>>,
+    /// Pre-resolved id of `cfg.anchor_channel`. Set when the channel
+    /// is visible to the bot at boot. Required for thread-fallback
+    /// mode (`per_workspace_channels: false`); when missing, the
+    /// provider degrades to "no chat surface" and logs a warning at
+    /// startup so the user knows to `/invite @pilot`.
+    anchor_channel_id: Option<String>,
 }
 
 impl SlackProvider {
@@ -45,11 +61,16 @@ impl SlackProvider {
         bot_user_id: String,
         seed: HashMap<String, String>,
     ) -> Self {
+        let anchor_channel_id = seed.get(&cfg.anchor_channel).cloned();
         Self {
             api,
-            cfg,
+            cfg: ProviderCfg {
+                channel_prefix: cfg.channel_prefix,
+                per_workspace_channels: cfg.per_workspace_channels,
+            },
             bot_user_id,
-            name_to_id: Mutex::new(seed),
+            name_to_id: std::sync::Mutex::new(seed),
+            anchor_channel_id,
         }
     }
 }
@@ -70,35 +91,55 @@ impl ChatProvider for SlackProvider {
         &'a self,
         channel: &'a str,
         body: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ChatError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<String, ChatError>> + Send + 'a>> {
         Box::pin(async move {
             self.api
                 .post_message(&Message::new(channel.to_string(), body.to_string()))
+                .await
+                .map(|resp| resp.ts)
+                .map_err(|e| ChatError::Provider(e.to_string()))
+        })
+    }
+
+    fn post_to_thread<'a>(
+        &'a self,
+        channel: &'a str,
+        thread_ts: &'a str,
+        body: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ChatError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.api
+                .post_message(
+                    &Message::new(channel.to_string(), body.to_string()).in_thread(thread_ts),
+                )
                 .await
                 .map(|_| ())
                 .map_err(|e| ChatError::Provider(e.to_string()))
         })
     }
 
-    fn channel_name(
+    fn terminal_target(
         &self,
         workspace_key: &str,
         session_id: &str,
         agent_id: &str,
-    ) -> Option<String> {
-        // `per_workspace_channels: false` means "don't auto-create
-        // per-(session, agent) channels" — outbound notifications
-        // are dropped. The user wanted everything in `#pilot` in
-        // that mode; today we just stay silent there.
-        if !self.cfg.per_workspace_channels {
-            return None;
+    ) -> TerminalTarget {
+        if self.cfg.per_workspace_channels {
+            return TerminalTarget::DedicatedChannel(channel_name_for_terminal(
+                workspace_key,
+                session_id,
+                agent_id,
+                &self.cfg.channel_prefix,
+            ));
         }
-        Some(channel_name_for_terminal(
-            workspace_key,
-            session_id,
-            agent_id,
-            &self.cfg.channel_prefix,
-        ))
+        // `per_workspace_channels: false`: anchor a thread in the
+        // shared `#pilot`-style channel. If the bot can't see that
+        // channel (no `/invite`) there's nowhere to post — drop the
+        // surface rather than fail every notification with a 404.
+        match self.anchor_channel_id.as_ref() {
+            Some(id) => TerminalTarget::AnchorThread(id.clone()),
+            None => TerminalTarget::NoSurface,
+        }
     }
 
     fn ensure_channel<'a>(
@@ -106,7 +147,7 @@ impl ChatProvider for SlackProvider {
         name: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ChatError>> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(id) = self.name_to_id.lock().await.get(name).cloned() {
+            if let Some(id) = self.name_to_id.lock().unwrap().get(name).cloned() {
                 return Ok(id);
             }
             match self.api.conversations_create(name).await {
@@ -114,7 +155,7 @@ impl ChatProvider for SlackProvider {
                     let id = resp.channel.id.clone();
                     self.name_to_id
                         .lock()
-                        .await
+                        .unwrap()
                         .insert(name.to_string(), id.clone());
                     tracing::info!(channel = %resp.channel.name, "slack: created channel");
                     Ok(id)
@@ -126,7 +167,7 @@ impl ChatProvider for SlackProvider {
                     tracing::debug!(name = %name, "slack: channel exists, looking up id");
                     match self.api.conversations_list(1000).await {
                         Ok(listing) => {
-                            let mut s = self.name_to_id.lock().await;
+                            let mut s = self.name_to_id.lock().unwrap();
                             for c in &listing.channels {
                                 s.insert(c.name.clone(), c.id.clone());
                             }
@@ -214,7 +255,7 @@ async fn run(
     // ── Plumbing ──────────────────────────────────────────────────
     let provider: Arc<dyn ChatProvider> =
         Arc::new(SlackProvider::new(api, slack, auth.user_id.clone(), seed));
-    let state = Arc::new(Mutex::new(RouterState::new()));
+    let state = Arc::new(tokio::sync::Mutex::new(RouterState::new()));
 
     // ── Inbound socket ────────────────────────────────────────────
     let (mut inbound_rx, _socket_handle) = SocketModeClient::new(app_token).start();
@@ -257,17 +298,20 @@ fn map_inbound(ev: InboundEvent) -> Option<ChatInbound> {
             user,
             text,
             ts,
+            thread_ts,
         }
         | InboundEvent::Message {
             channel,
             user,
             text,
             ts,
+            thread_ts,
         } => Some(ChatInbound::Message {
             channel,
             user,
             text,
             ts,
+            thread_ts,
         }),
     }
 }
@@ -325,6 +369,7 @@ mod tests {
             user: "U1".into(),
             text: "hi".into(),
             ts: "1.0".into(),
+            thread_ts: None,
         })
         .unwrap();
         let message = map_inbound(InboundEvent::Message {
@@ -332,9 +377,86 @@ mod tests {
             user: "U1".into(),
             text: "hi".into(),
             ts: "1.0".into(),
+            thread_ts: None,
         })
         .unwrap();
         assert!(matches!(mention, ChatInbound::Message { .. }));
         assert!(matches!(message, ChatInbound::Message { .. }));
+    }
+
+    #[test]
+    fn map_inbound_carries_thread_ts_through() {
+        let out = map_inbound(InboundEvent::Message {
+            channel: "C1".into(),
+            user: "U1".into(),
+            text: "yes".into(),
+            ts: "2.0".into(),
+            thread_ts: Some("1.0".into()),
+        })
+        .unwrap();
+        match out {
+            ChatInbound::Message {
+                thread_ts: Some(t), ..
+            } => assert_eq!(t, "1.0"),
+            other => panic!("expected threaded message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_target_dedicated_when_per_workspace_channels() {
+        let p = SlackProvider::new(
+            ApiClient::new("xoxb-test".to_string()),
+            SlackConfig {
+                per_workspace_channels: true,
+                ..SlackConfig::default()
+            },
+            "UBOT".to_string(),
+            HashMap::new(),
+        );
+        let target = p.terminal_target("github-acme-widget-186", "a3f1c277-9abc", "claude");
+        match target {
+            TerminalTarget::DedicatedChannel(name) => {
+                assert!(name.contains("github-acme-widget-186"));
+                assert!(name.contains("claude"));
+            }
+            other => panic!("expected DedicatedChannel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_target_anchor_thread_when_per_workspace_channels_false() {
+        let mut seed = HashMap::new();
+        seed.insert("pilot".to_string(), "C-ANCHOR".to_string());
+        let p = SlackProvider::new(
+            ApiClient::new("xoxb-test".to_string()),
+            SlackConfig {
+                per_workspace_channels: false,
+                anchor_channel: "pilot".into(),
+                ..SlackConfig::default()
+            },
+            "UBOT".to_string(),
+            seed,
+        );
+        let target = p.terminal_target("ws", "sess", "claude");
+        match target {
+            TerminalTarget::AnchorThread(id) => assert_eq!(id, "C-ANCHOR"),
+            other => panic!("expected AnchorThread, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_target_none_when_anchor_channel_not_visible() {
+        let p = SlackProvider::new(
+            ApiClient::new("xoxb-test".to_string()),
+            SlackConfig {
+                per_workspace_channels: false,
+                anchor_channel: "pilot".into(),
+                ..SlackConfig::default()
+            },
+            "UBOT".to_string(),
+            HashMap::new(),
+        );
+        let target = p.terminal_target("ws", "sess", "claude");
+        assert!(matches!(target, TerminalTarget::NoSurface));
     }
 }

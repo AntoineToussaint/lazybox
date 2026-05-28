@@ -29,6 +29,7 @@ pilot-auth       = { workspace = true }
 pilot-config     = { workspace = true }
 pilot-store      = { workspace = true }
 pilot-gh         = { workspace = true }
+pilot-slack      = { workspace = true }
 pilot-linear     = { path = "../linear-provider" }
 pilot-tui-term   = { workspace = true }
 pilot-tui-core   = { workspace = true }

@@ -127,6 +127,25 @@ impl ProviderHandle {
             Self::Linear(c) => pilot_core::TaskProvider::set_assignees(c, ws, logins).await,
         }
     }
+    pub async fn list_repo_labels(
+        &self,
+        ws: &pilot_core::Workspace,
+    ) -> Result<Vec<pilot_core::Label>, pilot_core::ProviderError> {
+        match self {
+            Self::Github(c) => pilot_core::TaskProvider::list_repo_labels(c, ws).await,
+            Self::Linear(c) => pilot_core::TaskProvider::list_repo_labels(c, ws).await,
+        }
+    }
+    pub async fn set_labels(
+        &self,
+        ws: &pilot_core::Workspace,
+        names: &[String],
+    ) -> Result<(), pilot_core::ProviderError> {
+        match self {
+            Self::Github(c) => pilot_core::TaskProvider::set_labels(c, ws, names).await,
+            Self::Linear(c) => pilot_core::TaskProvider::set_labels(c, ws, names).await,
+        }
+    }
     pub async fn post_reply(
         &self,
         ws: &pilot_core::Workspace,
@@ -365,6 +384,73 @@ pub async fn handle_set_assignees(
     config.poll_wake.notify_one();
 }
 
+/// Handle `Command::SetLabels`: replace the workspace's label set
+/// with the given names. Provider diffs against the persisted set
+/// and runs add/remove mutations against the GraphQL `Labelable`
+/// interface (works for both PRs and issues). Empty `names` clears
+/// every label. Kicks the poll loop so the row's chip column
+/// updates immediately.
+pub async fn handle_set_labels(
+    config: &ServerConfig,
+    workspace_key: WorkspaceKey,
+    names: Vec<String>,
+) {
+    let emit_err = |msg: &str| {
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("labels", msg));
+    };
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        emit_err(&format!("set_labels: workspace {workspace_key} not found"));
+        return;
+    };
+    let provider = match build_provider_for_workspace(&workspace_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            emit_err(&e);
+            return;
+        }
+    };
+    if let Err(e) = provider.set_labels(&ws, &names).await {
+        tracing::warn!("set_labels {workspace_key} {names:?}: {e:?}");
+        emit_err(&format!("update labels failed: {e}"));
+        return;
+    }
+    tracing::info!("set labels to {names:?} on workspace {workspace_key}");
+    config.poll_wake.notify_one();
+}
+
+/// Handle `Command::FetchRepoLabels`: pull the workspace repo's full
+/// label set and broadcast `Event::RepoLabels` so the TUI can
+/// populate the picker. Silent on failure (we just don't broadcast),
+/// the picker then falls back to whatever labels are already on the
+/// task — same UX as a cold network.
+pub async fn handle_fetch_repo_labels(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        tracing::debug!("fetch_repo_labels: workspace {workspace_key} not found");
+        return;
+    };
+    let provider = match build_provider_for_workspace(&workspace_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("fetch_repo_labels: {e}");
+            return;
+        }
+    };
+    match provider.list_repo_labels(&ws).await {
+        Ok(labels) => {
+            tracing::info!("fetch_repo_labels {workspace_key}: {} labels", labels.len());
+            let _ = config.bus.send(Event::RepoLabels {
+                workspace_key,
+                labels,
+            });
+        }
+        Err(e) => {
+            tracing::warn!("fetch_repo_labels {workspace_key}: {e:?}");
+        }
+    }
+}
+
 /// Handle `Command::FetchPrDetails`: pull the workspace's PR
 /// review-thread activity from GitHub (the field the inbox-scan
 /// query deliberately omits), merge it into the workspace's
@@ -430,36 +516,33 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
                 let Some(node_id) = pr.node_id.clone() else {
                     return Ok(None);
                 };
-                let activities = match client.fetch_pr_details(&node_id).await {
-                    Ok(a) => a,
+                match client.fetch_pr_details(&node_id).await {
+                    Ok(Some(details)) => Ok(Some(details)),
+                    Ok(None) => Ok(None),
                     Err(e) => {
                         tracing::warn!("fetch_pr_details({node_id}): {e}");
-                        return Ok(None);
+                        Ok(None)
                     }
-                };
-                if activities.is_empty() {
-                    tracing::debug!("fetch_pr_details({node_id}): no review-thread activity");
-                    return Ok(None);
                 }
-                Ok(Some(activities))
             }
         },
-        |ws, activities_opt| {
-            let Some(activities) = activities_opt else {
+        |ws, details_opt| {
+            let Some(details) = details_opt else {
                 return;
             };
-            let merged_count = activities.len();
+            let merged_count = details.activities.len();
             // `Workspace::merge_activity` dedups by (author, body,
             // created_at) AND remaps `read_indices` across the
             // post-sort positions. A prior implementation here did a
             // raw push + sort, which left `read_indices` pointing at
             // stale slots — every lazy-fetch silently scrambled the
             // user's read marks.
-            ws.merge_activity(&activities);
+            ws.merge_activity(&details.activities);
+            merge_pr_details_into_workspace(ws, details);
             tracing::info!(
                 workspace = %ws.key,
                 merged = merged_count,
-                "fetch_pr_details: merged review-thread activities"
+                "fetch_pr_details: merged review-thread activities + PR fields"
             );
         },
     )
@@ -468,6 +551,38 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
     // its own provider errors; both Applied and Missing are
     // user-visible-silent successes.
     let _ = result;
+}
+
+/// Splice a freshly-fetched `PrDetails` into a workspace's PR slot.
+/// No-op when the workspace has no PR (the lazy-fetch path skips
+/// issue-only workspaces upstream so this is mostly defensive).
+///
+/// Field rules:
+/// - `closes_issues`, `checks`, `ci`, `review`, `role`, `needs_reply`,
+///   `last_commenter` — overwrite with the lazy result. The lazy
+///   query is authoritative; it has the data the inbox-scan path
+///   could only approximate.
+/// - `unread_count` — recompute from the activity list since lazy
+///   knows the full activity count. The workspace-level
+///   `Workspace::unread_count()` still respects `read_indices`, so
+///   user read state isn't disturbed.
+fn merge_pr_details_into_workspace(ws: &mut Workspace, details: pilot_gh::PrDetails) {
+    let Some(pr) = ws.pr.as_mut() else {
+        return;
+    };
+    if !details.closes_issues.is_empty() {
+        // Replace verbatim — lazy is authoritative.
+        pr.closes_issues = details.closes_issues;
+    }
+    if !details.checks.is_empty() {
+        pr.checks = details.checks;
+    }
+    pr.ci = details.ci;
+    pr.review = details.review;
+    pr.role = details.role;
+    pr.needs_reply = details.needs_reply;
+    pr.last_commenter = details.last_commenter;
+    pr.unread_count = details.activities.len() as u32;
 }
 
 /// Admin: walk every persisted workspace, drop sessions whose
@@ -664,22 +779,23 @@ pub async fn prefetch_top_pr_details(
                         let node_id = node_id.clone();
                         async move {
                             match client.fetch_pr_details(&node_id).await {
-                                Ok(activities) => Ok::<_, ()>(activities),
+                                Ok(details) => Ok::<_, ()>(details),
                                 Err(e) => {
                                     tracing::debug!(
                                         "prefetch_top_pr_details: fetch_pr_details({node_id}) failed: {e}",
                                     );
-                                    Ok(Vec::new())
+                                    Ok(None)
                                 }
                             }
                         }
                     },
-                    |ws, activities| {
-                        if activities.is_empty() {
+                    |ws, details_opt| {
+                        let Some(details) = details_opt else {
                             return;
-                        }
-                        merged_here = activities.len();
-                        ws.merge_activity(&activities);
+                        };
+                        merged_here = details.activities.len();
+                        ws.merge_activity(&details.activities);
+                        merge_pr_details_into_workspace(ws, details);
                     },
                 )
                 .await;

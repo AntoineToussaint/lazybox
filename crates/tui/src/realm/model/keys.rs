@@ -241,6 +241,7 @@ impl<T: TerminalAdapter> Model<T> {
                     Some(Action::RequestReviewers)
                 }
                 pilot_tui_core::action::ActionKind::AddAssignees => Some(Action::AddAssignees),
+                pilot_tui_core::action::ActionKind::ManageLabels => Some(Action::ManageLabels),
                 pilot_tui_core::action::ActionKind::OpenInBrowser => Some(Action::OpenInBrowser),
                 pilot_tui_core::action::ActionKind::OpenHelp => Some(Action::OpenHelp),
                 pilot_tui_core::action::ActionKind::OpenSettings => Some(Action::OpenSettings),
@@ -494,6 +495,11 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(terminal_id) = self.terminals.active_terminal_id() else {
             return;
         };
+        // Update the pinned-recap composing buffer for agent
+        // terminals; without this, a pasted prompt would commit on
+        // Enter as a blank recap (the keystroke tracker only sees the
+        // CR, not the paste payload).
+        self.terminals.record_paste(text);
         let mut bytes = Vec::with_capacity(text.len() + 12);
         bytes.extend_from_slice(b"\x1b[200~");
         bytes.extend_from_slice(text.as_bytes());
@@ -554,6 +560,28 @@ impl<T: TerminalAdapter> Model<T> {
                         let session_key: pilot_core::SessionKey = (&ws.key).into();
                         self.mount_sidebar_context_menu(session_key);
                     }
+                    return;
+                }
+                // Right-click on a URL, file path, or issue reference
+                // inside the terminal pane → open it (browser for URLs
+                // and `#N` refs, the configured editor for paths). We
+                // intercept BEFORE the PTY-forwarding path below so a
+                // right-click on a link works the same regardless of
+                // whether the inner program (claude, vim, …) would
+                // otherwise grab the event. If nothing openable is
+                // under the cursor we fall through to the normal
+                // routing — the PTY still gets the right-click for
+                // its own context menus.
+                if matches!(button, crossterm::event::MouseButton::Right)
+                    && rect_contains(right_bottom_rect, m.column, m.row)
+                    && self
+                        .layout
+                        .hit_test_splitter(m.column, m.row, sidebar_rect, right_top_rect)
+                        .is_none()
+                    && let Some(target) =
+                        self.terminals.target_at(right_bottom_rect, m.column, m.row)
+                {
+                    self.open_click_target(target);
                     return;
                 }
                 // A left-click in the terminal pane ALWAYS starts a
@@ -763,13 +791,20 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                // Apply the inertia damper BEFORE checking which pane
+                // owns the event so the OS-driven "flick keeps
+                // scrolling for 500ms after the gesture" phase decays
+                // its STEP and a reverse-direction gesture cancels
+                // the queued inertia. `dampen_scroll_step` returns 0
+                // when the event should be dropped entirely (reverse
+                // mid-burst).
+                let raw_up = matches!(m.kind, MouseEventKind::ScrollUp);
+                let scaled = self.dampen_scroll_step(raw_up, m);
+                if scaled == 0 {
+                    return;
+                }
                 if rect_contains(right_top_rect, m.column, m.row) {
-                    const STEP: isize = 8;
-                    let delta = if matches!(m.kind, MouseEventKind::ScrollUp) {
-                        -STEP
-                    } else {
-                        STEP
-                    };
+                    let delta = if raw_up { -scaled } else { scaled };
                     if self.right.scroll_activity(delta) {
                         self.redraw = true;
                     }
@@ -781,7 +816,7 @@ impl<T: TerminalAdapter> Model<T> {
                 if self.terminals.focused_terminal_tracks_mouse() {
                     let cell_col = m.column.saturating_sub(right_bottom_rect.x) as u32;
                     let cell_row = m.row.saturating_sub(right_bottom_rect.y) as u32;
-                    let button = if matches!(m.kind, MouseEventKind::ScrollUp) {
+                    let button = if raw_up {
                         libghostty_vt::mouse::Button::Four
                     } else {
                         libghostty_vt::mouse::Button::Five
@@ -797,12 +832,7 @@ impl<T: TerminalAdapter> Model<T> {
                         return;
                     }
                 }
-                const STEP: isize = 5;
-                let delta = if matches!(m.kind, MouseEventKind::ScrollUp) {
-                    -STEP
-                } else {
-                    STEP
-                };
+                let delta = if raw_up { -scaled } else { scaled };
                 let _ = self.terminals.scroll_active(delta);
                 self.redraw = true;
             }

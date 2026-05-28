@@ -340,6 +340,20 @@ pub enum Command {
     MarkRead {
         session_key: SessionKey,
     },
+    /// Hint to the daemon: the user is now looking at this
+    /// workspace. The polling layer uses it to bump the workspace's
+    /// repo to the front of the round-robin sync cursor so a
+    /// comment landing on the visible PR shows up next cycle
+    /// instead of waiting the rest of the rotation. No store
+    /// mutation, no broadcast — pure scheduling hint.
+    ///
+    /// Sent on sidebar cursor moves alongside the existing
+    /// `MarkRead`. The daemon silently ignores it if the workspace
+    /// has no upstream repo (e.g. a locally-created pre-PR
+    /// sandbox).
+    FocusWorkspace {
+        session_key: SessionKey,
+    },
     /// Mark exactly one activity row as read. The auto-mark-on-hover
     /// flow uses this so a brief glance at one comment doesn't flip
     /// the whole workspace's unread badge to zero. `index` is the
@@ -468,6 +482,24 @@ pub enum Command {
     SetAssignees {
         workspace_key: pilot_core::WorkspaceKey,
         logins: Vec<String>,
+    },
+    /// Replace the label set on the workspace's PR / issue. Daemon
+    /// diffs against the currently-persisted labels and fires
+    /// `addLabelsToLabelable` + `removeLabelsFromLabelable` as
+    /// needed. Empty list clears every label. Names are matched
+    /// against the repo's full label set; names that don't exist on
+    /// the repo are silently dropped.
+    SetLabels {
+        workspace_key: pilot_core::WorkspaceKey,
+        names: Vec<String>,
+    },
+    /// Ask the daemon to fetch the repository's full label set for
+    /// the workspace's PR / issue and broadcast it back via
+    /// `Event::RepoLabels`. Used by the label picker on mount so
+    /// the user can pick from every label the repo defines (not
+    /// just the ones currently applied).
+    FetchRepoLabels {
+        workspace_key: pilot_core::WorkspaceKey,
     },
     /// Admin command: walk every persisted workspace, drop sessions
     /// whose terminals aren't currently live, and remove the
@@ -648,6 +680,15 @@ pub enum Event {
     PrMerged {
         workspace_key: pilot_core::WorkspaceKey,
         pr_label: String,
+    },
+    /// Response to `Command::FetchRepoLabels`. Carries the
+    /// repository's full label set (name + color) so the TUI's
+    /// label picker can populate without round-tripping a
+    /// request/response correlation id — the picker is keyed by
+    /// `workspace_key` so the receiver knows which mount to fill.
+    RepoLabels {
+        workspace_key: pilot_core::WorkspaceKey,
+        labels: Vec<pilot_core::Label>,
     },
     /// A new session (= folder worktree) was provisioned inside its
     /// workspace. Sent in response to `Command::CreateSession` and

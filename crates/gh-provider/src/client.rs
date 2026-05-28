@@ -875,6 +875,49 @@ impl GhClient {
         NotificationsSnapshot {
             has_last_modified: s.last_modified.is_some(),
             last_full_sweep_elapsed: s.last_full_sweep_at.map(|i| i.elapsed()),
+            heartbeat_backed_off: s.heartbeat_backed_off(),
+        }
+    }
+
+    /// How long to skip the notifications heartbeat after a failure.
+    /// Matched to [`Self::FULL_SWEEP_INTERVAL`] so a single chronic
+    /// auth/rate-limit problem costs at most one extra round-trip per
+    /// sweep cycle — and clears itself the moment the user fixes
+    /// their token. Shorter would re-fire the broken heartbeat
+    /// repeatedly during an outage; longer would mask a transient
+    /// blip.
+    const HEARTBEAT_BACK_OFF: std::time::Duration = std::time::Duration::from_secs(600);
+
+    /// Record a heartbeat success — clears any prior back-off so the
+    /// next tick uses the cheap incremental path again.
+    fn note_heartbeat_succeeded(&self) {
+        let mut state = self
+            .notifications_state
+            .lock()
+            .expect("notifications state mutex poisoned");
+        if state.heartbeat_back_off_until.is_some() {
+            tracing::info!("notifications heartbeat recovered — clearing back-off");
+            state.heartbeat_back_off_until = None;
+        }
+    }
+
+    /// Arm the heartbeat back-off window. The polling layer's
+    /// `should_full_sweep` honors this and bypasses the heartbeat
+    /// round-trip until the deadline passes. Idempotent — re-arming
+    /// while already backed off just extends the window.
+    fn note_heartbeat_failed(&self) {
+        let mut state = self
+            .notifications_state
+            .lock()
+            .expect("notifications state mutex poisoned");
+        let deadline = std::time::Instant::now() + Self::HEARTBEAT_BACK_OFF;
+        let was_armed = state.heartbeat_back_off_until.is_some();
+        state.heartbeat_back_off_until = Some(deadline);
+        if !was_armed {
+            tracing::warn!(
+                back_off_secs = Self::HEARTBEAT_BACK_OFF.as_secs(),
+                "notifications heartbeat failed — backing off; full sweeps continue",
+            );
         }
     }
 
@@ -894,6 +937,26 @@ impl GhClient {
     /// its own 5000-req/hr quota), but we still gate through the local
     /// bucket so a runaway loop can't hammer this endpoint either.
     pub async fn fetch_notifications(&self) -> Result<NotificationsPoll, GhError> {
+        // Bookkeeping wrapper: on success, clear any prior back-off
+        // window so the next tick uses the heartbeat again; on failure,
+        // arm the back-off so chronic auth/rate-limit problems don't
+        // pay the failed REST round-trip on every tick. We could push
+        // this into the polling layer, but the heartbeat invariant
+        // ("after one call, the back-off state is consistent") belongs
+        // with the call itself — callers don't have to remember to
+        // bookkeep.
+        let result = self.fetch_notifications_inner().await;
+        match &result {
+            Ok(_) => self.note_heartbeat_succeeded(),
+            Err(_) => self.note_heartbeat_failed(),
+        }
+        result
+    }
+
+    /// Inner implementation of [`Self::fetch_notifications`]. Pure I/O;
+    /// the wrapper handles back-off bookkeeping so this method can use
+    /// `?` freely without forgetting to record the failure.
+    async fn fetch_notifications_inner(&self) -> Result<NotificationsPoll, GhError> {
         use http::StatusCode;
         use http::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, LAST_MODIFIED};
 

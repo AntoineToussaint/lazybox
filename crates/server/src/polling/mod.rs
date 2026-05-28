@@ -293,75 +293,112 @@ impl GhSource {
         }
 
         // Process `@pilot` mention triggers BEFORE returning the task
-        // list. For each mention we (1) post the 👀 reaction so the
-        // next poll sees `viewerHasReacted=true` and skips, then (2)
-        // queue an AutoSpawnAgent action the polling tick will
-        // dispatch after upsert (the issue workspace must exist on
-        // disk before we spawn into it).
+        // list. Two passes:
+        //
+        // 1. **Sync pass — queue spawns.** Walk every mention, look up
+        //    its task in the freshly-polled set, and push the
+        //    AutoSpawnAgent into `pending_actions`. No `.await`, no
+        //    cancellation point. The polling tick will drain + dispatch
+        //    after upsert (workspace must exist on disk before spawn).
+        //
+        // 2. **Async pass — react with 👀.** Fire `react_eyes`
+        //    concurrently (bounded by 5 in-flight, matching the
+        //    targeted-fetch fan-out). The reaction is the dedup marker
+        //    for the next sweep's mention scan via `viewerHasReacted`.
+        //
+        // **Why queue first.** A cancel point between react_eyes
+        // returning Ok and a subsequent push would strand the mention
+        // with the emoji on the issue (committed remote state) and no
+        // queued spawn (dropped local state). Next sweep would see
+        // `viewerHasReacted=true` and skip — agent never starts.
+        // Queueing first means the reverse failure mode: spawn fires
+        // without an emoji, which the next sweep would re-trigger,
+        // but `handle_spawn`'s singleton check (per `(session_key, kind)`)
+        // collapses to a no-op. Idempotent.
         //
         // Reaction failures are LOGGED but do NOT block the spawn —
-        // better to act on the mention than to silently ignore it.
-        // A failed react means we might re-spawn next tick; that's
-        // noisy but recoverable (user can Shift-X).
+        // the queue is already populated. A failed react means we
+        // re-spawn next tick; `handle_spawn`'s singleton makes that a
+        // no-op too.
         if !mentions.is_empty() {
             self.emit_progress(format!(
-                "Found {} @pilot mention(s); reacting + queueing auto-spawn",
+                "Found {} @pilot mention(s); queueing auto-spawn + reacting",
                 mentions.len()
             ));
         }
-        for mention in mentions {
-            if let Err(e) = self.client.react_eyes(&mention.target_node_id).await {
-                tracing::warn!(
-                    repo = %mention.repo,
-                    issue = mention.issue_number,
-                    target = %mention.target_node_id,
-                    "react_eyes failed (will still queue auto-spawn): {e}",
-                );
-            }
-            // Look up the matching task in the freshly-polled set so
-            // we can use the real title/body for the prompt + the
-            // canonical workspace key derivation. If we can't find it
-            // (shouldn't happen — the scan ran on the same response
-            // that produced `raw`), skip rather than spawn against a
-            // synthetic task.
-            let Some(task) = raw.iter().find(|t| {
-                t.id.source == "github"
-                    && t.repo.as_deref() == Some(mention.repo.as_str())
-                    && t.id
-                        .key
-                        .rsplit_once('#')
-                        .and_then(|(_, n)| n.parse::<u64>().ok())
-                        == Some(mention.issue_number)
-            }) else {
-                tracing::warn!(
-                    repo = %mention.repo,
-                    issue = mention.issue_number,
-                    "mention scan returned a target with no matching Task — skipping auto-spawn"
-                );
-                continue;
-            };
-            let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(task));
-            let prompt = Some(pilot_core::prompts::build_implement_issue_prompt(task));
-            let reason = format!(
-                "@pilot mention by {} on {}#{} ({})",
-                mention.triggered_by_login,
-                mention.repo,
-                mention.issue_number,
-                match &mention.source {
-                    pilot_gh::MentionSource::Body => "issue body",
-                    pilot_gh::MentionSource::Comment { .. } => "comment",
-                },
-            );
-            tracing::info!(%reason, target = %mention.target_node_id, "queued auto-spawn");
-            self.pending_actions
+
+        // Pass 1: build the spawn queue + pair off (mention, react-target)
+        // for the parallel pass. We carry the `target_node_id` String
+        // separately so the async pass owns it (the loop below moves
+        // mentions into the queue).
+        let mut react_targets: Vec<String> = Vec::with_capacity(mentions.len());
+        {
+            let mut pending = self
+                .pending_actions
                 .lock()
-                .expect("GhSource.pending_actions poisoned")
-                .push(ProviderAction::AutoSpawnAgent {
+                .expect("GhSource.pending_actions poisoned");
+            for mention in mentions {
+                // Look up the matching task in the freshly-polled set so
+                // we use the real title/body for the prompt + the
+                // canonical workspace key derivation. If we can't find it
+                // (shouldn't happen — the scan ran on the same response
+                // that produced `raw`), skip rather than spawn against a
+                // synthetic task.
+                let Some(task) = raw.iter().find(|t| {
+                    t.id.source == "github"
+                        && t.repo.as_deref() == Some(mention.repo.as_str())
+                        && task_number_from_key(&t.id.key) == Some(mention.issue_number)
+                }) else {
+                    tracing::warn!(
+                        repo = %mention.repo,
+                        issue = mention.issue_number,
+                        "mention scan returned a target with no matching Task — skipping auto-spawn"
+                    );
+                    continue;
+                };
+                let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(task));
+                let prompt = Some(pilot_core::prompts::build_implement_issue_prompt(task));
+                let reason = format!(
+                    "@pilot mention by {} on {}#{} ({})",
+                    mention.triggered_by_login,
+                    mention.repo,
+                    mention.issue_number,
+                    match &mention.source {
+                        pilot_gh::MentionSource::Body => "issue body",
+                        pilot_gh::MentionSource::Comment { .. } => "comment",
+                    },
+                );
+                tracing::info!(%reason, target = %mention.target_node_id, "queued auto-spawn");
+                pending.push(ProviderAction::AutoSpawnAgent {
                     session_key,
-                    agent_id: default_agent_id(),
+                    agent_id: DEFAULT_AGENT_ID.to_string(),
                     prompt,
                     reason,
                 });
+                react_targets.push(mention.target_node_id);
+            }
+        }
+
+        // Pass 2: fire reactions concurrently. 5 in flight matches
+        // `fetch_incremental`'s targeted-fetch concurrency — same rate
+        // budget shared, so this is the most parallelism we can give
+        // without competing with ourselves. The collect() drives the
+        // stream to completion; cancellation here only loses emoji
+        // posts, the queued spawns survive.
+        if !react_targets.is_empty() {
+            use futures::stream::{self, StreamExt};
+            const REACT_CONCURRENCY: usize = 5;
+            stream::iter(react_targets)
+                .for_each_concurrent(REACT_CONCURRENCY, |target_node_id| async move {
+                    if let Err(e) = self.client.react_eyes(&target_node_id).await {
+                        tracing::warn!(
+                            target = %target_node_id,
+                            "react_eyes failed (spawn still queued; next tick may re-fire — \
+                             handle_spawn singleton makes that a no-op): {e}",
+                        );
+                    }
+                })
+                .await;
         }
 
         self.emit_progress(format!("Got {} raw items, applying filters…", raw.len()));
@@ -502,8 +539,14 @@ fn log_rate_budget(client: &GhClient) {
 /// the issue. Lives here (not behind a config lookup) because the
 /// polling layer doesn't get a `&PersistedSetup` at fetch time —
 /// the source is constructed once per tick and `fetch` is async.
-fn default_agent_id() -> String {
-    "claude".to_string()
+const DEFAULT_AGENT_ID: &str = "claude";
+
+/// Extract the trailing PR/issue number from a GitHub `TaskId::key`
+/// (e.g. `"acme/widget#186" → 186`). Centralized so future callers
+/// don't reinvent the rsplit-and-parse chain; today both the mention
+/// loop and `TaskProvider::post_reply` (in `gh-provider`) need it.
+fn task_number_from_key(key: &str) -> Option<u64> {
+    key.rsplit_once('#').and_then(|(_, n)| n.parse().ok())
 }
 
 /// Dispatch one [`ProviderAction`] surfaced by a [`TaskSource`]
@@ -1267,11 +1310,18 @@ pub async fn tick_with_state(
                     source: source.name().to_string(),
                     count,
                 });
-                // Drain + dispatch any side-effect actions the
-                // source queued during `fetch` (today: auto-spawn
-                // requests from `@pilot` mentions). Runs AFTER the
-                // upsert loop so the freshly-created issue
-                // workspaces exist before we spawn into them.
+                // Drain + dispatch any side-effect actions the source
+                // queued during `fetch` (today: auto-spawn requests
+                // from `@pilot` mentions).
+                //
+                // ORDERING INVARIANT: this MUST run after the upsert
+                // loop AND before rescope. `dispatch_action` calls
+                // `handle_spawn`, which expects the freshly-upserted
+                // workspace to exist on disk; rescope may delete
+                // out-of-scope workspaces. Moving this below rescope
+                // would silently break auto-spawn — the workspace
+                // gets deleted before the spawn dispatches and the
+                // agent starts in a sandbox.
                 let actions = source.drain_actions();
                 if !actions.is_empty() {
                     tracing::info!(

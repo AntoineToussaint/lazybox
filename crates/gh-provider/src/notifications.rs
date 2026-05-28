@@ -182,21 +182,46 @@ pub(crate) struct NotificationsState {
     /// first tick after daemon start always runs a full sweep to
     /// bootstrap the inbox.
     pub(crate) last_full_sweep_at: Option<std::time::Instant>,
+    /// "Skip the cheap heartbeat round-trip and go straight to full
+    /// sweep" deadline. Armed by `note_heartbeat_failed` when the
+    /// notifications endpoint errors (auth scope missing, REST
+    /// rate-limit, 5xx) — without this, a chronically-broken
+    /// heartbeat would pay BOTH the failed REST round-trip AND the
+    /// full GraphQL sweep on every tick. Cleared by
+    /// `note_heartbeat_succeeded` once the endpoint recovers.
+    pub(crate) heartbeat_back_off_until: Option<std::time::Instant>,
 }
 
 impl NotificationsState {
     /// Is the slow-sweep cadence due?
     ///
-    /// True when no sweep has run yet (bootstrap case — first tick
-    /// after daemon start) OR when the configured `threshold` has
-    /// elapsed since the last sweep. Centralized here (rather than
-    /// inlined in `GhClient`) so the timer arithmetic can be
-    /// unit-tested without spinning up a real client.
+    /// True in any of three cases:
+    ///   - no sweep has run yet (bootstrap, first tick after daemon start),
+    ///   - the configured `threshold` has elapsed since the last sweep,
+    ///   - the notifications heartbeat is currently in a back-off window
+    ///     (a chronic heartbeat failure → skip the round-trip and just
+    ///     do the sweep until it recovers).
+    ///
+    /// Centralized here (rather than inlined in `GhClient`) so the
+    /// timer arithmetic can be unit-tested without spinning up a real
+    /// client.
     pub fn is_full_sweep_due(&self, threshold: std::time::Duration) -> bool {
+        if self.heartbeat_backed_off() {
+            return true;
+        }
         match self.last_full_sweep_at {
             None => true,
             Some(t) => t.elapsed() >= threshold,
         }
+    }
+
+    /// True when a previous heartbeat failure has armed a back-off
+    /// window that hasn't yet expired. Public-to-crate because the
+    /// `should_full_sweep` path consults it; also surfaced via
+    /// `NotificationsSnapshot` for the status indicator.
+    pub(crate) fn heartbeat_backed_off(&self) -> bool {
+        self.heartbeat_back_off_until
+            .is_some_and(|deadline| std::time::Instant::now() < deadline)
     }
 
     /// Construct a fresh `Arc<Mutex<NotificationsState>>` — the shape
@@ -222,6 +247,10 @@ pub(crate) type SharedNotificationsState = std::sync::Arc<Mutex<NotificationsSta
 pub struct NotificationsSnapshot {
     pub has_last_modified: bool,
     pub last_full_sweep_elapsed: Option<std::time::Duration>,
+    /// True when the heartbeat is in a back-off window (chronic
+    /// failure). The polling layer is currently skipping the cheap
+    /// notifications round-trip; full sweeps still run.
+    pub heartbeat_backed_off: bool,
 }
 
 /// Format a `DateTime<Utc>` as an HTTP-date (RFC 7231 IMF-fixdate),
@@ -336,6 +365,42 @@ mod tests {
         // `involves:USER` search and seeds the inbox.
         let s = NotificationsState::default();
         assert!(s.is_full_sweep_due(std::time::Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn heartbeat_back_off_forces_full_sweep_even_if_timer_says_no() {
+        // The whole point of the back-off: a chronic heartbeat
+        // failure shouldn't pay the round-trip on every tick. Even
+        // when the slow-sweep timer thinks "incremental is fine right
+        // now," `is_full_sweep_due` must return true while the
+        // back-off window is active so the polling layer skips the
+        // heartbeat and goes straight to the sweep.
+        let s = NotificationsState {
+            // Sweep happened RIGHT now — timer alone wouldn't promote.
+            last_full_sweep_at: Some(std::time::Instant::now()),
+            // Back-off armed 100ms into the future.
+            heartbeat_back_off_until: Some(
+                std::time::Instant::now() + std::time::Duration::from_millis(100),
+            ),
+            ..Default::default()
+        };
+        assert!(s.heartbeat_backed_off());
+        assert!(s.is_full_sweep_due(std::time::Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn expired_heartbeat_back_off_does_not_force_full_sweep() {
+        // Back-off in the past = expired. Once it expires, the timer
+        // alone gates the decision again — a fresh sweep means the
+        // heartbeat resumes on the next tick.
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let s = NotificationsState {
+            last_full_sweep_at: Some(std::time::Instant::now()),
+            heartbeat_back_off_until: Some(past),
+            ..Default::default()
+        };
+        assert!(!s.heartbeat_backed_off());
+        assert!(!s.is_full_sweep_due(std::time::Duration::from_secs(600)));
     }
 
     #[test]

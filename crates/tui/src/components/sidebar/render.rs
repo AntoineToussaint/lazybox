@@ -204,6 +204,9 @@ impl Sidebar {
         // `#7204 R` and `#31 R` had different role-letter positions
         // and the whole column visibly jittered. Minimum 3 ("#NN")
         // so very-short numbers still leave space for a separator.
+        //
+        // Width is `1` (the `#`) + digit count of `n`, computed via
+        // `ilog10` so the hot path doesn't allocate a String per row.
         let max_pr_num_width = self
             .visible
             .iter()
@@ -213,7 +216,7 @@ impl Sidebar {
                     .get(k)
                     .and_then(|w| w.primary_task())
                     .and_then(crate::components::task_label::pr_number)
-                    .map(|n| format!("#{n}").chars().count()),
+                    .map(|n| 2 + n.checked_ilog10().unwrap_or(0) as usize),
                 _ => None,
             })
             .max()

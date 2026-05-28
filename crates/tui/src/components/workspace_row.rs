@@ -170,8 +170,9 @@ fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     };
     // Single cell, no trailing space — the glyph sits flush against
     // the `#NNN` cell that follows so the row reads `⇄#312` instead
-    // of `[PR]   #312` (issue #42).
-    Cell::from_span(Span::styled(glyph.to_string(), style))
+    // of `[PR]   #312` (issue #42). `glyph` is `&'static str` so the
+    // Span borrows it without allocating on the per-frame hot path.
+    Cell::from_span(Span::styled(glyph, style))
 }
 
 fn cell_pr_num(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -507,6 +508,86 @@ mod tests {
         assert_eq!(cell.width(), 3);
     }
 
+    /// Build a PR-shaped task — `make_task` fills `url` from `key`,
+    /// so the `/pull/` segment is what makes `Workspace::attach_task`
+    /// classify it as a PR (not an issue). The two `cell_type` tests
+    /// need this; the existing `make_task` keys (`owner/repo#1`)
+    /// would land in the gh_issues slot and render `○`.
+    fn pr_task(repo: &str, n: u64) -> Task {
+        let mut task = make_task(&format!("{repo}#{n}"), "x");
+        task.url = format!("https://github.com/{repo}/pull/{n}");
+        task
+    }
+
+    /// Type cell renders the single-cell unicode glyph by default.
+    /// Anchors the layout contract for issue #42: type column is
+    /// exactly 1 cell wide so `#NNN` sits flush against the glyph.
+    #[test]
+    fn cell_type_emits_single_cell_glyph_for_pr() {
+        let task = pr_task("owner/repo", 1);
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_type(&ctx);
+        assert_eq!(cell.width(), 1);
+        assert_eq!(cell.spans[0].content.as_ref(), "⇄");
+    }
+
+    /// `ascii_glyphs = true` (config opt-in) swaps the unicode glyph
+    /// for the plain letter so fonts that don't render the unicode
+    /// reliably still get a usable, single-cell marker.
+    #[test]
+    fn cell_type_honors_ascii_fallback() {
+        let task = pr_task("owner/repo", 1);
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.ascii_glyphs = true;
+        let cell = cell_type(&ctx);
+        assert_eq!(cell.width(), 1);
+        assert_eq!(cell.spans[0].content.as_ref(), "p");
+    }
+
+    /// Issue workspace (no PR slot) renders the `○` glyph — pins
+    /// the per-variant routing through `workspace_type_label`.
+    #[test]
+    fn cell_type_emits_circle_for_issue() {
+        let task = make_task("owner/repo#1", "x"); // make_task URL → issue
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_type(&ctx);
+        assert_eq!(cell.width(), 1);
+        assert_eq!(cell.spans[0].content.as_ref(), "○");
+    }
+
+    /// Empty workspace (no PR, no issues) → no type cell, so the
+    /// glyph column collapses to nothing rather than rendering a
+    /// stray character.
+    #[test]
+    fn cell_type_empty_for_scratch_workspace() {
+        let ws = Workspace::empty(
+            pilot_core::WorkspaceKey("scratch".into()),
+            "main",
+            fixed_time(),
+        );
+        let theme = theme();
+        let ctx = WorkspaceRowCtx {
+            workspace: Some(&ws),
+            task: None,
+            theme: &theme,
+            now: fixed_time(),
+            focused: false,
+            is_cursor: false,
+            max_pr_num_width: 2,
+            long_snooze_armed: false,
+            asking: false,
+            badges: vec![],
+            ascii_glyphs: false,
+        };
+        assert_eq!(cell_type(&ctx).width(), 0);
+    }
+
     /// Kind label parses `feat: foo` into a `[feat] ` cell.
     #[test]
     fn cell_kind_strips_conventional_prefix() {
@@ -751,23 +832,11 @@ mod tests {
         // Find the `C` glyph in row A; row B must have a space at
         // the SAME char/cell offset, not anything else. The type
         // glyph (`⇄` / `○`) is multi-byte UTF-8, so anchor by char
-        // index — `String::find` is byte-based and would drift.
-        let c_pos = row_a
-            .char_indices()
-            .scan(0usize, |i, (_byte, ch)| {
-                let start = *i;
-                *i += 1;
-                Some((start, ch))
-            })
-            .collect::<Vec<_>>()
+        // position — `str::find` is byte-based and would drift.
+        let row_a_chars: Vec<char> = row_a.chars().collect();
+        let c_pos = row_a_chars
             .windows(3)
-            .find_map(|w| {
-                if w[0].1 == ' ' && w[1].1 == 'C' && w[2].1 == ' ' {
-                    Some(w[0].0)
-                } else {
-                    None
-                }
-            })
+            .position(|w| w == [' ', 'C', ' '])
             .expect("row A should have a ` C ` badge");
         let same_window: String = row_b.chars().skip(c_pos).take(3).collect();
         assert_eq!(

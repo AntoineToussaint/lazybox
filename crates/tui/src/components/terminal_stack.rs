@@ -926,7 +926,14 @@ impl TerminalStack {
     /// the scrollback, leave the pane, send SIGINT. Keys are sourced
     /// from the catalog where possible so a rebind / rename in
     /// `ActionDef` flows through automatically.
-    pub fn contextual_bindings_static(
+    ///
+    /// Associated function (no `&self`) because the bindings don't
+    /// depend on terminal-stack state — they're the same whether the
+    /// pane has zero terminals or twenty. The pane wrapper still
+    /// takes `&self` for symmetry with the other panes (Sidebar /
+    /// Right both inspect state to decide what to surface), but
+    /// reaches through to this stateless implementation.
+    pub fn contextual_bindings(
         overrides: &std::collections::BTreeMap<String, String>,
     ) -> Vec<crate::Binding> {
         use crate::Binding;
@@ -946,7 +953,10 @@ impl TerminalStack {
             // being a catalog action — but it's actionable knowledge
             // for the user (escape a hung process), so it stays in
             // the hint bar as a hand-curated entry.
-            Binding::new_static("Ctrl-c", "interrupt"),
+            Binding {
+                keys: std::borrow::Cow::Borrowed("Ctrl-c"),
+                label: std::borrow::Cow::Borrowed("interrupt"),
+            },
         ]
     }
 

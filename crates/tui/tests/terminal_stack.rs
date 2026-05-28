@@ -714,7 +714,7 @@ fn footer_drops_all_keys_to_pty_noise() {
     // shortcut. The hint bar should now only carry escape hatches —
     // scroll the scrollback, leave the pane, interrupt the process.
     let overrides = std::collections::BTreeMap::new();
-    let bindings = TerminalStack::contextual_bindings_static(&overrides);
+    let bindings = TerminalStack::contextual_bindings(&overrides);
     let labels: Vec<String> = bindings.iter().map(|b| b.label.to_string()).collect();
     assert!(
         !labels.iter().any(|l| l.contains("→ PTY")),
@@ -741,7 +741,7 @@ fn footer_keys_follow_user_action_key_overrides() {
     // both through `ActionDef::effective_keys_display`.
     let mut overrides = std::collections::BTreeMap::new();
     overrides.insert("leave_terminal".to_string(), "Esc".to_string());
-    let bindings = TerminalStack::contextual_bindings_static(&overrides);
+    let bindings = TerminalStack::contextual_bindings(&overrides);
     let leave = bindings.iter().find(|b| b.label == "exit to sidebar");
     assert!(leave.is_some(), "leave-terminal binding must surface");
     assert_eq!(leave.unwrap().keys, "Esc");

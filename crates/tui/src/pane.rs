@@ -34,16 +34,6 @@ pub struct Binding {
     pub label: std::borrow::Cow<'static, str>,
 }
 
-impl Binding {
-    /// Builder for the (overwhelmingly common) static-literal case.
-    pub const fn new_static(keys: &'static str, label: &'static str) -> Self {
-        Self {
-            keys: std::borrow::Cow::Borrowed(keys),
-            label: std::borrow::Cow::Borrowed(label),
-        }
-    }
-}
-
 /// Returned by `Pane::detachable()` when this pane (or its content)
 /// can pop out into a separate window.
 #[derive(Debug, Clone, PartialEq, Eq)]

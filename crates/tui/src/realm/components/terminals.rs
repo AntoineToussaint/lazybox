@@ -105,7 +105,7 @@ impl Terminals {
         &self,
         overrides: &std::collections::BTreeMap<String, String>,
     ) -> Vec<crate::pane::Binding> {
-        crate::components::terminal_stack::TerminalStack::contextual_bindings_static(overrides)
+        crate::components::terminal_stack::TerminalStack::contextual_bindings(overrides)
     }
 
     /// Detach spec for the focused tile, if any (delegates to the

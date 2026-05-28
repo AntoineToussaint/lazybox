@@ -156,7 +156,7 @@ pub fn render(
         }
         spans.push(Span::styled(compact_key(&b.keys), key_style));
         spans.push(Span::styled(" ", bg));
-        spans.push(Span::styled(b.label.to_string(), label_style));
+        spans.push(Span::styled(b.label.clone(), label_style));
     }
     f.render_widget(Paragraph::new(Line::from(spans)).style(bg), left_rect);
 
@@ -170,22 +170,31 @@ pub fn render(
 /// of truth for binding specs stays explicit (so the `?` help modal
 /// shows the full chord); the footer renderer just chooses a tighter
 /// display form so the line doesn't get jagged with `Shift-` prefixes.
-fn compact_key(keys: &str) -> String {
+///
+/// Returns `Cow` so the pass-through case (most rows) doesn't
+/// allocate — the footer redraws on every state change and this is a
+/// hot path.
+fn compact_key(keys: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
     if let Some(rest) = keys.strip_prefix("Shift-") {
         // `Shift-X` where X is one ASCII letter → uppercase letter
         // alone (standard Unix convention: uppercase = shifted).
-        let chars: Vec<char> = rest.chars().collect();
-        if chars.len() == 1 && chars[0].is_ascii_alphabetic() {
-            return chars[0].to_ascii_uppercase().to_string();
+        let mut iter = rest.chars();
+        if let (Some(c), None) = (iter.next(), iter.next())
+            && c.is_ascii_alphabetic()
+        {
+            return Cow::Owned(c.to_ascii_uppercase().to_string());
         }
     }
     if let Some(rest) = keys.strip_prefix("Ctrl-") {
-        let chars: Vec<char> = rest.chars().collect();
-        if chars.len() == 1 && chars[0].is_ascii_alphabetic() {
-            return format!("^{}", chars[0].to_ascii_uppercase());
+        let mut iter = rest.chars();
+        if let (Some(c), None) = (iter.next(), iter.next())
+            && c.is_ascii_alphabetic()
+        {
+            return Cow::Owned(format!("^{}", c.to_ascii_uppercase()));
         }
     }
-    keys.to_string()
+    Cow::Borrowed(keys)
 }
 
 #[cfg(test)]

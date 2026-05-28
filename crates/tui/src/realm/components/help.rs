@@ -149,7 +149,7 @@ impl Component for Help {
                 Span::styled(" ", panel_bg),
                 Span::styled(key, key_style),
                 Span::styled("  ", sep_style),
-                Span::styled(b.label.to_string(), label_style),
+                Span::styled(b.label.clone(), label_style),
             ]);
             frame.render_widget(Paragraph::new(line), cell);
         }

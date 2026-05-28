@@ -108,6 +108,12 @@ pub enum Id {
     /// → `Command::AddAssignees { workspace_key, logins }`. Works
     /// on issues too (both PRs and issues are `Assignable`).
     AddAssignees,
+    /// Multi-select picker mounted on Shift-L (`ManageLabels`).
+    /// Lists the repository's full label set with the currently-
+    /// applied labels pre-checked; submit → `Command::SetLabels`.
+    /// Works on issues too — both PRs and issues implement GraphQL's
+    /// `Labelable` interface.
+    ManageLabels,
     /// Duration picker mounted on `z` (ToggleSnooze) when the
     /// workspace is NOT currently snoozed. Single-pick choice
     /// modal with several common snooze durations (1h, today,
@@ -312,6 +318,15 @@ pub struct Model<T: TerminalAdapter> {
     pending_assignees_request: Option<pilot_core::WorkspaceKey>,
     /// Candidate logins shown in the `AddAssignees` picker.
     assignees_choices: Vec<String>,
+    /// Workspace key the `ManageLabels` picker is targeting. Stashed
+    /// at mount time so when `Event::RepoLabels` lands the picker
+    /// can re-mount with the repo's labels. Cleared on submit /
+    /// dismiss.
+    pending_labels_request: Option<pilot_core::WorkspaceKey>,
+    /// Repo-label names rendered in the `ManageLabels` picker. Order
+    /// matches the picker's row indices so `Msg::ChoicePicked(indices)`
+    /// indexes back into this list. Cleared on submit / dismiss.
+    labels_choices: Vec<String>,
     /// Workspace currently waiting on the `SnoozeDuration` picker's
     /// result. `Msg::ChoicePicked` reads this + `snooze_choices` to
     /// turn the picked index into a `Command::Snooze`.
@@ -532,6 +547,8 @@ impl<T: TerminalAdapter> Model<T> {
             review_choices: Vec::new(),
             pending_assignees_request: None,
             assignees_choices: Vec::new(),
+            pending_labels_request: None,
+            labels_choices: Vec::new(),
             pending_snooze_workspace: None,
             snooze_choices: Vec::new(),
             pending_removal_prompts: std::collections::VecDeque::new(),

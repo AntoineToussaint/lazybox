@@ -88,7 +88,7 @@ query($query: String!, $first: Int!, $after: String) {
             }
           }
         }
-        labels(first: 3) { nodes { name } }
+        labels(first: 10) { nodes { name color } }
         assignees(first: 5) { nodes { login } }
         reviewRequests(first: 5) {
           nodes {
@@ -344,6 +344,11 @@ pub struct GqlLabels {
 #[derive(Deserialize, Debug)]
 pub struct GqlLabel {
     pub name: String,
+    /// GitHub returns the label's hex color (e.g. `"d73a4a"`) without
+    /// the leading `#`. Optional so an older response shape (or a
+    /// query that doesn't ask for the field) deserializes cleanly.
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -685,6 +690,105 @@ pub fn add_reaction_eyes_body(reactable_node_id: &str) -> serde_json::Value {
         "query": ADD_REACTION_MUTATION,
         "variables": { "id": reactable_node_id },
     })
+}
+
+/// GraphQL mutations for label add/remove on any `Labelable` (PR or
+/// Issue — both implement the interface). Mutations take GraphQL node
+/// IDs, not names, so the daemon resolves names → IDs via
+/// `list_repo_labels` (which returns both) before calling the mutation.
+const ADD_LABELS_MUTATION: &str = r#"
+mutation($id: ID!, $labelIds: [ID!]!) {
+  addLabelsToLabelable(input: { labelableId: $id, labelIds: $labelIds }) {
+    labelable { __typename }
+  }
+}
+"#;
+
+pub fn add_labels_body(labelable_node_id: &str, label_node_ids: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "query": ADD_LABELS_MUTATION,
+        "variables": {
+            "id": labelable_node_id,
+            "labelIds": label_node_ids,
+        },
+    })
+}
+
+const REMOVE_LABELS_MUTATION: &str = r#"
+mutation($id: ID!, $labelIds: [ID!]!) {
+  removeLabelsFromLabelable(input: { labelableId: $id, labelIds: $labelIds }) {
+    labelable { __typename }
+  }
+}
+"#;
+
+pub fn remove_labels_body(labelable_node_id: &str, label_node_ids: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "query": REMOVE_LABELS_MUTATION,
+        "variables": {
+            "id": labelable_node_id,
+            "labelIds": label_node_ids,
+        },
+    })
+}
+
+/// Fetch the full label set on a repository. Returns up to 100
+/// labels — enough for any real repo (typical projects sit well
+/// under 50). Pagination would matter for monorepos with hundreds
+/// of labels; we'll cross that bridge if it bites.
+const REPO_LABELS_QUERY: &str = r#"
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    labels(first: 100) {
+      nodes { id name color description }
+    }
+  }
+  rateLimit {
+    limit
+    remaining
+    resetAt
+  }
+}
+"#;
+
+pub fn repo_labels_body(owner: &str, name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": REPO_LABELS_QUERY,
+        "variables": { "owner": owner, "name": name },
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlRepoLabelsResponse {
+    pub data: Option<GqlRepoLabelsData>,
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlRepoLabelsData {
+    pub repository: Option<GqlRepoLabels>,
+    #[serde(rename = "rateLimit", default)]
+    pub rate_limit: Option<GqlRateLimit>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlRepoLabels {
+    pub labels: GqlRepoLabelsConn,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlRepoLabelsConn {
+    pub nodes: Vec<GqlRepoLabelNode>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct GqlRepoLabelNode {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// Per-PR "give me everything heavy" query. Pulls every field the
@@ -1263,7 +1367,15 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
             Some(pr.base_ref_name.clone())
         },
         updated_at: pr.updated_at,
-        labels: pr.labels.nodes.iter().map(|l| l.name.clone()).collect(),
+        labels: pr
+            .labels
+            .nodes
+            .iter()
+            .map(|l| pilot_core::Label {
+                name: l.name.clone(),
+                color: l.color.clone().unwrap_or_default(),
+            })
+            .collect(),
         reviewers: pr
             .review_requests
             .nodes
@@ -1789,7 +1901,7 @@ query($query: String!, $first: Int!, $after: String) {
         createdAt
         state
         author { login }
-        labels(first: 10) { nodes { name } }
+        labels(first: 10) { nodes { name color } }
         assignees(first: 10) { nodes { login } }
         reactions(content: EYES) { viewerHasReacted }
         comments(first: 15) {
@@ -1978,7 +2090,15 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         branch: None,
         base_branch: None,
         updated_at: issue.updated_at,
-        labels: issue.labels.nodes.iter().map(|l| l.name.clone()).collect(),
+        labels: issue
+            .labels
+            .nodes
+            .iter()
+            .map(|l| pilot_core::Label {
+                name: l.name.clone(),
+                color: l.color.clone().unwrap_or_default(),
+            })
+            .collect(),
         reviewers: vec![],
         assignees: issue
             .assignees
@@ -2532,7 +2652,7 @@ mod tests {
         // First label / first few assignees / reviewers is all the
         // sidebar renders.
         assert!(
-            SEARCH_QUERY.contains("labels(first: 3)"),
+            SEARCH_QUERY.contains("labels(first: 10)"),
             "labels cap drifted",
         );
         assert!(
@@ -2568,7 +2688,6 @@ mod tests {
             "reviews(first: 3)",
             "reviews(first: 10)",
             "reviews(first: 20)",
-            "labels(first: 10)",
             "assignees(first: 10)",
             "reviewRequests(first: 10)",
             "contexts(first: 5)",

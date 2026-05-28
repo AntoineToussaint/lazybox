@@ -41,6 +41,64 @@ pub enum TaskState {
     Draft,
 }
 
+/// A label/tag on a task. Mostly transparent to pilot — providers
+/// give us the name + color (hex like `"d73a4a"` for GitHub) and
+/// the sidebar renders the name with the color as foreground. Color
+/// is best-effort: empty string means "no color known."
+///
+/// Serde compatibility: deserializes from either a bare string (old
+/// wire format) or `{name, color}`. Pre-color persisted state keeps
+/// working — color defaults to empty until the next poll repopulates
+/// it from the provider.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct Label {
+    pub name: String,
+    #[serde(default)]
+    pub color: String,
+}
+
+impl Label {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            color: String::new(),
+        }
+    }
+
+    pub fn with_color(name: impl Into<String>, color: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            color: color.into(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Label {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Accept either `"bug"` (old) or `{"name":"bug","color":"d73a4a"}`.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Either {
+            Plain(String),
+            Struct {
+                name: String,
+                #[serde(default)]
+                color: String,
+            },
+        }
+        match Either::deserialize(deserializer)? {
+            Either::Plain(name) => Ok(Self {
+                name,
+                color: String::new(),
+            }),
+            Either::Struct { name, color } => Ok(Self { name, color }),
+        }
+    }
+}
+
 /// CI / build status rolled up from individual checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum CiStatus {
@@ -151,7 +209,7 @@ pub struct Task {
     #[serde(default)]
     pub base_branch: Option<String>,
     pub updated_at: DateTime<Utc>,
-    pub labels: Vec<String>,
+    pub labels: Vec<Label>,
     /// Requested reviewers (user logins or team names).
     #[serde(default)]
     pub reviewers: Vec<String>,
@@ -638,5 +696,34 @@ mod status_tag_tests {
         t.id.source = "linear".into();
         t.url = "https://linear.app/team/issue/ENG-42".into();
         assert!(!t.is_pr(), "Linear has no PR concept");
+    }
+
+    #[test]
+    fn label_deserializes_old_string_shape() {
+        // Pre-color persisted state stored labels as bare strings.
+        // The custom Deserialize must keep accepting that shape so a
+        // running pilot upgrade doesn't lose label data.
+        let json = r#"["bug", "ci"]"#;
+        let labels: Vec<Label> = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            labels,
+            vec![Label::new("bug"), Label::new("ci")],
+            "back-compat: bare string labels must still deserialize",
+        );
+    }
+
+    #[test]
+    fn label_deserializes_new_struct_shape() {
+        let json = r#"[{"name":"bug","color":"d73a4a"}]"#;
+        let labels: Vec<Label> = serde_json::from_str(json).unwrap();
+        assert_eq!(labels, vec![Label::with_color("bug", "d73a4a")]);
+    }
+
+    #[test]
+    fn label_struct_color_is_optional() {
+        // Color absent → defaults to empty (same as new(name)).
+        let json = r#"[{"name":"bug"}]"#;
+        let labels: Vec<Label> = serde_json::from_str(json).unwrap();
+        assert_eq!(labels, vec![Label::new("bug")]);
     }
 }

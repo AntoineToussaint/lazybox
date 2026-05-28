@@ -87,6 +87,10 @@ pub enum Action {
     RequestReviewers,
     /// Add assignee(s) to the workspace's PR or issue.
     AddAssignees,
+    /// Open the label picker on the workspace's PR or issue. Pre-
+    /// checks the currently-applied labels; submit replaces the
+    /// label set on the upstream provider.
+    ManageLabels,
     /// Open the focused workspace's PR / issue page in the host's
     /// default web browser. Useful for jumping to GitHub when the
     /// in-pilot UI doesn't carry every affordance yet (mobile-rich
@@ -191,6 +195,7 @@ pub enum ActionKind {
     CollapseIntoPr,
     RequestReviewers,
     AddAssignees,
+    ManageLabels,
     OpenInBrowser,
     // Activity
     ToggleActivity,
@@ -239,6 +244,7 @@ impl Action {
             Action::CollapseIntoPr => ActionKind::CollapseIntoPr,
             Action::RequestReviewers => ActionKind::RequestReviewers,
             Action::AddAssignees => ActionKind::AddAssignees,
+            Action::ManageLabels => ActionKind::ManageLabels,
             Action::OpenInBrowser => ActionKind::OpenInBrowser,
             Action::ToggleActivity => ActionKind::ToggleActivity,
             Action::ToggleRow => ActionKind::ToggleRow,
@@ -445,6 +451,13 @@ impl ActionDef {
                 describe: "Change assignees on the workspace's PR / issue — pre-checks existing; toggle to add or remove.",
                 section: Section::Workspace,
             },
+            ActionKind::ManageLabels => &Self {
+                kind: ActionKind::ManageLabels,
+                default_keys: "Shift-L",
+                label: "labels",
+                describe: "Add / remove labels on the workspace's PR or issue. Picker pre-checks the labels currently applied; submit replaces the set.",
+                section: Section::Workspace,
+            },
             ActionKind::OpenInBrowser => &Self {
                 kind: ActionKind::OpenInBrowser,
                 default_keys: "Shift-O",
@@ -554,6 +567,7 @@ impl ActionDef {
             ActionKind::MergePr,
             ActionKind::RequestReviewers,
             ActionKind::AddAssignees,
+            ActionKind::ManageLabels,
             ActionKind::OpenInBrowser,
             ActionKind::Reply,
             ActionKind::AdoptSessions,
@@ -799,6 +813,7 @@ impl ActionKind {
             ActionKind::CollapseIntoPr => "collapse_into_pr",
             ActionKind::RequestReviewers => "request_reviewers",
             ActionKind::AddAssignees => "add_assignees",
+            ActionKind::ManageLabels => "manage_labels",
             ActionKind::OpenInBrowser => "open_in_browser",
             ActionKind::ToggleActivity => "toggle_activity",
             ActionKind::ToggleRow => "toggle_row",
@@ -911,6 +926,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&pilot_core::Workspace>)
         | ActionKind::ToggleSnooze
         | ActionKind::RequestReviewers
         | ActionKind::AddAssignees
+        | ActionKind::ManageLabels
         | ActionKind::OpenInBrowser => has_ws,
         // Activity actions need a workspace AND that workspace
         // having some activity to act on. The pane that owns this

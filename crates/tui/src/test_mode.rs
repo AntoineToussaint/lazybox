@@ -117,7 +117,7 @@ fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
         branch: Some("main".into()),
         base_branch: Some("main".into()),
         updated_at: Utc::now(),
-        labels: vec!["test".into()],
+        labels: vec![pilot_core::Label::new("test")],
         reviewers: vec![],
         assignees: vec![],
         auto_merge_enabled: false,

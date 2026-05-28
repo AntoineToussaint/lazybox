@@ -155,6 +155,11 @@ impl<T: TerminalAdapter> Model<T> {
             let mut bytes = Vec::with_capacity(snippet.body.len() + 1);
             bytes.extend_from_slice(snippet.body.as_bytes());
             bytes.push(b'\r');
+            // Mirror the snippet into the recap tracker — it's a full
+            // command submitted in one shot, so without this the
+            // pinned "you ▸ …" line would keep showing the previous
+            // message.
+            self.terminals.record_pty_write(terminal_id, &bytes);
             cmds.push(IpcCommand::Write { terminal_id, bytes });
             self.flash_info(format!("sent snippet ]{key}"));
             return cmds;

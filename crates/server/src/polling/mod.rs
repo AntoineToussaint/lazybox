@@ -88,7 +88,7 @@ pub trait TaskSource: Send + Sync + 'static {
     /// owned by a source whose scope this tick is authoritative for
     /// are candidates for removal.
     ///
-    /// Default is [`PolledScope::Repos(Vec::new())`] — "I covered no
+    /// Default is [`PolledScope::Repos`]`(Vec::new())` — "I covered no
     /// repos authoritatively this tick", so `rescope` preserves every
     /// stored workspace owned by this source. The destructive choice
     /// ([`PolledScope::Exhaustive`]) requires an explicit override so

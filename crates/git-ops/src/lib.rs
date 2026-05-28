@@ -127,7 +127,7 @@ impl WorktreeManager {
         self.checkout_at(&wt_path, owner, repo, branch).await
     }
 
-    /// Same as [`checkout`] but with an explicit target path. Used by
+    /// Same as [`Self::checkout`] but with an explicit target path. Used by
     /// pilot's session model where the worktree path is derived from a
     /// stable session UUID — `<state_root>/worktrees/<uuid>` — and
     /// must never depend on owner/repo/branch (so renames + branch
@@ -228,7 +228,7 @@ impl WorktreeManager {
             .await
     }
 
-    /// Same as [`checkout_new_branch`] but with an explicit target path.
+    /// Same as [`Self::checkout_new_branch`] but with an explicit target path.
     /// Used by pilot's session model where the worktree path is derived
     /// from a stable session UUID and must not depend on branch names
     /// (so a branch rename inside the worktree doesn't relocate the
@@ -491,7 +491,7 @@ impl WorktreeManager {
     /// Idempotent for inline scripts (re-run with matching content
     /// is a no-op; differing content rewrites). For linked scripts
     /// re-applying a matching symlink is a no-op; a conflicting one
-    /// errors — same contract as [`apply_mounts`].
+    /// errors — same contract as [`Self::apply_mounts`].
     ///
     /// Returns the first failure (rest are skipped). Best-effort
     /// retry is the caller's job.

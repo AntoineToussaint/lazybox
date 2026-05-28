@@ -1752,25 +1752,19 @@ impl GhClient {
         Ok(())
     }
 
-    /// Merge a PR — same as clicking "Merge pull request" on
-    /// github.com. Requires the PR's GraphQL node ID. We don't pin
-    /// the merge method; GitHub will use whatever the repo's
-    /// settings allow / require.
-    /// Lazy-fetch one PR's heavy fields (review threads — inline code
-    /// comments). The inbox-scan query trades these off for cost; this
-    /// method back-fills them when the user actually opens a PR.
+    /// Lazy-fetch one PR's heavy fields — every field the inbox-scan
+    /// `SEARCH_QUERY` deliberately omits to cut per-poll cost. Returns
+    /// a `PrDetails` payload ready for the caller to splice into the
+    /// workspace via `merge_pr_details` (or the equivalent inline
+    /// fold in `handle_fetch_pr_details` / `prefetch_top_pr_details`).
     ///
-    /// Returns the merged `Activity` list ready to splice into the
-    /// workspace's existing activity collection. Caller is responsible
-    /// for dedup (by `node_id`) since this re-fetches data the eager
-    /// path might still be loading. Both paths produce the same shape
-    /// — same kind, same body formatting, same path/line/diff_hunk
-    /// extraction — so the merged list is indistinguishable from a
-    /// purely-eager fetch.
+    /// `Ok(None)` means the node lookup returned null — the PR was
+    /// deleted or the token lost visibility between the inbox search
+    /// and this call. Caller should treat that as "no update."
     pub async fn fetch_pr_details(
         &self,
         pull_request_node_id: &str,
-    ) -> Result<Vec<pilot_core::Activity>, GhError> {
+    ) -> Result<Option<graphql::PrDetails>, GhError> {
         self.acquire_or_block("PR details lazy-fetch")?;
         let body = graphql::pr_details_body(pull_request_node_id);
         let response: graphql::GqlPrDetailsResponse = self.post_graphql_with_retry(&body).await?;
@@ -1790,16 +1784,13 @@ impl GhClient {
             self.observe_rate_limit(rl);
         }
         let Some(node) = data.node else {
-            // PR was deleted / not visible to this token between the
-            // inbox search and the lazy fetch. Not retryable — return
-            // an empty activity list so the caller can clean up.
             tracing::info!(
                 "fetch_pr_details: node {} not found (deleted or scope changed)",
                 pull_request_node_id,
             );
-            return Ok(Vec::new());
+            return Ok(None);
         };
-        Ok(graphql::pr_details_to_activities(&node))
+        Ok(Some(graphql::pr_details_to_details(&node, &self.user)))
     }
 
     /// Resolve a GitHub login to its node ID via GraphQL. Used as

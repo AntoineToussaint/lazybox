@@ -270,7 +270,10 @@ mod tests {
             author: author.map(|l| GqlAuthor { login: l.into() }),
             labels: GqlLabels { nodes: vec![] },
             assignees: GqlAssignees { nodes: vec![] },
-            comments: GqlComments { nodes: comments },
+            comments: GqlComments {
+                nodes: comments,
+                total_count: None,
+            },
             repository: Some(GqlIssueRepo {
                 name_with_owner: "o/r".into(),
             }),

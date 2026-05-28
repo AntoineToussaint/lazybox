@@ -213,7 +213,10 @@ impl Workspace {
     }
 
     /// Attach a task to this workspace. Routing rules:
-    /// - PR → the `pr` slot (replaces the existing one if any).
+    /// - PR → the `pr` slot (replaces the existing one if any). When
+    ///   replacing, lazy-fetched fields on the existing PR are
+    ///   preserved if the incoming task left them empty — see
+    ///   `preserve_lazy_pr_fields` for the list.
     /// - GitHub issue → `gh_issues` (de-duped by `TaskId`).
     /// - Linear ticket → `linear_issues` (de-duped by `TaskId`).
     /// - Anything else → silently dropped (we don't have a slot).
@@ -222,7 +225,13 @@ impl Workspace {
     /// workspace's feed and de-duplicated.
     pub fn attach_task(&mut self, task: Task) {
         match classify(&task) {
-            TaskSlot::Pr => self.pr = Some(task.clone()),
+            TaskSlot::Pr => {
+                let merged = match self.pr.take() {
+                    Some(existing) => preserve_lazy_pr_fields(task.clone(), &existing),
+                    None => task.clone(),
+                };
+                self.pr = Some(merged);
+            }
             TaskSlot::GhIssue => upsert_by_id(&mut self.gh_issues, task.clone()),
             TaskSlot::LinearIssue => upsert_by_id(&mut self.linear_issues, task.clone()),
             TaskSlot::Unknown => return,
@@ -443,6 +452,30 @@ fn upsert_by_id(list: &mut Vec<Task>, task: Task) {
     } else {
         list.push(task);
     }
+}
+
+/// Preserve fields that the gh-provider's inbox-scan query no longer
+/// fetches — `closes_issues` (from `closingIssuesReferences`) and
+/// `checks` (from `statusCheckRollup.contexts`). Both are populated
+/// by the lazy `PR_DETAILS_QUERY`; without this preservation, every
+/// subsequent inbox poll would clobber them back to empty and the
+/// issue↔PR collapse / per-check sidebar would flicker off.
+///
+/// Rule: incoming wins for any field it has populated; existing
+/// wins only for the listed lazy fields when incoming is empty.
+/// This keeps "PR actually has no closing refs" working correctly
+/// — the inbox-scan path always emits empty so we'd never know the
+/// difference, but the post-workspace-open lazy-fetch IS authoritative
+/// (it pulls the field directly) and a refresh there will reset to
+/// the new truth.
+fn preserve_lazy_pr_fields(mut incoming: Task, existing: &Task) -> Task {
+    if incoming.closes_issues.is_empty() && !existing.closes_issues.is_empty() {
+        incoming.closes_issues = existing.closes_issues.clone();
+    }
+    if incoming.checks.is_empty() && !existing.checks.is_empty() {
+        incoming.checks = existing.checks.clone();
+    }
+    incoming
 }
 
 /// Stable per-task workspace key generator. PR `o/r#123` → "o/r-123".
@@ -1119,6 +1152,72 @@ mod tests {
             ws.pr.as_ref().unwrap().id.key,
             "o/r#2",
             "second PR replaces first"
+        );
+    }
+
+    /// Regression for the GraphQL trim: the inbox-scan query no
+    /// longer fetches `closingIssuesReferences` or
+    /// `statusCheckRollup.contexts`, so the incoming PR's
+    /// `closes_issues` / `checks` are empty. Without preservation,
+    /// every poll cycle would wipe out the lazy-fetched values and
+    /// the issue↔PR collapse would flicker off on every tick.
+    #[test]
+    fn attach_pr_preserves_lazy_fields_when_incoming_is_empty() {
+        let mut first = pr("o/r#1");
+        first.closes_issues = vec![TaskId {
+            source: "github".into(),
+            key: "o/r#42".into(),
+        }];
+        first.checks = vec![crate::CheckRun {
+            name: "lint".into(),
+            status: CiStatus::Success,
+            url: None,
+        }];
+        let mut ws = Workspace::from_task(first, now());
+
+        // Subsequent poll: same PR id, empty lazy fields (inbox-scan shape).
+        let next = pr("o/r#1");
+        ws.attach_task(next);
+
+        let pr_ref = ws.pr.as_ref().unwrap();
+        assert_eq!(
+            pr_ref.closes_issues.len(),
+            1,
+            "closes_issues must survive an inbox-scan-shaped re-poll",
+        );
+        assert_eq!(pr_ref.closes_issues[0].key, "o/r#42");
+        assert_eq!(
+            pr_ref.checks.len(),
+            1,
+            "checks must survive an inbox-scan-shaped re-poll",
+        );
+        assert_eq!(pr_ref.checks[0].name, "lint");
+    }
+
+    /// Inverse: when the new PR DOES carry lazy fields (lazy-fetch
+    /// or fully-eager fixture), incoming wins. Preservation is a
+    /// one-way "don't clobber to empty" guard, not a sticky cache.
+    #[test]
+    fn attach_pr_lazy_fields_get_overwritten_when_incoming_has_them() {
+        let mut first = pr("o/r#1");
+        first.closes_issues = vec![TaskId {
+            source: "github".into(),
+            key: "o/r#42".into(),
+        }];
+        let mut ws = Workspace::from_task(first, now());
+
+        let mut next = pr("o/r#1");
+        next.closes_issues = vec![TaskId {
+            source: "github".into(),
+            key: "o/r#99".into(),
+        }];
+        ws.attach_task(next);
+
+        let pr_ref = ws.pr.as_ref().unwrap();
+        assert_eq!(pr_ref.closes_issues.len(), 1);
+        assert_eq!(
+            pr_ref.closes_issues[0].key, "o/r#99",
+            "incoming wins when it has data",
         );
     }
 

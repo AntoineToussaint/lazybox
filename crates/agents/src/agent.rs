@@ -239,7 +239,15 @@ pub mod builtins {
             // chat lists that happen to start with `1.` (the second
             // option is the giveaway: a chooser is always followed
             // immediately by `2.`).
-            let has_arrow = s.contains('❯') || s.contains("> 1.") || s.contains("> 1)");
+            //
+            // ASCII arrow accepted on ANY option (`> 1.`, `> 2.`,
+            // `> 3.`, …) — the user moves the cursor with j/k, and
+            // claude re-renders the arrow at the new option. Earlier
+            // we only matched `> 1.`, which silently missed the Write
+            // permission dialog when the default selection was
+            // option 2 ("Yes, and allow Claude to edit its own
+            // settings for this session").
+            let has_arrow = s.contains('❯') || has_ascii_chooser_arrow(&s);
             let has_two_options =
                 (s.contains("1.") || s.contains("1)")) && (s.contains("2.") || s.contains("2)"));
             if has_arrow && has_two_options {
@@ -253,6 +261,23 @@ pub mod builtins {
                 return Some(AgentState::Asking);
             }
 
+            // Permission-chooser footer: `Esc to cancel` rendered
+            // alongside a numbered-options shape (`1.` + `2.`). The
+            // permission dialog uses a SHORTER footer than the input
+            // box ("Esc to cancel" alone, without "Tab to amend"), so
+            // the input-box paired check above doesn't fire. Pairing
+            // `Esc to cancel` with the chooser shape is still high-
+            // confidence — both halves are UI-specific markers that
+            // never co-occur in chat output. This is the path that
+            // catches the Write/Edit/Bash permission dialog even when
+            // the ASCII arrow lands on option 2 or 3 (so the
+            // arrow+options branch above misses it) and the
+            // `do you want to <verb>` standalone phrase scrolled off
+            // the detection window's tail.
+            if s.contains("Esc to cancel") && has_two_options {
+                return Some(AgentState::Asking);
+            }
+
             // Standalone high-confidence prompts. These exact phrases
             // appear only when claude is blocking on user input —
             // there's no realistic chat context that produces them.
@@ -263,6 +288,23 @@ pub mod builtins {
             // outputs where the `❯` glyph got pushed off the
             // detection window's tail.
             let lower = s.to_lowercase();
+            // Each entry maps to one prompt shape claude can render.
+            // Keep this list in sync with the fixture-driven test
+            // suite (`PROMPT_FIXTURES` in `tests/agents.rs`) so every
+            // documented shape has explicit coverage.
+            //
+            // Shapes covered, by tool:
+            //   - Write tool         → "do you want to create"
+            //   - Edit / MultiEdit   → "do you want to make this edit"
+            //   - file overwrites    → "do you want to overwrite"
+            //   - bash / file deletes → "do you want to delete"
+            //   - Bash approval      → "do you want to allow"
+            //   - plan-mode exit     → "do you want to proceed?"
+            //   - continue chat      → "do you want to continue?"
+            //   - apply diff/patch   → "do you want to apply"
+            //   - tool consent       → "do you want to enable"
+            //   - retry on failure   → "do you want to retry"
+            //   - settings edit      → "do you want to edit its own settings"
             const STANDALONE: &[&str] = &[
                 "do you want to proceed?",
                 "do you want to continue?",
@@ -270,6 +312,11 @@ pub mod builtins {
                 "do you want to allow",
                 "do you want to enable",
                 "do you want to retry",
+                "do you want to create",
+                "do you want to make this edit",
+                "do you want to overwrite",
+                "do you want to delete",
+                "do you want to edit its own settings",
             ];
             if STANDALONE.iter().any(|p| lower.contains(p)) {
                 return Some(AgentState::Asking);
@@ -355,10 +402,16 @@ pub mod builtins {
             // plus-numbered-options pattern `detect_state` uses for
             // high-confidence Asking detection, plus the trust-folder
             // string Claude shows on first run.
-            let has_arrow = s.contains('❯') || s.contains("> 1.") || s.contains("> 1)");
+            let has_arrow = s.contains('❯') || has_ascii_chooser_arrow(&s);
             let has_two_options =
                 (s.contains("1.") || s.contains("1)")) && (s.contains("2.") || s.contains("2)"));
             if has_arrow && has_two_options {
+                return false;
+            }
+            // Permission-chooser footer signal — same shape
+            // `detect_state` uses to flag Asking when the ASCII arrow
+            // sits on option 2/3 instead of option 1.
+            if s.contains("Esc to cancel") && has_two_options {
                 return false;
             }
             let lower = s.to_lowercase();
@@ -366,6 +419,8 @@ pub mod builtins {
                 || lower.contains("do you trust the files")
                 || lower.contains("do you want to proceed?")
                 || lower.contains("do you want to allow")
+                || lower.contains("do you want to create")
+                || lower.contains("do you want to make this edit")
             {
                 return false;
             }
@@ -473,6 +528,33 @@ pub mod builtins {
             }
         }
         true
+    }
+
+    /// Detect Claude's ASCII selection-arrow at ANY numbered option:
+    /// `> 1.`, `> 2.`, … or `> 1)`, `> 2)`, …
+    ///
+    /// Earlier we only matched `> 1.` literally — that quietly missed
+    /// permission dialogs whose default selection is option 2
+    /// ("Yes, and allow Claude to edit its own settings for this
+    /// session") because the cursor renders as `> 2.`, not `> 1.`.
+    /// Walks the byte stream once and looks for `>` ` ` digit
+    /// `.`/`)` — cheap, no allocations, covers options 1–9 which is
+    /// every chooser claude renders today.
+    pub(crate) fn has_ascii_chooser_arrow(s: &str) -> bool {
+        let bytes = s.as_bytes();
+        if bytes.len() < 4 {
+            return false;
+        }
+        for i in 0..=bytes.len() - 4 {
+            if bytes[i] == b'>'
+                && bytes[i + 1] == b' '
+                && bytes[i + 2].is_ascii_digit()
+                && (bytes[i + 3] == b'.' || bytes[i + 3] == b')')
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Recognize lines that are claude's UI footer / hint strip.

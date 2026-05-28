@@ -136,6 +136,20 @@ impl Terminals {
         self.inner.extract_text(rect, start, end)
     }
 
+    /// Return the URL the focused terminal's grid shows at the
+    /// frame-space cell `(col, row)`, if any. Used by the
+    /// right-click handler to detect "the user clicked on a link"
+    /// and route to the system browser before falling through to
+    /// PTY mouse forwarding.
+    pub fn url_at(
+        &mut self,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<String> {
+        self.inner.url_at(rect, col, row)
+    }
+
     /// Human-readable scrollbar diagnostic for the focused
     /// terminal. Used by the orchestrator's scroll-event handler
     /// to surface viewport state in the footer.

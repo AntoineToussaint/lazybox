@@ -430,36 +430,33 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
                 let Some(node_id) = pr.node_id.clone() else {
                     return Ok(None);
                 };
-                let activities = match client.fetch_pr_details(&node_id).await {
-                    Ok(a) => a,
+                match client.fetch_pr_details(&node_id).await {
+                    Ok(Some(details)) => Ok(Some(details)),
+                    Ok(None) => Ok(None),
                     Err(e) => {
                         tracing::warn!("fetch_pr_details({node_id}): {e}");
-                        return Ok(None);
+                        Ok(None)
                     }
-                };
-                if activities.is_empty() {
-                    tracing::debug!("fetch_pr_details({node_id}): no review-thread activity");
-                    return Ok(None);
                 }
-                Ok(Some(activities))
             }
         },
-        |ws, activities_opt| {
-            let Some(activities) = activities_opt else {
+        |ws, details_opt| {
+            let Some(details) = details_opt else {
                 return;
             };
-            let merged_count = activities.len();
+            let merged_count = details.activities.len();
             // `Workspace::merge_activity` dedups by (author, body,
             // created_at) AND remaps `read_indices` across the
             // post-sort positions. A prior implementation here did a
             // raw push + sort, which left `read_indices` pointing at
             // stale slots — every lazy-fetch silently scrambled the
             // user's read marks.
-            ws.merge_activity(&activities);
+            ws.merge_activity(&details.activities);
+            merge_pr_details_into_workspace(ws, details);
             tracing::info!(
                 workspace = %ws.key,
                 merged = merged_count,
-                "fetch_pr_details: merged review-thread activities"
+                "fetch_pr_details: merged review-thread activities + PR fields"
             );
         },
     )
@@ -468,6 +465,38 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
     // its own provider errors; both Applied and Missing are
     // user-visible-silent successes.
     let _ = result;
+}
+
+/// Splice a freshly-fetched `PrDetails` into a workspace's PR slot.
+/// No-op when the workspace has no PR (the lazy-fetch path skips
+/// issue-only workspaces upstream so this is mostly defensive).
+///
+/// Field rules:
+/// - `closes_issues`, `checks`, `ci`, `review`, `role`, `needs_reply`,
+///   `last_commenter` — overwrite with the lazy result. The lazy
+///   query is authoritative; it has the data the inbox-scan path
+///   could only approximate.
+/// - `unread_count` — recompute from the activity list since lazy
+///   knows the full activity count. The workspace-level
+///   `Workspace::unread_count()` still respects `read_indices`, so
+///   user read state isn't disturbed.
+fn merge_pr_details_into_workspace(ws: &mut Workspace, details: pilot_gh::PrDetails) {
+    let Some(pr) = ws.pr.as_mut() else {
+        return;
+    };
+    if !details.closes_issues.is_empty() {
+        // Replace verbatim — lazy is authoritative.
+        pr.closes_issues = details.closes_issues;
+    }
+    if !details.checks.is_empty() {
+        pr.checks = details.checks;
+    }
+    pr.ci = details.ci;
+    pr.review = details.review;
+    pr.role = details.role;
+    pr.needs_reply = details.needs_reply;
+    pr.last_commenter = details.last_commenter;
+    pr.unread_count = details.activities.len() as u32;
 }
 
 /// Admin: walk every persisted workspace, drop sessions whose
@@ -664,22 +693,23 @@ pub async fn prefetch_top_pr_details(
                         let node_id = node_id.clone();
                         async move {
                             match client.fetch_pr_details(&node_id).await {
-                                Ok(activities) => Ok::<_, ()>(activities),
+                                Ok(details) => Ok::<_, ()>(details),
                                 Err(e) => {
                                     tracing::debug!(
                                         "prefetch_top_pr_details: fetch_pr_details({node_id}) failed: {e}",
                                     );
-                                    Ok(Vec::new())
+                                    Ok(None)
                                 }
                             }
                         }
                     },
-                    |ws, activities| {
-                        if activities.is_empty() {
+                    |ws, details_opt| {
+                        let Some(details) = details_opt else {
                             return;
-                        }
-                        merged_here = activities.len();
-                        ws.merge_activity(&activities);
+                        };
+                        merged_here = details.activities.len();
+                        ws.merge_activity(&details.activities);
+                        merge_pr_details_into_workspace(ws, details);
                     },
                 )
                 .await;

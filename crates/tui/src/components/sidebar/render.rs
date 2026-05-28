@@ -5,6 +5,8 @@
 //! key-handler made the parent `impl` block hard to navigate.
 
 use super::*;
+use crate::components::table::Row as TableRow;
+use crate::components::workspace_row::{WorkspaceRowCtx, build_row as build_workspace_row};
 
 impl Sidebar {
     pub fn render(&mut self, area: Rect, frame: &mut Frame, focused: bool) {
@@ -202,6 +204,9 @@ impl Sidebar {
         // `#7204 R` and `#31 R` had different role-letter positions
         // and the whole column visibly jittered. Minimum 3 ("#NN")
         // so very-short numbers still leave space for a separator.
+        //
+        // Width is `1` (the `#`) + digit count of `n`, computed via
+        // `ilog10` so the hot path doesn't allocate a String per row.
         let max_pr_num_width = self
             .visible
             .iter()
@@ -211,7 +216,7 @@ impl Sidebar {
                     .get(k)
                     .and_then(|w| w.primary_task())
                     .and_then(crate::components::task_label::pr_number)
-                    .map(|n| format!("#{n}").chars().count()),
+                    .map(|n| 2 + n.checked_ilog10().unwrap_or(0) as usize),
                 _ => None,
             })
             .max()
@@ -219,9 +224,25 @@ impl Sidebar {
             .max(3);
         // Column spec for workspace rows — built once per render
         // (max_pr_num_width is fixed across rows in this pass).
-        // Each row's `render_table` call reuses this slice; the
-        // table primitive owns padding + cursor fill geometry.
         let workspace_columns = crate::components::workspace_row::build_columns(max_pr_num_width);
+
+        // Workspace rows go through ONE `render_table` call so
+        // `Column::max(0)` sees every row's natural cell width and
+        // picks a single column width for all of them. When each
+        // row was rendered solo, an empty status / badge cell
+        // collapsed THAT row's column to 0 while a sibling row kept
+        // its full width — the `C` badge visibly drifted between
+        // lines and the title flex absorbed different amounts per
+        // row.
+        let mut rendered_workspace_lines = self.prebuild_workspace_lines(
+            &workspace_columns,
+            max_pr_num_width,
+            row_budget,
+            theme,
+            now,
+            focused,
+        );
+
         let lines: Vec<Line> = self
             .visible
             .iter()
@@ -327,29 +348,10 @@ impl Sidebar {
                     }
                     Line::from(spans)
                 }
-                VisibleRow::Workspace(key) => {
-                    use crate::components::workspace_row::{WorkspaceRowCtx, build_row};
-                    let workspace = self.workspaces.get(key);
-                    let ctx = WorkspaceRowCtx {
-                        workspace,
-                        task: workspace.and_then(|w| w.primary_task()),
-                        theme,
-                        now,
-                        focused,
-                        is_cursor: i == self.cursor,
-                        max_pr_num_width,
-                        long_snooze_armed: self.latches.armed(TRIGGER_LONG_SNOOZE) == Some(key),
-                        asking: workspace.is_some_and(|w| {
-                            crate::agent_attention::workspace_is_asking(w, &self.agents_asking)
-                        }),
-                        badges: self.runner_badges(key),
-                    };
-                    let row = build_row(&ctx);
-                    crate::components::table::render_table(&[row], &workspace_columns, row_budget)
-                        .into_iter()
-                        .next()
-                        .unwrap_or_default()
-                }
+                VisibleRow::Workspace(_) => rendered_workspace_lines
+                    .get_mut(i)
+                    .and_then(|slot| slot.take())
+                    .unwrap_or_default(),
                 VisibleRow::Session {
                     workspace,
                     session_id,
@@ -387,5 +389,65 @@ impl Sidebar {
 
         let para = Paragraph::new(lines);
         frame.render_widget(para, inner);
+    }
+
+    /// Build & lay out every visible workspace row in one
+    /// `render_table` pass, then scatter the resulting Lines back to
+    /// the visible-list indices they belong to.
+    ///
+    /// The returned `Vec<Option<Line>>` has `self.visible.len()`
+    /// slots, with `Some(line)` at every `VisibleRow::Workspace`
+    /// position and `None` everywhere else. The caller `.take()`s
+    /// each Line as it walks `self.visible`, so every Line is moved
+    /// exactly once.
+    ///
+    /// This is what fixes issue #22's column-drift: each `Max`
+    /// column in `workspace_columns` picks one width across all
+    /// rows in this call, instead of collapsing per-row whenever a
+    /// row happened to have an empty cell there.
+    fn prebuild_workspace_lines(
+        &self,
+        workspace_columns: &[crate::components::table::Column],
+        max_pr_num_width: usize,
+        row_budget: usize,
+        theme: &crate::theme::Theme,
+        now: chrono::DateTime<chrono::Utc>,
+        focused: bool,
+    ) -> Vec<Option<Line<'static>>> {
+        let workspace_count = self
+            .visible
+            .iter()
+            .filter(|r| matches!(r, VisibleRow::Workspace(_)))
+            .count();
+        let mut positions: Vec<usize> = Vec::with_capacity(workspace_count);
+        let mut rows: Vec<TableRow> = Vec::with_capacity(workspace_count);
+        for (i, row) in self.visible.iter().enumerate() {
+            let VisibleRow::Workspace(key) = row else {
+                continue;
+            };
+            let workspace = self.workspaces.get(key);
+            let ctx = WorkspaceRowCtx {
+                workspace,
+                task: workspace.and_then(|w| w.primary_task()),
+                theme,
+                now,
+                focused,
+                is_cursor: i == self.cursor,
+                max_pr_num_width,
+                long_snooze_armed: self.latches.armed(TRIGGER_LONG_SNOOZE) == Some(key),
+                asking: workspace.is_some_and(|w| {
+                    crate::agent_attention::workspace_is_asking(w, &self.agents_asking)
+                }),
+                badges: self.runner_badges(key),
+            };
+            positions.push(i);
+            rows.push(build_workspace_row(&ctx));
+        }
+        let lines = crate::components::table::render_table(&rows, workspace_columns, row_budget);
+        let mut out: Vec<Option<Line<'static>>> = vec![None; self.visible.len()];
+        for (i, line) in positions.into_iter().zip(lines) {
+            out[i] = Some(line);
+        }
+        out
     }
 }

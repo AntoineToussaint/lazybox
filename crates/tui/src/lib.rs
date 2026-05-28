@@ -32,6 +32,8 @@ pub mod pilot_theme;
 pub mod realm;
 pub mod setup;
 pub mod setup_flow;
+pub mod slack_init;
+pub mod slack_prune;
 pub mod test_mode;
 pub mod theme;
 

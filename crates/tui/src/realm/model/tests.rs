@@ -198,6 +198,77 @@ mod effects_tests {
         assert!(m.active_removal_prompt.is_none());
     }
 
+    /// Helper for the scroll damper tests: build a dummy mouse
+    /// event. The damper only inspects `is_up` (passed separately)
+    /// + the timestamps it reads via `Instant::now()`, so the
+    /// per-event mouse data doesn't matter.
+    fn dummy_wheel() -> crossterm::event::MouseEvent {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Fresh gesture (no prior scroll) returns the full STEP.
+    #[test]
+    fn dampen_scroll_step_fresh_gesture_returns_initial_step() {
+        let mut m = build_model();
+        assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 5);
+    }
+
+    /// Sustained same-direction burst decays the step. First 4
+    /// events stay at 5, events 5-14 drop to 3, event 15+ → 1.
+    #[test]
+    fn dampen_scroll_step_decays_within_sustained_burst() {
+        let mut m = build_model();
+        for _ in 0..4 {
+            assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 5);
+        }
+        // Event 5 onwards: mid step.
+        assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 3);
+        // Bump count up to 14 (still mid).
+        for _ in 0..9 {
+            assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 3);
+        }
+        // Event 15+: tail step.
+        assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 1);
+    }
+
+    /// Direction reversal mid-burst returns 0 (drop the event) AND
+    /// clears the burst, so the next event in the new direction
+    /// starts fresh at full STEP. This is what cancels macOS's
+    /// queued inertia from the prior gesture.
+    #[test]
+    fn dampen_scroll_step_direction_reversal_drops_event_and_resets_burst() {
+        let mut m = build_model();
+        // Build up a downward burst.
+        for _ in 0..6 {
+            let _ = m.dampen_scroll_step(false, dummy_wheel());
+        }
+        // Reverse: drop + reset.
+        assert_eq!(m.dampen_scroll_step(true, dummy_wheel()), 0);
+        // Next upward event: fresh burst → full step.
+        assert_eq!(m.dampen_scroll_step(true, dummy_wheel()), 5);
+    }
+
+    /// After `BURST_IDLE` of inactivity, the next event is treated
+    /// as a fresh gesture. We can't time-travel without injecting a
+    /// clock, but we can prove the freshness path indirectly: a
+    /// burst built up then explicitly cleared (None) returns to
+    /// full step on the next event.
+    #[test]
+    fn dampen_scroll_step_after_explicit_clear_starts_fresh() {
+        let mut m = build_model();
+        for _ in 0..10 {
+            let _ = m.dampen_scroll_step(false, dummy_wheel());
+        }
+        m.scroll_inertia = None;
+        assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 5);
+    }
+
     /// Adopt picker: source + target workspace keys flow into an
     /// `AdoptSessions` command. The picks index resolves into the
     /// `adopt_choices` slot we set up.

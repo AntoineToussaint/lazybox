@@ -731,7 +731,16 @@ impl RightPane {
                 Span::raw(" "),
                 Span::styled(&workspace.name, Style::default().bold()),
             ])];
-            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+            // Same truncation treatment as the populated header
+            // path below — wrap can't break inside a workspace
+            // name like `tensorzero/nanogateway`, so a narrow pane
+            // would clip the trailing chars silently.
+            let width = area.width as usize;
+            let truncated: Vec<Line> = lines
+                .into_iter()
+                .map(|l| crate::components::table::truncate_line(l, width))
+                .collect();
+            frame.render_widget(Paragraph::new(truncated), area);
             return;
         };
 
@@ -860,7 +869,19 @@ impl RightPane {
             ]));
         }
 
-        let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+        // Truncate each line to the pane width with `…` instead of
+        // relying on `Wrap`. The wrap can only break at whitespace,
+        // and the lines this header produces are mostly single
+        // identifiers — `tensorzero/nanogateway`, branch names,
+        // `@logins` — that have no break point and just clipped
+        // silently when the pane got narrow. truncate_line preserves
+        // every span's style and emits `…` at the cut.
+        let width = area.width as usize;
+        let truncated: Vec<Line> = lines
+            .into_iter()
+            .map(|l| crate::components::table::truncate_line(l, width))
+            .collect();
+        let para = Paragraph::new(truncated);
         frame.render_widget(para, area);
     }
 

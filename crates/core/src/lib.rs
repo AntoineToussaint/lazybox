@@ -8,6 +8,7 @@ pub mod config;
 pub mod issue_links;
 pub mod paths;
 pub mod project;
+pub mod prompts;
 pub mod provider;
 pub mod scope;
 mod session_key;

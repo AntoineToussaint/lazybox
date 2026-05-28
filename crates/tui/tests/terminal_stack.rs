@@ -712,7 +712,8 @@ fn footer_drops_all_keys_to_pty_noise() {
     // Regression for issue #25: `all keys → PTY` was a footer entry
     // that described an implementation mode rather than an actionable
     // shortcut. The hint bar should now only carry escape hatches —
-    // scroll the scrollback, leave the pane, interrupt the process.
+    // leave the pane, interrupt the process. (Shift-PgUp/Dn scroll
+    // was dropped in #11 — mouse-wheel is the primary scroll path.)
     let overrides = std::collections::BTreeMap::new();
     let bindings = TerminalStack::contextual_bindings(&overrides);
     let labels: Vec<String> = bindings.iter().map(|b| b.label.to_string()).collect();
@@ -725,8 +726,7 @@ fn footer_drops_all_keys_to_pty_noise() {
         !keys.iter().any(|k| k == "all keys"),
         "footer must not advertise the `all keys` pseudo-binding, got {keys:?}",
     );
-    // Sanity: scroll + exit + interrupt remain.
-    assert!(labels.iter().any(|l| l == "scroll"));
+    // Sanity: exit + interrupt remain.
     assert!(labels.iter().any(|l| l == "exit to sidebar"));
     assert!(labels.iter().any(|l| l == "interrupt"));
 }

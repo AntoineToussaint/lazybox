@@ -545,8 +545,12 @@ impl ActionDef {
             ActionKind::OpenEditor,
             ActionKind::MarkAllRead,
             ActionKind::ToggleSnooze,
-            ActionKind::NewWorkspace,
+            // Project comes before Workspace — projects are
+            // containers; the user reads "create a project, then
+            // create workspaces inside it." Help modal + any other
+            // catalog-driven UI inherits this ordering.
             ActionKind::NewProject,
+            ActionKind::NewWorkspace,
             ActionKind::MergePr,
             ActionKind::RequestReviewers,
             ActionKind::AddAssignees,

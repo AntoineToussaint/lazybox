@@ -158,7 +158,10 @@ impl Snippets {
         match Self::load_from(&Self::default_repo_path(repo_root), SnippetOrigin::Repo) {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!("failed to load repo snippets at {}: {e}", repo_root.display());
+                tracing::warn!(
+                    "failed to load repo snippets at {}: {e}",
+                    repo_root.display()
+                );
                 Self::default()
             }
         }

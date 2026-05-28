@@ -821,9 +821,7 @@ impl<T: TerminalAdapter> Model<T> {
             // The user typed `]<key>` expecting a snippet and there
             // are none. Flash a hint pointing at the snippets file
             // so they know how to configure one.
-            self.flash_info(
-                "no snippets configured — add some to ~/.pilot/snippets.yaml",
-            );
+            self.flash_info("no snippets configured — add some to ~/.pilot/snippets.yaml");
             return;
         }
         let mut rows = Vec::with_capacity(self.snippets.len());

@@ -102,10 +102,7 @@ pub fn render_plan(
     if archive.is_empty() {
         s.push_str("Nothing to archive.\n");
     } else {
-        s.push_str(&format!(
-            "Would archive {} channel(s):\n",
-            archive.len()
-        ));
+        s.push_str(&format!("Would archive {} channel(s):\n", archive.len()));
         for c in archive {
             if let Some(p) = &c.parts {
                 s.push_str(&format!(
@@ -133,10 +130,7 @@ pub fn render_plan(
 /// don't get slack channels in the first place (see
 /// `chat.rs:TerminalSpawned` handler — it bails when the terminal
 /// isn't `Agent`-kind) so they're skipped here too.
-pub fn live_channel_names_from_store(
-    store: &dyn Store,
-    channel_prefix: &str,
-) -> HashSet<String> {
+pub fn live_channel_names_from_store(store: &dyn Store, channel_prefix: &str) -> HashSet<String> {
     let mut out = HashSet::new();
     let workspaces = match store.list_workspaces() {
         Ok(v) => v,
@@ -214,11 +208,7 @@ pub trait PruneSlack {
     fn list_all_channels<'a>(
         &'a self,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<Vec<ChannelInfo>, String>>
-                + Send
-                + 'a,
-        >,
+        Box<dyn std::future::Future<Output = Result<Vec<ChannelInfo>, String>> + Send + 'a>,
     >;
     /// Archive one channel by id. Returns the slack `error` code on
     /// failure so the caller can recognize `already_archived` /
@@ -246,11 +236,7 @@ impl PruneSlack for LiveSlack {
     fn list_all_channels<'a>(
         &'a self,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<Vec<ChannelInfo>, String>>
-                + Send
-                + 'a,
-        >,
+        Box<dyn std::future::Future<Output = Result<Vec<ChannelInfo>, String>> + Send + 'a>,
     > {
         Box::pin(async move {
             // Pages of 200 — Slack caps page size at 1000 but 200 is a
@@ -283,8 +269,7 @@ impl PruneSlack for LiveSlack {
     fn archive<'a>(
         &'a self,
         channel_id: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
             match self.api.conversations_archive(channel_id).await {
                 Ok(()) => Ok(()),
@@ -536,11 +521,7 @@ mod tests {
     // ── live_channel_names_from_store ───────────────────────────
 
     fn seed_store_with_workspace(store: &MemoryStore, key: &str, sessions: Vec<Session>) {
-        let mut ws = Workspace::empty(
-            WorkspaceKey::new(key),
-            "main",
-            chrono::Utc::now(),
-        );
+        let mut ws = Workspace::empty(WorkspaceKey::new(key), "main", chrono::Utc::now());
         for s in sessions {
             ws.add_session(s);
         }
@@ -580,12 +561,8 @@ mod tests {
         seed_store_with_workspace(&store, "github-acme-widget-186", vec![a.clone(), s]);
 
         let live = live_channel_names_from_store(&store, "");
-        let expected = channel_name_for_terminal(
-            "github-acme-widget-186",
-            &a.id.to_string(),
-            "claude",
-            "",
-        );
+        let expected =
+            channel_name_for_terminal("github-acme-widget-186", &a.id.to_string(), "claude", "");
         assert!(live.contains(&expected));
         // Shell sessions don't get slack channels, so no entry for the
         // shell session's id.
@@ -599,8 +576,7 @@ mod tests {
         seed_store_with_workspace(&store, "github-foo-1", vec![a.clone()]);
 
         let live = live_channel_names_from_store(&store, "pr-");
-        let expected =
-            channel_name_for_terminal("github-foo-1", &a.id.to_string(), "codex", "pr-");
+        let expected = channel_name_for_terminal("github-foo-1", &a.id.to_string(), "codex", "pr-");
         assert!(live.contains(&expected));
     }
 
@@ -657,11 +633,7 @@ mod tests {
         fn list_all_channels<'a>(
             &'a self,
         ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<Output = Result<Vec<ChannelInfo>, String>>
-                    + Send
-                    + 'a,
-            >,
+            Box<dyn std::future::Future<Output = Result<Vec<ChannelInfo>, String>> + Send + 'a>,
         > {
             let chans = self.channels.clone();
             Box::pin(async move { Ok(chans) })
@@ -669,9 +641,8 @@ mod tests {
         fn archive<'a>(
             &'a self,
             channel_id: &'a str,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>,
-        > {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
+        {
             Box::pin(async move {
                 if let Some(err) = &self.fail_archive {
                     return Err(err.clone());
@@ -693,8 +664,8 @@ mod tests {
     #[tokio::test]
     async fn dry_run_lists_without_archiving() {
         let slack = FakeSlack::new(vec![
-            ci("general", 0),                 // unmanaged
-            ci("ws-deadbeef-claude", 0),      // stale
+            ci("general", 0),            // unmanaged
+            ci("ws-deadbeef-claude", 0), // stale
         ]);
         let store = MemoryStore::new();
         let mut io = ScriptedIo::new(&[]);
@@ -763,8 +734,7 @@ mod tests {
         // must not be archived even though it matches the pattern.
         let store = MemoryStore::new();
         let a = agent_session("ws", "claude");
-        let live_name =
-            channel_name_for_terminal("ws", &a.id.to_string(), "claude", "");
+        let live_name = channel_name_for_terminal("ws", &a.id.to_string(), "claude", "");
         seed_store_with_workspace(&store, "ws", vec![a]);
 
         let slack = FakeSlack::new(vec![ChannelInfo {
@@ -810,7 +780,7 @@ mod tests {
     async fn older_than_filter_excludes_young_channels() {
         let now = 1_000_000;
         let slack = FakeSlack::new(vec![
-            ci("ws-deadbeef-claude", now - 100),   // 100s old
+            ci("ws-deadbeef-claude", now - 100),    // 100s old
             ci("ws-cafef00d-codex", now - 800_000), // ~9d old
         ]);
         let store = MemoryStore::new();

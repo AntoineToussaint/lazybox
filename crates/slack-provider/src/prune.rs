@@ -277,8 +277,7 @@ mod tests {
 
     #[test]
     fn parse_honors_prefix() {
-        let parts =
-            parse_channel_name("pr-github-acme-widget-186-deadbeef-codex", "pr-").unwrap();
+        let parts = parse_channel_name("pr-github-acme-widget-186-deadbeef-codex", "pr-").unwrap();
         assert_eq!(parts.workspace_slug, "github-acme-widget-186");
         assert_eq!(parts.agent, "codex");
     }
@@ -438,13 +437,16 @@ mod tests {
 
     #[test]
     fn plan_counts_each_disposition() {
-        let live: HashSet<String> = ["ws-aaaaaaaa-claude"].iter().map(|s| s.to_string()).collect();
+        let live: HashSet<String> = ["ws-aaaaaaaa-claude"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let channels = vec![
-            info("general", 0),                        // NotManaged
-            info("random", 0),                         // NotManaged
-            info("ws-aaaaaaaa-claude", 0),             // LiveSession
-            info("ws-bbbbbbbb-claude", 100),           // would Prune
-            info("ws-cccccccc-codex", 999_900),        // FilteredOut (too young)
+            info("general", 0),                 // NotManaged
+            info("random", 0),                  // NotManaged
+            info("ws-aaaaaaaa-claude", 0),      // LiveSession
+            info("ws-bbbbbbbb-claude", 100),    // would Prune
+            info("ws-cccccccc-codex", 999_900), // FilteredOut (too young)
         ];
         let filter = Filter {
             older_than_secs: Some(100_000),

@@ -269,9 +269,24 @@ impl WorktreeManager {
             run_git(&["clone", "--bare", &url, &bare_path.to_string_lossy()]).await?;
         }
 
-        // Fetch the base's tip. Tolerate failure: if the base was deleted
-        // remotely we fall back to the local ref below.
-        let _ = run_git_in(
+        // Refresh the remote-tracking ref AND fast-forward the bare
+        // clone's local `refs/heads/<base_branch>` to it. Without
+        // this, the bare clone's local view of the base branch could
+        // be arbitrarily stale and offline-mode worktrees would start
+        // from old commits (issue #35).
+        //
+        // Done as fetch → update-ref rather than a two-refspec fetch
+        // because git treats stacked `<src>:<dst>` pairs with the
+        // same source ambiguously and fails to update the heads/ ref
+        // even when the remote-tracking one succeeds.
+        //
+        // Tolerate fetch failure (offline / auth): warn and fall back
+        // to whatever local ref we have — the issue explicitly asks
+        // for graceful degradation rather than blocking worktree
+        // creation when the network's down. The bare clone never has
+        // a checked-out working tree of its own, so forcing the local
+        // ref is safe (we touch only base_branch).
+        let fetch = run_git_in(
             &bare_path,
             &[
                 "fetch",
@@ -280,6 +295,35 @@ impl WorktreeManager {
             ],
         )
         .await;
+        match &fetch {
+            Ok(_) => {
+                if let Err(e) = run_git_in(
+                    &bare_path,
+                    &[
+                        "update-ref",
+                        &format!("refs/heads/{base_branch}"),
+                        &format!("refs/remotes/origin/{base_branch}"),
+                    ],
+                )
+                .await
+                {
+                    tracing::warn!(
+                        owner = %owner,
+                        repo = %repo,
+                        base_branch = %base_branch,
+                        "could not fast-forward local {base_branch} to origin/{base_branch}; remote-tracking ref still updated ({e})"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    owner = %owner,
+                    repo = %repo,
+                    base_branch = %base_branch,
+                    "could not fetch origin/{base_branch} before creating worktree; falling back to local ref ({e})"
+                );
+            }
+        }
 
         if let Some(parent) = wt_path.parent() {
             tokio::fs::create_dir_all(parent).await?;

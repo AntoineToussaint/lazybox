@@ -402,6 +402,20 @@ impl<T: TerminalAdapter> Model<T> {
     pub(super) fn sync_panes(&mut self) {
         let workspace = self.sidebar.selected_workspace().cloned();
         let session_key = self.sidebar.selected_workspace_key().cloned();
+        // Daemon round-robin hint: every cursor mutation that
+        // changes the selected workspace emits one
+        // `FocusWorkspace`. Centralized here (not in each key/mouse
+        // handler) so j/k, click-to-select, programmatic preselect,
+        // and event-driven recompute all feed the same scheduler
+        // signal without duplicating the dedup. The daemon ignores
+        // hints for workspaces with no upstream GitHub repo, so
+        // pre-PR sandboxes don't deform the rotation.
+        if session_key != self.last_focused_session_key {
+            self.last_focused_session_key = session_key.clone();
+            if let Some(key) = session_key.clone() {
+                self.send_cmd(IpcCommand::FocusWorkspace { session_key: key });
+            }
+        }
         // Lazy-fetch trigger: when the focused workspace has a PR
         // and we haven't pulled its review-thread activity this
         // session, kick off the back-fill. The dedupe set prevents

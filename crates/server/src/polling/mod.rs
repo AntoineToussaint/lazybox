@@ -24,6 +24,11 @@
 
 mod handlers;
 mod mutate;
+mod scheduler;
+
+pub use scheduler::{
+    CURSOR_TTL, DEFAULT_ROUND_ROBIN_N, RoundRobinPick, RoundRobinState, pick_repos_for_tick,
+};
 
 pub use handlers::{
     ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_fetch_pr_details,
@@ -62,6 +67,17 @@ pub trait TaskSource: Send + Sync + 'static {
     fn fetch<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>;
+
+    /// Drain side-effect actions accumulated during the most recent
+    /// `fetch`. The polling tick calls this after each fetch and
+    /// dispatches the resulting [`ProviderAction`]s with full
+    /// `&ServerConfig` access — used today by `GhSource` to surface
+    /// auto-spawn requests triggered by `@pilot` mentions. Default
+    /// impl returns nothing so sources without side effects don't
+    /// have to think about it.
+    fn drain_actions(&self) -> Vec<ProviderAction> {
+        Vec::new()
+    }
 }
 
 /// `GhClient` adapter. The filter narrows the upstream result by
@@ -78,6 +94,48 @@ pub struct GhSource {
     /// to `TaskSource::fetch` (would couple them), so each source
     /// keeps a clone of just the broadcast sender.
     pub bus: tokio::sync::broadcast::Sender<Event>,
+    /// GitHub logins that may trigger auto-spawn via a `@pilot`
+    /// mention. Resolved by `sources_for` from
+    /// `config.yaml::mention.allowed_logins`, with the authenticated
+    /// viewer's login added as a default when the YAML list is
+    /// empty. Empty here disables the feature entirely.
+    pub mention_allowed_logins: std::collections::BTreeSet<String>,
+    /// Side channel for actions the source wants the polling tick to
+    /// take after `fetch()` returns — today, auto-spawn requests
+    /// triggered by `@pilot` mentions. Populated inside `fetch` and
+    /// drained by `tick_with_state` after the upsert pass so the
+    /// freshly-created issue workspace exists before we spawn into it.
+    pub pending_actions: std::sync::Arc<std::sync::Mutex<Vec<ProviderAction>>>,
+    /// Per-tick scheduling decision from `pick_repos_for_tick`.
+    /// `sources_for` computes this against the cursor in
+    /// `TickState::repo_sync_cursor` and writes it here so the
+    /// `TaskSource::fetch` impl knows whether to fan out per-repo or
+    /// to fire the global sweep. Held by value (not Arc) — each
+    /// `sources_for` call produces a fresh source.
+    pub scheduling: RoundRobinPick,
+}
+
+/// Out-of-band action a `TaskSource` may surface alongside the
+/// `Vec<Task>` from `fetch()`. The polling tick drains these after
+/// each fetch and dispatches them with full `&ServerConfig` access
+/// (which the trait's `fetch` deliberately does not get).
+#[derive(Debug, Clone)]
+pub enum ProviderAction {
+    /// Spawn `agent_id` in the workspace identified by `session_key`,
+    /// optionally with `prompt` injected after the agent reaches its
+    /// ready state. Today this fires when an allowed user has
+    /// written `@pilot` in an issue body or comment and pilot
+    /// already posted the 👀 reaction (the idempotency marker).
+    AutoSpawnAgent {
+        session_key: pilot_core::SessionKey,
+        agent_id: String,
+        prompt: Option<String>,
+        /// Free-text reason for the trace log: "@pilot mention by
+        /// alice on owner/repo#42 body". Surfaces in /tmp/pilot.log
+        /// so a user wondering "why did pilot start typing?" can
+        /// trace it back to a specific comment.
+        reason: String,
+    },
 }
 
 impl GhSource {
@@ -91,9 +149,67 @@ impl GhSource {
     }
 }
 
+/// Default agent id the auto-spawn flow uses when no override is
+/// configured. Mirrors the historical `pilot-tui` fallback so the
+/// user gets the same agent whether they press `w` or `@pilot`-tag
+/// the issue. Lives here (not behind a config lookup) because the
+/// polling layer doesn't get a `&PersistedSetup` at fetch time —
+/// the source is constructed once per tick and `fetch` is async.
+fn default_agent_id() -> String {
+    "claude".to_string()
+}
+
+/// Dispatch one [`ProviderAction`] surfaced by a [`TaskSource`]
+/// during the most recent fetch. Today this is just the
+/// auto-spawn-on-mention path; future provider-driven actions plug
+/// in by adding a variant + an arm.
+///
+/// Auto-spawn singleton enforcement happens inside `handle_spawn`
+/// (it checks `find_existing_singleton` per `(session_key, kind)`),
+/// so a `@pilot` mention on an issue that already has a running
+/// claude session focuses the existing terminal instead of starting
+/// a second one. We rely on that rather than re-implementing the
+/// check here, so the auto-spawn path and the user-pressed `w` path
+/// have IDENTICAL semantics.
+async fn dispatch_action(config: &ServerConfig, source_name: &str, action: ProviderAction) {
+    match action {
+        ProviderAction::AutoSpawnAgent {
+            session_key,
+            agent_id,
+            prompt,
+            reason,
+        } => {
+            tracing::info!(
+                source = source_name,
+                %session_key,
+                %agent_id,
+                %reason,
+                has_prompt = prompt.is_some(),
+                "auto-spawning agent on provider action"
+            );
+            crate::spawn_handler::handle_spawn(
+                config,
+                session_key,
+                None,
+                pilot_ipc::TerminalKind::Agent(agent_id),
+                None,
+                prompt,
+            )
+            .await;
+        }
+    }
+}
+
 impl TaskSource for GhSource {
     fn name(&self) -> &str {
         "github"
+    }
+    fn drain_actions(&self) -> Vec<ProviderAction> {
+        let mut guard = self
+            .pending_actions
+            .lock()
+            .expect("GhSource.pending_actions poisoned");
+        std::mem::take(&mut *guard)
     }
     fn fetch<'a>(
         &'a self,
@@ -123,15 +239,38 @@ impl TaskSource for GhSource {
             // they can paste the query into github.com/search and
             // verify what GitHub itself thinks is in scope.
             if want_prs {
-                self.emit_progress(format!("PR query: {}", self.client.pr_search_query()));
+                if self.scheduling.run_global {
+                    self.emit_progress(format!(
+                        "PR query (global): {}",
+                        self.client.pr_search_query()
+                    ));
+                }
+                if !self.scheduling.repos.is_empty() {
+                    self.emit_progress(format!(
+                        "PR query (round-robin {} repo{}): {}",
+                        self.scheduling.repos.len(),
+                        if self.scheduling.repos.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
+                        self.scheduling.repos.join(", "),
+                    ));
+                }
             }
             if want_issues {
                 self.emit_progress(format!("Issue query: {}", self.client.issue_search_query()));
             }
 
-            let (raw, partial_warning) = self
+            let (raw, partial_warning, mentions) = self
                 .client
-                .fetch_selected_with_status(want_prs, want_issues)
+                .fetch_round_robin_with_status_and_mentions(
+                    want_prs,
+                    &self.scheduling.repos,
+                    self.scheduling.run_global,
+                    want_issues,
+                    &self.mention_allowed_logins,
+                )
                 .await
                 .map_err(pilot_core::ProviderError::from)?;
             // Surface partial sync failures to the user — one side
@@ -146,6 +285,78 @@ impl TaskSource for GhSource {
                     detail: "see /tmp/pilot.log for the full error".into(),
                     kind: "retryable".into(),
                 });
+            }
+
+            // Process `@pilot` mention triggers BEFORE returning the
+            // task list. For each mention we (1) post the 👀
+            // reaction so the next poll sees `viewerHasReacted=true`
+            // and skips, then (2) queue an AutoSpawnAgent action the
+            // polling tick will dispatch after upsert (the issue
+            // workspace must exist on disk before we spawn into it).
+            //
+            // Reaction failures are LOGGED but do NOT block the
+            // spawn — better to act on the mention than to silently
+            // ignore it. A failed react means we might re-spawn next
+            // tick; that's noisy but recoverable (user can Shift-X).
+            if !mentions.is_empty() {
+                self.emit_progress(format!(
+                    "Found {} @pilot mention(s); reacting + queueing auto-spawn",
+                    mentions.len()
+                ));
+            }
+            for mention in mentions {
+                if let Err(e) = self.client.react_eyes(&mention.target_node_id).await {
+                    tracing::warn!(
+                        repo = %mention.repo,
+                        issue = mention.issue_number,
+                        target = %mention.target_node_id,
+                        "react_eyes failed (will still queue auto-spawn): {e}",
+                    );
+                }
+                // Look up the matching task in the freshly-polled
+                // set so we can use the real title/body for the
+                // prompt + the canonical workspace key derivation.
+                // If we can't find it (shouldn't happen — the scan
+                // ran on the same response that produced `raw`),
+                // skip rather than spawn against a synthetic task.
+                let Some(task) = raw.iter().find(|t| {
+                    t.id.source == "github"
+                        && t.repo.as_deref() == Some(mention.repo.as_str())
+                        && t.id
+                            .key
+                            .rsplit_once('#')
+                            .and_then(|(_, n)| n.parse::<u64>().ok())
+                            == Some(mention.issue_number)
+                }) else {
+                    tracing::warn!(
+                        repo = %mention.repo,
+                        issue = mention.issue_number,
+                        "mention scan returned a target with no matching Task — skipping auto-spawn"
+                    );
+                    continue;
+                };
+                let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(task));
+                let prompt = Some(pilot_core::prompts::build_implement_issue_prompt(task));
+                let reason = format!(
+                    "@pilot mention by {} on {}#{} ({})",
+                    mention.triggered_by_login,
+                    mention.repo,
+                    mention.issue_number,
+                    match &mention.source {
+                        pilot_gh::MentionSource::Body => "issue body",
+                        pilot_gh::MentionSource::Comment { .. } => "comment",
+                    },
+                );
+                tracing::info!(%reason, target = %mention.target_node_id, "queued auto-spawn");
+                self.pending_actions
+                    .lock()
+                    .expect("GhSource.pending_actions poisoned")
+                    .push(ProviderAction::AutoSpawnAgent {
+                        session_key,
+                        agent_id: default_agent_id(),
+                        prompt,
+                        reason,
+                    });
             }
 
             self.emit_progress(format!("Got {} raw items, applying filters…", raw.len()));
@@ -494,11 +705,64 @@ pub async fn sources_for(
                             }
                         }
                         state.gh_client = Some(client.clone());
+                        // Resolve the `@pilot` allowlist. Empty
+                        // YAML list → fall back to "just the
+                        // authenticated viewer", which mirrors the
+                        // design doc's MVP scope (only the local
+                        // pilot user's own issues + comments count).
+                        let mut mention_allowed: std::collections::BTreeSet<String> =
+                            pilot_config::Config::load()
+                                .ok()
+                                .map(|c| c.mention.allowed_logins.into_iter().collect())
+                                .unwrap_or_default();
+                        if mention_allowed.is_empty() && !viewer.is_empty() {
+                            mention_allowed.insert(viewer.clone());
+                        }
+                        // Round-robin scheduling. Pre-fetch we:
+                        //   1. Prune stale cursor entries so repos
+                        //      the user stopped touching age out
+                        //      (otherwise the cursor would grow with
+                        //      every new involvement, never shrink).
+                        //   2. Pick the per-tick slice from the
+                        //      remaining cursor.
+                        //   3. Bump the cursor for repos we're about
+                        //      to query (even a 0-result query
+                        //      advances the rotation — without it, an
+                        //      empty repo stays "stalest" forever).
+                        //   4. Increment the tick counter AFTER the
+                        //      pick so the scheduler's K-th-tick rule
+                        //      observes the value we passed in.
+                        let now = std::time::Instant::now();
+                        state.round_robin.prune(now);
+                        let scheduling = pick_repos_for_tick(
+                            &state.round_robin.cursor,
+                            state.round_robin.focused_repo.as_deref(),
+                            state.round_robin.tick,
+                            DEFAULT_ROUND_ROBIN_N,
+                        );
+                        if scheduling.run_global || !scheduling.repos.is_empty() {
+                            tracing::info!(
+                                source = pilot_gh::SOURCE,
+                                tick = state.round_robin.tick,
+                                run_global = scheduling.run_global,
+                                round_robin = ?scheduling.repos,
+                                known_repos = state.round_robin.cursor.len(),
+                                focused = state.round_robin.focused_repo.as_deref().unwrap_or(""),
+                                "round-robin scheduling decision"
+                            );
+                        }
+                        for repo in &scheduling.repos {
+                            state.round_robin.record_sync(repo, now);
+                        }
+                        state.round_robin.tick = state.round_robin.tick.wrapping_add(1);
                         sources.push(Box::new(GhSource {
                             client,
                             filter,
                             scopes,
                             bus: bus.clone(),
+                            mention_allowed_logins: mention_allowed,
+                            pending_actions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                            scheduling,
                         }));
                     }
                     Err(e) => tracing::warn!("github client init failed: {e}"),
@@ -611,6 +875,12 @@ pub struct TickState {
     /// PR — once is enough; the TUI's lazy-fetch refreshes on focus
     /// for users who want explicit re-pull.
     pub(crate) prefetched_pr_details: std::collections::HashSet<String>,
+    /// Per-repo round-robin bookkeeping: cursor, focused repo, and
+    /// monotonic tick counter. Co-located in `RoundRobinState` so
+    /// the scheduling-related logic stays inside `polling::scheduler`
+    /// — adding TTL pruning or a dynamic-N knob doesn't touch this
+    /// struct.
+    pub round_robin: RoundRobinState,
 }
 
 pub async fn tick_with_state(
@@ -675,6 +945,33 @@ pub async fn tick_with_state(
                     std::time::Duration::from_secs(15);
                 let upsert_started = std::time::Instant::now();
                 let total = tasks.len();
+                // Seed the round-robin cursor with repos we
+                // observed in the result set. Borrowed `&str` dedup
+                // keeps allocation cost proportional to unique repos
+                // (typically <10), not total task count (often >30).
+                // Done BEFORE `tasks.into_iter()` so the dedup set's
+                // borrow lifetime ends cleanly; the cursor write
+                // itself owns the small handful of unique strings.
+                // Combined with the pre-fetch bump in `sources_for`,
+                // this captures both "we queried this repo" and "the
+                // global sweep turned up a new repo we now want to
+                // round-robin through" — the rotation expands
+                // automatically as the user's involvement set grows.
+                let now = std::time::Instant::now();
+                if source.name() == pilot_gh::SOURCE {
+                    let mut seen_repos: std::collections::HashSet<&str> =
+                        std::collections::HashSet::new();
+                    for task in &tasks {
+                        if let Some(repo) = task.repo.as_deref()
+                            && !repo.is_empty()
+                        {
+                            seen_repos.insert(repo);
+                        }
+                    }
+                    for repo in &seen_repos {
+                        state.round_robin.record_sync(repo, now);
+                    }
+                }
                 for (i, task) in tasks.into_iter().enumerate() {
                     if task.mergeable == pilot_core::Mergeable::Unknown {
                         saw_unknown_mergeable = true;
@@ -727,6 +1024,22 @@ pub async fn tick_with_state(
                     source: source.name().to_string(),
                     count,
                 });
+                // Drain + dispatch any side-effect actions the
+                // source queued during `fetch` (today: auto-spawn
+                // requests from `@pilot` mentions). Runs AFTER the
+                // upsert loop so the freshly-created issue
+                // workspaces exist before we spawn into them.
+                let actions = source.drain_actions();
+                if !actions.is_empty() {
+                    tracing::info!(
+                        source = source.name(),
+                        count = actions.len(),
+                        "dispatching provider actions"
+                    );
+                }
+                for action in actions {
+                    dispatch_action(config, source.name(), action).await;
+                }
             }
             Err(e) => {
                 if e.is_retryable() {
@@ -1984,6 +2297,51 @@ pub(super) fn load_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Optio
     let record = config.store.get_workspace(key).ok().flatten()?;
     let json = record.workspace_json?;
     serde_json::from_str::<Workspace>(&json).ok()
+}
+
+/// Record the user's "I'm looking at this workspace" hint on the
+/// round-robin scheduler. The next `pick_repos_for_tick` call reads
+/// it and bumps the repo to the front of the rotation so a comment
+/// landing on the visible PR shows up next cycle instead of waiting
+/// its turn.
+///
+/// No-op when:
+/// - the workspace is missing from the store (race with a delete);
+/// - the workspace has no primary task (locally-created pre-PR
+///   sandbox);
+/// - the primary task isn't a GitHub item (Linear doesn't share the
+///   per-repo fan-out model);
+/// - the primary task has no usable repo string.
+///
+/// The hint is *replaced*, not accumulated — only the most-recent
+/// focus matters; older selections age out via stalest-first ordering.
+pub async fn set_focused_workspace(config: &ServerConfig, key: &WorkspaceKey) {
+    let Some(workspace) = load_workspace(config, key) else {
+        return;
+    };
+    let Some(task) = workspace.primary_task() else {
+        return;
+    };
+    if task.id.source != pilot_gh::SOURCE {
+        return;
+    }
+    let Some(repo) = task
+        .repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let mut state = config.poll_state.lock().await;
+    let prev = state.round_robin.focused_repo.replace(repo.to_string());
+    if prev.as_deref() != Some(repo) {
+        tracing::debug!(
+            workspace_key = %key.as_str(),
+            repo,
+            "round-robin focus updated"
+        );
+    }
 }
 
 /// `owner/repo#N` for PR / issue rows; falls back to the workspace

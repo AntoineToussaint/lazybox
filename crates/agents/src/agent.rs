@@ -40,6 +40,28 @@ pub trait Agent: Send + Sync {
         None
     }
 
+    /// Tight "ready to receive a pasted prompt" check. Returns true
+    /// when the agent's INPUT BOX is visibly drawn AND no
+    /// permission gate / chooser is currently up.
+    ///
+    /// Distinct from `detect_state` because the binary
+    /// Active/Asking state is too coarse — `Asking` includes both
+    /// "Y/N permission gate" (paste would be eaten) AND "idle input
+    /// box with a question in chat history" (paste is fine).
+    /// `detect_state`'s loose heuristics (last line ends with `?`)
+    /// power the `?` sidebar pill, where false positives are
+    /// harmless. The inject path can't tolerate them — a false
+    /// Asking made the inject wait 60s on every spawn before
+    /// shipping the paste.
+    ///
+    /// Default `false` — agents that don't override never report
+    /// ready, so the spawn-time injector falls back to its time-
+    /// based settle. Built-ins (Claude, Codex, Cursor) override.
+    fn detect_ready_for_prompt(&self, recent_output: &[u8]) -> bool {
+        let _ = recent_output;
+        false
+    }
+
     /// Encode a prompt as bytes the daemon should write to the PTY.
     /// Most agents accept plain text + a newline; some need bracketed
     /// paste or specific control sequences.
@@ -307,6 +329,47 @@ pub mod builtins {
             }
 
             Some(AgentState::Active)
+        }
+
+        /// Claude is ready to receive a pasted prompt when:
+        ///   1. The input-box footer is on screen (`Esc to cancel` +
+        ///      `Tab to amend` paired markers — Claude renders these
+        ///      ONLY while waiting at the prompt input).
+        ///   2. No permission chooser / Y-N gate is currently up
+        ///      (the high-confidence `❯ 1. ... 2. ...` arrow-plus-
+        ///      numbered-options pattern, OR known trust-folder
+        ///      strings).
+        ///
+        /// Returning true means "paste arrives in the input buffer,
+        /// not as a Y/N answer." Returning false means "wait — the
+        /// banner isn't done OR a permission gate is up."
+        fn detect_ready_for_prompt(&self, recent_output: &[u8]) -> bool {
+            let s = strip_ansi_lossy(recent_output);
+            // Input-box must be visible.
+            let has_input_box =
+                super::detect::contains_paired(&s, &["Esc to cancel"], &["Tab to amend"]);
+            if !has_input_box {
+                return false;
+            }
+            // Permission / chooser must NOT be visible. Same arrow-
+            // plus-numbered-options pattern `detect_state` uses for
+            // high-confidence Asking detection, plus the trust-folder
+            // string Claude shows on first run.
+            let has_arrow = s.contains('❯') || s.contains("> 1.") || s.contains("> 1)");
+            let has_two_options =
+                (s.contains("1.") || s.contains("1)")) && (s.contains("2.") || s.contains("2)"));
+            if has_arrow && has_two_options {
+                return false;
+            }
+            let lower = s.to_lowercase();
+            if lower.contains("trust this folder")
+                || lower.contains("do you trust the files")
+                || lower.contains("do you want to proceed?")
+                || lower.contains("do you want to allow")
+            {
+                return false;
+            }
+            true
         }
     }
 

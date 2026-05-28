@@ -403,6 +403,23 @@ pub struct GqlComment {
     pub original_line: Option<u32>,
     #[serde(default, rename = "diffHunk")]
     pub diff_hunk: Option<String>,
+    /// Eyes-reaction state for the authenticated viewer. Populated
+    /// by the issues-search query (which selects `reactions(content:
+    /// EYES) { viewerHasReacted }`); other queries leave it `None`.
+    /// Drives `@pilot` mention idempotency: pilot reacts 👀 on first
+    /// sight, then skips comments where this is `Some(true)`.
+    #[serde(default)]
+    pub reactions: Option<GqlReactionView>,
+}
+
+/// Tiny projection of a `ReactionConnection` filtered to one content
+/// kind (currently `EYES`). True when the authenticated viewer has
+/// reacted with that content. Used by the `@pilot`-mention path to
+/// decide whether pilot has already acknowledged a comment.
+#[derive(Deserialize, Debug, Clone, Copy, Default)]
+pub struct GqlReactionView {
+    #[serde(default, rename = "viewerHasReacted")]
+    pub viewer_has_reacted: bool,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -469,6 +486,20 @@ pub fn query_body(search_query: &str) -> serde_json::Value {
     query_body_after(search_query, None)
 }
 
+/// Per-page size for the PR search. Was 100 (GraphQL's maximum)
+/// but with the heavy SEARCH_QUERY payload, GitHub's GraphQL
+/// gateway timed out (HTTP 502 / 504 "We couldn't respond to your
+/// request in time") on every attempt — user logs from
+/// 2026-05-28 showed PR sync failing every cycle while the
+/// lighter issues query (still on 100/page) succeeded fine.
+///
+/// 25 gives GitHub's gateway 4× the per-request compute budget to
+/// resolve our connections, at the cost of 4× the page count for
+/// users with 100+ involved PRs. Empirically GitHub's gateway
+/// budget is closer to the per-request side than the per-result
+/// side, so smaller pages win.
+const PR_PAGE_SIZE: u32 = 25;
+
 pub fn query_body_after(search_query: &str, after: Option<&str>) -> serde_json::Value {
     // Omit `after` entirely when None — sending `"after": null` in the
     // variables block trips GitHub's GraphQL with a misleading
@@ -478,12 +509,12 @@ pub fn query_body_after(search_query: &str, after: Option<&str>) -> serde_json::
     let variables = match after {
         Some(cursor) => serde_json::json!({
             "query": search_query,
-            "first": 100,
+            "first": PR_PAGE_SIZE,
             "after": cursor,
         }),
         None => serde_json::json!({
             "query": search_query,
-            "first": 100,
+            "first": PR_PAGE_SIZE,
         }),
     };
     serde_json::json!({
@@ -632,6 +663,27 @@ pub fn merge_pr_body(pull_request_node_id: &str) -> serde_json::Value {
     serde_json::json!({
         "query": MERGE_PR_MUTATION,
         "variables": { "id": pull_request_node_id },
+    })
+}
+
+/// GraphQL mutation: add a 👀 reaction to any `Reactable` (Issue body
+/// or IssueComment, in pilot's case). Posting this reaction is the
+/// authoritative idempotency marker for the `@pilot`-mention
+/// auto-spawn path — subsequent polls see `viewerHasReacted: true`
+/// and skip the trigger. Re-adding an existing reaction is a no-op
+/// on GitHub's side, so retrying is safe.
+const ADD_REACTION_MUTATION: &str = r#"
+mutation($id: ID!) {
+  addReaction(input: { subjectId: $id, content: EYES }) {
+    reaction { content }
+  }
+}
+"#;
+
+pub fn add_reaction_eyes_body(reactable_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": ADD_REACTION_MUTATION,
+        "variables": { "id": reactable_node_id },
     })
 }
 
@@ -1739,12 +1791,14 @@ query($query: String!, $first: Int!, $after: String) {
         author { login }
         labels(first: 10) { nodes { name } }
         assignees(first: 10) { nodes { login } }
+        reactions(content: EYES) { viewerHasReacted }
         comments(first: 15) {
           nodes {
             id
             author { login }
             body
             createdAt
+            reactions(content: EYES) { viewerHasReacted }
           }
         }
         repository {
@@ -1778,6 +1832,12 @@ pub struct GqlIssue {
     pub comments: GqlComments,
     #[serde(default)]
     pub repository: Option<GqlIssueRepo>,
+    /// Eyes-reaction state for the authenticated viewer on the issue
+    /// BODY (separate from per-comment reactions on
+    /// `comments.nodes[].reactions`). See [`GqlReactionView`] for the
+    /// semantics + why pilot uses 👀 as an idempotency marker.
+    #[serde(default)]
+    pub reactions: Option<GqlReactionView>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -2021,6 +2081,7 @@ mod tests {
             repository: Some(GqlIssueRepo {
                 name_with_owner: "o/r".into(),
             }),
+            reactions: None,
         }
     }
 
@@ -2095,6 +2156,7 @@ mod tests {
                     line: None,
                     original_line: None,
                     diff_hunk: None,
+                    reactions: None,
                 },
                 GqlComment {
                     id: Some("c2".into()),
@@ -2107,6 +2169,7 @@ mod tests {
                     line: None,
                     original_line: None,
                     diff_hunk: None,
+                    reactions: None,
                 },
             ],
             total_count: None,
@@ -2134,6 +2197,7 @@ mod tests {
                 line: None,
                 original_line: None,
                 diff_hunk: None,
+                reactions: None,
             }],
             total_count: None,
         };
@@ -2491,15 +2555,24 @@ mod tests {
             SEARCH_QUERY.contains("totalCount"),
             "comments.totalCount disappeared — `unread_count` would collapse to 0 on inbox-scan",
         );
-        // Hard guard: the previous bloated numbers must NOT come
-        // back accidentally.
+        // Hard guards: previous bloated numbers (both pre-trim AND
+        // the intermediate #17 band-aid trim) must NOT come back.
+        // The band-aid (`comments(first: 5)` etc.) was superseded
+        // by the lazy-fetch split — any return to *any* eager
+        // `comments(first: N)` or `reviews(first: N)` in the
+        // inbox-scan query regresses the cost fix.
         for stale in [
+            "comments(first: 5)",
             "comments(first: 15)",
             "comments(first: 30)",
+            "reviews(first: 3)",
             "reviews(first: 10)",
+            "reviews(first: 20)",
             "labels(first: 10)",
             "assignees(first: 10)",
             "reviewRequests(first: 10)",
+            "contexts(first: 5)",
+            "contexts(first: 20)",
         ] {
             assert!(
                 !SEARCH_QUERY.contains(stale),
@@ -2563,6 +2636,7 @@ mod tests {
                                 line: Some(42),
                                 original_line: None,
                                 diff_hunk: Some("@@ -1 +1 @@".into()),
+                                reactions: None,
                             },
                             GqlComment {
                                 id: Some("C_reply".into()),
@@ -2575,6 +2649,7 @@ mod tests {
                                 line: None,
                                 original_line: None,
                                 diff_hunk: None,
+                                reactions: None,
                             },
                         ],
                         total_count: None,
@@ -2647,6 +2722,7 @@ mod tests {
                             line: None,
                             original_line: None,
                             diff_hunk: None,
+                            reactions: None,
                         }],
                         total_count: None,
                     },
@@ -2693,6 +2769,7 @@ mod tests {
                 line: None,
                 original_line: None,
                 diff_hunk: None,
+                reactions: None,
             }],
             total_count: Some(3),
         };

@@ -15,10 +15,9 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
-# `snafu::Backtrace` is required to construct an `octocrab::Error::Other`
-# variant when synthesizing a timeout error in `post_graphql_with_retry`.
-# octocrab pulls snafu transitively; we just need direct access.
-snafu = "0.8"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
 
 [lints]
 workspace = true

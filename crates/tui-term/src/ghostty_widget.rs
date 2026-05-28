@@ -198,10 +198,18 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
                     // row — terminals render that as a thin
                     // underline at the bottom of the cell, producing
                     // the stack of stray horizontal bars the user
-                    // screenshotted. Real underlines are always
-                    // applied to glyphs; bare spaces with these
-                    // modifiers are essentially never intentional.
-                    let glyph_is_blank = text == " " || text.is_empty();
+                    // screenshotted. Real underlines / strikethroughs
+                    // are always applied to glyphs; bare whitespace
+                    // with these modifiers is essentially never
+                    // intentional.
+                    //
+                    // Widened from the original `text == " "` check:
+                    // claude (and other CLIs) sometimes pad with
+                    // non-breaking space (U+00A0), figure space
+                    // (U+2007), zero-width space (U+200B), tabs, or
+                    // wide-glyph trailers. The earlier check missed
+                    // all of those.
+                    let glyph_is_blank = is_blank_glyph(text);
                     if cell_style.underline != Underline::None && !glyph_is_blank {
                         style = style.add_modifier(Modifier::UNDERLINED);
                     }
@@ -282,6 +290,25 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
 
 /// Copy the entire shadow buffer onto the live buf. Used when the
 /// snapshot reports `Dirty::Clean` — fastest possible "render."
+/// True when `text` is "visually empty" for the purpose of
+/// suppressing underline / strikethrough. Catches every Unicode
+/// whitespace codepoint via `char::is_whitespace` (covers ASCII
+/// space, NBSP U+00A0, figure space U+2007, ideographic space
+/// U+3000, tab, etc.) PLUS zero-width characters that look blank
+/// but `is_whitespace` returns false for (ZWSP U+200B, ZWNJ
+/// U+200C, ZWJ U+200D, BOM U+FEFF). When every grapheme cluster
+/// in the cell falls into one of those buckets, decorations like
+/// underline + strikethrough produce stray horizontal bars across
+/// otherwise-empty rows — not what the producing CLI meant.
+fn is_blank_glyph(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    text.chars().all(|c| {
+        c.is_whitespace() || matches!(c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}')
+    })
+}
+
 fn blit_shadow(shadow: &Buffer, buf: &mut Buffer, area: Rect) {
     for y in 0..area.height {
         for x in 0..area.width {
@@ -471,5 +498,54 @@ mod tests {
             area_wide,
             "shadow rebuilt for the new rect (no stale 10x3 cache)",
         );
+    }
+
+    /// Empty + ASCII-whitespace cases. The ORIGINAL `text == " "`
+    /// check covered these; the test pins them so a future tighten
+    /// doesn't regress.
+    #[test]
+    fn is_blank_glyph_matches_empty_and_ascii_space() {
+        assert!(is_blank_glyph(""));
+        assert!(is_blank_glyph(" "));
+        assert!(is_blank_glyph("\t"));
+        assert!(is_blank_glyph("   "));
+    }
+
+    /// Regression for the user-screenshotted bug: phantom strike
+    /// lines on cells claude padded with NBSP / figure space /
+    /// zero-width space. The original `text == " "` check missed
+    /// all of these. Widening to "every grapheme is whitespace or
+    /// a known zero-width char" catches them.
+    #[test]
+    fn is_blank_glyph_matches_unicode_blanks() {
+        // NBSP — `is_whitespace` catches it.
+        assert!(is_blank_glyph("\u{00A0}"));
+        // Figure space.
+        assert!(is_blank_glyph("\u{2007}"));
+        // Ideographic space.
+        assert!(is_blank_glyph("\u{3000}"));
+        // Zero-width space — NOT in `is_whitespace`, caught by the
+        // explicit list.
+        assert!(is_blank_glyph("\u{200B}"));
+        // Zero-width joiner + non-joiner + BOM — same family.
+        assert!(is_blank_glyph("\u{200C}"));
+        assert!(is_blank_glyph("\u{200D}"));
+        assert!(is_blank_glyph("\u{FEFF}"));
+        // Mixed string of "blank" chars stays blank.
+        assert!(is_blank_glyph(" \u{00A0}\t\u{200B}"));
+    }
+
+    /// Real glyphs (including box-drawing chars claude uses for
+    /// task panels) MUST NOT be classified as blank — they need
+    /// to keep their strikethrough / underline so a struck-out
+    /// completed item still renders correctly.
+    #[test]
+    fn is_blank_glyph_rejects_real_content() {
+        assert!(!is_blank_glyph("a"));
+        assert!(!is_blank_glyph("•"));
+        // Box-drawing horizontal — appears verbatim in claude's UI.
+        assert!(!is_blank_glyph("─"));
+        // Space embedded in real content — overall not blank.
+        assert!(!is_blank_glyph("a b"));
     }
 }

@@ -597,12 +597,24 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
         // here so a future tightening can't silently re-introduce
         // the gap.
         name: "write_tool_permission_arrow_on_option_2",
-        buffer: "Do you want to create MEMORY.md?\n  1. Yes\n> 2. Yes, and allow Claude to edit its own settings for this session\n  3. No\nEsc to cancel",
+        buffer: concat!(
+            "Do you want to create MEMORY.md?\n",
+            "  1. Yes\n",
+            "> 2. Yes, and allow Claude to edit its own settings for this session\n",
+            "  3. No\n",
+            "Esc to cancel",
+        ),
         expected: AgentState::Asking,
     },
     PromptFixture {
         name: "edit_tool_permission_utf8_arrow",
-        buffer: "Do you want to make this edit to agent.rs?\n❯ 1. Yes\n  2. Yes, allow all edits during this session\n  3. No, and tell Claude what to do differently\nEsc to cancel",
+        buffer: concat!(
+            "Do you want to make this edit to agent.rs?\n",
+            "❯ 1. Yes\n",
+            "  2. Yes, allow all edits during this session\n",
+            "  3. No, and tell Claude what to do differently\n",
+            "Esc to cancel",
+        ),
         expected: AgentState::Asking,
     },
     PromptFixture {
@@ -610,22 +622,44 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
         // `has_ascii_chooser_arrow` helper (any `> N.` shape, not
         // just `> 1.`).
         name: "bash_permission_cursor_on_option_3",
-        buffer: "Allow Bash this command?\n  1. Yes\n  2. Yes, and don't ask again\n> 3. No, and tell Claude what to do differently\nEsc to cancel",
+        buffer: concat!(
+            "Allow Bash this command?\n",
+            "  1. Yes\n",
+            "  2. Yes, and don't ask again\n",
+            "> 3. No, and tell Claude what to do differently\n",
+            "Esc to cancel",
+        ),
         expected: AgentState::Asking,
     },
     PromptFixture {
         name: "bash_permission_utf8_arrow",
-        buffer: "Allow Bash this command?\n❯ 1. Yes\n  2. Yes, and don't ask again\n  3. No, and tell Claude what to do differently\nEsc to cancel",
+        buffer: concat!(
+            "Allow Bash this command?\n",
+            "❯ 1. Yes\n",
+            "  2. Yes, and don't ask again\n",
+            "  3. No, and tell Claude what to do differently\n",
+            "Esc to cancel",
+        ),
         expected: AgentState::Asking,
     },
     PromptFixture {
         name: "plan_mode_exit",
-        buffer: "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel",
+        buffer: concat!(
+            "Do you want to proceed?\n",
+            "❯ 1. Yes\n",
+            "  2. No\n",
+            "Esc to cancel",
+        ),
         expected: AgentState::Asking,
     },
     PromptFixture {
         name: "trust_folder_chooser",
-        buffer: "Do you trust the files in this folder?\n❯ 1. Yes, proceed\n  2. No, exit\nEsc to cancel",
+        buffer: concat!(
+            "Do you trust the files in this folder?\n",
+            "❯ 1. Yes, proceed\n",
+            "  2. No, exit\n",
+            "Esc to cancel",
+        ),
         expected: AgentState::Asking,
     },
     PromptFixture {
@@ -634,7 +668,13 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
         // question text. Coverage hangs on the arrow+options
         // branch — no question-phrase pairing required.
         name: "ask_user_question_three_options",
-        buffer: "Which library should we use?\n❯ 1. tokio\n  2. async-std\n  3. smol\nEsc to cancel",
+        buffer: concat!(
+            "Which library should we use?\n",
+            "❯ 1. tokio\n",
+            "  2. async-std\n",
+            "  3. smol\n",
+            "Esc to cancel",
+        ),
         expected: AgentState::Asking,
     },
     PromptFixture {
@@ -644,7 +684,12 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
         // The new `Esc to cancel + numbered options` branch is
         // the only matcher that fires here.
         name: "permission_dialog_no_arrow_no_question_phrase",
-        buffer: "  1. Approve\n  2. Skip\n  3. Cancel\nEsc to cancel",
+        buffer: concat!(
+            "  1. Approve\n",
+            "  2. Skip\n",
+            "  3. Cancel\n",
+            "Esc to cancel",
+        ),
         expected: AgentState::Asking,
     },
     PromptFixture {
@@ -666,7 +711,12 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
     },
     PromptFixture {
         name: "settings_edit_consent",
-        buffer: "Claude wants to edit its own settings. Allow?\n❯ 1. Yes\n  2. No\nEsc to cancel",
+        buffer: concat!(
+            "Claude wants to edit its own settings. Allow?\n",
+            "❯ 1. Yes\n",
+            "  2. No\n",
+            "Esc to cancel",
+        ),
         expected: AgentState::Asking,
     },
 
@@ -675,7 +725,10 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
         // Plain build output. No prompt markers, no `?`. Belt-
         // and-braces baseline.
         name: "active_streaming_build_output",
-        buffer: "Compiling pilot-tui v0.1.0\nFinished release [optimized] target(s) in 4.32s",
+        buffer: concat!(
+            "Compiling pilot-tui v0.1.0\n",
+            "Finished release [optimized] target(s) in 4.32s",
+        ),
         expected: AgentState::Active,
     },
     PromptFixture {

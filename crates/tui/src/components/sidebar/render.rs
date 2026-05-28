@@ -298,13 +298,13 @@ impl Sidebar {
                     let _ = row_budget;
                     Line::from(spans)
                 }
-                VisibleRow::RoleHeader(role) => {
-                    // Indented role section header, sitting between
-                    // the repo header and the workspace rows of that
-                    // role. Borrowed visual from the role badge so
-                    // the colour matches the per-row letter.
-                    let (letter, color) =
-                        crate::components::sidebar::pills::role_badge(theme, *role);
+                VisibleRow::KindHeader(kind) => {
+                    // Indented PR/Issue section header, sitting
+                    // between the repo header and the workspace rows
+                    // of that kind. Distinct from `RepoHeader` by
+                    // indent + leading marker; the chip-coloured
+                    // marker mirrors the per-row PR/issue pills so
+                    // the eye lines them up.
                     let is_cursor = i == self.cursor;
                     let row_bg = if is_cursor && focused {
                         Some(theme.row_focused())
@@ -314,21 +314,20 @@ impl Sidebar {
                         None
                     };
                     let caret = if is_cursor { "▸ " } else { "  " };
-                    let label = match role {
-                        pilot_core::TaskRole::Author => "author",
-                        pilot_core::TaskRole::Reviewer => "reviewer",
-                        pilot_core::TaskRole::Assignee => "assignee",
-                        pilot_core::TaskRole::Mentioned => "mentioned",
+                    let (marker, color) = match kind {
+                        crate::components::sidebar::WorkspaceKind::Pr => ("P ", theme.success),
+                        crate::components::sidebar::WorkspaceKind::Issue => ("I ", theme.hover),
                     };
+                    let label = kind.header_label();
                     let mut spans: Vec<Span> = vec![
                         Span::styled(
                             caret.to_string(),
                             row_bg.unwrap_or_default().fg(theme.text_dim),
                         ),
-                        // Two-space indent so role headers tuck under
+                        // Two-space indent so kind headers tuck under
                         // their parent repo header visually.
                         Span::raw("  "),
-                        Span::styled(format!("{letter} "), row_bg.unwrap_or_default().fg(color)),
+                        Span::styled(marker.to_string(), row_bg.unwrap_or_default().fg(color)),
                         Span::styled(
                             label,
                             row_bg
@@ -338,7 +337,10 @@ impl Sidebar {
                         ),
                     ];
                     if let Some(bg) = row_bg {
-                        let used = caret.chars().count() + 2 + 2 + label.chars().count();
+                        let used = caret.chars().count()
+                            + 2
+                            + marker.chars().count()
+                            + label.chars().count();
                         if used < row_budget {
                             spans.push(Span::styled(" ".repeat(row_budget - used), bg));
                         }

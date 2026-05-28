@@ -8,7 +8,8 @@ expression: rendered
  ────────────────────────────────────
 
    ▾  owner/repo
+     P PRs
+   ▸ [PR] #10 A   task: o/r#10    1mo
      I Issues
-   ▸ [I]   #1 A   task: o/r#1     1mo
-     [I]   #2 A   task: o/r#2     1mo
-     [I]   #3 A   task: o/r#3     1mo
+     [I]  #11 A   task: o/r#11    1mo
+     [I]  #12 A   task: o/r#12    1mo

@@ -1111,127 +1111,143 @@ mod role_filter_tests {
     }
 
     #[test]
-    fn by_role_split_injects_role_headers_between_groups() {
-        // Two authored and two reviewer workspaces under one repo.
-        // ByRoleSplit must emit a RoleHeader before each role change.
+    fn by_role_split_injects_kind_headers_between_pr_and_issue_groups() {
+        // One PR and one issue under the same repo. ByRoleSplit must
+        // emit a `KindHeader(Pr)` then a `KindHeader(Issue)` so the
+        // two sections are visually distinct (issue #37).
+        use crate::components::sidebar::WorkspaceKind;
         let mut sb = Sidebar::new(PaneId::new(1));
         let now = chrono::Utc::now();
-        for (key, role) in [
-            ("1", TaskRole::Author),
-            ("2", TaskRole::Author),
-            ("3", TaskRole::Reviewer),
-            ("4", TaskRole::Reviewer),
-        ] {
-            let mut t = base_task();
-            t.id.key = key.into();
-            t.url = format!("https://github.com/o/r/pull/{key}");
-            t.role = role;
-            t.updated_at = now;
-            let w = Workspace::from_task(t, now);
-            let sk = SessionKey::from(&w.key);
-            sb.workspaces.insert(sk, w);
-        }
+
+        // PR workspace.
+        let mut pr_task = base_task();
+        pr_task.id.key = "1".into();
+        pr_task.url = "https://github.com/o/r/pull/1".into();
+        let pr_ws = Workspace::from_task(pr_task, now);
+        sb.workspaces.insert(SessionKey::from(&pr_ws.key), pr_ws);
+
+        // Issue workspace — task with `url` pointing at /issues/
+        // routes through `Workspace::from_task` into the `gh_issues`
+        // slot via `classify`, leaving `pr = None`.
+        let mut issue_task = base_task();
+        issue_task.id.key = "2".into();
+        issue_task.url = "https://github.com/o/r/issues/2".into();
+        let issue_ws = Workspace::from_task(issue_task, now);
+        sb.workspaces
+            .insert(SessionKey::from(&issue_ws.key), issue_ws);
+
         // Default is already ByRoleSplit — just recompute the
-        // visible list (which the cycles used to do as a side
-        // effect).
+        // visible list.
         sb.recompute_visible();
         assert_eq!(sb.sort_mode(), SortMode::ByRoleSplit);
 
-        // Expected order: RepoHeader, RoleHeader(Author), 2 Workspaces,
-        // RoleHeader(Reviewer), 2 Workspaces. Headers count separately.
         let headers: Vec<&VisibleRow> = sb
             .visible
             .iter()
-            .filter(|r| matches!(r, VisibleRow::RoleHeader(_)))
+            .filter(|r| matches!(r, VisibleRow::KindHeader(_)))
             .collect();
         assert_eq!(
             headers.len(),
             2,
-            "one role header per distinct role — got {:?}",
+            "one kind header per distinct kind — got {:?}",
             sb.visible
         );
+        // PRs section comes before Issues so the eye lands on
+        // actionable review work first.
         assert!(matches!(
             headers[0],
-            VisibleRow::RoleHeader(TaskRole::Author)
+            VisibleRow::KindHeader(WorkspaceKind::Pr)
         ));
         assert!(matches!(
             headers[1],
-            VisibleRow::RoleHeader(TaskRole::Reviewer)
+            VisibleRow::KindHeader(WorkspaceKind::Issue)
         ));
     }
 
     #[test]
-    fn role_headers_only_appear_in_split_mode() {
-        // Same fixture, but in Default + ByRole modes the role headers
-        // should NOT appear (they're a ByRoleSplit-only affordance).
+    fn kind_headers_only_appear_in_split_mode() {
+        // PR + issue fixture, but in Recent + ByRole modes the kind
+        // headers must NOT appear — they're a ByRoleSplit-only
+        // affordance, so toggling between `[recent]`/`[by-role]` and
+        // `[split]` produces a visibly different layout (issue #37).
         let mut sb = Sidebar::new(PaneId::new(1));
         let now = chrono::Utc::now();
-        for (key, role) in [("1", TaskRole::Author), ("2", TaskRole::Reviewer)] {
-            let mut t = base_task();
-            t.id.key = key.into();
-            t.url = format!("https://github.com/o/r/pull/{key}");
-            t.role = role;
-            t.updated_at = now;
-            let w = Workspace::from_task(t, now);
-            sb.workspaces.insert(SessionKey::from(&w.key), w);
-        }
+
+        let mut pr_task = base_task();
+        pr_task.id.key = "1".into();
+        pr_task.url = "https://github.com/o/r/pull/1".into();
+        let pr_ws = Workspace::from_task(pr_task, now);
+        sb.workspaces.insert(SessionKey::from(&pr_ws.key), pr_ws);
+
+        let mut issue_task = base_task();
+        issue_task.id.key = "2".into();
+        issue_task.url = "https://github.com/o/r/issues/2".into();
+        let issue_ws = Workspace::from_task(issue_task, now);
+        sb.workspaces
+            .insert(SessionKey::from(&issue_ws.key), issue_ws);
 
         for mode in [SortMode::Recent, SortMode::ByRole] {
-            // Reset to Default then cycle to the target.
+            // Reset to Recent then cycle to the target.
             while sb.sort_mode() != SortMode::Recent {
                 sb.cycle_sort_mode();
             }
             while sb.sort_mode() != mode {
                 sb.cycle_sort_mode();
             }
-            let has_role_header = sb
+            let has_kind_header = sb
                 .visible
                 .iter()
-                .any(|r| matches!(r, VisibleRow::RoleHeader(_)));
+                .any(|r| matches!(r, VisibleRow::KindHeader(_)));
             assert!(
-                !has_role_header,
-                "RoleHeader leaked into {:?} mode — got {:?}",
+                !has_kind_header,
+                "KindHeader leaked into {:?} mode — got {:?}",
                 mode, sb.visible
             );
         }
     }
 
     #[test]
-    fn cursor_skips_role_headers_with_j_navigation() {
-        // After ByRoleSplit cycle, cursor walks past role headers like
-        // any other header. Manual cursor-move via the public API.
+    fn cursor_skips_kind_headers_with_j_navigation() {
+        // After ByRoleSplit cycle, cursor parks on kind headers like
+        // any other header but `selected_session_key` returns None.
         let mut sb = Sidebar::new(PaneId::new(1));
         let now = chrono::Utc::now();
-        for (key, role) in [("1", TaskRole::Author), ("2", TaskRole::Reviewer)] {
-            let mut t = base_task();
-            t.id.key = key.into();
-            t.url = format!("https://github.com/o/r/pull/{key}");
-            t.role = role;
-            t.updated_at = now;
-            let w = Workspace::from_task(t, now);
-            sb.workspaces.insert(SessionKey::from(&w.key), w);
-        }
-        sb.cycle_sort_mode();
-        sb.cycle_sort_mode();
-        // Contract: every RoleHeader row resolves to `None` from
+
+        let mut pr_task = base_task();
+        pr_task.id.key = "1".into();
+        pr_task.url = "https://github.com/o/r/pull/1".into();
+        let pr_ws = Workspace::from_task(pr_task, now);
+        sb.workspaces.insert(SessionKey::from(&pr_ws.key), pr_ws);
+
+        let mut issue_task = base_task();
+        issue_task.id.key = "2".into();
+        issue_task.url = "https://github.com/o/r/issues/2".into();
+        let issue_ws = Workspace::from_task(issue_task, now);
+        sb.workspaces
+            .insert(SessionKey::from(&issue_ws.key), issue_ws);
+        sb.recompute_visible();
+        assert_eq!(sb.sort_mode(), SortMode::ByRoleSplit);
+
+        // Contract: every KindHeader row resolves to `None` from
         // `selected_session_key` — same skip-the-header semantics
-        // RepoHeader already provides. Walk the entire visible list
-        // and check each header row directly (no cursor mutation
-        // needed; the predicate is per-row).
+        // RepoHeader already provides.
         let visible_snapshot: Vec<VisibleRow> = sb.visible.to_vec();
+        let mut saw_kind_header = false;
         for (idx, row) in visible_snapshot.iter().enumerate() {
-            if matches!(row, VisibleRow::RoleHeader(_)) {
-                // The accessor pulls from `self.cursor`, so park the
-                // cursor on this row and assert. The cursor mutation
-                // doesn't go through `move_cursor_by` — we're poking
-                // private state to exercise the public predicate.
+            if matches!(row, VisibleRow::KindHeader(_)) {
+                saw_kind_header = true;
                 sb.cursor = idx;
                 assert!(
                     sb.selected_session_key().is_none(),
-                    "RoleHeader cursor must not resolve to a session key (row {idx})"
+                    "KindHeader cursor must not resolve to a session key (row {idx})"
                 );
             }
         }
+        assert!(
+            saw_kind_header,
+            "fixture should have produced at least one KindHeader — got {:?}",
+            visible_snapshot
+        );
     }
 
     #[test]

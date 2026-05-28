@@ -13,8 +13,7 @@
 //! sidebar.
 
 use crate::components::sidebar::{
-    BADGE_COL_W, STATUS_COL_W, TIME_COL_W, UNREAD_COL_W, badge_pill_style, role_badge,
-    status_pills, workspace_type_label,
+    badge_pill_style, role_badge, status_pills, workspace_type_label,
 };
 use crate::components::table::{Cell, Column, Row};
 use crate::theme::Theme;
@@ -69,49 +68,55 @@ impl<'a> WorkspaceRowCtx<'a> {
 }
 
 /// Column spec for every workspace row in the current render pass.
-/// Built once (with `max_pr_num_width` from the pre-pass), used for
-/// every row's `render_table` call.
+/// Built once (with `max_pr_num_width` from the pre-pass), and shared by
+/// a SINGLE `render_table` call that takes every visible workspace row
+/// at once — that's what lets `Column::max(0)` line up across rows
+/// (each Max column expands to the widest natural cell across the whole
+/// table, and collapses to 0 when no row has content).
 ///
 /// Order (left → right):
 ///
-/// 0.  Prefix — `  ▸ ` (cursor) / `    ` (no cursor).
-/// 1.  Type label — `[PR] ` / `[I ] ` / blank.
-/// 2.  PR number — `#NNN`, padded to `max_pr_num_width`.
-/// 3.  Role badge — ` R` colored marker, or blank.
-/// 4.  Asking glyph — ` ? ` warn-colored, or blank — reserved width
-///     so the kind/title to the right don't jitter between
-///     asking / not-asking rows.
-/// 5.  Kind label — `[feat] ` etc, or blank.
-/// 6.  Title — flex, absorbs the remaining width. Truncates with `…`.
-/// 7.  Kill mark — ` [kill?]` / ` [snooze 1y?]`, or blank.
-/// 8.  Unread pill — ` ●N `, right-aligned.
-/// 9.  Badge: agent slot — ` C ` / ` C×2 ` / blank.
-/// 10. Badge: separator — single space.
-/// 11. Badge: shell slot — ` S ` / blank.
-/// 12. Status pill — ` MERGED   ` etc, right-aligned.
-/// 13. Gutter — single space between status + time.
-/// 14. Time — `Xm` / `Xh` / `Xd`, right-aligned.
+/// 0. Prefix — `  ▸ ` (cursor) / `    ` (no cursor).
+/// 1. Type label — `[PR] ` / `[I]  ` / `[L]  ` / blank.
+/// 2. PR number — `#NNN`, padded to `max_pr_num_width`.
+/// 3. Role badge — ` R` colored marker, or blank.
+/// 4. Asking glyph — ` ? ` warn-colored, or blank — reserved width so
+///    the kind/title to the right don't jitter between asking /
+///    not-asking rows.
+/// 5. Kind label — `[FEAT] ` etc, or blank. Max across rows so titles
+///    align even when some rows have no kind prefix.
+/// 6. Title — flex, absorbs the remaining width. Truncates with `…`.
+/// 7. Kill mark — ` [snooze 1y?]`, or blank. Max so the title flex
+///    reclaims the space when no row is armed.
+/// 8. Unread pill — ` ●N `, right-aligned. Max so the column collapses
+///    when no row has unread, and lines up at a consistent x when any
+///    row does.
+/// 9. Badge: agent slot — ` C ` / ` C×2 ` / blank. Same Max semantics.
+/// 10. Badge: shell slot — ` S ` / blank. Cell carries a leading space
+///    so the two badges visually separate when both present.
+/// 11. Status pill — ` MERGED  ` / ` REVIEW   CI FAIL ` / blank.
+///    Right-aligned. Cell is empty (width 0) when both review + CI
+///    pills are None, so the column collapses for an all-empty table
+///    instead of always reserving 19 cells of dead air.
+/// 12. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
+///    baked into the cell so a 1-cell gap separates time from
+///    whatever sits to its left (status pill or, when status is
+///    empty, the title flex padding).
 pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
-    // The badge column is split into THREE slots so the agent / shell
-    // letters land at fixed x positions across rows: ` X ` (3) + sep
-    // (1) + ` X ` (3) = BADGE_COL_W.
-    debug_assert_eq!(BADGE_COL_W, 3 + 1 + 3);
     vec![
         Column::fixed(4),                        // 0: prefix
         Column::fixed(5),                        // 1: type label (incl. trailing space)
         Column::fixed(max_pr_num_width).right(), // 2: pr_num (right-aligned so digits line up)
         Column::fixed(2),                        // 3: role (" R" or blank)
         Column::fixed(3),                        // 4: asking (" ? " reserved)
-        Column::max(0),                          // 5: kind ("[feat] " or blank)
+        Column::max(0),                          // 5: kind ("[FEAT] " or blank)
         Column::flex(0),                         // 6: title
         Column::max(0),                          // 7: kill_mark
-        Column::fixed(UNREAD_COL_W).right(),     // 8: unread
-        Column::fixed(3),                        // 9: badge_agent
-        Column::fixed(1),                        // 10: badge_sep
-        Column::fixed(3),                        // 11: badge_shell
-        Column::fixed(STATUS_COL_W).right(),     // 12: status
-        Column::fixed(1),                        // 13: gutter
-        Column::fixed(TIME_COL_W).right(),       // 14: time
+        Column::max(0).right(),                  // 8: unread
+        Column::max(0),                          // 9: badge_agent
+        Column::max(0),                          // 10: badge_shell (carries its own leading space)
+        Column::max(0).right(),                  // 11: status
+        Column::max(0).right(),                  // 12: time (carries its own leading space)
     ]
 }
 
@@ -131,10 +136,8 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
         cell_kill_mark(ctx),
         cell_unread(ctx),
         cell_badge_agent(ctx),
-        cell_badge_sep(ctx),
         cell_badge_shell(ctx),
         cell_status(ctx),
-        cell_gutter(ctx),
         cell_time(ctx),
     ];
     Row::new(cells).fill(ctx.row_style())
@@ -295,11 +298,6 @@ fn cell_badge_agent(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     badge_slot_cell(ctx, agent)
 }
 
-fn cell_badge_sep(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    // Single space so the two badge pills don't visually touch.
-    Cell::from_span(Span::styled(" ".to_string(), ctx.row_style()))
-}
-
 fn cell_badge_shell(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let shell = ctx.badges.iter().find(|(c, _)| *c == 'S').copied();
     badge_slot_cell(ctx, shell)
@@ -325,9 +323,15 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         return Cell::empty();
     };
     let (primary, secondary) = status_pills(task);
-    // Each pill renders 9 cells; a 1-cell gutter between them. The
-    // total = STATUS_COL_W (19). Empty slots render as row-style
-    // spaces so the column lines up across rows.
+    // Empty cell when there's nothing to show — `Column::max(0)`
+    // collapses the column to 0 cells across the whole table when
+    // NO row in the visible list has a pill, handing the slack
+    // back to the title flex. When ANY row has a pill, the column
+    // expands to 19 cells (9 review + 1 gutter + 9 CI) and rows
+    // without pills get padded by the table renderer.
+    if primary.is_none() && secondary.is_none() {
+        return Cell::empty();
+    }
     let mut spans: Vec<RSpan<'static>> = Vec::with_capacity(3);
     match primary {
         Some(p) => spans.push(RSpan::styled(p.label.to_string(), p.style)),
@@ -341,14 +345,6 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     Cell::new(spans)
 }
 
-fn cell_gutter(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    // Visible 1-cell separator between status pill and time. Empty
-    // when there's no task (so no status pill either) — but the
-    // gutter still reserves its cell so the time column anchors
-    // identically across rows.
-    Cell::from_span(Span::styled(" ".to_string(), ctx.row_style()))
-}
-
 fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let Some(task) = ctx.task else {
         return Cell::empty();
@@ -360,8 +356,14 @@ fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         Style::default().fg(ctx.theme.text_dim)
     };
     // Time text may be `now` (3), `5m` (2), `12h` (3), `2d` (2),
-    // `12mo` (4). Right-aligned column pads on the left.
-    Cell::from_span(Span::styled(text, style))
+    // `12mo` (4). Leading space is part of the cell so there's
+    // always a 1-cell gap between time and whatever sits to its
+    // left (status pill, or — when status collapses to 0 — the
+    // title flex padding).
+    Cell::new(vec![
+        Span::styled(" ".to_string(), ctx.row_style()),
+        Span::styled(text, style),
+    ])
 }
 
 #[cfg(test)]
@@ -436,7 +438,7 @@ mod tests {
     #[test]
     fn build_columns_have_expected_count_and_order() {
         let cols = build_columns(5);
-        assert_eq!(cols.len(), 15);
+        assert_eq!(cols.len(), 13);
         // Title column (idx 6) is the only Flex one.
         let flex_indices: Vec<_> = cols
             .iter()
@@ -611,5 +613,157 @@ mod tests {
             badges: vec![],
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
+    }
+
+    /// `cell_status` returns an empty cell when neither review nor CI
+    /// has anything to surface — so the table's `Column::max(0)` for
+    /// status collapses to 0 when no row in the visible list has a
+    /// pill, handing the slack back to the title flex.
+    #[test]
+    fn cell_status_empty_when_no_pills() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.review = ReviewStatus::None;
+        task.ci = CiStatus::None;
+        task.state = TaskState::Open;
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(cell_status(&ctx).width(), 0);
+    }
+
+    /// When a status pill IS present the cell stays 19 cells wide —
+    /// review (9) + sep (1) + CI (9) — so rows with one pill line up
+    /// alongside rows with two.
+    #[test]
+    fn cell_status_is_nineteen_cells_with_a_pill() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.ci = CiStatus::Failure;
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(cell_status(&ctx).width(), 19);
+    }
+
+    /// `cell_time` carries its own leading space, so when the status
+    /// column collapses (no pills anywhere) the time still reads as
+    /// `<title flex padding>` + 1-cell gap + `5m`, not jammed against
+    /// the title's last character.
+    #[test]
+    fn cell_time_emits_leading_space() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_time(&ctx);
+        // First span is a single-cell row-style space.
+        assert_eq!(cell.spans[0].content.as_ref(), " ");
+    }
+
+    /// Regression for issue #22, part 1: title flex reclaims the
+    /// 36+ trailing cells when no row has unread / badge / status
+    /// content. The pre-fix table reserved 5 (unread) + 7 (badges) +
+    /// 19 (status) + 1 (gutter) = 32 cells PER ROW even when every
+    /// cell was empty, so a 100-cell sidebar effectively gave the
+    /// title flex only ~42 cells and truncated long titles with `…`
+    /// while leaving a huge gap to the right.
+    #[test]
+    fn title_flex_expands_when_trailing_columns_are_all_empty() {
+        // Two open issues, both with NO unread / badges / CI / review.
+        let task_a = make_task(
+            "owner/repo#1",
+            "Round-robin per-repo sync to reduce query overhead",
+        );
+        let task_b = make_task(
+            "owner/repo#2",
+            "Switch from polling-driven sync to notifications",
+        );
+        let ws_a = Workspace::from_task(task_a.clone(), fixed_time());
+        let ws_b = Workspace::from_task(task_b.clone(), fixed_time());
+        let theme = theme();
+        let ctx_a = ctx_for(&ws_a, &task_a, &theme);
+        let ctx_b = ctx_for(&ws_b, &task_b, &theme);
+        let columns = build_columns(4);
+        let rows = vec![build_row(&ctx_a), build_row(&ctx_b)];
+        // Generous row budget (mimics a wide terminal's sidebar).
+        let lines = crate::components::table::render_table(&rows, &columns, 100);
+        // Both lines render. The title text should make it into the
+        // line (truncated or not) — the bug was the title getting
+        // chopped to ~42 cells with 30+ empty cells trailing it.
+        let joined_a: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let joined_b: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        // Title body should appear in full when there's room. With
+        // no trailing-column content, the longest natural title here
+        // (`Round-robin per-repo sync to reduce query overhead`,
+        // 50 cells) fits comfortably inside the 100-cell budget.
+        assert!(
+            joined_a.contains("Round-robin per-repo sync to reduce query overhead"),
+            "title was truncated despite empty trailing columns: {joined_a:?}",
+        );
+        assert!(
+            joined_b.contains("Switch from polling-driven sync to notifications"),
+            "title was truncated despite empty trailing columns: {joined_b:?}",
+        );
+    }
+
+    /// Regression for issue #22, part 2: a row WITHOUT a `C` badge
+    /// (and no other right-side content) does not leave the badge
+    /// column as a ragged gap. When at least one row has a `C`
+    /// badge, every other row pads to the same column width so the
+    /// `C` letters line up at the same x position across rows.
+    #[test]
+    fn badge_column_lines_up_across_rows() {
+        // Row A: has a Claude agent badge. Row B: no badge.
+        let task_a = make_task("owner/repo#1", "A");
+        let task_b = make_task("owner/repo#2", "B");
+        let ws_a = Workspace::from_task(task_a.clone(), fixed_time());
+        let ws_b = Workspace::from_task(task_b.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx_a = ctx_for(&ws_a, &task_a, &theme);
+        ctx_a.badges = vec![('C', 1)];
+        let ctx_b = ctx_for(&ws_b, &task_b, &theme);
+        let columns = build_columns(4);
+        let rows = vec![build_row(&ctx_a), build_row(&ctx_b)];
+        let lines = crate::components::table::render_table(&rows, &columns, 80);
+        let row_a: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let row_b: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        // Same total visible width across rows — that's what makes
+        // every fixed-position column (incl. the trailing time
+        // column) align across rows.
+        let width_a = crate::util::visual_width(&row_a);
+        let width_b = crate::util::visual_width(&row_b);
+        assert_eq!(
+            width_a, width_b,
+            "rows must render to the same total width or trailing columns drift: {row_a:?} vs {row_b:?}",
+        );
+        // Find the `C` glyph in row A; row B must have a space at
+        // the SAME byte/cell offset, not anything else. (Both rows
+        // share the prefix layout so cell == char counting is safe
+        // here.)
+        let c_pos = row_a.find(" C ").expect("row A should have a ` C ` badge");
+        let same_window: String = row_b.chars().skip(c_pos).take(3).collect();
+        assert_eq!(
+            same_window, "   ",
+            "row B did not reserve the ` C ` column at the same x as row A",
+        );
+    }
+
+    /// Multi-instance badge (` C×2 `, 5 cells) no longer gets
+    /// truncated to `… ` because the badge column is `Column::max(0)`
+    /// and expands to the widest natural cell across the table.
+    #[test]
+    fn multi_instance_badge_is_not_truncated() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.badges = vec![('C', 2)];
+        let columns = build_columns(4);
+        let rows = vec![build_row(&ctx)];
+        let lines = crate::components::table::render_table(&rows, &columns, 80);
+        let line: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            line.contains(" C×2 "),
+            "multi-instance badge was truncated: {line:?}",
+        );
     }
 }

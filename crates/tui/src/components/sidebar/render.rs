@@ -219,9 +219,47 @@ impl Sidebar {
             .max(3);
         // Column spec for workspace rows — built once per render
         // (max_pr_num_width is fixed across rows in this pass).
-        // Each row's `render_table` call reuses this slice; the
-        // table primitive owns padding + cursor fill geometry.
         let workspace_columns = crate::components::workspace_row::build_columns(max_pr_num_width);
+
+        // Pre-pass: build every workspace row into the table's
+        // `Row` form, then run them through ONE `render_table` call.
+        // Doing the layout in a single batch is what lets
+        // `Column::max(0)` line up across rows — when each row was
+        // rendered solo, an empty status / badge cell collapsed that
+        // row's column to 0 while a sibling row kept its full 19
+        // cells, so the title flex absorbed different amounts on
+        // each line and the `C` badge column visually drifted.
+        let mut workspace_row_idx: Vec<usize> = Vec::new();
+        let mut workspace_rows: Vec<crate::components::table::Row> = Vec::new();
+        for (i, row) in self.visible.iter().enumerate() {
+            if let VisibleRow::Workspace(key) = row {
+                use crate::components::workspace_row::{WorkspaceRowCtx, build_row};
+                let workspace = self.workspaces.get(key);
+                let ctx = WorkspaceRowCtx {
+                    workspace,
+                    task: workspace.and_then(|w| w.primary_task()),
+                    theme,
+                    now,
+                    focused,
+                    is_cursor: i == self.cursor,
+                    max_pr_num_width,
+                    long_snooze_armed: self.latches.armed(TRIGGER_LONG_SNOOZE) == Some(key),
+                    asking: workspace.is_some_and(|w| {
+                        crate::agent_attention::workspace_is_asking(w, &self.agents_asking)
+                    }),
+                    badges: self.runner_badges(key),
+                };
+                workspace_row_idx.push(i);
+                workspace_rows.push(build_row(&ctx));
+            }
+        }
+        let workspace_lines =
+            crate::components::table::render_table(&workspace_rows, &workspace_columns, row_budget);
+        let mut rendered_workspace_lines: Vec<Option<Line>> = vec![None; self.visible.len()];
+        for (i, line) in workspace_row_idx.into_iter().zip(workspace_lines) {
+            rendered_workspace_lines[i] = Some(line);
+        }
+
         let lines: Vec<Line> = self
             .visible
             .iter()
@@ -327,29 +365,10 @@ impl Sidebar {
                     }
                     Line::from(spans)
                 }
-                VisibleRow::Workspace(key) => {
-                    use crate::components::workspace_row::{WorkspaceRowCtx, build_row};
-                    let workspace = self.workspaces.get(key);
-                    let ctx = WorkspaceRowCtx {
-                        workspace,
-                        task: workspace.and_then(|w| w.primary_task()),
-                        theme,
-                        now,
-                        focused,
-                        is_cursor: i == self.cursor,
-                        max_pr_num_width,
-                        long_snooze_armed: self.latches.armed(TRIGGER_LONG_SNOOZE) == Some(key),
-                        asking: workspace.is_some_and(|w| {
-                            crate::agent_attention::workspace_is_asking(w, &self.agents_asking)
-                        }),
-                        badges: self.runner_badges(key),
-                    };
-                    let row = build_row(&ctx);
-                    crate::components::table::render_table(&[row], &workspace_columns, row_budget)
-                        .into_iter()
-                        .next()
-                        .unwrap_or_default()
-                }
+                VisibleRow::Workspace(_) => rendered_workspace_lines
+                    .get_mut(i)
+                    .and_then(|slot| slot.take())
+                    .unwrap_or_default(),
                 VisibleRow::Session {
                     workspace,
                     session_id,

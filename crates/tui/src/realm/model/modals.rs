@@ -167,8 +167,7 @@ impl<T: TerminalAdapter> Model<T> {
             .workspace_iter()
             .find(|(k, _)| k.as_str() == workspace_key.as_str())
             .map(|(_, w)| {
-                let mut set: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
+                let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
                 if let Some(pr) = &w.pr {
                     for l in &pr.labels {
                         set.insert(l.name.clone());
@@ -182,12 +181,16 @@ impl<T: TerminalAdapter> Model<T> {
                 set
             })
             .unwrap_or_default();
-        let names: Vec<String> = repo_labels.iter().map(|l| l.name.clone()).collect();
         // Each row reads `[name]` so the user gets the same chip
         // framing the sidebar uses — keeps mental model consistent.
-        let labels_for_picker: Vec<String> =
-            repo_labels.iter().map(|l| format!("[{}]", l.name)).collect();
-        self.labels_choices = names.clone();
+        // `labels_choices` stays as the bare names (what the picker
+        // submits back upstream); the bracketed form only lives in
+        // the picker's display labels.
+        let labels_for_picker: Vec<String> = repo_labels
+            .iter()
+            .map(|l| format!("[{}]", l.name))
+            .collect();
+        self.labels_choices = repo_labels.into_iter().map(|l| l.name).collect();
         self.pending_labels_request = Some(workspace_key);
         let modal = Choice::multi("Apply labels", labels_for_picker)
             .title("Labels (toggle to add/remove)")

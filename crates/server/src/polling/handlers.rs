@@ -401,9 +401,7 @@ pub async fn handle_set_labels(
             .send(Event::provider_error_retryable("labels", msg));
     };
     let Some(ws) = load_workspace(config, &workspace_key) else {
-        emit_err(&format!(
-            "set_labels: workspace {workspace_key} not found"
-        ));
+        emit_err(&format!("set_labels: workspace {workspace_key} not found"));
         return;
     };
     let provider = match build_provider_for_workspace(&workspace_key).await {
@@ -441,10 +439,7 @@ pub async fn handle_fetch_repo_labels(config: &ServerConfig, workspace_key: Work
     };
     match provider.list_repo_labels(&ws).await {
         Ok(labels) => {
-            tracing::info!(
-                "fetch_repo_labels {workspace_key}: {} labels",
-                labels.len()
-            );
+            tracing::info!("fetch_repo_labels {workspace_key}: {} labels", labels.len());
             let _ = config.bus.send(Event::RepoLabels {
                 workspace_key,
                 labels,

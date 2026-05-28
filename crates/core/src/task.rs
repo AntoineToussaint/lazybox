@@ -49,8 +49,11 @@ pub enum TaskState {
 /// Serde compatibility: deserializes from either a bare string (old
 /// wire format) or `{name, color}`. Pre-color persisted state keeps
 /// working — color defaults to empty until the next poll repopulates
-/// it from the provider.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+/// it from the provider. The `#[serde(from = "LabelRepr")]` attribute
+/// keeps the shim small; `LabelRepr` is the on-wire shape and
+/// `From<LabelRepr>` does the normalization.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "LabelRepr")]
 pub struct Label {
     pub name: String,
     #[serde(default)]
@@ -61,7 +64,7 @@ impl Label {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            color: String::new(),
+            ..Self::default()
         }
     }
 
@@ -73,28 +76,28 @@ impl Label {
     }
 }
 
-impl<'de> Deserialize<'de> for Label {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        // Accept either `"bug"` (old) or `{"name":"bug","color":"d73a4a"}`.
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Either {
-            Plain(String),
-            Struct {
-                name: String,
-                #[serde(default)]
-                color: String,
-            },
-        }
-        match Either::deserialize(deserializer)? {
-            Either::Plain(name) => Ok(Self {
+/// On-wire shape for [`Label`]. Either a bare string (legacy persisted
+/// state) or `{name, color}`. Lives at the module root rather than
+/// inside the `#[serde(from)]` attribute so callers can grep for it.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LabelRepr {
+    Plain(String),
+    Struct {
+        name: String,
+        #[serde(default)]
+        color: String,
+    },
+}
+
+impl From<LabelRepr> for Label {
+    fn from(repr: LabelRepr) -> Self {
+        match repr {
+            LabelRepr::Plain(name) => Self {
                 name,
                 color: String::new(),
-            }),
-            Either::Struct { name, color } => Ok(Self { name, color }),
+            },
+            LabelRepr::Struct { name, color } => Self { name, color },
         }
     }
 }
@@ -209,6 +212,9 @@ pub struct Task {
     #[serde(default)]
     pub base_branch: Option<String>,
     pub updated_at: DateTime<Utc>,
+    /// `#[serde(default)]` so an older daemon snapshot (no labels
+    /// field) still deserializes — mirrors `reviewers` / `assignees`.
+    #[serde(default)]
     pub labels: Vec<Label>,
     /// Requested reviewers (user logins or team names).
     #[serde(default)]

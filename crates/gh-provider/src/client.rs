@@ -1925,7 +1925,11 @@ impl GhClient {
     /// description). Cached by the caller — every repo's label
     /// set is small (typically under 50 entries) and changes
     /// rarely, so re-querying per picker open is fine.
-    pub async fn list_repo_labels(
+    ///
+    /// Named with the `_for_repo` suffix so this inherent method
+    /// doesn't shadow the trait-side `TaskProvider::list_repo_labels`
+    /// (which takes a `&Workspace` and delegates here).
+    pub async fn list_labels_for_repo(
         &self,
         owner: &str,
         name: &str,
@@ -1947,10 +1951,7 @@ impl GhClient {
         if let Some(rl) = &data.rate_limit {
             self.observe_rate_limit(rl);
         }
-        let nodes = data
-            .repository
-            .map(|r| r.labels.nodes)
-            .unwrap_or_default();
+        let nodes = data.repository.map(|r| r.labels.nodes).unwrap_or_default();
         Ok(nodes)
     }
 
@@ -2273,7 +2274,7 @@ impl pilot_core::TaskProvider for GhClient {
             ));
         };
         let nodes = self
-            .list_repo_labels(owner, name)
+            .list_labels_for_repo(owner, name)
             .await
             .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
         Ok(nodes
@@ -2297,19 +2298,20 @@ impl pilot_core::TaskProvider for GhClient {
     ) -> Result<(), pilot_core::ProviderError> {
         // Find the labelable node — prefer the PR, fall back to the
         // first issue. Same shape as set_assignees: both PRs and
-        // issues implement the `Labelable` interface.
-        let (node_id, existing): (&str, Vec<String>) = {
-            let pr_match = workspace.pr.as_ref().and_then(|p| {
-                p.node_id
-                    .as_deref()
-                    .map(|n| (n, p.labels.iter().map(|l| l.name.clone()).collect()))
-            });
-            let issue_match = workspace.gh_issues.first().and_then(|i| {
-                i.node_id
-                    .as_deref()
-                    .map(|n| (n, i.labels.iter().map(|l| l.name.clone()).collect()))
-            });
-            pr_match.or(issue_match).ok_or_else(|| {
+        // issues implement the `Labelable` interface. We borrow the
+        // existing label slice (no per-name clone) and just remember
+        // the node id we'll mutate against.
+        let (node_id, existing) = workspace
+            .pr
+            .as_ref()
+            .and_then(|p| p.node_id.as_deref().map(|n| (n, p.labels.as_slice())))
+            .or_else(|| {
+                workspace
+                    .gh_issues
+                    .first()
+                    .and_then(|i| i.node_id.as_deref().map(|n| (n, i.labels.as_slice())))
+            })
+            .ok_or_else(|| {
                 pilot_core::ProviderError::permanent(
                     "github",
                     format!(
@@ -2317,15 +2319,14 @@ impl pilot_core::TaskProvider for GhClient {
                         workspace.key
                     ),
                 )
-            })?
-        };
+            })?;
 
         // Need the repo's labels to map names → ids. Pull them once;
         // anything the user picked that isn't in the repo's set is
         // silently dropped (can't apply a label that doesn't exist).
         let repo = workspace
             .primary_task()
-            .and_then(|t| t.repo.clone())
+            .and_then(|t| t.repo.as_deref())
             .ok_or_else(|| {
                 pilot_core::ProviderError::permanent("github", "primary task has no repo")
             })?;
@@ -2333,24 +2334,29 @@ impl pilot_core::TaskProvider for GhClient {
             pilot_core::ProviderError::permanent("github", format!("bad repo string `{repo}`"))
         })?;
         let repo_labels = self
-            .list_repo_labels(owner, name)
+            .list_labels_for_repo(owner, name)
             .await
             .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+        // Hash lookup keeps the typical 0-50 repo-labels × 0-10 picks
+        // case constant-time without the two extra HashSet allocs the
+        // prior diff path used.
         let id_by_name: std::collections::HashMap<&str, &str> = repo_labels
             .iter()
             .map(|l| (l.name.as_str(), l.id.as_str()))
             .collect();
-
-        let desired: std::collections::HashSet<&str> = names.iter().map(String::as_str).collect();
-        let current: std::collections::HashSet<&str> =
-            existing.iter().map(String::as_str).collect();
-        let to_add: Vec<String> = desired
-            .difference(&current)
-            .filter_map(|n| id_by_name.get(*n).map(|id| (*id).to_string()))
+        // Linear diff: `to_add` = names ∈ desired \ existing,
+        // `to_remove` = names ∈ existing \ desired. At ≤10 entries
+        // on each side the inner `.any()` scan beats the cost of
+        // building two HashSets.
+        let to_add: Vec<String> = names
+            .iter()
+            .filter(|n| !existing.iter().any(|l| &l.name == *n))
+            .filter_map(|n| id_by_name.get(n.as_str()).map(|id| (*id).to_string()))
             .collect();
-        let to_remove: Vec<String> = current
-            .difference(&desired)
-            .filter_map(|n| id_by_name.get(*n).map(|id| (*id).to_string()))
+        let to_remove: Vec<String> = existing
+            .iter()
+            .filter(|l| !names.iter().any(|n| n == &l.name))
+            .filter_map(|l| id_by_name.get(l.name.as_str()).map(|id| (*id).to_string()))
             .collect();
         if to_add.is_empty() && to_remove.is_empty() {
             tracing::debug!(

@@ -274,7 +274,11 @@ fn cell_labels(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     };
     let total = labels.len();
     let shown = labels.iter().take(MAX_CHIPS);
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(total * 4 + 2);
+    // Upper bound: MAX_CHIPS chips × (space + `[` + name + `]`) +
+    // one optional overflow span. Sized to the visible rendering,
+    // not the input length — a PR with 50 labels still only emits
+    // 13 spans worth of buffer here.
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(MAX_CHIPS * 4 + 1);
     for label in shown {
         spans.push(Span::styled(" ".to_string(), ctx.row_style()));
         let bracket_style = if ctx.is_cursor {
@@ -308,9 +312,14 @@ fn cell_labels(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 /// Translate GitHub's hex color (e.g. `"d73a4a"`) into a ratatui
 /// `Style`. Empty / unparseable → `text_dim`. The hex string may
 /// arrive with or without a leading `#`; both shapes are handled.
+///
+/// ASCII-gated before byte-slicing: `.len()` is byte length, not
+/// char count, so without the gate a 2-byte UTF-8 char that happens
+/// to fit in 6 bytes would slice through a code point and panic.
+/// GitHub never returns that, but providers are external input.
 fn label_text_style(theme: &Theme, hex: &str) -> Style {
     let cleaned = hex.trim_start_matches('#');
-    if cleaned.len() != 6 {
+    if !cleaned.is_ascii() || cleaned.len() != 6 {
         return Style::default().fg(theme.text_dim);
     }
     let parse = |s: &str| u8::from_str_radix(s, 16).ok();
@@ -319,9 +328,7 @@ fn label_text_style(theme: &Theme, hex: &str) -> Style {
         parse(&cleaned[2..4]),
         parse(&cleaned[4..6]),
     ) {
-        (Some(r), Some(g), Some(b)) => {
-            Style::default().fg(ratatui::style::Color::Rgb(r, g, b))
-        }
+        (Some(r), Some(g), Some(b)) => Style::default().fg(ratatui::style::Color::Rgb(r, g, b)),
         _ => Style::default().fg(theme.text_dim),
     }
 }
@@ -835,10 +842,7 @@ mod tests {
     #[test]
     fn cell_labels_renders_bracketed_chips() {
         let mut task = make_task("owner/repo#1", "x");
-        task.labels = vec![
-            pilot_core::Label::new("bug"),
-            pilot_core::Label::new("ci"),
-        ];
+        task.labels = vec![pilot_core::Label::new("bug"), pilot_core::Label::new("ci")];
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);

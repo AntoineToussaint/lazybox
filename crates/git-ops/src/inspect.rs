@@ -14,7 +14,7 @@ use std::time::SystemTime;
 
 use tokio::process::Command;
 
-use crate::{GitError, WorktreeManager, git_env};
+use crate::{GitError, WorktreeManager, apply_git_env};
 
 // `base_dir` is reachable via a crate-private accessor on
 // `WorktreeManager`; see `crates/git-ops/src/lib.rs`. Inspector code
@@ -404,12 +404,13 @@ async fn discover_bare_clones(repos_root: &Path) -> Vec<PathBuf> {
 /// the keys we care about and ignore the rest so future git versions
 /// adding new keys don't break parsing.
 async fn list_porcelain(bare: &Path) -> Result<Vec<PorcelainEntry>, GitError> {
-    let output = Command::new("git")
-        .current_dir(bare)
-        .args(["worktree", "list", "--porcelain"])
-        .envs(git_env())
-        .output()
-        .await?;
+    let output = apply_git_env(
+        Command::new("git")
+            .current_dir(bare)
+            .args(["worktree", "list", "--porcelain"]),
+    )
+    .output()
+    .await?;
     if !output.status.success() {
         return Err(GitError::Command(
             String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -455,23 +456,25 @@ async fn list_porcelain(bare: &Path) -> Result<Vec<PorcelainEntry>, GitError> {
 }
 
 async fn ref_exists(bare: &Path, ref_name: &str) -> bool {
-    Command::new("git")
-        .current_dir(bare)
-        .args(["show-ref", "--verify", "--quiet", ref_name])
-        .envs(git_env())
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    apply_git_env(
+        Command::new("git")
+            .current_dir(bare)
+            .args(["show-ref", "--verify", "--quiet", ref_name]),
+    )
+    .output()
+    .await
+    .map(|o| o.status.success())
+    .unwrap_or(false)
 }
 
 async fn uncommitted(worktree: &Path) -> bool {
-    let Ok(output) = Command::new("git")
-        .current_dir(worktree)
-        .args(["status", "--porcelain"])
-        .envs(git_env())
-        .output()
-        .await
+    let Ok(output) = apply_git_env(
+        Command::new("git")
+            .current_dir(worktree)
+            .args(["status", "--porcelain"]),
+    )
+    .output()
+    .await
     else {
         return false;
     };
@@ -484,12 +487,13 @@ async fn unpushed(worktree: &Path) -> bool {
     // commits to worry about" because the cleanup path assumes a
     // pilot-created worktree where the branch either tracks origin or
     // was never published.
-    let Ok(output) = Command::new("git")
-        .current_dir(worktree)
-        .args(["rev-list", "--count", "@{u}..HEAD"])
-        .envs(git_env())
-        .output()
-        .await
+    let Ok(output) = apply_git_env(
+        Command::new("git")
+            .current_dir(worktree)
+            .args(["rev-list", "--count", "@{u}..HEAD"]),
+    )
+    .output()
+    .await
     else {
         return false;
     };

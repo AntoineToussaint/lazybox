@@ -1143,12 +1143,18 @@ impl RightPane {
 
     /// State-aware short list for the footer hint bar.
     ///
-    /// Catalog-driven: build the relevant `Action`s, then map to
-    /// `Binding`s via `ActionDef::for_action`. The `v select row` /
-    /// `toggle row` flip is the one pane-local label override —
-    /// it depends on selection state (a value the catalog doesn't
-    /// see), so we override after the catalog lookup.
-    pub fn contextual_bindings(&self) -> Vec<crate::Binding> {
+    /// Catalog-driven: build the relevant `Action`s, then ask the
+    /// catalog for the effective key (override-aware) + state-aware
+    /// label. The `v select row` / `toggle row` flip is the one
+    /// pane-local label override — selection state isn't in
+    /// `workspace`, so it can't go through `contextual_label`.
+    ///
+    /// `overrides` carries the user's `ui.action_keys` map; pass an
+    /// empty map to use catalog defaults.
+    pub fn contextual_bindings(
+        &self,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<crate::Binding> {
         use crate::Binding;
         use pilot_tui_core::action::{Action, ActionDef, contextual_label};
 
@@ -1180,60 +1186,16 @@ impl RightPane {
             .into_iter()
             .map(|a| {
                 let def = ActionDef::for_action(&a);
-                // Selection state isn't in `workspace`; override
-                // `v select row` ↔ `v toggle row` here. Every other
-                // label flows through `contextual_label`.
-                let label = match &a {
-                    Action::SelectRow if has_selection => "toggle row",
-                    _ => contextual_label(&a, workspace),
+                let label: std::borrow::Cow<'static, str> = match &a {
+                    Action::SelectRow if has_selection => std::borrow::Cow::Borrowed("toggle row"),
+                    _ => std::borrow::Cow::Borrowed(contextual_label(&a, workspace)),
                 };
                 Binding {
-                    keys: def.default_keys,
+                    keys: def.effective_keys_display(overrides),
                     label,
                 }
             })
             .collect()
-    }
-
-    pub fn keymap(&self) -> &'static [crate::Binding] {
-        use crate::Binding;
-        // Pane-local bindings only — Tab, q-q, ? and the global
-        // splitter / detach combos are listed under "Global" in the
-        // Help modal so each pane's hint bar stays tight.
-        &[
-            Binding {
-                keys: "↑/↓",
-                label: "scroll",
-            },
-            Binding {
-                keys: "→/←",
-                label: "expand/collapse",
-            },
-            Binding {
-                keys: "r",
-                label: "reply",
-            },
-            Binding {
-                keys: "v",
-                label: "select",
-            },
-            Binding {
-                keys: "w",
-                label: "work on selected",
-            },
-            Binding {
-                keys: "d",
-                label: "PR description",
-            },
-            Binding {
-                keys: "g/G",
-                label: "top/bottom",
-            },
-            Binding {
-                keys: "Enter",
-                label: "toggle section",
-            },
-        ]
     }
 
     pub fn detachable(&self) -> Option<crate::DetachSpec> {

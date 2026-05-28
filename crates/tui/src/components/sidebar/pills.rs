@@ -32,28 +32,30 @@ pub(crate) struct StatusPill {
 /// the "needs attention" counter on the collapsed repo header.
 /// Each signal (unread / CI / review / agent-asking / mentioned)
 /// is independently toggleable via `~/.pilot/config.yaml::attention`.
-/// Short type marker rendered before the `#number` on each workspace
-/// row. Each label is exactly 5 cells (`[PR] `, `[I]  `, `[L]  `)
-/// so the `#NNN` number after the label always lands at the same
-/// x-position — the eye can scan the column without the brackets
-/// wandering left-right between rows.
+/// Single-cell type marker rendered immediately before the `#number`
+/// on each workspace row. The glyph sits flush against the number
+/// (`⇄#312`, not `[PR]   #312`) so the title column gets the cells
+/// back — see issue #42.
 ///
-/// Variants:
-/// - `[PR] ` — workspaces holding a pull request.
-/// - `[I]  ` — github-issue-only workspaces.
-/// - `[L]  ` — linear-ticket-only workspaces. Distinguished from
-///   `[I]` because they're a different source (different keymaps
-///   later, no review threads, no PRs, …).
-/// - `None`  — empty scratch workspaces (no PR, no issues).
-pub(crate) fn workspace_type_label(workspace: &Workspace) -> Option<&'static str> {
+/// Variants (default unicode):
+/// - `⇄` — workspaces holding a pull request.
+/// - `○` — github-issue-only workspaces.
+/// - `◆` — linear-ticket-only workspaces. Distinct source (different
+///   keymaps later, no review threads, no PRs, …).
+/// - `None` — empty scratch workspaces (no PR, no issues).
+///
+/// `ascii` toggles the fallback letters (`p` / `i` / `l`) for fonts
+/// that don't render the unicode glyphs reliably as a single cell.
+/// Wired from `display.ascii_glyphs` in `~/.pilot/config.yaml`.
+pub(crate) fn workspace_type_label(workspace: &Workspace, ascii: bool) -> Option<&'static str> {
     if workspace.pr.is_some() {
-        return Some("[PR] ");
+        return Some(if ascii { "p" } else { "⇄" });
     }
     if !workspace.gh_issues.is_empty() {
-        return Some("[I]  ");
+        return Some(if ascii { "i" } else { "○" });
     }
     if !workspace.linear_issues.is_empty() {
-        return Some("[L]  ");
+        return Some(if ascii { "l" } else { "◆" });
     }
     None
 }

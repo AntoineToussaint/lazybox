@@ -239,6 +239,22 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcEvent::WorkspaceRemoved(key) = &event {
             self.pr_details_fetched.remove(key);
         }
+        // Response to a `FetchRepoLabels` command — mount the picker
+        // once the daemon has the repo's label set. We tolerate
+        // out-of-band events (e.g. a stale fetch firing after the
+        // user dismissed the picker) by only mounting when the
+        // workspace key still matches the pending request.
+        if let IpcEvent::RepoLabels {
+            workspace_key,
+            labels,
+        } = &event
+        {
+            if self.pending_labels_request.as_ref() == Some(workspace_key) {
+                self.mount_manage_labels(workspace_key.clone(), labels.clone());
+                self.redraw = true;
+            }
+            return;
+        }
         self.sidebar.on_daemon_event(&event);
         // Surface Active→Asking transitions in the footer with a
         // brief Hint-severity notice. The sidebar already pushed an

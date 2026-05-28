@@ -224,6 +224,73 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::AddAssignees, modal);
     }
 
+    /// Mount the label picker once the daemon has answered our
+    /// `FetchRepoLabels` request. Called from `handle_repo_labels`
+    /// when the event lands for the workspace this picker is waiting
+    /// on. Pre-checks the labels already applied to the task so the
+    /// picker reads as "change the label set" rather than "add
+    /// labels"; submit replaces the upstream set via `SetLabels`.
+    pub(crate) fn mount_manage_labels(
+        &mut self,
+        workspace_key: pilot_core::WorkspaceKey,
+        repo_labels: Vec<pilot_core::Label>,
+    ) {
+        use crate::realm::components::choice::Choice;
+
+        // Don't trample whatever's currently on top.
+        if matches!(self.modal_stack.last(), Some(Id::ManageLabels)) {
+            return;
+        }
+        if repo_labels.is_empty() {
+            self.flash_info("no labels defined on this repo");
+            return;
+        }
+        // Pre-tick the labels currently applied to the task. Union
+        // across PR + first issue so a workspace that has both still
+        // sees its task-side labels checked.
+        let existing: std::collections::HashSet<String> = self
+            .sidebar
+            .workspace_iter()
+            .find(|(k, _)| k.as_str() == workspace_key.as_str())
+            .map(|(_, w)| {
+                let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+                if let Some(pr) = &w.pr {
+                    for l in &pr.labels {
+                        set.insert(l.name.clone());
+                    }
+                }
+                if let Some(issue) = w.gh_issues.first() {
+                    for l in &issue.labels {
+                        set.insert(l.name.clone());
+                    }
+                }
+                set
+            })
+            .unwrap_or_default();
+        // Each row reads `[name]` so the user gets the same chip
+        // framing the sidebar uses — keeps mental model consistent.
+        // `labels_choices` stays as the bare names (what the picker
+        // submits back upstream); the bracketed form only lives in
+        // the picker's display labels.
+        let labels_for_picker: Vec<String> = repo_labels
+            .iter()
+            .map(|l| format!("[{}]", l.name))
+            .collect();
+        self.labels_choices = repo_labels.into_iter().map(|l| l.name).collect();
+        self.pending_labels_request = Some(workspace_key);
+        let modal = Choice::multi("Apply labels", labels_for_picker)
+            .title("Labels (toggle to add/remove)")
+            .label(|s: &String| s.clone())
+            .with_selected_by(move |label: &String| {
+                let trimmed = label
+                    .strip_prefix('[')
+                    .and_then(|s| s.strip_suffix(']'))
+                    .unwrap_or(label);
+                existing.contains(trimmed)
+            });
+        self.mount_modal(Id::ManageLabels, modal);
+    }
+
     /// Mount the snooze duration picker. Used by `z` (ToggleSnooze)
     /// when the workspace is NOT currently snoozed — the user picks
     /// the duration instead of always paying the YAML default.
@@ -416,7 +483,7 @@ impl<T: TerminalAdapter> Model<T> {
         // hand-curated GLOBAL block, which is how `g` (sidebar refresh)
         // shipped without ever appearing in the help. Now adding an
         // entry to the catalog automatically surfaces it.
-        self.mount_modal(Id::Help, Help::from_catalog());
+        self.mount_modal(Id::Help, Help::from_catalog(&self.action_key_overrides));
     }
 
     /// If there's a queued "out-of-scope workspace has active

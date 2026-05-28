@@ -813,11 +813,9 @@ impl Sidebar {
             .cloned()
             .collect();
         let current = self.selected_session_key().cloned();
-        let Some(target) = crate::agent_attention::next_flagged_workspace(
-            &failing,
-            &keys_order,
-            current.as_ref(),
-        ) else {
+        let Some(target) =
+            crate::agent_attention::next_flagged_workspace(&failing, &keys_order, current.as_ref())
+        else {
             return false;
         };
         self.focus_workspace_key(&target)

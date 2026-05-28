@@ -1578,7 +1578,10 @@ fn shift_f_jumps_to_next_failing_ci_workspace() {
     // should land on #2.
     let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
-    let w1 = Workspace::from_task(pr_task_with_ci("owner/repo", "o/r#1", CiStatus::Success), now);
+    let w1 = Workspace::from_task(
+        pr_task_with_ci("owner/repo", "o/r#1", CiStatus::Success),
+        now,
+    );
     let mut t2 = pr_task_with_ci("owner/repo", "o/r#2", CiStatus::Failure);
     t2.updated_at = now - Duration::seconds(1);
     let w2 = Workspace::from_task(t2, now);
@@ -1620,7 +1623,10 @@ fn shift_f_is_a_noop_when_no_ci_is_failing() {
     // the dispatcher can flash "no failing PRs" instead of redrawing.
     let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
-    let w = Workspace::from_task(pr_task_with_ci("owner/repo", "o/r#1", CiStatus::Success), now);
+    let w = Workspace::from_task(
+        pr_task_with_ci("owner/repo", "o/r#1", CiStatus::Success),
+        now,
+    );
     let starting_key = ws_key(&w);
     s.on_event(&Event::Snapshot {
         workspaces: vec![w],

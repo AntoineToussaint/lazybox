@@ -385,13 +385,12 @@ impl GhSource {
         let poll = match self.client.fetch_notifications().await {
             Ok(p) => p,
             Err(e) => {
-                // Heartbeat failure isn't fatal: log + fall back to
-                // signalling "no incremental data" so the tick driver
-                // can choose to either skip the tick (cheap) or promote
-                // to a full sweep (safe). We choose the former — a
-                // single bad notifications call shouldn't burn the
-                // GraphQL budget; the next tick re-attempts.
-                tracing::warn!("notifications heartbeat failed: {e} — skipping this tick");
+                // Heartbeat failure isn't fatal: signal "no
+                // incremental data" so the outer `fetch` promotes to
+                // a full sweep this tick. The full sweep also re-arms
+                // the slow-sweep clock so a chronically-broken
+                // heartbeat doesn't trap us in a loop.
+                tracing::warn!("notifications heartbeat failed: {e} — promoting to full sweep");
                 return Ok(None);
             }
         };

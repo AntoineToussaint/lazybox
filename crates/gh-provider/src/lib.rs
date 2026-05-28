@@ -15,7 +15,7 @@ pub use graphql::PrDetails;
 pub use mentions::{MentionSource, PilotMention, scan_issue};
 pub use notifications::{
     NotificationEntry, NotificationTarget, NotificationTargetKind, NotificationsPoll,
-    NotificationsSnapshot, NotificationsState,
+    NotificationsSnapshot,
 };
 pub use poller::GhPoller;
 pub use rate_budget::{AcquireError, RateBudget, RemoteRateLimit, Snapshot as RateSnapshot};

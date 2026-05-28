@@ -171,7 +171,7 @@ pub(crate) fn parse_subject_url(url: &str) -> Option<NotificationTarget> {
 /// Wrapped in `Mutex` because `GhClient` is cheap-cloneable across
 /// ticks via `Arc`; one bucket, many handles.
 #[derive(Debug, Default)]
-pub struct NotificationsState {
+pub(crate) struct NotificationsState {
     /// HTTP date string from GitHub's `Last-Modified` header (e.g.
     /// `"Sun, 06 Nov 2026 08:49:37 GMT"`). Storing the exact server
     /// value (rather than locally-formatted `now`) keeps the round-trip

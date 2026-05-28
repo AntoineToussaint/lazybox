@@ -964,15 +964,24 @@ impl GhClient {
             // We synthesize a GhError::Graphql with the status because
             // the REST body shape isn't a GqlResponse; the caller logs
             // it and the next tick retries naturally.
+            //
+            // Bound the snippet to ~512 bytes: GitHub's 502/503
+            // maintenance pages are multi-MB HTML, and this string
+            // ends up duplicated through `GhError::Graphql` →
+            // `ProviderError::Retryable` → `Event::ProviderError` on
+            // the broadcast bus. A bad upstream hour would otherwise
+            // churn tens of MB of identical body strings through the
+            // event channel.
             let body = self
                 .inner
                 .body_to_string(response)
                 .await
                 .unwrap_or_else(|_| "<unreadable body>".to_string());
+            let cap = body.len().min(512);
+            let snippet = &body[..body.floor_char_boundary(cap)];
             return Err(GhError::Graphql(format!(
-                "notifications HTTP {}: {}",
+                "notifications HTTP {}: {snippet}",
                 status.as_u16(),
-                body
             )));
         }
 
@@ -1018,8 +1027,7 @@ impl GhClient {
     ) -> Result<Option<Task>, GhError> {
         self.acquire_or_block("single-PR notification deep-fetch")?;
         let body = graphql::single_pr_body(owner, repo, number);
-        let response: graphql::GqlSinglePrResponse =
-            self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlSinglePrResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -1049,8 +1057,7 @@ impl GhClient {
     ) -> Result<Option<Task>, GhError> {
         self.acquire_or_block("single-issue notification deep-fetch")?;
         let body = graphql::single_issue_body(owner, repo, number);
-        let response: graphql::GqlSingleIssueResponse =
-            self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlSingleIssueResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()

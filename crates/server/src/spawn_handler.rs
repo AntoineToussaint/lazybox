@@ -555,7 +555,16 @@ pub async fn handle_spawn(
             // we give up and inject anyway — at that point pushing
             // the queued instruction past the prompt is the only
             // way it doesn't get silently dropped.
-            const ASKING_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+            // 3s, not 60s: the Asking detector matches claude's
+            // normal idle main prompt (last-line-ends-with-? plus
+            // the `?` pill heuristic), so a generous deadline made
+            // every fresh spawn block for the FULL 60s before
+            // injecting — pilot felt broken. 3s is enough for a
+            // user to clear a real permission prompt with `y` (the
+            // case we're actually protecting against), short enough
+            // that idle-prompt false positives don't make `w` feel
+            // dead.
+            const ASKING_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
             const ASKING_POLL: std::time::Duration = std::time::Duration::from_millis(200);
             tracing::info!(
                 terminal_id = ?id,
@@ -1395,53 +1404,36 @@ pub async fn handle_inject_prompt(
     let paste = agent.inject_prompt(prompt);
     let submit = agent.inject_submit();
 
-    // Spawn the inject as a detached task so a long Asking wait
-    // doesn't block the daemon's command dispatch loop. CRITICAL:
-    // earlier shipped code awaited the Asking-wait inline here —
-    // the dispatcher couldn't process the user's Y/n keystrokes
-    // (which would CLEAR Asking) until the wait timed out at 60s,
-    // so the app appeared to hang completely. Detached task = the
-    // dispatcher stays free, keystrokes flow, Asking clears, inject
-    // fires shortly after.
+    // NO Asking-wait in this path. Two earlier iterations of this
+    // code waited for `agent_states[id] != Asking` before injecting,
+    // motivated by the spawn-time race where Claude's "Trust this
+    // folder? y/n" permission prompt would eat the first char of
+    // the inject. That race is real but it only happens at SPAWN —
+    // by the time the user is pressing `w` to inject into an
+    // EXISTING claude session, the permission gate has been past
+    // for a while.
+    //
+    // The Asking detector is intentionally permissive (matches
+    // claude's idle main prompt via the "last line ends with `?`"
+    // heuristic so the `?` sidebar pill surfaces "you're owed
+    // input"). That same permissiveness makes it a bad gate for
+    // inject: it stays Asking on the normal idle screen, so an
+    // inject-wait waited the full 60s deadline EVERY time + then
+    // injected after. From the user's perspective: pressing `w`
+    // did nothing.
+    //
+    // For the spawn-time race we keep the wait in `handle_spawn`
+    // where `Asking` near t=0 actually means a permission prompt.
+    // For inject into a long-running claude, just write the paste.
     let backend = config.backend.clone();
-    let agent_states = config.agent_states.clone();
-    let id = terminal_id;
     tokio::spawn(async move {
-        // Don't write into a prompt the agent is currently showing
-        // (y/n permission gate, file-conflict chooser, etc.). The
-        // first char of the paste becomes the chooser answer and
-        // the rest types in as a soft-line response — both halves
-        // corrupt.
-        //
-        // 60s outer deadline so an idle Asking modal doesn't leak
-        // the task forever.
-        const ASKING_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
-        const ASKING_POLL: std::time::Duration = std::time::Duration::from_millis(200);
-        let started = std::time::Instant::now();
-        loop {
-            let state = agent_states.lock().await.get(&id).copied();
-            if state != Some(pilot_ipc::AgentState::Asking) {
-                break;
-            }
-            if started.elapsed() >= ASKING_DEADLINE {
-                tracing::warn!(
-                    terminal_id = ?id,
-                    "inject_prompt: agent still Asking after {:?} — injecting anyway",
-                    ASKING_DEADLINE,
-                );
-                break;
-            }
-            tokio::time::sleep(ASKING_POLL).await;
-        }
-
         if let Err(e) = backend.write(&backend_key, &paste).await {
             tracing::warn!("inject_prompt: backend.write(paste) failed: {e}");
             return;
         }
-        // Same 200ms gap the spawn-time injector uses so the paste
-        // batch settles before Enter fires (Claude treats rapid
-        // bytes as a paste — Enter inside the paste is a soft line
-        // break).
+        // 200ms gap so the paste batch settles before Enter fires
+        // (Claude treats rapid bytes as a paste — Enter inside the
+        // paste is a soft line break).
         if let Some(submit_bytes) = submit {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             if let Err(e) = backend.write(&backend_key, &submit_bytes).await {

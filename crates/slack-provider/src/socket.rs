@@ -47,22 +47,28 @@ pub enum InboundEvent {
     /// "slack connected" + post the bootstrap message.
     Hello,
     /// User mentioned the bot. `channel` + `text` (with the `<@Uxxx>`
-    /// prefix stripped) drive the command parser.
+    /// prefix stripped) drive the command parser. `thread_ts` is set
+    /// when the mention came from inside a Slack thread — the
+    /// dispatcher uses it to route to the (session, agent) anchored
+    /// by that thread in `per_workspace_channels: false` mode.
     Mention {
         channel: String,
         user: String,
         text: String,
         ts: String,
+        thread_ts: Option<String>,
     },
     /// Plain message in a channel the bot is a member of. Pilot
     /// treats these the same as mentions in per-workspace channels
     /// (since the user shouldn't have to `@pilot` in a dedicated
-    /// channel for the bot).
+    /// channel for the bot). `thread_ts` is set for replies inside a
+    /// thread; see `Mention` for the routing semantics.
     Message {
         channel: String,
         user: String,
         text: String,
         ts: String,
+        thread_ts: Option<String>,
     },
     /// Slack told us to reconnect. The driver loop catches this and
     /// rebuilds the WSS URL; consumers see one `Hello` per new
@@ -249,12 +255,20 @@ fn parse_events_api(payload: &serde_json::Value) -> Option<InboundEvent> {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // Slack only includes `thread_ts` on events that came from inside
+    // a thread; for a top-level message it's absent (don't read it as
+    // ts === thread_ts, since the bot needs that distinction).
+    let thread_ts = event
+        .get("thread_ts")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     match kind {
         "app_mention" => Some(InboundEvent::Mention {
             channel,
             user,
             text,
             ts,
+            thread_ts,
         }),
         "message" => {
             // Slack delivers bot's own messages back as `message`
@@ -269,6 +283,7 @@ fn parse_events_api(payload: &serde_json::Value) -> Option<InboundEvent> {
                 user,
                 text,
                 ts,
+                thread_ts,
             })
         }
         _ => None,
@@ -323,14 +338,43 @@ mod tests {
                     user,
                     text,
                     ts,
+                    thread_ts,
                 },
             ] => {
                 assert_eq!(channel, "C123");
                 assert_eq!(user, "U456");
                 assert_eq!(text, "<@UBOT> work");
                 assert_eq!(ts, "12345.6789");
+                assert!(thread_ts.is_none());
             }
             other => panic!("expected mention, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn events_api_message_in_thread_carries_thread_ts() {
+        let env: SocketEnvelope = serde_json::from_value(json!({
+            "type": "events_api",
+            "envelope_id": "e3",
+            "payload": {
+                "event": {
+                    "type": "message",
+                    "channel": "C123",
+                    "user": "U456",
+                    "text": "yes",
+                    "ts": "12346.0000",
+                    "thread_ts": "12345.6789",
+                }
+            }
+        }))
+        .unwrap();
+        match env.into_inbound().as_slice() {
+            [
+                InboundEvent::Message {
+                    thread_ts: Some(t), ..
+                },
+            ] => assert_eq!(t, "12345.6789"),
+            other => panic!("expected threaded message, got {other:?}"),
         }
     }
 

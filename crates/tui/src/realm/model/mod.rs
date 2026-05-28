@@ -1112,6 +1112,133 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::Editor, modal);
     }
 
+    /// Route a [`ClickTarget`] produced by a right-click in the agent
+    /// view to the right opener: URLs and `#N` / `owner/repo#N` issue
+    /// references go to the system browser; file paths open in the
+    /// configured editor (jumping to `line:col` when present).
+    pub fn open_click_target(&mut self, target: crate::components::terminal_stack::ClickTarget) {
+        use crate::components::terminal_stack::ClickTarget;
+        match target {
+            ClickTarget::Url(url) => self.open_external_url(&url),
+            ClickTarget::Issue { repo, number } => self.open_issue_ref(repo, number),
+            ClickTarget::Path { path, line, col } => self.open_path_in_editor(&path, line, col),
+        }
+    }
+
+    /// Hand `url` to the platform browser launcher and surface the
+    /// outcome in the footer.
+    fn open_external_url(&mut self, url: &str) {
+        match crate::editors::open_url(url) {
+            Ok(()) => {
+                tracing::info!(%url, "opened url from terminal");
+                self.flash_hint(format!("opened {url}"));
+            }
+            Err(e) => {
+                tracing::warn!(%url, "open_url failed: {e}");
+                self.flash_error(format!("open failed: {e}"));
+            }
+        }
+    }
+
+    /// Resolve an issue reference to a GitHub URL and open it. A bare
+    /// `#N` borrows the focused workspace's repo; `owner/repo#N`
+    /// carries its own. GitHub redirects `/issues/N` to `/pull/N`
+    /// when the number is a PR, so this one URL shape covers both.
+    fn open_issue_ref(&mut self, repo: Option<String>, number: u64) {
+        let repo = repo.or_else(|| self.focused_repo());
+        let Some(repo) = repo else {
+            self.flash_info(format!("no repo to resolve #{number}"));
+            return;
+        };
+        if !repo.contains('/') {
+            self.flash_info(format!("can't resolve #{number} — repo is '{repo}'"));
+            return;
+        }
+        let url = format!("https://github.com/{repo}/issues/{number}");
+        self.open_external_url(&url);
+    }
+
+    /// The `owner/repo` of the workspace whose terminals are focused,
+    /// falling back to the sidebar selection. `None` when neither has
+    /// a repo-bearing task (e.g. a from-scratch workspace).
+    fn focused_repo(&self) -> Option<String> {
+        let from_active = self
+            .terminals
+            .active_session()
+            .and_then(|sk| self.sidebar.workspace_by_key(sk));
+        from_active
+            .or_else(|| self.sidebar.selected_workspace())
+            .and_then(|w| w.primary_task())
+            .and_then(|t| t.repo.clone())
+    }
+
+    /// The on-disk worktree of the workspace whose terminals are
+    /// focused. Used to resolve `./` and bare-relative paths clicked
+    /// in the transcript.
+    fn focused_worktree(&self) -> Option<std::path::PathBuf> {
+        self.terminals
+            .active_session()
+            .and_then(|sk| self.sidebar.workspace_by_key(sk))
+            .or_else(|| self.sidebar.selected_workspace())
+            .and_then(|w| w.sessions.first().map(|s| s.worktree_path.clone()))
+    }
+
+    /// Expand a clicked path token to an absolute path: `~` → home,
+    /// relative → joined onto the focused session's worktree (or left
+    /// as-is when there's no worktree to anchor against).
+    fn resolve_clicked_path(&self, raw: &str) -> std::path::PathBuf {
+        use std::path::PathBuf;
+        if raw == "~" {
+            if let Some(home) = home_dir() {
+                return home;
+            }
+        } else if let Some(rest) = raw.strip_prefix("~/") {
+            if let Some(home) = home_dir() {
+                return home.join(rest);
+            }
+        }
+        let p = PathBuf::from(raw);
+        if p.is_absolute() {
+            return p;
+        }
+        match self.focused_worktree() {
+            Some(worktree) => worktree.join(raw),
+            None => p,
+        }
+    }
+
+    /// Open a clicked file path in the configured editor. With one
+    /// detected editor we launch directly; with several we use the
+    /// first (the workspace `E` picker remains the place to choose).
+    /// A `line[:col]` suffix is forwarded so the editor jumps there.
+    fn open_path_in_editor(&mut self, raw: &str, line: Option<u32>, col: Option<u32>) {
+        if self.setup.editors.is_empty() {
+            let path = pilot_core::paths::config_yaml();
+            self.flash_info(format!(
+                "no editor detected — add one under `editors:` in {}",
+                path.display(),
+            ));
+            return;
+        }
+        let resolved = self.resolve_clicked_path(raw);
+        let editor = self.setup.editors[0].clone();
+        match crate::editors::open_file(&editor, &resolved, line, col) {
+            Ok(()) => {
+                tracing::info!(path = %resolved.display(), editor = %editor.id, "opened file from terminal");
+                let where_ = match (line, col) {
+                    (Some(l), Some(c)) => format!("{}:{l}:{c}", resolved.display()),
+                    (Some(l), None) => format!("{}:{l}", resolved.display()),
+                    _ => resolved.display().to_string(),
+                };
+                self.flash_hint(format!("opened {where_} in {}", editor.display));
+            }
+            Err(e) => {
+                tracing::warn!(path = %resolved.display(), "open_file failed: {e}");
+                self.flash_error(format!("failed to open {raw}: {e}"));
+            }
+        }
+    }
+
     fn launch_editor(
         &mut self,
         editor: &crate::editors::EditorTemplate,
@@ -1457,4 +1584,15 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
     }
+}
+
+/// The user's home directory, for expanding `~`-prefixed paths
+/// clicked in the terminal. Honors `$HOME` (and `%USERPROFILE%` on
+/// Windows); returns `None` when neither is set so callers fall back
+/// to leaving the path unexpanded.
+fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
 }

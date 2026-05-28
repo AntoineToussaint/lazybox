@@ -101,6 +101,31 @@ pub enum ScrollOutcome {
     Moved { offset: u64, total: u64, len: u64 },
 }
 
+/// What the user right-clicked on inside the terminal grid. Returned
+/// by [`TerminalStack::target_at`] so the model can route each kind
+/// to the right opener: URLs and issue references go to the browser,
+/// file paths to the configured editor. Detection is passive — any
+/// matching token rendered in the transcript is clickable, no markup
+/// required.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClickTarget {
+    /// `http(s)://…` — open in the system browser.
+    Url(String),
+    /// A filesystem path, exactly as it appeared on screen (possibly
+    /// still `~`- or `.`-relative). The model resolves it against the
+    /// focused session's worktree before opening in the editor.
+    /// `line`/`col` come from an optional `:line[:col]` suffix.
+    Path {
+        path: String,
+        line: Option<u32>,
+        col: Option<u32>,
+    },
+    /// `#42` or `owner/repo#42` — open the GitHub issue/PR page.
+    /// `repo` is `None` for a bare `#42`, which the model resolves
+    /// against the focused workspace's repo.
+    Issue { repo: Option<String>, number: u64 },
+}
+
 pub struct TerminalStack {
     id: PaneId,
     terminals: HashMap<TerminalId, TerminalSlot>,
@@ -901,21 +926,21 @@ impl TerminalStack {
         out
     }
 
-    /// If the cell at frame-space `(col, row)` lies inside an
-    /// `http(s)://…` token on its row, return the URL. Otherwise
-    /// `None`. Drives right-click-to-open: the click coordinates
-    /// arrive in the same frame-space the renderer used, so we
-    /// translate the same way `extract_text` does (skip the pane
-    /// border + tab strip via `inner_x = rect.x + 1`, `inner_y =
-    /// rect.y + 3`). Single-row only — wrapped URLs aren't
-    /// detected (per the issue: "stay simple, terminal URLs are
-    /// virtually always on one row").
-    pub fn url_at(
+    /// If the cell at frame-space `(col, row)` lies inside a URL,
+    /// file path, or `#N` / `owner/repo#N` issue reference on its
+    /// row, return the matching [`ClickTarget`]. Otherwise `None`.
+    /// Drives right-click-to-open: the click coordinates arrive in
+    /// the same frame-space the renderer used, so we translate the
+    /// same way `extract_text` does (skip the pane border + tab strip
+    /// via `inner_x = rect.x + 1`, `inner_y = rect.y + 3`). Single-row
+    /// only — wrapped tokens aren't detected (per the issue: "stay
+    /// simple, terminal URLs/paths are virtually always on one row").
+    pub fn target_at(
         &mut self,
         rect: tuirealm::ratatui::layout::Rect,
         col: u16,
         row: u16,
-    ) -> Option<String> {
+    ) -> Option<ClickTarget> {
         let id = self.focused_terminal_id()?;
         let slot = self.terminals.get_mut(&id)?;
         let inner_x = rect.x.saturating_add(1);
@@ -960,7 +985,7 @@ impl TerminalStack {
             return None;
         }
         let byte_pos = *cell_byte_starts.get(cell_col as usize)?;
-        find_url_at_byte(&row_text, byte_pos).map(|s| s.to_string())
+        detect_target(&row_text, byte_pos)
     }
 
     pub fn scroll_active(&mut self, delta: isize) -> ScrollOutcome {
@@ -2188,6 +2213,153 @@ pub(crate) fn find_url_at_byte(row_text: &str, byte_pos: usize) -> Option<&str> 
     None
 }
 
+/// Classify the token at `byte_pos` in `row_text`. Tries detectors
+/// in specificity order: a URL (begins with a scheme) wins over an
+/// issue reference, which wins over a bare file path. Returns `None`
+/// when the click landed on whitespace or an unrecognized token.
+pub(crate) fn detect_target(row_text: &str, byte_pos: usize) -> Option<ClickTarget> {
+    if let Some(url) = find_url_at_byte(row_text, byte_pos) {
+        return Some(ClickTarget::Url(url.to_string()));
+    }
+    if let Some(issue) = find_issue_ref_at_byte(row_text, byte_pos) {
+        return Some(issue);
+    }
+    find_path_at_byte(row_text, byte_pos)
+}
+
+/// Return the byte span of the whitespace-delimited token containing
+/// `pos`. `None` when `pos` is out of range, not on a char boundary,
+/// or sits on whitespace (no token under the cursor).
+fn token_at_byte(s: &str, pos: usize) -> Option<(usize, usize)> {
+    if pos >= s.len() || !s.is_char_boundary(pos) {
+        return None;
+    }
+    let here = s[pos..].chars().next()?;
+    if here.is_whitespace() {
+        return None;
+    }
+    let mut start = pos;
+    while start > 0 {
+        let prev = s[..start].chars().next_back()?;
+        if prev.is_whitespace() {
+            break;
+        }
+        start -= prev.len_utf8();
+    }
+    let mut end = pos;
+    while end < s.len() {
+        let next = s[end..].chars().next()?;
+        if next.is_whitespace() {
+            break;
+        }
+        end += next.len_utf8();
+    }
+    Some((start, end))
+}
+
+/// Strip a single layer of wrapping brackets / quotes and trailing
+/// sentence punctuation so `(./foo.rs),` becomes `./foo.rs`. A
+/// trailing `:` is preserved — it's significant for `path:line`
+/// suffixes. Leading openers are only stripped when the matching
+/// closer is present so we don't eat a real leading char.
+fn trim_token(tok: &str) -> &str {
+    let mut t = tok;
+    loop {
+        let trimmed = t
+            .strip_suffix(['.', ',', ';', '!', '?', ')', ']', '}', '>', '"', '\''])
+            .unwrap_or(t);
+        let trimmed = trimmed
+            .strip_prefix(['(', '[', '{', '<', '"', '\''])
+            .unwrap_or(trimmed);
+        if trimmed == t {
+            return t;
+        }
+        t = trimmed;
+    }
+}
+
+/// Detect a `#42` or `owner/repo#42` issue reference under `byte_pos`.
+fn find_issue_ref_at_byte(row_text: &str, byte_pos: usize) -> Option<ClickTarget> {
+    let (start, end) = token_at_byte(row_text, byte_pos)?;
+    let tok = trim_token(&row_text[start..end]);
+
+    // Same-repo: `#42`.
+    if let Some(rest) = tok.strip_prefix('#') {
+        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+            return Some(ClickTarget::Issue {
+                repo: None,
+                number: rest.parse().ok()?,
+            });
+        }
+        return None;
+    }
+
+    // Cross-repo: `owner/repo#42`. Mirrors the validation in
+    // `pilot_core::issue_links`: the repo part must contain a `/` and
+    // only owner/repo-legal characters.
+    let hash = tok.find('#')?;
+    let repo = &tok[..hash];
+    let rest = &tok[hash + 1..];
+    if repo.contains('/')
+        && repo
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+        && !rest.is_empty()
+        && rest.chars().all(|c| c.is_ascii_digit())
+    {
+        return Some(ClickTarget::Issue {
+            repo: Some(repo.to_string()),
+            number: rest.parse().ok()?,
+        });
+    }
+    None
+}
+
+/// Detect a file path under `byte_pos`. To avoid treating every bare
+/// word as a file, a candidate must start with an unambiguous path
+/// prefix (`/`, `~`, `./`, `../`). A trailing `:line` or `:line:col`
+/// suffix is split off and parsed.
+fn find_path_at_byte(row_text: &str, byte_pos: usize) -> Option<ClickTarget> {
+    let (start, end) = token_at_byte(row_text, byte_pos)?;
+    let tok = trim_token(&row_text[start..end]);
+    let looks_like_path = tok.starts_with('/')
+        || tok == "~"
+        || tok.starts_with("~/")
+        || tok.starts_with("./")
+        || tok.starts_with("../");
+    if !looks_like_path {
+        return None;
+    }
+    let (path, line, col) = split_line_col(tok);
+    Some(ClickTarget::Path {
+        path: path.to_string(),
+        line,
+        col,
+    })
+}
+
+/// Split a trailing `:line` or `:line:col` suffix off a path. Both
+/// suffix segments must be all-ASCII-digit runs; anything else leaves
+/// the path untouched (so a colon inside a filename isn't mistaken
+/// for a line number).
+fn split_line_col(s: &str) -> (&str, Option<u32>, Option<u32>) {
+    let Some((rest, last)) = s.rsplit_once(':') else {
+        return (s, None, None);
+    };
+    if last.is_empty() || !last.chars().all(|c| c.is_ascii_digit()) {
+        return (s, None, None);
+    }
+    if let Some((rest2, mid)) = rest.rsplit_once(':')
+        && !mid.is_empty()
+        && mid.chars().all(|c| c.is_ascii_digit())
+    {
+        // path:line:col
+        return (rest2, mid.parse().ok(), last.parse().ok());
+    }
+    // path:line
+    (rest, last.parse().ok(), None)
+}
+
 #[cfg(test)]
 mod find_url_at_byte_tests {
     use super::find_url_at_byte;
@@ -2258,6 +2430,170 @@ mod find_url_at_byte_tests {
         // Last char of URL.
         let last = row.len() - 1;
         assert_eq!(find_url_at_byte(row, last), Some("https://example.com"));
+    }
+}
+
+#[cfg(test)]
+mod detect_target_tests {
+    use super::{ClickTarget, detect_target, split_line_col};
+
+    #[test]
+    fn url_wins_over_everything() {
+        let row = "open https://github.com/o/r/issues/9 now";
+        assert_eq!(
+            detect_target(row, 6),
+            Some(ClickTarget::Url("https://github.com/o/r/issues/9".into()))
+        );
+    }
+
+    #[test]
+    fn detects_absolute_path() {
+        let row = "see /etc/hosts for config";
+        assert_eq!(
+            detect_target(row, 5),
+            Some(ClickTarget::Path {
+                path: "/etc/hosts".into(),
+                line: None,
+                col: None,
+            })
+        );
+    }
+
+    #[test]
+    fn detects_home_relative_path() {
+        let row = "edit ~/.config/pilot.yaml please";
+        assert_eq!(
+            detect_target(row, 6),
+            Some(ClickTarget::Path {
+                path: "~/.config/pilot.yaml".into(),
+                line: None,
+                col: None,
+            })
+        );
+    }
+
+    #[test]
+    fn detects_dot_relative_path() {
+        let row = "open ./src/main.rs here";
+        assert_eq!(
+            detect_target(row, 5),
+            Some(ClickTarget::Path {
+                path: "./src/main.rs".into(),
+                line: None,
+                col: None,
+            })
+        );
+    }
+
+    #[test]
+    fn detects_path_with_line() {
+        let row = "at ./src/main.rs:42 boom";
+        assert_eq!(
+            detect_target(row, 4),
+            Some(ClickTarget::Path {
+                path: "./src/main.rs".into(),
+                line: Some(42),
+                col: None,
+            })
+        );
+    }
+
+    #[test]
+    fn detects_path_with_line_and_col() {
+        let row = "panic at /abs/file.rs:12:3 here";
+        assert_eq!(
+            detect_target(row, 10),
+            Some(ClickTarget::Path {
+                path: "/abs/file.rs".into(),
+                line: Some(12),
+                col: Some(3),
+            })
+        );
+    }
+
+    #[test]
+    fn trims_wrapping_punctuation_on_path() {
+        let row = "see (./README.md).";
+        assert_eq!(
+            detect_target(row, 6),
+            Some(ClickTarget::Path {
+                path: "./README.md".into(),
+                line: None,
+                col: None,
+            })
+        );
+    }
+
+    #[test]
+    fn bare_word_is_not_a_path() {
+        let row = "the quick brown fox";
+        assert_eq!(detect_target(row, 5), None);
+    }
+
+    #[test]
+    fn relative_without_dot_prefix_is_not_a_path() {
+        // `src/main.rs` (no leading ./) is too ambiguous — could be
+        // prose — so we require an explicit prefix.
+        let row = "src/main.rs changed";
+        assert_eq!(detect_target(row, 2), None);
+    }
+
+    #[test]
+    fn detects_same_repo_issue() {
+        let row = "fixed in #42 today";
+        assert_eq!(
+            detect_target(row, 10),
+            Some(ClickTarget::Issue {
+                repo: None,
+                number: 42,
+            })
+        );
+    }
+
+    #[test]
+    fn detects_cross_repo_issue() {
+        let row = "see acme/widgets#7 upstream";
+        assert_eq!(
+            detect_target(row, 4),
+            Some(ClickTarget::Issue {
+                repo: Some("acme/widgets".into()),
+                number: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn issue_with_trailing_punctuation() {
+        let row = "closes #99.";
+        assert_eq!(
+            detect_target(row, 7),
+            Some(ClickTarget::Issue {
+                repo: None,
+                number: 99,
+            })
+        );
+    }
+
+    #[test]
+    fn hash_without_digits_is_not_an_issue() {
+        let row = "a #section heading";
+        assert_eq!(detect_target(row, 2), None);
+    }
+
+    #[test]
+    fn whitespace_click_returns_none() {
+        let row = "see /etc/hosts here";
+        // Column 3 is the space before the path.
+        assert_eq!(detect_target(row, 3), None);
+    }
+
+    #[test]
+    fn split_line_col_variants() {
+        assert_eq!(split_line_col("/a/b.rs"), ("/a/b.rs", None, None));
+        assert_eq!(split_line_col("/a/b.rs:7"), ("/a/b.rs", Some(7), None));
+        assert_eq!(split_line_col("/a/b.rs:7:3"), ("/a/b.rs", Some(7), Some(3)));
+        // A non-numeric trailing segment is part of the path.
+        assert_eq!(split_line_col("/a/b:c"), ("/a/b:c", None, None));
     }
 }
 

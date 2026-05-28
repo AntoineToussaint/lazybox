@@ -23,7 +23,7 @@ use pilot_core::{
     TaskState,
 };
 use pilot_ipc::{Command, Event, channel};
-use pilot_server::polling::{self, TaskSource};
+use pilot_server::polling::{self, FetchMode, TaskSource};
 use pilot_server::{Server, ServerConfig};
 use pilot_store::WorkspaceRecord;
 use std::future::Future;
@@ -214,6 +214,31 @@ impl TaskSource for ScopedSource {
     }
     fn polled_scope(&self) -> polling::PolledScope {
         self.scope.clone()
+    }
+}
+
+/// A source that returns its task list AND reports the fetch as
+/// incremental. Stand-in for `GhSource`'s notifications-driven fast
+/// path in tests that exercise the rescope-skip behavior without
+/// needing a real GitHub token.
+struct IncrementalSource {
+    name: String,
+    tasks: Vec<Task>,
+}
+
+impl TaskSource for IncrementalSource {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn fetch<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    {
+        let tasks = self.tasks.clone();
+        Box::pin(async move { Ok(tasks) })
+    }
+    fn last_fetch_kind(&self) -> FetchMode {
+        FetchMode::Incremental
     }
 }
 
@@ -1216,6 +1241,7 @@ async fn rescope_removes_workspaces_with_no_active_session() {
         retry_after_secs: None,
         saw_unknown_mergeable: false,
         source_scopes: std::collections::HashMap::new(),
+        all_full: true,
     };
     polling::rescope(&config, &outcome).await;
 
@@ -1262,6 +1288,7 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
         retry_after_secs: None,
         saw_unknown_mergeable: false,
         source_scopes: std::collections::HashMap::new(),
+        all_full: true,
     };
     let mut state = polling::TickState::default();
     polling::rescope_with_state(&config, &outcome, &mut state).await;
@@ -1320,6 +1347,7 @@ async fn rescope_with_empty_but_successful_poll_keeps_workspaces() {
         retry_after_secs: None,
         saw_unknown_mergeable: false,
         source_scopes: std::collections::HashMap::new(),
+        all_full: true,
     };
     polling::rescope(&config, &outcome).await;
     let after: Vec<String> = config
@@ -1349,6 +1377,7 @@ async fn rescope_with_all_sources_failed_skips_cleanup() {
         retry_after_secs: None,
         saw_unknown_mergeable: false,
         source_scopes: std::collections::HashMap::new(),
+        all_full: true,
     };
     polling::rescope(&config, &outcome).await;
     let after: Vec<String> = config
@@ -1423,6 +1452,7 @@ async fn rescope_preserves_workspaces_from_unpolled_repos() {
             "github".into(),
             polling::PolledScope::Repos(vec!["owner/polled".into()]),
         )]),
+        all_full: true,
     };
     polling::rescope(&config, &outcome).await;
 
@@ -1475,6 +1505,7 @@ async fn rescope_with_exhaustive_scope_still_deletes_stale() {
             "github".into(),
             polling::PolledScope::Exhaustive,
         )]),
+        all_full: true,
     };
     polling::rescope(&config, &outcome).await;
 
@@ -1527,6 +1558,7 @@ async fn rescope_preserves_workspaces_from_unreported_sources() {
             "linear".into(),
             polling::PolledScope::Exhaustive,
         )]),
+        all_full: true,
     };
     // `polled` is empty so the existing "empty polled, refuse to
     // wipe" guard fires before our new scope guard — assert the
@@ -2293,6 +2325,94 @@ async fn tick_outcome_does_not_flag_unknown_when_all_tasks_are_resolved() {
     let mut state = polling::TickState::default();
     let outcome = polling::tick_with_state(&config, &[source], &mut state).await;
     assert!(!outcome.saw_unknown_mergeable);
+}
+
+// ── FetchMode plumbing (issue #19: notifications-driven sync) ───────
+
+#[tokio::test]
+async fn tick_outcome_all_full_default_is_true_when_only_full_sources_present() {
+    // Default impl of `TaskSource::last_fetch_kind` returns Full, and
+    // every existing source (Linear, all test fakes) inherits it. A
+    // tick with only such sources must report `all_full = true` so
+    // rescope runs normally — anything else would silently freeze the
+    // sidebar.
+    let config = ServerConfig::in_memory();
+    let source: Box<dyn TaskSource> = Box::new(FakeSource {
+        name: "github".into(),
+        tasks: vec![make_task("o/r#1")],
+    });
+    let mut state = polling::TickState::default();
+    let outcome = polling::tick_with_state(&config, &[source], &mut state).await;
+    assert!(
+        outcome.all_full,
+        "all-Full sources should not block rescope"
+    );
+}
+
+#[tokio::test]
+async fn tick_outcome_all_full_flips_false_when_any_source_is_incremental() {
+    // A single incremental source (the notifications-driven fast path)
+    // is enough to disable rescope for the whole tick — incremental
+    // results are by definition a subset of in-scope tasks, so trusting
+    // them for rescope would delete every untouched workspace.
+    let config = ServerConfig::in_memory();
+    let sources: Vec<Box<dyn TaskSource>> = vec![
+        Box::new(FakeSource {
+            name: "linear".into(),
+            tasks: vec![],
+        }),
+        Box::new(IncrementalSource {
+            name: "github".into(),
+            tasks: vec![make_task("o/r#1")],
+        }),
+    ];
+    let mut state = polling::TickState::default();
+    let outcome = polling::tick_with_state(&config, &sources, &mut state).await;
+    assert!(
+        !outcome.all_full,
+        "any incremental source must clear all_full"
+    );
+}
+
+#[tokio::test]
+async fn rescope_skipped_for_incremental_tick_so_untouched_workspaces_survive() {
+    // The whole point of `all_full`: an incremental tick that returns
+    // only the recently-changed workspaces must NOT cause every other
+    // workspace to get deleted. This is the symmetric counterpart to
+    // `rescope_with_empty_but_successful_poll_keeps_workspaces` — same
+    // shape (some workspaces missing from `polled`) but for the
+    // notifications-driven cadence rather than a transient empty
+    // response.
+    use pilot_core::WorkspaceKey;
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_task("o/r#untouched-1")).await;
+    polling::upsert(&config, make_task("o/r#untouched-2")).await;
+    polling::upsert(&config, make_task("o/r#touched")).await;
+
+    let outcome = polling::TickOutcome {
+        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+            &make_task("o/r#touched"),
+        ))],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::new(),
+        all_full: false,
+    };
+    polling::rescope(&config, &outcome).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert_eq!(
+        after.len(),
+        3,
+        "incremental tick must not delete untouched workspaces — got {after:?}"
+    );
 }
 
 /// `delete_project` cascades: every workspace whose `project_key`

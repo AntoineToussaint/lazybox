@@ -992,6 +992,204 @@ fn activities_from_comments(comments: &GqlComments) -> Vec<Activity> {
         .collect()
 }
 
+/// Single-node PR fetch. Used by the notifications-driven incremental
+/// path: when `/notifications` reports activity on `repo/N`, we fetch
+/// exactly that one PR (rather than re-running the heavy `involves:USER`
+/// SEARCH that returns the same 100 PRs we already have).
+///
+/// Field set MUST mirror what [`SEARCH_QUERY`] selects per PR so the
+/// reused [`pr_to_task`] conversion produces the same shape — anything
+/// added there should be mirrored here, or the targeted refresh will
+/// silently drop fields on the row it just touched. Connection sizes
+/// (`first: N`) match the search query for the same reason.
+const SINGLE_PR_QUERY: &str = r#"
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id
+      number
+      title
+      body
+      url
+      updatedAt
+      createdAt
+      isDraft
+      state
+      merged
+      additions
+      deletions
+      headRefName
+      baseRefName
+      mergeable
+      mergeStateStatus
+      reviewDecision
+      autoMergeRequest { enabledAt }
+      isInMergeQueue
+      author { login }
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              state
+              contexts(first: 20) {
+                nodes {
+                  __typename
+                  ... on CheckRun {
+                    name
+                    conclusion
+                    status
+                    permalink
+                  }
+                  ... on StatusContext {
+                    context
+                    state
+                    targetUrl
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      labels(first: 10) { nodes { name } }
+      assignees(first: 10) { nodes { login } }
+      reviewRequests(first: 10) {
+        nodes {
+          requestedReviewer {
+            ... on User { login }
+            ... on Team { name }
+          }
+        }
+      }
+      comments(first: 15) {
+        nodes {
+          id
+          author { login }
+          body
+          createdAt
+        }
+      }
+      reviews(first: 10) {
+        nodes {
+          author { login }
+          body
+          state
+          submittedAt
+        }
+      }
+      closingIssuesReferences(first: 10) {
+        nodes {
+          number
+          repository { nameWithOwner }
+        }
+      }
+    }
+  }
+  rateLimit {
+    limit
+    remaining
+    resetAt
+  }
+}
+"#;
+
+pub fn single_pr_body(owner: &str, name: &str, number: u64) -> serde_json::Value {
+    serde_json::json!({
+        "query": SINGLE_PR_QUERY,
+        "variables": {
+            "owner": owner,
+            "name": name,
+            // GraphQL `Int` is i32 — PR numbers fit comfortably.
+            "number": number,
+        },
+    })
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSinglePrResponse {
+    pub data: Option<GqlSinglePrData>,
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSinglePrData {
+    pub repository: Option<GqlSinglePrRepository>,
+    #[serde(rename = "rateLimit")]
+    pub rate_limit: Option<GqlRateLimit>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSinglePrRepository {
+    #[serde(rename = "pullRequest")]
+    pub pull_request: Option<GqlPr>,
+}
+
+/// Single-node Issue fetch. Symmetric to `SINGLE_PR_QUERY` for issue
+/// notifications. Field set mirrors `ISSUES_QUERY` so `issue_to_task`
+/// reuses without modification.
+const SINGLE_ISSUE_QUERY: &str = r#"
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      id
+      number
+      title
+      body
+      url
+      updatedAt
+      createdAt
+      state
+      author { login }
+      labels(first: 10) { nodes { name } }
+      assignees(first: 10) { nodes { login } }
+      comments(first: 15) {
+        nodes {
+          id
+          author { login }
+          body
+          createdAt
+        }
+      }
+      repository { nameWithOwner }
+    }
+  }
+  rateLimit {
+    limit
+    remaining
+    resetAt
+  }
+}
+"#;
+
+pub fn single_issue_body(owner: &str, name: &str, number: u64) -> serde_json::Value {
+    serde_json::json!({
+        "query": SINGLE_ISSUE_QUERY,
+        "variables": {
+            "owner": owner,
+            "name": name,
+            "number": number,
+        },
+    })
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSingleIssueResponse {
+    pub data: Option<GqlSingleIssueData>,
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSingleIssueData {
+    pub repository: Option<GqlSingleIssueRepository>,
+    #[serde(rename = "rateLimit")]
+    pub rate_limit: Option<GqlRateLimit>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlSingleIssueRepository {
+    pub issue: Option<GqlIssue>,
+}
+
 /// Convert the lazy-fetched review-thread data into the same
 /// `Activity` shape the inbox search produces. Same formatting
 /// rules as `pr_to_task`'s reviewThreads loop (✅/📌 prefixes,

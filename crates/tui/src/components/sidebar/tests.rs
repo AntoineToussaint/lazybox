@@ -461,29 +461,29 @@ mod workspace_type_label_tests {
     }
 
     #[test]
-    fn pr_workspace_returns_pr_label() {
+    fn pr_workspace_returns_pr_glyph() {
         let mut w = empty_ws();
         w.attach_task(task("https://github.com/o/r/pull/1"));
-        assert_eq!(workspace_type_label(&w), Some("[PR] "));
+        assert_eq!(workspace_type_label(&w, false), Some("⇄"));
     }
 
     #[test]
-    fn issue_workspace_returns_i_label() {
+    fn issue_workspace_returns_issue_glyph() {
         let mut w = empty_ws();
         w.attach_task(task("https://github.com/o/r/issues/42"));
-        assert_eq!(workspace_type_label(&w), Some("[I]  "));
+        assert_eq!(workspace_type_label(&w, false), Some("○"));
     }
 
     #[test]
-    fn linear_only_workspace_returns_l_label() {
+    fn linear_only_workspace_returns_linear_glyph() {
         // Distinct source from github — issues that came from Linear
-        // get `[L]` so the row gives a stronger "where does this
+        // get `◆` so the row gives a stronger "where does this
         // live?" signal at a glance.
         let mut w = empty_ws();
         let mut t = task("https://linear.app/team/issue/ABC-7");
         t.id.source = "linear".into();
         w.attach_task(t);
-        assert_eq!(workspace_type_label(&w), Some("[L]  "));
+        assert_eq!(workspace_type_label(&w, false), Some("◆"));
     }
 
     #[test]
@@ -493,45 +493,77 @@ mod workspace_type_label_tests {
         let mut w = empty_ws();
         w.attach_task(task("https://github.com/o/r/pull/1"));
         w.attach_task(task("https://github.com/o/r/issues/42"));
-        assert_eq!(workspace_type_label(&w), Some("[PR] "));
+        assert_eq!(workspace_type_label(&w, false), Some("⇄"));
     }
 
     #[test]
-    fn all_workspace_type_labels_are_five_cells() {
-        // Column alignment invariant — the `#NNN` number after the
-        // label must land at the same x position on every row.
-        for label in [
-            workspace_type_label(&{
-                let mut w = empty_ws();
-                w.attach_task(task("https://github.com/o/r/pull/1"));
-                w
-            }),
-            workspace_type_label(&{
-                let mut w = empty_ws();
-                w.attach_task(task("https://github.com/o/r/issues/1"));
-                w
-            }),
-            workspace_type_label(&{
-                let mut w = empty_ws();
-                let mut t = task("https://linear.app/team/issue/ABC-1");
-                t.id.source = "linear".into();
-                w.attach_task(t);
-                w
-            }),
-        ] {
-            let label = label.expect("each workspace shape has a label");
-            assert_eq!(
-                label.chars().count(),
-                5,
-                "label {label:?} must be exactly 5 cells",
-            );
+    fn all_workspace_type_labels_are_one_cell() {
+        // Column alignment invariant — the `#NNN` number sits
+        // immediately after the glyph, so the type column is
+        // exactly one cell wide on every row. See issue #42.
+        for ascii in [false, true] {
+            for label in [
+                workspace_type_label(
+                    &{
+                        let mut w = empty_ws();
+                        w.attach_task(task("https://github.com/o/r/pull/1"));
+                        w
+                    },
+                    ascii,
+                ),
+                workspace_type_label(
+                    &{
+                        let mut w = empty_ws();
+                        w.attach_task(task("https://github.com/o/r/issues/1"));
+                        w
+                    },
+                    ascii,
+                ),
+                workspace_type_label(
+                    &{
+                        let mut w = empty_ws();
+                        let mut t = task("https://linear.app/team/issue/ABC-1");
+                        t.id.source = "linear".into();
+                        w.attach_task(t);
+                        w
+                    },
+                    ascii,
+                ),
+            ] {
+                let label = label.expect("each workspace shape has a label");
+                assert_eq!(
+                    label.chars().count(),
+                    1,
+                    "label {label:?} (ascii={ascii}) must be exactly 1 cell",
+                );
+            }
         }
+    }
+
+    /// ASCII fallback exposes plain letters so fonts that don't
+    /// render the unicode glyphs reliably still get a usable marker.
+    #[test]
+    fn ascii_fallback_returns_letters() {
+        let mut pr = empty_ws();
+        pr.attach_task(task("https://github.com/o/r/pull/1"));
+        assert_eq!(workspace_type_label(&pr, true), Some("p"));
+
+        let mut issue = empty_ws();
+        issue.attach_task(task("https://github.com/o/r/issues/1"));
+        assert_eq!(workspace_type_label(&issue, true), Some("i"));
+
+        let mut linear = empty_ws();
+        let mut t = task("https://linear.app/team/issue/ABC-1");
+        t.id.source = "linear".into();
+        linear.attach_task(t);
+        assert_eq!(workspace_type_label(&linear, true), Some("l"));
     }
 
     #[test]
     fn empty_workspace_returns_none() {
         let w = empty_ws();
-        assert_eq!(workspace_type_label(&w), None);
+        assert_eq!(workspace_type_label(&w, false), None);
+        assert_eq!(workspace_type_label(&w, true), None);
     }
 }
 

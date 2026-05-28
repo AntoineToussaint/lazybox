@@ -10,6 +10,6 @@ expression: rendered
 
    ▾  owner/repo
      A author
-   ▸ [I]   #1 A   task: o/r#1     1mo
-     [I]   #2 A   task: o/r#2     1mo
-     [I]   #3 A   task: o/r#3     1mo
+   ▸ ○#1 A   task: o/r#1          1mo
+     ○#2 A   task: o/r#2          1mo
+     ○#3 A   task: o/r#3          1mo

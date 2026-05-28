@@ -840,13 +840,14 @@ impl<T: TerminalAdapter> Model<T> {
     /// Behaviour:
     /// - Fresh burst (no prior scroll, or > `BURST_IDLE` since the
     ///   last event): full STEP, count starts at 1.
-    /// - Sustained same-direction burst: STEP decays — 5 → 3 after
-    ///   5 events, → 1 after 15.
-    /// - Direction reversal mid-burst: drop the event (return 0) and
-    ///   arm a short refractory window so the OS's queued inertia
-    ///   from the prior gesture doesn't immediately keep firing.
-    ///   Caller's next event in the NEW direction starts a fresh
-    ///   burst.
+    /// - Sustained same-direction burst: STEP decays — 5 → 3 at
+    ///   event 5, → 1 at event 8, then events past `STOP_AT` are
+    ///   dropped entirely so the OS momentum tail stops the view
+    ///   within ~200 ms instead of trickling for the full 1–2 s.
+    /// - Direction reversal mid-burst: real momentum never reverses,
+    ///   so a reverse-flick is unambiguous user intent. Admit
+    ///   immediately at full STEP (starting a fresh opposite-direction
+    ///   burst) instead of swallowing the press.
     ///
     /// The returned isize is always the **magnitude** (positive) of
     /// the scroll step; sign is applied by the caller using
@@ -864,19 +865,27 @@ impl<T: TerminalAdapter> Model<T> {
         /// gesture. macOS inertia events arrive ~16ms apart; 250ms
         /// is a generous gap that survives a brief stall.
         const BURST_IDLE: std::time::Duration = std::time::Duration::from_millis(250);
-        /// Within a burst, after this many events the step drops.
+        /// Within a burst, the step drops at these counts.
         const DECAY_AT: u32 = 5;
-        const TAIL_AT: u32 = 15;
+        const TAIL_AT: u32 = 8;
+        /// Hard stop. At ~16 ms per event, dropping past event 12
+        /// puts the visible scroll-stop ~190 ms after the user's last
+        /// physical input — inside the issue's 100–200 ms acceptance
+        /// window with one frame of slack.
+        const STOP_AT: u32 = 12;
 
         let now = Instant::now();
         let new_dir: i8 = if is_up { -1 } else { 1 };
 
-        // Stale state → fresh burst.
-        let burst = self.scroll_inertia.filter(|s| now - s.last_at < BURST_IDLE);
+        // Stale state → fresh burst. `saturating_duration_since`
+        // belts-and-braces against a non-monotonic clock; with
+        // `std::time::Instant` it never actually saturates.
+        let burst = self
+            .scroll_inertia
+            .filter(|s| now.saturating_duration_since(s.last_at) < BURST_IDLE);
 
         match burst {
             None => {
-                // Fresh gesture — full step.
                 self.scroll_inertia = Some(ScrollInertia {
                     dir: new_dir,
                     count: 1,
@@ -885,18 +894,23 @@ impl<T: TerminalAdapter> Model<T> {
                 STEP_INITIAL
             }
             Some(s) if s.dir != new_dir => {
-                // Direction flip mid-burst. Drop this event AND wipe
-                // the burst so the next event (in the new direction)
-                // starts fresh. The user's intent is "stop / go the
-                // other way" — eating one event is the cheapest way
-                // to cancel the OS-queued inertia.
-                self.scroll_inertia = None;
-                0
+                // Real momentum never reverses — a reverse-flick is
+                // unambiguous user intent. Start a fresh burst in
+                // the new direction and admit immediately at full
+                // step instead of swallowing the press.
+                self.scroll_inertia = Some(ScrollInertia {
+                    dir: new_dir,
+                    count: 1,
+                    last_at: now,
+                });
+                STEP_INITIAL
             }
             Some(mut s) => {
                 s.count = s.count.saturating_add(1);
                 s.last_at = now;
-                let step = if s.count >= TAIL_AT {
+                let step = if s.count >= STOP_AT {
+                    0
+                } else if s.count >= TAIL_AT {
                     STEP_TAIL
                 } else if s.count >= DECAY_AT {
                     STEP_MID
@@ -1271,9 +1285,11 @@ impl<T: TerminalAdapter> Model<T> {
         // actionable right now, not a generic alphabet. The full
         // keymap stays in `?` help.
         let keymap: Vec<crate::pane::Binding> = match self.focus {
-            PaneFocus::Sidebar => self.sidebar.contextual_bindings(),
-            PaneFocus::Right => self.right.contextual_bindings(),
-            PaneFocus::Terminals => self.terminals.contextual_bindings(),
+            PaneFocus::Sidebar => self.sidebar.contextual_bindings(&self.action_key_overrides),
+            PaneFocus::Right => self.right.contextual_bindings(&self.action_key_overrides),
+            PaneFocus::Terminals => self
+                .terminals
+                .contextual_bindings(&self.action_key_overrides),
         };
         let notice = self.status.notice.clone();
         let mut captured_area = Rect::default();

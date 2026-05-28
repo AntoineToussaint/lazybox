@@ -31,9 +31,10 @@ pub use scheduler::{
 };
 
 pub use handlers::{
-    ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_fetch_pr_details,
-    handle_fetch_repo_labels, handle_merge_pr, handle_request_reviewers, handle_set_assignees,
-    handle_set_labels, post_reply, prefetch_top_pr_details,
+    ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_delete_orphaned_worktree,
+    handle_fetch_pr_details, handle_fetch_repo_labels, handle_inspect_worktrees, handle_merge_pr,
+    handle_request_reviewers, handle_set_assignees, handle_set_labels, post_reply,
+    prefetch_top_pr_details,
 };
 pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 
@@ -703,6 +704,10 @@ async fn dispatch_action(config: &ServerConfig, source_name: &str, action: Provi
                 pilot_ipc::TerminalKind::Agent(agent_id),
                 None,
                 prompt,
+                // Autonomous `@pilot` spawn — launch unattended with
+                // permission prompts disabled (subject to the
+                // `agent.autonomous_skip_permissions` toggle).
+                true,
             )
             .await;
         }

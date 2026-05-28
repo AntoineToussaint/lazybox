@@ -93,27 +93,28 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///    the role column to a fixed x across rows.
 /// 3. Role badge — ` R` colored marker, or blank.
 /// 4. Asking glyph — ` ? ` warn-colored, or blank — reserved width so
-///    the kind/title to the right don't jitter between asking /
+///    the title to the right doesn't jitter between asking /
 ///    not-asking rows.
-/// 5. Kind label — `[FEAT] ` etc, or blank. Max across rows so titles
-///    align even when some rows have no kind prefix.
-/// 6. Title — flex, absorbs the remaining width. Truncates with `…`.
-/// 7. Labels — ` [bug] [ci] +2`, or blank. Max so the title flex
+/// 5. Title — flex, absorbs the remaining width. Truncates with `…`.
+///    Conventional-commit / bracket tags like `[CI]` stay inline at
+///    the front of the title rather than being hoisted into a
+///    reserved column that every tag-less row would pay for (#80).
+/// 6. Labels — ` [bug] [ci] +2`, or blank. Max so the title flex
 ///    reclaims the space when no row has labels; truncates at 3
 ///    chips with a `+N` overflow indicator.
-/// 8. Kill mark — ` [snooze 1y?]`, or blank. Max so the title flex
+/// 7. Kill mark — ` [snooze 1y?]`, or blank. Max so the title flex
 ///    reclaims the space when no row is armed.
-/// 9. Unread pill — ` ●N `, right-aligned. Max so the column collapses
+/// 8. Unread pill — ` ●N `, right-aligned. Max so the column collapses
 ///    when no row has unread, and lines up at a consistent x when any
 ///    row does.
-/// 10. Badge: agent slot — ` C ` / ` C×2 ` / blank. Same Max semantics.
-/// 11. Badge: shell slot — ` S ` / blank. Cell carries a leading space
+/// 9. Badge: agent slot — ` C ` / ` C×2 ` / blank. Same Max semantics.
+/// 10. Badge: shell slot — ` S ` / blank. Cell carries a leading space
 ///    so the two badges visually separate when both present.
-/// 12. Status pill — ` MERGED  ` / ` REVIEW   CI FAIL ` / blank.
+/// 11. Status pill — ` MERGED  ` / ` REVIEW   CI FAIL ` / blank.
 ///    Right-aligned. Cell is empty (width 0) when both review + CI
 ///    pills are None, so the column collapses for an all-empty table
 ///    instead of always reserving 19 cells of dead air.
-/// 13. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
+/// 12. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
 ///    baked into the cell so a 1-cell gap separates time from
 ///    whatever sits to its left (status pill or, when status is
 ///    empty, the title flex padding).
@@ -124,15 +125,14 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
         Column::fixed(max_pr_num_width), // 2: pr_num (left-aligned, flush against the glyph)
         Column::fixed(2),                // 3: role (" R" or blank)
         Column::fixed(3),                // 4: asking (" ? " reserved)
-        Column::max(0),                  // 5: kind ("[FEAT] " or blank)
-        Column::flex(0),                 // 6: title
-        Column::max(0),                  // 7: labels
-        Column::max(0),                  // 8: kill_mark
-        Column::max(0).right(),          // 9: unread
-        Column::max(0),                  // 10: badge_agent
-        Column::max(0),                  // 11: badge_shell (carries its own leading space)
-        Column::max(0).right(),          // 12: status
-        Column::max(0).right(),          // 13: time (carries its own leading space)
+        Column::flex(0),                 // 5: title
+        Column::max(0),                  // 6: labels
+        Column::max(0),                  // 7: kill_mark
+        Column::max(0).right(),          // 8: unread
+        Column::max(0),                  // 9: badge_agent
+        Column::max(0),                  // 10: badge_shell (carries its own leading space)
+        Column::max(0).right(),          // 11: status
+        Column::max(0).right(),          // 12: time (carries its own leading space)
     ]
 }
 
@@ -147,7 +147,6 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
         cell_pr_num(ctx),
         cell_role(ctx),
         cell_asking(ctx),
-        cell_kind(ctx),
         cell_title(ctx),
         cell_labels(ctx),
         cell_kill_mark(ctx),
@@ -248,33 +247,13 @@ fn cell_asking(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     }
 }
 
-fn cell_kind(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let raw = ctx.raw_title();
-    let Some((kind, _)) = crate::components::task_label::parse_conventional_prefix(raw) else {
-        return Cell::empty();
-    };
-    let style = if ctx.is_cursor {
-        ctx.row_style()
-    } else {
-        Style::default()
-            .fg(crate::components::task_label::kind_color(kind))
-            .add_modifier(Modifier::BOLD)
-    };
-    Cell::new(vec![
-        Span::styled(format!("[{}]", kind.label()), style),
-        Span::styled(" ".to_string(), ctx.row_style()),
-    ])
-}
-
 fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let raw = ctx.raw_title();
-    let body = match crate::components::task_label::parse_conventional_prefix(raw) {
-        Some((_, rest)) => rest,
-        None => raw,
-    };
-    // No truncation here — the table renderer trims with `…` when
-    // the flex column ends up smaller than the cell's natural width.
-    Cell::from_span(Span::styled(body.to_string(), ctx.row_style()))
+    // The full title, tags and all. Bracketed tags like `[CI]` stay
+    // where they originated instead of being hoisted into a reserved
+    // column (#80). No truncation here — the table renderer trims with
+    // `…` when the flex column ends up smaller than the cell's natural
+    // width.
+    Cell::from_span(Span::styled(ctx.raw_title().to_string(), ctx.row_style()))
 }
 
 /// Render the task's labels as compact chips: ` [name] [name] +N`.
@@ -539,15 +518,15 @@ mod tests {
     #[test]
     fn build_columns_have_expected_count_and_order() {
         let cols = build_columns(5);
-        assert_eq!(cols.len(), 14);
-        // Title column (idx 6) is the only Flex one.
+        assert_eq!(cols.len(), 13);
+        // Title column (idx 5) is the only Flex one.
         let flex_indices: Vec<_> = cols
             .iter()
             .enumerate()
             .filter(|(_, c)| matches!(c.width, crate::components::table::ColumnWidth::Flex { .. }))
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(flex_indices, vec![6]);
+        assert_eq!(flex_indices, vec![5]);
     }
 
     #[test]
@@ -678,27 +657,28 @@ mod tests {
         assert_eq!(cell_type(&ctx).width(), 0);
     }
 
-    /// Kind label parses `feat: foo` into a `[feat] ` cell.
+    /// Title cell keeps a bracketed `[CI]`-style tag inline instead of
+    /// hoisting it into a reserved column (#80).
     #[test]
-    fn cell_kind_strips_conventional_prefix() {
-        let task = make_task("owner/repo#1", "feat: add login");
+    fn cell_title_keeps_bracket_tag_inline() {
+        let task = make_task("owner/repo#1", "[CI] cache post-job upload");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
-        let cell = cell_kind(&ctx);
-        let joined: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(joined, "[FEAT] ");
+        let cell = cell_title(&ctx);
+        assert_eq!(cell.spans[0].content.as_ref(), "[CI] cache post-job upload");
     }
 
-    /// Title cell renders the body without the conventional prefix.
+    /// Title cell keeps a conventional-commit prefix inline rather than
+    /// stripping it into a separate kind column (#80).
     #[test]
-    fn cell_title_strips_conventional_prefix() {
+    fn cell_title_keeps_conventional_prefix_inline() {
         let task = make_task("owner/repo#1", "feat: add login");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
         let cell = cell_title(&ctx);
-        assert_eq!(cell.spans[0].content.as_ref(), "add login");
+        assert_eq!(cell.spans[0].content.as_ref(), "feat: add login");
     }
 
     /// Cursor row gets `row_focused` style and propagates via the

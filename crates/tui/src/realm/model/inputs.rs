@@ -346,6 +346,49 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return cmds;
         }
+        // Worktree inspector (Id::InspectList) — pick a row, then
+        // either fire the bulk shortcut or mount a per-row confirm.
+        if matches!(self.modal_stack.last(), Some(Id::InspectList)) {
+            // Drop the picker first so the confirm modal lands on
+            // top of a clean stack.
+            self.pop_modal();
+            let Some(&idx) = picks.first() else {
+                self.pending_inspect_rows.clear();
+                return cmds;
+            };
+            let rows = std::mem::take(&mut self.pending_inspect_rows);
+            // Rebuild the same logical index space the picker used:
+            // sentinel at slot 0 when any safe rows exist, real
+            // rows after that. Picker indices map 1:1.
+            let safe_first = rows
+                .iter()
+                .filter(|r| !r.reasons.is_empty() && r.is_safe_to_delete)
+                .count()
+                > 0;
+            if safe_first && idx == 0 {
+                // Bulk shortcut — dispatch a delete per safe row,
+                // skip the rest. Daemon re-checks safety per call;
+                // a row whose state went stale (new uncommitted
+                // change since inspection) gets a "no, refused"
+                // event back and the modal will refresh.
+                for row in &rows {
+                    if !row.reasons.is_empty() && row.is_safe_to_delete {
+                        cmds.push(IpcCommand::DeleteOrphanedWorktree {
+                            path: row.path.clone(),
+                            force: false,
+                        });
+                    }
+                }
+                let n = cmds.len();
+                self.flash_info(format!("deleting {n} clearly-safe worktrees…"));
+                return cmds;
+            }
+            let row_idx = if safe_first { idx - 1 } else { idx };
+            if let Some(row) = rows.get(row_idx).cloned() {
+                self.mount_inspect_confirm(row);
+            }
+            return cmds;
+        }
         // Editor picker (Id::Editor) — pick → launch (or defer
         // behind a session-spawn when the workspace has no
         // worktree yet).
@@ -449,6 +492,15 @@ impl<T: TerminalAdapter> Model<T> {
                 // queued Action without firing.
                 self.pending_action_confirm = None;
             }
+            Some(Id::InspectList) => {
+                // Picker closed without a pick — release the cached
+                // rows so they don't bleed into a later inspector run
+                // with stale paths.
+                self.pending_inspect_rows.clear();
+            }
+            Some(Id::InspectConfirm) => {
+                self.pending_inspect_target = None;
+            }
             Some(Id::RequestReviewers) => {
                 // Esc cancels; drop the stashed workspace key +
                 // candidate list so a later mount on a *different*
@@ -528,6 +580,16 @@ impl<T: TerminalAdapter> Model<T> {
                     // count comes back via
                     // `Event::CleanWorktreesCompleted`.
                     self.flash_info("cleaning worktrees…");
+                }
+            }
+            Some(Id::InspectConfirm) => {
+                let target = self.pending_inspect_target.take();
+                if yes && let Some(row) = target {
+                    let force = row.has_uncommitted_changes || row.has_unpushed_commits;
+                    cmds.push(IpcCommand::DeleteOrphanedWorktree {
+                        path: row.path,
+                        force,
+                    });
                 }
             }
             _ => {}

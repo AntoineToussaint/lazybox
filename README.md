@@ -336,6 +336,29 @@ slack:
   per_workspace_channels: true
 ```
 
+**Autonomous sessions** (`agent:`): when pilot picks up `@pilot`-
+triggered work it spawns the agent unattended — no human is sitting
+there to answer tool-use approval prompts. So those sessions launch
+Claude Code with `--dangerously-skip-permissions` ("no-permission"
+mode), and the tab strip flags them with a `⚠ no-perms` badge so it's
+obvious which sessions aren't gated by approvals. Sessions you open
+yourself (`c` in the sidebar, `f`-for-fix) always keep prompts on —
+the approval *is* the human-in-the-loop guard. Flip the default off to
+force prompts on every session:
+
+```yaml
+agent:
+  autonomous_skip_permissions: false
+```
+
+The bypass works under both Claude subscription login (Pro/Max) and an
+Anthropic API key; the only restriction is that Claude Code refuses to
+start in bypass mode as root/sudo, which the worktree sessions don't
+hit. The blast radius stays bounded to the per-task git worktree, and
+the [autonomous work-prompt principles](crates/core/src/prompts.rs)
+(no destructive shortcuts, no `--no-verify`, root-cause over masking)
+are the in-prompt counterweight to the relaxed approvals.
+
 State (workspace activity, read/unread, snooze, terminal scrollback
 ring) persists in `~/.pilot/v2/state.db` via SQLite.
 

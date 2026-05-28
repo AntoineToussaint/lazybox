@@ -33,6 +33,7 @@ fn spawned(id: u64, session: &str, kind: TerminalKind) -> Event {
         terminal_id: TerminalId(id),
         session_key: sk(session),
         kind,
+        no_permission: false,
     }
 }
 
@@ -173,6 +174,7 @@ fn snapshot_replaces_all_terminals() {
             kind: TerminalKind::Shell,
             replay: b"\x1b[0mhi\n".to_vec(),
             last_seq: 42,
+            no_permission: false,
         }],
         projects: vec![],
     });
@@ -445,6 +447,35 @@ fn render_shows_tab_bar_and_content() {
     assert!(
         out.contains("first line") && out.contains("second line"),
         "active terminal content; got:\n{out}"
+    );
+}
+
+#[test]
+fn render_shows_no_perms_badge_for_autonomous_session() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&Event::TerminalSpawned {
+        terminal_id: TerminalId(1),
+        session_key: sk("o/r#1"),
+        kind: TerminalKind::Agent("claude".into()),
+        no_permission: true,
+    });
+    t.set_active_session(Some(sk("o/r#1")));
+    let out = render_to_string(&mut t, 60, 10, true);
+    assert!(
+        out.contains("no-perms"),
+        "autonomous session must show the no-permission badge; got:\n{out}"
+    );
+}
+
+#[test]
+fn render_omits_no_perms_badge_for_interactive_session() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+    let out = render_to_string(&mut t, 60, 10, true);
+    assert!(
+        !out.contains("no-perms"),
+        "interactive session must not show the no-permission badge; got:\n{out}"
     );
 }
 
@@ -989,6 +1020,35 @@ fn record_pty_write_skips_escape_sequences() {
     // "ab", left-arrow (ESC [ D), "c", then submit.
     t.record_pty_write(TerminalId(1), b"ab\x1b[Dc\r");
     assert_eq!(t.last_user_message_of(TerminalId(1)), Some("abc"));
+}
+
+#[test]
+fn record_pty_write_unknown_meta_escape_does_not_wipe_buffer() {
+    // A stray `ESC`-prefixed sequence that isn't CSI/SS3 (e.g. an
+    // Alt-combo) must drop only the ESC and keep parsing — it must
+    // never silently clear an in-flight prompt. Only a *lone* ESC
+    // (the real Esc key) resets the line.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    // "a", ESC+x (meta), "b", submit → the ESC is dropped, the rest
+    // composes normally.
+    t.record_pty_write(TerminalId(1), b"a\x1bxb\r");
+    assert_eq!(t.last_user_message_of(TerminalId(1)), Some("axb"));
+}
+
+#[test]
+fn ctrl_u_clears_composing_without_commit() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    type_str(&mut t, "scratch");
+    let mut cmds = Vec::new();
+    t.handle_key(ctrl('u'), &mut cmds);
+    assert_eq!(t.composing_of(TerminalId(1)), Some(""));
+    assert_eq!(t.last_user_message_of(TerminalId(1)), None);
 }
 
 #[test]

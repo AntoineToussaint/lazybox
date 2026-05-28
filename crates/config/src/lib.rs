@@ -397,10 +397,26 @@ impl Default for HooksSchedule {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-#[derive(Default)]
 pub struct AgentSection {
     #[serde(flatten)]
     pub config: pilot_core::AgentConfig,
+    /// Launch pilot-spawned autonomous sessions (e.g. `@pilot`-triggered
+    /// work) with permission prompts disabled — `claude
+    /// --dangerously-skip-permissions` — so the agent runs unattended
+    /// instead of blocking on every tool-use approval. Only affects
+    /// autonomous spawns; interactive sessions the user opens always
+    /// keep prompts on. Default on; flip to `false` to force prompts on
+    /// every session.
+    pub autonomous_skip_permissions: bool,
+}
+
+impl Default for AgentSection {
+    fn default() -> Self {
+        Self {
+            config: pilot_core::AgentConfig::default(),
+            autonomous_skip_permissions: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -821,6 +837,26 @@ repos:
     fn missing_repos_section_defaults_to_empty() {
         let cfg: Config = serde_yaml::from_str("{}").expect("parse");
         assert!(cfg.repos.is_empty());
+    }
+
+    /// Autonomous sessions launch in no-permission mode by default,
+    /// and the toggle round-trips so a paranoid user can flip it off.
+    #[test]
+    fn autonomous_skip_permissions_defaults_on_and_round_trips() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(
+            cfg.agent.autonomous_skip_permissions,
+            "default is on for autonomous sessions"
+        );
+
+        let mut paranoid = Config::default();
+        paranoid.agent.autonomous_skip_permissions = false;
+        let written = serde_yaml::to_string(&paranoid).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert!(
+            !reparsed.agent.autonomous_skip_permissions,
+            "flipping the toggle off survives a save/load round-trip"
+        );
     }
 
     /// `placement: above` should parse + serialize correctly.

@@ -44,7 +44,7 @@ use crate::backend::{RawPtyBackend, SessionBackend, TmuxBackend};
 use pilot_agents::Registry;
 use pilot_ipc::{AgentRunId, Connection, Event, TerminalId};
 use pilot_store::{MemoryStore, SqliteStore, Store};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -232,6 +232,12 @@ pub struct ServerConfig {
     /// `TerminalExited`.
     pub terminal_meta:
         Arc<Mutex<HashMap<TerminalId, (pilot_core::SessionKey, pilot_ipc::TerminalKind)>>>,
+    /// Terminals launched in no-permission / bypass mode (autonomous
+    /// sessions). Populated by `handle_spawn` when a spawn skips
+    /// permission prompts; read by `snapshot_terminals` so a
+    /// reconnecting client can re-render the indicator. Cleaned on
+    /// `TerminalExited` alongside the other per-terminal maps.
+    pub no_permission_terminals: Arc<Mutex<HashSet<TerminalId>>>,
     /// Structured stream-json agent runs. Keyed by wire-side run id.
     pub agent_runs: Arc<Mutex<HashMap<AgentRunId, agent_runs::AgentRunHandle>>>,
     /// Process-wide structured run id allocator.
@@ -332,6 +338,7 @@ impl ServerConfig {
             terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
             agent_states: Arc::new(Mutex::new(HashMap::new())),
             terminal_meta: Arc::new(Mutex::new(HashMap::new())),
+            no_permission_terminals: Arc::new(Mutex::new(HashSet::new())),
             agent_runs: Arc::new(Mutex::new(HashMap::new())),
             next_agent_run_id: Arc::new(AtomicU64::new(1)),
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),
@@ -476,6 +483,8 @@ impl Server {
                         pilot_ipc::Command::RemoveProviderCredential { .. } => "RemoveProviderCredential",
                         pilot_ipc::Command::ListProviderCredentials { .. } => "ListProviderCredentials",
                         pilot_ipc::Command::CleanWorktrees => "CleanWorktrees",
+                        pilot_ipc::Command::InspectWorktrees => "InspectWorktrees",
+                        pilot_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
                         pilot_ipc::Command::Shutdown => "Shutdown",
                     };
                     tracing::info!("daemon ← {label}");
@@ -557,6 +566,11 @@ impl Server {
                                 kind,
                                 cwd,
                                 initial_prompt,
+                                // User-initiated spawn (sidebar `c`,
+                                // `f`-for-fix, split shell). Interactive
+                                // sessions keep permission prompts on —
+                                // the human is right there to approve.
+                                false,
                             )
                             .await;
                         }
@@ -886,6 +900,18 @@ impl Server {
                             let cfg = self.config.clone();
                             tokio::spawn(async move {
                                 polling::handle_clean_worktrees(&cfg).await;
+                            });
+                        }
+                        pilot_ipc::Command::InspectWorktrees => {
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_inspect_worktrees(&cfg).await;
+                            });
+                        }
+                        pilot_ipc::Command::DeleteOrphanedWorktree { path, force } => {
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_delete_orphaned_worktree(&cfg, path, force).await;
                             });
                         }
                     }

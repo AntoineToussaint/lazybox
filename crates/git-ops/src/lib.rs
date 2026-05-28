@@ -6,6 +6,9 @@
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+mod inspect;
+pub use inspect::{OrphanReason, TrackedSession, WorktreeInspection};
+
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
     #[error("git command failed: {0}")]
@@ -88,6 +91,15 @@ impl WorktreeManager {
         Self {
             base_dir: base_dir.into(),
         }
+    }
+
+    /// The directory this manager was constructed against — typically
+    /// `<state_root>/`, with `repos/` (bare clones) and `worktrees/`
+    /// (per-task checkouts) as siblings underneath. Crate-private so
+    /// the inspector can compose paths without leaking the layout to
+    /// every downstream caller.
+    pub(crate) fn base_dir(&self) -> &Path {
+        &self.base_dir
     }
 
     /// Default base dir: `<PILOT_HOME>/v2/` (default `~/.pilot/v2/`).
@@ -699,7 +711,10 @@ async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
 /// pilot is ever launched from inside another git worktree (or
 /// `cargo test` from one), the subprocess would operate on the
 /// inherited repo instead of the bare clone we're targeting.
-fn apply_git_env(cmd: &mut Command) -> &mut Command {
+///
+/// `pub(crate)` so the inspector module can apply the same hygienic
+/// env to its read-only probes.
+pub(crate) fn apply_git_env(cmd: &mut Command) -> &mut Command {
     cmd.env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_FLUSH", "1")
         .env_remove("GIT_DIR")

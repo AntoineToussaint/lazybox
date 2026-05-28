@@ -314,10 +314,11 @@ impl Sidebar {
                         None
                     };
                     let caret = if is_cursor { "▸ " } else { "  " };
-                    let (marker, color) = match kind {
-                        crate::components::sidebar::WorkspaceKind::Pr => ("P ", theme.success),
-                        crate::components::sidebar::WorkspaceKind::Issue => ("I ", theme.hover),
+                    let color = match kind {
+                        WorkspaceKind::Pr => theme.success,
+                        WorkspaceKind::Issue => theme.hover,
                     };
+                    let marker = kind.header_marker();
                     let label = kind.header_label();
                     let mut spans: Vec<Span> = vec![
                         Span::styled(
@@ -327,7 +328,7 @@ impl Sidebar {
                         // Two-space indent so kind headers tuck under
                         // their parent repo header visually.
                         Span::raw("  "),
-                        Span::styled(marker.to_string(), row_bg.unwrap_or_default().fg(color)),
+                        Span::styled(format!("{marker} "), row_bg.unwrap_or_default().fg(color)),
                         Span::styled(
                             label,
                             row_bg
@@ -337,10 +338,8 @@ impl Sidebar {
                         ),
                     ];
                     if let Some(bg) = row_bg {
-                        let used = caret.chars().count()
-                            + 2
-                            + marker.chars().count()
-                            + label.chars().count();
+                        // caret + 2-space indent + "X " marker + label.
+                        let used = caret.chars().count() + 2 + 2 + label.chars().count();
                         if used < row_budget {
                             spans.push(Span::styled(" ".repeat(row_budget - used), bg));
                         }

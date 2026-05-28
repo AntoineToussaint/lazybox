@@ -92,8 +92,6 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // in step 5 can drop a `KindHeader` between the two sections.
     // Within each role/kind band, recency breaks ties — so the
     // most recently updated PR-you-authored is still on top.
-    let role_first = matches!(input.sort_mode, SortMode::ByRole | SortMode::ByRoleSplit);
-    let split_kind = input.sort_mode == SortMode::ByRoleSplit;
     for rows in by_repo.values_mut() {
         rows.sort_by(|(ka, a), (kb, b)| {
             let a_ts = a
@@ -107,26 +105,16 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
             let recency = b_ts.cmp(&a_ts);
             let tie = ka.as_str().cmp(kb.as_str());
             let role_cmp = || {
-                let a_rank = role_rank(a.primary_task().map(|t| t.role));
-                let b_rank = role_rank(b.primary_task().map(|t| t.role));
-                a_rank.cmp(&b_rank)
+                role_rank(a.primary_task().map(|t| t.role))
+                    .cmp(&role_rank(b.primary_task().map(|t| t.role)))
             };
-            let kind_cmp = || {
-                // PR (0) sorts before Issue (1).
-                let a_rank = match WorkspaceKind::classify(a) {
-                    WorkspaceKind::Pr => 0u8,
-                    WorkspaceKind::Issue => 1,
-                };
-                let b_rank = match WorkspaceKind::classify(b) {
-                    WorkspaceKind::Pr => 0u8,
-                    WorkspaceKind::Issue => 1,
-                };
-                a_rank.cmp(&b_rank)
-            };
-            match (split_kind, role_first) {
-                (true, _) => kind_cmp().then_with(role_cmp).then(recency).then(tie),
-                (false, true) => role_cmp().then(recency).then(tie),
-                (false, false) => recency.then(tie),
+            // `WorkspaceKind` derives `Ord` with `Pr < Issue`, so
+            // a plain `cmp` does the PR-first ordering.
+            let kind_cmp = || WorkspaceKind::classify(a).cmp(&WorkspaceKind::classify(b));
+            match input.sort_mode {
+                SortMode::Recent => recency.then(tie),
+                SortMode::ByRole => role_cmp().then(recency).then(tie),
+                SortMode::ByRoleSplit => kind_cmp().then_with(role_cmp).then(recency).then(tie),
             }
         });
     }

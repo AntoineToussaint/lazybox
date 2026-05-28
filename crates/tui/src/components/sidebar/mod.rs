@@ -127,7 +127,11 @@ impl SortMode {
 /// the user typically interacts with first; everything else
 /// (GitHub issues, Linear tickets, empty workspaces) falls under
 /// `Issue`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Variant order matters: `Pr` is declared first so the derived
+/// `Ord` puts PRs ahead of issues — same intent the `[split]` mode
+/// needs when partitioning the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WorkspaceKind {
     Pr,
     Issue,
@@ -149,6 +153,16 @@ impl WorkspaceKind {
         match self {
             WorkspaceKind::Pr => "PRs",
             WorkspaceKind::Issue => "Issues",
+        }
+    }
+
+    /// Single-letter marker rendered before the header label —
+    /// mirrors the per-row `[PR]` / `[I]` pill colouring so the
+    /// section header lines up visually with the rows under it.
+    pub fn header_marker(self) -> char {
+        match self {
+            WorkspaceKind::Pr => 'P',
+            WorkspaceKind::Issue => 'I',
         }
     }
 }

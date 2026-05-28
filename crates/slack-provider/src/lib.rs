@@ -27,6 +27,7 @@
 //! See `docs/slack-setup.md` for the Slack-side app config.
 
 pub mod api;
+pub mod prune;
 pub mod socket;
 
 pub use api::{Client, Message, channel_name_for_workspace};

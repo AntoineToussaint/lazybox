@@ -198,6 +198,7 @@ fn all_events() -> Vec<Event> {
                 kind: TerminalKind::Agent("claude".into()),
                 replay: b"replay-bytes".to_vec(),
                 last_seq: 42,
+                no_permission: true,
             }],
             projects: vec![],
         },
@@ -217,6 +218,7 @@ fn all_events() -> Vec<Event> {
             terminal_id: TerminalId(2),
             session_key: key.clone(),
             kind: TerminalKind::Shell,
+            no_permission: false,
         },
         Event::TerminalOutput {
             terminal_id: TerminalId(2),

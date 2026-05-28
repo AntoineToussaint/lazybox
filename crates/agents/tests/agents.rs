@@ -15,6 +15,7 @@ fn sample_ctx() -> SpawnCtx {
         repo: Some("o/r".into()),
         pr_number: Some("1".into()),
         env: HashMap::new(),
+        skip_permissions: false,
     }
 }
 
@@ -36,6 +37,32 @@ fn claude_spawn_and_resume_argv() {
         agent.resume(&ctx),
         vec!["claude".to_string(), "--continue".to_string()],
         "resume must use --continue so the previous conversation is picked up"
+    );
+}
+
+#[test]
+fn claude_skip_permissions_appends_bypass_flag() {
+    let agent = Claude;
+    let ctx = SpawnCtx {
+        skip_permissions: true,
+        ..sample_ctx()
+    };
+    assert_eq!(
+        agent.spawn(&ctx),
+        vec![
+            "claude".to_string(),
+            "--dangerously-skip-permissions".to_string()
+        ],
+        "autonomous (skip_permissions) spawn must bypass tool-use prompts"
+    );
+    assert_eq!(
+        agent.resume(&ctx),
+        vec![
+            "claude".to_string(),
+            "--continue".to_string(),
+            "--dangerously-skip-permissions".to_string()
+        ],
+        "resume must carry the bypass flag too so a resumed autonomous session stays unattended"
     );
 }
 

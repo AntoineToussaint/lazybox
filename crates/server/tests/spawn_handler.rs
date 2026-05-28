@@ -88,6 +88,108 @@ async fn spawn_shell_emits_terminal_spawned_event() {
     .await
     .expect("deadline");
 }
+/// Acceptance: user-initiated interactive sessions still get prompts.
+/// A `Command::Spawn` is always interactive, so the spawned claude must
+/// NOT carry `--dangerously-skip-permissions` and the spawn event must
+/// report `no_permission: false`, regardless of the autonomous toggle.
+#[tokio::test]
+async fn interactive_claude_spawn_keeps_permission_prompts() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        client
+            .send(Command::Spawn {
+                session_key: "test:ws-1".into(),
+                session_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                initial_prompt: None,
+            })
+            .unwrap();
+        let spawned = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("TerminalSpawned arrived");
+        match spawned {
+            Event::TerminalSpawned { no_permission, .. } => {
+                assert!(!no_permission, "interactive sessions keep prompts on");
+            }
+            _ => unreachable!(),
+        }
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+        assert_eq!(
+            mock.argv_for(&key).await.unwrap(),
+            vec!["claude".to_string()],
+            "interactive claude must not get the bypass flag",
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// Acceptance: an autonomous spawn propagates its no-permission decision
+/// consistently across the spawned argv, the `TerminalSpawned` event,
+/// and the reconnection snapshot. The decision value itself (on by
+/// default) is pinned by the `skip_permissions_for` unit test; here we
+/// pin that whatever the daemon decided reaches all three surfaces in
+/// lockstep — so the UI badge can never disagree with the real argv.
+#[tokio::test]
+async fn autonomous_spawn_wires_no_permission_consistently() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut bus_rx = config.bus.subscribe();
+        let cwd = std::env::temp_dir().to_string_lossy().to_string();
+        pilot_server::spawn_handler::handle_spawn(
+            &config,
+            "test:ws-auto".into(),
+            None,
+            TerminalKind::Agent("claude".into()),
+            Some(cwd),
+            None,
+            true, // autonomous
+        )
+        .await;
+
+        let mut event_flag = None;
+        while let Ok(ev) = bus_rx.try_recv() {
+            if let Event::TerminalSpawned { no_permission, .. } = ev {
+                event_flag = Some(no_permission);
+                break;
+            }
+        }
+        let event_flag = event_flag.expect("TerminalSpawned broadcast");
+
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+        let argv_flag = mock
+            .argv_for(&key)
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a == "--dangerously-skip-permissions");
+
+        let snapshot_flag = pilot_server::spawn_handler::snapshot_terminals(&config)
+            .await
+            .into_iter()
+            .next()
+            .expect("one snapshot")
+            .no_permission;
+
+        assert_eq!(
+            event_flag, argv_flag,
+            "spawn event's no_permission must match the actual claude argv",
+        );
+        assert_eq!(
+            snapshot_flag, argv_flag,
+            "reconnection snapshot must match the actual claude argv",
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
 #[tokio::test]
 async fn unknown_agent_id_emits_provider_error() {
     timeout(TEST_DEADLINE, async {

@@ -321,6 +321,10 @@ struct TerminalSlot {
     /// scroll the prompt off-screen. `None` until the user has
     /// submitted at least one message in this terminal.
     last_user_message: Option<String>,
+    /// Launched in no-permission / bypass mode (autonomous session
+    /// running unattended). Drives the "no-perms" badge in the tab
+    /// strip so it's obvious which sessions skip approval prompts.
+    no_permission: bool,
 }
 
 impl TerminalSlot {
@@ -1086,7 +1090,12 @@ impl TerminalStack {
         slot.last_seq = seq;
     }
 
-    fn make_slot(session_key: SessionKey, kind: TerminalKind, last_seq: u64) -> TerminalSlot {
+    fn make_slot(
+        session_key: SessionKey,
+        kind: TerminalKind,
+        last_seq: u64,
+        no_permission: bool,
+    ) -> TerminalSlot {
         let vt = TerminalVt::new().expect("libghostty-vt init");
         TerminalSlot {
             session_key,
@@ -1098,6 +1107,7 @@ impl TerminalStack {
             last_rendered_size: None,
             composing: String::new(),
             last_user_message: None,
+            no_permission,
         }
     }
 
@@ -1319,8 +1329,12 @@ impl TerminalStack {
             Event::Snapshot { terminals, .. } => {
                 self.terminals.clear();
                 for snap in terminals {
-                    let mut slot =
-                        Self::make_slot(snap.session_key.clone(), snap.kind.clone(), snap.last_seq);
+                    let mut slot = Self::make_slot(
+                        snap.session_key.clone(),
+                        snap.kind.clone(),
+                        snap.last_seq,
+                        snap.no_permission,
+                    );
                     // Replay the daemon-side ring through the VT so
                     // the cell grid reflects what was on screen
                     // before this client connected.
@@ -1334,8 +1348,9 @@ impl TerminalStack {
                 terminal_id,
                 session_key,
                 kind,
+                no_permission,
             } => {
-                let slot = Self::make_slot(session_key.clone(), kind.clone(), 0);
+                let slot = Self::make_slot(session_key.clone(), kind.clone(), 0, *no_permission);
                 self.terminals.insert(*terminal_id, slot);
                 // A fresh terminal arrived for the active session —
                 // expand so the user actually sees it. We bypass the
@@ -1487,7 +1502,7 @@ impl TerminalStack {
         // tab label occupies for click-hit-testing.
         let mut cursor: u16 = title_area.x + title_prefix.chars().count() as u16;
         for (i, id) in visible.iter().enumerate() {
-            let (icon, label, is_asking) = self
+            let (icon, label, is_asking, no_permission) = self
                 .terminals
                 .get(id)
                 .map(|s| {
@@ -1500,9 +1515,9 @@ impl TerminalStack {
                         _ => crate::components::icons::SHELL,
                     };
                     let asking = matches!(s.agent_state, pilot_ipc::AgentState::Asking);
-                    (icon, Self::tab_label(&s.kind), asking)
+                    (icon, Self::tab_label(&s.kind), asking, s.no_permission)
                 })
-                .unwrap_or((crate::components::icons::SHELL, "?".into(), false));
+                .unwrap_or((crate::components::icons::SHELL, "?".into(), false, false));
             let is_active = i == self.active_tab_idx;
             let style = if is_active && focused {
                 Style::default()
@@ -1538,6 +1553,17 @@ impl TerminalStack {
                     Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
                 ));
                 cursor = cursor.saturating_add(asking_text.chars().count() as u16);
+            }
+            // No-permission / bypass mode: this session auto-accepts
+            // tool-use prompts and runs unattended. Flag it so the user
+            // can tell at a glance which tabs aren't gated by approvals.
+            if no_permission {
+                let noperm_text = " ⚠ no-perms";
+                title_spans.push(Span::styled(
+                    noperm_text,
+                    Style::default().fg(theme.warn).add_modifier(Modifier::DIM),
+                ));
+                cursor = cursor.saturating_add(noperm_text.chars().count() as u16);
             }
         }
         frame.render_widget(Paragraph::new(Line::from(title_spans)), title_area);

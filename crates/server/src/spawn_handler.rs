@@ -63,6 +63,7 @@ fn argv_for(
     config: &ServerConfig,
     kind: &TerminalKind,
     cwd: &Option<PathBuf>,
+    skip_permissions: bool,
 ) -> Option<Vec<String>> {
     match kind {
         TerminalKind::Agent(agent_id) => {
@@ -75,6 +76,7 @@ fn argv_for(
                 repo: None,
                 pr_number: None,
                 env: Default::default(),
+                skip_permissions,
             };
             Some(agent.spawn(&ctx))
         }
@@ -112,13 +114,26 @@ pub async fn handle_spawn(
     kind: TerminalKind,
     cwd: Option<String>,
     initial_prompt: Option<String>,
+    autonomous: bool,
 ) {
+    // Autonomous sessions (e.g. `@pilot`-triggered work) launch with
+    // tool-use permission prompts disabled so the agent runs unattended
+    // — there's no human nearby to approve. Gated by config so a
+    // paranoid user can force prompts on every session. Interactive
+    // spawns never bypass: the prompt IS the human-in-the-loop guard.
+    // The flag works under both Claude subscription login and an API
+    // key; the only bypass restriction is no-root/sudo, which the
+    // worktree sessions satisfy.
+    let cfg = pilot_config::Config::load().unwrap_or_default();
+    let skip_permissions = skip_permissions_for(autonomous, &cfg);
     tracing::info!(
         %session_key,
         ?session_id,
         ?kind,
         cwd = ?cwd,
         has_initial_prompt = initial_prompt.is_some(),
+        autonomous,
+        skip_permissions,
         "handle_spawn: entry"
     );
     // Singleton enforcement at the daemon (the source of truth for
@@ -158,7 +173,7 @@ pub async fn handle_spawn(
                 }
             }
         };
-    let argv = match argv_for(config, &kind, &cwd_path) {
+    let argv = match argv_for(config, &kind, &cwd_path, skip_permissions) {
         Some(a) => a,
         None => {
             let _ = config.bus.send(Event::provider_error_permanent(
@@ -239,6 +254,13 @@ pub async fn handle_spawn(
             .await
             .insert(terminal_id, sid);
     }
+    if skip_permissions {
+        config
+            .no_permission_terminals
+            .lock()
+            .await
+            .insert(terminal_id);
+    }
     config
         .terminals
         .lock()
@@ -250,6 +272,7 @@ pub async fn handle_spawn(
     // raw PTYs but doesn't know which workspace they belong to —
     // sidebar badges go blank, even though the agent is still alive.
     persist_terminal_meta(config, &backend_key, &session_key, &kind).await;
+    persist_no_permission(config, &backend_key, skip_permissions).await;
 
     // Pump backend output → bus. Also runs agent-state detection
     // on each chunk so the user sees a "needs input" badge when
@@ -261,6 +284,7 @@ pub async fn handle_spawn(
     let term_sessions_map = config.terminal_sessions.clone();
     let agent_states_map = config.agent_states.clone();
     let terminal_meta_map = config.terminal_meta.clone();
+    let no_permission_map = config.no_permission_terminals.clone();
     let store_for_pump = config.store.clone();
     let id_for_pump = terminal_id;
     let key_for_pump = backend_key.clone();
@@ -306,6 +330,7 @@ pub async fn handle_spawn(
         terminal_id,
         session_key,
         kind,
+        no_permission: skip_permissions,
     });
     if let Err(e) = send_result {
         tracing::error!("handle_spawn: bus.send(TerminalSpawned) failed: {e}");
@@ -548,7 +573,9 @@ pub async fn handle_spawn(
         term_sessions_map.lock().await.remove(&id_for_pump);
         agent_states_map.lock().await.remove(&id_for_pump);
         terminal_meta_map.lock().await.remove(&id_for_pump);
+        no_permission_map.lock().await.remove(&id_for_pump);
         let _ = store_for_pump.delete_kv(&format!("terminal:{key_for_pump}"));
+        let _ = store_for_pump.delete_kv(&format!("terminal-noperm:{key_for_pump}"));
     });
 
     // Schedule prompt injection. Drives the `f`-for-fix flow: the
@@ -959,6 +986,14 @@ fn collect_repo_env(config: &ServerConfig, session_key: &SessionKey) -> Vec<(Str
         Err(_) => return Vec::new(),
     };
     env_for_repo(&cfg, &repo)
+}
+
+/// Whether a spawn should launch in no-permission / bypass mode.
+/// Only autonomous (pilot-spawned) sessions are eligible, and only
+/// when the `agent.autonomous_skip_permissions` toggle is on (default).
+/// Pure so tests don't need a real YAML on disk.
+pub(crate) fn skip_permissions_for(autonomous: bool, cfg: &pilot_config::Config) -> bool {
+    autonomous && cfg.agent.autonomous_skip_permissions
 }
 
 /// Pure-data lookup so tests don't need a real YAML on disk.
@@ -1380,6 +1415,8 @@ pub async fn handle_inject_prompt(
                     fb.kind,
                     fb.cwd,
                     Some(prompt.to_string()),
+                    // `w`-driven inject is a user action — keep prompts on.
+                    false,
                 )
                 .await;
                 return;
@@ -1499,6 +1536,7 @@ pub async fn recover_sessions(config: &ServerConfig) {
         let (session_key, kind) = load_terminal_meta(config, &key)
             .await
             .unwrap_or_else(|| (SessionKey::from(""), TerminalKind::Shell));
+        let no_permission = load_no_permission(config, &key).await;
         let terminal_id = alloc_terminal_id();
         config
             .terminals
@@ -1514,11 +1552,19 @@ pub async fn recover_sessions(config: &ServerConfig) {
             .lock()
             .await
             .insert(terminal_id, (session_key.clone(), kind.clone()));
+        if no_permission {
+            config
+                .no_permission_terminals
+                .lock()
+                .await
+                .insert(terminal_id);
+        }
 
         let bus = config.bus.clone();
         let backend = config.backend.clone();
         let terminals_map = config.terminals.clone();
         let terminal_meta_map = config.terminal_meta.clone();
+        let no_permission_map = config.no_permission_terminals.clone();
         let key_for_pump = key.clone();
         // Broadcast Spawned before spawning the pump — same race
         // guard as the main spawn path.
@@ -1526,6 +1572,7 @@ pub async fn recover_sessions(config: &ServerConfig) {
             terminal_id,
             session_key,
             kind,
+            no_permission,
         });
         tokio::spawn(async move {
             let mut sub = match backend.subscribe(&key_for_pump).await {
@@ -1556,6 +1603,7 @@ pub async fn recover_sessions(config: &ServerConfig) {
             });
             terminals_map.lock().await.remove(&terminal_id);
             terminal_meta_map.lock().await.remove(&terminal_id);
+            no_permission_map.lock().await.remove(&terminal_id);
         });
     }
 }
@@ -1599,6 +1647,35 @@ async fn load_terminal_meta(
     Some((SessionKey::from(parsed.0.as_str()), parsed.1))
 }
 
+/// Persist whether `backend_key` was launched in no-permission mode so
+/// a pilot restart can re-render the indicator for surviving sessions
+/// (`recover_sessions`). Stored under a key separate from
+/// `terminal_meta` so the existing two-tuple payload format is left
+/// untouched. Only written when `skip_permissions` — absence means
+/// "prompts on", the common case.
+async fn persist_no_permission(config: &ServerConfig, backend_key: &str, skip_permissions: bool) {
+    if !skip_permissions {
+        return;
+    }
+    if let Err(e) = config
+        .store
+        .set_kv(&format!("terminal-noperm:{backend_key}"), "1")
+    {
+        tracing::warn!("persist terminal no-permission flag: store write failed: {e}");
+    }
+}
+
+/// Inverse of `persist_no_permission`. True when the surviving session
+/// was launched in no-permission mode.
+async fn load_no_permission(config: &ServerConfig, backend_key: &str) -> bool {
+    config
+        .store
+        .get_kv(&format!("terminal-noperm:{backend_key}"))
+        .ok()
+        .flatten()
+        .is_some()
+}
+
 /// Used by `Subscribe` to seed a new client with what's already
 /// running. Reads the parallel `terminal_meta` map populated by
 /// `handle_spawn` so each snapshot carries the right session_key
@@ -1634,6 +1711,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
             })
             .collect()
     };
+    let no_permission = config.no_permission_terminals.lock().await.clone();
 
     let mut out = Vec::with_capacity(entries.len());
     for (id, key, session_key, kind) in entries {
@@ -1674,6 +1752,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                 }
             };
         out.push(TerminalSnapshot {
+            no_permission: no_permission.contains(&id),
             terminal_id: id,
             session_key,
             kind,
@@ -1749,6 +1828,10 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 kind,
                 None,
                 None,
+                // Restored from a persisted session record, which
+                // doesn't carry the autonomous flag — re-spawn with
+                // prompts on rather than silently bypassing.
+                false,
             )
             .await;
         }
@@ -1804,6 +1887,24 @@ mod tests {
     fn env_for_repo_returns_empty_when_repo_not_configured() {
         let cfg = pilot_config::Config::default();
         assert!(env_for_repo(&cfg, "no/such-repo").is_empty());
+    }
+
+    #[test]
+    fn skip_permissions_only_for_autonomous_when_enabled() {
+        let mut cfg = pilot_config::Config::default();
+        // Default config has the toggle on.
+        assert!(cfg.agent.autonomous_skip_permissions);
+
+        // Autonomous + toggle on → bypass.
+        assert!(skip_permissions_for(true, &cfg));
+        // Interactive never bypasses, even with the toggle on — the
+        // prompt is the human-in-the-loop guard.
+        assert!(!skip_permissions_for(false, &cfg));
+
+        // Paranoid user flips the toggle off → no session bypasses.
+        cfg.agent.autonomous_skip_permissions = false;
+        assert!(!skip_permissions_for(true, &cfg));
+        assert!(!skip_permissions_for(false, &cfg));
     }
 
     #[test]

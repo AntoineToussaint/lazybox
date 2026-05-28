@@ -13,6 +13,12 @@ pub struct SpawnCtx {
     pub repo: Option<String>,
     pub pr_number: Option<String>,
     pub env: HashMap<String, String>,
+    /// Launch the agent with tool-use permission prompts disabled
+    /// ("no-permission" / bypass mode) so it runs unattended. Set only
+    /// for pilot-spawned autonomous sessions; honored by agents that
+    /// support a bypass flag (Claude → `--dangerously-skip-permissions`).
+    /// Agents without one ignore it.
+    pub skip_permissions: bool,
 }
 
 pub trait Agent: Send + Sync {
@@ -355,11 +361,19 @@ pub mod builtins {
         fn display_name(&self) -> &'static str {
             "Claude Code"
         }
-        fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
-            vec!["claude".into()]
+        fn spawn(&self, ctx: &SpawnCtx) -> Vec<String> {
+            let mut argv = vec!["claude".into()];
+            if ctx.skip_permissions {
+                argv.push("--dangerously-skip-permissions".into());
+            }
+            argv
         }
-        fn resume(&self, _ctx: &SpawnCtx) -> Vec<String> {
-            vec!["claude".into(), "--continue".into()]
+        fn resume(&self, ctx: &SpawnCtx) -> Vec<String> {
+            let mut argv = vec!["claude".into(), "--continue".into()];
+            if ctx.skip_permissions {
+                argv.push("--dangerously-skip-permissions".into());
+            }
+            argv
         }
 
         /// Claude Code's input area batches rapid byte arrival as a

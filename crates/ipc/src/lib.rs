@@ -708,6 +708,12 @@ pub enum Event {
         terminal_id: TerminalId,
         session_key: SessionKey,
         kind: TerminalKind,
+        /// Launched in no-permission / bypass mode (autonomous
+        /// session running unattended). Drives the session UI's
+        /// "no-perms" indicator. Always `false` for interactive and
+        /// shell terminals.
+        #[serde(default)]
+        no_permission: bool,
     },
     TerminalOutput {
         terminal_id: TerminalId,
@@ -949,6 +955,11 @@ pub struct TerminalSnapshot {
     /// this into its libghostty-vt to reconstruct the screen.
     pub replay: Vec<u8>,
     pub last_seq: u64,
+    /// Launched in no-permission / bypass mode. Lets a reconnecting
+    /// client re-render the "no-perms" indicator without waiting for
+    /// a fresh `TerminalSpawned`.
+    #[serde(default)]
+    pub no_permission: bool,
 }
 
 // ── Transport abstraction ──────────────────────────────────────────────

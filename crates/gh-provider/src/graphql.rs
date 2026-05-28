@@ -496,6 +496,20 @@ pub fn query_body(search_query: &str) -> serde_json::Value {
     query_body_after(search_query, None)
 }
 
+/// Per-page size for the PR search. Was 100 (GraphQL's maximum)
+/// but with the heavy SEARCH_QUERY payload, GitHub's GraphQL
+/// gateway timed out (HTTP 502 / 504 "We couldn't respond to your
+/// request in time") on every attempt — user logs from
+/// 2026-05-28 showed PR sync failing every cycle while the
+/// lighter issues query (still on 100/page) succeeded fine.
+///
+/// 25 gives GitHub's gateway 4× the per-request compute budget to
+/// resolve our connections, at the cost of 4× the page count for
+/// users with 100+ involved PRs. Empirically GitHub's gateway
+/// budget is closer to the per-request side than the per-result
+/// side, so smaller pages win.
+const PR_PAGE_SIZE: u32 = 25;
+
 pub fn query_body_after(search_query: &str, after: Option<&str>) -> serde_json::Value {
     // Omit `after` entirely when None — sending `"after": null` in the
     // variables block trips GitHub's GraphQL with a misleading
@@ -505,12 +519,12 @@ pub fn query_body_after(search_query: &str, after: Option<&str>) -> serde_json::
     let variables = match after {
         Some(cursor) => serde_json::json!({
             "query": search_query,
-            "first": 100,
+            "first": PR_PAGE_SIZE,
             "after": cursor,
         }),
         None => serde_json::json!({
             "query": search_query,
-            "first": 100,
+            "first": PR_PAGE_SIZE,
         }),
     };
     serde_json::json!({

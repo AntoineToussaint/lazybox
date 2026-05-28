@@ -191,6 +191,32 @@ impl TaskSource for ActionEmittingSource {
     }
 }
 
+/// Fake source that returns a fixed task set AND advertises a
+/// caller-specified `PolledScope`. Used by rescope tests that want
+/// to exercise partial-coverage behavior end-to-end through
+/// `tick_with_state` instead of building `TickOutcome` by hand.
+struct ScopedSource {
+    name: String,
+    tasks: Vec<Task>,
+    scope: polling::PolledScope,
+}
+
+impl TaskSource for ScopedSource {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn fetch<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    {
+        let tasks = self.tasks.clone();
+        Box::pin(async move { Ok(tasks) })
+    }
+    fn polled_scope(&self) -> polling::PolledScope {
+        self.scope.clone()
+    }
+}
+
 // ── tick() / upsert() ───────────────────────────────────────────────
 
 #[tokio::test]
@@ -1189,7 +1215,7 @@ async fn rescope_removes_workspaces_with_no_active_session() {
         any_source_succeeded: true,
         retry_after_secs: None,
         saw_unknown_mergeable: false,
-        source_scopes: Vec::new(),
+        source_scopes: std::collections::HashMap::new(),
     };
     polling::rescope(&config, &outcome).await;
 
@@ -1235,7 +1261,7 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
         any_source_succeeded: true,
         retry_after_secs: None,
         saw_unknown_mergeable: false,
-        source_scopes: Vec::new(),
+        source_scopes: std::collections::HashMap::new(),
     };
     let mut state = polling::TickState::default();
     polling::rescope_with_state(&config, &outcome, &mut state).await;
@@ -1293,7 +1319,7 @@ async fn rescope_with_empty_but_successful_poll_keeps_workspaces() {
         any_source_succeeded: true,
         retry_after_secs: None,
         saw_unknown_mergeable: false,
-        source_scopes: Vec::new(),
+        source_scopes: std::collections::HashMap::new(),
     };
     polling::rescope(&config, &outcome).await;
     let after: Vec<String> = config
@@ -1322,7 +1348,7 @@ async fn rescope_with_all_sources_failed_skips_cleanup() {
         any_source_succeeded: false,
         retry_after_secs: None,
         saw_unknown_mergeable: false,
-        source_scopes: Vec::new(),
+        source_scopes: std::collections::HashMap::new(),
     };
     polling::rescope(&config, &outcome).await;
     let after: Vec<String> = config
@@ -1393,10 +1419,10 @@ async fn rescope_preserves_workspaces_from_unpolled_repos() {
         any_source_succeeded: true,
         retry_after_secs: None,
         saw_unknown_mergeable: false,
-        source_scopes: vec![(
+        source_scopes: std::collections::HashMap::from([(
             "github".into(),
             polling::PolledScope::Repos(vec!["owner/polled".into()]),
-        )],
+        )]),
     };
     polling::rescope(&config, &outcome).await;
 
@@ -1445,7 +1471,10 @@ async fn rescope_with_exhaustive_scope_still_deletes_stale() {
         any_source_succeeded: true,
         retry_after_secs: None,
         saw_unknown_mergeable: false,
-        source_scopes: vec![("github".into(), polling::PolledScope::Exhaustive)],
+        source_scopes: std::collections::HashMap::from([(
+            "github".into(),
+            polling::PolledScope::Exhaustive,
+        )]),
     };
     polling::rescope(&config, &outcome).await;
 
@@ -1494,7 +1523,10 @@ async fn rescope_preserves_workspaces_from_unreported_sources() {
         any_source_succeeded: true,
         retry_after_secs: None,
         saw_unknown_mergeable: false,
-        source_scopes: vec![("linear".into(), polling::PolledScope::Exhaustive)],
+        source_scopes: std::collections::HashMap::from([(
+            "linear".into(),
+            polling::PolledScope::Exhaustive,
+        )]),
     };
     // `polled` is empty so the existing "empty polled, refuse to
     // wipe" guard fires before our new scope guard — assert the
@@ -1532,28 +1564,6 @@ async fn rescope_round_robin_tick_after_global_keeps_unpolled() {
     // still in the store — they belong to repos we didn't query
     // this tick, not repos that fell out of upstream scope.
     use pilot_core::{Task, TaskId};
-    use std::pin::Pin;
-
-    struct ScopedSource {
-        name: String,
-        tasks: Vec<Task>,
-        scope: polling::PolledScope,
-    }
-    impl polling::TaskSource for ScopedSource {
-        fn name(&self) -> &str {
-            &self.name
-        }
-        fn fetch<'a>(
-            &'a self,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
-        {
-            let tasks = self.tasks.clone();
-            Box::pin(async move { Ok(tasks) })
-        }
-        fn polled_scope(&self) -> polling::PolledScope {
-            self.scope.clone()
-        }
-    }
 
     fn gh_task(repo: &str, num: u32) -> Task {
         let mut t = make_task(&format!("{repo}#{num}"));

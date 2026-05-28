@@ -490,18 +490,29 @@ impl Server {
                             // row iteration off the runtime worker so
                             // `select!` stays responsive to bus events
                             // while the snapshot loads.
-                            let store_for_ws = self.config.store.clone();
-                            let store_for_proj = self.config.store.clone();
-                            let workspaces = tokio::task::spawn_blocking(move || {
-                                load_workspaces(&*store_for_ws)
-                            })
+                            //
+                            // Both scans share one task so the daemon
+                            // only pays the spawn/handoff cost once and
+                            // doesn't sequentially await two dispatches.
+                            // A panic inside the task (poisoned mutex,
+                            // corrupt JSON) is logged loudly — sending
+                            // an empty Snapshot silently would render a
+                            // blank sidebar with no breadcrumb in the
+                            // log.
+                            let store = self.config.store.clone();
+                            let (workspaces, projects) = match tokio::task::spawn_blocking(
+                                move || (load_workspaces(&*store), load_projects(&*store)),
+                            )
                             .await
-                            .unwrap_or_default();
-                            let projects = tokio::task::spawn_blocking(move || {
-                                load_projects(&*store_for_proj)
-                            })
-                            .await
-                            .unwrap_or_default();
+                            {
+                                Ok(pair) => pair,
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Subscribe snapshot load task failed: {e} — sending empty snapshot",
+                                    );
+                                    (Vec::new(), Vec::new())
+                                }
+                            };
                             let terminals = spawn_handler::snapshot_terminals(&self.config).await;
                             let _ = conn.tx.send(Event::Snapshot {
                                 workspaces,

@@ -73,19 +73,18 @@ pub trait TaskSource: Send + Sync + 'static {
     /// owned by a source whose scope this tick is authoritative for
     /// are candidates for removal.
     ///
-    /// Default is [`PolledScope::Exhaustive`] — "I covered everything
-    /// I own this tick." Sources that fan out across repos and only
-    /// query a slice per tick (e.g. `GhSource` with round-robin
-    /// scheduling) must override to return [`PolledScope::Repos`]
-    /// when they didn't run the global sweep.
+    /// Default is [`PolledScope::Repos(Vec::new())`] — "I covered no
+    /// repos authoritatively this tick", so `rescope` preserves every
+    /// stored workspace owned by this source. The destructive choice
+    /// ([`PolledScope::Exhaustive`]) requires an explicit override so
+    /// a forgetful source author can't silently re-introduce the
+    /// issue #34 bug: a new partial-coverage source (Jira polling one
+    /// project at a time, GitHub round-robining repos, …) that omits
+    /// the override gets the safe answer.
     ///
-    /// Without this override, a round-robin tick that only polled 3
-    /// of the user's 10 repos would let `rescope` delete every
-    /// workspace from the other 7 — they aren't in `polled` because
-    /// they weren't queried this tick, not because they fell out of
-    /// scope upstream. (Issue #34.)
+    /// `GhSource` and `LinearSource` both override below.
     fn polled_scope(&self) -> PolledScope {
-        PolledScope::Exhaustive
+        PolledScope::Repos(Vec::new())
     }
 
     /// Drain side-effect actions accumulated during the most recent
@@ -459,6 +458,13 @@ impl LinearSource {
 impl TaskSource for LinearSource {
     fn name(&self) -> &str {
         "linear"
+    }
+    /// Linear's `fetch_all` paginates through every issue the user
+    /// has access to with no per-team round-robin — one successful
+    /// fetch covers everything Linear owns this tick, so a workspace
+    /// not in `polled` genuinely fell out of upstream scope.
+    fn polled_scope(&self) -> PolledScope {
+        PolledScope::Exhaustive
     }
     fn fetch<'a>(
         &'a self,
@@ -966,12 +972,13 @@ pub async fn tick_with_state(
     // preserve them. (Issue #34: a round-robin GH tick only polls 3
     // of N repos; without per-source scope, `rescope` would delete
     // workspaces from the unpolled (N - 3) repos.)
-    let mut source_scopes: Vec<(String, PolledScope)> = Vec::new();
+    let mut source_scopes: std::collections::HashMap<String, PolledScope> =
+        std::collections::HashMap::new();
     for source in sources {
         match source.fetch().await {
             Ok(tasks) => {
                 any_source_succeeded = true;
-                source_scopes.push((source.name().to_string(), source.polled_scope()));
+                source_scopes.insert(source.name().to_string(), source.polled_scope());
                 let count = tasks.len();
                 tracing::info!(source = source.name(), count, "poll succeeded");
                 // 0-result polls are almost always misconfiguration —
@@ -1188,7 +1195,11 @@ pub struct TickOutcome {
     /// (legacy tests) construct an outcome manually; in those cases
     /// `rescope` falls back to its pre-#34 behavior of treating every
     /// stored workspace as exhaustively covered.
-    pub source_scopes: Vec<(String, PolledScope)>,
+    ///
+    /// A `HashMap` (not a `Vec`) because each source appears at most
+    /// once per tick — duplicates would be a bug, and the rescope
+    /// lookup is point-query by source name.
+    pub source_scopes: std::collections::HashMap<String, PolledScope>,
 }
 
 /// Compare `polled` against the persisted workspace set; remove
@@ -1258,16 +1269,12 @@ pub async fn rescope_with_state(
     // workspace not in `polled` got deleted — so PRs from the
     // unpolled (N - 3) repos disappeared every warm tick.
     //
-    // Empty `source_scopes` (legacy callers, test fixtures, the
-    // no-sources path) falls back to the pre-#34 behavior: every
-    // unpolled workspace is a deletion candidate. The production
-    // poll loop always populates this.
-    let scope_by_source: std::collections::HashMap<&str, &PolledScope> = outcome
-        .source_scopes
-        .iter()
-        .map(|(name, scope)| (name.as_str(), scope))
-        .collect();
-    let scope_aware = !scope_by_source.is_empty();
+    // An empty map (legacy callers, test fixtures, the no-sources
+    // path) signals "no per-source info this tick" — we fall back
+    // to the pre-#34 behavior of treating every unpolled workspace
+    // as a deletion candidate. The production poll loop always
+    // populates this.
+    let scope_by_source = &outcome.source_scopes;
 
     let records = match config.store.list_workspaces() {
         Ok(r) => r,
@@ -1326,11 +1333,11 @@ pub async fn rescope_with_state(
         // or whose repo wasn't in the polled slice (round-robin)
         // must be preserved — we have no fresh information about it.
         //
-        // Workspaces with no primary task fall through to the
-        // existing locally-created guard above; orphans without
-        // project_key (shouldn't happen but defensive) are treated
-        // as in-scope so a corrupt row doesn't survive forever.
-        if scope_aware
+        // Empty `scope_by_source` keeps legacy behavior (every
+        // unpolled workspace is a candidate); orphans with no
+        // primary task fall through to the existing locally-created
+        // guard above.
+        if !scope_by_source.is_empty()
             && let Some(task) = stored_ws.as_ref().and_then(|w| w.primary_task())
         {
             let source = task.id.source.as_str();
@@ -1686,7 +1693,7 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
             any_source_succeeded: true,
             retry_after_secs: None,
             saw_unknown_mergeable: false,
-            source_scopes: Vec::new(),
+            source_scopes: std::collections::HashMap::new(),
         };
         rescope_with_state(config, &outcome, &mut state).await;
         return TickSummary::default();
@@ -1728,7 +1735,7 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
                 any_source_succeeded: false,
                 retry_after_secs: Some(30),
                 saw_unknown_mergeable: false,
-                source_scopes: Vec::new(),
+                source_scopes: std::collections::HashMap::new(),
             }
         }
     };

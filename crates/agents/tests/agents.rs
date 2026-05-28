@@ -15,6 +15,7 @@ fn sample_ctx() -> SpawnCtx {
         repo: Some("o/r".into()),
         pr_number: Some("1".into()),
         env: HashMap::new(),
+        autonomous: false,
     }
 }
 
@@ -36,6 +37,37 @@ fn claude_spawn_and_resume_argv() {
         agent.resume(&ctx),
         vec!["claude".to_string(), "--continue".to_string()],
         "resume must use --continue so the previous conversation is picked up"
+    );
+}
+
+#[test]
+fn claude_autonomous_spawn_skips_permissions() {
+    // Unattended pilot spawns (auto-fix / auto-spawn-on-mention) run
+    // with no human at the terminal: the agent must clear the first-
+    // run workspace-trust dialog on a fresh worktree (otherwise the
+    // injected prompt lands in the trust chooser and is lost) and
+    // push edits without anyone to approve them. Both gates are
+    // bypassed by `--dangerously-skip-permissions`.
+    let agent = Claude;
+    let ctx = SpawnCtx {
+        autonomous: true,
+        ..sample_ctx()
+    };
+    assert_eq!(
+        agent.spawn(&ctx),
+        vec![
+            "claude".to_string(),
+            "--dangerously-skip-permissions".to_string()
+        ],
+    );
+    assert_eq!(
+        agent.resume(&ctx),
+        vec![
+            "claude".to_string(),
+            "--continue".to_string(),
+            "--dangerously-skip-permissions".to_string()
+        ],
+        "resume must keep both --continue and the permission bypass"
     );
 }
 

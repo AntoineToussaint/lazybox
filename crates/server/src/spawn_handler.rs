@@ -63,6 +63,7 @@ fn argv_for(
     config: &ServerConfig,
     kind: &TerminalKind,
     cwd: &Option<PathBuf>,
+    autonomous: bool,
 ) -> Option<Vec<String>> {
     match kind {
         TerminalKind::Agent(agent_id) => {
@@ -75,6 +76,7 @@ fn argv_for(
                 repo: None,
                 pr_number: None,
                 env: Default::default(),
+                autonomous,
             };
             Some(agent.spawn(&ctx))
         }
@@ -112,6 +114,7 @@ pub async fn handle_spawn(
     kind: TerminalKind,
     cwd: Option<String>,
     initial_prompt: Option<String>,
+    autonomous: bool,
 ) {
     tracing::info!(
         %session_key,
@@ -119,6 +122,7 @@ pub async fn handle_spawn(
         ?kind,
         cwd = ?cwd,
         has_initial_prompt = initial_prompt.is_some(),
+        autonomous,
         "handle_spawn: entry"
     );
     // Singleton enforcement at the daemon (the source of truth for
@@ -158,7 +162,7 @@ pub async fn handle_spawn(
                 }
             }
         };
-    let argv = match argv_for(config, &kind, &cwd_path) {
+    let argv = match argv_for(config, &kind, &cwd_path, autonomous) {
         Some(a) => a,
         None => {
             let _ = config.bus.send(Event::provider_error_permanent(
@@ -1385,6 +1389,9 @@ pub async fn handle_inject_prompt(
                     fb.kind,
                     fb.cwd,
                     Some(prompt.to_string()),
+                    // Interactive: this fallback only fires for a
+                    // user-driven `InjectPrompt` whose terminal died.
+                    false,
                 )
                 .await;
                 return;
@@ -1754,6 +1761,9 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 kind,
                 None,
                 None,
+                // Restoring a user-owned session on daemon start —
+                // keep the interactive permission behavior.
+                false,
             )
             .await;
         }

@@ -6,13 +6,26 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Context passed to `Agent::spawn` / `resume`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SpawnCtx {
     pub session_key: String,
     pub worktree: PathBuf,
     pub repo: Option<String>,
     pub pr_number: Option<String>,
     pub env: HashMap<String, String>,
+    /// True when pilot is spawning this agent to run UNATTENDED —
+    /// the polling-driven auto-fix / auto-spawn-on-mention flows,
+    /// where no human is watching the terminal. Agents that have a
+    /// "skip every permission gate" flag (Claude's
+    /// `--dangerously-skip-permissions`) add it here: a fresh
+    /// worktree otherwise stalls on the workspace-trust dialog (which
+    /// is only auto-skipped in non-interactive `-p` mode, and pilot
+    /// runs the agent in an interactive tmux PTY), and any subsequent
+    /// Edit/Bash approval prompt would deadlock with nobody to answer
+    /// it. Interactive spawns (the user pressed `s`/`f` and is
+    /// watching) leave this `false` so the permission prompts still
+    /// surface in the TUI.
+    pub autonomous: bool,
 }
 
 pub trait Agent: Send + Sync {
@@ -355,11 +368,15 @@ pub mod builtins {
         fn display_name(&self) -> &'static str {
             "Claude Code"
         }
-        fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
-            vec!["claude".into()]
+        fn spawn(&self, ctx: &SpawnCtx) -> Vec<String> {
+            let mut argv = vec!["claude".into()];
+            argv.extend(claude_autonomy_flags(ctx));
+            argv
         }
-        fn resume(&self, _ctx: &SpawnCtx) -> Vec<String> {
-            vec!["claude".into(), "--continue".into()]
+        fn resume(&self, ctx: &SpawnCtx) -> Vec<String> {
+            let mut argv = vec!["claude".into(), "--continue".into()];
+            argv.extend(claude_autonomy_flags(ctx));
+            argv
         }
 
         /// Claude Code's input area batches rapid byte arrival as a
@@ -620,6 +637,25 @@ pub mod builtins {
     /// need correctness for rendering (libghostty-vt does that) — just
     /// enough to make pattern matches survive cursor moves and color
     /// codes interleaved with the literal text.
+    /// Extra argv Claude needs when pilot spawns it UNATTENDED.
+    ///
+    /// `--dangerously-skip-permissions` bypasses every permission
+    /// check, which for an autonomous run is exactly right: it skips
+    /// the first-run workspace-trust dialog (the gate that was eating
+    /// auto-fix's injected prompt on a fresh worktree — the trust
+    /// dialog is only auto-skipped in non-interactive `-p` mode, and
+    /// pilot runs Claude in an interactive tmux PTY) AND the Edit/Bash
+    /// approval prompts that would otherwise deadlock a run with no
+    /// human at the keyboard. Empty for interactive spawns so the
+    /// user still gets asked.
+    fn claude_autonomy_flags(ctx: &SpawnCtx) -> Vec<String> {
+        if ctx.autonomous {
+            vec!["--dangerously-skip-permissions".into()]
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Detect Claude's ASCII selection-arrow at ANY numbered option:
     /// `> 0.`–`> 9.` or `> 0)`–`> 9)`.
     ///

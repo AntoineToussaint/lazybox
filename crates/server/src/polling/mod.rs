@@ -751,6 +751,11 @@ async fn dispatch_action(
                 pilot_ipc::TerminalKind::Agent(agent_id),
                 None,
                 prompt,
+                // Unattended spawn — no human is watching this
+                // terminal, so the agent must run past the workspace-
+                // trust dialog and any tool-approval prompts on its
+                // own (see `SpawnCtx::autonomous`).
+                true,
             )
             .await;
         }
@@ -869,6 +874,12 @@ async fn dispatch_action(
                         term_kind,
                         None,
                         prompt,
+                        // Unattended auto-fix spawn — the agent has to
+                        // clear the first-run workspace-trust dialog on
+                        // the fresh worktree (else the injected fix
+                        // prompt lands in the trust chooser) and push a
+                        // fix without a human to approve its edits.
+                        true,
                     )
                     .await;
                 }

@@ -557,6 +557,11 @@ impl Server {
                                 kind,
                                 cwd,
                                 initial_prompt,
+                                // Interactive spawn: the user pressed `s`/`f`
+                                // and is watching this terminal, so leave the
+                                // permission prompts in place — they surface
+                                // in the TUI for the user to approve.
+                                false,
                             )
                             .await;
                         }

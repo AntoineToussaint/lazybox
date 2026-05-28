@@ -238,7 +238,13 @@ mod tests {
         }
         // Exhausted within the window.
         assert!(matches!(
-            check_and_record(&store, "ws", AutoFixKind::CiFailure, &s, t0() + chrono::Duration::hours(7)),
+            check_and_record(
+                &store,
+                "ws",
+                AutoFixKind::CiFailure,
+                &s,
+                t0() + chrono::Duration::hours(7)
+            ),
             AttemptDecision::Exhausted { .. }
         ));
         // >24h after the window started → fresh budget.

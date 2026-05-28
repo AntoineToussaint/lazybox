@@ -2741,7 +2741,7 @@ fn readmit_is_noop_without_mentions() {
 
 #[tokio::test]
 async fn tick_dispatches_auto_fix_action_spawns_agent() {
-    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let (config, mock) = ServerConfig::in_memory_with_mock();
     let mut bus_rx = config.bus.subscribe();
 
     let task = make_task("o/r#202");
@@ -2780,6 +2780,19 @@ async fn tick_dispatches_auto_fix_action_spawns_agent() {
     assert!(
         saw_spawn,
         "AutoFixPr action under its attempt budget must trigger TerminalSpawned"
+    );
+
+    // The auto-fix agent runs unattended on a possibly-fresh worktree,
+    // so it must be launched with `--dangerously-skip-permissions` —
+    // otherwise the first-run workspace-trust dialog eats the injected
+    // fix prompt and any later Edit/Bash approval deadlocks the run.
+    let argvs = mock.all_argv().await;
+    assert!(
+        argvs
+            .iter()
+            .any(|a| a.first().map(String::as_str) == Some("claude")
+                && a.iter().any(|s| s == "--dangerously-skip-permissions")),
+        "auto-fix spawn must pass --dangerously-skip-permissions; got {argvs:?}"
     );
 }
 

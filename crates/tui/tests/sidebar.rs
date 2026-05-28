@@ -586,19 +586,21 @@ fn render_to_string(s: &mut Sidebar, width: u16, height: u16, focused: bool) -> 
 #[test]
 fn render_smoke_has_mailbox_label_and_grouped_rows() {
     let mut s = populated_sidebar();
-    // Width 80 leaves breathing room for the `[PR]`/`[I]` type
-    // marker, role char, the dual-pill status column (19 cells),
-    // and the time trailer without truncating the title — this
-    // test is about presence, not density.
+    // Width 80 leaves breathing room for the type glyph, role char,
+    // the dual-pill status column (19 cells), and the time trailer
+    // without truncating the title — this test is about presence,
+    // not density.
     let rendered = render_to_string(&mut s, 80, 12, true);
     // V1-style brand label: `PILOT` for the Inbox mailbox.
     assert!(rendered.contains("PILOT"));
     assert!(rendered.contains('2'), "row count in title");
     assert!(rendered.contains("owner/repo"), "repo header rendered");
     assert!(rendered.contains("task: o/r#1"), "first workspace visible");
+    // The PR (`⇄`) sits flush against the `#NNN` cell — `⇄#1` /
+    // `○#1`, see issue #42.
     assert!(
-        rendered.contains("[PR]"),
-        "PR rows carry an explicit [PR] type marker",
+        rendered.contains('⇄') || rendered.contains('○'),
+        "rows carry a single-cell type glyph",
     );
 }
 

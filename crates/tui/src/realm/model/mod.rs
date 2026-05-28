@@ -1160,9 +1160,11 @@ impl<T: TerminalAdapter> Model<T> {
         // actionable right now, not a generic alphabet. The full
         // keymap stays in `?` help.
         let keymap: Vec<crate::pane::Binding> = match self.focus {
-            PaneFocus::Sidebar => self.sidebar.contextual_bindings(),
-            PaneFocus::Right => self.right.contextual_bindings(),
-            PaneFocus::Terminals => self.terminals.contextual_bindings(),
+            PaneFocus::Sidebar => self.sidebar.contextual_bindings(&self.action_key_overrides),
+            PaneFocus::Right => self.right.contextual_bindings(&self.action_key_overrides),
+            PaneFocus::Terminals => self
+                .terminals
+                .contextual_bindings(&self.action_key_overrides),
         };
         let notice = self.status.notice.clone();
         let mut captured_area = Rect::default();

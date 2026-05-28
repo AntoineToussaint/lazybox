@@ -771,6 +771,23 @@ impl ActionDef {
         }
         self.default_chord()
     }
+
+    /// Resolve the display string for this action's effective key
+    /// binding: user override if present and parseable, otherwise the
+    /// catalog default. Mirrors `effective_chord` but returns the raw
+    /// string for footer / help rendering — surfaces what the user
+    /// actually has to press, not the catalog's default.
+    pub fn effective_keys_display(
+        &self,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> std::borrow::Cow<'static, str> {
+        if let Some(raw) = overrides.get(self.kind.name())
+            && KeyChord::parse(raw).is_some()
+        {
+            return std::borrow::Cow::Owned(raw.clone());
+        }
+        std::borrow::Cow::Borrowed(self.default_keys)
+    }
 }
 
 impl ActionKind {
@@ -1037,6 +1054,35 @@ mod tests {
         let overrides = BTreeMap::new();
         let def = ActionDef::for_kind(ActionKind::Refresh);
         assert_eq!(def.effective_chord(&overrides), def.default_chord());
+    }
+
+    #[test]
+    fn effective_keys_display_returns_default_without_override() {
+        // Footer / help should show the catalog default when the user
+        // hasn't remapped anything. Borrowed Cow keeps zero-alloc.
+        use std::borrow::Cow;
+        use std::collections::BTreeMap;
+        let overrides = BTreeMap::new();
+        let def = ActionDef::for_kind(ActionKind::Refresh);
+        assert_eq!(
+            def.effective_keys_display(&overrides),
+            Cow::Borrowed("Shift-R")
+        );
+    }
+
+    #[test]
+    fn effective_keys_display_returns_override_string() {
+        use std::collections::BTreeMap;
+        let mut overrides = BTreeMap::new();
+        overrides.insert("refresh".into(), "F5".into());
+        let def = ActionDef::for_kind(ActionKind::Refresh);
+        // F5 doesn't parse as a chord (no Function-key support yet),
+        // so it should fall back to the default — typo guard.
+        assert_eq!(def.effective_keys_display(&overrides), "Shift-R");
+
+        // A parseable override surfaces.
+        overrides.insert("refresh".into(), "Ctrl-r".into());
+        assert_eq!(def.effective_keys_display(&overrides), "Ctrl-r");
     }
 
     #[test]

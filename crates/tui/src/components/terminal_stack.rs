@@ -918,26 +918,35 @@ impl TerminalStack {
         None
     }
 
-    /// Bindings shown in the hint bar.
-    pub fn keymap(&self) -> &'static [crate::Binding] {
+    /// Bindings shown in the hint bar. Drops the legacy
+    /// `all keys → PTY` entry — that describes an implementation mode
+    /// rather than an actionable shortcut, so it was noise in the
+    /// footer. The user always knows their typing reaches the inner
+    /// program; what they need surfaced is *escape hatches*: scroll
+    /// the scrollback, leave the pane, send SIGINT. Keys are sourced
+    /// from the catalog where possible so a rebind / rename in
+    /// `ActionDef` flows through automatically.
+    pub fn contextual_bindings_static(
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<crate::Binding> {
         use crate::Binding;
-        &[
+        use pilot_tui_core::action::{ActionDef, ActionKind};
+        let scroll = ActionDef::for_kind(ActionKind::TerminalScroll);
+        let leave = ActionDef::for_kind(ActionKind::LeaveTerminal);
+        vec![
             Binding {
-                keys: "all keys",
-                label: "→ PTY",
+                keys: scroll.effective_keys_display(overrides),
+                label: std::borrow::Cow::Borrowed(scroll.label),
             },
             Binding {
-                keys: "Shift-PgUp/Dn",
-                label: "scroll",
+                keys: leave.effective_keys_display(overrides),
+                label: std::borrow::Cow::Borrowed(leave.label),
             },
-            Binding {
-                keys: "]]",
-                label: "exit to sidebar",
-            },
-            Binding {
-                keys: "Ctrl-c",
-                label: "interrupt",
-            },
+            // `Ctrl-c` is forwarded straight to the PTY rather than
+            // being a catalog action — but it's actionable knowledge
+            // for the user (escape a hung process), so it stays in
+            // the hint bar as a hand-curated entry.
+            Binding::new_static("Ctrl-c", "interrupt"),
         ]
     }
 

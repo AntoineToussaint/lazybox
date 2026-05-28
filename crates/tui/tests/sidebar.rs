@@ -1067,7 +1067,10 @@ fn contextual_bindings_surface_merge_on_ready_pr() {
         terminals: vec![],
         projects: vec![],
     });
-    let labels: Vec<&str> = s.contextual_bindings().iter().map(|b| b.label).collect();
+    let overrides = std::collections::BTreeMap::new();
+    let bindings = s.contextual_bindings(&overrides);
+    let labels: Vec<String> = bindings.iter().map(|b| b.label.to_string()).collect();
+    let labels: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
     assert!(
         labels.contains(&"merge PR"),
         "READY PR must surface the merge binding, got {labels:?}",
@@ -1084,7 +1087,10 @@ fn contextual_bindings_surface_fix_ci_when_red() {
         terminals: vec![],
         projects: vec![],
     });
-    let labels: Vec<&str> = s.contextual_bindings().iter().map(|b| b.label).collect();
+    let overrides = std::collections::BTreeMap::new();
+    let bindings = s.contextual_bindings(&overrides);
+    let labels: Vec<String> = bindings.iter().map(|b| b.label.to_string()).collect();
+    let labels: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
     assert!(
         labels.contains(&"fix CI"),
         "CI-failing PR must surface fix CI, got {labels:?}",
@@ -1093,6 +1099,32 @@ fn contextual_bindings_surface_fix_ci_when_red() {
         !labels.contains(&"merge"),
         "merge must NOT show when CI is failing, got {labels:?}",
     );
+}
+
+#[test]
+fn contextual_bindings_honor_user_key_overrides() {
+    // Issue #25 acceptance: a rebind in `ui.action_keys` should flow
+    // into the footer's `keys` column automatically. Footer rows
+    // resolve their key through `ActionDef::effective_keys_display`,
+    // so the single-source-of-truth invariant — "you can never see
+    // a hint for a key that isn't wired up" — holds end-to-end.
+    let mut s = Sidebar::new(PaneId::new(1));
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(
+            make_task("o/r", "o/r#1", Utc::now()),
+            Utc::now(),
+        )],
+        terminals: vec![],
+        projects: vec![],
+    });
+    let mut overrides = std::collections::BTreeMap::new();
+    overrides.insert("spawn_shell".to_string(), "Ctrl-t".to_string());
+    let bindings = s.contextual_bindings(&overrides);
+    let shell = bindings
+        .iter()
+        .find(|b| b.label == "shell")
+        .expect("shell binding must surface for a selected workspace");
+    assert_eq!(shell.keys, "Ctrl-t");
 }
 
 #[test]

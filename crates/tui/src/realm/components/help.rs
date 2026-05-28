@@ -22,8 +22,9 @@ pub struct HelpSection {
     /// Section title (rendered today flatten into one grid; reserved
     /// for future per-section styling).
     pub title: &'static str,
-    /// Bindings for this section.
-    pub bindings: &'static [Binding],
+    /// Bindings for this section. Owned so we can carry user-override
+    /// keys without leaking a `&'static` slice per render.
+    pub bindings: Vec<Binding>,
 }
 
 /// Yazi-style which-key panel.
@@ -32,33 +33,11 @@ pub struct Help {
 }
 
 impl Help {
-    /// Build from a list of sections. Legacy entry point — kept for
-    /// the splash / setup flows that want a curated help list. The
-    /// regular `?` modal uses `from_catalog` so it reads from the
-    /// single source of truth.
-    pub fn new(sections: Vec<HelpSection>) -> Self {
-        Self { sections }
-    }
-
     /// Build the help panel from `ActionDef::all()` — the canonical
-    /// catalog. Every action surfaces; the user sees a complete
-    /// reference instead of the pane-stitched subset the legacy
-    /// constructor produced. Sections collapse to one flat list
-    /// today (the renderer doesn't yet section-header), so we drop
-    /// the section labels — the catalog's ordering already groups
-    /// by `Section` so the visual grouping survives.
-    pub fn from_catalog() -> Self {
-        // Build a stable per-section static buffer so the public
-        // `bindings: &'static [Binding]` shape on `HelpSection`
-        // stays untouched. The catalog itself isn't `&[Binding]` —
-        // it's `impl Iterator<Item = &ActionDef>` — so we adapt by
-        // leaking a Vec into a `Box<[_]>` cast back to a static
-        // slice. One-shot, leak is fine: the help modal is mounted
-        // and unmounted but the static slice persists for the
-        // process lifetime, which costs ~30 bytes per action.
-        fn leak<T>(v: Vec<T>) -> &'static [T] {
-            Box::leak(v.into_boxed_slice())
-        }
+    /// catalog — honoring user keybinding overrides. Every action
+    /// surfaces; the user sees a complete reference instead of the
+    /// pane-stitched subset the legacy constructor produced.
+    pub fn from_catalog(overrides: &std::collections::BTreeMap<String, String>) -> Self {
         let mut by_section: std::collections::BTreeMap<u8, Vec<Binding>> =
             std::collections::BTreeMap::new();
         for def in ActionDef::all() {
@@ -69,8 +48,8 @@ impl Help {
                 Section::Terminal => 3,
             };
             by_section.entry(order).or_default().push(Binding {
-                keys: def.default_keys,
-                label: def.label,
+                keys: def.effective_keys_display(overrides),
+                label: std::borrow::Cow::Borrowed(def.label),
             });
         }
         let sections: Vec<HelpSection> = by_section
@@ -82,10 +61,7 @@ impl Help {
                     2 => "Activity",
                     _ => "Terminal",
                 };
-                HelpSection {
-                    title,
-                    bindings: leak(bindings),
-                }
+                HelpSection { title, bindings }
             })
             .collect();
         Self { sections }
@@ -158,7 +134,7 @@ impl Component for Help {
             }
 
             const KEY_PAD: usize = 14;
-            let mut key = format_keys_for_display(b.keys);
+            let mut key = format_keys_for_display(&b.keys);
             if key.chars().count() < KEY_PAD {
                 key.push_str(&" ".repeat(KEY_PAD - key.chars().count()));
             }
@@ -173,7 +149,7 @@ impl Component for Help {
                 Span::styled(" ", panel_bg),
                 Span::styled(key, key_style),
                 Span::styled("  ", sep_style),
-                Span::styled(b.label, label_style),
+                Span::styled(b.label.to_string(), label_style),
             ]);
             frame.render_widget(Paragraph::new(line), cell);
         }

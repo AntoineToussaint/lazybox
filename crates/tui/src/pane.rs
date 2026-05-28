@@ -19,12 +19,29 @@ impl PaneId {
 
 /// One entry in a Pane's keymap. Drives the bottom hint bar and the
 /// help overlay.
-#[derive(Debug, Clone, Copy)]
+///
+/// `keys` / `label` are `Cow<'static, str>` so a Binding can carry
+/// either a baked-in static (`"j"` / `"navigate"`) or a runtime-
+/// resolved string — the user's key override or a workspace-aware
+/// label like `"archive (kills sessions)"`. Static-only call sites
+/// stay zero-alloc via `Cow::Borrowed`; the catalog → footer pipeline
+/// switches to `Cow::Owned` only when a user override is in play.
+#[derive(Debug, Clone)]
 pub struct Binding {
     /// What the user presses (`"j"`, `"Tab"`, `"Ctrl-c"`, `"]]"`).
-    pub keys: &'static str,
+    pub keys: std::borrow::Cow<'static, str>,
     /// Short verb-phrase. Goes straight into the hint bar.
-    pub label: &'static str,
+    pub label: std::borrow::Cow<'static, str>,
+}
+
+impl Binding {
+    /// Builder for the (overwhelmingly common) static-literal case.
+    pub const fn new_static(keys: &'static str, label: &'static str) -> Self {
+        Self {
+            keys: std::borrow::Cow::Borrowed(keys),
+            label: std::borrow::Cow::Borrowed(label),
+        }
+    }
 }
 
 /// Returned by `Pane::detachable()` when this pane (or its content)

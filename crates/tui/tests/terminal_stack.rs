@@ -706,3 +706,43 @@ fn ctrl_w_arms_consumes_only_the_prefix() {
         "untouched keys go to the active terminal"
     );
 }
+
+#[test]
+fn footer_drops_all_keys_to_pty_noise() {
+    // Regression for issue #25: `all keys → PTY` was a footer entry
+    // that described an implementation mode rather than an actionable
+    // shortcut. The hint bar should now only carry escape hatches —
+    // scroll the scrollback, leave the pane, interrupt the process.
+    let overrides = std::collections::BTreeMap::new();
+    let bindings = TerminalStack::contextual_bindings_static(&overrides);
+    let labels: Vec<String> = bindings.iter().map(|b| b.label.to_string()).collect();
+    assert!(
+        !labels.iter().any(|l| l.contains("→ PTY")),
+        "footer must not advertise `→ PTY` mode, got {labels:?}",
+    );
+    let keys: Vec<String> = bindings.iter().map(|b| b.keys.to_string()).collect();
+    assert!(
+        !keys.iter().any(|k| k == "all keys"),
+        "footer must not advertise the `all keys` pseudo-binding, got {keys:?}",
+    );
+    // Sanity: scroll + exit + interrupt remain.
+    assert!(labels.iter().any(|l| l == "scroll"));
+    assert!(labels.iter().any(|l| l == "exit to sidebar"));
+    assert!(labels.iter().any(|l| l == "interrupt"));
+}
+
+#[test]
+fn footer_keys_follow_user_action_key_overrides() {
+    // Catalog-driven footer: a user rebind in `~/.pilot/config.yaml`
+    // → `ui.action_keys.leave_terminal: "Esc"` should appear in the
+    // footer's `keys` column without any extra plumbing. The original
+    // bug (footer drift from actual shortcuts) was that hint text was
+    // hardcoded separately from the dispatcher; the new design routes
+    // both through `ActionDef::effective_keys_display`.
+    let mut overrides = std::collections::BTreeMap::new();
+    overrides.insert("leave_terminal".to_string(), "Esc".to_string());
+    let bindings = TerminalStack::contextual_bindings_static(&overrides);
+    let leave = bindings.iter().find(|b| b.label == "exit to sidebar");
+    assert!(leave.is_some(), "leave-terminal binding must surface");
+    assert_eq!(leave.unwrap().keys, "Esc");
+}

@@ -168,15 +168,15 @@ impl<T: TerminalAdapter> Model<T> {
         // Terminal-pane escape sequence (`]]` by default). Two
         // consecutive presses of the escape char inside a terminal
         // return focus to the sidebar instead of forwarding to the
-        // PTY. The first `]` is held back; if a non-`]` key arrives
-        // before the second `]`, the held char is flushed to the PTY
-        // first so the user's `]` isn't silently swallowed.
-        //
-        // The same first `]` also arms the snippet-picker latch
-        // (issue #40). On a follow-up *printable* key (when
-        // snippets are configured), we open the picker with that
-        // char as initial filter instead of flushing the held `]`.
-        // The `]]` escape still wins because the `Key::Char(']')`
+        // PTY. The first `]` is held back via `escape_latch`; if a
+        // non-`]` key arrives before the second `]`, we either:
+        //   - mount the snippet picker (issue #40), when the
+        //     follow-up is a printable char AND a snippet library
+        //     is configured, OR
+        //   - flush the held `]` + the new key to the PTY, so
+        //     typing patterns like `]a` aren't lost when there are
+        //     no snippets.
+        // The `]]` escape always wins because the `Key::Char(']')`
         // branch is checked first.
         if self.focus == PaneFocus::Terminals
             && key.modifiers.is_empty()
@@ -186,13 +186,9 @@ impl<T: TerminalAdapter> Model<T> {
             if self.escape_latch.tap(ESCAPE_WINDOW) {
                 self.focus = PaneFocus::Sidebar;
                 self.set_focus_attr();
-                self.snippet_latch.disarm();
                 self.redraw = true;
                 return;
             }
-            // Arm the snippet latch alongside the escape latch — the
-            // next key decides which one fires.
-            self.snippet_latch.tap(ESCAPE_WINDOW);
             return;
         }
         if self.focus == PaneFocus::Terminals && self.escape_latch.is_armed() {
@@ -200,32 +196,23 @@ impl<T: TerminalAdapter> Model<T> {
             // Snippet trigger wins over flush-to-PTY when:
             //   - a snippet library is configured, AND
             //   - the follow-up key is a printable char with no
-            //     modifiers (Ctrl-X, F-keys, arrows are passed
-            //     through to the PTY).
-            //
+            //     modifiers (Ctrl-X, F-keys, arrows pass through
+            //     to the PTY).
             // The mounted picker captures further typing; that's
-            // why we return early after mounting. If we didn't,
-            // the post-mount `match self.focus` path below would
-            // also forward this same key to the PTY — duplicating
-            // it once into the picker and once into the agent's
-            // input.
-            let printable = key.modifiers.is_empty()
-                && matches!(key.code, Key::Char(c) if !c.is_control());
-            if printable && !self.snippets.is_empty() {
-                self.snippet_latch.disarm();
-                let initial = match key.code {
-                    Key::Char(c) => c.to_string(),
-                    _ => String::new(),
-                };
-                self.mount_snippet_picker(initial);
+            // why we return early. If we didn't, the post-mount
+            // pane-dispatch below would also forward this key to
+            // the PTY — duplicating it once into the picker and
+            // once into the agent's input.
+            if !self.snippets.is_empty()
+                && let Key::Char(c) = key.code
+                && !c.is_control()
+            {
+                self.mount_snippet_picker(c.to_string());
                 self.redraw = true;
                 return;
             }
-            self.snippet_latch.disarm();
             // Non-`]` key + no snippet match → flush the held `]`
-            // to the PTY before the new key, so typing patterns
-            // like `]a` (when no snippets are configured) aren't
-            // lost.
+            // to the PTY before the new key.
             let mut held_cmds: Vec<IpcCommand> = Vec::new();
             let held = crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char(self.ui_defaults.terminal_escape_char),

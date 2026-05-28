@@ -419,17 +419,12 @@ pub struct Model<T: TerminalAdapter> {
     /// decide whether to mount the picker. Empty when neither file
     /// exists (the typical first-run state).
     pub(crate) snippets: pilot_config::Snippets,
-    /// Snapshot of the rows the active SnippetPicker is showing —
-    /// indexed by `Msg::ChoicePicked` to recover the underlying
-    /// snippet on submit. Cleared on mount/unmount.
-    pub(crate) snippet_choices:
-        Vec<crate::realm::components::snippet_picker::PickerRow>,
-    /// `]` latch in the terminal pane. First `]` arms; the next
-    /// non-`]` printable key opens the picker pre-filled with it.
-    /// Disambiguates from the existing `escape_latch` (`]]` →
-    /// sidebar) — both can be armed simultaneously and the snippet
-    /// path wins only when a NON-`]` printable lands.
-    pub(crate) snippet_latch: crate::confirm_latch::DoubleTapLatch,
+    /// Snapshot of the snippet keys the active SnippetPicker is
+    /// showing — indexed by `Msg::ChoicePicked` to recover the
+    /// underlying entry via `self.snippets.get(...)`. Cleared on
+    /// mount/unmount. Storing keys (not full rows) avoids cloning
+    /// the snippet body twice on every picker mount.
+    pub(crate) snippet_choices: Vec<String>,
     /// Inertia damper for trackpad scroll. macOS sends ~20-50 wheel
     /// events per flick (the OS inertia phase); each one moves the
     /// viewport `STEP` rows, so a single gesture scrolls hundreds of
@@ -572,9 +567,8 @@ impl<T: TerminalAdapter> Model<T> {
             pending_action_confirm: None,
             pending_new_workspace_project: None,
             pending_focus_project_name: None,
-            snippets: pilot_config::Snippets::empty(),
+            snippets: pilot_config::Snippets::default(),
             snippet_choices: Vec::new(),
-            snippet_latch: crate::confirm_latch::DoubleTapLatch::new(),
             scroll_inertia: None,
         }
     }
@@ -796,32 +790,32 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Mount the snippet picker with an initial filter (typically
-    /// the single char the user typed after `]`). The picker's row
-    /// snapshot is stashed in `self.snippet_choices` so
-    /// `handle_choice_picked` can resolve a picked index back to a
-    /// snippet body without re-running the filter.
+    /// the single char the user typed after `]`). Picker rows are
+    /// derived from the model's snippet collection; their keys are
+    /// stashed in `self.snippet_choices` so `handle_choice_picked`
+    /// can resolve a picked index back to a snippet via
+    /// `self.snippets.get(...)` without re-running the filter.
     pub(crate) fn mount_snippet_picker(&mut self, initial_filter: String) {
         use crate::realm::components::snippet_picker::{PickerRow, SnippetPicker};
         if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
             return;
         }
-        let rows: Vec<PickerRow> = self
-            .snippets
-            .entries()
-            .into_iter()
-            .map(|(k, v)| PickerRow::from(k, v))
-            .collect();
-        if rows.is_empty() {
-            // Don't open a picker over an empty list — the user
-            // typed `]<key>` expecting a snippet and there are
-            // none. Flash a hint pointing at the snippets file
+        if self.snippets.is_empty() {
+            // The user typed `]<key>` expecting a snippet and there
+            // are none. Flash a hint pointing at the snippets file
             // so they know how to configure one.
             self.flash_info(
                 "no snippets configured — add some to ~/.pilot/snippets.yaml",
             );
             return;
         }
-        self.snippet_choices = rows.clone();
+        let mut rows = Vec::with_capacity(self.snippets.len());
+        let mut keys = Vec::with_capacity(self.snippets.len());
+        for (k, v) in self.snippets.all() {
+            rows.push(PickerRow::new(k, v));
+            keys.push(k.to_string());
+        }
+        self.snippet_choices = keys;
         let picker = SnippetPicker::new(rows, initial_filter);
         self.mount_modal(Id::SnippetPicker, picker);
     }

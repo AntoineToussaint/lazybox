@@ -102,25 +102,31 @@ pub enum SnippetsError {
 }
 
 impl Snippets {
-    /// Empty collection. Use this when neither file exists.
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
     /// Load from a specific file. Missing file → empty collection
     /// (no error — snippet files are optional). Origin is stamped
     /// on every entry so the picker can show provenance.
+    ///
+    /// We match on `ErrorKind::NotFound` from the read itself
+    /// rather than gating on a prior `path.exists()` check — that
+    /// would race a file removal between the two calls and surface
+    /// as a misleading `Io` error.
     pub fn load_from(path: &Path, origin: SnippetOrigin) -> Result<Self, SnippetsError> {
-        if !path.exists() {
-            return Ok(Self::empty());
-        }
-        let raw = std::fs::read_to_string(path)?;
+        let raw = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(e) => return Err(e.into()),
+        };
         let file: SnippetsFile = serde_yaml::from_str(&raw)?;
-        let mut by_key = BTreeMap::new();
-        for (k, mut snippet) in file.snippets {
-            snippet.origin = origin;
-            by_key.insert(k, snippet);
-        }
+        let by_key = file
+            .snippets
+            .into_iter()
+            .map(|(k, mut s)| {
+                s.origin = origin;
+                (k, s)
+            })
+            .collect();
         Ok(Self { by_key })
     }
 
@@ -141,7 +147,7 @@ impl Snippets {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("failed to load global snippets: {e}");
-                Self::empty()
+                Self::default()
             }
         }
     }
@@ -153,7 +159,7 @@ impl Snippets {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("failed to load repo snippets at {}: {e}", repo_root.display());
-                Self::empty()
+                Self::default()
             }
         }
     }
@@ -161,13 +167,10 @@ impl Snippets {
     /// Merge two snippet sets. Entries in `overlay` win on key
     /// conflict. Used to stack repo-local on top of global so a
     /// project can override a shared shortcut without touching the
-    /// user's library. Returns the merged set; neither input is
-    /// preserved.
+    /// user's library.
     pub fn merged(base: Self, overlay: Self) -> Self {
         let mut by_key = base.by_key;
-        for (k, v) in overlay.by_key {
-            by_key.insert(k, v);
-        }
+        by_key.extend(overlay.by_key);
         Self { by_key }
     }
 
@@ -184,9 +187,10 @@ impl Snippets {
         self.by_key.get(key)
     }
 
-    /// All snippets, sorted by key for stable picker layout.
-    pub fn all(&self) -> impl Iterator<Item = (&String, &Snippet)> {
-        self.by_key.iter()
+    /// All snippets, in key order. Lazy — no allocation. Caller
+    /// decides whether to collect or stream.
+    pub fn all(&self) -> impl Iterator<Item = (&str, &Snippet)> {
+        self.by_key.iter().map(|(k, v)| (k.as_str(), v))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -196,54 +200,6 @@ impl Snippets {
     pub fn len(&self) -> usize {
         self.by_key.len()
     }
-
-    /// Filter for the picker. Empty query → every snippet (key
-    /// order). Non-empty → entries whose KEY or DESCRIPTION contains
-    /// `query`, case-insensitively. Stable sort: key-prefix matches
-    /// first, then key-contains, then description-contains. Within
-    /// each tier, alphabetical by key — the picker is for keyboard
-    /// users and "type the prefix, hit Enter" should consistently
-    /// land on the same item.
-    pub fn filter(&self, query: &str) -> Vec<&Snippet> {
-        let q = query.trim().to_ascii_lowercase();
-        if q.is_empty() {
-            return self.by_key.values().collect();
-        }
-        let mut tiered: Vec<(u8, &String, &Snippet)> = self
-            .by_key
-            .iter()
-            .filter_map(|(k, v)| {
-                let kl = k.to_ascii_lowercase();
-                let dl = v.description.to_ascii_lowercase();
-                let tier = if kl.starts_with(&q) {
-                    0
-                } else if kl.contains(&q) {
-                    1
-                } else if dl.contains(&q) {
-                    2
-                } else {
-                    return None;
-                };
-                Some((tier, k, v))
-            })
-            .collect();
-        tiered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(b.1)));
-        tiered.into_iter().map(|(_, _, v)| v).collect()
-    }
-
-    /// Picker row layout — key + value pairs in the order the
-    /// picker should render. Walks the merged map, so repo
-    /// overrides are already in effect.
-    pub fn entries(&self) -> Vec<(&String, &Snippet)> {
-        self.by_key.iter().collect()
-    }
-
-    /// Snippet keys, sorted. Convenience for the model code that
-    /// stashes "picker offered these snippets in this order" so
-    /// `Msg::ChoicePicked(idx)` can resolve back to a key.
-    pub fn keys(&self) -> Vec<String> {
-        self.by_key.keys().cloned().collect()
-    }
 }
 
 #[cfg(test)]
@@ -251,10 +207,9 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    /// Helper: write a snippets YAML into a `tempfile::NamedTempFile`-
-    /// shaped tmp dir and return the path. We don't want the real
-    /// crate `tempfile` here (avoid a new dep) — std::env::temp_dir
-    /// plus a unique name is enough for these unit tests.
+    /// Helper: write a snippets YAML into a unique tmp dir and
+    /// return the path. We don't pull in the `tempfile` crate just
+    /// for tests — `std::env::temp_dir` + a unique name is enough.
     fn write_tmp(name: &str, contents: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "pilot-snippets-test-{}-{}",
@@ -333,21 +288,18 @@ snippets:
         let repo = Snippets::load_from(&repo_path, SnippetOrigin::Repo).unwrap();
         let merged = Snippets::merged(global, repo);
         assert_eq!(merged.len(), 3);
-        // `rev` should be the repo version.
         let rev = merged.get("rev").unwrap();
         assert_eq!(rev.description, "Repo-specific review");
         assert_eq!(rev.body, "repo body");
         assert_eq!(rev.origin, SnippetOrigin::Repo);
-        // The repo-only entry is present.
         assert_eq!(merged.get("deploy").unwrap().origin, SnippetOrigin::Repo);
-        // The global-only entry is present.
         assert_eq!(merged.get("shared").unwrap().origin, SnippetOrigin::Global);
     }
 
     #[test]
-    fn filter_empty_returns_all_in_key_order() {
+    fn all_yields_entries_in_key_order() {
         let path = write_tmp(
-            "filter-all",
+            "all-order",
             r#"
 snippets:
   zeta:
@@ -362,43 +314,8 @@ snippets:
 "#,
         );
         let s = Snippets::load_from(&path, SnippetOrigin::Global).unwrap();
-        let all = s.filter("");
-        let keys: Vec<_> = all.iter().map(|v| v.description.as_str()).collect();
-        // BTreeMap iteration is alphabetic by key: alpha, mid, zeta.
-        assert_eq!(keys, vec!["first", "middle", "last"]);
-    }
-
-    /// Prefix matches on KEY come before contains-matches; contains
-    /// on description comes last. Pins the tier order so the
-    /// auto-submit "exact key match" path lands on the right row.
-    #[test]
-    fn filter_tiers_prefix_then_contains() {
-        let path = write_tmp(
-            "filter-tiers",
-            r#"
-snippets:
-  rev:
-    description: nothing
-    body: ""
-  preview:
-    description: something with rev inside the description
-    body: ""
-  arrev:
-    description: nothing
-    body: ""
-"#,
-        );
-        let s = Snippets::load_from(&path, SnippetOrigin::Global).unwrap();
-        let out = s.filter("rev");
-        // `rev` (key prefix) first, then `arrev` (key contains),
-        // then `preview` (description contains). With three rows the
-        // description of the third row pins the description-tier
-        // landing in last place.
-        assert_eq!(out.len(), 3);
-        assert_eq!(
-            out[2].description,
-            "something with rev inside the description"
-        );
+        let keys: Vec<&str> = s.all().map(|(k, _)| k).collect();
+        assert_eq!(keys, vec!["alpha", "mid", "zeta"]);
     }
 
     /// Lookup by exact key — the auto-submit path uses this.
@@ -448,5 +365,22 @@ snippets: {}
         );
         let s = Snippets::load_from(&path, SnippetOrigin::Global).unwrap();
         assert!(s.is_empty());
+    }
+
+    /// Malformed YAML surfaces as `SnippetsError::Parse`, not a
+    /// silent empty load — users will want to know they typo'd.
+    #[test]
+    fn malformed_yaml_surfaces_parse_error() {
+        let path = write_tmp(
+            "bad-yaml",
+            r#"
+snippets:
+  rev:
+    body: [this is not a valid mapping value
+"#,
+        );
+        let err = Snippets::load_from(&path, SnippetOrigin::Global)
+            .expect_err("malformed YAML should error");
+        assert!(matches!(err, SnippetsError::Parse(_)));
     }
 }

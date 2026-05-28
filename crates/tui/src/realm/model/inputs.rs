@@ -126,19 +126,21 @@ impl<T: TerminalAdapter> Model<T> {
         // feature: the user gets to the agent's input in a single
         // keystroke chord, no intermediate "review then send" step.
         if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
-            let chosen = picks
+            let key = picks
                 .first()
                 .and_then(|i| self.snippet_choices.get(*i).cloned());
             self.snippet_choices.clear();
             self.pop_modal();
-            let Some(row) = chosen else {
+            let Some(key) = key else {
                 return cmds;
             };
-            let snippet = self.snippets.get(&row.key).cloned();
-            let Some(snippet) = snippet else {
+            let Some(snippet) = self.snippets.get(&key) else {
+                // Picker resolved to a key the live snippet set
+                // doesn't recognise — possible only if the
+                // collection was swapped between mount and submit
+                // (no in-process path does that today).
                 tracing::warn!(
-                    "snippet picker: picked key {:?} but no entry in snippets — stale modal?",
-                    row.key
+                    "snippet picker: picked key {key:?} but no entry in snippets — stale modal?",
                 );
                 return cmds;
             };
@@ -150,10 +152,11 @@ impl<T: TerminalAdapter> Model<T> {
             // may contain embedded newlines (multi-line prompts);
             // those land verbatim in the input. The trailing `\r`
             // is what the agent treats as Enter / submit.
-            let mut bytes = snippet.body.into_bytes();
+            let mut bytes = Vec::with_capacity(snippet.body.len() + 1);
+            bytes.extend_from_slice(snippet.body.as_bytes());
             bytes.push(b'\r');
             cmds.push(IpcCommand::Write { terminal_id, bytes });
-            self.flash_info(format!("sent snippet ]{}", row.key));
+            self.flash_info(format!("sent snippet ]{key}"));
             return cmds;
         }
         // Sidebar right-click context menu. Pick → dispatch the

@@ -10,7 +10,7 @@
 //! Modal returns:
 //! - `Msg::ChoicePicked(vec![idx])` — index into the picker's
 //!   row vec (NOT into the visible-after-filter subset). The
-//!   model snapshots the same row vec in `snippet_choices`, so
+//!   model snapshots the same row keys in `snippet_choices`, so
 //!   the handler resolves idx → key with a single index.
 //! - `Msg::ModalDismissed` — Esc or Ctrl-C.
 //!
@@ -36,10 +36,10 @@ use tuirealm::ratatui::prelude::*;
 use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tuirealm::state::State;
 
-/// A single picker row — snippet shortcut key plus the underlying
-/// definition. The picker stores rows as `(key, snippet)` tuples
-/// so the filter/render path doesn't need a second lookup.
-#[derive(Clone)]
+/// A single picker row — snippet shortcut key plus the bits the
+/// picker needs to render it. The full `Snippet` (with its body)
+/// stays on the model; the picker only needs a label.
+#[derive(Clone, Debug)]
 pub struct PickerRow {
     pub key: String,
     pub description: String,
@@ -48,8 +48,12 @@ pub struct PickerRow {
 }
 
 impl PickerRow {
-    pub fn from(key: &str, snippet: &Snippet) -> Self {
-        let preview = snippet
+    /// Build a row from a snippet entry. Body preview = first
+    /// non-empty line, trimmed — keeps multi-line snippet bodies
+    /// from blowing up the 1-row picker entry while the full
+    /// body still flows to the agent on submit.
+    pub fn new(key: &str, snippet: &Snippet) -> Self {
+        let body_preview = snippet
             .body
             .lines()
             .find(|l| !l.trim().is_empty())
@@ -59,79 +63,73 @@ impl PickerRow {
         Self {
             key: key.to_string(),
             description: snippet.description.clone(),
-            body_preview: preview,
+            body_preview,
             origin: snippet.origin,
         }
     }
 }
 
+/// Case-insensitive ASCII prefix check that doesn't allocate. The
+/// snippet picker re-runs the filter on every keystroke; the
+/// previous `to_ascii_lowercase()` approach was allocating one
+/// `String` per row per keystroke.
+fn starts_with_icase(haystack: &str, needle: &str) -> bool {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    h.len() >= n.len() && h[..n.len()].eq_ignore_ascii_case(n)
+}
+
 pub struct SnippetPicker {
+    /// Caller-supplied rows. Must arrive sorted by key (we
+    /// `debug_assert!` it in `new` so a mis-sorted test input
+    /// fails loudly instead of silently rendering wrong).
     rows: Vec<PickerRow>,
+    /// Current filter string. Driven by the input field.
     filter: String,
-    cursor: usize,
+    /// Cursor index into `visible_indices`. `None` when the
+    /// visible set is empty — avoids the "cursor=0 but no row
+    /// at that slot" pseudo-valid state.
+    cursor: Option<usize>,
+    /// Indices into `rows` that match the current filter, in
+    /// display order. Recomputed on every keystroke; cheap.
     visible_indices: Vec<usize>,
 }
 
 impl SnippetPicker {
-    pub fn new(mut rows: Vec<PickerRow>, initial_filter: String) -> Self {
-        // Sort by key so the picker presents a stable, predictable
-        // order regardless of how the caller assembled the Vec.
-        // `Snippets::entries` already walks a BTreeMap (alphabetic
-        // by key) so this is a no-op in the production path; tests
-        // and any future synthetic-input callers don't have to
-        // remember to pre-sort.
-        rows.sort_by(|a, b| a.key.cmp(&b.key));
+    pub fn new(rows: Vec<PickerRow>, initial_filter: String) -> Self {
+        debug_assert!(
+            rows.windows(2).all(|w| w[0].key <= w[1].key),
+            "SnippetPicker::new expects rows pre-sorted by key (Snippets::all walks a BTreeMap)",
+        );
         let mut picker = Self {
             rows,
             filter: initial_filter,
-            cursor: 0,
+            cursor: None,
             visible_indices: Vec::new(),
         };
         picker.refilter();
         picker
     }
 
-    pub fn visible_indices(&self) -> &[usize] {
-        &self.visible_indices
-    }
-
-    pub fn filter_text(&self) -> &str {
-        &self.filter
-    }
-
-    pub fn rows(&self) -> &[PickerRow] {
-        &self.rows
-    }
-
-    /// Recompute `visible_indices` from `filter` and clamp cursor.
-    /// Prefix match on the snippet key, case-insensitive. Description
-    /// is shown to help the user pick, but not searched — a one-char
-    /// query would otherwise match almost every snippet through some
-    /// stray letter in a description, drowning out the key-prefix
-    /// hits the user is actually after. The `]<key>` ergonomics
-    /// (issue #40) want predictable "type the prefix, top hit is
-    /// what you want" behaviour, so prefix-only is the right shape.
+    /// Recompute `visible_indices` from `filter`, place the cursor
+    /// on the first visible row (or `None` if empty). Prefix match
+    /// on the snippet key, case-insensitive. Description is shown
+    /// but not searched — a one-char query would otherwise match
+    /// almost every snippet through some stray letter in a
+    /// description, drowning out the key-prefix hits the user is
+    /// actually after.
     fn refilter(&mut self) {
-        let q = self.filter.trim().to_ascii_lowercase();
-        if q.is_empty() {
-            self.visible_indices = (0..self.rows.len()).collect();
+        let q = self.filter.trim();
+        self.visible_indices = if q.is_empty() {
+            (0..self.rows.len()).collect()
         } else {
-            self.visible_indices = self
-                .rows
+            self.rows
                 .iter()
                 .enumerate()
-                .filter_map(|(i, r)| {
-                    if r.key.to_ascii_lowercase().starts_with(&q) {
-                        Some(i)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-        }
-        if self.cursor >= self.visible_indices.len() {
-            self.cursor = self.visible_indices.len().saturating_sub(1);
-        }
+                .filter_map(|(i, r)| starts_with_icase(&r.key, q).then_some(i))
+                .collect()
+        };
+        self.cursor = (!self.visible_indices.is_empty()).then_some(0);
     }
 
     /// `Some(idx)` when the picker should auto-submit: the typed
@@ -139,15 +137,68 @@ impl SnippetPicker {
     /// sole visible match. Anything else (multiple matches, partial
     /// matches, no exact key hit) → user must press Enter.
     fn auto_submit_index(&self) -> Option<usize> {
-        if self.visible_indices.len() != 1 {
+        let [idx] = self.visible_indices[..] else {
             return None;
-        }
-        let idx = self.visible_indices[0];
+        };
         let key = &self.rows[idx].key;
-        if key.eq_ignore_ascii_case(self.filter.trim()) {
-            Some(idx)
-        } else {
-            None
+        key.eq_ignore_ascii_case(self.filter.trim()).then_some(idx)
+    }
+
+    /// Pure key handler. Method (not free function) so the API
+    /// reads naturally; tests can still drive it without spinning
+    /// up a tuirealm `Application` by constructing a `SnippetPicker`
+    /// directly and calling `on_key`.
+    pub fn on_key(&mut self, key: &KeyEvent) -> Option<Msg> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if matches!(key.code, Key::Esc) || (ctrl && matches!(key.code, Key::Char('c'))) {
+            return Some(Msg::ModalDismissed);
+        }
+        match key.code {
+            Key::Down => {
+                if let Some(c) = self.cursor
+                    && c + 1 < self.visible_indices.len()
+                {
+                    self.cursor = Some(c + 1);
+                }
+                None
+            }
+            Key::Up => {
+                if let Some(c) = self.cursor
+                    && c > 0
+                {
+                    self.cursor = Some(c - 1);
+                }
+                None
+            }
+            Key::Home => {
+                if !self.visible_indices.is_empty() {
+                    self.cursor = Some(0);
+                }
+                None
+            }
+            Key::End => {
+                if !self.visible_indices.is_empty() {
+                    self.cursor = Some(self.visible_indices.len() - 1);
+                }
+                None
+            }
+            Key::Enter => {
+                let c = self.cursor?;
+                let row_idx = *self.visible_indices.get(c)?;
+                Some(Msg::ChoicePicked(vec![row_idx]))
+            }
+            Key::Backspace => {
+                self.filter.pop();
+                self.refilter();
+                None
+            }
+            Key::Char(c) if !ctrl => {
+                self.filter.push(c);
+                self.refilter();
+                self.auto_submit_index()
+                    .map(|idx| Msg::ChoicePicked(vec![idx]))
+            }
+            _ => None,
         }
     }
 }
@@ -213,7 +264,7 @@ impl Component for SnippetPicker {
             div_rect,
         );
 
-        let mut body: Vec<Line> = Vec::with_capacity(self.visible_indices.len());
+        let mut body: Vec<Line> = Vec::with_capacity(self.visible_indices.len().max(1));
         if self.visible_indices.is_empty() {
             body.push(Line::from(Span::styled(
                 if self.rows.is_empty() {
@@ -226,7 +277,7 @@ impl Component for SnippetPicker {
         } else {
             for (i, &row_idx) in self.visible_indices.iter().enumerate() {
                 let r = &self.rows[row_idx];
-                let is_cursor = i == self.cursor;
+                let is_cursor = self.cursor == Some(i);
                 let caret = if is_cursor { "▸ " } else { "  " };
                 let mut row_style = Style::default().fg(theme.text_strong);
                 if is_cursor {
@@ -235,10 +286,7 @@ impl Component for SnippetPicker {
                 let origin_tag = r.origin.label();
                 let mut spans: Vec<Span<'static>> = vec![
                     Span::styled(caret.to_string(), row_style),
-                    Span::styled(
-                        format!("]{:<6}  ", r.key),
-                        row_style.fg(theme.accent),
-                    ),
+                    Span::styled(format!("]{:<6}  ", r.key), row_style.fg(theme.accent)),
                     Span::styled(r.description.clone(), row_style),
                 ];
                 if !origin_tag.is_empty() {
@@ -287,67 +335,10 @@ impl Component for SnippetPicker {
 
 impl AppComponent<Msg, UserEvent> for SnippetPicker {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
-        let Event::Keyboard(key) = ev else {
-            return None;
-        };
-        handle_picker_key(self, key)
-    }
-}
-
-/// Pure key handler factored out so tests can drive the picker
-/// without spinning up a tuirealm `Application`.
-pub fn handle_picker_key(picker: &mut SnippetPicker, key: &KeyEvent) -> Option<Msg> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    if matches!(key.code, Key::Esc) || (ctrl && matches!(key.code, Key::Char('c'))) {
-        return Some(Msg::ModalDismissed);
-    }
-    match key.code {
-        Key::Down => {
-            if !picker.visible_indices.is_empty()
-                && picker.cursor + 1 < picker.visible_indices.len()
-            {
-                picker.cursor += 1;
-            }
-            None
+        match ev {
+            Event::Keyboard(key) => self.on_key(key),
+            _ => None,
         }
-        Key::Up => {
-            if picker.cursor > 0 {
-                picker.cursor -= 1;
-            }
-            None
-        }
-        Key::Home => {
-            picker.cursor = 0;
-            None
-        }
-        Key::End => {
-            if !picker.visible_indices.is_empty() {
-                picker.cursor = picker.visible_indices.len() - 1;
-            }
-            None
-        }
-        Key::Enter => {
-            picker
-                .visible_indices
-                .get(picker.cursor)
-                .map(|&row_idx| Msg::ChoicePicked(vec![row_idx]))
-        }
-        Key::Backspace => {
-            picker.filter.pop();
-            picker.refilter();
-            picker.cursor = 0;
-            None
-        }
-        Key::Char(c) if !ctrl => {
-            picker.filter.push(c);
-            picker.refilter();
-            picker.cursor = 0;
-            // Auto-submit when the filter equals a key uniquely.
-            picker
-                .auto_submit_index()
-                .map(|idx| Msg::ChoicePicked(vec![idx]))
-        }
-        _ => None,
     }
 }
 
@@ -356,25 +347,14 @@ mod tests {
     use super::*;
     use pilot_config::{Snippet, SnippetOrigin};
 
+    /// Build a sorted row vec. The production caller (`mount_snippet_picker`)
+    /// hands the picker rows derived from `Snippets::all()`, which walks
+    /// a BTreeMap and is therefore already sorted; tests have to match
+    /// that contract or trip the `debug_assert!` in `SnippetPicker::new`.
     fn make_rows() -> Vec<PickerRow> {
+        // Keys: deploy, pr, rev — already alphabetical.
         vec![
-            PickerRow::from(
-                "rev",
-                &Snippet {
-                    description: "Review diff".into(),
-                    body: "review please".into(),
-                    origin: SnippetOrigin::Global,
-                },
-            ),
-            PickerRow::from(
-                "pr",
-                &Snippet {
-                    description: "Open PR".into(),
-                    body: "open pr please".into(),
-                    origin: SnippetOrigin::Global,
-                },
-            ),
-            PickerRow::from(
+            PickerRow::new(
                 "deploy",
                 &Snippet {
                     description: "Pre-deploy check".into(),
@@ -382,11 +362,31 @@ mod tests {
                     origin: SnippetOrigin::Repo,
                 },
             ),
+            PickerRow::new(
+                "pr",
+                &Snippet {
+                    description: "Open PR".into(),
+                    body: "open pr please".into(),
+                    origin: SnippetOrigin::Global,
+                },
+            ),
+            PickerRow::new(
+                "rev",
+                &Snippet {
+                    description: "Review diff".into(),
+                    body: "review please".into(),
+                    origin: SnippetOrigin::Global,
+                },
+            ),
         ]
     }
 
     fn ke(c: char) -> KeyEvent {
         KeyEvent::new(Key::Char(c), KeyModifiers::NONE)
+    }
+
+    fn key(code: Key) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     #[test]
@@ -398,20 +398,18 @@ mod tests {
             .map(|&i| picker.rows[i].key.clone())
             .collect();
         assert_eq!(keys, vec!["deploy", "pr", "rev"]);
+        assert_eq!(picker.cursor, Some(0));
     }
 
     #[test]
     fn typing_filters_and_recovers_on_backspace() {
         let mut picker = SnippetPicker::new(make_rows(), String::new());
-        let out = handle_picker_key(&mut picker, &ke('r'));
+        let out = picker.on_key(&ke('r'));
         assert!(out.is_none(), "no auto-submit on incomplete key");
         assert_eq!(picker.visible_indices.len(), 1);
         assert_eq!(picker.rows[picker.visible_indices[0]].key, "rev");
 
-        let _ = handle_picker_key(
-            &mut picker,
-            &KeyEvent::new(Key::Backspace, KeyModifiers::NONE),
-        );
+        let _ = picker.on_key(&key(Key::Backspace));
         assert_eq!(picker.filter, "");
         assert_eq!(picker.visible_indices.len(), 3);
     }
@@ -422,9 +420,9 @@ mod tests {
     #[test]
     fn typing_full_key_auto_submits() {
         let mut picker = SnippetPicker::new(make_rows(), String::new());
-        assert!(handle_picker_key(&mut picker, &ke('r')).is_none());
-        assert!(handle_picker_key(&mut picker, &ke('e')).is_none());
-        let out = handle_picker_key(&mut picker, &ke('v'));
+        assert!(picker.on_key(&ke('r')).is_none());
+        assert!(picker.on_key(&ke('e')).is_none());
+        let out = picker.on_key(&ke('v'));
         match out {
             Some(Msg::ChoicePicked(v)) => {
                 assert_eq!(v.len(), 1);
@@ -434,15 +432,13 @@ mod tests {
         }
     }
 
-    /// Mounted with an initial filter (the `]r` flow). The initial
-    /// `r` is already in the picker's filter; the next chars
-    /// continue from there.
+    /// Mounted with an initial filter (the `]r` flow).
     #[test]
     fn initial_filter_carries_through() {
         let mut picker = SnippetPicker::new(make_rows(), "r".into());
         assert_eq!(picker.visible_indices.len(), 1);
-        assert!(handle_picker_key(&mut picker, &ke('e')).is_none());
-        match handle_picker_key(&mut picker, &ke('v')) {
+        assert!(picker.on_key(&ke('e')).is_none());
+        match picker.on_key(&ke('v')) {
             Some(Msg::ChoicePicked(v)) => assert_eq!(picker.rows[v[0]].key, "rev"),
             other => panic!("expected ChoicePicked, got {other:?}"),
         }
@@ -452,26 +448,38 @@ mod tests {
     /// multiple keys (the discovery / manual-pick path).
     #[test]
     fn enter_submits_cursor_selection() {
-        let mut rows = make_rows();
-        rows.push(PickerRow::from(
-            "ping",
-            &Snippet {
-                description: "Ping".into(),
-                body: "ping body".into(),
-                origin: SnippetOrigin::Global,
-            },
-        ));
+        // Pre-sorted: ping, pr, rev. Both ping and pr start with `p`.
+        let rows = vec![
+            PickerRow::new(
+                "ping",
+                &Snippet {
+                    description: "Ping".into(),
+                    body: "ping body".into(),
+                    origin: SnippetOrigin::Global,
+                },
+            ),
+            PickerRow::new(
+                "pr",
+                &Snippet {
+                    description: "Open PR".into(),
+                    body: "pr body".into(),
+                    origin: SnippetOrigin::Global,
+                },
+            ),
+            PickerRow::new(
+                "rev",
+                &Snippet {
+                    description: "Review diff".into(),
+                    body: "review body".into(),
+                    origin: SnippetOrigin::Global,
+                },
+            ),
+        ];
         let mut picker = SnippetPicker::new(rows, String::new());
-        assert!(handle_picker_key(&mut picker, &ke('p')).is_none());
+        assert!(picker.on_key(&ke('p')).is_none());
         assert_eq!(picker.visible_indices.len(), 2);
-        let _ = handle_picker_key(
-            &mut picker,
-            &KeyEvent::new(Key::Down, KeyModifiers::NONE),
-        );
-        match handle_picker_key(
-            &mut picker,
-            &KeyEvent::new(Key::Enter, KeyModifiers::NONE),
-        ) {
+        let _ = picker.on_key(&key(Key::Down));
+        match picker.on_key(&key(Key::Enter)) {
             Some(Msg::ChoicePicked(v)) => assert_eq!(picker.rows[v[0]].key, "pr"),
             other => panic!("expected ChoicePicked, got {other:?}"),
         }
@@ -480,21 +488,51 @@ mod tests {
     #[test]
     fn esc_dismisses() {
         let mut picker = SnippetPicker::new(make_rows(), String::new());
-        let out = handle_picker_key(&mut picker, &KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        let out = picker.on_key(&key(Key::Esc));
+        assert!(matches!(out, Some(Msg::ModalDismissed)));
+    }
+
+    /// `ctrl-c` also dismisses (terminal-pane users keep that as
+    /// their muscle-memory cancel).
+    #[test]
+    fn ctrl_c_dismisses() {
+        let mut picker = SnippetPicker::new(make_rows(), String::new());
+        let out = picker.on_key(&KeyEvent::new(Key::Char('c'), KeyModifiers::CONTROL));
         assert!(matches!(out, Some(Msg::ModalDismissed)));
     }
 
     #[test]
     fn picker_with_no_snippets_handles_typing_safely() {
         let mut picker = SnippetPicker::new(vec![], String::new());
-        assert!(handle_picker_key(&mut picker, &ke('x')).is_none());
+        assert!(picker.cursor.is_none());
+        assert!(picker.on_key(&ke('x')).is_none());
         assert!(picker.visible_indices.is_empty());
-        assert!(
-            handle_picker_key(
-                &mut picker,
-                &KeyEvent::new(Key::Enter, KeyModifiers::NONE)
-            )
-            .is_none()
-        );
+        // Enter on empty visible set is a no-op (no row to submit).
+        assert!(picker.on_key(&key(Key::Enter)).is_none());
+    }
+
+    /// Filter narrowing to zero matches clears the cursor — Enter
+    /// then no longer panics on out-of-bounds index access.
+    #[test]
+    fn no_matches_clears_cursor_and_enter_is_noop() {
+        let mut picker = SnippetPicker::new(make_rows(), "zzz".into());
+        assert!(picker.visible_indices.is_empty());
+        assert!(picker.cursor.is_none());
+        assert!(picker.on_key(&key(Key::Enter)).is_none());
+    }
+
+    /// Filter is case-insensitive — typing `REV` against the `rev`
+    /// snippet should still auto-submit.
+    #[test]
+    fn filter_is_case_insensitive() {
+        let mut picker = SnippetPicker::new(make_rows(), String::new());
+        for c in ['R', 'E', 'V'] {
+            let out = picker.on_key(&ke(c));
+            if let Some(Msg::ChoicePicked(v)) = out {
+                assert_eq!(picker.rows[v[0]].key, "rev");
+                return;
+            }
+        }
+        panic!("expected auto-submit on case-insensitive full key");
     }
 }

@@ -3,6 +3,10 @@
 //! YAML-based configuration for pilot. Loads from `~/.pilot/config.yaml`
 //! with sensible defaults if the file is missing.
 
+mod snippets;
+
+pub use snippets::{Snippet, SnippetOrigin, Snippets, SnippetsError};
+
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;

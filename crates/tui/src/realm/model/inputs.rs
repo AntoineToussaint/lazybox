@@ -120,6 +120,42 @@ impl<T: TerminalAdapter> Model<T> {
     /// the directly-visible IPC commands land in the Vec.
     pub fn handle_choice_picked(&mut self, picks: Vec<usize>) -> Vec<IpcCommand> {
         let mut cmds = Vec::new();
+        // Snippet picker — pick → write the snippet body to the
+        // active terminal followed by `\r` (auto-submit). The
+        // "expand AND submit" combo is the whole point of the
+        // feature: the user gets to the agent's input in a single
+        // keystroke chord, no intermediate "review then send" step.
+        if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
+            let chosen = picks
+                .first()
+                .and_then(|i| self.snippet_choices.get(*i).cloned());
+            self.snippet_choices.clear();
+            self.pop_modal();
+            let Some(row) = chosen else {
+                return cmds;
+            };
+            let snippet = self.snippets.get(&row.key).cloned();
+            let Some(snippet) = snippet else {
+                tracing::warn!(
+                    "snippet picker: picked key {:?} but no entry in snippets — stale modal?",
+                    row.key
+                );
+                return cmds;
+            };
+            let Some(terminal_id) = self.terminals.active_terminal_id() else {
+                self.flash_info("no active terminal — open a session first");
+                return cmds;
+            };
+            // Append `\r` so the agent submits. The body itself
+            // may contain embedded newlines (multi-line prompts);
+            // those land verbatim in the input. The trailing `\r`
+            // is what the agent treats as Enter / submit.
+            let mut bytes = snippet.body.into_bytes();
+            bytes.push(b'\r');
+            cmds.push(IpcCommand::Write { terminal_id, bytes });
+            self.flash_info(format!("sent snippet ]{}", row.key));
+            return cmds;
+        }
         // Sidebar right-click context menu. Pick → dispatch the
         // same IpcCommand the matching keyboard shortcut would.
         // Empty pick (Esc) clears the stash silently.

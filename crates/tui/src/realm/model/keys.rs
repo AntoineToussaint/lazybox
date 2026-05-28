@@ -171,6 +171,13 @@ impl<T: TerminalAdapter> Model<T> {
         // PTY. The first `]` is held back; if a non-`]` key arrives
         // before the second `]`, the held char is flushed to the PTY
         // first so the user's `]` isn't silently swallowed.
+        //
+        // The same first `]` also arms the snippet-picker latch
+        // (issue #40). On a follow-up *printable* key (when
+        // snippets are configured), we open the picker with that
+        // char as initial filter instead of flushing the held `]`.
+        // The `]]` escape still wins because the `Key::Char(']')`
+        // branch is checked first.
         if self.focus == PaneFocus::Terminals
             && key.modifiers.is_empty()
             && matches!(key.code, Key::Char(c) if c == self.ui_defaults.terminal_escape_char)
@@ -179,16 +186,46 @@ impl<T: TerminalAdapter> Model<T> {
             if self.escape_latch.tap(ESCAPE_WINDOW) {
                 self.focus = PaneFocus::Sidebar;
                 self.set_focus_attr();
+                self.snippet_latch.disarm();
                 self.redraw = true;
                 return;
             }
+            // Arm the snippet latch alongside the escape latch — the
+            // next key decides which one fires.
+            self.snippet_latch.tap(ESCAPE_WINDOW);
             return;
         }
         if self.focus == PaneFocus::Terminals && self.escape_latch.is_armed() {
             self.escape_latch.disarm();
-            // Non-`]` key arrived after a held `]` — flush the held
-            // char to the PTY before the new key, so typing patterns
-            // like `]a` aren't lost.
+            // Snippet trigger wins over flush-to-PTY when:
+            //   - a snippet library is configured, AND
+            //   - the follow-up key is a printable char with no
+            //     modifiers (Ctrl-X, F-keys, arrows are passed
+            //     through to the PTY).
+            //
+            // The mounted picker captures further typing; that's
+            // why we return early after mounting. If we didn't,
+            // the post-mount `match self.focus` path below would
+            // also forward this same key to the PTY — duplicating
+            // it once into the picker and once into the agent's
+            // input.
+            let printable = key.modifiers.is_empty()
+                && matches!(key.code, Key::Char(c) if !c.is_control());
+            if printable && !self.snippets.is_empty() {
+                self.snippet_latch.disarm();
+                let initial = match key.code {
+                    Key::Char(c) => c.to_string(),
+                    _ => String::new(),
+                };
+                self.mount_snippet_picker(initial);
+                self.redraw = true;
+                return;
+            }
+            self.snippet_latch.disarm();
+            // Non-`]` key + no snippet match → flush the held `]`
+            // to the PTY before the new key, so typing patterns
+            // like `]a` (when no snippets are configured) aren't
+            // lost.
             let mut held_cmds: Vec<IpcCommand> = Vec::new();
             let held = crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char(self.ui_defaults.terminal_escape_char),

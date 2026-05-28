@@ -378,6 +378,14 @@ async fn run_embedded_realm(
             &ui_defaults,
         );
         model.apply_action_key_overrides(user_config.ui.action_keys.clone());
+        // Snippets — global (`<pilot_home>/snippets.yaml`) merged
+        // with the cwd's `.pilot/snippets.yaml` (repo wins on key
+        // conflict). Cwd is "wherever the user launched pilot from",
+        // which is the natural repo root for a single-repo workflow.
+        let snippets = pilot_config::Snippets::load_merged(
+            std::env::current_dir().ok().as_deref(),
+        );
+        model.apply_snippets(snippets);
         model = model.with_splits(user_config.ui.sidebar_pct, user_config.ui.right_top_pct);
         if let Some((report, sources)) = wizard_seed {
             model.start_setup_wizard(report, sources);

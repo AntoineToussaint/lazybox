@@ -135,6 +135,12 @@ pub enum Id {
     /// modals (MergePrConfirm, the kill latch, …) — one modal id,
     /// one Yes-handler, one place to remember.
     ActionConfirm,
+    /// Snippet picker mounted from the terminal pane on `]<key>`.
+    /// Filter input + scrollable snippet list. `Msg::ChoicePicked`
+    /// resolves the picked row to a snippet body, which the
+    /// dispatcher writes to the active terminal followed by `\r`
+    /// (auto-submit). See `realm::components::snippet_picker`.
+    SnippetPicker,
 }
 
 /// App-level message vocabulary for modals + globals.
@@ -407,6 +413,23 @@ pub struct Model<T: TerminalAdapter> {
     /// j/k (RepoHeader rows are skipped by `move_cursor_by`) and the
     /// user has no clear next step.
     pending_focus_project_name: Option<String>,
+    /// Loaded + merged snippet collection (`<pilot_home>/snippets.yaml`
+    /// + `<cwd>/.pilot/snippets.yaml`). Populated at startup by
+    /// `apply_snippets`; the terminal-pane `]` latch reads this to
+    /// decide whether to mount the picker. Empty when neither file
+    /// exists (the typical first-run state).
+    pub(crate) snippets: pilot_config::Snippets,
+    /// Snapshot of the rows the active SnippetPicker is showing —
+    /// indexed by `Msg::ChoicePicked` to recover the underlying
+    /// snippet on submit. Cleared on mount/unmount.
+    pub(crate) snippet_choices:
+        Vec<crate::realm::components::snippet_picker::PickerRow>,
+    /// `]` latch in the terminal pane. First `]` arms; the next
+    /// non-`]` printable key opens the picker pre-filled with it.
+    /// Disambiguates from the existing `escape_latch` (`]]` →
+    /// sidebar) — both can be armed simultaneously and the snippet
+    /// path wins only when a NON-`]` printable lands.
+    pub(crate) snippet_latch: crate::confirm_latch::DoubleTapLatch,
     /// Inertia damper for trackpad scroll. macOS sends ~20-50 wheel
     /// events per flick (the OS inertia phase); each one moves the
     /// viewport `STEP` rows, so a single gesture scrolls hundreds of
@@ -549,6 +572,9 @@ impl<T: TerminalAdapter> Model<T> {
             pending_action_confirm: None,
             pending_new_workspace_project: None,
             pending_focus_project_name: None,
+            snippets: pilot_config::Snippets::empty(),
+            snippet_choices: Vec::new(),
+            snippet_latch: crate::confirm_latch::DoubleTapLatch::new(),
             scroll_inertia: None,
         }
     }
@@ -759,6 +785,45 @@ impl<T: TerminalAdapter> Model<T> {
         // hardcoded consts.
         self.ui_defaults = ui.clone();
         self.right.apply_ui_defaults(ui);
+    }
+
+    /// Install the loaded snippet collection. Called from the
+    /// startup path in `main.rs` after `Snippets::load_merged`. The
+    /// terminal-pane `]<key>` latch reads from `self.snippets`
+    /// directly, so this is the only handoff needed.
+    pub fn apply_snippets(&mut self, snippets: pilot_config::Snippets) {
+        self.snippets = snippets;
+    }
+
+    /// Mount the snippet picker with an initial filter (typically
+    /// the single char the user typed after `]`). The picker's row
+    /// snapshot is stashed in `self.snippet_choices` so
+    /// `handle_choice_picked` can resolve a picked index back to a
+    /// snippet body without re-running the filter.
+    pub(crate) fn mount_snippet_picker(&mut self, initial_filter: String) {
+        use crate::realm::components::snippet_picker::{PickerRow, SnippetPicker};
+        if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
+            return;
+        }
+        let rows: Vec<PickerRow> = self
+            .snippets
+            .entries()
+            .into_iter()
+            .map(|(k, v)| PickerRow::from(k, v))
+            .collect();
+        if rows.is_empty() {
+            // Don't open a picker over an empty list — the user
+            // typed `]<key>` expecting a snippet and there are
+            // none. Flash a hint pointing at the snippets file
+            // so they know how to configure one.
+            self.flash_info(
+                "no snippets configured — add some to ~/.pilot/snippets.yaml",
+            );
+            return;
+        }
+        self.snippet_choices = rows.clone();
+        let picker = SnippetPicker::new(rows, initial_filter);
+        self.mount_modal(Id::SnippetPicker, picker);
     }
 
     /// Apply catalog-driven action key overrides (`ui.action_keys`).

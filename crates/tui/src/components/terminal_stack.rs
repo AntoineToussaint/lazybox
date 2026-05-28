@@ -1005,6 +1005,10 @@ impl TerminalStack {
                 label: "exit to sidebar",
             },
             Binding {
+                keys: "]<key>",
+                label: "snippets",
+            },
+            Binding {
                 keys: "Ctrl-c",
                 label: "interrupt",
             },

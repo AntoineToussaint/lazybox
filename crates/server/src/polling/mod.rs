@@ -2910,14 +2910,43 @@ pub async fn set_focused_workspace(config: &ServerConfig, key: &WorkspaceKey) {
     else {
         return;
     };
-    let mut state = config.poll_state.lock().await;
-    let prev = state.round_robin.focused_repo.replace(repo.to_string());
-    if prev.as_deref() != Some(repo) {
-        tracing::debug!(
-            workspace_key = %key.as_str(),
-            repo,
-            "round-robin focus updated"
-        );
+    // Best-effort round-robin focus hint — NEVER block here.
+    //
+    // This runs INLINE on the daemon serve loop for every
+    // `FocusWorkspace` / `MarkRead`, i.e. on every sidebar navigation.
+    // `run_one_tick` holds `poll_state` for the ENTIRE poll cycle (the
+    // comment there says so explicitly) — up to ~17s on a slow GitHub
+    // fetch. A blocking `.lock().await` here would therefore wedge the
+    // single-task serve loop for that whole window, queueing every
+    // keystroke `Write` and `Spawn` behind it. That is the
+    // user-visible "can't type in the agent / can't start a shell while
+    // GitHub syncs, then it unblocks when the sync finishes" bug:
+    // modal input still works (TUI-only, no daemon round-trip) but
+    // anything that needs the daemon stalls.
+    //
+    // The hint only steers WHICH repo the NEXT poll prioritizes, so if
+    // a poll is already mid-flight (lock held) we simply skip the
+    // update. `try_lock` makes that explicit and keeps the serve loop
+    // responsive no matter how long the active tick runs.
+    match config.poll_state.try_lock() {
+        Ok(mut state) => {
+            let prev = state.round_robin.focused_repo.replace(repo.to_string());
+            if prev.as_deref() != Some(repo) {
+                tracing::debug!(
+                    workspace_key = %key.as_str(),
+                    repo,
+                    "round-robin focus updated"
+                );
+            }
+        }
+        Err(_) => {
+            tracing::debug!(
+                workspace_key = %key.as_str(),
+                repo,
+                "poll tick holds poll_state — skipping round-robin focus hint to keep \
+                 the serve loop responsive (keystrokes/spawns must not wait on the sync)"
+            );
+        }
     }
 }
 

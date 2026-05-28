@@ -242,6 +242,56 @@ impl TaskSource for IncrementalSource {
     }
 }
 
+// ── serve-loop responsiveness during a poll ─────────────────────────
+
+/// Regression: the daemon serve loop must never freeze while a GitHub
+/// poll is in flight.
+///
+/// `set_focused_workspace` runs INLINE on the single-task serve loop
+/// for every `FocusWorkspace` / `MarkRead` (i.e. every sidebar
+/// navigation). `run_one_tick` holds `poll_state` for the ENTIRE poll
+/// cycle — up to ~17s on a slow GitHub fetch. Before the fix this
+/// handler did `poll_state.lock().await`, so during a sync it blocked
+/// the serve loop for the whole fetch, queueing every keystroke `Write`
+/// and `Spawn` behind it: "can't type in the agent / can't start a
+/// shell while GitHub syncs, then it unblocks when the sync finishes."
+/// (Modal input kept working because it never leaves the TUI.)
+///
+/// With `try_lock` the handler returns immediately when a poll holds
+/// the lock, so the serve loop stays responsive.
+#[tokio::test]
+async fn set_focused_workspace_never_blocks_on_an_in_flight_poll() {
+    let config = ServerConfig::in_memory();
+    let task = make_task("o/r#42");
+    let workspace = pilot_core::Workspace::from_task(task.clone(), Utc::now());
+    polling::upsert(&config, task).await;
+
+    // Simulate an in-flight poll tick holding the lock across its
+    // network fetch, exactly like `run_one_tick` does.
+    let held = config.poll_state.lock().await;
+
+    // The inline handler must return promptly rather than wait on the
+    // held lock. Pre-fix this hangs until `held` drops; the 2s timeout
+    // turns that hang into a clean failure instead of a stuck test.
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        polling::set_focused_workspace(&config, &workspace.key),
+    )
+    .await;
+    assert!(
+        res.is_ok(),
+        "set_focused_workspace blocked while a poll held poll_state — \
+         the 'frozen during GitHub sync' regression is back"
+    );
+
+    // The hint was skipped (not silently applied) while the lock was
+    // held: focused_repo is still unset.
+    assert!(
+        held.round_robin.focused_repo.is_none(),
+        "focus hint must be skipped, not applied, while a poll holds the lock"
+    );
+}
+
 // ── tick() / upsert() ───────────────────────────────────────────────
 
 #[tokio::test]

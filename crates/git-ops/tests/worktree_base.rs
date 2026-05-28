@@ -48,17 +48,13 @@ fn git_out(cwd: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// Read the SHA of a specific ref in a bare repo. `git rev-parse`
-/// and `git show-ref --hash <ref>` both misbehave for our needs
-/// when run with cwd=<bare>: rev-parse sees `refs/heads/main` as a
-/// literal path under the bare dir (which exists), and `--hash`
-/// parses its argument as `--hash=<n>` rather than a ref name.
-/// `for-each-ref` is unambiguous.
+/// Read the SHA of a specific ref in a bare repo. `for-each-ref`
+/// is the most direct command for this: returns the empty string
+/// for non-existent refs (so assertions get a usable diff) and
+/// avoids the argument-parsing quirks of `show-ref --hash <ref>`
+/// (which is interpreted as `--hash=<ref>`).
 fn bare_ref(bare: &Path, refname: &str) -> String {
-    git_out(
-        bare,
-        &["for-each-ref", "--format=%(objectname)", refname],
-    )
+    git_out(bare, &["for-each-ref", "--format=%(objectname)", refname])
 }
 
 /// Set up a regular "upstream" repo (with one initial commit on
@@ -86,17 +82,20 @@ fn setup(owner: &str, repo: &str) -> (TempDir, TempDir, PathBuf) {
         .join(owner)
         .join(format!("{repo}.git"));
     std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
-    let status = Command::new("git")
-        .args([
+    // Route through `git()` (which clears GIT_DIR &c.) for the same
+    // env hygiene as everything else in this file. cwd is irrelevant
+    // for `git clone --bare A B` — both source and dest are absolute
+    // paths and clone creates a new repo.
+    git(
+        upstream.path(),
+        &[
             "clone",
             "--bare",
             "-q",
             &upstream.path().to_string_lossy(),
             &bare.to_string_lossy(),
-        ])
-        .status()
-        .unwrap();
-    assert!(status.success(), "clone --bare");
+        ],
+    );
     // Wire origin to the upstream local path so subsequent fetches
     // resolve without touching the network.
     git(

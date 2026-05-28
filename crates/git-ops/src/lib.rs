@@ -164,20 +164,14 @@ impl WorktreeManager {
             run_git(&["clone", "--bare", &url, &bare_path.to_string_lossy()]).await?;
         }
 
-        // Try to refresh the remote-tracking ref. We tolerate failure here:
-        // if the remote branch was deleted (common right after merge), the
-        // fetch drops the remote-tracking ref and we fall back to the local
-        // branch below. Target a remote-tracking ref (not refs/heads/*) so
-        // we don't collide with another worktree holding the same branch.
-        let _ = run_git_in(
-            &bare_path,
-            &[
-                "fetch",
-                "origin",
-                &format!("+{branch}:refs/remotes/origin/{branch}"),
-            ],
-        )
-        .await;
+        // Refresh the remote-tracking ref (not refs/heads/*: that
+        // would collide with a worktree currently holding the same
+        // branch). Common reasons fetch can fail and that we tolerate:
+        // remote branch was deleted post-merge, offline, auth issue.
+        // In all cases the start_point lookup below falls back to the
+        // local ref. `fetch_origin_ref` logs a warning so the
+        // degradation isn't silent.
+        let _ = fetch_origin_ref(&bare_path, owner, repo, branch).await;
 
         if let Some(parent) = wt_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -269,60 +263,46 @@ impl WorktreeManager {
             run_git(&["clone", "--bare", &url, &bare_path.to_string_lossy()]).await?;
         }
 
-        // Refresh the remote-tracking ref AND fast-forward the bare
-        // clone's local `refs/heads/<base_branch>` to it. Without
-        // this, the bare clone's local view of the base branch could
-        // be arbitrarily stale and offline-mode worktrees would start
-        // from old commits (issue #35).
+        // Refresh origin/<base_branch> AND force-update the bare
+        // clone's local `refs/heads/<base_branch>` to match — without
+        // this the local ref can be arbitrarily stale and offline-mode
+        // worktrees start from old commits (issue #35).
         //
-        // Done as fetch → update-ref rather than a two-refspec fetch
-        // because git treats stacked `<src>:<dst>` pairs with the
-        // same source ambiguously and fails to update the heads/ ref
-        // even when the remote-tracking one succeeds.
+        // Done as fetch + update-ref (not a two-refspec fetch) because
+        // git treats stacked `<src>:<dst>` pairs with the same source
+        // ambiguously and fails to update the heads/ ref even when the
+        // remote-tracking one succeeds.
         //
-        // Tolerate fetch failure (offline / auth): warn and fall back
-        // to whatever local ref we have — the issue explicitly asks
-        // for graceful degradation rather than blocking worktree
-        // creation when the network's down. The bare clone never has
-        // a checked-out working tree of its own, so forcing the local
-        // ref is safe (we touch only base_branch).
-        let fetch = run_git_in(
-            &bare_path,
-            &[
-                "fetch",
-                "origin",
-                &format!("+{base_branch}:refs/remotes/origin/{base_branch}"),
-            ],
-        )
-        .await;
-        match &fetch {
-            Ok(_) => {
-                if let Err(e) = run_git_in(
-                    &bare_path,
-                    &[
-                        "update-ref",
-                        &format!("refs/heads/{base_branch}"),
-                        &format!("refs/remotes/origin/{base_branch}"),
-                    ],
-                )
-                .await
-                {
-                    tracing::warn!(
-                        owner = %owner,
-                        repo = %repo,
-                        base_branch = %base_branch,
-                        "could not fast-forward local {base_branch} to origin/{base_branch}; remote-tracking ref still updated ({e})"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    owner = %owner,
-                    repo = %repo,
-                    base_branch = %base_branch,
-                    "could not fetch origin/{base_branch} before creating worktree; falling back to local ref ({e})"
-                );
-            }
+        // Force-update (no FF check) is safe: the bare clone has no
+        // working tree of its own and never commits locally, so
+        // `refs/heads/<base_branch>` is only ever a mirror of origin.
+        // The new worktree will be on `new_branch`, not base_branch,
+        // so updating the base ref can't collide with a checked-out
+        // worktree.
+        //
+        // Tolerate fetch failure (offline / auth): warn and proceed
+        // from whatever local ref we have. Per the issue's acceptance
+        // criteria, worktree creation must not block on the network.
+        if fetch_origin_ref(&bare_path, owner, repo, base_branch)
+            .await
+            .is_ok()
+            && let Err(e) = run_git_in(
+                &bare_path,
+                &[
+                    "update-ref",
+                    &format!("refs/heads/{base_branch}"),
+                    &format!("refs/remotes/origin/{base_branch}"),
+                ],
+            )
+            .await
+        {
+            tracing::warn!(
+                owner,
+                repo,
+                base_branch,
+                error = %e,
+                "could not force-update local base branch to origin; remote-tracking ref still refreshed"
+            );
         }
 
         if let Some(parent) = wt_path.parent() {
@@ -658,6 +638,38 @@ impl WorktreeManager {
     }
 }
 
+/// Fetch a single branch from origin into the bare clone, updating
+/// `refs/remotes/origin/<branch>`. On failure, log a warning and
+/// return the error — callers decide whether to propagate or fall
+/// back to a local ref. Centralized so both `checkout_at` and
+/// `checkout_new_branch_at` get identical diagnostics (issue #35).
+async fn fetch_origin_ref(
+    bare_path: &Path,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+) -> Result<(), GitError> {
+    run_git_in(
+        bare_path,
+        &[
+            "fetch",
+            "origin",
+            &format!("+{branch}:refs/remotes/origin/{branch}"),
+        ],
+    )
+    .await
+    .map(|_| ())
+    .inspect_err(|e| {
+        tracing::warn!(
+            owner,
+            repo,
+            branch,
+            error = %e,
+            "could not fetch branch from origin; falling back to local ref"
+        );
+    })
+}
+
 /// Cheap existence check for a git ref. Uses `show-ref --verify --quiet`;
 /// exit 0 = ref exists, non-zero = missing or ambiguous.
 async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
@@ -670,28 +682,36 @@ async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Environment overrides applied to every git invocation. The
-/// important one is `GIT_TERMINAL_PROMPT=0`: without it, a locked
-/// SSH key or HTTPS-without-auth would prompt the user — except
-/// pilot is in alternate-screen mode, so the prompt is invisible
-/// and the subprocess just hangs forever, freezing whatever async
-/// task awaited it (worktree migration, session restore, etc.).
-/// Disabling the prompt makes git fail fast with a clean error.
-fn git_env() -> [(&'static str, &'static str); 2] {
-    [
-        ("GIT_TERMINAL_PROMPT", "0"),
-        // Suppress git's progress bar to keep `output()` from
-        // accumulating huge stderr buffers on slow clones.
-        ("GIT_FLUSH", "1"),
-    ]
+/// Apply pilot's standard env overrides to a `git` Command.
+///
+/// Sets:
+/// - `GIT_TERMINAL_PROMPT=0` — without this, a locked SSH key or
+///   HTTPS-without-auth prompts the user, but pilot's in alternate-
+///   screen mode so the prompt is invisible and the subprocess
+///   hangs forever, freezing whatever async task awaited it
+///   (worktree migration, session restore, etc.). Disabling makes
+///   git fail fast with a clean error.
+/// - `GIT_FLUSH=1` — suppress git's progress bar so `.output()`
+///   doesn't accumulate huge stderr buffers on slow clones.
+///
+/// Removes any inherited `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE`
+/// / `GIT_COMMON_DIR`. Those override `current_dir(cwd)` silently — if
+/// pilot is ever launched from inside another git worktree (or
+/// `cargo test` from one), the subprocess would operate on the
+/// inherited repo instead of the bare clone we're targeting.
+fn apply_git_env(cmd: &mut Command) -> &mut Command {
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_FLUSH", "1")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
 }
 
 async fn run_git(args: &[&str]) -> Result<String, GitError> {
     let started = std::time::Instant::now();
     tracing::info!("git {}", args.join(" "));
-    let output = Command::new("git")
-        .args(args)
-        .envs(git_env())
+    let output = apply_git_env(Command::new("git").args(args))
         .output()
         .await?;
     let elapsed = started.elapsed();
@@ -856,11 +876,7 @@ async fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
     const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     let started = std::time::Instant::now();
     tracing::info!("git (in {}) {}", cwd.display(), args.join(" "));
-    let fut = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .envs(git_env())
-        .output();
+    let fut = apply_git_env(Command::new("git").current_dir(cwd).args(args)).output();
     let output = match tokio::time::timeout(GIT_TIMEOUT, fut).await {
         Ok(res) => res?,
         Err(_) => {

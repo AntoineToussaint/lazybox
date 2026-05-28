@@ -10,6 +10,24 @@ pub enum GhError {
     Api(#[from] octocrab::Error),
     #[error("GraphQL error: {0}")]
     Graphql(String),
+    /// Non-success HTTP response from GitHub, OR a 2xx response we
+    /// couldn't parse as JSON. Carries the actual status + content-
+    /// type + a body excerpt so the user sees "HTTP 502 Bad Gateway"
+    /// instead of the opaque "Serde Error" `octocrab::Error::Serde`
+    /// produces on the typed deserialize path. This is the variant
+    /// emitted by `post_graphql_with_retry`; it replaces the previous
+    /// "expected value at line 1 column 1 — likely 502" guess.
+    #[error("github HTTP {status}{reason}: {body_excerpt}")]
+    HttpStatus {
+        status: u16,
+        /// Canonical status reason ("Bad Gateway") rendered as
+        /// " (Bad Gateway)" so the Display string reads naturally
+        /// when present; empty string when GitHub returned an
+        /// unknown / out-of-range status code.
+        reason: String,
+        content_type: String,
+        body_excerpt: String,
+    },
     /// Pagination safety cap hit — typically means the user's filter
     /// is too loose (>2000 matching PRs). Tail truncated.
     #[error("GraphQL paged out: returned {count} PRs across {pages} pages, hit safety cap")]
@@ -33,31 +51,110 @@ pub enum GhError {
     },
 }
 
-/// Render a `GhError` as a useful string. The Display impl on
-/// `octocrab::Error::GitHub` *only prints `"GitHub"`* — it drops the
-/// inner status / message / errors entirely. We unwrap to the
-/// underlying `GitHubError` (or other variants) so the message
-/// actually reaches logs + the error modal.
-/// Is this octocrab error worth retrying? Used by
-/// `post_graphql_with_retry` to decide between sleep-and-retry and
-/// fail-fast. The cutoff matches `From<GhError> for ProviderError`'s
-/// retryable classification — anything that maps to `Retryable`
-/// there is fair game here too.
-fn is_transient(e: &octocrab::Error) -> bool {
+/// Is this error worth retrying? Used by `post_graphql_with_retry`
+/// to decide between sleep-and-retry and fail-fast.
+///
+/// Transport variants (Hyper/Service/Http/Json/Io) are always
+/// transient — the request never reached GitHub's app layer.
+/// `HttpStatus` retries on 502/503/504 + 429 + any 2xx with a
+/// non-JSON content-type (proxy/CDN serving a maintenance page),
+/// matching what `From<GhError> for ProviderError` classifies as
+/// `Retryable`. Auth (401/403), other 4xx, and 2xx-JSON parse
+/// failures (real schema mismatches) are not retried.
+fn is_transient(e: &GhError) -> bool {
     match e {
-        octocrab::Error::Hyper { .. }
-        | octocrab::Error::Service { .. }
-        | octocrab::Error::Http { .. }
-        | octocrab::Error::Json { .. }
-        | octocrab::Error::Serde { .. } => true,
-        octocrab::Error::GitHub { source, .. } => {
-            // 502/503/504 — server-side hiccup. NOT 429: rate
-            // limit is for the budget layer, not retry-loops.
-            // NOT 5xx in general: e.g. a 500 with a deterministic
-            // error message won't change on retry.
+        GhError::Api(octocrab::Error::Hyper { .. })
+        | GhError::Api(octocrab::Error::Service { .. })
+        | GhError::Api(octocrab::Error::Http { .. })
+        | GhError::Api(octocrab::Error::Json { .. })
+        | GhError::Api(octocrab::Error::Serde { .. }) => true,
+        GhError::Api(octocrab::Error::GitHub { source, .. }) => {
             matches!(source.status_code.as_u16(), 502..=504)
         }
+        GhError::Api(_) => false,
+        GhError::HttpStatus {
+            status,
+            content_type,
+            ..
+        } => {
+            if matches!(*status, 502..=504) || *status == 429 {
+                return true;
+            }
+            // 2xx with a non-JSON body — usually a proxy/CDN
+            // maintenance page that won the race with GitHub.
+            // Worth one retry, mirroring how octocrab's typed
+            // `Serde` failure used to be classified.
+            (200..=299).contains(status) && !content_type_is_json(content_type)
+        }
         _ => false,
+    }
+}
+
+/// `true` when the content-type header looks like JSON. GitHub uses
+/// `application/json; charset=utf-8` so we substring-match rather
+/// than equality-check. Empty / missing content-type counts as
+/// "not JSON" — we don't want to attempt JSON parse on bytes whose
+/// type the server didn't advertise.
+fn content_type_is_json(ct: &str) -> bool {
+    ct.to_ascii_lowercase().contains("application/json")
+}
+
+/// Excerpt of a body for inclusion in error messages. Trims
+/// whitespace and caps at 200 chars so a maintenance-page HTML blob
+/// doesn't blow up logs / the footer.
+fn body_excerpt(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.chars().count() <= 200 {
+        trimmed.to_string()
+    } else {
+        // char_indices respects UTF-8 boundaries — a naïve
+        // `&trimmed[..200]` would panic on a multi-byte char.
+        let cutoff = trimmed
+            .char_indices()
+            .nth(200)
+            .map(|(i, _)| i)
+            .unwrap_or(trimmed.len());
+        format!("{}…", &trimmed[..cutoff])
+    }
+}
+
+/// Construct a `GhError::HttpStatus` from a status + content-type +
+/// body. Centralised so the canonical-reason lookup and the body
+/// excerpting stay in sync between the raw-HTTP path and any future
+/// callers (e.g. REST handlers that drop to `_get` similarly).
+fn http_status_error(status: u16, content_type: &str, body: &str) -> GhError {
+    // Canonical reason ("Bad Gateway" for 502, "Unauthorized" for
+    // 401, …) wrapped in " (…)" so the Display string reads naturally.
+    // Open-coded instead of pulling the `http` crate just to call
+    // `StatusCode::canonical_reason()` — the list is short and stable.
+    let reason_word = match status {
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        413 => "Payload Too Large",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "",
+    };
+    let reason = if reason_word.is_empty() {
+        String::new()
+    } else {
+        format!(" ({reason_word})")
+    };
+    GhError::HttpStatus {
+        status,
+        reason,
+        content_type: content_type.to_string(),
+        body_excerpt: body_excerpt(body),
     }
 }
 
@@ -68,6 +165,11 @@ fn is_transient(e: &octocrab::Error) -> bool {
 /// user, and our footer pipes it straight in. Take only what
 /// comes before the first snafu marker and the first newline,
 /// trim trailing whitespace.
+///
+/// Still in use for the remaining typed-octocrab call sites
+/// (`/user`, `list_org_memberships`, repo listings, REST issue
+/// comment). The new raw GraphQL path on issue #13 emits
+/// `GhError::HttpStatus` directly and bypasses this entirely.
 fn strip_error_backtrace(s: &str) -> String {
     // snafu's backtrace prelude is "Found at" on the line right
     // after the message. Cut everything from "Found at" onward.
@@ -95,6 +197,7 @@ fn detail_of(err: &GhError) -> String {
         GhError::WatchAllFailed { count } => {
             format!("all {count} configured watched-repo queries failed (network or auth issue)")
         }
+        GhError::HttpStatus { .. } => format!("{err}"),
         GhError::Api(octo) => match octo {
             octocrab::Error::GitHub { source, .. } => {
                 // GitHubError's Display does the right thing —
@@ -151,6 +254,29 @@ impl From<GhError> for pilot_core::ProviderError {
                 return pilot_core::ProviderError::auth(SOURCE, detail);
             }
             if status == 429 || (500..=599).contains(&status) {
+                return pilot_core::ProviderError::retryable(SOURCE, detail);
+            }
+            return pilot_core::ProviderError::permanent(SOURCE, detail);
+        }
+
+        // Same status-aware classification for `HttpStatus`, the
+        // variant emitted by the raw GraphQL path. 2xx + non-JSON
+        // is treated as retryable: it almost always means a proxy /
+        // CDN intercepted the call with an HTML maintenance page
+        // even though the upstream eventually came back.
+        if let GhError::HttpStatus {
+            status,
+            content_type,
+            ..
+        } = &err
+        {
+            if *status == 401 || *status == 403 {
+                return pilot_core::ProviderError::auth(SOURCE, detail);
+            }
+            if *status == 429 || (500..=599).contains(status) {
+                return pilot_core::ProviderError::retryable(SOURCE, detail);
+            }
+            if (200..=299).contains(status) && !content_type_is_json(content_type) {
                 return pilot_core::ProviderError::retryable(SOURCE, detail);
             }
             return pilot_core::ProviderError::permanent(SOURCE, detail);
@@ -290,31 +416,39 @@ impl GhClient {
     }
 
     /// POST to `/graphql` with bounded exponential backoff on
-    /// transient errors. The body is borrowed (octocrab takes
-    /// `Option<&B>`), so the SAME body bytes go out on every
-    /// attempt — no risk of the body-clone bug that made us
-    /// disable octocrab's built-in retry. The caller has already
-    /// spent a rate-budget token via `acquire_or_block`; we do
-    /// NOT re-acquire per retry (a single 502-then-retry-success
-    /// is one logical call from GitHub's perspective).
+    /// transient errors.
+    ///
+    /// Drops to octocrab's raw `_post` API so we can inspect the
+    /// HTTP status + content-type BEFORE attempting to parse. With
+    /// the typed `post::<_, T>` path, a non-JSON response (502
+    /// maintenance page, login redirect when the token has expired,
+    /// gateway error) surfaced as the opaque
+    /// `Serde Error: expected value at line 1 column 1` —
+    /// users had no idea what actually went wrong. Now we
+    /// classify on the actual status code and the body excerpt
+    /// reaches the footer / logs.
+    ///
+    /// The body is borrowed (octocrab takes `Option<&B>`), so the
+    /// SAME body bytes go out on every attempt — no risk of the
+    /// body-clone bug that made us disable octocrab's built-in
+    /// retry. The caller has already spent a rate-budget token via
+    /// `acquire_or_block`; we do NOT re-acquire per retry (a
+    /// single 502-then-retry-success is one logical call from
+    /// GitHub's perspective).
     ///
     /// Retry policy:
-    /// - Transport variants (Hyper, Service, Http, Json, Serde,
-    ///   Io) → retry. Always transient.
-    /// - 502 / 503 / 504 → retry. GitHub serves these under load.
-    /// - Anything else (4xx including auth and 429, 5xx other
-    ///   than the three above, deserialization mismatches in
-    ///   typed `T`) → return immediately. Retrying wouldn't change
-    ///   the answer.
+    /// - Transport variants (Hyper, Service, Http, Json, Io) →
+    ///   retry. Always transient.
+    /// - 502 / 503 / 504, 429 → retry.
+    /// - 2xx with a non-JSON body → retry (proxy/CDN bait).
+    /// - Anything else (auth, validation, 2xx-JSON schema mismatch)
+    ///   → return immediately. Retrying wouldn't change the answer.
     ///
     /// Backoff sequence: 200ms → 800ms. Two retries after the
     /// initial attempt = 3 attempts total. Tight enough that a
     /// 60s poll cycle still has headroom; long enough that the
     /// usual <1s blip resolves itself.
-    async fn post_graphql_with_retry<T>(
-        &self,
-        body: &serde_json::Value,
-    ) -> Result<T, octocrab::Error>
+    async fn post_graphql_with_retry<T>(&self, body: &serde_json::Value) -> Result<T, GhError>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -326,7 +460,7 @@ impl GhClient {
         // breaks 5s) but well under the 90s spinner guard so a hung
         // call surfaces as an error before the UI gives up.
         const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
-        let mut last_err: Option<octocrab::Error> = None;
+        let mut last_err: Option<GhError> = None;
         // `0..=DELAYS_MS.len()` is intentional: we try once at
         // attempt=0 (no delay yet), then once per entry of
         // `DELAYS_MS`. The index is used both as the sleep offset
@@ -337,16 +471,50 @@ impl GhClient {
             reason = "the index is the attempt count; see comment above"
         )]
         for attempt in 0..=DELAYS_MS.len() {
-            let req = self.inner.post::<_, T>("/graphql", Some(body));
-            match tokio::time::timeout(REQUEST_TIMEOUT, req).await {
-                Ok(Ok(v)) => {
+            let outcome = match tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                self.post_graphql_once::<T>(body),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        "graphql request exceeded {}s wall-clock; \
+                             attempt {}/{} will retry",
+                        REQUEST_TIMEOUT.as_secs(),
+                        attempt + 1,
+                        DELAYS_MS.len() + 1,
+                    );
+                    // Synthesise an HttpStatus error so retry +
+                    // classification share the same shape as the
+                    // rest of this loop. status=0 is the "no
+                    // response" sentinel — it lands as
+                    // `Retryable` in `From<GhError>` via the
+                    // 2xx-non-JSON branch (status=0 isn't 2xx,
+                    // so we explicitly retry it here too).
+                    Err(GhError::HttpStatus {
+                        status: 0,
+                        reason: String::new(),
+                        content_type: String::new(),
+                        body_excerpt: format!(
+                            "graphql request timed out after {}s",
+                            REQUEST_TIMEOUT.as_secs()
+                        ),
+                    })
+                }
+            };
+            match outcome {
+                Ok(v) => {
                     if attempt > 0 {
                         tracing::info!("graphql request succeeded on retry {attempt}");
                     }
                     return Ok(v);
                 }
-                Ok(Err(e)) => {
-                    if !is_transient(&e) {
+                Err(e) => {
+                    let transient =
+                        is_transient(&e) || matches!(&e, GhError::HttpStatus { status: 0, .. });
+                    if !transient {
                         return Err(e);
                     }
                     if attempt < DELAYS_MS.len() {
@@ -360,36 +528,55 @@ impl GhClient {
                     }
                     last_err = Some(e);
                 }
-                Err(_elapsed) => {
-                    // Wall-clock timeout. Treat as transient so the
-                    // retry loop gets a chance, but log loudly — a
-                    // 25s request is unusual enough to investigate.
-                    tracing::warn!(
-                        "graphql request exceeded {}s wall-clock; \
-                         attempt {}/{} will retry",
-                        REQUEST_TIMEOUT.as_secs(),
-                        attempt + 1,
-                        DELAYS_MS.len() + 1,
-                    );
-                    if attempt < DELAYS_MS.len() {
-                        tokio::time::sleep(std::time::Duration::from_millis(DELAYS_MS[attempt]))
-                            .await;
-                    }
-                    // No octocrab::Error to stash — synthesize one
-                    // by making a clearly-labelled HTTP error.
-                    use snafu::GenerateImplicitData;
-                    last_err = Some(octocrab::Error::Other {
-                        source: format!(
-                            "graphql request timed out after {}s",
-                            REQUEST_TIMEOUT.as_secs()
-                        )
-                        .into(),
-                        backtrace: snafu::Backtrace::generate(),
-                    });
-                }
             }
         }
         Err(last_err.expect("loop runs at least once"))
+    }
+
+    /// One round-trip to `/graphql` with status-aware error
+    /// surfacing. Bypasses octocrab's typed `post::<_, T>` because
+    /// that path swallows the HTTP status on non-JSON responses
+    /// (returns `octocrab::Error::Serde` with no access to the raw
+    /// body), which is the bug in #13.
+    async fn post_graphql_once<T>(&self, body: &serde_json::Value) -> Result<T, GhError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let response = self
+            .inner
+            ._post("/graphql", Some(body))
+            .await
+            .map_err(GhError::Api)?;
+        let status = response.status().as_u16();
+        // `HeaderMap::get` is case-insensitive, so lowercase here is
+        // both the canonical form and what octocrab uses internally.
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let raw_body = self
+            .inner
+            .body_to_string(response)
+            .await
+            .map_err(GhError::Api)?;
+        // Non-2xx or non-JSON: never attempt to parse — the body is
+        // an HTML page / login redirect / GitHub error JSON we'd
+        // rather surface verbatim than mis-deserialise.
+        if !(200..=299).contains(&status) || !content_type_is_json(&content_type) {
+            return Err(http_status_error(status, &content_type, &raw_body));
+        }
+        // 2xx + JSON content-type: this is the success path. A parse
+        // failure here is a real schema mismatch between our types
+        // and GitHub's response — surface it with status + content-
+        // type intact instead of dropping to `Serde`.
+        serde_json::from_str::<T>(&raw_body).map_err(|e| GhError::HttpStatus {
+            status,
+            reason: " (json parse failed)".to_string(),
+            content_type,
+            body_excerpt: format!("{e} — body: {}", body_excerpt(&raw_body)),
+        })
     }
 
     /// Gate-or-fail: spend one rate-budget token and convert the
@@ -824,7 +1011,7 @@ impl GhClient {
                         "GraphQL request body was: {}",
                         serde_json::to_string_pretty(&body).unwrap_or_default()
                     );
-                    GhError::Api(e)
+                    e
                 })?;
             let response: graphql::GqlResponse = match serde_json::from_value(raw.clone()) {
                 Ok(r) => r,
@@ -908,10 +1095,7 @@ impl GhClient {
             });
         }
         let body = graphql::query_body(&query);
-        let resp: graphql::GqlResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let resp: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = resp.errors {
             let joined: String = errors
                 .iter()
@@ -982,7 +1166,7 @@ impl GhClient {
             let response: graphql::GqlIssueResponse =
                 self.post_graphql_with_retry(&body).await.map_err(|e| {
                     tracing::error!("Issues HTTP error (page {page}): {e}\n{e:?}");
-                    GhError::Api(e)
+                    e
                 })?;
 
             if let Some(errors) = &response.errors {
@@ -1299,10 +1483,7 @@ impl GhClient {
     pub async fn react_eyes(&self, reactable_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("addReaction(EYES) mutation")?;
         let body = graphql::add_reaction_eyes_body(reactable_node_id);
-        let response: graphql::GqlResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -1320,10 +1501,7 @@ impl GhClient {
     pub async fn update_branch(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("updatePullRequestBranch mutation")?;
         let body = graphql::update_branch_body(pull_request_node_id);
-        let response: graphql::GqlResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
         // Observe rate-limit if the mutation response includes it
         // (currently it doesn't — the mutation body doesn't select
         // `rateLimit` — but if a future query body change pulls it
@@ -1366,10 +1544,7 @@ impl GhClient {
     ) -> Result<Vec<pilot_core::Activity>, GhError> {
         self.acquire_or_block("PR details lazy-fetch")?;
         let body = graphql::pr_details_body(pull_request_node_id);
-        let response: graphql::GqlPrDetailsResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlPrDetailsResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -1404,10 +1579,7 @@ impl GhClient {
     pub async fn lookup_user_id(&self, login: &str) -> Result<String, GhError> {
         self.acquire_or_block("user lookup query")?;
         let body = graphql::user_id_body(login);
-        let response: graphql::GqlUserIdResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlUserIdResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -1441,10 +1613,7 @@ impl GhClient {
         }
         self.acquire_or_block("requestReviews mutation")?;
         let body = graphql::request_reviews_body(pull_request_node_id, &user_ids);
-        let response: graphql::GqlResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(data) = &response.data
             && let Some(rl) = &data.rate_limit
         {
@@ -1478,10 +1647,7 @@ impl GhClient {
         }
         self.acquire_or_block("addAssigneesToAssignable mutation")?;
         let body = graphql::add_assignees_body(assignable_node_id, &user_ids);
-        let response: graphql::GqlResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(data) = &response.data
             && let Some(rl) = &data.rate_limit
         {
@@ -1517,10 +1683,7 @@ impl GhClient {
         }
         self.acquire_or_block("removeAssigneesFromAssignable mutation")?;
         let body = graphql::remove_assignees_body(assignable_node_id, &user_ids);
-        let response: graphql::GqlResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(data) = &response.data
             && let Some(rl) = &data.rate_limit
         {
@@ -1541,10 +1704,7 @@ impl GhClient {
     pub async fn merge_pr(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("mergePullRequest mutation")?;
         let body = graphql::merge_pr_body(pull_request_node_id);
-        let response: graphql::GqlResponse = self
-            .post_graphql_with_retry(&body)
-            .await
-            .map_err(GhError::Api)?;
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(data) = &response.data
             && let Some(rl) = &data.rate_limit
         {
@@ -1770,6 +1930,160 @@ impl pilot_core::TaskProvider for GhClient {
         self.post_issue_comment(repo, number, body)
             .await
             .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Spin up a tiny TCP server that answers every request with the
+    /// same canned HTTP response. Returns the `http://addr` base URI
+    /// to feed into `Octocrab::builder().base_uri(…)`. We hand-roll
+    /// the response instead of pulling in `wiremock` because we need
+    /// only one canned answer per test and want zero new deps.
+    async fn spawn_canned_response_server(
+        status_line: &'static str,
+        content_type: &'static str,
+        body: &'static str,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => continue,
+                };
+                tokio::spawn(async move {
+                    // Read until we see the end of the HTTP request
+                    // headers (\r\n\r\n) so the client doesn't see
+                    // a premature close before its write completes.
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    let response = format!(
+                        "HTTP/1.1 {status_line}\r\n\
+                         Content-Type: {content_type}\r\n\
+                         Content-Length: {}\r\n\
+                         Connection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn make_client(base_uri: &str) -> GhClient {
+        // Bypass `from_credential` (which calls `/user`) — we want
+        // a `GhClient` that talks to the mock server directly.
+        let inner = octocrab::Octocrab::builder()
+            .base_uri(base_uri)
+            .unwrap()
+            .build()
+            .unwrap();
+        GhClient {
+            inner,
+            user: "test-user".to_string(),
+            credential_source: "test".to_string(),
+            pr_filters: vec![],
+            issue_filters: vec![],
+            watch_repos: vec![],
+            budget: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::rate_budget::RateBudget::default_for_pilot(),
+            )),
+        }
+    }
+
+    /// Regression test for issue #13: GitHub returns a 502 HTML
+    /// maintenance page; we used to surface the opaque
+    /// "Serde Error: expected value at line 1 column 1". Now the
+    /// error includes the actual HTTP status and the canonical reason.
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_502_html_surfaces_actual_status() {
+        let base_uri = spawn_canned_response_server(
+            "502 Bad Gateway",
+            "text/html",
+            "<html><body><h1>502 Bad Gateway</h1></body></html>",
+        )
+        .await;
+        let client = make_client(&base_uri);
+        let body = serde_json::json!({"query": "{}"});
+        let err = client
+            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .await
+            .expect_err("502 response should produce an error");
+        let msg = err.to_string();
+        assert!(msg.contains("502"), "expected '502' in error: {msg}");
+        assert!(
+            msg.contains("Bad Gateway"),
+            "expected canonical reason 'Bad Gateway' in error: {msg}"
+        );
+        assert!(
+            !msg.contains("Serde Error"),
+            "must NOT regress to the opaque serde wording: {msg}"
+        );
+        assert!(
+            matches!(err, GhError::HttpStatus { status: 502, .. }),
+            "expected HttpStatus variant, got: {err:?}"
+        );
+    }
+
+    /// 401 should surface as `HttpStatus { status: 401, .. }` and
+    /// classify as `ProviderError::Auth` via the `From` impl —
+    /// previously we relied on `octocrab::Error::GitHub`, which the
+    /// raw path doesn't produce.
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_401_classifies_as_auth() {
+        let base_uri = spawn_canned_response_server(
+            "401 Unauthorized",
+            "application/json",
+            r#"{"message":"Bad credentials"}"#,
+        )
+        .await;
+        let client = make_client(&base_uri);
+        let body = serde_json::json!({"query": "{}"});
+        let err = client
+            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .await
+            .expect_err("401 should produce an error");
+        assert!(
+            matches!(err, GhError::HttpStatus { status: 401, .. }),
+            "expected HttpStatus(401), got: {err:?}"
+        );
+        let pe: pilot_core::ProviderError = err.into();
+        assert!(
+            matches!(pe, pilot_core::ProviderError::Auth { .. }),
+            "401 should map to ProviderError::Auth, got: {pe:?}"
+        );
+    }
+
+    /// A 2xx response whose body fails JSON parsing surfaces with
+    /// the status + content-type intact, plus the parse-failure
+    /// detail in the body excerpt.
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_200_with_invalid_json_surfaces_parse_failure() {
+        let base_uri =
+            spawn_canned_response_server("200 OK", "application/json", "not actually json").await;
+        let client = make_client(&base_uri);
+        let body = serde_json::json!({"query": "{}"});
+        let err = client
+            .post_graphql_with_retry::<serde_json::Value>(&body)
+            .await
+            .expect_err("unparseable 2xx body should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("json parse failed"),
+            "expected parse-failure marker in error: {msg}"
+        );
+        assert!(
+            matches!(err, GhError::HttpStatus { status: 200, .. }),
+            "expected HttpStatus(200), got: {err:?}"
+        );
     }
 }
 

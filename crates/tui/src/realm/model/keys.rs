@@ -571,8 +571,7 @@ impl<T: TerminalAdapter> Model<T> {
                         .layout
                         .hit_test_splitter(m.column, m.row, sidebar_rect, right_top_rect)
                         .is_none()
-                    && let Some(url) =
-                        self.terminals.url_at(right_bottom_rect, m.column, m.row)
+                    && let Some(url) = self.terminals.url_at(right_bottom_rect, m.column, m.row)
                 {
                     match pilot_tui_core::editors::open_url(&url) {
                         Ok(()) => {

@@ -2012,10 +2012,7 @@ mod find_url_at_byte_tests {
     fn picks_correct_url_when_multiple_on_row() {
         let row = "first https://a.example.com then http://b.example.com end";
         // Inside first URL.
-        assert_eq!(
-            find_url_at_byte(row, 10),
-            Some("https://a.example.com")
-        );
+        assert_eq!(find_url_at_byte(row, 10), Some("https://a.example.com"));
         // Inside second URL.
         assert_eq!(find_url_at_byte(row, 40), Some("http://b.example.com"));
         // Between them.

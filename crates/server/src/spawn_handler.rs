@@ -329,16 +329,18 @@ pub async fn handle_spawn(
         // ticks.
         const STATE_BUF_CAP: usize = 32 * 1024;
         let mut state_buf: Vec<u8> = Vec::with_capacity(STATE_BUF_CAP);
-        // Hysteresis: timestamp of the last Asking detection.
-        // When detect_state returns Active and the previous state
-        // was Asking, we ONLY transition to Active if it's been
-        // long enough since we last saw Asking patterns — gives
-        // the buffer time to capture genuine new output (user
-        // typed a response, Claude is now streaming back), rather
-        // than treating a ticker chunk that scrolled the prompt
-        // out of buffer as "agent done."
-        let mut last_asking_at: Option<std::time::Instant> = None;
-        const ASKING_HYSTERESIS: std::time::Duration = std::time::Duration::from_secs(8);
+        // Hysteresis: timestamp of the last InputNeeded detection.
+        // When detect_state leaves InputNeeded (to Working or Idle)
+        // and the previous state was InputNeeded, we ONLY honor the
+        // transition if it's been long enough since we last saw the
+        // prompt patterns — gives the buffer time to capture genuine
+        // new output (user typed a response, Claude is now streaming
+        // back), rather than treating a ticker chunk that scrolled the
+        // prompt out of buffer as "agent done." The faster, expected
+        // Working↔Idle flips are NOT damped — only leaving the sticky
+        // "needs input" state is.
+        let mut last_input_needed_at: Option<std::time::Instant> = None;
+        const INPUT_NEEDED_HYSTERESIS: std::time::Duration = std::time::Duration::from_secs(8);
 
         async fn maybe_emit_state_change(
             agent: Option<&std::sync::Arc<dyn pilot_agents::Agent>>,
@@ -350,7 +352,7 @@ pub async fn handle_spawn(
             bus: &tokio::sync::broadcast::Sender<Event>,
             id: TerminalId,
             session_key: &SessionKey,
-            last_asking_at: &mut Option<std::time::Instant>,
+            last_input_needed_at: &mut Option<std::time::Instant>,
             hysteresis: std::time::Duration,
         ) {
             const STATE_BUF_CAP: usize = 32 * 1024;
@@ -400,18 +402,16 @@ pub async fn handle_spawn(
                 detected = ?new_state,
                 "detect_state ran",
             );
-            if new_state == pilot_ipc::AgentState::Asking {
+            if new_state == pilot_ipc::AgentState::InputNeeded {
                 tracing::debug!(
                     terminal_id = ?id,
                     buf_len = buf.len(),
                     tail_tip = %String::from_utf8_lossy(
                         &detect_window[detect_window.len().saturating_sub(120)..]
                     ),
-                    "detect_state → Asking",
+                    "detect_state → InputNeeded",
                 );
-            }
-            if new_state == pilot_ipc::AgentState::Asking {
-                *last_asking_at = Some(std::time::Instant::now());
+                *last_input_needed_at = Some(std::time::Instant::now());
             }
             let current = {
                 let map = states.lock().await;
@@ -421,15 +421,19 @@ pub async fn handle_spawn(
             // detector miss the prompt for one chunk, then catch
             // it on the next. Without this guard the pill flickers
             // every few seconds while Claude is genuinely still
-            // waiting.
-            if current == Some(pilot_ipc::AgentState::Asking)
-                && new_state == pilot_ipc::AgentState::Active
-                && let Some(t) = last_asking_at
+            // waiting. Only damp the edge that LEAVES InputNeeded —
+            // a transient ticker chunk that scrolls the prompt out of
+            // buffer shouldn't drop "needs input" to Working/Idle.
+            if current == Some(pilot_ipc::AgentState::InputNeeded)
+                && new_state != pilot_ipc::AgentState::InputNeeded
+                && let Some(t) = last_input_needed_at
                 && t.elapsed() < hysteresis
             {
                 tracing::debug!(
                     terminal_id = ?id,
-                    "state hysteresis: suppressing Asking → Active (only {:?} since last Asking)",
+                    ?new_state,
+                    "state hysteresis: suppressing InputNeeded → {:?} (only {:?} since last InputNeeded)",
+                    new_state,
                     t.elapsed(),
                 );
                 return;
@@ -495,8 +499,8 @@ pub async fn handle_spawn(
                 &bus,
                 id_for_pump,
                 &session_key_for_pump,
-                &mut last_asking_at,
-                ASKING_HYSTERESIS,
+                &mut last_input_needed_at,
+                INPUT_NEEDED_HYSTERESIS,
             )
             .await;
             let _ = bus.send(Event::TerminalOutput {
@@ -517,8 +521,8 @@ pub async fn handle_spawn(
                 &bus,
                 id_for_pump,
                 &session_key_for_pump,
-                &mut last_asking_at,
-                ASKING_HYSTERESIS,
+                &mut last_input_needed_at,
+                INPUT_NEEDED_HYSTERESIS,
             )
             .await;
             if !signaled_first_output {
@@ -1305,18 +1309,20 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
         tracing::warn!("backend write {key}: {e}");
     }
     // If the user just sent Enter (`\r` or `\n`) to an agent
-    // terminal that's currently in `Asking` state, optimistically
-    // flip it back to `Active`. The detect_state loop will re-fire
-    // `Asking` on the next output chunk if the agent's response
-    // turned out to be another prompt; but for the common case
-    // (user typed `y`/`yes`/`1`/<text> + Enter), the `?` pill
-    // disappears immediately instead of lingering through the 8s
-    // hysteresis window. Bracket-paste markers (`ESC[200~` / `ESC[201~`)
-    // count too — those wrap claude's submit at the end.
+    // terminal that's currently in `InputNeeded` state, optimistically
+    // flip it to `Working` — the user answered the prompt, so the
+    // agent is about to act on it. The detect_state loop will correct
+    // this on the next output chunk (back to `InputNeeded` if the
+    // response turned out to be another prompt, or to `Idle` once the
+    // agent goes quiet); but for the common case (user typed
+    // `y`/`yes`/`1`/<text> + Enter), the `?` pill clears immediately
+    // instead of lingering through the 8s hysteresis window.
+    // Bracket-paste markers (`ESC[200~` / `ESC[201~`) count too —
+    // those wrap claude's submit at the end.
     if !bytes.contains(&b'\r') && !bytes.contains(&b'\n') {
         return;
     }
-    if config.agent_state_for(terminal_id).await != Some(pilot_ipc::AgentState::Asking) {
+    if config.agent_state_for(terminal_id).await != Some(pilot_ipc::AgentState::InputNeeded) {
         return;
     }
     let session_key = config
@@ -1332,15 +1338,15 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
         .agent_states
         .lock()
         .await
-        .insert(terminal_id, pilot_ipc::AgentState::Active);
+        .insert(terminal_id, pilot_ipc::AgentState::Working);
     tracing::debug!(
         ?terminal_id,
-        "user pressed Enter; optimistically clearing Asking → Active"
+        "user pressed Enter; optimistically flipping InputNeeded → Working"
     );
     let _ = config.bus.send(Event::AgentState {
         session_key,
         terminal_id,
-        state: pilot_ipc::AgentState::Active,
+        state: pilot_ipc::AgentState::Working,
     });
 }
 

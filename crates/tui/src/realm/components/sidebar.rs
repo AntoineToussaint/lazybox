@@ -89,6 +89,13 @@ impl Sidebar {
         self.inner.drain_pending_asking_notices()
     }
 
+    /// Advance the "working" spinner on a low-rate tick. Returns
+    /// `true` when the glyph changed so the run loop can mark the
+    /// frame dirty. Delegates to the inner pilot sidebar.
+    pub fn tick_working(&mut self) -> bool {
+        self.inner.tick_working()
+    }
+
     /// Drain Shift-M "Merge PR #N?" requests. The orchestrator mounts
     /// a Confirm modal per entry.
 

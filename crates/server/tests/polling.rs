@@ -1696,7 +1696,7 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
         .agent_states
         .lock()
         .await
-        .insert(TerminalId(42), pilot_ipc::AgentState::Active);
+        .insert(TerminalId(42), pilot_ipc::AgentState::Working);
 
     polling::delete_workspace(&config, &workspace_key).await;
 

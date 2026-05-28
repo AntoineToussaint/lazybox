@@ -23,8 +23,16 @@
 //!
 //! - [`apply_agent_state`] adds/removes a workspace key from the
 //!   asking-set and reports the [`AttentionTransition`].
+//! - [`apply_working_state`] is the companion for the third state —
+//!   it tracks the disjoint working-set that drives the side panel's
+//!   animated "working" spinner.
 //! - [`next_asking_workspace`] picks the next asking workspace —
 //!   used by the `!` jump-to-asking key.
+//!
+//! The three [`AgentState`]s (`Working` / `InputNeeded` / `Idle`)
+//! share a single per-session UI slot, so the asking-set and
+//! working-set are kept mutually exclusive: every event applies to
+//! both, landing the key in at most one.
 
 use pilot_core::{SessionKey, Workspace};
 use pilot_ipc::AgentState;
@@ -59,7 +67,7 @@ pub fn apply_agent_state(
     incoming: AgentState,
 ) -> AttentionTransition {
     let was_asking = asking_set.contains(workspace_key);
-    let is_asking = matches!(incoming, AgentState::Asking);
+    let is_asking = matches!(incoming, AgentState::InputNeeded);
     match (was_asking, is_asking) {
         (false, true) => {
             asking_set.insert(workspace_key.clone());
@@ -71,6 +79,48 @@ pub fn apply_agent_state(
         }
         _ => AttentionTransition::NoChange,
     }
+}
+
+/// Apply an `Event::AgentState` to the sidebar's working-set — the
+/// companion to [`apply_agent_state`] for the third state.
+///
+/// The working-set and asking-set are kept disjoint by construction:
+/// each event carries exactly one [`AgentState`], so applying it to
+/// both sets adds the key to at most one of them and removes it from
+/// the other. The side panel renders both in a single per-session
+/// slot (working spinner vs `?` pill), so they must never both hold
+/// the same key.
+///
+/// Returns `true` when membership changed (caller should re-render),
+/// `false` on a repeat/no-op broadcast. Unlike asking, entering the
+/// working state warrants no desktop notification — it's not
+/// something the user needs to act on — so this returns a plain
+/// bool rather than an [`AttentionTransition`].
+pub fn apply_working_state(
+    working_set: &mut HashSet<SessionKey>,
+    workspace_key: &SessionKey,
+    incoming: AgentState,
+) -> bool {
+    let was_working = working_set.contains(workspace_key);
+    let is_working = matches!(incoming, AgentState::Working);
+    match (was_working, is_working) {
+        (false, true) => {
+            working_set.insert(workspace_key.clone());
+            true
+        }
+        (true, false) => {
+            working_set.remove(workspace_key);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// True iff the workspace's key is in the working-set. Mirror of
+/// [`workspace_is_asking`] for the "actively working" signal.
+pub fn workspace_is_working(workspace: &Workspace, working_set: &HashSet<SessionKey>) -> bool {
+    let key = SessionKey::from(&workspace.key);
+    working_set.contains(&key)
 }
 
 /// True iff the workspace's key is in the asking-set. Single
@@ -137,7 +187,7 @@ mod tests {
     #[test]
     fn first_asking_for_a_key_reports_now_asking() {
         let mut set = HashSet::new();
-        let t = apply_agent_state(&mut set, &ws_key(1), AgentState::Asking);
+        let t = apply_agent_state(&mut set, &ws_key(1), AgentState::InputNeeded);
         assert_eq!(t, AttentionTransition::NowAsking);
         assert!(set.contains(&ws_key(1)));
     }
@@ -146,7 +196,7 @@ mod tests {
     fn asking_to_active_reports_no_longer_asking() {
         let mut set = HashSet::new();
         set.insert(ws_key(1));
-        let t = apply_agent_state(&mut set, &ws_key(1), AgentState::Active);
+        let t = apply_agent_state(&mut set, &ws_key(1), AgentState::Idle);
         assert_eq!(t, AttentionTransition::NoLongerAsking);
         assert!(!set.contains(&ws_key(1)));
     }
@@ -157,8 +207,8 @@ mod tests {
         // Must not re-notify or we'd spam the OS notification
         // center every second a Claude prompt is on screen.
         let mut set = HashSet::new();
-        apply_agent_state(&mut set, &ws_key(1), AgentState::Asking);
-        let t = apply_agent_state(&mut set, &ws_key(1), AgentState::Asking);
+        apply_agent_state(&mut set, &ws_key(1), AgentState::InputNeeded);
+        let t = apply_agent_state(&mut set, &ws_key(1), AgentState::InputNeeded);
         assert_eq!(t, AttentionTransition::NoChange);
         assert!(set.contains(&ws_key(1)));
     }
@@ -166,7 +216,7 @@ mod tests {
     #[test]
     fn active_to_active_is_no_change() {
         let mut set = HashSet::new();
-        let t = apply_agent_state(&mut set, &ws_key(1), AgentState::Active);
+        let t = apply_agent_state(&mut set, &ws_key(1), AgentState::Idle);
         assert_eq!(t, AttentionTransition::NoChange);
         assert!(set.is_empty());
     }
@@ -175,11 +225,11 @@ mod tests {
     fn keys_are_independent() {
         // Asking on workspace A must not affect workspace B's state.
         let mut set = HashSet::new();
-        apply_agent_state(&mut set, &ws_key(1), AgentState::Asking);
-        apply_agent_state(&mut set, &ws_key(2), AgentState::Asking);
+        apply_agent_state(&mut set, &ws_key(1), AgentState::InputNeeded);
+        apply_agent_state(&mut set, &ws_key(2), AgentState::InputNeeded);
         assert!(set.contains(&ws_key(1)));
         assert!(set.contains(&ws_key(2)));
-        apply_agent_state(&mut set, &ws_key(1), AgentState::Active);
+        apply_agent_state(&mut set, &ws_key(1), AgentState::Idle);
         assert!(!set.contains(&ws_key(1)));
         assert!(set.contains(&ws_key(2)));
     }
@@ -193,6 +243,86 @@ mod tests {
         assert!(!workspace_is_asking(&ws, &set));
         set.insert(SessionKey::from(&ws.key));
         assert!(workspace_is_asking(&ws, &set));
+    }
+
+    // ── apply_working_state / workspace_is_working ────────────────
+
+    #[test]
+    fn first_working_for_a_key_changes_set() {
+        let mut set = HashSet::new();
+        assert!(apply_working_state(
+            &mut set,
+            &ws_key(1),
+            AgentState::Working
+        ));
+        assert!(set.contains(&ws_key(1)));
+    }
+
+    #[test]
+    fn working_to_idle_clears_set() {
+        let mut set = HashSet::new();
+        set.insert(ws_key(1));
+        assert!(apply_working_state(&mut set, &ws_key(1), AgentState::Idle));
+        assert!(!set.contains(&ws_key(1)));
+    }
+
+    #[test]
+    fn repeat_working_broadcast_is_no_change() {
+        // The daemon re-emits Working on every output chunk while the
+        // agent streams. Membership doesn't change → no re-render.
+        let mut set = HashSet::new();
+        apply_working_state(&mut set, &ws_key(1), AgentState::Working);
+        assert!(!apply_working_state(
+            &mut set,
+            &ws_key(1),
+            AgentState::Working
+        ));
+        assert!(set.contains(&ws_key(1)));
+    }
+
+    #[test]
+    fn input_needed_does_not_mark_working() {
+        // InputNeeded clears working (and apply_agent_state would set
+        // asking) — the two slots stay disjoint.
+        let mut working = HashSet::new();
+        working.insert(ws_key(1));
+        assert!(apply_working_state(
+            &mut working,
+            &ws_key(1),
+            AgentState::InputNeeded
+        ));
+        assert!(!working.contains(&ws_key(1)));
+    }
+
+    #[test]
+    fn working_and_asking_sets_stay_disjoint() {
+        // Drive a full Idle → Working → InputNeeded → Idle cycle
+        // through both appliers and assert the key is never in both.
+        let mut asking = HashSet::new();
+        let mut working = HashSet::new();
+        let k = ws_key(1);
+        for state in [
+            AgentState::Working,
+            AgentState::InputNeeded,
+            AgentState::Idle,
+            AgentState::Working,
+        ] {
+            apply_agent_state(&mut asking, &k, state);
+            apply_working_state(&mut working, &k, state);
+            assert!(
+                !(asking.contains(&k) && working.contains(&k)),
+                "key must never be both asking and working (state {state:?})",
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_is_working_reads_set() {
+        let mut set = HashSet::new();
+        let ws = sample_workspace(1);
+        assert!(!workspace_is_working(&ws, &set));
+        set.insert(SessionKey::from(&ws.key));
+        assert!(workspace_is_working(&ws, &set));
     }
 
     // ── next_asking_workspace ─────────────────────────────────────

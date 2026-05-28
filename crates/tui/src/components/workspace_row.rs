@@ -40,8 +40,21 @@ pub struct WorkspaceRowCtx<'a> {
     /// retired when Archive moved to a Confirm modal (every
     /// destructive action goes through `ActionConfirm` now).
     pub long_snooze_armed: bool,
-    /// Any agent in this workspace is in `AgentState::Asking`.
+    /// Any agent in this workspace is in `AgentState::InputNeeded`.
+    /// Renders the `?` pill in the shared state slot. Mutually
+    /// exclusive with `working` — input-needed wins if both were ever
+    /// set (they can't be, by the disjoint asking/working sets).
     pub asking: bool,
+    /// Any agent in this workspace is in `AgentState::Working`
+    /// (streaming / running a tool). Renders the animated spinner in
+    /// the same slot the `?` pill uses.
+    pub working: bool,
+    /// Current spinner glyph for the `working` slot. Shared across all
+    /// rows in a render pass — the sidebar advances a single frame
+    /// counter on a low-rate tick (see `Sidebar::tick_working`), so
+    /// the animation costs one glyph lookup per working row, no
+    /// per-tick row rebuild.
+    pub working_glyph: &'static str,
     /// `Sidebar::runner_badges(key)` — `[('C', n), ('S', m)]` etc.
     pub badges: Vec<(char, usize)>,
     /// Render the type indicator as plain ASCII (`p`/`i`/`l`) instead
@@ -86,9 +99,10 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///    — see issue #42.
 /// 2. PR number — `#NNN`, padded to `max_pr_num_width`.
 /// 3. Role badge — ` R` colored marker, or blank.
-/// 4. Asking glyph — ` ? ` warn-colored, or blank — reserved width so
-///    the kind/title to the right don't jitter between asking /
-///    not-asking rows.
+/// 4. State slot — ` ? ` (input-needed, warn) / ` ⠋ ` (working,
+///    animated accent spinner) / blank (idle). One slot, three
+///    mutually-exclusive states; reserved width so the kind/title to
+///    the right don't jitter as a row changes state.
 /// 5. Kind label — `[FEAT] ` etc, or blank. Max across rows so titles
 ///    align even when some rows have no kind prefix.
 /// 6. Title — flex, absorbs the remaining width. Truncates with `…`.
@@ -117,7 +131,7 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
         Column::fixed(1),                        // 1: type glyph (single cell, flush against #N)
         Column::fixed(max_pr_num_width).right(), // 2: pr_num (right-aligned so digits line up)
         Column::fixed(2),                        // 3: role (" R" or blank)
-        Column::fixed(3),                        // 4: asking (" ? " reserved)
+        Column::fixed(3),                        // 4: state slot (" ? "/" ⠋ "/blank, reserved)
         Column::max(0),                          // 5: kind ("[FEAT] " or blank)
         Column::flex(0),                         // 6: title
         Column::max(0),                          // 7: labels
@@ -140,7 +154,7 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
         cell_type(ctx),
         cell_pr_num(ctx),
         cell_role(ctx),
-        cell_asking(ctx),
+        cell_state(ctx),
         cell_kind(ctx),
         cell_title(ctx),
         cell_labels(ctx),
@@ -220,23 +234,47 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     ])
 }
 
-fn cell_asking(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    if ctx.asking {
-        let style = if ctx.is_cursor {
-            ctx.row_style()
-        } else {
-            Style::default()
-                .fg(ctx.theme.warn)
-                .add_modifier(Modifier::BOLD)
-        };
-        // Reserved 3 cells: " ? " (leading + glyph + trailing space).
-        Cell::new(vec![
-            Span::styled(" ?".to_string(), style),
-            Span::styled(" ".to_string(), ctx.row_style()),
-        ])
+/// The shared per-session state slot: a single 3-cell column that
+/// renders the agent's current `AgentState` with a distinct visual
+/// per state, so it's one thing to scan:
+///   - `InputNeeded` → ` ? ` (warn, bold) — a static glyph: the
+///     agent is paused waiting on me.
+///   - `Working`     → ` <spinner> ` (accent, bold) — an animated
+///     glyph: the agent is making progress right now.
+///   - `Idle`        → blank.
+/// Reserved width either way so the kind/title to the right don't
+/// jitter as a row moves between states. InputNeeded takes precedence
+/// over Working defensively, though the two are disjoint upstream.
+fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    let (glyph, fg) = if ctx.asking {
+        ("?", ctx.theme.warn)
+    } else if ctx.working {
+        (ctx.working_glyph, ctx.theme.accent)
     } else {
-        Cell::empty()
-    }
+        return Cell::empty();
+    };
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default().fg(fg).add_modifier(Modifier::BOLD)
+    };
+    // Reserved 3 cells: " G " (leading + glyph + trailing space).
+    Cell::new(vec![
+        Span::styled(format!(" {glyph}"), style),
+        Span::styled(" ".to_string(), ctx.row_style()),
+    ])
+}
+
+/// Spinner frames for the "working" state slot. A small braille
+/// cycle — visually distinct from the static `?` input-needed glyph
+/// and cheap to render. `working_glyph` indexes this by the sidebar's
+/// shared frame counter.
+pub const WORKING_SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Resolve the spinner glyph for a given frame index. Wraps, so the
+/// caller's counter can grow unbounded.
+pub fn working_glyph(frame: usize) -> &'static str {
+    WORKING_SPINNER_FRAMES[frame % WORKING_SPINNER_FRAMES.len()]
 }
 
 fn cell_kind(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -518,6 +556,8 @@ mod tests {
             max_pr_num_width: 4,
             long_snooze_armed: false,
             asking: false,
+            working: false,
+            working_glyph: working_glyph(0),
             badges: vec![],
             ascii_glyphs: false,
         }
@@ -563,28 +603,71 @@ mod tests {
         assert_eq!(cell.spans[0].content.as_ref(), "#42");
     }
 
-    /// Asking glyph: when not asking, cell is empty so the column's
-    /// reserved width fills with row-style spaces (no jitter).
+    /// State slot: idle (neither asking nor working) → empty cell, so
+    /// the column's reserved width fills with row-style spaces (no
+    /// jitter as rows change state).
     #[test]
-    fn cell_asking_empty_when_not_asking() {
+    fn cell_state_empty_when_idle() {
         let task = make_task("owner/repo#1", "x");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
-        let cell = cell_asking(&ctx);
+        let cell = cell_state(&ctx);
         assert_eq!(cell.width(), 0);
     }
 
-    /// Asking glyph: 3 cells reserved (" ?" + trailing space).
+    /// State slot: input-needed → 3 cells (" ?" + trailing space).
     #[test]
-    fn cell_asking_three_cells_when_asking() {
+    fn cell_state_three_cells_when_asking() {
         let task = make_task("owner/repo#1", "x");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
         ctx.asking = true;
-        let cell = cell_asking(&ctx);
+        let cell = cell_state(&ctx);
         assert_eq!(cell.width(), 3);
+        assert_eq!(cell.spans[0].content.as_ref(), " ?");
+    }
+
+    /// State slot: working → 3 cells with the current spinner glyph.
+    /// Same reserved width as the asking pill so the slot never jitters.
+    #[test]
+    fn cell_state_three_cells_with_spinner_when_working() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.working = true;
+        ctx.working_glyph = working_glyph(3);
+        let cell = cell_state(&ctx);
+        assert_eq!(cell.width(), 3);
+        assert_eq!(
+            cell.spans[0].content.as_ref(),
+            format!(" {}", working_glyph(3))
+        );
+    }
+
+    /// State slot precedence: input-needed wins over working if both
+    /// flags are somehow set (they can't be, by the disjoint sets,
+    /// but the slot must still render exactly one thing).
+    #[test]
+    fn cell_state_input_needed_wins_over_working() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.asking = true;
+        ctx.working = true;
+        let cell = cell_state(&ctx);
+        assert_eq!(cell.spans[0].content.as_ref(), " ?");
+    }
+
+    /// The spinner frame index wraps so an unbounded counter is safe.
+    #[test]
+    fn working_glyph_wraps_frame_index() {
+        let n = WORKING_SPINNER_FRAMES.len();
+        assert_eq!(working_glyph(0), working_glyph(n));
+        assert_eq!(working_glyph(1), working_glyph(n + 1));
     }
 
     /// Build a PR-shaped task — `make_task` fills `url` from `key`,
@@ -661,6 +744,8 @@ mod tests {
             max_pr_num_width: 2,
             long_snooze_armed: false,
             asking: false,
+            working: false,
+            working_glyph: working_glyph(0),
             badges: vec![],
             ascii_glyphs: false,
         };
@@ -782,6 +867,8 @@ mod tests {
             max_pr_num_width: 3,
             long_snooze_armed: false,
             asking: false,
+            working: false,
+            working_glyph: working_glyph(0),
             badges: vec![],
             ascii_glyphs: false,
         };

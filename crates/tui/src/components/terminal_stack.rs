@@ -298,9 +298,9 @@ struct TerminalSlot {
     /// inspect it. Not used for rendering.
     recent: Vec<u8>,
     /// Agent state cached from the daemon's `Event::AgentState`
-    /// broadcasts. Drives the "needs input" badge in the tab strip.
-    /// Default Active so non-agent terminals (shells) carry a
-    /// neutral state.
+    /// broadcasts. Drives the "needs input" / "working" badge in the
+    /// tab strip. Default `Idle` so non-agent terminals (shells) carry
+    /// a neutral state and never falsely show working.
     agent_state: pilot_ipc::AgentState,
     /// Last (cols, rows) we rendered this terminal at. Used to detect
     /// pane resizes — when the rect changes between frames we push a
@@ -1094,7 +1094,7 @@ impl TerminalStack {
             last_seq,
             vt,
             recent: Vec::new(),
-            agent_state: pilot_ipc::AgentState::Active,
+            agent_state: pilot_ipc::AgentState::Idle,
             last_rendered_size: None,
             composing: String::new(),
             last_user_message: None,
@@ -1477,7 +1477,7 @@ impl TerminalStack {
         // tab label occupies for click-hit-testing.
         let mut cursor: u16 = title_area.x + title_prefix.chars().count() as u16;
         for (i, id) in visible.iter().enumerate() {
-            let (icon, label, is_asking) = self
+            let (icon, label, agent_state) = self
                 .terminals
                 .get(id)
                 .map(|s| {
@@ -1489,10 +1489,9 @@ impl TerminalStack {
                         // Log-tail terminals reuse the shell glyph for now.
                         _ => crate::components::icons::SHELL,
                     };
-                    let asking = matches!(s.agent_state, pilot_ipc::AgentState::Asking);
-                    (icon, Self::tab_label(&s.kind), asking)
+                    (icon, Self::tab_label(&s.kind), Some(s.agent_state))
                 })
-                .unwrap_or((crate::components::icons::SHELL, "?".into(), false));
+                .unwrap_or((crate::components::icons::SHELL, "?".into(), None));
             let is_active = i == self.active_tab_idx;
             let style = if is_active && focused {
                 Style::default()
@@ -1517,17 +1516,25 @@ impl TerminalStack {
                 .push((i, cursor..cursor.saturating_add(tab_w), title_area.y));
             cursor = cursor.saturating_add(tab_w);
             title_spans.push(Span::styled(tab_text, style));
-            // Bold yellow "!" next to an agent waiting on the user.
-            // Stays prominent regardless of which tab is active so
-            // the user notices a Claude prompt even while typing in
-            // a different shell.
-            if is_asking {
-                let asking_text = " ! needs input";
-                title_spans.push(Span::styled(
-                    asking_text,
+            // State hint next to the tab, mirroring the sidebar's
+            // single state slot. Bold yellow "! needs input" when the
+            // agent is waiting on the user (stays prominent regardless
+            // of which tab is active so a Claude prompt is noticed even
+            // while typing in another shell); a dim accent "· working"
+            // while it streams. Idle/untracked shows nothing.
+            let (hint, hint_style) = match agent_state {
+                Some(pilot_ipc::AgentState::InputNeeded) => (
+                    " ! needs input",
                     Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
-                ));
-                cursor = cursor.saturating_add(asking_text.chars().count() as u16);
+                ),
+                Some(pilot_ipc::AgentState::Working) => {
+                    (" · working", Style::default().fg(theme.accent))
+                }
+                _ => ("", Style::default()),
+            };
+            if !hint.is_empty() {
+                title_spans.push(Span::styled(hint, hint_style));
+                cursor = cursor.saturating_add(hint.chars().count() as u16);
             }
         }
         frame.render_widget(Paragraph::new(Line::from(title_spans)), title_area);

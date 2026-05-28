@@ -36,6 +36,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// Trigger for the long-snooze confirm latch (`Shift-Z`).
 const TRIGGER_LONG_SNOOZE: crate::latch_set::KeyTrigger =
     crate::latch_set::KeyTrigger::new(KeyCode::Char('Z'), KeyModifiers::SHIFT);
+
+/// Minimum wall-clock between "working" spinner frame advances.
+/// ~8 fps — fast enough to read as motion, slow enough that the
+/// animation only nudges the render loop a few times a second while
+/// an agent is busy (and never when nothing is working).
+const WORKING_SPIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
 use pills::visual_width;
 use pilot_core::{SessionId, SessionKey, Workspace};
 use pilot_ipc::{Command, Event, TerminalId, TerminalKind};
@@ -312,13 +318,29 @@ pub struct Sidebar {
     /// drain. Surfaces in pilot's footer alongside the OS notification
     /// so users with notifications muted still see the prompt.
     pending_asking_notices: Vec<String>,
-    /// Workspace keys whose agent is currently in `AgentState::Asking`.
+    /// Workspace keys whose agent is currently in `AgentState::InputNeeded`.
     /// Single source of truth for the `?` row pill, the `? N input`
     /// header counter, and `!` jump-to-asking. Source: `Event::AgentState`
     /// broadcasts from the daemon, sidebar-local — independent of
     /// `Workspace.sessions[i].state` (which gets clobbered every
     /// poll cycle when the daemon re-broadcasts `WorkspaceUpserted`).
     agents_asking: std::collections::HashSet<SessionKey>,
+    /// Workspace keys whose agent is currently in `AgentState::Working`
+    /// (streaming output / running a tool). Drives the animated
+    /// "working" spinner in the same per-session slot as the `?`
+    /// asking pill — the two are mutually exclusive. Source:
+    /// `Event::AgentState`, sidebar-local for the same reason as
+    /// `agents_asking`.
+    agents_working: std::collections::HashSet<SessionKey>,
+    /// Current frame of the shared "working" spinner. Advanced by
+    /// [`Sidebar::tick_working`] at a low fixed cadence (NOT per
+    /// render) so the animation is cheap; every working row reads the
+    /// same frame, so one `usize` drives them all.
+    working_spinner_frame: usize,
+    /// Wall-clock of the last spinner advance. `tick_working` only
+    /// bumps the frame once `WORKING_SPIN_INTERVAL` has elapsed, so a
+    /// busy event loop doesn't spin the glyph faster than ~8 fps.
+    last_working_spin: Option<std::time::Instant>,
     /// Screen rect of the role-filter chip in row 1 of the header,
     /// stashed by `render` so mouse clicks can cycle it without
     /// re-deriving the layout. `None` before the first render.
@@ -375,9 +397,43 @@ impl Sidebar {
             pending_notifications: Vec::new(),
             pending_asking_notices: Vec::new(),
             agents_asking: std::collections::HashSet::new(),
+            agents_working: std::collections::HashSet::new(),
+            working_spinner_frame: 0,
+            last_working_spin: None,
             filter_chip_rect: None,
             sort_chip_rect: None,
         }
+    }
+
+    /// Advance the "working" spinner if any agent is working and the
+    /// fixed cadence has elapsed. Returns `true` when the frame
+    /// changed, so the caller knows a re-render is warranted.
+    ///
+    /// Cheap by construction: when no agent is working it does nothing
+    /// (and resets so the spinner always restarts at frame 0). When
+    /// one is, it advances at most once per [`WORKING_SPIN_INTERVAL`]
+    /// regardless of how often the run loop calls it — the animation
+    /// never forces a redraw faster than ~8 fps, and a single shared
+    /// frame index means no per-row work on each tick.
+    pub fn tick_working(&mut self) -> bool {
+        if self.agents_working.is_empty() {
+            // Reset so the next working session starts its spinner from
+            // the first frame rather than wherever the last one stopped.
+            let was_running = self.last_working_spin.is_some();
+            self.last_working_spin = None;
+            self.working_spinner_frame = 0;
+            return was_running;
+        }
+        let now = std::time::Instant::now();
+        let due = self
+            .last_working_spin
+            .is_none_or(|t| now.duration_since(t) >= WORKING_SPIN_INTERVAL);
+        if !due {
+            return false;
+        }
+        self.last_working_spin = Some(now);
+        self.working_spinner_frame = self.working_spinner_frame.wrapping_add(1);
+        true
     }
 
     /// Take any pending desktop notifications queued by event

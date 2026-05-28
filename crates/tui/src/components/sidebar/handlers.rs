@@ -365,6 +365,16 @@ impl Sidebar {
                     session_key,
                     *state,
                 );
+                // The "working" slot shares the same UI cell as the
+                // `?` pill and is driven by the same event. Keep its
+                // disjoint set in sync; a membership change means the
+                // spinner needs to appear/disappear, so force a
+                // re-render below alongside the asking transition.
+                let working_changed = crate::agent_attention::apply_working_state(
+                    &mut self.agents_working,
+                    session_key,
+                    *state,
+                );
                 if matches!(
                     transition,
                     crate::agent_attention::AttentionTransition::NowAsking
@@ -387,10 +397,12 @@ impl Sidebar {
                             .push(format!("{} needs input — press ! to jump", workspace.name));
                     }
                 }
-                if !matches!(
-                    transition,
-                    crate::agent_attention::AttentionTransition::NoChange
-                ) {
+                if working_changed
+                    || !matches!(
+                        transition,
+                        crate::agent_attention::AttentionTransition::NoChange
+                    )
+                {
                     self.recompute_visible();
                 }
             }

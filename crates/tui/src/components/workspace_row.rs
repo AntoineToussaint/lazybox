@@ -1003,28 +1003,34 @@ mod tests {
     #[test]
     fn type_glyph_is_flush_against_number_for_mixed_widths() {
         let theme = theme();
-        // Three PRs with 1-, 2-, and 3-digit numbers → max_pr_num_width
-        // is driven by `#312` (4 cells). The narrower rows are the ones
-        // the old right-align padded on the left.
-        let widths = [7u64, 42, 312];
-        let tasks: Vec<Task> = widths.iter().map(|n| pr_task("owner/repo", *n)).collect();
-        let wss: Vec<Workspace> = tasks
+        // Mixed glyph types AND mixed number widths (1/2/3 digits) so
+        // `max_pr_num_width` is driven by `#312` (4 cells). The narrower
+        // rows are the ones the old right-align padded on the left; the
+        // issue (`○`) row exercises the non-PR glyph path too, so a
+        // regression can't hide on one glyph variant.
+        let cases: [(Task, &str); 3] = [
+            (make_task("owner/repo#7", "x"), "○#7"), // issue, 1 digit
+            (pr_task("owner/repo", 42), "⇄#42"),     // PR, 2 digits
+            (pr_task("owner/repo", 312), "⇄#312"),   // PR, 3 digits
+        ];
+        let workspaces: Vec<Workspace> = cases
             .iter()
-            .map(|t| Workspace::from_task(t.clone(), fixed_time()))
+            .map(|(task, _)| Workspace::from_task(task.clone(), fixed_time()))
             .collect();
-        let ctxs: Vec<WorkspaceRowCtx<'_>> = wss
+        let ctxs: Vec<WorkspaceRowCtx<'_>> = workspaces
             .iter()
-            .zip(tasks.iter())
-            .map(|(ws, t)| ctx_for(ws, t, &theme))
+            .zip(cases.iter())
+            .map(|(ws, (task, _))| ctx_for(ws, task, &theme))
             .collect();
         let columns = build_columns(4); // width of "#312"
         let rows: Vec<Row> = ctxs.iter().map(build_row).collect();
         let lines = crate::components::table::render_table(&rows, &columns, 80);
-        for (line, n) in lines.iter().zip(widths.iter()) {
+        for (line, (_, expected)) in lines.iter().zip(cases.iter()) {
             let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             assert!(
-                joined.contains(&format!("⇄#{n}")),
-                "glyph must be flush against the number (no gap): {joined:?}",
+                joined.contains(expected),
+                "type glyph must sit flush against the number (no gap); \
+                 wanted {expected:?} in {joined:?}",
             );
         }
     }

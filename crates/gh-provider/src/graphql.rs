@@ -397,6 +397,23 @@ pub struct GqlComment {
     pub original_line: Option<u32>,
     #[serde(default, rename = "diffHunk")]
     pub diff_hunk: Option<String>,
+    /// Eyes-reaction state for the authenticated viewer. Populated
+    /// by the issues-search query (which selects `reactions(content:
+    /// EYES) { viewerHasReacted }`); other queries leave it `None`.
+    /// Drives `@pilot` mention idempotency: pilot reacts 👀 on first
+    /// sight, then skips comments where this is `Some(true)`.
+    #[serde(default)]
+    pub reactions: Option<GqlReactionView>,
+}
+
+/// Tiny projection of a `ReactionConnection` filtered to one content
+/// kind (currently `EYES`). True when the authenticated viewer has
+/// reacted with that content. Used by the `@pilot`-mention path to
+/// decide whether pilot has already acknowledged a comment.
+#[derive(Deserialize, Debug, Clone, Copy, Default)]
+pub struct GqlReactionView {
+    #[serde(default, rename = "viewerHasReacted")]
+    pub viewer_has_reacted: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -626,6 +643,27 @@ pub fn merge_pr_body(pull_request_node_id: &str) -> serde_json::Value {
     serde_json::json!({
         "query": MERGE_PR_MUTATION,
         "variables": { "id": pull_request_node_id },
+    })
+}
+
+/// GraphQL mutation: add a 👀 reaction to any `Reactable` (Issue body
+/// or IssueComment, in pilot's case). Posting this reaction is the
+/// authoritative idempotency marker for the `@pilot`-mention
+/// auto-spawn path — subsequent polls see `viewerHasReacted: true`
+/// and skip the trigger. Re-adding an existing reaction is a no-op
+/// on GitHub's side, so retrying is safe.
+const ADD_REACTION_MUTATION: &str = r#"
+mutation($id: ID!) {
+  addReaction(input: { subjectId: $id, content: EYES }) {
+    reaction { content }
+  }
+}
+"#;
+
+pub fn add_reaction_eyes_body(reactable_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": ADD_REACTION_MUTATION,
+        "variables": { "id": reactable_node_id },
     })
 }
 
@@ -1382,12 +1420,14 @@ query($query: String!, $first: Int!, $after: String) {
         author { login }
         labels(first: 10) { nodes { name } }
         assignees(first: 10) { nodes { login } }
+        reactions(content: EYES) { viewerHasReacted }
         comments(first: 15) {
           nodes {
             id
             author { login }
             body
             createdAt
+            reactions(content: EYES) { viewerHasReacted }
           }
         }
         repository {
@@ -1421,6 +1461,12 @@ pub struct GqlIssue {
     pub comments: GqlComments,
     #[serde(default)]
     pub repository: Option<GqlIssueRepo>,
+    /// Eyes-reaction state for the authenticated viewer on the issue
+    /// BODY (separate from per-comment reactions on
+    /// `comments.nodes[].reactions`). See [`GqlReactionView`] for the
+    /// semantics + why pilot uses 👀 as an idempotency marker.
+    #[serde(default)]
+    pub reactions: Option<GqlReactionView>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -1661,6 +1707,7 @@ mod tests {
             repository: Some(GqlIssueRepo {
                 name_with_owner: "o/r".into(),
             }),
+            reactions: None,
         }
     }
 
@@ -1735,6 +1782,7 @@ mod tests {
                     line: None,
                     original_line: None,
                     diff_hunk: None,
+                    reactions: None,
                 },
                 GqlComment {
                     id: Some("c2".into()),
@@ -1747,6 +1795,7 @@ mod tests {
                     line: None,
                     original_line: None,
                     diff_hunk: None,
+                    reactions: None,
                 },
             ],
         };
@@ -1773,6 +1822,7 @@ mod tests {
                 line: None,
                 original_line: None,
                 diff_hunk: None,
+                reactions: None,
             }],
         };
         let task = issue_to_task(&issue, "alice");
@@ -2158,6 +2208,7 @@ mod tests {
                                 line: Some(42),
                                 original_line: None,
                                 diff_hunk: Some("@@ -1 +1 @@".into()),
+                                reactions: None,
                             },
                             GqlComment {
                                 id: Some("C_reply".into()),
@@ -2170,6 +2221,7 @@ mod tests {
                                 line: None,
                                 original_line: None,
                                 diff_hunk: None,
+                                reactions: None,
                             },
                         ],
                     },
@@ -2239,6 +2291,7 @@ mod tests {
                             line: None,
                             original_line: None,
                             diff_hunk: None,
+                            reactions: None,
                         }],
                     },
                 }],

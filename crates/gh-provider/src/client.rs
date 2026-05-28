@@ -158,6 +158,31 @@ fn http_status_error(status: u16, content_type: &str, body: &str) -> GhError {
     }
 }
 
+/// Strip snafu's location + backtrace dump from an error's
+/// `Display` output. Octocrab's `Error` variants (Serde, Hyper,
+/// etc.) use snafu, whose Display includes `Found at 0: ...` and a
+/// trail of `/rustc/...` source paths — totally illegible to a
+/// user, and our footer pipes it straight in. Take only what
+/// comes before the first snafu marker and the first newline,
+/// trim trailing whitespace.
+///
+/// Still in use for the remaining typed-octocrab call sites
+/// (`/user`, `list_org_memberships`, repo listings, REST issue
+/// comment). The new raw GraphQL path on issue #13 emits
+/// `GhError::HttpStatus` directly and bypasses this entirely.
+fn strip_error_backtrace(s: &str) -> String {
+    // snafu's backtrace prelude is "Found at" on the line right
+    // after the message. Cut everything from "Found at" onward.
+    // Some snafu versions use "Caused by:" — handle both.
+    let cut_at = s
+        .find("\nFound at")
+        .or_else(|| s.find("Found at"))
+        .or_else(|| s.find("\nCaused by:"))
+        .unwrap_or(s.len());
+    let head = &s[..cut_at];
+    head.lines().next().unwrap_or("").trim_end().to_string()
+}
+
 fn detail_of(err: &GhError) -> String {
     match err {
         GhError::Graphql(s) => s.clone(),
@@ -179,7 +204,16 @@ fn detail_of(err: &GhError) -> String {
                 // includes status, message, docs URL, errors.
                 format!("GitHub API ({}): {}", source.status_code, source)
             }
-            other => format!("{other}"),
+            // Serde / Json failures usually mean GitHub returned a
+            // non-JSON body (502 page, redirect to login). Add a
+            // hint to the technical message so the user knows
+            // what's likely going on without us having to plumb
+            // the raw response status through octocrab.
+            octocrab::Error::Serde { .. } | octocrab::Error::Json { .. } => {
+                let s = strip_error_backtrace(&format!("{other}", other = octo));
+                format!("{s} (likely GitHub returned a non-JSON page — 502 / login redirect)")
+            }
+            other => strip_error_backtrace(&format!("{other}")),
         },
     }
 }
@@ -1086,8 +1120,30 @@ impl GhClient {
 
     /// Fetch all open GitHub Issues involving the authenticated user,
     /// paginated. Separate from `fetch_all_prs` so callers opt in
-    /// explicitly.
+    /// explicitly. Thin wrapper over `fetch_all_issues_with_mentions`
+    /// that discards the mention side-channel — use the underlying
+    /// method when you want the `@pilot` triggers too.
     pub async fn fetch_all_issues(&self) -> Result<Vec<Task>, GhError> {
+        let (tasks, _mentions) = self
+            .fetch_all_issues_with_mentions(&std::collections::BTreeSet::new())
+            .await?;
+        Ok(tasks)
+    }
+
+    /// Same as `fetch_all_issues` but also scans each raw issue for
+    /// `@pilot` mentions from `allowed_logins` and returns the
+    /// resulting [`crate::PilotMention`] list. Done in one pass so we
+    /// don't pay the issue search twice; the GraphQL response already
+    /// carries `reactions(content: EYES) { viewerHasReacted }` for
+    /// idempotency.
+    ///
+    /// An empty `allowed_logins` set yields no mentions (the gate is
+    /// "allow nobody by default"), so production callers always pass
+    /// at least the authenticated viewer's login.
+    pub async fn fetch_all_issues_with_mentions(
+        &self,
+        allowed_logins: &std::collections::BTreeSet<String>,
+    ) -> Result<(Vec<Task>, Vec<crate::PilotMention>), GhError> {
         let started = std::time::Instant::now();
         // Same assembly as `fetch_all_prs` — see notes there.
         let mut quals = graphql::default_issues_qualifiers();
@@ -1100,6 +1156,7 @@ impl GhClient {
         tracing::info!("GraphQL issues search: {search_query}");
 
         let mut tasks: Vec<Task> = Vec::new();
+        let mut mentions: Vec<crate::PilotMention> = Vec::new();
         let mut cursor: Option<String> = None;
         let mut page = 0usize;
         loop {
@@ -1135,12 +1192,12 @@ impl GhClient {
                 self.observe_rate_limit(rl);
             }
 
-            tasks.extend(
-                data.search
-                    .nodes
-                    .iter()
-                    .map(|issue| graphql::issue_to_task(issue, &self.user)),
-            );
+            for issue in &data.search.nodes {
+                tasks.push(graphql::issue_to_task(issue, &self.user));
+                if !allowed_logins.is_empty() {
+                    mentions.extend(crate::mentions::scan_issue(issue, allowed_logins));
+                }
+            }
 
             let page_info = data.search.page_info.unwrap_or_default();
             if !page_info.has_next_page {
@@ -1166,10 +1223,11 @@ impl GhClient {
 
         let elapsed_ms = started.elapsed().as_millis();
         tracing::info!(
-            "fetch_all_issues: completed in {elapsed_ms}ms — {} issues",
-            tasks.len()
+            "fetch_all_issues_with_mentions: completed in {elapsed_ms}ms — {} issues, {} mentions",
+            tasks.len(),
+            mentions.len(),
         );
-        Ok(tasks)
+        Ok((tasks, mentions))
     }
 
     /// Fetch PRs + Issues in parallel, combine into one `Vec<Task>`.
@@ -1326,6 +1384,67 @@ impl GhClient {
         }
     }
 
+    /// Like `fetch_selected_with_status` but also runs the
+    /// `@pilot`-mention scan on the issues side. The returned
+    /// [`PilotMention`](crate::PilotMention) list is empty when
+    /// `allowed_logins` is empty (the mention feature is opt-in via
+    /// config) or when no allowed user has written `@pilot` on an
+    /// unreacted body / comment. Errors fall back to the same
+    /// partial-failure shape as the underlying call — a failed
+    /// PR side keeps issues + mentions, and vice versa.
+    pub async fn fetch_selected_with_status_and_mentions(
+        &self,
+        want_prs: bool,
+        want_issues: bool,
+        allowed_logins: &std::collections::BTreeSet<String>,
+    ) -> Result<(Vec<Task>, Option<String>, Vec<crate::PilotMention>), GhError> {
+        if !want_prs && !want_issues {
+            return Ok((Vec::new(), None, Vec::new()));
+        }
+        let pr_fut = async {
+            if want_prs {
+                self.fetch_all_prs().await
+            } else {
+                Ok(Vec::new())
+            }
+        };
+        let issue_fut = async {
+            if want_issues {
+                self.fetch_all_issues_with_mentions(allowed_logins).await
+            } else {
+                Ok((Vec::new(), Vec::new()))
+            }
+        };
+        let (prs, issues) = tokio::join!(pr_fut, issue_fut);
+        match (prs, issues) {
+            (Ok(mut p), Ok((i, m))) => {
+                p.extend(i);
+                Ok((p, None, m))
+            }
+            (Ok(p), Err(e)) => {
+                if want_issues && p.is_empty() {
+                    Err(e)
+                } else {
+                    let msg = format!("issues sync failed (PRs OK): {e}");
+                    tracing::warn!("{msg}");
+                    Ok((p, Some(msg), Vec::new()))
+                }
+            }
+            (Err(e), Ok((i, m))) => {
+                if want_prs && i.is_empty() {
+                    Err(e)
+                } else {
+                    let msg = format!("PRs sync failed (issues OK): {e}");
+                    tracing::warn!("{msg}");
+                    Ok((i, Some(msg), m))
+                }
+            }
+            (Err(pr_err), Err(issue_err)) => Err(GhError::Graphql(format!(
+                "both PR and issue fetches failed: PRs={pr_err}; issues={issue_err}"
+            ))),
+        }
+    }
+
     /// Post a top-level comment on an issue or PR. PRs ARE issues in
     /// the REST API, so the same `issues/{n}/comments` endpoint works
     /// for both. `repo` is the `owner/name` shorthand the rest of the
@@ -1349,6 +1468,31 @@ impl GhClient {
             .create_comment(issue_or_pr_number, body)
             .await
             .map_err(GhError::Api)?;
+        Ok(())
+    }
+
+    /// Post a 👀 (`:eyes:`) reaction on any Reactable — typically an
+    /// Issue body or an IssueComment for the `@pilot`-mention
+    /// auto-spawn flow. The reaction is the canonical idempotency
+    /// marker for that flow: subsequent polls select
+    /// `viewerHasReacted` and skip already-acknowledged surfaces, so
+    /// pilot doesn't re-spawn every cycle.
+    ///
+    /// Re-posting an existing reaction is a no-op on GitHub's side,
+    /// so retrying on transient failure is safe.
+    pub async fn react_eyes(&self, reactable_node_id: &str) -> Result<(), GhError> {
+        self.acquire_or_block("addReaction(EYES) mutation")?;
+        let body = graphql::add_reaction_eyes_body(reactable_node_id);
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::error!("addReaction(EYES) errors for {reactable_node_id}: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
         Ok(())
     }
 
@@ -1940,5 +2084,59 @@ mod tests {
             matches!(err, GhError::HttpStatus { status: 200, .. }),
             "expected HttpStatus(200), got: {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod backtrace_strip_tests {
+    use super::strip_error_backtrace;
+
+    /// Plain one-line message passes through unchanged.
+    #[test]
+    fn passes_short_message_through() {
+        assert_eq!(
+            strip_error_backtrace("expected value at line 1 column 1"),
+            "expected value at line 1 column 1"
+        );
+    }
+
+    /// snafu's "Found at 0: ..." prelude marks the backtrace —
+    /// cut everything from there. This is the actual format octocrab
+    /// uses; the user's footer was dumping the rest verbatim.
+    #[test]
+    fn cuts_snafu_found_at_prelude() {
+        let raw = "Serde Error: expected value at line 1 column 1\n\
+                   Found at 0: std::backtrace_rs::backtrace::libunwind::trace\n\
+                              at /rustc/59807616e1fa2540724bfbac14d7c0d/library/std/src/backtrace_rs.rs:66";
+        assert_eq!(
+            strip_error_backtrace(raw),
+            "Serde Error: expected value at line 1 column 1"
+        );
+    }
+
+    /// Some snafu versions / wrappers use "Caused by:" instead.
+    #[test]
+    fn cuts_caused_by_prelude() {
+        let raw = "outer error\nCaused by: deeper error\nfurther frame";
+        assert_eq!(strip_error_backtrace(raw), "outer error");
+    }
+
+    /// "Found at" run together with the message (no newline) — still
+    /// cut. The user's screenshot showed "...column 1Found at 0:..."
+    /// where the newline didn't render because the footer is a
+    /// single line.
+    #[test]
+    fn cuts_inline_found_at_marker() {
+        let raw = "expected value at line 1 column 1Found at 0: trace";
+        assert_eq!(
+            strip_error_backtrace(raw),
+            "expected value at line 1 column 1"
+        );
+    }
+
+    /// Trailing whitespace gets trimmed — keeps the footer flush.
+    #[test]
+    fn trims_trailing_whitespace() {
+        assert_eq!(strip_error_backtrace("oh no   "), "oh no");
     }
 }

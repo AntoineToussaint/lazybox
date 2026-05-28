@@ -398,6 +398,28 @@ pub struct Model<T: TerminalAdapter> {
     /// j/k (RepoHeader rows are skipped by `move_cursor_by`) and the
     /// user has no clear next step.
     pending_focus_project_name: Option<String>,
+    /// Inertia damper for trackpad scroll. macOS sends ~20-50 wheel
+    /// events per flick (the OS inertia phase); each one moves the
+    /// viewport `STEP` rows, so a single gesture scrolls hundreds of
+    /// rows past where the user expected. We track the current
+    /// burst's direction / count / age so a sustained flick decays
+    /// its step and a direction reversal stops the queued inertia
+    /// from the prior gesture instead of fighting it. `None` when no
+    /// recent scroll.
+    pub(crate) scroll_inertia: Option<ScrollInertia>,
+}
+
+/// State tracked for the trackpad-scroll damper (see
+/// `Model::scroll_inertia`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ScrollInertia {
+    /// +1 for ScrollDown, -1 for ScrollUp. Sign of the burst.
+    pub dir: i8,
+    /// Events accepted into this burst so far. Drives the
+    /// diminishing-step curve.
+    pub count: u32,
+    /// Last event time — drives the staleness check.
+    pub last_at: std::time::Instant,
 }
 
 /// Custom Port that drains events from an `mpsc::Receiver`. Pilot
@@ -517,6 +539,7 @@ impl<T: TerminalAdapter> Model<T> {
             pending_action_confirm: None,
             pending_new_workspace_project: None,
             pending_focus_project_name: None,
+            scroll_inertia: None,
         }
     }
 }
@@ -798,6 +821,84 @@ impl<T: TerminalAdapter> Model<T> {
     /// the send fails (Subscribe is idempotent, terminal-Write loses
     /// keystrokes on a dead channel anyway) — but a silent log helps
     /// debug "I pressed X and nothing happened" after the fact.
+    /// Damp trackpad-scroll inertia. macOS trackpad flicks emit
+    /// ~20-50 wheel events over ~500ms — the OS inertia phase — each
+    /// at full STEP. Without damping, a flick scrolls hundreds of
+    /// rows past where the user wanted, and reversing mid-flick
+    /// fights the queued events instead of cancelling them.
+    ///
+    /// Behaviour:
+    /// - Fresh burst (no prior scroll, or > `BURST_IDLE` since the
+    ///   last event): full STEP, count starts at 1.
+    /// - Sustained same-direction burst: STEP decays — 5 → 3 after
+    ///   5 events, → 1 after 15.
+    /// - Direction reversal mid-burst: drop the event (return 0) and
+    ///   arm a short refractory window so the OS's queued inertia
+    ///   from the prior gesture doesn't immediately keep firing.
+    ///   Caller's next event in the NEW direction starts a fresh
+    ///   burst.
+    ///
+    /// The returned isize is always the **magnitude** (positive) of
+    /// the scroll step; sign is applied by the caller using
+    /// `raw_up`. `0` means "drop this event."
+    pub(crate) fn dampen_scroll_step(
+        &mut self,
+        is_up: bool,
+        _ev: crossterm::event::MouseEvent,
+    ) -> isize {
+        use std::time::Instant;
+        const STEP_INITIAL: isize = 5;
+        const STEP_MID: isize = 3;
+        const STEP_TAIL: isize = 1;
+        /// Idle time after which we treat the next event as a fresh
+        /// gesture. macOS inertia events arrive ~16ms apart; 250ms
+        /// is a generous gap that survives a brief stall.
+        const BURST_IDLE: std::time::Duration = std::time::Duration::from_millis(250);
+        /// Within a burst, after this many events the step drops.
+        const DECAY_AT: u32 = 5;
+        const TAIL_AT: u32 = 15;
+
+        let now = Instant::now();
+        let new_dir: i8 = if is_up { -1 } else { 1 };
+
+        // Stale state → fresh burst.
+        let burst = self.scroll_inertia.filter(|s| now - s.last_at < BURST_IDLE);
+
+        match burst {
+            None => {
+                // Fresh gesture — full step.
+                self.scroll_inertia = Some(ScrollInertia {
+                    dir: new_dir,
+                    count: 1,
+                    last_at: now,
+                });
+                STEP_INITIAL
+            }
+            Some(s) if s.dir != new_dir => {
+                // Direction flip mid-burst. Drop this event AND wipe
+                // the burst so the next event (in the new direction)
+                // starts fresh. The user's intent is "stop / go the
+                // other way" — eating one event is the cheapest way
+                // to cancel the OS-queued inertia.
+                self.scroll_inertia = None;
+                0
+            }
+            Some(mut s) => {
+                s.count = s.count.saturating_add(1);
+                s.last_at = now;
+                let step = if s.count >= TAIL_AT {
+                    STEP_TAIL
+                } else if s.count >= DECAY_AT {
+                    STEP_MID
+                } else {
+                    STEP_INITIAL
+                };
+                self.scroll_inertia = Some(s);
+                step
+            }
+        }
+    }
+
     fn send_cmd(&self, cmd: IpcCommand) {
         if let Err(e) = self.client.send(cmd) {
             tracing::warn!("ipc send failed: {e}");

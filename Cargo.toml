@@ -91,6 +91,7 @@ pilot-store       = { path = "crates/store" }
 pilot-config      = { path = "crates/config" }
 pilot-git-ops     = { path = "crates/git-ops" }
 pilot-gh          = { path = "crates/gh-provider" }
+pilot-slack       = { path = "crates/slack-provider" }
 pilot-tui-term    = { path = "crates/tui-term" }
 pilot-tui-core    = { path = "crates/tui-core" }
 

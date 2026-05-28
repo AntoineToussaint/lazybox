@@ -1,0 +1,50 @@
+# Slack app manifest for pilot.
+#
+# Paste this verbatim into <https://api.slack.com/apps> → Create New
+# App → From manifest. After Slack creates the app, run
+# `pilot slack init` to capture the two tokens and wire them into
+# `~/.pilot/config.yaml`. See `docs/slack-setup.md`.
+display_information:
+  name: pilot
+  description: Reactive workspace-inbox bot — mirrors workspaces into channels, accepts commands to drive claude sessions.
+  background_color: "#0b0b0b"
+
+features:
+  bot_user:
+    display_name: pilot
+    always_online: true
+
+oauth_config:
+  scopes:
+    bot:
+      # Read + post in channels pilot creates / is invited to.
+      - chat:write
+      - channels:read
+      - channels:history
+      - groups:history    # private channels (in case you DM-style a per-workspace channel)
+      - im:history        # DMs to the bot
+      - im:read
+      - mpim:history      # multi-party DMs
+      # Receive @mentions + slash commands.
+      - app_mentions:read
+      # Auto-create one channel per workspace + self-join `#pilot`
+      # during `pilot slack init`.
+      - channels:manage
+      - channels:join
+      # File uploads (paste diff hunks back to channel).
+      - files:write
+
+settings:
+  event_subscriptions:
+    # Socket Mode — pilot opens a WebSocket out from your home
+    # machine, so no public HTTPS endpoint required.
+    bot_events:
+      - app_mention
+      - message.channels
+      - message.im
+      - message.groups
+  interactivity:
+    is_enabled: true
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false

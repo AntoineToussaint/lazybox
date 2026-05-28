@@ -318,29 +318,30 @@ fn badge_slot_cell(ctx: &WorkspaceRowCtx<'_>, badge: Option<(char, usize)>) -> C
 }
 
 fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    use ratatui::text::Span as RSpan;
     let Some(task) = ctx.task else {
         return Cell::empty();
     };
     let (primary, secondary) = status_pills(task);
     // Empty cell when there's nothing to show — `Column::max(0)`
     // collapses the column to 0 cells across the whole table when
-    // NO row in the visible list has a pill, handing the slack
-    // back to the title flex. When ANY row has a pill, the column
-    // expands to 19 cells (9 review + 1 gutter + 9 CI) and rows
-    // without pills get padded by the table renderer.
+    // NO row in the visible list has a pill, handing the slack back
+    // to the title flex. When ANY row has a pill, the column expands
+    // to 19 cells (9 review + 1 gutter + 9 CI) and rows without
+    // pills get padded by the table renderer.
     if primary.is_none() && secondary.is_none() {
         return Cell::empty();
     }
-    let mut spans: Vec<RSpan<'static>> = Vec::with_capacity(3);
+    let blank_pill =
+        |spans: &mut Vec<Span<'static>>| spans.push(Span::styled(" ".repeat(9), ctx.row_style()));
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(3);
     match primary {
-        Some(p) => spans.push(RSpan::styled(p.label.to_string(), p.style)),
-        None => spans.push(RSpan::styled(" ".repeat(9), ctx.row_style())),
+        Some(p) => spans.push(Span::styled(p.label.to_string(), p.style)),
+        None => blank_pill(&mut spans),
     }
-    spans.push(RSpan::styled(" ".to_string(), ctx.row_style()));
+    spans.push(Span::styled(" ".to_string(), ctx.row_style()));
     match secondary {
-        Some(p) => spans.push(RSpan::styled(p.label.to_string(), p.style)),
-        None => spans.push(RSpan::styled(" ".repeat(9), ctx.row_style())),
+        Some(p) => spans.push(Span::styled(p.label.to_string(), p.style)),
+        None => blank_pill(&mut spans),
     }
     Cell::new(spans)
 }

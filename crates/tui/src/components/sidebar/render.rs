@@ -5,6 +5,8 @@
 //! key-handler made the parent `impl` block hard to navigate.
 
 use super::*;
+use crate::components::table::Row as TableRow;
+use crate::components::workspace_row::{WorkspaceRowCtx, build_row as build_workspace_row};
 
 impl Sidebar {
     pub fn render(&mut self, area: Rect, frame: &mut Frame, focused: bool) {
@@ -221,44 +223,22 @@ impl Sidebar {
         // (max_pr_num_width is fixed across rows in this pass).
         let workspace_columns = crate::components::workspace_row::build_columns(max_pr_num_width);
 
-        // Pre-pass: build every workspace row into the table's
-        // `Row` form, then run them through ONE `render_table` call.
-        // Doing the layout in a single batch is what lets
-        // `Column::max(0)` line up across rows — when each row was
-        // rendered solo, an empty status / badge cell collapsed that
-        // row's column to 0 while a sibling row kept its full 19
-        // cells, so the title flex absorbed different amounts on
-        // each line and the `C` badge column visually drifted.
-        let mut workspace_row_idx: Vec<usize> = Vec::new();
-        let mut workspace_rows: Vec<crate::components::table::Row> = Vec::new();
-        for (i, row) in self.visible.iter().enumerate() {
-            if let VisibleRow::Workspace(key) = row {
-                use crate::components::workspace_row::{WorkspaceRowCtx, build_row};
-                let workspace = self.workspaces.get(key);
-                let ctx = WorkspaceRowCtx {
-                    workspace,
-                    task: workspace.and_then(|w| w.primary_task()),
-                    theme,
-                    now,
-                    focused,
-                    is_cursor: i == self.cursor,
-                    max_pr_num_width,
-                    long_snooze_armed: self.latches.armed(TRIGGER_LONG_SNOOZE) == Some(key),
-                    asking: workspace.is_some_and(|w| {
-                        crate::agent_attention::workspace_is_asking(w, &self.agents_asking)
-                    }),
-                    badges: self.runner_badges(key),
-                };
-                workspace_row_idx.push(i);
-                workspace_rows.push(build_row(&ctx));
-            }
-        }
-        let workspace_lines =
-            crate::components::table::render_table(&workspace_rows, &workspace_columns, row_budget);
-        let mut rendered_workspace_lines: Vec<Option<Line>> = vec![None; self.visible.len()];
-        for (i, line) in workspace_row_idx.into_iter().zip(workspace_lines) {
-            rendered_workspace_lines[i] = Some(line);
-        }
+        // Workspace rows go through ONE `render_table` call so
+        // `Column::max(0)` sees every row's natural cell width and
+        // picks a single column width for all of them. When each
+        // row was rendered solo, an empty status / badge cell
+        // collapsed THAT row's column to 0 while a sibling row kept
+        // its full width — the `C` badge visibly drifted between
+        // lines and the title flex absorbed different amounts per
+        // row.
+        let mut rendered_workspace_lines = self.prebuild_workspace_lines(
+            &workspace_columns,
+            max_pr_num_width,
+            row_budget,
+            theme,
+            now,
+            focused,
+        );
 
         let lines: Vec<Line> = self
             .visible
@@ -406,5 +386,65 @@ impl Sidebar {
 
         let para = Paragraph::new(lines);
         frame.render_widget(para, inner);
+    }
+
+    /// Build & lay out every visible workspace row in one
+    /// `render_table` pass, then scatter the resulting Lines back to
+    /// the visible-list indices they belong to.
+    ///
+    /// The returned `Vec<Option<Line>>` has `self.visible.len()`
+    /// slots, with `Some(line)` at every `VisibleRow::Workspace`
+    /// position and `None` everywhere else. The caller `.take()`s
+    /// each Line as it walks `self.visible`, so every Line is moved
+    /// exactly once.
+    ///
+    /// This is what fixes issue #22's column-drift: each `Max`
+    /// column in `workspace_columns` picks one width across all
+    /// rows in this call, instead of collapsing per-row whenever a
+    /// row happened to have an empty cell there.
+    fn prebuild_workspace_lines(
+        &self,
+        workspace_columns: &[crate::components::table::Column],
+        max_pr_num_width: usize,
+        row_budget: usize,
+        theme: &crate::theme::Theme,
+        now: chrono::DateTime<chrono::Utc>,
+        focused: bool,
+    ) -> Vec<Option<Line<'static>>> {
+        let workspace_count = self
+            .visible
+            .iter()
+            .filter(|r| matches!(r, VisibleRow::Workspace(_)))
+            .count();
+        let mut positions: Vec<usize> = Vec::with_capacity(workspace_count);
+        let mut rows: Vec<TableRow> = Vec::with_capacity(workspace_count);
+        for (i, row) in self.visible.iter().enumerate() {
+            let VisibleRow::Workspace(key) = row else {
+                continue;
+            };
+            let workspace = self.workspaces.get(key);
+            let ctx = WorkspaceRowCtx {
+                workspace,
+                task: workspace.and_then(|w| w.primary_task()),
+                theme,
+                now,
+                focused,
+                is_cursor: i == self.cursor,
+                max_pr_num_width,
+                long_snooze_armed: self.latches.armed(TRIGGER_LONG_SNOOZE) == Some(key),
+                asking: workspace.is_some_and(|w| {
+                    crate::agent_attention::workspace_is_asking(w, &self.agents_asking)
+                }),
+                badges: self.runner_badges(key),
+            };
+            positions.push(i);
+            rows.push(build_workspace_row(&ctx));
+        }
+        let lines = crate::components::table::render_table(&rows, workspace_columns, row_budget);
+        let mut out: Vec<Option<Line<'static>>> = vec![None; self.visible.len()];
+        for (i, line) in positions.into_iter().zip(lines) {
+            out[i] = Some(line);
+        }
+        out
     }
 }

@@ -99,6 +99,65 @@ fn sidebar_golden_render_focused() {
     insta::assert_snapshot!("sidebar_focused_3_sessions", rendered);
 }
 
+/// Regression guard for issue #37: the `[split]` sort mode must
+/// render PRs and Issues as visually distinct sections per repo.
+/// Mixes one PR (`/pull/` URL) and two issues (`/issues/` URL)
+/// under the same repo and locks the resulting layout.
+#[test]
+fn sidebar_golden_render_split_pr_vs_issue() {
+    let mut s = Sidebar::new(PaneId::new(1));
+    let mut pr = make_task("o/r#10", 5);
+    pr.url = "https://github.com/o/r/pull/10".into();
+    let mut issue_a = make_task("o/r#11", 30);
+    issue_a.url = "https://github.com/o/r/issues/11".into();
+    let mut issue_b = make_task("o/r#12", 90);
+    issue_b.url = "https://github.com/o/r/issues/12".into();
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            Workspace::from_task(pr, fixed_time()),
+            Workspace::from_task(issue_a, fixed_time()),
+            Workspace::from_task(issue_b, fixed_time()),
+        ],
+        terminals: vec![],
+        projects: vec![],
+    });
+    // Sidebar starts in the default `ByRoleSplit` (chip label
+    // `split`) sort mode; render directly without cycling so the
+    // snapshot captures the default user experience.
+    let rendered = render_to_string(&mut s, 40, 12, true);
+    insta::assert_snapshot!("sidebar_split_pr_vs_issue", rendered);
+}
+
+/// Companion to the split-mode snapshot: same fixture but in
+/// `Recent` mode, which suppresses kind headers. Pairs with the
+/// split snapshot so a regression that wipes out the headers in
+/// split mode would still produce visibly different output here.
+#[test]
+fn sidebar_golden_render_recent_pr_and_issue_mixed() {
+    use pilot_tui::components::sidebar::SortMode;
+    let mut s = Sidebar::new(PaneId::new(1));
+    while s.sort_mode() != SortMode::Recent {
+        s.cycle_sort_mode();
+    }
+    let mut pr = make_task("o/r#10", 5);
+    pr.url = "https://github.com/o/r/pull/10".into();
+    let mut issue_a = make_task("o/r#11", 30);
+    issue_a.url = "https://github.com/o/r/issues/11".into();
+    let mut issue_b = make_task("o/r#12", 90);
+    issue_b.url = "https://github.com/o/r/issues/12".into();
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            Workspace::from_task(pr, fixed_time()),
+            Workspace::from_task(issue_a, fixed_time()),
+            Workspace::from_task(issue_b, fixed_time()),
+        ],
+        terminals: vec![],
+        projects: vec![],
+    });
+    let rendered = render_to_string(&mut s, 40, 12, true);
+    insta::assert_snapshot!("sidebar_recent_pr_and_issue_mixed", rendered);
+}
+
 #[test]
 fn sidebar_golden_render_unfocused() {
     let mut s = Sidebar::new(PaneId::new(1));

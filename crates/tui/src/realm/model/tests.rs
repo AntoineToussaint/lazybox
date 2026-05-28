@@ -527,6 +527,218 @@ snippets:
 }
 
 #[cfg(test)]
+mod input_starvation_tests {
+    //! Regression: a chatty agent must NEVER block the keyboard.
+    //!
+    //! The daemon emits one `TerminalOutput` per PTY chunk into an
+    //! *unbounded* channel. The run loop used to drain it with an
+    //! unbounded `while let Ok(..)`, so under sustained agent output
+    //! `try_recv` never returned `Empty`, the loop never reached the
+    //! keyboard read, and the user "couldn't type in the agent" until
+    //! the burst ended. `drain_daemon_events` now caps the work per
+    //! iteration so control ALWAYS returns to the input read — input
+    //! starvation is impossible by construction. These tests freeze
+    //! that bound.
+    use super::super::Model;
+    use super::super::helpers::{MAX_EVENTS_PER_TICK, drain_daemon_events};
+    use pilot_ipc::{Event, TerminalId, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn flood(server: &pilot_ipc::Connection, n: usize) {
+        for seq in 0..n {
+            let _ = server.tx.send(Event::TerminalOutput {
+                terminal_id: TerminalId(1),
+                bytes: b"streaming output chunk\n".to_vec(),
+                seq: seq as u64,
+            });
+        }
+    }
+
+    /// A single drain processes AT MOST one tick's worth of events and
+    /// reports a backlog, leaving the rest queued — proof the loop
+    /// falls through to the keyboard read instead of spinning on
+    /// output forever.
+    #[test]
+    fn flood_does_not_drain_everything_in_one_tick() {
+        let (client, server) = channel::pair();
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+
+        let flooded = MAX_EVENTS_PER_TICK * 4;
+        flood(&server, flooded);
+
+        // One iteration's drain: must report a backlog (more queued)…
+        assert!(
+            drain_daemon_events(&mut m),
+            "drain should signal a backlog when the channel is over the cap"
+        );
+        // …and must have left events behind (didn't drain everything).
+        assert!(
+            m.client.rx.try_recv().is_ok(),
+            "events must remain queued after one bounded drain — \
+             otherwise the keyboard read is starved"
+        );
+    }
+
+    /// Repeated drains eventually empty the channel and report no
+    /// backlog — the cap throttles per-tick, it doesn't drop events.
+    #[test]
+    fn repeated_drains_eventually_empty_the_channel() {
+        let (client, server) = channel::pair();
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+
+        let flooded = MAX_EVENTS_PER_TICK * 4;
+        flood(&server, flooded);
+
+        // Bound the loop generously above the minimum needed (4) so a
+        // genuinely stuck drain trips the assert instead of hanging.
+        let mut backlog = true;
+        let mut iterations = 0;
+        while backlog {
+            backlog = drain_daemon_events(&mut m);
+            iterations += 1;
+            assert!(iterations <= 64, "drain never converged — possible spin");
+        }
+        // Channel fully consumed, no event left behind.
+        assert!(m.client.rx.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod coalesce_tests {
+    //! `coalesce_adjacent_output` collapses a streaming burst into one
+    //! dispatch per terminal — this is what keeps memory bounded under
+    //! a chatty agent. The merge must be byte-for-byte faithful and
+    //! must NOT reorder across terminals or non-output events.
+    use super::super::helpers::coalesce_adjacent_output;
+    use pilot_ipc::{Event, TerminalId};
+
+    fn out(id: u64, bytes: &[u8], seq: u64) -> Event {
+        Event::TerminalOutput {
+            terminal_id: TerminalId(id),
+            bytes: bytes.to_vec(),
+            seq,
+        }
+    }
+
+    /// A run of same-terminal output merges into ONE event carrying
+    /// the concatenated bytes and the LAST chunk's seq.
+    #[test]
+    fn adjacent_same_terminal_runs_merge_with_last_seq() {
+        let input = vec![out(1, b"hel", 10), out(1, b"lo ", 11), out(1, b"world", 12)];
+        let merged = coalesce_adjacent_output(input);
+        assert_eq!(merged.len(), 1);
+        match &merged[0] {
+            Event::TerminalOutput {
+                terminal_id,
+                bytes,
+                seq,
+            } => {
+                assert_eq!(*terminal_id, TerminalId(1));
+                assert_eq!(bytes, b"hello world");
+                assert_eq!(*seq, 12, "merged event carries the last chunk's seq");
+            }
+            other => panic!("expected one TerminalOutput, got {other:?}"),
+        }
+    }
+
+    /// Output for a different terminal ends the run — no cross-terminal
+    /// merging, and order is preserved.
+    #[test]
+    fn different_terminals_do_not_merge() {
+        let input = vec![out(1, b"a", 1), out(2, b"b", 1), out(1, b"c", 2)];
+        let merged = coalesce_adjacent_output(input);
+        assert_eq!(merged.len(), 3, "no merge across terminals");
+        // Order preserved: t1, t2, t1.
+        let ids: Vec<u64> = merged
+            .iter()
+            .map(|e| match e {
+                Event::TerminalOutput { terminal_id, .. } => terminal_id.0,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(ids, vec![1, 2, 1]);
+    }
+
+    /// A non-output event between two same-terminal outputs breaks the
+    /// run — ordering relative to other events is never disturbed.
+    #[test]
+    fn non_output_event_breaks_the_run() {
+        let input = vec![
+            out(1, b"before", 1),
+            Event::TerminalExited {
+                terminal_id: TerminalId(1),
+                exit_code: Some(0),
+            },
+            out(1, b"after", 2),
+        ];
+        let merged = coalesce_adjacent_output(input);
+        assert_eq!(merged.len(), 3, "the Exited event must not be absorbed");
+        assert!(matches!(merged[1], Event::TerminalExited { .. }));
+    }
+
+    /// Empty input is a no-op.
+    #[test]
+    fn empty_input_yields_empty() {
+        assert!(coalesce_adjacent_output(Vec::new()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod backlog_monitor_tests {
+    //! The monitor is the leak detector: it watches the residual
+    //! channel depth after each drain and only escalates when the
+    //! backlog climbs to a new high — a steady stream of rising
+    //! residuals is "the consumer is falling behind".
+    use super::super::helpers::BacklogMonitor;
+
+    /// A clear (residual 0) resets the consecutive-backlog streak.
+    #[test]
+    fn clearing_resets_the_streak() {
+        let mut m = BacklogMonitor::default();
+        m.observe(50);
+        m.observe(80);
+        assert_eq!(m.consecutive_backlog_ticks(), 2);
+        m.observe(0);
+        assert_eq!(m.consecutive_backlog_ticks(), 0, "streak resets on clear");
+    }
+
+    /// A backlog that climbs tick-over-tick raises the streak and the
+    /// high-water mark — the signal a leak detector keys on.
+    #[test]
+    fn growing_backlog_tracks_streak_and_hwm() {
+        let mut m = BacklogMonitor::default();
+        for depth in [200usize, 700, 1500, 4000] {
+            m.observe(depth);
+        }
+        assert_eq!(m.consecutive_backlog_ticks(), 4);
+        assert_eq!(m.hwm(), 4000, "high-water mark tracks the worst depth");
+    }
+
+    /// The high-water mark never regresses when depth dips but stays
+    /// non-zero — a transient dip isn't "recovered".
+    #[test]
+    fn hwm_is_monotonic_across_dips() {
+        let mut m = BacklogMonitor::default();
+        m.observe(3000);
+        m.observe(100);
+        assert_eq!(m.hwm(), 3000);
+        assert_eq!(
+            m.consecutive_backlog_ticks(),
+            2,
+            "still backlogged, no clear"
+        );
+    }
+}
+
+#[cfg(test)]
 mod base64_tests {
     use super::super::helpers::base64_encode;
 

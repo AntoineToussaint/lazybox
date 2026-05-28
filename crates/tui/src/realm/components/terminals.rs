@@ -215,6 +215,16 @@ impl Terminals {
         self.inner.record_paste(text);
     }
 
+    /// Mirror bytes written straight to a terminal's PTY (e.g. a
+    /// snippet body submitted in one shot) into that terminal's
+    /// user-message tracker, so the pinned recap reflects commands
+    /// that never flow through the key-by-key path. No-op for
+    /// non-Agent terminals. The caller still sends the bytes to the
+    /// PTY — this only updates pilot's own composing buffer.
+    pub fn record_pty_write(&mut self, id: pilot_ipc::TerminalId, bytes: &[u8]) {
+        self.inner.record_pty_write(id, bytes);
+    }
+
     /// Encode a mouse event for the focused terminal. Returns the
     /// bytes to `Write` to the PTY (paired with the target terminal
     /// id), or None when the terminal isn't tracking mouse or the

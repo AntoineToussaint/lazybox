@@ -145,6 +145,12 @@ impl Right {
     pub fn selected_activity_indices(&self) -> Vec<usize> {
         self.inner.selected_activity_indices()
     }
+
+    /// Drop the multi-select set. Called by `w` dispatch once the
+    /// selection has been consumed into an agent spawn.
+    pub fn clear_activity_selection(&mut self) {
+        self.inner.clear_activity_selection();
+    }
 }
 
 impl Component for Right {

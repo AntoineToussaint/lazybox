@@ -909,6 +909,75 @@ fn w_on_issue_from_right_pane_also_injects() {
     );
 }
 
+/// `w` must honor a multi-selected activity row regardless of which
+/// pane has focus. The selection lives in the right pane, but a user
+/// who selects a comment (right pane), then Tabs back to the sidebar
+/// and presses `w`, must still get the address-comments spawn — not
+/// the focus-dependent "fix CI" fallback. Regression for #77.
+#[test]
+fn sidebar_w_honors_activity_selection() {
+    use chrono::Utc;
+    use pilot_core::{Activity, ActivityKind, CiStatus, Workspace};
+    use pilot_ipc::Command;
+
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    // PR with failing CI — without a selection, `w` would spawn the
+    // "fix CI" prompt. A selected comment must take priority.
+    let mut task = task_with_pr("o/r#1");
+    task.ci = CiStatus::Failure;
+    let mut ws = Workspace::from_task(task, Utc::now());
+    ws.activity.push(Activity {
+        author: "alice".into(),
+        body: "nit on line 4".into(),
+        created_at: Utc::now(),
+        kind: ActivityKind::Comment,
+        node_id: None,
+        path: None,
+        line: None,
+        diff_hunk: None,
+        thread_id: None,
+    });
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+        projects: vec![],
+    });
+
+    // Select the focused activity row from the right pane with Space,
+    // then return focus to the sidebar.
+    while m.focus() != PaneFocus::Right {
+        m.dispatch_key(key(Key::Tab));
+    }
+    m.dispatch_key(key(Key::Char(' ')));
+    while m.focus() != PaneFocus::Sidebar {
+        m.dispatch_key(key(Key::Tab));
+    }
+
+    // Press `w` from the sidebar.
+    m.dispatch_key(key(Key::Char('w')));
+
+    let mut commands: Vec<Command> = Vec::new();
+    while let Ok(cmd) = server.rx.try_recv() {
+        commands.push(cmd);
+    }
+    let prompt = commands
+        .iter()
+        .find_map(|c| match c {
+            Command::Spawn {
+                initial_prompt: Some(p),
+                ..
+            } => Some(p.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("sidebar `w` must spawn an agent, got: {commands:#?}"));
+    assert!(
+        prompt.contains("Address the following review comments"),
+        "sidebar `w` must honor the selected activity (address-comments), not the \
+         focus-dependent fix-CI fallback; got:\n{prompt}",
+    );
+}
+
 fn task_with_pr(key: &str) -> pilot_core::Task {
     use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
     let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));

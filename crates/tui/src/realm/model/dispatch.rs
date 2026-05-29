@@ -136,9 +136,16 @@ impl<T: TerminalAdapter> Model<T> {
                 // gets "address review", … Resolver returns
                 // SpawnAgent with the right prompt, the dispatcher
                 // just translates to IpcCommand.
+                //
+                // The activity selection lives in the right pane, but
+                // `w` must honor it from any focus — otherwise pressing
+                // `w` after multi-selecting silently ignores the
+                // selection when the sidebar (or terminal) has focus.
                 let default_agent = self.sidebar.default_agent().to_string();
                 let workspace = self.sidebar.selected_workspace().cloned();
-                let intent = crate::intent::resolve_work(workspace.as_ref(), &[], &default_agent);
+                let selected = self.right.selected_activity_indices();
+                let intent =
+                    crate::intent::resolve_work(workspace.as_ref(), &selected, &default_agent);
                 if let crate::intent::Intent::SpawnAgent {
                     workspace_key,
                     agent_id,
@@ -152,6 +159,7 @@ impl<T: TerminalAdapter> Model<T> {
                         cwd: None,
                         initial_prompt: prompt,
                     });
+                    self.right.clear_activity_selection();
                 }
             }
             Action::OpenEditor => {

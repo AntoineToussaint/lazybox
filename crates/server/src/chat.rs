@@ -220,7 +220,7 @@ pub struct RouterState {
     /// only if the message wasn't in a known thread.
     thread_to_terminal: HashMap<String, TerminalId>,
     /// `terminal_id → last instant we saw PTY output`. Updated on
-    /// every `TerminalOutput` bus event. When `AgentState::Asking`
+    /// every `TerminalOutput` bus event. When `AgentState::InputNeeded`
     /// fires the dispatcher reads this to label notifications as
     /// "paused" (recent output) vs "done" (quiet for a while).
     last_output_at: HashMap<TerminalId, Instant>,
@@ -464,7 +464,7 @@ pub async fn handle_bus_event(
             state: agent_state,
             ..
         } => {
-            if agent_state != AgentState::Asking {
+            if agent_state != AgentState::InputNeeded {
                 return;
             }
             let (channel_id, thread_ts, quiet_for) = {
@@ -887,8 +887,9 @@ fn format_terminal_status(
         .unwrap_or_else(|| ws_key.to_string());
     let icon = agent_icon(tid, agent_states);
     let state_label = match agent_states.get(&tid).copied() {
-        Some(AgentState::Asking) => "⏸ asking",
-        Some(AgentState::Active) => "▶ active",
+        Some(AgentState::InputNeeded) => "⏸ needs input",
+        Some(AgentState::Working) => "▶ working",
+        Some(AgentState::Idle) => "· idle",
         None => "—",
     };
     let session_short: String = terminal_sessions
@@ -900,13 +901,13 @@ fn format_terminal_status(
     )
 }
 
-/// Status icon for an agent terminal. `⏸` if asking, `▶` if
-/// active, `·` if untracked.
+/// Status icon for an agent terminal. `⏸` if it needs input, `▶` if
+/// working, `·` if idle or untracked.
 fn agent_icon(tid: TerminalId, agent_states: &HashMap<TerminalId, AgentState>) -> &'static str {
     match agent_states.get(&tid).copied() {
-        Some(AgentState::Asking) => "⏸",
-        Some(AgentState::Active) => "▶",
-        None => "·",
+        Some(AgentState::InputNeeded) => "⏸",
+        Some(AgentState::Working) => "▶",
+        Some(AgentState::Idle) | None => "·",
     }
 }
 
@@ -955,8 +956,8 @@ mod tests {
     #[test]
     fn format_status_reply_global_lists_terminals_grouped_by_workspace() {
         let mut agent_states = HashMap::new();
-        agent_states.insert(TerminalId(1), AgentState::Active);
-        agent_states.insert(TerminalId(2), AgentState::Asking);
+        agent_states.insert(TerminalId(1), AgentState::Working);
+        agent_states.insert(TerminalId(2), AgentState::InputNeeded);
         let mut terminal_to_channel = HashMap::new();
         terminal_to_channel.insert(TerminalId(1), "C1".to_string());
         terminal_to_channel.insert(TerminalId(2), "C2".to_string());
@@ -1006,7 +1007,7 @@ mod tests {
     #[test]
     fn format_status_reply_per_terminal_includes_workspace_agent_session_state() {
         let mut agent_states = HashMap::new();
-        agent_states.insert(TerminalId(7), AgentState::Asking);
+        agent_states.insert(TerminalId(7), AgentState::InputNeeded);
         let mut terminal_meta = HashMap::new();
         terminal_meta.insert(
             TerminalId(7),
@@ -1032,7 +1033,7 @@ mod tests {
         assert!(reply.starts_with("⏸ *Fix the date picker*"), "{}", reply);
         assert!(reply.contains("agent: `claude`"), "{}", reply);
         assert!(reply.contains("session: `a3f1c277"), "{}", reply);
-        assert!(reply.contains("state: ⏸ asking"), "{}", reply);
+        assert!(reply.contains("state: ⏸ needs input"), "{}", reply);
     }
 
     #[test]
@@ -1052,12 +1053,15 @@ mod tests {
     fn agent_icon_reflects_state() {
         let tid = TerminalId(1);
         assert_eq!(agent_icon(tid, &HashMap::new()), "·");
-        let mut active = HashMap::new();
-        active.insert(tid, AgentState::Active);
-        assert_eq!(agent_icon(tid, &active), "▶");
+        let mut working = HashMap::new();
+        working.insert(tid, AgentState::Working);
+        assert_eq!(agent_icon(tid, &working), "▶");
         let mut asking = HashMap::new();
-        asking.insert(tid, AgentState::Asking);
+        asking.insert(tid, AgentState::InputNeeded);
         assert_eq!(agent_icon(tid, &asking), "⏸");
+        let mut idle = HashMap::new();
+        idle.insert(tid, AgentState::Idle);
+        assert_eq!(agent_icon(tid, &idle), "·");
     }
 
     #[test]

@@ -68,7 +68,7 @@ impl Sidebar {
     /// **Why drain here and not inside the inner sidebar?** The
     /// inner sidebar is constructed directly in unit tests (`cargo
     /// test`) — if it called `osascript` itself, every test that
-    /// drove an `AgentState::Asking` event would spam the user's
+    /// drove an `AgentState::InputNeeded` event would spam the user's
     /// notification center. Keeping the IO side-effect in this
     /// wrapper (which production code goes through; tests don't)
     /// keeps the inner sidebar fully deterministic.
@@ -87,6 +87,13 @@ impl Sidebar {
     /// have notifications muted.
     pub fn drain_pending_asking_notices(&mut self) -> Vec<String> {
         self.inner.drain_pending_asking_notices()
+    }
+
+    /// Advance the "working" spinner on a low-rate tick. Returns
+    /// `true` when the glyph changed so the run loop can mark the
+    /// frame dirty. Delegates to the inner pilot sidebar.
+    pub fn tick_working(&mut self) -> bool {
+        self.inner.tick_working()
     }
 
     /// Drain Shift-M "Merge PR #N?" requests. The orchestrator mounts

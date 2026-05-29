@@ -38,9 +38,23 @@ pub trait Agent: Send + Sync {
         self.spawn(ctx)
     }
 
-    /// Inspect recent PTY output and return an updated state, or None
-    /// if no confident determination. Used when the agent has no hooks
-    /// (Codex, Cursor) or as a fallback when hooks miss a transition.
+    /// Per-agent state detector. Inspect recent PTY output and return
+    /// the agent's current [`AgentState`] — `Working` (streaming /
+    /// running a tool), `InputNeeded` (paused on a prompt), or `Idle`
+    /// (done / nothing happening) — or `None` when there's no
+    /// confident determination.
+    ///
+    /// This is the per-agent strategy the issue calls for: pilot's
+    /// side panel never pattern-matches PTY output itself, it asks the
+    /// active session's agent. Each agent kind recognises "working"
+    /// differently (Claude's streaming pulser, Codex's spinner, …), so
+    /// the detection vocabulary lives here, next to the agent, not in
+    /// a global matcher.
+    ///
+    /// The default returns `None` — an unknown agent has no detector,
+    /// so consumers render it as `Idle`. Crucially it must never
+    /// default to `Working`: an agent that can't tell should look idle,
+    /// not falsely busy.
     fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
         let _ = recent_output;
         None
@@ -401,17 +415,25 @@ pub mod builtins {
             Some(vec![b'\r'])
         }
 
-        /// Claude Code's interactive prompt UI is recognisable by a
-        /// stable footer line (`Esc to cancel · Tab to amend · …`)
-        /// plus paired question phrasings. Both signals run through
-        /// the shared `super::detect` helpers so adding a new
-        /// pattern is a one-line declarative change, not another
-        /// hand-rolled substring soup.
+        /// Claude Code's three observable states, in one detector:
         ///
-        /// Returning `Some(Active)` on the default path (rather than
-        /// `None`) lets the daemon notice the Asking → Active
-        /// transition when the user hits a choice; without it the
-        /// cached state would stay Asking forever.
+        /// - **`InputNeeded`** — a permission chooser, Y/N gate, or a
+        ///   conversational question is on screen (issues #26 / #58).
+        ///   Recognised by the chooser arrow + numbered options, the
+        ///   `Esc to cancel` permission footer, the standalone
+        ///   `do you want to …` phrases, or the last-line-ends-with-?
+        ///   heuristic — all via the shared `super::detect` helpers.
+        /// - **`Working`** — the model is streaming or a tool is
+        ///   running. Claude paints a pulsing glyph + `(esc to
+        ///   interrupt)` in its bottom status line ONLY while busy;
+        ///   that hint is the per-agent "working" pulser the side
+        ///   panel keys off.
+        /// - **`Idle`** — the input box is drawn with nothing pending,
+        ///   or the output is plain non-interactive text.
+        ///
+        /// Returning `Some(_)` on every path (rather than `None`) lets
+        /// the daemon notice every transition between the three states;
+        /// without it the cached state would stick at its last value.
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
             let s = strip_ansi_lossy(recent_output);
 
@@ -446,14 +468,7 @@ pub mod builtins {
             let has_arrow = s.contains('❯') || has_ascii_chooser_arrow(&s);
             let has_chooser = has_numbered_chooser_options(&s);
             if has_arrow && has_chooser {
-                return Some(AgentState::Asking);
-            }
-
-            // Footer marker — Claude renders the textarea hint while
-            // editing a prompt. Paired so a chat message that quotes
-            // "Esc to cancel" doesn't false-trigger.
-            if super::detect::contains_paired(&s, &["Esc to cancel"], &["Tab to amend"]) {
-                return Some(AgentState::Asking);
+                return Some(AgentState::InputNeeded);
             }
 
             // Permission-chooser footer: `Esc to cancel` rendered
@@ -470,7 +485,7 @@ pub mod builtins {
             // `do you want to <verb>` standalone phrase scrolled off
             // the detection window's tail.
             if s.contains("Esc to cancel") && has_chooser {
-                return Some(AgentState::Asking);
+                return Some(AgentState::InputNeeded);
             }
 
             // Standalone high-confidence prompts. These exact phrases
@@ -487,7 +502,7 @@ pub mod builtins {
                 .iter()
                 .any(|p| lower.contains(p))
             {
-                return Some(AgentState::Asking);
+                return Some(AgentState::InputNeeded);
             }
 
             // Paired fallback for bare yes/no prompts (no arrow UI) +
@@ -505,7 +520,38 @@ pub mod builtins {
                     "Proceed?",
                 ],
             ) {
-                return Some(AgentState::Asking);
+                return Some(AgentState::InputNeeded);
+            }
+
+            // Working: the model is streaming or a tool is running.
+            // Claude shows a pulsing glyph + `(esc to interrupt)` in
+            // its bottom status line ONLY while busy — that hint is the
+            // per-agent "working" pulser we key off (the glyph itself
+            // cycles `·`/`✻`/`✽`/… and is unreliable to match; the
+            // accompanying interrupt hint is stable for the whole
+            // streaming / tool-run window).
+            //
+            // Recency guard: when Claude finishes and redraws the idle
+            // input box, its `Tab to amend` footer is painted AFTER the
+            // (now stale) `esc to interrupt` still sitting in the
+            // rolling detection buffer. Treat the agent as working only
+            // when the interrupt hint is the MORE RECENT of the two
+            // bottom-line markers. Without this, a just-finished agent
+            // would look busy forever: it sits idle and quiet, so the
+            // buffer never appends enough new bytes to evict the stale
+            // hint. This keeps the state honest — matching what the PTY
+            // is actually doing, not what it was doing a minute ago.
+            //
+            // Known limitation (acceptable, best-effort like the rest
+            // of this detector): if the literal "esc to interrupt" is
+            // echoed in chat/scrollback BELOW the last input box (e.g.
+            // a pasted transcript), it can read as Working for one
+            // detection window before the next render evicts it.
+            if let Some(work_pos) = lower.rfind("esc to interrupt") {
+                let idle_pos = lower.rfind("tab to amend");
+                if idle_pos.is_none_or(|ip| work_pos > ip) {
+                    return Some(AgentState::Working);
+                }
             }
 
             // Conversational asks (issue #58) — a SEPARATE code path
@@ -520,10 +566,15 @@ pub mod builtins {
             // these sessions previously looked idle. Tuned for recall
             // (see `detect::conversational`).
             if super::detect::conversational::is_conversational_ask(&s) {
-                return Some(AgentState::Asking);
+                return Some(AgentState::InputNeeded);
             }
 
-            Some(AgentState::Active)
+            // Nothing pending and not streaming: the input box is drawn
+            // and quiet, or the output is plain non-interactive text.
+            // Returning `Some(Idle)` (not the trait default `None`)
+            // lets the daemon flip Working / InputNeeded → Idle when
+            // the agent goes quiet.
+            Some(AgentState::Idle)
         }
 
         /// Claude is ready to receive a pasted prompt when:
@@ -598,9 +649,11 @@ pub mod builtins {
             if super::detect::contains_any(&s, super::detect::YN_PROMPT_PATTERNS)
                 || super::detect::contains_any(&s, &["approve?"])
             {
-                return Some(AgentState::Asking);
+                return Some(AgentState::InputNeeded);
             }
-            Some(AgentState::Active)
+            // No Codex "working" pulser is recognised yet, so fall back
+            // to `Idle` rather than `Working` — never falsely busy.
+            Some(AgentState::Idle)
         }
     }
 
@@ -624,9 +677,11 @@ pub mod builtins {
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
             let s = strip_ansi_lossy(recent_output);
             if super::detect::contains_any(&s, super::detect::YN_PROMPT_PATTERNS) {
-                return Some(AgentState::Asking);
+                return Some(AgentState::InputNeeded);
             }
-            Some(AgentState::Active)
+            // No Cursor "working" pulser is recognised yet — fall back
+            // to `Idle`, never falsely busy.
+            Some(AgentState::Idle)
         }
     }
 
@@ -742,7 +797,7 @@ pub mod builtins {
             let text = String::from_utf8_lossy(recent_output);
             let refs: Vec<&str> = self.asking_patterns.iter().map(String::as_str).collect();
             if super::detect::contains_any(&text, &refs) {
-                Some(AgentState::Asking)
+                Some(AgentState::InputNeeded)
             } else {
                 None
             }

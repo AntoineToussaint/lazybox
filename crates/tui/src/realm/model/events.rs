@@ -432,6 +432,18 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Advance the sidebar's "working" spinner. Called once per run-
+    /// loop iteration; the sidebar itself rate-limits the frame
+    /// advance (so this is a cheap no-op most ticks) and only reports
+    /// `true` when the glyph actually changed — which is the only
+    /// time the animation needs a fresh frame. No working agent → no
+    /// redraws at all.
+    pub fn tick_working(&mut self) {
+        if self.sidebar.tick_working() {
+            self.redraw = true;
+        }
+    }
+
     /// Drive the polling spinner + termination check from the run
     /// loop. Cheap; called every iteration. Returns Some(msg) when
     /// the polling modal wants to be torn down.

@@ -446,6 +446,12 @@ impl Sidebar {
                 asking: workspace.is_some_and(|w| {
                     crate::agent_attention::workspace_is_asking(w, &self.agents_asking)
                 }),
+                working: workspace.is_some_and(|w| {
+                    crate::agent_attention::workspace_is_working(w, &self.agents_working)
+                }),
+                working_glyph: crate::components::workspace_row::working_glyph(
+                    self.working_spinner_frame,
+                ),
                 badges: self.runner_badges(key),
                 ascii_glyphs: self.ascii_glyphs,
             };

@@ -366,6 +366,19 @@ impl Sidebar {
                     session_key,
                     *state,
                 );
+                // The "working" slot shares the same UI cell as the
+                // `?` pill and is driven by the same event. Keep its
+                // disjoint set in sync. No `recompute_visible()` is
+                // needed for a working-only change: `compute_visible`
+                // reads `agents_asking` but not `agents_working`, so
+                // the row list is identical; the spinner glyph is read
+                // fresh from `agents_working` at render time, and the
+                // daemon-event path already forces a redraw.
+                crate::agent_attention::apply_working_state(
+                    &mut self.agents_working,
+                    session_key,
+                    *state,
+                );
                 if matches!(
                     transition,
                     crate::agent_attention::AttentionTransition::NowAsking

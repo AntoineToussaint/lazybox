@@ -1444,7 +1444,7 @@ fn agent_state_asking_makes_workspace_findable_by_bang() {
     s.on_event(&Event::AgentState {
         terminal_id: pilot_ipc::TerminalId(0),
         session_key: key.clone(),
-        state: pilot_ipc::AgentState::Asking,
+        state: pilot_ipc::AgentState::InputNeeded,
     });
 
     // After: `!` can find it.
@@ -1453,6 +1453,103 @@ fn agent_state_asking_makes_workspace_findable_by_bang() {
         "Event::AgentState {{ Asking }} must register in the asking-set",
     );
     assert_eq!(s.selected_session_key(), Some(&key));
+}
+
+#[test]
+fn agent_state_working_shows_spinner_and_is_not_asking() {
+    // Working renders the animated spinner in the shared state slot,
+    // is NOT treated as "needs input" (no `!` jump, no notification),
+    // and `tick_working` advances the frame the first time it's due.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let w = agent_workspace("owner/repo", "o/r#1", now);
+    let key = ws_key(&w);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w],
+        terminals: vec![],
+        projects: vec![],
+    });
+    let _ = s.drain_pending_notifications();
+
+    s.on_event(&Event::AgentState {
+        terminal_id: pilot_ipc::TerminalId(0),
+        session_key: key.clone(),
+        state: pilot_ipc::AgentState::Working,
+    });
+
+    // Working is not an attention signal.
+    assert!(
+        !s.focus_next_asking_workspace(),
+        "Working must NOT register as asking",
+    );
+    assert!(
+        s.drain_pending_notifications().is_empty(),
+        "Working must not enqueue a desktop notification",
+    );
+
+    // The spinner glyph appears in the rendered slot. Frame 0 of the
+    // working spinner is `⠋` (WORKING_SPINNER_FRAMES[0], kept internal
+    // to the workspace_row module — asserted here by its literal).
+    let rendered = render_to_string(&mut s, 80, 12, true);
+    assert!(
+        rendered.contains('⠋'),
+        "working spinner glyph must render; got:\n{rendered}",
+    );
+
+    // tick_working advances on the first due tick, then rate-limits.
+    assert!(s.tick_working(), "first tick with a working agent is due");
+    assert!(
+        !s.tick_working(),
+        "back-to-back tick is within the cadence window — no advance",
+    );
+}
+
+#[test]
+fn working_then_input_needed_swaps_the_shared_slot() {
+    // The two states share one slot and are mutually exclusive:
+    // flipping Working → InputNeeded must drop the spinner and raise
+    // the `?` pill (findable by `!`).
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let w = agent_workspace("owner/repo", "o/r#1", now);
+    let key = ws_key(&w);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w],
+        terminals: vec![],
+        projects: vec![],
+    });
+
+    s.on_event(&Event::AgentState {
+        terminal_id: pilot_ipc::TerminalId(0),
+        session_key: key.clone(),
+        state: pilot_ipc::AgentState::Working,
+    });
+    assert!(!s.focus_next_asking_workspace(), "working is not asking");
+
+    s.on_event(&Event::AgentState {
+        terminal_id: pilot_ipc::TerminalId(0),
+        session_key: key.clone(),
+        state: pilot_ipc::AgentState::InputNeeded,
+    });
+
+    // Now asking; the spinner is gone and the `?` pill is up.
+    assert!(
+        s.focus_next_asking_workspace(),
+        "InputNeeded after Working must register as asking",
+    );
+    s.focus_workspace_key(&key);
+    let rendered = render_to_string(&mut s, 80, 12, true);
+    assert!(
+        !rendered.contains('⠋'),
+        "spinner must clear once the slot shows the `?` pill; got:\n{rendered}",
+    );
+    assert!(rendered.contains('?'), "the input-needed pill must render");
+
+    // With no working agent left, tick_working is a no-op.
+    assert!(
+        !s.tick_working(),
+        "no working agent → spinner tick does nothing",
+    );
 }
 
 #[test]
@@ -1477,7 +1574,7 @@ fn workspace_upserted_does_not_clobber_asking_state() {
     s.on_event(&Event::AgentState {
         terminal_id: pilot_ipc::TerminalId(0),
         session_key: key.clone(),
-        state: pilot_ipc::AgentState::Asking,
+        state: pilot_ipc::AgentState::InputNeeded,
     });
     assert!(s.focus_next_asking_workspace(), "asking after the event");
 
@@ -1520,7 +1617,7 @@ fn agent_state_asking_queues_a_desktop_notification() {
     s.on_event(&Event::AgentState {
         terminal_id: pilot_ipc::TerminalId(0),
         session_key: key.clone(),
-        state: pilot_ipc::AgentState::Asking,
+        state: pilot_ipc::AgentState::InputNeeded,
     });
     let queued = s.drain_pending_notifications();
     assert_eq!(queued.len(), 1, "first transition must enqueue once");
@@ -1534,7 +1631,7 @@ fn agent_state_asking_queues_a_desktop_notification() {
     s.on_event(&Event::AgentState {
         terminal_id: pilot_ipc::TerminalId(0),
         session_key: key,
-        state: pilot_ipc::AgentState::Asking,
+        state: pilot_ipc::AgentState::InputNeeded,
     });
     let queued = s.drain_pending_notifications();
     assert!(
@@ -1563,7 +1660,7 @@ fn bang_jumps_to_next_asking_workspace() {
     s.on_event(&Event::AgentState {
         terminal_id: pilot_ipc::TerminalId(0),
         session_key: k2.clone(),
-        state: pilot_ipc::AgentState::Asking,
+        state: pilot_ipc::AgentState::InputNeeded,
     });
 
     let moved = s.focus_next_asking_workspace();

@@ -126,33 +126,102 @@ fn default_agent_inject_submit_is_none() {
 #[test]
 fn codex_detects_yn_prompt() {
     // Codex prompts the user with `[y/n]` for tool approvals. The
-    // detector flags those as Asking; everything else is Active.
+    // detector flags those as InputNeeded; everything else is Idle
+    // (no Codex "working" pulser is recognised yet, so we never
+    // falsely report Working).
     let agent = Codex;
     assert_eq!(
         agent.detect_state(b"run rm -rf? [y/n]"),
-        Some(AgentState::Asking)
+        Some(AgentState::InputNeeded)
     );
-    assert_eq!(agent.detect_state(b"hello world"), Some(AgentState::Active));
+    assert_eq!(agent.detect_state(b"hello world"), Some(AgentState::Idle));
 }
 
 #[test]
 fn claude_detects_chooser_footer() {
     // The Claude Code chooser UI is recognisable by its `Esc to
     // cancel · Tab to amend` footer plus a question phrasing. Both
-    // need to match for Asking; neither alone is sufficient
+    // need to match for InputNeeded; neither alone is sufficient
     // (chat output could include the phrase).
     let agent = Claude;
     let buf = b"Do you want to proceed?\n> 1. Yes\n  2. No\n\n\
                 Esc to cancel \xc2\xb7 Tab to amend \xc2\xb7 ctrl+e to explain";
-    assert_eq!(agent.detect_state(buf), Some(AgentState::Asking));
+    assert_eq!(agent.detect_state(buf), Some(AgentState::InputNeeded));
 }
 
 #[test]
-fn claude_active_when_just_streaming() {
+fn claude_idle_when_no_working_hint_and_no_prompt() {
+    // Plain text with neither a prompt nor the `(esc to interrupt)`
+    // working hint is `Idle` — we never infer "working" from raw
+    // output, only from Claude's explicit streaming pulser. This is
+    // the acceptance guard: a quiet agent must not look busy.
     let agent = Claude;
     assert_eq!(
         agent.detect_state(b"running tests..."),
-        Some(AgentState::Active)
+        Some(AgentState::Idle)
+    );
+}
+
+#[test]
+fn claude_working_when_interrupt_hint_present() {
+    // While streaming / running a tool, Claude paints a pulsing glyph
+    // plus `(esc to interrupt)` in its bottom status line. That hint
+    // is the per-agent "working" pulser the side panel keys off.
+    let agent = Claude;
+    let buf = "✻ Cogitating… (12s · ↑ 1.2k tokens · esc to interrupt)";
+    assert_eq!(
+        agent.detect_state(buf.as_bytes()),
+        Some(AgentState::Working),
+    );
+}
+
+#[test]
+fn claude_idle_when_interrupt_hint_is_stale_under_input_box() {
+    // Recency guard: a just-finished agent has a now-stale
+    // `esc to interrupt` still in the rolling buffer, but the idle
+    // input box (`Tab to amend`) was painted AFTER it. The more-
+    // recent bottom-line marker wins → Idle, not a forever-busy
+    // false positive.
+    let agent = Claude;
+    let buf = "✻ Working… (esc to interrupt)\n\
+               <result streamed>\n\
+               │ > \n\
+               Esc to cancel · Tab to amend · ctrl+e to explain\n";
+    assert_eq!(agent.detect_state(buf.as_bytes()), Some(AgentState::Idle));
+}
+
+#[test]
+fn claude_idle_at_empty_input_box() {
+    // A drawn-but-quiet input box with nothing pending is `Idle`,
+    // not `InputNeeded` — "done / waiting for my next instruction"
+    // is distinct from "blocking on a specific decision" (#26/#58).
+    let agent = Claude;
+    let idle = "│ > \n│ \n\n\
+                Esc to cancel · Tab to amend · ctrl+e to explain\n";
+    assert_eq!(agent.detect_state(idle.as_bytes()), Some(AgentState::Idle));
+}
+
+#[test]
+fn default_agent_detect_state_is_none_so_consumers_render_idle() {
+    // The trait default has no detector → None. Consumers treat the
+    // absence of a signal as Idle, so an unknown agent never lies
+    // about working — even when its output literally contains the
+    // Claude working hint.
+    struct Unknown;
+    impl Agent for Unknown {
+        fn id(&self) -> &'static str {
+            "unknown"
+        }
+        fn display_name(&self) -> &'static str {
+            "Unknown"
+        }
+        fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
+            vec!["unknown".into()]
+        }
+    }
+    assert_eq!(
+        Unknown.detect_state(b"esc to interrupt streaming hard"),
+        None
     );
 }
 
@@ -216,7 +285,10 @@ fn claude_detects_choice_arrow() {
                ❯ 1. Yes\n\
                  2. Yes, and don't ask again\n\
                  3. No, and tell Claude what to do differently\n";
-    assert_eq!(agent.detect_state(buf.as_bytes()), Some(AgentState::Asking),);
+    assert_eq!(
+        agent.detect_state(buf.as_bytes()),
+        Some(AgentState::InputNeeded),
+    );
 }
 
 #[test]
@@ -235,7 +307,7 @@ fn claude_detects_choice_arrow_with_tmux_repaint_fragmentation() {
                2. No\n";
     assert_eq!(
         agent.detect_state(buf.as_bytes()),
-        Some(AgentState::Asking),
+        Some(AgentState::InputNeeded),
         "arrow + 1. Yes anywhere in buffer must fire Asking, even when not adjacent",
     );
 }
@@ -246,7 +318,7 @@ fn claude_detects_choice_arrow_ascii_fallback() {
     // the UTF-8 glyph isn't available. Cover both shapes.
     let agent = Claude;
     let buf = b"Do you want to make this edit?\n> 1. Yes\n  2. No\n";
-    assert_eq!(agent.detect_state(buf), Some(AgentState::Asking));
+    assert_eq!(agent.detect_state(buf), Some(AgentState::InputNeeded));
 }
 
 #[test]
@@ -287,11 +359,11 @@ fn generic_cli_asking_pattern_matching() {
     };
     assert_eq!(
         agent.detect_state(b"Some output... Press Enter to continue\n"),
-        Some(AgentState::Asking)
+        Some(AgentState::InputNeeded)
     );
     assert_eq!(
         agent.detect_state(b"Install all? [y/N]"),
-        Some(AgentState::Asking)
+        Some(AgentState::InputNeeded)
     );
     assert_eq!(agent.detect_state(b"just normal output"), None);
 }
@@ -494,7 +566,7 @@ fn claude_detects_standalone_proceed_prompt_lowercase() {
     // phrase lowercase. Standalone path matches on lowercase.
     let agent = Claude;
     let buf = b"some long bash output\nDo you want to proceed?\n";
-    assert_eq!(agent.detect_state(buf), Some(AgentState::Asking));
+    assert_eq!(agent.detect_state(buf), Some(AgentState::InputNeeded));
 }
 
 #[test]
@@ -508,7 +580,7 @@ fn claude_detects_other_lowercase_standalone_prompts() {
     ] {
         assert_eq!(
             agent.detect_state(prompt.as_bytes()),
-            Some(AgentState::Asking),
+            Some(AgentState::InputNeeded),
             "standalone prompt should fire: {prompt:?}",
         );
     }
@@ -522,11 +594,11 @@ fn claude_standalone_does_not_fire_on_chat_context() {
     let agent = Claude;
     assert_eq!(
         agent.detect_state(b"I'll proceed with the change once you say so."),
-        Some(AgentState::Active),
+        Some(AgentState::Idle),
     );
     assert_eq!(
         agent.detect_state(b"Reading the manual to figure out how to continue."),
-        Some(AgentState::Active),
+        Some(AgentState::Idle),
     );
 }
 
@@ -538,7 +610,7 @@ fn claude_detects_question_via_last_line_ends_with_qmark() {
     // future claude prompt shapes, etc.).
     let agent = Claude;
     let buf = b"I checked the file.\nShall I delete the cache directory?";
-    assert_eq!(agent.detect_state(buf), Some(AgentState::Asking));
+    assert_eq!(agent.detect_state(buf), Some(AgentState::InputNeeded));
 }
 
 #[test]
@@ -550,16 +622,17 @@ fn claude_question_heuristic_skips_quoted_continuation_lines() {
     // them and look at the next non-quote line.
     let agent = Claude;
     let buf = b"> Why does this happen?\nReading the file to find out.";
-    assert_eq!(agent.detect_state(buf), Some(AgentState::Active));
+    assert_eq!(agent.detect_state(buf), Some(AgentState::Idle));
 }
 
 #[test]
-fn claude_question_heuristic_stays_active_on_plain_streaming() {
-    // No question mark anywhere → Active. Belt-and-braces.
+fn claude_question_heuristic_stays_idle_on_plain_streaming() {
+    // No question mark, no prompt, no working hint → Idle.
+    // Belt-and-braces.
     let agent = Claude;
     assert_eq!(
         agent.detect_state(b"Running tests...\nCompiling pilot-tui v0.1.0\nFinished in 4.2s"),
-        Some(AgentState::Active),
+        Some(AgentState::Idle),
     );
 }
 
@@ -601,7 +674,7 @@ fn claude_conversational_ask_fires_on_long_clarifying_question() {
     let buf = b"Reading through the file now to figure out which of the three \
                 possible refactors would land us the cleanest API surface, so \
                 we extract the inner type or keep it inline?";
-    assert_eq!(agent.detect_state(buf), Some(AgentState::Asking));
+    assert_eq!(agent.detect_state(buf), Some(AgentState::InputNeeded));
 }
 
 #[test]
@@ -612,7 +685,7 @@ fn claude_conversational_ask_fires_on_want_me_to_after_a_statement() {
     // the model is plainly waiting on the user.
     let agent = Claude;
     let buf = b"I've finished the implementation. Want me to run the tests now?";
-    assert_eq!(agent.detect_state(buf), Some(AgentState::Asking));
+    assert_eq!(agent.detect_state(buf), Some(AgentState::InputNeeded));
 }
 
 #[test]
@@ -620,7 +693,7 @@ fn claude_conversational_ask_fires_on_short_prompts() {
     // Belt-and-braces: the canonical short prompt still fires.
     let agent = Claude;
     let buf = b"Some context above\nProceed with the rewrite?";
-    assert_eq!(agent.detect_state(buf), Some(AgentState::Asking));
+    assert_eq!(agent.detect_state(buf), Some(AgentState::InputNeeded));
 }
 
 // ── Prompt-shape fixture suite ─────────────────────────────────────────
@@ -651,14 +724,15 @@ struct PromptFixture {
     /// preserved; multi-line content uses `\n` literals so the
     /// fixture is one source line per visual row.
     buffer: &'static str,
-    /// Expected `AgentState`. `Asking` for real prompts, `Active`
-    /// for false-positive controls (chat output that LOOKS like a
-    /// prompt but isn't).
+    /// Expected `AgentState`. `InputNeeded` for real prompts,
+    /// `Working` for the streaming pulser, `Idle` for false-positive
+    /// controls (chat output that LOOKS like a prompt but isn't, or a
+    /// quiet input box).
     expected: AgentState,
 }
 
 const PROMPT_FIXTURES: &[PromptFixture] = &[
-    // ── Asking shapes — the real prompts ─────────────────────────
+    // ── InputNeeded shapes — the real prompts ────────────────────
     PromptFixture {
         // Regression for issue #26: cursor on option 2 (not 1),
         // and the chooser footer is just "Esc to cancel" (no
@@ -676,7 +750,7 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
             "  3. No\n",
             "Esc to cancel",
         ),
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         name: "edit_tool_permission_utf8_arrow",
@@ -687,7 +761,7 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
             "  3. No, and tell Claude what to do differently\n",
             "Esc to cancel",
         ),
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         // Arrow on option 3 — exercises the generalized
@@ -701,7 +775,7 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
             "> 3. No, and tell Claude what to do differently\n",
             "Esc to cancel",
         ),
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         name: "bash_permission_utf8_arrow",
@@ -712,7 +786,7 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
             "  3. No, and tell Claude what to do differently\n",
             "Esc to cancel",
         ),
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         name: "plan_mode_exit",
@@ -722,7 +796,7 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
             "  2. No\n",
             "Esc to cancel",
         ),
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         name: "trust_folder_chooser",
@@ -732,7 +806,7 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
             "  2. No, exit\n",
             "Esc to cancel",
         ),
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         // AskUserQuestion-style multi-option chooser. Same shape
@@ -747,7 +821,7 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
             "  3. smol\n",
             "Esc to cancel",
         ),
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         // Permission dialog where the footer (`Esc to cancel`)
@@ -762,24 +836,24 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
             "  3. Cancel\n",
             "Esc to cancel",
         ),
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         // Standalone "do you want to <verb>" phrase variants —
         // each one is a permission/consent prompt class.
         name: "write_permission_standalone_no_chooser",
         buffer: "Do you want to create README.md?",
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         name: "overwrite_permission_standalone",
         buffer: "Do you want to overwrite the existing file?",
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         name: "delete_permission_standalone",
         buffer: "Do you want to delete src/old_module.rs?",
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         name: "settings_edit_consent",
@@ -789,37 +863,76 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
             "  2. No\n",
             "Esc to cancel",
         ),
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
-    // ── Active controls — must NOT fire as Asking ────────────────
+    // ── Working shapes — the streaming pulser ────────────────────
+    PromptFixture {
+        // Claude's bottom status line while the model streams /
+        // a tool runs. The `(esc to interrupt)` hint is the stable
+        // signal; the leading glyph cycles and isn't matched.
+        name: "working_streaming_status_line",
+        buffer: "✻ Cogitating… (8s · ↑ 412 tokens · esc to interrupt)",
+        expected: AgentState::Working,
+    },
+    PromptFixture {
+        // Tool-run variant — same interrupt hint, different verb.
+        name: "working_running_tool",
+        buffer: concat!(
+            "● Bash(cargo test)\n",
+            "  ⎿ Running…\n",
+            "✽ Running… (3s · esc to interrupt)",
+        ),
+        expected: AgentState::Working,
+    },
+    // ── Idle controls — must NOT fire as InputNeeded or Working ──
+    PromptFixture {
+        // Stale `esc to interrupt` left in the buffer, but the idle
+        // input box footer was painted AFTER it. Recency guard must
+        // pick Idle, not a forever-busy Working.
+        name: "idle_stale_interrupt_under_input_box",
+        buffer: concat!(
+            "✻ Working… (esc to interrupt)\n",
+            "Done.\n",
+            "│ > \n",
+            "Esc to cancel · Tab to amend · ctrl+e to explain",
+        ),
+        expected: AgentState::Idle,
+    },
+    PromptFixture {
+        // Quiet input box, nothing pending — done / waiting for the
+        // next instruction, which is Idle (not InputNeeded).
+        name: "idle_empty_input_box",
+        buffer: concat!("│ > \n", "Esc to cancel · Tab to amend · ctrl+e to explain",),
+        expected: AgentState::Idle,
+    },
     PromptFixture {
         // Plain build output. No prompt markers, no `?`. Belt-
         // and-braces baseline.
-        name: "active_streaming_build_output",
+        name: "idle_streaming_build_output",
         buffer: concat!(
             "Compiling pilot-tui v0.1.0\n",
             "Finished release [optimized] target(s) in 4.32s",
         ),
-        expected: AgentState::Active,
+        expected: AgentState::Idle,
     },
     PromptFixture {
         // Chat output that mentions "do you want to" but isn't
         // an actual prompt. The STANDALONE entries are tight
         // enough not to fire on this prose.
-        name: "active_chat_mentions_proceed",
+        name: "idle_chat_mentions_proceed",
         buffer: "I'll proceed with the change once you say so.",
-        expected: AgentState::Active,
+        expected: AgentState::Idle,
     },
     PromptFixture {
         // A `?` appears mid-paragraph but the turn ends on a
         // statement — only the LAST conversational line is load-
         // bearing, so the earlier question must NOT fire Asking.
-        name: "active_question_mid_paragraph_not_last_line",
+        name: "idle_question_mid_paragraph_not_last_line",
         buffer: concat!(
             "Why does this matter? Because the cache is cold on first run.\n",
             "Done — all tests pass.",
         ),
-        expected: AgentState::Active,
+        expected: AgentState::Idle,
     },
     // ── Conversational asks (issue #58) ──────────────────────────
     // Claude's OWN freeform asks ending a turn — no menu, no
@@ -840,7 +953,7 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
             "╰─────────────────────────────────────────╯\n",
             "  ? for shortcuts",
         ),
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         // Hardening: the footer below the input box is a standalone
@@ -856,55 +969,55 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
             "╰─────────────────────────────────────────╯\n",
             "  ⏵⏵ accept edits on",
         ),
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         name: "conversational_should_i",
         buffer: "Should I also update the tests for this change?",
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         name: "conversational_do_you_want",
         buffer: "Do you want me to update the changelog too?",
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         name: "conversational_shall_i",
         buffer: "Shall I continue with the next file?",
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         // Ends with `.`, not `?` — caught by the phrase list
         // ("let me know if"), not the ends-with-`?` rule.
         name: "conversational_let_me_know",
         buffer: "Let me know if you'd like me to continue.",
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         name: "conversational_would_you_like_me_to",
         buffer: "Would you like me to refactor the helper as well?",
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         // Bare one-word confirmation asks.
         name: "conversational_proceed_bare",
         buffer: "Proceed?",
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         name: "conversational_continue_bare",
         buffer: "Continue?",
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         name: "conversational_ok_to",
         buffer: "Ok to push these changes to the branch?",
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         name: "conversational_which_one",
         buffer: "Which one should I start with?",
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
     PromptFixture {
         // Long clarifying prose ending in a choice question. Under
@@ -913,7 +1026,7 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
         // recall, and this is a genuine ask the user must answer.
         name: "conversational_long_prose_ends_with_question",
         buffer: "I have a few approaches in mind: refactor the loop, extract a helper, or inline the whole thing. Which would you prefer?",
-        expected: AgentState::Asking,
+        expected: AgentState::InputNeeded,
     },
 ];
 

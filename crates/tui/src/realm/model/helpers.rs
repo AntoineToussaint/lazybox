@@ -448,6 +448,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         }
         model.tick_notice();
         model.tick_right();
+        model.tick_working();
 
         // 3. Process tuirealm-side messages (timer ticks for Loading,
         // injected modal keys). Non-blocking — listener thread already

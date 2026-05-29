@@ -99,15 +99,28 @@ impl TerminalKind {
     }
 }
 
-/// What the agent's PTY is doing right now. Drives the "needs
-/// input" badge on the TerminalStack tab. Two states is enough
-/// today — `Idle`/`Stopped` distinctions don't have a consumer.
+/// What the agent's PTY is doing right now. Drives the side-panel
+/// state slot (working spinner / "needs input" pill / idle) and the
+/// TerminalStack tab badge.
+///
+/// The three states are mutually exclusive and share a single UI
+/// slot per session. They're produced per-agent-kind by
+/// [`Agent::detect_state`](../pilot_agents/trait.Agent.html) — each
+/// agent decides how to recognise "working" / "input needed" from
+/// its own PTY output. An agent with no opinion returns `None`,
+/// which consumers treat as `Idle` (so an unknown agent never
+/// falsely reports `Working`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentState {
-    /// Working / streaming output. Default.
-    Active,
-    /// Waiting on a user choice (Y/N, approval, prompt).
-    Asking,
+    /// Actively producing output / running a tool right now — the
+    /// agent's status line shows a streaming spinner / pulser.
+    Working,
+    /// Paused waiting on the user: a permission gate, Y/N prompt, or
+    /// a conversational question (see issues #26 / #58).
+    InputNeeded,
+    /// Neither working nor waiting — done, idle, or no signal. The
+    /// safe default for any agent that can't tell.
+    Idle,
 }
 
 /// User input sent to a structured agent runtime.

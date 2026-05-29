@@ -322,7 +322,13 @@ impl<T: TerminalAdapter> Model<T> {
                     pilot_ipc::TerminalKind::Agent(a) => a.to_string(),
                     other => format!("{other:?}").to_lowercase(),
                 };
-                self.flash_info(format!("Spawning {label}…"));
+                // Animated footer spinner (not a static notice): worktree
+                // provisioning runs on the daemon before `TerminalSpawned`
+                // comes back, and on a cold clone that's a multi-second
+                // gap. The spinner turns the whole time so the user knows
+                // their `w`/`c`/`s` keypress registered. Cleared when the
+                // terminal lands (see `events.rs`).
+                self.status.note_spawning(label);
             }
         }
         for cmd in cmds {

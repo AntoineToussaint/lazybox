@@ -10,13 +10,21 @@
 
 set -euo pipefail
 
-# Honor pilot's vendored zig if present — same trick the Makefile
-# uses so anything the hook spawns picks up zig 0.15.2 instead of
-# whatever brew put on PATH. `make setup` drops the binary under a
-# host-specific dir (vendor/zig/<arch>-<os>-<ver>/zig), so glob for
-# it rather than assuming a fixed path.
+# Honor pilot's pinned zig if present — same trick the Makefile uses
+# so anything the hook spawns picks up zig 0.15.2 instead of whatever
+# brew put on PATH (ghostty's build.zig rejects 0.16). `make setup`
+# drops the binary under a host-specific dir; glob for it rather than
+# assuming a fixed path. As of the shared-cache change that dir lives
+# in `${PILOT_ZIG_CACHE:-~/.cache/pilot/zig}/<arch>-<os>-<ver>/` (one
+# download shared across all worktrees); we still check the legacy
+# in-repo `vendor/zig/` so an un-migrated checkout keeps working.
 repo_root="$(git rev-parse --show-toplevel)"
-zig_bin="$(find "${repo_root}/vendor/zig" -maxdepth 2 -name zig -type f 2>/dev/null | head -n1)"
+zig_cache="${PILOT_ZIG_CACHE:-${HOME}/.cache/pilot/zig}"
+zig_bin=""
+for root in "${zig_cache}" "${repo_root}/vendor/zig"; do
+    zig_bin="$(find "${root}" -maxdepth 2 -name zig -type f 2>/dev/null | head -n1)"
+    [ -n "${zig_bin}" ] && break
+done
 if [ -n "${zig_bin}" ]; then
     export PATH="$(dirname "${zig_bin}"):${PATH}"
 fi

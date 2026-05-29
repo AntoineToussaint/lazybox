@@ -980,6 +980,63 @@ async fn spawn_with_no_sources_exits_quickly_and_silently() {
         .expect("polling task exits when sources is empty")
         .expect("no panic");
 }
+
+/// Regression — first-run polling never starts (boot path bug).
+///
+/// `run_embedded_realm` used to gate `polling::spawn` on
+/// `persisted.is_some()`, so a first-run user (no setup yet) never got
+/// a poll loop. The wizard's on-complete hook writes config and fires
+/// `Command::Refresh` (→ `poll_wake.notify_one()`) to kick the first
+/// tick — but that notify hit a loop that was never spawned, so the
+/// inbox stayed empty until the user restarted pilot. The fix spawns
+/// the loop UNCONDITIONALLY at boot, before any setup exists.
+///
+/// That fix is only safe because the PRODUCTION `spawn` loop — unlike
+/// `spawn_with_sources` (see the test above) — does NOT exit when a
+/// tick produces no sources: it idles, re-reading config every tick,
+/// until the wizard writes providers and a wake fires. This test pins
+/// that property: spawn the real loop against an unconfigured
+/// `PILOT_HOME` (defaults → zero providers → no-op tick, no network)
+/// and assert the loop is still alive after several intervals. If
+/// someone "optimizes" `spawn` to exit-on-empty like
+/// `spawn_with_sources`, the first-run kick would wake a dead loop and
+/// this bug returns — this test goes red first.
+#[tokio::test(flavor = "multi_thread")]
+async fn production_spawn_loop_survives_unconfigured_boot() {
+    // Point config resolution at an EMPTY dir so `Config::load()`
+    // returns defaults (no providers enabled). Without this the loop
+    // would read the dev machine's real `~/.pilot/config.yaml`, build
+    // a real GhSource, and fire live GitHub requests from a unit test.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let prev = std::env::var_os("PILOT_HOME");
+    // SAFETY/ISOLATION: PILOT_HOME is process-global, but within this
+    // test binary `spawn`/`run_one_tick` are the only readers of the
+    // resolved config path, and only this test drives them — no other
+    // polling.rs test races on it. Restored before we return.
+    unsafe { std::env::set_var("PILOT_HOME", tmp.path()) };
+
+    let config = ServerConfig::in_memory();
+    let handle = polling::spawn(config, Duration::from_millis(10));
+
+    // Still running after ~30 ticks' worth of wall-clock = the loop
+    // did NOT exit on the empty-sources tick. (timeout → Err means the
+    // JoinHandle never resolved; dropping it on timeout just detaches
+    // the background task, which the runtime reaps at test teardown.)
+    let still_running = tokio::time::timeout(Duration::from_millis(300), handle)
+        .await
+        .is_err();
+
+    match prev {
+        Some(v) => unsafe { std::env::set_var("PILOT_HOME", v) },
+        None => unsafe { std::env::remove_var("PILOT_HOME") },
+    }
+
+    assert!(
+        still_running,
+        "production spawn() loop exited on unconfigured boot — \
+         first-run polling would never start after the wizard's Refresh",
+    );
+}
 // ── Per-provider filter ────────────────────────────────────────────
 
 fn make_typed_task(key: &str, role: TaskRole, is_pr: bool) -> Task {

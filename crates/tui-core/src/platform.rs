@@ -82,19 +82,21 @@ pub fn detach_child_process(cmd: &mut std::process::Command) {
 /// attention even when pilot isn't the focused app — e.g. Claude
 /// going to `Asking` while the user is reading email.
 ///
-/// **macOS**: only fires when `terminal-notifier` is on PATH. We
-/// previously fell back to `osascript -e 'display notification …'`,
-/// but newer macOS attributes the click action to Script Editor —
-/// clicking a pilot notification opened an empty AppleScript editor
-/// window, which was the opposite of helpful. Until pilot ships as a
-/// `.app` bundle with its own Info.plist and bundle id, the only
-/// reliable click-target on macOS is `terminal-notifier`'s own
-/// bundle. When it's missing we now silently no-op rather than
-/// hijack the user's editor on click.
+/// **macOS**: prefers `terminal-notifier` when it's on PATH — it
+/// ships its own bundle, so the banner carries a real icon and
+/// `-group` collapses repeats into one stack. When it's missing we
+/// fall back to `osascript -e 'display notification …'`, which is
+/// part of every macOS install and needs no `brew`. The tradeoff:
+/// newer macOS attributes the osascript banner's click action to
+/// Script Editor, so clicking it opens an empty AppleScript window.
+/// A banner that appears (and is read at a glance) beats no banner at
+/// all, so we accept the worse click target rather than stay silent
+/// on a stock Mac. (When pilot ships as a `.app` with its own bundle
+/// id this whole fallback goes away.)
 ///
-/// **Linux**: `notify-send` (libnotify). Present on every desktop
-/// environment we'd realistically support. Skipped silently if
-/// `notify-send` is missing.
+/// **Linux**: `notify-send` (libnotify), present on every desktop we
+/// realistically support. Skipped with a one-time log if it's
+/// missing — install `libnotify` (e.g. `apt install libnotify-bin`).
 ///
 /// **Windows**: stub (TODO: PowerShell `New-BurntToastNotification`).
 pub fn notify_user(title: &str, body: &str) {
@@ -107,45 +109,71 @@ pub fn notify_user(title: &str, body: &str) {
         static TERMINAL_NOTIFIER: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
         let tn = TERMINAL_NOTIFIER.get_or_init(|| which::which("terminal-notifier").ok());
 
-        let Some(tn_path) = tn else {
-            // No terminal-notifier on PATH → no notification. See the
-            // doc comment for why we don't fall back to osascript.
-            // A one-time tracing line so users can grep
-            // /tmp/pilot.log and find the "install terminal-notifier"
-            // hint when they wonder where their notifications went.
+        let stdio = || {
+            (
+                std::process::Stdio::null(),
+                std::process::Stdio::null(),
+                std::process::Stdio::null(),
+            )
+        };
+        if let Some(tn_path) = tn {
+            // `-sender` is intentionally omitted — without a real
+            // pilot.app bundle id, spoofing one would surface the
+            // wrong app's icon.
+            let (i, o, e) = stdio();
+            let _ = std::process::Command::new(tn_path)
+                .arg("-title")
+                .arg(title)
+                .arg("-message")
+                .arg(body)
+                .arg("-group")
+                .arg("com.pilot.agent")
+                .stdin(i)
+                .stdout(o)
+                .stderr(e)
+                .spawn();
+        } else {
+            // Zero-dependency fallback. The strings are interpolated
+            // into an AppleScript literal, so escape `\` and `"` to
+            // keep a title/body with quotes from breaking the script.
+            let script = format!(
+                "display notification \"{}\" with title \"{}\"",
+                applescript_escape(body),
+                applescript_escape(title),
+            );
+            let (i, o, e) = stdio();
+            let _ = std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(script)
+                .stdin(i)
+                .stdout(o)
+                .stderr(e)
+                .spawn();
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use std::sync::OnceLock;
+        static NOTIFY_SEND: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+        let ns = NOTIFY_SEND.get_or_init(|| which::which("notify-send").ok());
+
+        let Some(ns_path) = ns else {
+            // No notify-send on PATH → no notification. A one-time
+            // tracing line so users can grep /tmp/pilot.log and find
+            // the install hint when they wonder where their
+            // notifications went.
             static WARNED: OnceLock<()> = OnceLock::new();
             WARNED.get_or_init(|| {
                 tracing::info!(
-                    "notify_user: terminal-notifier not found on PATH; \
-                     desktop notifications disabled. `brew install terminal-notifier` to enable."
+                    "notify_user: notify-send not found on PATH; desktop \
+                     notifications disabled. Install libnotify \
+                     (e.g. `apt install libnotify-bin`) to enable."
                 );
             });
             let _ = (title, body);
             return;
         };
-        // `terminal-notifier` ships with its own bundle, so the
-        // notification carries a proper app icon and clicking it
-        // surfaces terminal-notifier (a no-op from the user's
-        // perspective — not the wrong-app surprise of Script Editor).
-        // `-group` collapses repeats into a single stack rather than
-        // piling up. `-sender` is intentionally omitted — without
-        // a real pilot.app bundle id, spoofing one would surface
-        // the wrong app's icon.
-        let _ = std::process::Command::new(tn_path)
-            .arg("-title")
-            .arg(title)
-            .arg("-message")
-            .arg(body)
-            .arg("-group")
-            .arg("com.pilot.agent")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let _ = std::process::Command::new("notify-send")
+        let _ = std::process::Command::new(ns_path)
             .arg(title)
             .arg(body)
             .stdin(std::process::Stdio::null())
@@ -157,6 +185,14 @@ pub fn notify_user(title: &str, body: &str) {
     {
         let _ = (title, body);
     }
+}
+
+/// Escape a string for embedding inside an AppleScript double-quoted
+/// literal: backslash first (so we don't double-escape the escapes we
+/// add next), then the double-quote.
+#[cfg(target_os = "macos")]
+fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Async wait for a graceful-shutdown signal — SIGTERM or Ctrl-C on

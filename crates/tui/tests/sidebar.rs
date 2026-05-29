@@ -1641,6 +1641,56 @@ fn agent_state_asking_queues_a_desktop_notification() {
 }
 
 #[test]
+fn desktop_notify_off_suppresses_os_banner_but_keeps_footer_notice() {
+    // With `attention.desktop_notify = false` the Asking transition
+    // must NOT queue an OS banner, but the in-app footer notice (a
+    // separate, quiet surface) still fires so the user isn't left
+    // blind to the prompt.
+    use std::collections::{BTreeSet, HashMap};
+
+    let mut s = Sidebar::new(PaneId::new(1));
+    let attention = pilot_config::AttentionConfig {
+        desktop_notify: false,
+        ..pilot_config::AttentionConfig::default()
+    };
+    s.apply_config(
+        attention,
+        BTreeSet::new(),
+        HashMap::new(),
+        None,
+        &pilot_config::DisplayConfig::default(),
+        &pilot_config::UiDefaults::default(),
+    );
+
+    let now = Utc::now();
+    let w = agent_workspace("owner/repo", "o/r#1", now);
+    let key = ws_key(&w);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w],
+        terminals: vec![],
+        projects: vec![],
+    });
+    let _ = s.drain_pending_notifications();
+    let _ = s.drain_pending_asking_notices();
+
+    s.on_event(&Event::AgentState {
+        terminal_id: pilot_ipc::TerminalId(0),
+        session_key: key,
+        state: pilot_ipc::AgentState::InputNeeded,
+    });
+
+    assert!(
+        s.drain_pending_notifications().is_empty(),
+        "desktop_notify off must suppress the OS banner",
+    );
+    assert_eq!(
+        s.drain_pending_asking_notices().len(),
+        1,
+        "the in-app footer notice fires regardless of desktop_notify",
+    );
+}
+
+#[test]
 fn bang_jumps_to_next_asking_workspace() {
     // Three workspaces, only #2 is asking. Cursor starts on #1.
     // Calling `focus_next_asking_workspace` (what the `!` global key

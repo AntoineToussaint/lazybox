@@ -114,6 +114,13 @@ pub struct AttentionConfig {
     pub review_pending: bool,
     pub agent_asking: bool,
     pub mentioned: bool,
+    /// Whether an agent crossing into `InputNeeded` fires an OS-level
+    /// desktop notification (`terminal-notifier` / `osascript` on
+    /// macOS, `notify-send` on Linux). Independent of `agent_asking`,
+    /// which only gates the in-app attention badge — set this to
+    /// `false` to keep the badge but silence the desktop banner.
+    /// Default on.
+    pub desktop_notify: bool,
 }
 
 impl Default for AttentionConfig {
@@ -124,6 +131,7 @@ impl Default for AttentionConfig {
             review_pending: true,
             agent_asking: true,
             mentioned: true,
+            desktop_notify: true,
         }
     }
 }
@@ -987,6 +995,23 @@ auto_fix:
         let written = serde_yaml::to_string(&cfg).expect("serialize");
         let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
         assert_eq!(reparsed.auto_fix.to_settings(), s);
+    }
+
+    #[test]
+    fn desktop_notify_defaults_on_and_round_trips() {
+        // Absent section → on, so notifications work out of the box.
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(cfg.attention.desktop_notify);
+
+        // A user who silences the banner keeps that choice across a
+        // save/load cycle, independent of the `agent_asking` badge.
+        let yaml = "attention:\n  desktop_notify: false\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert!(!cfg.attention.desktop_notify);
+        assert!(cfg.attention.agent_asking, "badge gate is independent");
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert!(!reparsed.attention.desktop_notify);
     }
 
     #[test]

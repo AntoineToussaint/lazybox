@@ -901,6 +901,7 @@ mod attention_signal_tests {
             review_pending: false,
             agent_asking: false,
             mentioned: false,
+            ..Default::default()
         };
         assert!(!workspace_needs_attention(&w, &cfg, &empty_set()));
     }
@@ -916,6 +917,7 @@ mod attention_signal_tests {
             review_pending: false,
             agent_asking: false,
             mentioned: false,
+            ..Default::default()
         };
         assert!(
             !workspace_needs_attention(&w, &cfg, &empty_set()),

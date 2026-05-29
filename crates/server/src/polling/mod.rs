@@ -2563,6 +2563,18 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
 /// "route to PR workspace" path can reuse the same write/broadcast
 /// behaviour without duplicating it.
 async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, task: Task) {
+    // 0. MERGE DETECTION: cheap pre-check (no IO) gates the store
+    //    read — only a PR observed as Merged can trigger cleanup. We
+    //    snapshot the previous state here, before `prepare_upsert`
+    //    overwrites it, so we only act on the open→merged *transition*
+    //    and not on every subsequent tick of an already-merged PR.
+    let merged_pr_to_clean = if task.is_pr() && task.state == pilot_core::TaskState::Merged {
+        let prev = load_workspace(config, key);
+        merged_transition_pr_number(prev.as_ref(), &task)
+    } else {
+        None
+    };
+
     // 1. PREPARE: build the workspace's final in-memory state.
     //    Includes the optional issue-collapse merge — if a PR
     //    polls in with `closes_issues`, we fold standalone issue
@@ -2581,6 +2593,47 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
     //    here log at `error` so an operator can spot a workspace
     //    that won't survive restart.
     commit_upsert(config, key, workspace);
+
+    // 4. CLEANUP: the PR just merged → reap its safe-to-delete
+    //    worktrees (gated behind `worktree.auto_cleanup_merged`).
+    //    Runs after the commit so cleanup re-reads the freshly
+    //    persisted session set.
+    if let Some(pr_number) = merged_pr_to_clean {
+        handlers::cleanup_merged_worktrees(config, key, pr_number).await;
+    }
+}
+
+/// PR number parsed off a task id (`owner/repo#123` → `123`). Mirrors
+/// the `#`-split [`Workspace::worktree_slug`] uses. `None` for issues
+/// or any id whose suffix isn't a number.
+fn pr_number_from_task(task: &Task) -> Option<u64> {
+    task.id
+        .key
+        .rsplit_once('#')
+        .and_then(|(_, n)| n.parse().ok())
+}
+
+/// Decide whether `task` represents a PR that *just* transitioned into
+/// the merged state, returning its number when so.
+///
+/// Requires a known predecessor that was **not** already merged — a
+/// genuine open→merged flip. Two reasons this is stricter than "is the
+/// incoming task merged?":
+/// - It's a one-shot guard: once the merged state is persisted, the
+///   next poll sees `prev` already merged and skips, so cleanup runs
+///   exactly once per merge.
+/// - A PR first discovered already-merged has no prior workspace and
+///   thus no sessions to reap, so firing would only burn an inspect
+///   sweep for nothing.
+fn merged_transition_pr_number(prev: Option<&Workspace>, task: &Task) -> Option<u64> {
+    if !task.is_pr() || task.state != pilot_core::TaskState::Merged {
+        return None;
+    }
+    let prev_state = prev.and_then(|w| w.task_by_id(&task.id))?.state;
+    if prev_state == pilot_core::TaskState::Merged {
+        return None;
+    }
+    pr_number_from_task(task)
 }
 
 /// Pure-ish prepare step: load the existing workspace (if any),
@@ -3675,4 +3728,117 @@ pub fn mark_workspace_read(config: &ServerConfig, key: &WorkspaceKey) {
     workspace.mark_read_all();
     workspace.last_viewed_at = Some(Utc::now());
     commit_upsert(config, key, workspace);
+}
+
+#[cfg(test)]
+mod merge_detection_tests {
+    use super::*;
+    use pilot_core::{TaskId, TaskRole, TaskState};
+
+    fn task(source: &str, key: &str, url: &str, state: TaskState) -> Task {
+        Task {
+            id: TaskId {
+                source: source.into(),
+                key: key.into(),
+            },
+            title: "t".into(),
+            body: None,
+            state,
+            role: TaskRole::Author,
+            ci: pilot_core::CiStatus::None,
+            review: pilot_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: url.into(),
+            repo: Some("o/r".into()),
+            branch: Some("feat".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: pilot_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    fn pr(key: &str, state: TaskState) -> Task {
+        task("github", key, "https://github.com/o/r/pull/7", state)
+    }
+
+    #[test]
+    fn pr_number_parses_trailing_id_segment() {
+        assert_eq!(
+            pr_number_from_task(&pr("o/r#7", TaskState::Merged)),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn pr_number_none_when_no_hash_number() {
+        let mut t = pr("o/r#7", TaskState::Merged);
+        t.id.key = "ENG-42".into();
+        assert_eq!(pr_number_from_task(&t), None);
+    }
+
+    #[test]
+    fn fresh_merge_with_open_predecessor_fires() {
+        let prev = Workspace::from_task(pr("o/r#7", TaskState::Open), Utc::now());
+        let incoming = pr("o/r#7", TaskState::Merged);
+        assert_eq!(merged_transition_pr_number(Some(&prev), &incoming), Some(7));
+    }
+
+    #[test]
+    fn merge_without_predecessor_does_not_fire() {
+        // First time we ever see the PR and it's already merged — no
+        // prior workspace, so no sessions to reap. Skip rather than
+        // burn an inspect sweep on nothing.
+        let incoming = pr("o/r#7", TaskState::Merged);
+        assert_eq!(merged_transition_pr_number(None, &incoming), None);
+    }
+
+    #[test]
+    fn merge_with_predecessor_lacking_the_task_does_not_fire() {
+        // Predecessor workspace exists but never had this PR attached
+        // (e.g. an issue-only row): no prior state to flip from.
+        let prev = Workspace::empty(WorkspaceKey::new("o-r-7"), "feat", Utc::now());
+        let incoming = pr("o/r#7", TaskState::Merged);
+        assert_eq!(merged_transition_pr_number(Some(&prev), &incoming), None);
+    }
+
+    #[test]
+    fn already_merged_predecessor_does_not_refire() {
+        let prev = Workspace::from_task(pr("o/r#7", TaskState::Merged), Utc::now());
+        let incoming = pr("o/r#7", TaskState::Merged);
+        assert_eq!(merged_transition_pr_number(Some(&prev), &incoming), None);
+    }
+
+    #[test]
+    fn non_merged_state_never_fires() {
+        let incoming = pr("o/r#7", TaskState::Open);
+        assert_eq!(merged_transition_pr_number(None, &incoming), None);
+    }
+
+    #[test]
+    fn issue_task_never_fires() {
+        // An issue (not a PR) flipping to a closed/merged-like state
+        // must not trip PR cleanup, even though issues carry numbers.
+        let issue = task(
+            "github",
+            "o/r#7",
+            "https://github.com/o/r/issues/7",
+            TaskState::Merged,
+        );
+        assert_eq!(merged_transition_pr_number(None, &issue), None);
+    }
 }

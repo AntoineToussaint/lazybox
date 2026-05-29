@@ -257,6 +257,12 @@ pub struct WorktreeConfig {
     /// `_pilot/scripts/<name>`. Either inline `content` or a path
     /// `source` to symlink. See `pilot_git_ops::Script`.
     pub scripts: Vec<ScriptSpec>,
+    /// When a tracked PR flips to merged, automatically reap the
+    /// worktrees backing its sessions — but only the ones the
+    /// inspector deems safe (no locked / uncommitted / unpushed work,
+    /// and no live terminal attached). Off by default: opt in once
+    /// you trust pilot not to pull a folder out from under you.
+    pub auto_cleanup_merged: bool,
 }
 
 /// Per-repo overrides keyed by `owner/name` (the same string GitHub's

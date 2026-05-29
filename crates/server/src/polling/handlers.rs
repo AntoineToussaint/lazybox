@@ -826,6 +826,136 @@ pub(crate) async fn delete_orphaned_worktree_with(
     }
 }
 
+/// Auto-reap the worktrees behind a freshly-merged PR's sessions.
+///
+/// Gated behind `worktree.auto_cleanup_merged` (off by default).
+/// Called from the upsert path when a PR transitions to merged — see
+/// [`super::merged_transition_pr_number`]. Loads the config fresh so a
+/// user flipping the toggle takes effect without a restart, then
+/// delegates to [`cleanup_merged_worktrees_with`] against the default
+/// base.
+pub async fn cleanup_merged_worktrees(config: &ServerConfig, key: &WorkspaceKey, pr_number: u64) {
+    let enabled = pilot_config::Config::load()
+        .map(|c| c.worktree.auto_cleanup_merged)
+        .unwrap_or(false);
+    if !enabled {
+        return;
+    }
+    cleanup_merged_worktrees_with(
+        config,
+        &pilot_git_ops::WorktreeManager::default_base(),
+        key,
+        pr_number,
+    )
+    .await
+}
+
+/// Test seam for [`cleanup_merged_worktrees`] — same contract, an
+/// explicit manager (tempdir-rooted in tests), and no config gate so
+/// the caller decides when cleanup runs.
+///
+/// Only removes worktrees the inspector flags `is_safe_to_delete`
+/// (clean tree, pushed, unlocked — typically the merged branch was
+/// auto-deleted upstream) AND whose session has no live terminal
+/// attached. Each reaped session is dropped from the workspace and the
+/// trimmed record re-committed; a final [`Event::Notification`] tells
+/// the user what was cleaned.
+pub(crate) async fn cleanup_merged_worktrees_with(
+    config: &ServerConfig,
+    mgr: &pilot_git_ops::WorktreeManager,
+    key: &WorkspaceKey,
+    pr_number: u64,
+) {
+    let Some(mut workspace) = load_workspace(config, key) else {
+        return;
+    };
+    if workspace.sessions.is_empty() {
+        return;
+    }
+
+    // Never yank a worktree the user is still attached to, even if its
+    // tree is clean — that's the "don't pull a folder out from under
+    // an active agent" guard the inspector's safety check can't make
+    // on its own.
+    let live: std::collections::HashSet<pilot_core::SessionId> = {
+        let map = config.terminal_sessions.lock().await;
+        map.values().copied().collect()
+    };
+
+    let tracked = collect_tracked_sessions(config);
+    let inspections = match mgr.inspect_worktrees(&tracked).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(workspace = %key, "cleanup_merged_worktrees: inspect failed: {e}");
+            return;
+        }
+    };
+
+    // Index inspection rows by canonicalized path. The inspector
+    // reports `path` straight from `read_dir`, while a session's
+    // `worktree_path` is whatever was stored at checkout — the two can
+    // differ purely by symlink resolution (e.g. macOS `/var` →
+    // `/private/var`, or a symlinked `PILOT_HOME`). Canonicalizing both
+    // sides matches the inspector's own `canonical_or_self` keying so a
+    // safe worktree is never silently skipped over a cosmetic path
+    // difference.
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let by_path: std::collections::HashMap<std::path::PathBuf, &pilot_git_ops::WorktreeInspection> =
+        inspections.iter().map(|r| (canon(&r.path), r)).collect();
+
+    let mut removed: usize = 0;
+    let mut wrote = false;
+    // Walk highest-index-first so removals don't shift indices out
+    // from under the loop.
+    for idx in (0..workspace.sessions.len()).rev() {
+        let session_id = workspace.sessions[idx].id;
+        let worktree_path = workspace.sessions[idx].worktree_path.clone();
+        if live.contains(&session_id) {
+            continue;
+        }
+        let Some(&row) = by_path.get(&canon(&worktree_path)) else {
+            continue;
+        };
+        if !row.is_safe_to_delete {
+            continue;
+        }
+        match mgr.delete_inspected(row, /*force=*/ false).await {
+            Ok(()) => {
+                tracing::info!(
+                    workspace = %key,
+                    session = %session_id,
+                    worktree = %worktree_path.display(),
+                    "cleanup_merged_worktrees: removed",
+                );
+                workspace.sessions.remove(idx);
+                removed += 1;
+                wrote = true;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    worktree = %worktree_path.display(),
+                    "cleanup_merged_worktrees: delete refused: {e}",
+                );
+            }
+        }
+    }
+
+    if wrote {
+        commit_upsert(config, key, workspace);
+    }
+    if removed > 0 {
+        let noun = if removed == 1 {
+            "worktree"
+        } else {
+            "worktrees"
+        };
+        let _ = config.bus.send(Event::Notification {
+            title: "pilot".into(),
+            body: format!("Cleaned up {removed} {noun} for merged PR #{pr_number}"),
+        });
+    }
+}
+
 /// Post-tick prefetch: after a successful poll, pick the top-N PRs
 /// most likely to be clicked next and concurrently fetch their
 /// review-thread details so the right pane is hot when the user
@@ -1367,5 +1497,189 @@ mod inspect_tests {
                 .unwrap_or_default()
                 .contains("no longer under management")
         );
+    }
+
+    /// Seed a merged-PR workspace with one shell session rooted at
+    /// `wt`, saved under its own `workspace.key` so `load_workspace`
+    /// resolves it. Returns `(key, session_id)`.
+    fn seed_merged_workspace(
+        store: &MemoryStore,
+        wt: PathBuf,
+        branch: &str,
+    ) -> (WorkspaceKey, SessionId) {
+        use pilot_core::{Task, TaskId, TaskRole, TaskState, Workspace};
+        let task = Task {
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
+            title: "merged pr".into(),
+            body: None,
+            state: TaskState::Merged,
+            role: TaskRole::Author,
+            ci: pilot_core::CiStatus::None,
+            review: pilot_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/1".into(),
+            repo: Some("o/r".into()),
+            branch: Some(branch.into()),
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: pilot_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+        let mut workspace = Workspace::from_task(task, chrono::Utc::now());
+        let key = workspace.key.clone();
+        let session =
+            WorkspaceSession::new(key.clone(), SessionKind::Shell, wt, chrono::Utc::now());
+        let session_id = session.id;
+        workspace.sessions.push(session);
+        let json = serde_json::to_string(&workspace).unwrap();
+        store
+            .save_workspace(&WorkspaceRecord {
+                key: key.as_str().into(),
+                created_at: chrono::Utc::now(),
+                workspace_json: Some(json),
+            })
+            .unwrap();
+        (key, session_id)
+    }
+
+    /// Drop the remote-tracking ref so the inspector sees the merged
+    /// branch as auto-deleted upstream (the GitHub-on-merge default),
+    /// which is what flips the worktree to `is_safe_to_delete`.
+    async fn delete_remote_ref(fx: &Fixture, branch: &str) {
+        run(
+            &fx.bare,
+            &["update-ref", "-d", &format!("refs/remotes/origin/{branch}")],
+        )
+        .await;
+    }
+
+    /// Happy path: merged PR whose branch was auto-deleted upstream →
+    /// worktree reaped, session dropped from the stored workspace, and
+    /// a `Notification` naming the PR lands on the bus.
+    #[tokio::test]
+    async fn cleanup_reaps_safe_merged_worktree() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "merged", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store.clone());
+        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        cleanup_merged_worktrees_with(&config, &mgr, &key, 1).await;
+
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::Notification { .. })).await;
+        let Event::Notification { body, .. } = evt else {
+            unreachable!()
+        };
+        assert!(body.contains("PR #1"), "got: {body}");
+        assert!(!wt.exists(), "merged worktree should be gone");
+
+        // Session record pruned so a restart doesn't resurrect a
+        // pointer to a deleted directory.
+        let reloaded = load_workspace(&config, &key).expect("workspace");
+        assert!(reloaded.sessions.is_empty(), "session should be dropped");
+    }
+
+    /// A merged PR worktree with uncommitted work is NOT reaped — the
+    /// inspector's safety gate (`is_safe_to_delete = false`) holds, no
+    /// session is dropped, and no notification fires.
+    #[tokio::test]
+    async fn cleanup_preserves_dirty_merged_worktree() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "merged-dirty", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+
+        cleanup_merged_worktrees_with(&config, &mgr, &key, 1).await;
+
+        assert!(wt.exists(), "dirty worktree must be preserved");
+        let reloaded = load_workspace(&config, &key).expect("workspace");
+        assert_eq!(reloaded.sessions.len(), 1, "session must be retained");
+    }
+
+    /// Hardening regression: a session whose stored `worktree_path`
+    /// reaches the worktree through a symlinked parent (the inspector
+    /// reports the resolved real path) must still be matched and
+    /// reaped. A naive `path == path` comparison would silently skip
+    /// it; the canonicalized lookup catches it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_matches_session_path_through_symlink() {
+        let fx = setup_fixture().await;
+        let real = add_wt(&fx, "canon", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+
+        // `<base>/worktrees-link` → `<base>/worktrees`, so the stored
+        // path resolves to the same worktree by a different spelling.
+        let link = fx.base.path().join("worktrees-link");
+        std::os::unix::fs::symlink(fx.base.path().join("worktrees"), &link).unwrap();
+        let symlinked = link.join("canon");
+
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, symlinked, "feat");
+
+        let config = fresh_config(store);
+        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+
+        cleanup_merged_worktrees_with(&config, &mgr, &key, 1).await;
+
+        assert!(
+            !real.exists(),
+            "worktree reached via symlink should be reaped"
+        );
+        let reloaded = load_workspace(&config, &key).expect("workspace");
+        assert!(reloaded.sessions.is_empty(), "session should be dropped");
+    }
+
+    /// A session with a live terminal attached is skipped even when
+    /// its tree is clean — we never pull a folder out from under an
+    /// agent the user is actively using.
+    #[tokio::test]
+    async fn cleanup_skips_live_session() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "merged-live", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        // Pretend a terminal is attached to this session.
+        config
+            .terminal_sessions
+            .lock()
+            .await
+            .insert(pilot_ipc::TerminalId(1), sid);
+        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+
+        cleanup_merged_worktrees_with(&config, &mgr, &key, 1).await;
+
+        assert!(wt.exists(), "live session's worktree must be preserved");
+        let reloaded = load_workspace(&config, &key).expect("workspace");
+        assert_eq!(reloaded.sessions.len(), 1, "live session must be retained");
     }
 }

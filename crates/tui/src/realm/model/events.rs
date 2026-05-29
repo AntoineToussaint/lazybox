@@ -335,6 +335,12 @@ impl<T: TerminalAdapter> Model<T> {
             };
             self.flash_hint(msg);
         }
+        // Daemon-pushed user notice (e.g. auto-cleanup of a merged
+        // PR's worktrees). Surface the body in the footer; the OS
+        // banner path isn't wired for daemon-originated notices.
+        if let IpcEvent::Notification { body, .. } = &event {
+            self.flash_hint(body.clone());
+        }
         // Worktree inspector replied. Swap the placeholder for the
         // real list. `mount_inspect_list` is idempotent — calling it
         // again after a delete re-renders the now-shorter list, so

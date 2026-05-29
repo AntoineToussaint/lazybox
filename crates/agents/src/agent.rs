@@ -484,7 +484,22 @@ pub mod builtins {
             // arrow+options branch above misses it) and the
             // `do you want to <verb>` standalone phrase scrolled off
             // the detection window's tail.
-            if s.contains("Esc to cancel") && has_chooser {
+            //
+            // CRITICAL: gate on the ABSENCE of `Tab to amend`. The
+            // idle input box's footer is `Esc to cancel · Tab to amend
+            // · ctrl+e to explain` — it ALSO contains `Esc to cancel`.
+            // So an idle agent with any `1.` / `2.` in its recent
+            // scrollback (numbered lists, version strings like `1.2`,
+            // changelog bullets — extremely common) used to satisfy
+            // `Esc to cancel && has_chooser` and false-fire InputNeeded
+            // while the agent was actually sitting idle. A real
+            // permission dialog REPLACES the input box, so its footer is
+            // the SHORT `Esc to cancel` WITHOUT `Tab to amend`; requiring
+            // `Tab to amend` to be absent is exactly the distinction the
+            // branch's design always intended. This was a major source
+            // of the "the ? pill is on sessions that aren't asking"
+            // false positives (issue #101).
+            if s.contains("Esc to cancel") && !s.contains("Tab to amend") && has_chooser {
                 return Some(AgentState::InputNeeded);
             }
 

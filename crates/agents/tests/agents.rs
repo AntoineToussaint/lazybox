@@ -906,6 +906,25 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
         expected: AgentState::Idle,
     },
     PromptFixture {
+        // Regression for issue #101 false positives: an IDLE input box
+        // (footer carries both `Esc to cancel` AND `Tab to amend`) with
+        // an ordinary numbered list in the scrollback above it. The
+        // `Esc to cancel + numbered-options` permission-footer branch
+        // must NOT fire here — a real permission dialog replaces the
+        // input box, so its footer lacks `Tab to amend`. Pre-fix, every
+        // idle session that had typed a `1.`/`2.` list anywhere in the
+        // recent buffer wore a spurious `?` pill.
+        name: "idle_input_box_with_numbered_list_above_is_not_a_prompt",
+        buffer: concat!(
+            "Here's the plan:\n",
+            "  1. Refactor the parser\n",
+            "  2. Add tests\n",
+            "│ > \n",
+            "Esc to cancel · Tab to amend · ctrl+e to explain",
+        ),
+        expected: AgentState::Idle,
+    },
+    PromptFixture {
         // Plain build output. No prompt markers, no `?`. Belt-
         // and-braces baseline.
         name: "idle_streaming_build_output",

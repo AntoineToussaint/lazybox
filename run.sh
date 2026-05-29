@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# Dev-mode launcher for pilot. Prepends the vendored zig 0.15.2 to
-# PATH (libghostty-vt's build.zig rejects newer zig) and forwards
-# extra args to the binary (e.g. `./run.sh --fresh`).
+# Dev-mode launcher for pilot. Prepends the pinned zig 0.15.2 to PATH
+# (libghostty-vt's build.zig rejects newer zig) and forwards extra
+# args to the binary (e.g. `./run.sh --fresh`).
+#
+# zig lives in a HOST-LEVEL cache (default ~/.cache/pilot/zig, override
+# with PILOT_ZIG_CACHE) shared by every clone and worktree, so a fresh
+# worktree runs immediately without re-bootstrapping. Keep the default
+# in lockstep with scripts/bootstrap.sh and the Makefile's ZIG_CACHE.
 #
 # First-time: `make setup` to fetch zig.
 # Day-to-day: `./run.sh [args…]` or `make run`.
@@ -22,9 +27,21 @@ case "$(uname -m)" in
   *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
 esac
 
-ZIG_DIR="${ROOT}/vendor/zig/${arch}-${os}-0.15.2"
-if [ ! -x "${ZIG_DIR}/zig" ]; then
-  echo "vendored zig missing — run \`make setup\` first." >&2
+slug="${arch}-${os}-0.15.2"
+# Resolve pinned zig from either a per-worktree local install or the
+# shared host-level cache. Local wins when present (lets a worktree pin
+# its own zig); otherwise fall back to the cache `make setup` populates
+# (default ~/.cache/pilot/zig, override with PILOT_ZIG_CACHE) so a fresh
+# worktree runs without re-bootstrapping.
+LOCAL_DIR="${ROOT}/vendor/zig/${slug}"
+CACHE_DIR="${PILOT_ZIG_CACHE:-${HOME}/.cache/pilot/zig}/${slug}"
+if [ -x "${LOCAL_DIR}/zig" ]; then
+  ZIG_DIR="${LOCAL_DIR}"
+elif [ -x "${CACHE_DIR}/zig" ]; then
+  ZIG_DIR="${CACHE_DIR}"
+else
+  echo "pinned zig missing — run \`make setup\` first." >&2
+  echo "  looked in ${LOCAL_DIR} and ${CACHE_DIR}" >&2
   exit 1
 fi
 

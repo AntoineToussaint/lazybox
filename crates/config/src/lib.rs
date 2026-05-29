@@ -637,7 +637,7 @@ const MIN_AUTO_FIX_COOLDOWN: Duration = Duration::from_secs(60);
 impl AutoFixConfig {
     /// Convert the YAML form into the runtime [`pilot_core::AutoFixSettings`]
     /// the polling layer consumes. Clamps `cooldown` up to
-    /// [`MIN_AUTO_FIX_COOLDOWN`] so a too-small value can't spam.
+    /// `MIN_AUTO_FIX_COOLDOWN` so a too-small value can't spam.
     pub fn to_settings(&self) -> pilot_core::AutoFixSettings {
         pilot_core::AutoFixSettings {
             enabled: self.enabled,

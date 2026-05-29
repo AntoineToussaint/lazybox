@@ -45,7 +45,7 @@ pub struct TermSession {
     /// Rolling buffer of recent PTY output (last ~4KB) for callers to inspect.
     recent_output: Vec<u8>,
     /// True when the viewport has been scrolled up into scrollback history.
-    /// Used to display the "[SCROLLBACK]" indicator.
+    /// Used to display the `[SCROLLBACK]` indicator.
     scrolled_back: bool,
     /// Explicit `!Send + !Sync` marker — see struct doc.
     _not_send: std::marker::PhantomData<*mut ()>,

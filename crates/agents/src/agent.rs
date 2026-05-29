@@ -630,7 +630,6 @@ pub mod builtins {
         }
     }
 
-
     /// Detect Claude's ASCII selection-arrow at ANY numbered option:
     /// `> 0.`–`> 9.` or `> 0)`–`> 9)`.
     ///

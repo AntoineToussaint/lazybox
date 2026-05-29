@@ -617,16 +617,46 @@ impl<T: TerminalAdapter> Model<T> {
                     self.open_click_target(target);
                     return;
                 }
+                // Splitter drag wins over both focus changes and
+                // terminal interaction — clicking a splitter resizes,
+                // it never refocuses or types into a pane.
+                if let Some(target) =
+                    self.layout
+                        .hit_test_splitter(m.column, m.row, sidebar_rect, right_top_rect)
+                {
+                    self.layout.active_drag = Some(target);
+                    return;
+                }
+                // Move focus to the clicked pane BEFORE any
+                // terminal-specific handling. The selection and
+                // mouse-forwarding logic below keys off `self.focus`, so
+                // focus has to be updated up front — otherwise the first
+                // click after leaving the terminal only refocuses it and
+                // the click never reaches the inner program, forcing a
+                // redundant second click before typing works (#103).
+                let target = if rect_contains(sidebar_rect, m.column, m.row) {
+                    Some(PaneFocus::Sidebar)
+                } else if rect_contains(right_top_rect, m.column, m.row) {
+                    Some(PaneFocus::Right)
+                } else if rect_contains(right_bottom_rect, m.column, m.row) {
+                    Some(PaneFocus::Terminals)
+                } else {
+                    None
+                };
+                if let Some(focus) = target
+                    && self.focus != focus
+                {
+                    self.focus = focus;
+                    self.set_focus_attr();
+                    self.redraw = true;
+                }
+
                 // A left-click in the terminal pane ALWAYS starts a
                 // potential pilot selection — we commit to that
                 // even when the inner program is mouse-tracking.
                 let claim_for_selection = rect_contains(right_bottom_rect, m.column, m.row)
                     && self.focus == PaneFocus::Terminals
-                    && matches!(button, crossterm::event::MouseButton::Left)
-                    && self
-                        .layout
-                        .hit_test_splitter(m.column, m.row, sidebar_rect, right_top_rect)
-                        .is_none();
+                    && matches!(button, crossterm::event::MouseButton::Left);
 
                 // Forward CLICK-down to mouse-tracking inner programs
                 // only when we're NOT claiming for selection — i.e.,
@@ -635,10 +665,6 @@ impl<T: TerminalAdapter> Model<T> {
                     && rect_contains(right_bottom_rect, m.column, m.row)
                     && self.focus == PaneFocus::Terminals
                     && self.terminals.focused_terminal_tracks_mouse()
-                    && self
-                        .layout
-                        .hit_test_splitter(m.column, m.row, sidebar_rect, right_top_rect)
-                        .is_none()
                 {
                     let cell_col = m.column.saturating_sub(right_bottom_rect.x) as u32;
                     let cell_row = m.row.saturating_sub(right_bottom_rect.y) as u32;
@@ -660,28 +686,7 @@ impl<T: TerminalAdapter> Model<T> {
                         return;
                     }
                 }
-                if let Some(target) =
-                    self.layout
-                        .hit_test_splitter(m.column, m.row, sidebar_rect, right_top_rect)
-                {
-                    self.layout.active_drag = Some(target);
-                    return;
-                }
-                let target = if rect_contains(sidebar_rect, m.column, m.row) {
-                    Some(PaneFocus::Sidebar)
-                } else if rect_contains(right_top_rect, m.column, m.row) {
-                    Some(PaneFocus::Right)
-                } else if rect_contains(right_bottom_rect, m.column, m.row) {
-                    Some(PaneFocus::Terminals)
-                } else {
-                    None
-                };
                 if let Some(focus) = target {
-                    if self.focus != focus {
-                        self.focus = focus;
-                        self.set_focus_attr();
-                        self.redraw = true;
-                    }
                     if focus == PaneFocus::Sidebar {
                         // Try the header chips first (filter, then
                         // sort); if neither hit, fall through to row

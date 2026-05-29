@@ -384,15 +384,18 @@ impl Sidebar {
                     crate::agent_attention::AttentionTransition::NowAsking
                 ) {
                     if let Some(workspace) = self.workspaces.get(session_key) {
-                        let title = format!("pilot — {} needs input", workspace.name);
-                        let body = workspace
-                            .primary_task()
-                            .map(|t| t.title.clone())
-                            .unwrap_or_else(|| workspace.name.clone());
-                        self.pending_notifications.push(PendingNotification {
-                            title: title.clone(),
-                            body,
-                        });
+                        // OS-level banner, gated by the config toggle.
+                        // The footer notice below always fires — it's
+                        // in-app and free of the banner's noise.
+                        if self.attention.desktop_notify {
+                            let title = format!("pilot — {} needs input", workspace.name);
+                            let body = workspace
+                                .primary_task()
+                                .map(|t| t.title.clone())
+                                .unwrap_or_else(|| workspace.name.clone());
+                            self.pending_notifications
+                                .push(PendingNotification { title, body });
+                        }
                         // Inline footer notice in addition to the OS
                         // popup — covers users with notifications muted
                         // (which is most of them while focused). Hint

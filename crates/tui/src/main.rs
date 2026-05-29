@@ -286,14 +286,23 @@ async fn run_embedded_realm(
         .map(|p| p.enabled_providers.iter().cloned().collect())
         .unwrap_or_default();
     let persisted_for_model = persisted.clone();
-    // Spawn the long-lived poll loop ONCE. It re-reads YAML on
-    // every tick so filter / scope edits made via the Settings
-    // palette take effect on the next cycle without a respawn.
-    // Replaces the old per-Finish-respawn pattern that leaked one
-    // tokio task per edit.
-    if persisted.is_some() {
-        polling::spawn(config.clone(), resolve_poll_interval());
-    }
+    // Spawn the long-lived poll loop ONCE, UNCONDITIONALLY. It
+    // re-reads YAML on every tick so filter / scope edits made via
+    // the Settings palette take effect on the next cycle without a
+    // respawn. Replaces the old per-Finish-respawn pattern that
+    // leaked one tokio task per edit.
+    //
+    // Why unconditional (not `if persisted.is_some()`): on first run
+    // there's no persisted setup yet, so the old gate skipped the
+    // spawn entirely. The wizard's on-complete hook persists config
+    // and fires `Command::Refresh` (→ `poll_wake.notify_one()`) to
+    // kick an immediate tick — but that notify hit a loop that was
+    // never spawned, so polling never started until the user
+    // restarted pilot (empty inbox after first-run setup). Spawning
+    // here regardless is safe: with no config yet, `run_one_tick`
+    // sees no providers and ticks as a cheap no-op until the wizard
+    // writes `config.yaml` and the Refresh wakes the loop.
+    polling::spawn(config.clone(), resolve_poll_interval());
 
     // Slack mirror — opt-in via `~/.pilot/config.yaml::slack.{bot_token,
     // app_token}` (or `$SLACK_BOT_TOKEN` / `$SLACK_APP_TOKEN`). No-op

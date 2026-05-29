@@ -488,6 +488,20 @@ impl Server {
                         pilot_ipc::Command::Shutdown => "Shutdown",
                     };
                     tracing::info!("daemon ← {label}");
+                    // Time how long the serve loop spends INLINE on this
+                    // command. `tokio::select!` is single-task: while a
+                    // handler `.await`s (or worse, makes a synchronous
+                    // blocking call like a parking_lot store-mutex
+                    // acquire), NO other command — including the `Write`
+                    // keystrokes that drive the terminal — can be
+                    // serviced. The known-slow handlers detach via
+                    // `tokio::spawn` and return here in microseconds; a
+                    // handler that shows up SLOW below is one that's
+                    // wedging the loop (the "can't type while GitHub
+                    // syncs" class of bug — see issue #34). This is the
+                    // breadcrumb that tells us WHICH command, not just
+                    // "the app froze".
+                    let cmd_started = std::time::Instant::now();
                     match cmd {
                         pilot_ipc::Command::Subscribe => {
                             // Offload the SQLite scans (issue #34: pre-fix
@@ -914,6 +928,22 @@ impl Server {
                                 polling::handle_delete_orphaned_worktree(&cfg, path, force).await;
                             });
                         }
+                    }
+                    // Anything that held the single serve-loop task for
+                    // more than a couple frames blocked every other
+                    // command behind it. Warn loudly with the label so
+                    // a "frozen during sync" report points straight at
+                    // the offending handler instead of a guessing game.
+                    let cmd_ms = cmd_started.elapsed().as_millis();
+                    if cmd_ms >= 50 {
+                        tracing::warn!(
+                            command = label,
+                            ms = cmd_ms,
+                            "daemon serve loop BLOCKED on inline command handler — \
+                             all other commands (incl. keystroke Writes) stalled this long"
+                        );
+                    } else {
+                        tracing::debug!(command = label, ms = cmd_ms, "daemon → handled");
                     }
                 }
                 bus = bus_rx.recv() => {

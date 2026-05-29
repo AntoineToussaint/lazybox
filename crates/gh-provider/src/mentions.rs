@@ -266,6 +266,7 @@ mod tests {
             body: body.map(str::to_string),
             url: format!("https://github.com/o/r/issues/{number}"),
             updated_at: Utc::now(),
+            closed_at: None,
             state: "OPEN".into(),
             author: author.map(|l| GqlAuthor { login: l.into() }),
             labels: GqlLabels { nodes: vec![] },

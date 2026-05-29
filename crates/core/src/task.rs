@@ -212,6 +212,15 @@ pub struct Task {
     #[serde(default)]
     pub base_branch: Option<String>,
     pub updated_at: DateTime<Utc>,
+    /// When this task reached a terminal state — `closedAt` for a
+    /// PR (merge closes it too) or a closed issue. Unlike
+    /// `updated_at`, GitHub does NOT bump this on later activity
+    /// (post-merge comments, branch deletion, linked-issue closure),
+    /// so it's the stable signal for "how long ago did this finish."
+    /// `None` while the task is open. `#[serde(default)]` so older
+    /// snapshots deserialize.
+    #[serde(default)]
+    pub closed_at: Option<DateTime<Utc>>,
     /// `#[serde(default)]` so an older daemon snapshot (no labels
     /// field) still deserializes — mirrors `reviewers` / `assignees`.
     #[serde(default)]
@@ -487,6 +496,7 @@ mod status_tag_tests {
             branch: Some("b".into()),
             base_branch: None,
             updated_at: Utc::now(),
+            closed_at: None,
             labels: vec![],
             reviewers: vec![],
             assignees: vec![],

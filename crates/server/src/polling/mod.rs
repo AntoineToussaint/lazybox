@@ -3167,6 +3167,7 @@ fn issue_id_to_workspace_key(issue_id: &pilot_core::TaskId) -> WorkspaceKey {
         branch: None,
         base_branch: None,
         updated_at: Utc::now(),
+        closed_at: None,
         labels: vec![],
         reviewers: vec![],
         assignees: vec![],

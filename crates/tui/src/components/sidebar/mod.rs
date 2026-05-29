@@ -538,6 +538,10 @@ impl Sidebar {
         if let Some(workspace) = self.workspaces.get_mut(&sk) {
             if let Some(pr) = workspace.pr.as_mut() {
                 pr.state = pilot_core::TaskState::Merged;
+                // Stamp the close moment so the grace window keys off
+                // it (not the stale `updated_at`) until the next poll
+                // backfills GitHub's real `closedAt`.
+                pr.closed_at = Some(chrono::Utc::now());
             }
             self.recompute_visible();
         }

@@ -1069,6 +1069,7 @@ mod tests {
             branch: Some("feature/x".into()),
             base_branch: Some("main".into()),
             updated_at: now(),
+            closed_at: None,
             labels: vec![],
             reviewers: vec![],
             assignees: vec![],

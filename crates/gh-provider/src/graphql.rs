@@ -66,6 +66,7 @@ query($query: String!, $first: Int!, $after: String) {
         url
         updatedAt
         createdAt
+        closedAt
         isDraft
         state
         merged
@@ -211,6 +212,10 @@ pub struct GqlPr {
     pub url: String,
     #[serde(rename = "updatedAt")]
     pub updated_at: DateTime<Utc>,
+    /// When the PR was closed (merge also closes it). Stable — unlike
+    /// `updatedAt`, GitHub does NOT bump this on post-merge activity.
+    #[serde(rename = "closedAt", default)]
+    pub closed_at: Option<DateTime<Utc>>,
     #[serde(rename = "isDraft")]
     pub is_draft: bool,
     pub state: String, // OPEN, CLOSED, MERGED
@@ -1131,6 +1136,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       url
       updatedAt
       createdAt
+      closedAt
       isDraft
       state
       merged
@@ -1256,6 +1262,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       url
       updatedAt
       createdAt
+      closedAt
       state
       author { login }
       labels(first: 10) { nodes { name } }
@@ -1579,6 +1586,7 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
             Some(pr.base_ref_name.clone())
         },
         updated_at: pr.updated_at,
+        closed_at: pr.closed_at,
         labels: pr
             .labels
             .nodes
@@ -2111,6 +2119,7 @@ query($query: String!, $first: Int!, $after: String) {
         url
         updatedAt
         createdAt
+        closedAt
         state
         author { login }
         labels(first: 10) { nodes { name color } }
@@ -2149,6 +2158,10 @@ pub struct GqlIssue {
     pub url: String,
     #[serde(rename = "updatedAt")]
     pub updated_at: DateTime<Utc>,
+    /// When the issue was closed. Stable across later activity, unlike
+    /// `updatedAt`. `None` while the issue is open.
+    #[serde(rename = "closedAt", default)]
+    pub closed_at: Option<DateTime<Utc>>,
     pub state: String, // OPEN, CLOSED
     pub author: Option<GqlAuthor>,
     pub labels: GqlLabels,
@@ -2302,6 +2315,7 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         branch: None,
         base_branch: None,
         updated_at: issue.updated_at,
+        closed_at: issue.closed_at,
         labels: issue
             .labels
             .nodes
@@ -2395,6 +2409,7 @@ mod tests {
             body: None,
             url: format!("https://github.com/o/r/issues/{number}"),
             updated_at: chrono::Utc::now(),
+            closed_at: None,
             state: "OPEN".into(),
             author: author.map(|login| GqlAuthor {
                 login: login.into(),
@@ -2546,6 +2561,7 @@ mod tests {
             body: None,
             url: format!("https://github.com/o/r/pull/{number}"),
             updated_at: chrono::Utc::now(),
+            closed_at: None,
             is_draft: false,
             state: "OPEN".into(),
             merged: false,
@@ -3184,6 +3200,30 @@ mod tests {
         // Last commenter still lights up from the bodiless comment's
         // author so the sidebar's "from $login" line works pre-lazy.
         assert_eq!(task.last_commenter.as_deref(), Some("carol"));
+        // An open PR has no close moment.
+        assert_eq!(task.closed_at, None);
+    }
+
+    /// `closedAt` rides from the wire onto `Task.closed_at`. The
+    /// Inbox grace window keys off this stable timestamp (not the
+    /// activity-bumped `updated_at`) so a long-merged PR leaves the
+    /// inbox even while it still draws post-merge events — issue #96.
+    #[test]
+    fn pr_to_task_carries_closed_at() {
+        let merged_at = chrono::DateTime::parse_from_rfc3339("2026-05-20T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut pr = make_pr(7, "bob");
+        pr.merged = true;
+        pr.state = "MERGED".into();
+        pr.closed_at = Some(merged_at);
+        // Activity touched the PR long after the merge.
+        pr.updated_at = chrono::DateTime::parse_from_rfc3339("2026-05-28T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let task = pr_to_task(&pr, "alice");
+        assert_eq!(task.state, TaskState::Merged);
+        assert_eq!(task.closed_at, Some(merged_at));
     }
 
     /// Last commenter falls through from `comments.nodes[0]` even

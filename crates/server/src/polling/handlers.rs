@@ -1122,6 +1122,7 @@ mod inspect_tests {
             branch: Some("feat".into()),
             base_branch: None,
             updated_at: chrono::Utc::now(),
+            closed_at: None,
             labels: vec![],
             reviewers: vec![],
             assignees: vec![],

@@ -197,6 +197,7 @@ mod tests {
             branch: Some("feature".into()),
             base_branch: Some("main".into()),
             updated_at: Utc::now(),
+            closed_at: None,
             labels: vec![],
             reviewers: vec![],
             assignees: vec![],

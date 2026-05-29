@@ -32,6 +32,7 @@ fn sample_workspace() -> pilot_core::Workspace {
         branch: Some("b".into()),
         base_branch: None,
         updated_at: chrono::Utc::now(),
+        closed_at: None,
         labels: vec![],
         reviewers: vec![],
         assignees: vec![],

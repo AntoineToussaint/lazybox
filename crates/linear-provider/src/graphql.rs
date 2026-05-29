@@ -215,6 +215,7 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         branch: None,
         base_branch: None,
         updated_at: issue.updated_at,
+        closed_at: None,
         labels,
         reviewers: vec![],
         assignees,

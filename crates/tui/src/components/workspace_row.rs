@@ -94,14 +94,15 @@ impl<'a> WorkspaceRowCtx<'a> {
 /// Order (left → right):
 ///
 /// 0. Prefix — `  ▸ ` (cursor) / `    ` (no cursor).
-/// 1. Type glyph — `⇄` / `○` / `◆` (or ASCII `p`/`i`/`l`) / blank.
-///    Exactly 1 cell so it sits flush against the `NNN` to its right
-///    — see issue #42.
+/// 1. Type glyph — `⇄` / `○` / `◆` (or ASCII `p`/`i`/`l`) / blank,
+///    followed by a single space separator (2 cells total) so the
+///    row reads `⇄ 312` rather than the cramped `⇄312` — see issues
+///    #42 and #94.
 /// 2. PR number — `NNN` (no `#` prefix; the glyph carries the type —
 ///    issue #67), left-aligned and padded to `max_pr_num_width` so the
-///    digits sit FLUSH against the type glyph (`⇄312`, `○7`) on every
+///    digits sit one space off the type glyph (`⇄ 312`, `○ 7`) on every
 ///    row. Right-aligning instead pushed shorter numbers off the glyph
-///    with leading padding (`⇄312` vs `○  7`) — the inconsistent
+///    with leading padding (`⇄ 312` vs `○   7`) — the inconsistent
 ///    post-glyph spacing of issue #65. Trailing padding still aligns
 ///    the role column to a fixed x across rows.
 /// 3. Role badge — ` R` colored marker, or blank.
@@ -135,8 +136,8 @@ impl<'a> WorkspaceRowCtx<'a> {
 pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     vec![
         Column::fixed(4),                // 0: prefix
-        Column::fixed(1),                // 1: type glyph (single cell, flush against num)
-        Column::fixed(max_pr_num_width), // 2: pr_num (left-aligned, flush against the glyph)
+        Column::fixed(2),                // 1: type glyph + trailing space separator
+        Column::fixed(max_pr_num_width), // 2: pr_num (left-aligned, one space off the glyph)
         Column::fixed(2),                // 3: role (" R" or blank)
         Column::fixed(3),                // 4: state slot (" ? "/" ⠋ "/blank, reserved)
         Column::flex(0),                 // 5: title
@@ -192,12 +193,16 @@ fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .fg(ctx.theme.text_dim)
             .add_modifier(Modifier::BOLD)
     };
-    // Single cell, no trailing space — the glyph sits flush against
-    // the `NNN` cell that follows so the row reads `⇄312` instead
-    // of `[PR]   #312` (issues #42, #67). `glyph` is `&'static str`
-    // so the Span borrows it without allocating on the per-frame hot
-    // path.
-    Cell::from_span(Span::styled(glyph, style))
+    // Glyph + a single trailing space so the row reads `⇄ 312`
+    // instead of the cramped `⇄312` (issue #94); the space separator
+    // also keeps the `#`-less number readable (issues #42, #67).
+    // `glyph` is `&'static str` so the Span borrows it without
+    // allocating on the per-frame hot path; the trailing space takes
+    // the row fill style like the other inter-cell separators.
+    Cell::new(vec![
+        Span::styled(glyph, style),
+        Span::styled(" ".to_string(), ctx.row_style()),
+    ])
 }
 
 fn cell_pr_num(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -217,7 +222,7 @@ fn cell_pr_num(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // cost a column on every row (issue #67). We emit just the `NNN`
     // span; the column is Fixed(max_pr_num_width) and LEFT-aligned, so
     // the renderer pads the deficit on the RIGHT with the row's
-    // fill_style. Left alignment keeps the number flush against the
+    // fill_style. Left alignment keeps the number one space off the
     // type glyph on every row (issue #65) — a right-aligned column
     // padded shorter numbers on the left, opening an inconsistent gap
     // after the glyph. `pr_number_color` colors the digits.
@@ -680,18 +685,20 @@ mod tests {
         task
     }
 
-    /// Type cell renders the single-cell unicode glyph by default.
-    /// Anchors the layout contract for issue #42: type column is
-    /// exactly 1 cell wide so `#NNN` sits flush against the glyph.
+    /// Type cell renders the unicode glyph plus a trailing space by
+    /// default. Anchors the layout contract for issues #42 and #94:
+    /// type column is 2 cells (glyph + separator) so the number sits
+    /// one space off the glyph.
     #[test]
-    fn cell_type_emits_single_cell_glyph_for_pr() {
+    fn cell_type_emits_glyph_then_space_for_pr() {
         let task = pr_task("owner/repo", 1);
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
         let cell = cell_type(&ctx);
-        assert_eq!(cell.width(), 1);
+        assert_eq!(cell.width(), 2);
         assert_eq!(cell.spans[0].content.as_ref(), "⇄");
+        assert_eq!(cell.spans[1].content.as_ref(), " ");
     }
 
     /// `ascii_glyphs = true` (config opt-in) swaps the unicode glyph
@@ -705,8 +712,9 @@ mod tests {
         let mut ctx = ctx_for(&ws, &task, &theme);
         ctx.ascii_glyphs = true;
         let cell = cell_type(&ctx);
-        assert_eq!(cell.width(), 1);
+        assert_eq!(cell.width(), 2);
         assert_eq!(cell.spans[0].content.as_ref(), "p");
+        assert_eq!(cell.spans[1].content.as_ref(), " ");
     }
 
     /// Issue workspace (no PR slot) renders the `○` glyph — pins
@@ -718,8 +726,9 @@ mod tests {
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
         let cell = cell_type(&ctx);
-        assert_eq!(cell.width(), 1);
+        assert_eq!(cell.width(), 2);
         assert_eq!(cell.spans[0].content.as_ref(), "○");
+        assert_eq!(cell.spans[1].content.as_ref(), " ");
     }
 
     /// Empty workspace (no PR, no issues) → no type cell, so the
@@ -1075,17 +1084,17 @@ mod tests {
         );
     }
 
-    /// Regression for issue #65: the type glyph must sit FLUSH against
-    /// the `NNN` on every row, regardless of how wide that row's
-    /// number is. The bug was a right-aligned pr-number column: it
-    /// padded shorter numbers on the LEFT, so `⇄312` rendered flush
-    /// while `○7` picked up leading spaces (`○  7`) — inconsistent
-    /// post-glyph spacing across rows. Left alignment moves the
-    /// padding to the right, keeping the glyph→number gap a constant
-    /// zero cells everywhere. (The `#` prefix itself was dropped in
+    /// Regression for issues #65 and #94: the type glyph must sit one
+    /// space off the `NNN` on every row, regardless of how wide that
+    /// row's number is. The bug was a right-aligned pr-number column:
+    /// it padded shorter numbers on the LEFT, so `⇄ 312` rendered tight
+    /// while `○ 7` picked up extra leading spaces (`○   7`) —
+    /// inconsistent post-glyph spacing across rows. Left alignment moves
+    /// the padding to the right, keeping the glyph→number gap a constant
+    /// single space everywhere. (The `#` prefix itself was dropped in
     /// issue #67; the glyph now carries the issue-vs-PR signal.)
     #[test]
-    fn type_glyph_is_flush_against_number_for_mixed_widths() {
+    fn type_glyph_has_single_space_before_number_for_mixed_widths() {
         let theme = theme();
         // Mixed glyph types AND mixed number widths (1/2/3 digits) so
         // `max_pr_num_width` is driven by `312` (3 cells). The narrower
@@ -1093,9 +1102,9 @@ mod tests {
         // issue (`○`) row exercises the non-PR glyph path too, so a
         // regression can't hide on one glyph variant.
         let cases: [(Task, &str); 3] = [
-            (make_task("owner/repo#7", "x"), "○7"), // issue, 1 digit
-            (pr_task("owner/repo", 42), "⇄42"),     // PR, 2 digits
-            (pr_task("owner/repo", 312), "⇄312"),   // PR, 3 digits
+            (make_task("owner/repo#7", "x"), "○ 7"), // issue, 1 digit
+            (pr_task("owner/repo", 42), "⇄ 42"),     // PR, 2 digits
+            (pr_task("owner/repo", 312), "⇄ 312"),   // PR, 3 digits
         ];
         let workspaces: Vec<Workspace> = cases
             .iter()
@@ -1113,7 +1122,7 @@ mod tests {
             let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             assert!(
                 joined.contains(expected),
-                "type glyph must sit flush against the number (no gap); \
+                "type glyph must sit one space off the number; \
                  wanted {expected:?} in {joined:?}",
             );
         }

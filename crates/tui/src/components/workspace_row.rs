@@ -176,7 +176,7 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
 
 fn cell_prefix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let s = if ctx.is_cursor { "  ▸ " } else { "    " };
-    Cell::from_span(Span::styled(s.to_string(), ctx.row_style()))
+    Cell::from_span(Span::styled(s, ctx.row_style()))
 }
 
 fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -196,12 +196,12 @@ fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // Glyph + a single trailing space so the row reads `⇄ 312`
     // instead of the cramped `⇄312` (issue #94); the space separator
     // also keeps the `#`-less number readable (issues #42, #67).
-    // `glyph` is `&'static str` so the Span borrows it without
-    // allocating on the per-frame hot path; the trailing space takes
-    // the row fill style like the other inter-cell separators.
+    // Both spans borrow `&'static str` (no per-frame allocation on the
+    // hot path); the trailing space takes the row fill style like the
+    // other inter-cell separators.
     Cell::new(vec![
         Span::styled(glyph, style),
-        Span::styled(" ".to_string(), ctx.row_style()),
+        Span::styled(" ", ctx.row_style()),
     ])
 }
 
@@ -242,7 +242,7 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // " R" — leading space separator + colored letter. Reads
     // cleaner than `7204R` (which scanned as one weird token).
     Cell::new(vec![
-        Span::styled(" ".to_string(), ctx.row_style()),
+        Span::styled(" ", ctx.row_style()),
         Span::styled(letter.to_string(), style),
     ])
 }
@@ -325,7 +325,7 @@ fn cell_labels(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // 13 spans worth of buffer here.
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(MAX_CHIPS * 4 + 1);
     for label in shown {
-        spans.push(Span::styled(" ".to_string(), ctx.row_style()));
+        spans.push(Span::styled(" ", ctx.row_style()));
         let bracket_style = if ctx.is_cursor {
             ctx.row_style()
         } else {
@@ -386,10 +386,7 @@ fn cell_kill_mark(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     };
     // Kill mark text is theme.error fg with the row's bg behind it.
     // Style only carries fg — bg falls through from the row.
-    Cell::from_span(Span::styled(
-        text.to_string(),
-        Style::default().fg(ctx.theme.error),
-    ))
+    Cell::from_span(Span::styled(text, Style::default().fg(ctx.theme.error)))
 }
 
 fn cell_unread(ctx: &WorkspaceRowCtx<'_>) -> Cell {

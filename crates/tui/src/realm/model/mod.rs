@@ -1540,9 +1540,16 @@ impl<T: TerminalAdapter> Model<T> {
         // - Otherwise, surface the lightweight background indicator
         //   that fires on every subsequent cycle (so the user always
         //   knows whether pilot is currently talking to GitHub).
+        // Footer spinner priority: the blocking first-poll modal owns
+        // it at startup; otherwise an in-flight spawn (the user's
+        // just-pressed `w`/`c`/`s`) beats the ambient background-poll
+        // indicator, since it's direct feedback for an action they're
+        // waiting on. Background poll is the steady-state fallback.
         let polling_status: Option<(&'static str, String)> =
             if let Some(p) = self.status.polling.as_ref() {
                 Some((p.spinner_glyph(), p.status_label()))
+            } else if let Some(sp) = self.status.spawning.as_ref() {
+                Some((sp.spinner_glyph(), sp.label()))
             } else {
                 self.status
                     .bg_poll

@@ -301,6 +301,18 @@ impl<T: TerminalAdapter> Model<T> {
                 IpcEvent::ProviderError {
                     source, message, ..
                 } => {
+                    // A spawn failed (worktree provisioning, unknown
+                    // agent id, …) — `handle_spawn` reports these with
+                    // a `spawn*` source. No `TerminalSpawned` will ever
+                    // arrive, so clear the spinner now instead of
+                    // leaving it to time out on the guard, and surface
+                    // why so the user isn't left guessing.
+                    if source.starts_with("spawn") {
+                        if self.status.clear_spawning() {
+                            self.redraw = true;
+                        }
+                        self.flash_error(format!("✗ spawn failed — {message}"));
+                    }
                     // Manual refresh failed — convert the ack flag
                     // into a "sync failed" notice so the user
                     // doesn't have to guess whether their Shift-R
@@ -364,6 +376,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.focus = PaneFocus::Terminals;
             self.set_focus_attr();
             self.status.clear_spawning_notice();
+            self.status.clear_spawning();
             self.sync_panes();
             // Editor-deferred-by-spawn: the user pressed `e` on a
             // workspace with no worktree; we asked the daemon to
@@ -432,7 +445,8 @@ impl<T: TerminalAdapter> Model<T> {
     ///   poll is still in flight).
     pub fn polling_tick(&mut self) -> Option<Msg> {
         let msg = self.status.polling_tick();
-        let needs_redraw = msg.is_some() || self.status.bg_poll.is_some();
+        let needs_redraw =
+            msg.is_some() || self.status.bg_poll.is_some() || self.status.spawning.is_some();
         if needs_redraw {
             self.redraw = true;
         }

@@ -46,6 +46,15 @@ const BG_POLL_IDLE_GUARD: Duration = Duration::from_secs(90);
 /// 60+ second poll is normal.
 const STILL_WORKING_HINT_AFTER: Duration = Duration::from_secs(30);
 
+/// Backstop for the spawn spinner: if no `TerminalSpawned` /
+/// `TerminalFocusRequested` (and no spawn `ProviderError`) lands within
+/// this window, clear the indicator so a dropped event can't leave it
+/// spinning forever. Deliberately generous — a cold bare-clone +
+/// worktree checkout for a large repo can run well past a minute, and
+/// the whole point of the spinner is to reassure during exactly that
+/// wait, so the guard must outlast a realistic worst-case provision.
+const SPAWN_SPINNER_GUARD: Duration = Duration::from_secs(120);
+
 /// Lightweight footer indicator for poll cycles AFTER the initial
 /// blocking modal has been dismissed. Lit up on any `PollProgress`,
 /// cleared on `PollCompleted` or after the guard timeout.
@@ -81,6 +90,41 @@ impl BackgroundPoll {
     }
 }
 
+/// Animated "spawning…" indicator shown in the footer between a
+/// `Spawn` command leaving the TUI and the matching `TerminalSpawned`
+/// arriving. Worktree provisioning (bare clone → per-task worktree)
+/// happens on the daemon BEFORE it broadcasts `TerminalSpawned`, and
+/// on a cold clone that gap is several seconds with zero feedback —
+/// the dogfood complaint was "press w, nothing happens, did it even
+/// register?". This replaces the old static `Spawning claude…` Info
+/// notice (which neither animated nor outlived its 15s fade) with a
+/// glyph that visibly turns until the terminal actually appears.
+pub(crate) struct Spawning {
+    /// Agent / shell label, e.g. `"claude"`, `"shell"`. Rendered as
+    /// `spawning claude · 3s`.
+    pub label: String,
+    pub spinner_idx: usize,
+    pub started_at: Instant,
+}
+
+impl Spawning {
+    pub fn spinner_glyph(&self) -> &'static str {
+        BG_SPINNER_FRAMES[self.spinner_idx % BG_SPINNER_FRAMES.len()]
+    }
+    /// Footer label — `spawning claude` for the first second (no
+    /// suffix so a fast spawn doesn't flicker `0s`), then
+    /// `spawning claude · Ns` so a slow worktree provision reads as
+    /// "still working" rather than stuck.
+    pub fn label(&self) -> String {
+        let secs = self.started_at.elapsed().as_secs();
+        if secs < 1 {
+            format!("spawning {}", self.label)
+        } else {
+            format!("spawning {} · {secs}s", self.label)
+        }
+    }
+}
+
 pub(crate) struct StatusCtx {
     /// Most recent footer notice — error, warning, or info. Replaces
     /// the modal-on-every-error UX. Retryable severities auto-fade
@@ -101,6 +145,11 @@ pub(crate) struct StatusCtx {
     /// went silent after the first cycle and an assignment made on
     /// GitHub gave no signal until the row appeared (or didn't).
     pub bg_poll: Option<BackgroundPoll>,
+    /// Animated spawn indicator — lit when a `Spawn` command is sent,
+    /// cleared when the matching `TerminalSpawned` /
+    /// `TerminalFocusRequested` lands (or a spawn `ProviderError`, or
+    /// the `SPAWN_SPINNER_GUARD` backstop).
+    pub spawning: Option<Spawning>,
 }
 
 impl StatusCtx {
@@ -110,7 +159,27 @@ impl StatusCtx {
             polling: None,
             polling_last_tick: Instant::now(),
             bg_poll: None,
+            spawning: None,
         }
+    }
+
+    /// Light up the animated spawn indicator. `label` is the agent /
+    /// shell id (`"claude"`, `"shell"`). Replaces any prior spawn
+    /// indicator — back-to-back spawns just restart the timer, which
+    /// is the right behavior (the latest spawn is the one in flight).
+    pub fn note_spawning(&mut self, label: impl Into<String>) {
+        self.spawning = Some(Spawning {
+            label: label.into(),
+            spinner_idx: 0,
+            started_at: Instant::now(),
+        });
+    }
+
+    /// Clear the spawn indicator (matching terminal appeared, focus
+    /// was redirected to an existing one, or the spawn failed).
+    /// Returns true if there was one to clear so the caller can redraw.
+    pub fn clear_spawning(&mut self) -> bool {
+        self.spawning.take().is_some()
     }
 
     /// Record a poll-progress event from the daemon. Lights up the
@@ -160,6 +229,23 @@ impl StatusCtx {
             .unwrap_or(false);
         if stale {
             self.bg_poll = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Spawn-indicator backstop: clear it if `SPAWN_SPINNER_GUARD` has
+    /// elapsed since the spawn started without the matching event
+    /// landing. Returns true if it was cleared (caller redraws).
+    pub fn tick_spawning(&mut self) -> bool {
+        let stale = self
+            .spawning
+            .as_ref()
+            .map(|sp| sp.started_at.elapsed() >= SPAWN_SPINNER_GUARD)
+            .unwrap_or(false);
+        if stale {
+            self.spawning = None;
             true
         } else {
             false
@@ -216,8 +302,17 @@ impl StatusCtx {
         if let Some(bg) = self.bg_poll.as_mut() {
             bg.spinner_idx = bg.spinner_idx.wrapping_add(1);
         }
-        // Also gc a stale bg_poll (dropped PollCompleted).
+        // Same cadence for the spawn spinner — there are no progress
+        // events during worktree provisioning, so without advancing
+        // here the glyph would sit frozen for the whole (multi-second)
+        // wait, defeating the "something is happening" reassurance.
+        if let Some(sp) = self.spawning.as_mut() {
+            sp.spinner_idx = sp.spinner_idx.wrapping_add(1);
+        }
+        // Also gc a stale bg_poll (dropped PollCompleted) + a stale
+        // spawn indicator (dropped TerminalSpawned).
         let _ = self.tick_bg_poll();
+        let _ = self.tick_spawning();
         let polling = self.polling.as_mut()?;
         polling.tick_direct()
     }
@@ -348,6 +443,86 @@ mod tests {
             s.bg_poll.as_ref().map(|b| b.source.as_str()) == Some("linear"),
             "linear's spinner survived github's PollCompleted",
         );
+    }
+
+    #[test]
+    fn note_spawning_lights_up_and_clear_tears_down() {
+        let mut s = StatusCtx::new();
+        assert!(s.spawning.is_none());
+
+        s.note_spawning("claude");
+        let sp = s.spawning.as_ref().expect("spawn indicator lit");
+        assert_eq!(sp.label, "claude");
+        // Fresh spawn: sub-second label has no elapsed suffix.
+        assert_eq!(sp.label(), "spawning claude");
+
+        assert!(s.clear_spawning(), "clear reports it removed one");
+        assert!(s.spawning.is_none());
+        // Second clear is a no-op.
+        assert!(!s.clear_spawning());
+    }
+
+    #[test]
+    fn note_spawning_restarts_on_back_to_back_spawns() {
+        // A second spawn before the first lands replaces the indicator
+        // (latest spawn is the one actually in flight) and resets the
+        // animation frame.
+        let mut s = StatusCtx::new();
+        s.note_spawning("shell");
+        if let Some(sp) = s.spawning.as_mut() {
+            sp.spinner_idx = 7;
+        }
+        s.note_spawning("claude");
+        let sp = s.spawning.as_ref().unwrap();
+        assert_eq!(sp.label, "claude");
+        assert_eq!(sp.spinner_idx, 0, "frame counter restarts on re-spawn");
+    }
+
+    #[test]
+    fn spawn_label_gains_elapsed_suffix_after_a_second() {
+        let mut s = StatusCtx::new();
+        s.note_spawning("claude");
+        // Backdate so the elapsed branch fires deterministically.
+        if let Some(sp) = s.spawning.as_mut() {
+            sp.started_at = Instant::now() - Duration::from_secs(3);
+        }
+        assert_eq!(s.spawning.as_ref().unwrap().label(), "spawning claude · 3s");
+    }
+
+    #[test]
+    fn spawn_guard_clears_after_a_dropped_terminal_spawned() {
+        let mut s = StatusCtx::new();
+        s.note_spawning("claude");
+        // Backdate well past SPAWN_SPINNER_GUARD so the assertion
+        // isn't sensitive to the exact constant.
+        if let Some(sp) = s.spawning.as_mut() {
+            sp.started_at = Instant::now() - Duration::from_secs(600);
+        }
+        assert!(s.tick_spawning(), "stale spawn indicator cleared by guard");
+        assert!(s.spawning.is_none());
+    }
+
+    #[test]
+    fn spawn_guard_leaves_a_fresh_indicator_alone() {
+        let mut s = StatusCtx::new();
+        s.note_spawning("claude");
+        assert!(
+            !s.tick_spawning(),
+            "a just-started spawn must keep spinning"
+        );
+        assert!(s.spawning.is_some());
+    }
+
+    #[test]
+    fn polling_tick_advances_the_spawn_spinner() {
+        let mut s = StatusCtx::new();
+        s.note_spawning("claude");
+        // Backdate the heartbeat so the cadence gate (80ms) opens.
+        s.polling_last_tick = Instant::now() - Duration::from_millis(200);
+        let before = s.spawning.as_ref().unwrap().spinner_idx;
+        let _ = s.polling_tick();
+        let after = s.spawning.as_ref().unwrap().spinner_idx;
+        assert_eq!(after, before + 1, "spinner glyph advances on heartbeat");
     }
 
     #[test]

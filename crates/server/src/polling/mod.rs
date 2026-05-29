@@ -66,6 +66,22 @@ pub enum FetchMode {
     Incremental,
 }
 
+impl FetchMode {
+    /// Greppable label for sync-latency tracing — which delivery path
+    /// produced this tick's tasks. `Full` is the exhaustive
+    /// `involves:USER` sweep; `Incremental` is the notifications-driven
+    /// fast path (the closest thing pilot has to an event push). When an
+    /// update "took a long time to appear," this is the first thing to
+    /// check in `/tmp/pilot.log`: did it arrive via a slow full sweep or
+    /// a fast notifications poll?
+    pub fn label(self) -> &'static str {
+        match self {
+            FetchMode::Full => "full-sweep",
+            FetchMode::Incremental => "notifications",
+        }
+    }
+}
+
 /// Anything that can produce a flat list of `Task`s. Implementations
 /// should be cheap to construct and cheap to call repeatedly: they're
 /// invoked on every poll tick.
@@ -1602,15 +1618,24 @@ pub async fn tick_with_state(
     // incremental fetch.
     let mut all_full = true;
     for source in sources {
+        let fetch_started = std::time::Instant::now();
         match source.fetch().await {
             Ok(tasks) => {
+                let fetch_ms = fetch_started.elapsed().as_millis();
                 any_source_succeeded = true;
                 source_scopes.insert(source.name().to_string(), source.polled_scope());
-                if source.last_fetch_kind() == FetchMode::Incremental {
+                let mode = source.last_fetch_kind();
+                if mode == FetchMode::Incremental {
                     all_full = false;
                 }
                 let count = tasks.len();
-                tracing::info!(source = source.name(), count, "poll succeeded");
+                tracing::info!(
+                    source = source.name(),
+                    path = mode.label(),
+                    count,
+                    fetch_ms,
+                    "sync: fetch complete"
+                );
                 // 0-result polls are almost always misconfiguration —
                 // wrong scope, no role enabled, filter narrowed too far.
                 // Log loudly + surface a one-shot info notice so a
@@ -2240,7 +2265,12 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
                 }
             };
             tracing::info!(
-                "polling: tick #{tick_n} done (retry_after={:?}, unknown_mergeable={})",
+                "polling: tick #{tick_n} done (path={}, retry_after={:?}, unknown_mergeable={})",
+                if summary.all_full {
+                    "full-sweep"
+                } else {
+                    "incremental"
+                },
                 summary.retry_after_secs,
                 summary.saw_unknown_mergeable,
             );
@@ -2269,7 +2299,20 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
                 next_in = UNKNOWN_RETRY;
             }
             next_due = Instant::now() + next_in;
-            tracing::debug!("polling: tick #{tick_n} next_due in {}s", next_in.as_secs());
+            // Expose the effective cadence every tick so "why is sync
+            // slow?" is answerable from the log alone: the base interval,
+            // the actual wait (longer when backing off), and whether a
+            // rate-limit hint forced the gap open.
+            tracing::info!(
+                "polling: tick #{tick_n} next tick in {}s (base interval {}s{})",
+                next_in.as_secs(),
+                interval.as_secs(),
+                if next_in > interval {
+                    " — backing off"
+                } else {
+                    ""
+                },
+            );
         }
     })
 }
@@ -2340,6 +2383,11 @@ pub fn spawn_with_sources(
 pub struct TickSummary {
     pub retry_after_secs: Option<u64>,
     pub saw_unknown_mergeable: bool,
+    /// True when every successful source ran a full sweep (no source
+    /// took the incremental notifications path). Surfaced in the
+    /// driver's per-tick log so the delivery path of a slow update is
+    /// visible without cross-referencing per-source lines.
+    pub all_full: bool,
 }
 
 pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
@@ -2431,6 +2479,7 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
     let summary = TickSummary {
         retry_after_secs: outcome.retry_after_secs,
         saw_unknown_mergeable: outcome.saw_unknown_mergeable,
+        all_full: outcome.all_full,
     };
     rescope_with_state(config, &outcome, &mut state).await;
     // (Prefetch of top-N PR details — implemented but disabled
@@ -2551,6 +2600,25 @@ async fn prepare_upsert(config: &ServerConfig, key: &WorkspaceKey, task: Task) -
         .flatten()
         .and_then(|r| r.workspace_json)
         .and_then(|j| serde_json::from_str::<Workspace>(&j).ok());
+
+    // Sync-latency probe: when this task already lives in the workspace
+    // and the incoming copy is genuinely fresher, log how stale it was
+    // by the time we processed it (`now - task.updated_at`). This is the
+    // end-to-end "an update took a long time to appear" signal — large
+    // values point at a slow delivery path (full-sweep cadence) rather
+    // than a slow upsert. First-discovery (no existing task) is skipped:
+    // its age reflects the PR's history, not delivery latency.
+    if let Some(prev) = existing.as_ref().and_then(|w| w.task_by_id(&task.id))
+        && task.updated_at > prev.updated_at
+    {
+        let age_ms = (Utc::now() - task.updated_at).num_milliseconds().max(0);
+        tracing::info!(
+            task = %task.id,
+            workspace_key = %key.as_str(),
+            update_age_ms = age_ms,
+            "sync: delivered fresher task"
+        );
+    }
 
     let mut workspace = match existing {
         Some(mut w) => {

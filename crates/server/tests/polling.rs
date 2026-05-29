@@ -1661,6 +1661,12 @@ fn gh_polled_scope_downgrades_to_preserve_all_on_partial_sweep() {
     );
 }
 
+#[test]
+fn fetch_mode_label_distinguishes_delivery_paths() {
+    assert_eq!(FetchMode::Full.label(), "full-sweep");
+    assert_eq!(FetchMode::Incremental.label(), "notifications");
+}
+
 #[tokio::test]
 async fn rescope_preserves_prs_when_pr_fetch_partially_failed() {
     // End-to-end guard for the "PRs disappear on a flaky poll" bug.

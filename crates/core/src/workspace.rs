@@ -248,6 +248,16 @@ impl Workspace {
         self.linear_issues.retain(|t| &t.id != id);
     }
 
+    /// Find an attached task by id across all slots (PR, GitHub issues,
+    /// Linear issues). Returns `None` if no slot holds it.
+    pub fn task_by_id(&self, id: &TaskId) -> Option<&Task> {
+        self.pr
+            .iter()
+            .chain(self.gh_issues.iter())
+            .chain(self.linear_issues.iter())
+            .find(|t| &t.id == id)
+    }
+
     /// Every linked task's id, deduplicated.
     pub fn linked_task_ids(&self) -> Vec<TaskId> {
         let mut out = Vec::new();
@@ -1319,6 +1329,32 @@ mod tests {
         ws.attach_task(issue("linear", "ENG-7"));
         let ids = ws.linked_task_ids();
         assert_eq!(ids.len(), 3);
+    }
+
+    #[test]
+    fn task_by_id_finds_tasks_in_every_slot() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        ws.attach_task(pr("o/r#1"));
+        ws.attach_task(issue("github", "o/r#42"));
+        ws.attach_task(issue("linear", "ENG-7"));
+
+        for (source, key) in [
+            ("github", "o/r#1"),
+            ("github", "o/r#42"),
+            ("linear", "ENG-7"),
+        ] {
+            let id = TaskId {
+                source: source.into(),
+                key: key.into(),
+            };
+            assert_eq!(ws.task_by_id(&id).map(|t| &t.id), Some(&id));
+        }
+
+        let missing = TaskId {
+            source: "github".into(),
+            key: "o/r#999".into(),
+        };
+        assert!(ws.task_by_id(&missing).is_none());
     }
 
     #[test]

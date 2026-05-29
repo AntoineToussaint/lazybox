@@ -459,7 +459,7 @@ impl Sidebar {
     ///
     /// Cheap by construction: when no agent is working it does nothing
     /// (and resets so the spinner always restarts at frame 0). When
-    /// one is, it advances at most once per [`WORKING_SPIN_INTERVAL`]
+    /// one is, it advances at most once per `WORKING_SPIN_INTERVAL`
     /// regardless of how often the run loop calls it — the animation
     /// never forces a redraw faster than ~8 fps, and a single shared
     /// frame index means no per-row work on each tick.

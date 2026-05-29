@@ -299,6 +299,53 @@ mod effects_tests {
         assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 5);
     }
 
+    /// Returning to the terminal pane with a single click restores the
+    /// ability to interact in one click (#103). Before the fix, the
+    /// first click after leaving the terminal only refocused it —
+    /// `claim_for_selection` was gated on the OLD focus, so the click
+    /// never registered inside the pane and a redundant second click
+    /// was needed before typing/selection worked.
+    #[test]
+    fn single_click_back_into_terminal_claims_the_click() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use tuirealm::ratatui::layout::Rect;
+
+        let mut m = build_model();
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _right_top, right_bottom) = crate::realm::layout::pane_areas(
+            area,
+            m.layout.sidebar_pct,
+            m.layout.right_top_pct,
+            m.layout.sidebar_user_resized,
+        );
+
+        // Start as if the user had been typing in the terminal.
+        m.focus = PaneFocus::Terminals;
+
+        let down = |col, row| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        // Click the sidebar — focus leaves the terminal.
+        m.dispatch_mouse_in(down(sidebar_rect.x + 1, sidebar_rect.y + 1), area);
+        assert_eq!(m.focus, PaneFocus::Sidebar);
+
+        // A single click back into the terminal pane must BOTH refocus
+        // it AND claim the click for the pane (selection start) so the
+        // Up handler can deliver it to the inner program — no redundant
+        // second click.
+        m.terminal_selection = None;
+        m.dispatch_mouse_in(down(right_bottom.x + 2, right_bottom.y + 2), area);
+        assert_eq!(m.focus, PaneFocus::Terminals);
+        assert!(
+            m.terminal_selection.is_some(),
+            "first click back into the terminal must claim the click, not just refocus",
+        );
+    }
+
     /// Adopt picker: source + target workspace keys flow into an
     /// `AdoptSessions` command. The picks index resolves into the
     /// `adopt_choices` slot we set up.

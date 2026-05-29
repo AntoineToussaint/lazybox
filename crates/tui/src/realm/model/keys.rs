@@ -270,6 +270,9 @@ impl<T: TerminalAdapter> Model<T> {
                 pilot_tui_core::action::ActionKind::OpenHelp => Some(Action::OpenHelp),
                 pilot_tui_core::action::ActionKind::OpenSettings => Some(Action::OpenSettings),
                 pilot_tui_core::action::ActionKind::JumpToAsking => Some(Action::JumpToAsking),
+                pilot_tui_core::action::ActionKind::JumpToFailingCi => {
+                    Some(Action::JumpToFailingCi)
+                }
                 _ => None,
             };
             if let Some(action) = action {

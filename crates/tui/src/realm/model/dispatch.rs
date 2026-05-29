@@ -330,6 +330,15 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                 }
             }
+            Action::JumpToFailingCi => {
+                if self.sidebar.focus_next_failing_ci_workspace() {
+                    self.focus = PaneFocus::Sidebar;
+                    self.set_focus_attr();
+                    self.redraw = true;
+                } else {
+                    self.flash_hint("no failing PRs");
+                }
+            }
             Action::Reply => {
                 // Reply targets the focused workspace. Resolver
                 // returns `Intent::MountReply` when a workspace is

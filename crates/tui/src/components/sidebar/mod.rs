@@ -785,6 +785,42 @@ impl Sidebar {
         self.focus_workspace_key(&target)
     }
 
+    /// Move the cursor onto the next workspace whose PR has failing
+    /// (or mixed) CI, starting AFTER the current row and wrapping —
+    /// so `Shift-F` cycles through broken PRs rather than re-selecting
+    /// the current one. Returns true when a target was found.
+    ///
+    /// Membership comes from the same `CiFailing` attention signal the
+    /// header counter and row pill read, so what the user jumps to
+    /// always matches the red ` CI FAIL ` / ` CI MIX ` pills they see.
+    pub fn focus_next_failing_ci_workspace(&mut self) -> bool {
+        let keys_order: Vec<SessionKey> = self
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        let failing: std::collections::HashSet<SessionKey> = keys_order
+            .iter()
+            .filter(|k| {
+                self.workspaces.get(*k).is_some_and(|w| {
+                    workspace_attention_signals(w, &self.agents_asking)
+                        .contains(&AttentionSignal::CiFailing)
+                })
+            })
+            .cloned()
+            .collect();
+        let current = self.selected_session_key().cloned();
+        let Some(target) =
+            crate::agent_attention::next_flagged_workspace(&failing, &keys_order, current.as_ref())
+        else {
+            return false;
+        };
+        self.focus_workspace_key(&target)
+    }
+
     /// Move the cursor onto the session sub-row matching `id`. No-op
     /// when the row isn't visible — caller must already have aligned
     /// the workspace via `focus_workspace_key`.

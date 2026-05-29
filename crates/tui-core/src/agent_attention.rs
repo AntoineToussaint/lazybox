@@ -98,7 +98,22 @@ pub fn next_asking_workspace(
     keys_order: &[SessionKey],
     current: Option<&SessionKey>,
 ) -> Option<SessionKey> {
-    if keys_order.is_empty() || asking_set.is_empty() {
+    next_flagged_workspace(asking_set, keys_order, current)
+}
+
+/// Generic "advance the cursor to the next flagged row" sweep: pick
+/// the next key in `keys_order` that is a member of `flagged`,
+/// starting after `current` and wrapping. `None` when none match.
+///
+/// Both the `!` jump-to-asking and the `Shift-F` jump-to-failing-CI
+/// keys are the same motion over a different membership set, so the
+/// sweep lives here once and each caller supplies its own set.
+pub fn next_flagged_workspace(
+    flagged: &HashSet<SessionKey>,
+    keys_order: &[SessionKey],
+    current: Option<&SessionKey>,
+) -> Option<SessionKey> {
+    if keys_order.is_empty() || flagged.is_empty() {
         return None;
     }
     let start_idx = current
@@ -108,7 +123,7 @@ pub fn next_asking_workspace(
     for offset in 0..keys_order.len() {
         let idx = (start_idx + offset) % keys_order.len();
         let key = &keys_order[idx];
-        if asking_set.contains(key) {
+        if flagged.contains(key) {
             return Some(key.clone());
         }
     }
@@ -257,5 +272,34 @@ mod tests {
         set.insert(ws_key(2));
         let keys = vec![ws_key(1), ws_key(2)];
         assert_eq!(next_asking_workspace(&set, &keys, None), Some(ws_key(2)));
+    }
+
+    // ── next_flagged_workspace (shared sweep) ─────────────────────
+
+    #[test]
+    fn flagged_sweep_skips_past_current_and_wraps() {
+        // Generic membership: #1 and #3 flagged. From #1 → #3;
+        // from #3 the sweep wraps back to #1.
+        let mut set = HashSet::new();
+        set.insert(ws_key(1));
+        set.insert(ws_key(3));
+        let keys = vec![ws_key(1), ws_key(2), ws_key(3)];
+        assert_eq!(
+            next_flagged_workspace(&set, &keys, Some(&ws_key(1))),
+            Some(ws_key(3)),
+        );
+        assert_eq!(
+            next_flagged_workspace(&set, &keys, Some(&ws_key(3))),
+            Some(ws_key(1)),
+        );
+    }
+
+    #[test]
+    fn flagged_sweep_returns_none_when_set_empty() {
+        let set = HashSet::new();
+        assert_eq!(
+            next_flagged_workspace(&set, &[ws_key(1), ws_key(2)], None),
+            None,
+        );
     }
 }

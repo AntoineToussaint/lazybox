@@ -1487,12 +1487,13 @@ fn agent_state_working_shows_spinner_and_is_not_asking() {
         "Working must not enqueue a desktop notification",
     );
 
-    // The spinner glyph appears in the rendered slot.
+    // The spinner glyph appears in the rendered slot. Frame 0 of the
+    // working spinner is `⠋` (WORKING_SPINNER_FRAMES[0], kept internal
+    // to the workspace_row module — asserted here by its literal).
     let rendered = render_to_string(&mut s, 80, 12, true);
-    let first_frame = pilot_tui::components::workspace_row::working_glyph(0);
     assert!(
-        rendered.contains(first_frame),
-        "working spinner glyph {first_frame:?} must render; got:\n{rendered}",
+        rendered.contains('⠋'),
+        "working spinner glyph must render; got:\n{rendered}",
     );
 
     // tick_working advances on the first due tick, then rate-limits.
@@ -1538,9 +1539,8 @@ fn working_then_input_needed_swaps_the_shared_slot() {
     );
     s.focus_workspace_key(&key);
     let rendered = render_to_string(&mut s, 80, 12, true);
-    let spinner = pilot_tui::components::workspace_row::working_glyph(0);
     assert!(
-        !rendered.contains(spinner),
+        !rendered.contains('⠋'),
         "spinner must clear once the slot shows the `?` pill; got:\n{rendered}",
     );
     assert!(rendered.contains('?'), "the input-needed pill must render");

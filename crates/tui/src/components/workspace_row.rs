@@ -267,9 +267,13 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         Style::default().fg(fg).add_modifier(Modifier::BOLD)
     };
     // Reserved 3 cells: " G " (leading + glyph + trailing space).
+    // `glyph` is `&'static str` and the spaces are literals, so every
+    // span borrows static data — no per-row, per-frame allocation on
+    // the render hot path.
     Cell::new(vec![
-        Span::styled(format!(" {glyph}"), style),
-        Span::styled(" ".to_string(), ctx.row_style()),
+        Span::styled(" ", style),
+        Span::styled(glyph, style),
+        Span::styled(" ", ctx.row_style()),
     ])
 }
 
@@ -277,11 +281,12 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 /// cycle — visually distinct from the static `?` input-needed glyph
 /// and cheap to render. `working_glyph` indexes this by the sidebar's
 /// shared frame counter.
-pub const WORKING_SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+pub(crate) const WORKING_SPINNER_FRAMES: &[&str] =
+    &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Resolve the spinner glyph for a given frame index. Wraps, so the
 /// caller's counter can grow unbounded.
-pub fn working_glyph(frame: usize) -> &'static str {
+pub(crate) fn working_glyph(frame: usize) -> &'static str {
     WORKING_SPINNER_FRAMES[frame % WORKING_SPINNER_FRAMES.len()]
 }
 
@@ -606,7 +611,14 @@ mod tests {
         assert_eq!(cell.width(), 0);
     }
 
-    /// State slot: input-needed → 3 cells (" ?" + trailing space).
+    /// Concatenate a cell's span contents — the rendered text,
+    /// independent of how it's split into styled spans.
+    fn cell_text(cell: &Cell) -> String {
+        cell.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// State slot: input-needed → 3 cells (" ? " — leading space,
+    /// glyph, trailing space).
     #[test]
     fn cell_state_three_cells_when_asking() {
         let task = make_task("owner/repo#1", "x");
@@ -616,7 +628,7 @@ mod tests {
         ctx.asking = true;
         let cell = cell_state(&ctx);
         assert_eq!(cell.width(), 3);
-        assert_eq!(cell.spans[0].content.as_ref(), " ?");
+        assert_eq!(cell_text(&cell), " ? ");
     }
 
     /// State slot: working → 3 cells with the current spinner glyph.
@@ -631,10 +643,7 @@ mod tests {
         ctx.working_glyph = working_glyph(3);
         let cell = cell_state(&ctx);
         assert_eq!(cell.width(), 3);
-        assert_eq!(
-            cell.spans[0].content.as_ref(),
-            format!(" {}", working_glyph(3))
-        );
+        assert_eq!(cell_text(&cell), format!(" {} ", working_glyph(3)));
     }
 
     /// State slot precedence: input-needed wins over working if both
@@ -649,7 +658,7 @@ mod tests {
         ctx.asking = true;
         ctx.working = true;
         let cell = cell_state(&ctx);
-        assert_eq!(cell.spans[0].content.as_ref(), " ?");
+        assert_eq!(cell_text(&cell), " ? ");
     }
 
     /// The spinner frame index wraps so an unbounded counter is safe.

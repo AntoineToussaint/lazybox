@@ -541,6 +541,12 @@ pub mod builtins {
             // buffer never appends enough new bytes to evict the stale
             // hint. This keeps the state honest — matching what the PTY
             // is actually doing, not what it was doing a minute ago.
+            //
+            // Known limitation (acceptable, best-effort like the rest
+            // of this detector): if the literal "esc to interrupt" is
+            // echoed in chat/scrollback BELOW the last input box (e.g.
+            // a pasted transcript), it can read as Working for one
+            // detection window before the next render evicts it.
             if let Some(work_pos) = lower.rfind("esc to interrupt") {
                 let idle_pos = lower.rfind("tab to amend");
                 if idle_pos.is_none_or(|ip| work_pos > ip) {

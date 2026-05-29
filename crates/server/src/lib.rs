@@ -33,6 +33,7 @@ pub mod api_gateway;
 pub mod auth;
 pub mod backend;
 pub mod chat;
+pub mod event_forward;
 pub mod lifecycle;
 pub mod polling;
 pub mod pty;
@@ -447,6 +448,17 @@ impl Server {
     /// yet are trace-logged and dropped so adding a command at the IPC
     /// layer never breaks an existing client.
     pub async fn serve(&self, mut conn: Connection) -> Result<(), ServerError> {
+        // Bridge the raw event stream to the client's bounded channel
+        // through the drop-and-resync forwarder, when the transport
+        // wired one up (in-process + socket clients do; the JSON API
+        // gateway reads the raw stream directly and leaves this `None`).
+        // The serve loop below keeps writing raw events to `conn.tx`
+        // exactly as before — it never blocks on the client, so the
+        // command path (keystroke `Write`s) stays responsive no matter
+        // how far behind the consumer falls.
+        if let Some(forward) = conn.take_forward() {
+            tokio::spawn(event_forward::forward_events(forward, self.config.clone()));
+        }
         let mut bus_rx = self.config.bus.subscribe();
         loop {
             tokio::select! {

@@ -8,7 +8,9 @@
 //! and the local channels.
 
 use crate::transport;
-use crate::{Client, Command, Connection, Event, MAX_FRAME_BYTES};
+use crate::{
+    Client, Command, Connection, EVENT_CHANNEL_CAPACITY, Event, EventForward, MAX_FRAME_BYTES,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::Path;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -70,30 +72,60 @@ pub async fn connect(path: &Path) -> std::io::Result<Client> {
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
-    let (evt_tx, evt_rx) = mpsc::unbounded_channel::<Event>();
+    // Events are read into a BOUNDED channel: when the TUI falls behind
+    // and `Client::rx` fills, `reader_loop_bounded` blocks on the send,
+    // which stops draining the socket and back-pressures all the way to
+    // the daemon's per-connection forwarder — which is where the drop +
+    // resync actually happens. The client never drops, it only stalls.
+    let (evt_tx, evt_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
 
     // Writer task: drain Commands from TUI, frame them onto the socket.
     tokio::spawn(writer_loop(wr, cmd_rx));
     // Reader task: parse framed Events from the socket, push to TUI.
-    tokio::spawn(reader_loop(rd, evt_tx));
+    tokio::spawn(reader_loop_bounded(rd, evt_tx));
 
     Ok(Client::from_channels(cmd_tx, evt_rx))
 }
 
 /// Connection-side: wrap an accepted socket as a `Connection` handle.
+///
+/// Mirrors [`channel::pair`](crate::channel::pair): the serve loop
+/// writes raw events to an unbounded `tx`; the server-spawned forwarder
+/// bridges them into a **bounded** channel that the `writer_loop`
+/// frames onto the socket. A full bounded channel back-pressures the
+/// forwarder (which then drops + re-syncs `TerminalOutput`), so the
+/// daemon's send side can't grow without bound when a remote client
+/// stops reading.
 pub fn serve<R, W>(rd: R, wr: W) -> Connection
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
-    let (evt_tx, evt_rx) = mpsc::unbounded_channel::<Event>();
+    let (raw_tx, raw_rx) = mpsc::unbounded_channel::<Event>();
+    let (client_tx, client_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
     tokio::spawn(reader_loop(rd, cmd_tx));
-    tokio::spawn(writer_loop(wr, evt_rx));
-    Connection::from_channels(evt_tx, cmd_rx)
+    tokio::spawn(writer_loop_bounded(wr, client_rx));
+    Connection::with_forward(raw_tx, cmd_rx, EventForward { raw_rx, client_tx })
 }
 
 async fn writer_loop<W, M>(mut w: W, mut rx: mpsc::UnboundedReceiver<M>)
+where
+    W: AsyncWrite + Unpin,
+    M: Serialize,
+{
+    while let Some(msg) = rx.recv().await {
+        if let Err(e) = write_frame(&mut w, &msg).await {
+            tracing::warn!("writer: {e}");
+            break;
+        }
+    }
+}
+
+/// Bounded-channel writer. Identical to [`writer_loop`] but drains a
+/// bounded `Receiver` — used for the daemon's event stream so the
+/// socket write rate back-pressures the forwarder.
+async fn writer_loop_bounded<W, M>(mut w: W, mut rx: mpsc::Receiver<M>)
 where
     W: AsyncWrite + Unpin,
     M: Serialize,
@@ -115,6 +147,30 @@ where
         match read_frame::<_, M>(&mut r).await {
             Ok(Some(msg)) => {
                 if tx.send(msg).is_err() {
+                    break;
+                }
+            }
+            Ok(None) => break, // clean EOF
+            Err(e) => {
+                tracing::warn!("reader: {e}");
+                break;
+            }
+        }
+    }
+}
+
+/// Bounded-channel reader. Like [`reader_loop`] but `.send().await`s on
+/// a bounded `Sender`, so a full channel stalls socket reads and
+/// back-pressures the peer instead of buffering frames without bound.
+async fn reader_loop_bounded<R, M>(mut r: R, tx: mpsc::Sender<M>)
+where
+    R: AsyncRead + Unpin,
+    M: DeserializeOwned,
+{
+    loop {
+        match read_frame::<_, M>(&mut r).await {
+            Ok(Some(msg)) => {
+                if tx.send(msg).await.is_err() {
                     break;
                 }
             }

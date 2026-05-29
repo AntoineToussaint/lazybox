@@ -773,6 +773,23 @@ pub enum Event {
         /// Monotonic per-terminal sequence for gap detection.
         seq: u64,
     },
+    /// Re-establish a terminal's grid from the daemon-side replay ring
+    /// after the bounded event channel dropped one or more
+    /// `TerminalOutput` chunks for it (see [`channel`] / the server's
+    /// per-connection forwarder). Dropping raw bytes mid-stream
+    /// corrupts the libghostty-vt parser, so the forwarder never lets a
+    /// partial stream through: it drops the coalescable output, then
+    /// emits exactly one `TerminalResync` carrying the full ring. The
+    /// consumer resets its parser and re-feeds `replay`, which
+    /// reconstructs the correct screen without the dropped bytes. `seq`
+    /// is the ring's last sequence — the consumer adopts it so the
+    /// resumed live stream (all `seq` strictly greater) applies exactly
+    /// once.
+    TerminalResync {
+        terminal_id: TerminalId,
+        replay: Vec<u8>,
+        seq: u64,
+    },
     TerminalExited {
         terminal_id: TerminalId,
         exit_code: Option<i32>,
@@ -1034,6 +1051,36 @@ pub struct TerminalSnapshot {
 
 use tokio::sync::mpsc;
 
+/// Capacity of the bounded daemon→client event channel. This is the
+/// hard memory ceiling on inbound events: the channel never holds more
+/// than this many `Event`s no matter how fast the daemon produces
+/// `TerminalOutput`. When it fills, the per-connection forwarder drops
+/// the coalescable output for the affected terminal and re-syncs its
+/// grid from the daemon ring (see [`Event::TerminalResync`]).
+///
+/// Sized well above the run loop's per-tick drain cap
+/// (`MAX_EVENTS_PER_TICK` = 256) so ordinary single-frame bursts ride
+/// through without ever tripping the drop path — overflow only kicks in
+/// when the consumer is genuinely, sustainedly behind.
+pub const EVENT_CHANNEL_CAPACITY: usize = 2048;
+
+/// The plumbing a per-connection event forwarder owns: it drains
+/// `raw_rx` (everything the serve loop emits for this client) and
+/// writes into the bounded `client_tx`, applying drop-and-resync to
+/// `TerminalOutput` so the bounded channel can't grow without bound.
+/// Constructed by the transports ([`channel::pair`], [`socket`]) and
+/// handed to the server's `serve`, which spawns the forwarder with the
+/// daemon config it needs to fetch ring replays.
+pub struct EventForward {
+    /// Raw, unbounded stream the serve loop writes to (`Connection::tx`).
+    /// Drained promptly by the forwarder so it never accumulates.
+    pub raw_rx: mpsc::UnboundedReceiver<Event>,
+    /// Bounded sink the client reads from (`Client::rx`, possibly via a
+    /// socket). The forwarder's `try_send`/`reserve` against this is
+    /// what enforces the memory ceiling.
+    pub client_tx: mpsc::Sender<Event>,
+}
+
 /// A live connection to the daemon. Owned by the TUI.
 ///
 /// Local (in-process) daemons hand back a `Client` whose `send`/`recv`
@@ -1042,20 +1089,17 @@ use tokio::sync::mpsc;
 /// over a socket. The TUI doesn't see the difference.
 pub struct Client {
     tx: mpsc::UnboundedSender<Command>,
-    /// Inbound daemon events. Pub so the realm orchestrator can
-    /// `try_recv` non-blocking from a sync main loop. (Old async
-    /// loop uses `Client::recv` instead.)
-    pub rx: mpsc::UnboundedReceiver<Event>,
+    /// Inbound daemon events. Bounded — see [`EVENT_CHANNEL_CAPACITY`].
+    /// Pub so the realm orchestrator can `try_recv` non-blocking from a
+    /// sync main loop. (Old async loop uses `Client::recv` instead.)
+    pub rx: mpsc::Receiver<Event>,
 }
 
 impl Client {
     /// Build a `Client` from a pair of pre-wired channels. Used by both
-    /// transports — `channel::spawn` for in-process, `socket::connect`
+    /// transports — `channel::pair` for in-process, `socket::connect`
     /// for remote.
-    pub fn from_channels(
-        tx: mpsc::UnboundedSender<Command>,
-        rx: mpsc::UnboundedReceiver<Event>,
-    ) -> Self {
+    pub fn from_channels(tx: mpsc::UnboundedSender<Command>, rx: mpsc::Receiver<Event>) -> Self {
         Self { tx, rx }
     }
 
@@ -1074,19 +1118,56 @@ impl Client {
 
 /// The server-side of a connection. One per connected client.
 ///
-/// A daemon's main loop holds many `Connection`s. Events the daemon wants
-/// to broadcast get sent on each `tx`; `rx` receives commands from
-/// that specific client.
+/// A daemon's main loop holds many `Connection`s. Events the daemon
+/// wants to send go on `tx` (an **unbounded** raw stream); `rx`
+/// receives commands from that specific client. The serve loop never
+/// blocks on `tx`.
+///
+/// When `forward` is `Some`, the raw `tx` stream does not reach the
+/// client directly — a forwarder (spawned by the server) drains it into
+/// a bounded client channel, applying drop-and-resync to high-volume
+/// `TerminalOutput`. Transports that want the memory ceiling
+/// ([`channel::pair`], [`socket`]) set it; the JSON API gateway leaves
+/// it `None` and reads the raw stream itself.
 pub struct Connection {
     pub tx: mpsc::UnboundedSender<Event>,
     pub rx: mpsc::UnboundedReceiver<Command>,
+    forward: Option<EventForward>,
 }
 
 impl Connection {
+    /// Build a `Connection` with no forwarder: the raw `tx` stream is
+    /// the client stream. Used by the JSON API gateway, whose consumer
+    /// reads the unbounded receiver directly.
     pub fn from_channels(
         tx: mpsc::UnboundedSender<Event>,
         rx: mpsc::UnboundedReceiver<Command>,
     ) -> Self {
-        Self { tx, rx }
+        Self {
+            tx,
+            rx,
+            forward: None,
+        }
+    }
+
+    /// Build a `Connection` whose raw `tx` stream is bridged to the
+    /// client through `forward`. The server spawns the forwarder from
+    /// `take_forward`.
+    pub fn with_forward(
+        tx: mpsc::UnboundedSender<Event>,
+        rx: mpsc::UnboundedReceiver<Command>,
+        forward: EventForward,
+    ) -> Self {
+        Self {
+            tx,
+            rx,
+            forward: Some(forward),
+        }
+    }
+
+    /// Take the forwarder plumbing, if any. The server calls this once
+    /// at the start of `serve` and spawns the drop-and-resync task.
+    pub fn take_forward(&mut self) -> Option<EventForward> {
+        self.forward.take()
     }
 }

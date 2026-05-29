@@ -605,16 +605,40 @@ mod input_starvation_tests {
     //! that bound.
     use super::super::Model;
     use super::super::helpers::{MAX_EVENTS_PER_TICK, drain_daemon_events};
-    use pilot_ipc::{Event, TerminalId, channel};
+    use pilot_ipc::{Client, EVENT_CHANNEL_CAPACITY, Event, TerminalId};
+    use tokio::sync::mpsc;
     use tuirealm::ratatui::layout::Size;
 
-    fn flood(server: &pilot_ipc::Connection, n: usize) {
+    /// Build a `Model` wired to a bounded inbound event channel we can
+    /// fill directly — the same bounded channel the real transport
+    /// hands the TUI ([`pilot_ipc::EVENT_CHANNEL_CAPACITY`]), minus the
+    /// daemon-side forwarder. Returns the sender so the test floods it
+    /// itself. The command channel's receiver is held alive so the
+    /// model's `send` calls don't observe a closed channel.
+    fn model_with_event_sender() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        mpsc::Sender<Event>,
+        mpsc::UnboundedReceiver<pilot_ipc::Command>,
+    ) {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let model = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        (model, evt_tx, cmd_rx)
+    }
+
+    fn flood(tx: &mpsc::Sender<Event>, n: usize) {
         for seq in 0..n {
-            let _ = server.tx.send(Event::TerminalOutput {
+            tx.try_send(Event::TerminalOutput {
                 terminal_id: TerminalId(1),
                 bytes: b"streaming output chunk\n".to_vec(),
                 seq: seq as u64,
-            });
+            })
+            .expect("bounded channel must have room for the flood");
         }
     }
 
@@ -624,15 +648,14 @@ mod input_starvation_tests {
     /// output forever.
     #[test]
     fn flood_does_not_drain_everything_in_one_tick() {
-        let (client, server) = channel::pair();
-        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
-            client,
-            Size::new(120, 40),
-        )
-        .expect("model init");
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
 
+        // Keep the flood under the bounded channel's capacity so the
+        // test exercises the per-tick *drain* cap, not the channel's
+        // overflow path (that's covered by the forwarder's own tests).
         let flooded = MAX_EVENTS_PER_TICK * 4;
-        flood(&server, flooded);
+        assert!(flooded < EVENT_CHANNEL_CAPACITY);
+        flood(&evt_tx, flooded);
 
         // One iteration's drain: must report a backlog (more queued)…
         assert!(
@@ -651,15 +674,10 @@ mod input_starvation_tests {
     /// backlog — the cap throttles per-tick, it doesn't drop events.
     #[test]
     fn repeated_drains_eventually_empty_the_channel() {
-        let (client, server) = channel::pair();
-        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
-            client,
-            Size::new(120, 40),
-        )
-        .expect("model init");
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
 
         let flooded = MAX_EVENTS_PER_TICK * 4;
-        flood(&server, flooded);
+        flood(&evt_tx, flooded);
 
         // Bound the loop generously above the minimum needed (4) so a
         // genuinely stuck drain trips the assert instead of hanging.
@@ -672,6 +690,27 @@ mod input_starvation_tests {
         }
         // Channel fully consumed, no event left behind.
         assert!(m.client.rx.try_recv().is_err());
+    }
+
+    /// A `TerminalResync` — the daemon's signal that it dropped output
+    /// on a full channel and rebuilt the grid from the ring — is
+    /// counted by the BacklogMonitor so overflow episodes are
+    /// observable in the log (acceptance criterion from #88).
+    #[test]
+    fn resync_events_are_recorded_by_backlog_monitor() {
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
+
+        for _ in 0..3 {
+            evt_tx
+                .try_send(Event::TerminalResync {
+                    terminal_id: TerminalId(1),
+                    replay: b"hello".to_vec(),
+                    seq: 7,
+                })
+                .expect("room for resync");
+        }
+        drain_daemon_events(&mut m);
+        assert_eq!(m.event_backlog.resyncs(), 3);
     }
 }
 

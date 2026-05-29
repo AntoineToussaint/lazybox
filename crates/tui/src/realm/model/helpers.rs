@@ -320,9 +320,19 @@ pub(super) fn drain_daemon_events<T: TerminalAdapter>(model: &mut Model<T>) -> b
             break;
         }
     }
+    // Count resyncs in this batch before dispatching — each one is a
+    // daemon-side overflow that dropped `TerminalOutput` and rebuilt the
+    // grid from the ring, so surfacing it makes drops observable in
+    // `/tmp/pilot.log` (the #87 BacklogMonitor's remit, now extended to
+    // the actual drop signal rather than just a growing-backlog guess).
+    let resyncs = collected
+        .iter()
+        .filter(|e| matches!(e, IpcEvent::TerminalResync { .. }))
+        .count();
     for evt in coalesce_adjacent_output(collected) {
         model.handle_daemon_event(evt);
     }
+    model.event_backlog.observe_resyncs(resyncs);
     // Whatever is still queued after this drain is the backlog the
     // consumer hasn't caught up on — feed it to the monitor.
     let residual = model.client.rx.len();
@@ -392,9 +402,32 @@ pub(super) struct BacklogMonitor {
     /// monotonically climbing count alongside a rising `residual` means
     /// the consumer never catches up.
     consecutive_backlog_ticks: u32,
+    /// Total `TerminalResync` events seen — i.e. how many times the
+    /// daemon's bounded event channel overflowed, dropped output, and
+    /// rebuilt a terminal's grid from the ring. The hard-ceiling
+    /// counterpart to `hwm`: with a bounded channel the backlog can no
+    /// longer grow without bound, so this is the signal that drops
+    /// actually happened.
+    resyncs: u64,
 }
 
 impl BacklogMonitor {
+    /// Record `n` resyncs observed in one drain. Logs at warn when any
+    /// occurred so an overflow episode is greppable in `/tmp/pilot.log`.
+    pub(super) fn observe_resyncs(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.resyncs = self.resyncs.saturating_add(n as u64);
+        tracing::warn!(
+            resyncs = n,
+            total = self.resyncs,
+            "daemon dropped TerminalOutput on a full event channel and \
+             re-synced the terminal grid from the ring — consumer fell \
+             behind the producer (bounded-channel overflow)"
+        );
+    }
+
     /// Record the channel depth left after a drain. `residual` is the
     /// number of events still queued.
     pub(super) fn observe(&mut self, residual: usize) {
@@ -433,6 +466,12 @@ impl BacklogMonitor {
     #[cfg(test)]
     pub(super) fn hwm(&self) -> usize {
         self.hwm
+    }
+
+    /// Test/diagnostic accessor: total resyncs observed.
+    #[cfg(test)]
+    pub(super) fn resyncs(&self) -> u64 {
+        self.resyncs
     }
 }
 

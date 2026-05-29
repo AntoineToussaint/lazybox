@@ -90,7 +90,16 @@ async fn proxy_record_event_round_trips_through_ipc() {
         };
         let event = Event::ProxyRecord(record.clone());
 
-        let (mut client, server) = channel::pair();
+        let (mut client, mut server) = channel::pair();
+        // The in-process transport bridges the raw event stream to the
+        // client's bounded channel via the drop-and-resync forwarder,
+        // which the server normally spawns in `serve`. Spawn it here so
+        // the event actually reaches the client.
+        let forward = server.take_forward().expect("in-process forward plumbing");
+        tokio::spawn(pilot_server::event_forward::forward_events(
+            forward,
+            pilot_server::ServerConfig::in_memory(),
+        ));
         server.tx.send(event.clone()).unwrap();
         let received = timeout(Duration::from_secs(1), client.recv())
             .await

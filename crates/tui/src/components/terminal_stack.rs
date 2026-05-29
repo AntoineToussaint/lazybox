@@ -530,6 +530,25 @@ impl TerminalVt {
         self.cols = cols;
         self.rows = rows;
     }
+
+    /// Discard all parser state and rebuild a fresh terminal at the
+    /// current size. Used on resync after the event channel dropped
+    /// `TerminalOutput`: feeding the daemon ring into the *existing*
+    /// parser would double-render on top of a now-desynced grid, so we
+    /// start clean and re-feed from scratch — exactly how `Snapshot`
+    /// reconstructs a terminal on reconnect. Returns false (and leaves
+    /// the old state in place) if libghostty-vt init fails, so a
+    /// transient allocator hiccup degrades to a stale grid rather than
+    /// a blank one.
+    fn reset(&mut self) -> bool {
+        let (cols, rows) = (self.cols, self.rows);
+        let Some(mut fresh) = TerminalVt::new() else {
+            return false;
+        };
+        fresh.ensure_size(cols, rows);
+        *self = *fresh;
+        true
+    }
 }
 
 impl TerminalStack {
@@ -1190,6 +1209,30 @@ impl TerminalStack {
         slot.last_seq = seq;
     }
 
+    /// Re-establish a terminal's grid from the daemon ring after the
+    /// event channel dropped one or more `TerminalOutput` chunks for
+    /// it. The parser is reset and re-fed from scratch (a partial
+    /// stream would have left garbled escape state), so the
+    /// reconstructed screen is correct without the dropped bytes.
+    ///
+    /// No OSC 52 passthrough here, unlike `append_output`: the replay
+    /// is a re-render of bytes the inner program already emitted, not a
+    /// fresh "copy this" intent, so re-forwarding clipboard sequences
+    /// would spuriously rewrite the user's clipboard.
+    fn resync_terminal(&mut self, id: TerminalId, replay: &[u8], seq: u64) {
+        let Some(slot) = self.terminals.get_mut(&id) else {
+            return;
+        };
+        if !slot.vt.reset() {
+            return;
+        }
+        slot.vt.feed(replay);
+        slot.recent.clear();
+        let tail_start = replay.len().saturating_sub(RECENT_OUTPUT_CAP);
+        slot.recent.extend_from_slice(&replay[tail_start..]);
+        slot.last_seq = seq;
+    }
+
     fn make_slot(
         session_key: SessionKey,
         kind: TerminalKind,
@@ -1511,6 +1554,13 @@ impl TerminalStack {
                 seq,
             } => {
                 self.append_output(*terminal_id, bytes, *seq);
+            }
+            Event::TerminalResync {
+                terminal_id,
+                replay,
+                seq,
+            } => {
+                self.resync_terminal(*terminal_id, replay, *seq);
             }
             Event::TerminalFocusRequested { terminal_id } => {
                 // Daemon-driven focus from the singleton guard.
@@ -2924,5 +2974,90 @@ mod extract_text_offset_tests {
         slot.last_user_message = Some("hi".into());
         assert_eq!(TerminalStack::recap_rows(&slot, 2), 0);
         assert_eq!(TerminalStack::recap_rows(&slot, 3), 2);
+    }
+}
+
+#[cfg(test)]
+mod resync_tests {
+    //! After the bounded event channel drops `TerminalOutput`, the
+    //! daemon emits one `TerminalResync` carrying the full ring. The
+    //! consumer must rebuild a *correct* grid from it — re-feeding onto
+    //! the desynced parser (the naive drop) would garble the screen.
+    use super::*;
+    use ratatui::layout::Rect;
+
+    const ROW0: (u16, u16) = (1, 3);
+    const ROW1: (u16, u16) = (1, 4);
+
+    fn shell_stack(id: TerminalId, sk: &SessionKey) -> TerminalStack {
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.on_event(&Event::TerminalSpawned {
+            terminal_id: id,
+            session_key: sk.clone(),
+            kind: TerminalKind::Shell,
+            no_permission: false,
+        });
+        stack.set_active_session(Some(sk.clone()));
+        stack
+    }
+
+    fn row(stack: &mut TerminalStack, at: (u16, u16)) -> String {
+        stack.extract_text(Rect::new(0, 0, 80, 30), at, (20, at.1))
+    }
+
+    #[test]
+    fn resync_rebuilds_correct_grid_after_dropped_output() {
+        let sk = SessionKey::new("s");
+        // The full byte stream the daemon ring holds at resync time.
+        let full = b"line0\r\nline1\r\nline2\r\n";
+
+        // Reference: a client that received the whole stream cleanly.
+        let mut clean = shell_stack(TerminalId(1), &sk);
+        clean.on_event(&Event::TerminalOutput {
+            terminal_id: TerminalId(1),
+            bytes: full.to_vec(),
+            seq: 9,
+        });
+        let want0 = row(&mut clean, ROW0);
+        let want1 = row(&mut clean, ROW1);
+        assert_eq!(want0, "line0");
+        assert_eq!(want1, "line1");
+
+        // Desynced: this client only saw "line0" plus an unterminated
+        // CSI — the rest was dropped on a full channel. Its grid is
+        // missing line1/line2 and the parser is mid-escape.
+        let mut desynced = shell_stack(TerminalId(1), &sk);
+        desynced.on_event(&Event::TerminalOutput {
+            terminal_id: TerminalId(1),
+            bytes: b"line0\r\n\x1b[".to_vec(),
+            seq: 3,
+        });
+        assert_ne!(row(&mut desynced, ROW1), want1, "precondition: desynced");
+
+        // Resync from the ring restores the exact correct grid.
+        desynced.on_event(&Event::TerminalResync {
+            terminal_id: TerminalId(1),
+            replay: full.to_vec(),
+            seq: 9,
+        });
+        assert_eq!(row(&mut desynced, ROW0), want0);
+        assert_eq!(row(&mut desynced, ROW1), want1);
+
+        // …and the consumer adopts the ring's seq so the resumed live
+        // stream (all seq > 9) applies on top exactly once.
+        assert_eq!(desynced.terminals[&TerminalId(1)].last_seq, 9);
+    }
+
+    #[test]
+    fn resync_for_unknown_terminal_is_a_noop() {
+        let sk = SessionKey::new("s");
+        let mut stack = shell_stack(TerminalId(1), &sk);
+        // Different id — must not panic or create a phantom slot.
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: TerminalId(99),
+            replay: b"whatever".to_vec(),
+            seq: 5,
+        });
+        assert!(!stack.terminals.contains_key(&TerminalId(99)));
     }
 }

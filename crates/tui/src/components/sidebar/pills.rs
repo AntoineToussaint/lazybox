@@ -100,18 +100,25 @@ pub fn mailbox_membership(
     show_inactive_in_inbox: bool,
 ) -> bool {
     let snoozed = workspace.is_snoozed(now);
-    // "Recently inactivated" = task is Merged/Closed AND its
-    // `updated_at` (which GitHub touches at merge/close time) is
-    // within the grace window. Such workspaces appear in BOTH
-    // Inbox (so the user sees the MERGED/CLOSED transition) and
+    // "Recently inactivated" = task is Merged/Closed AND it reached
+    // that state within the grace window. Such workspaces appear in
+    // BOTH Inbox (so the user sees the MERGED/CLOSED transition) and
     // Inactive (so they're already in their permanent home).
+    //
+    // The clock is `closed_at` (the merge/close moment), NOT
+    // `updated_at`: GitHub bumps `updated_at` on ANY later activity —
+    // post-merge comments, branch deletion, linked-issue closure,
+    // deploy statuses. Keying off `updated_at` let a merged PR in an
+    // active repo keep resetting its own grace window, so it never
+    // fell out of the Inbox (issue #96). `closed_at` only moves once.
+    // Falls back to `updated_at` for records that predate the field.
     let recently_inactivated = workspace
         .primary_task()
         .map(|t| {
             matches!(
                 t.state,
                 pilot_core::TaskState::Merged | pilot_core::TaskState::Closed
-            ) && (now - t.updated_at) < INACTIVE_GRACE
+            ) && (now - t.closed_at.unwrap_or(t.updated_at)) < INACTIVE_GRACE
         })
         .unwrap_or(false);
     match mailbox {

@@ -243,6 +243,7 @@ mod tests {
             branch: Some("main".into()),
             base_branch: None,
             updated_at: fixed_time() - Duration::minutes(minutes_old),
+            closed_at: None,
             labels: vec![],
             reviewers: vec![],
             assignees: vec![],

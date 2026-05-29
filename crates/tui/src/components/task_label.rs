@@ -62,6 +62,7 @@ mod tests {
             branch: None,
             base_branch: None,
             updated_at: Utc::now(),
+            closed_at: None,
             labels: vec![],
             reviewers: vec![],
             assignees: vec![],

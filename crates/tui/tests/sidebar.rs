@@ -53,6 +53,7 @@ fn make_task(repo: &str, key: &str, updated: DateTime<Utc>) -> Task {
         branch: Some("main".into()),
         base_branch: None,
         updated_at: updated,
+        closed_at: None,
         labels: vec![],
         reviewers: vec![],
         assignees: vec![],

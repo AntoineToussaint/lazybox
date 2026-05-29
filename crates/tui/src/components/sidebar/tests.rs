@@ -53,6 +53,7 @@ mod status_pill_tests {
             branch: Some("b".into()),
             base_branch: None,
             updated_at: chrono::Utc::now(),
+            closed_at: None,
             labels: vec![],
             reviewers: vec![],
             assignees: vec![],
@@ -680,6 +681,44 @@ mod mailbox_membership_tests {
         let w = ws_with_updated_at(Some(TaskState::Merged), now - Duration::hours(2));
         assert!(!mailbox_membership(&w, Mailbox::Inbox, now, false));
         assert!(mailbox_membership(&w, Mailbox::Inactive, now, false));
+    }
+
+    /// Regression for #96. A merged PR keeps drawing activity after
+    /// the merge — branch deletion, the auto-close comment on linked
+    /// issues, deploy/CI statuses — and GitHub bumps `updated_at`
+    /// each time. The grace window must clock off the stable
+    /// `closed_at`, so a long-merged PR stays OUT of the Inbox even
+    /// when it was touched seconds ago.
+    #[test]
+    fn merged_pr_with_recent_activity_still_leaves_inbox() {
+        let now = Utc::now();
+        // `updated_at` a minute ago (fresh activity), but merged 2h ago.
+        let mut w = ws_with_updated_at(Some(TaskState::Merged), now - Duration::minutes(1));
+        if let Some(pr) = w.pr.as_mut() {
+            pr.closed_at = Some(now - Duration::hours(2));
+        }
+        assert!(
+            !mailbox_membership(&w, Mailbox::Inbox, now, false),
+            "a long-merged PR must stay out of Inbox despite recent activity",
+        );
+        assert!(mailbox_membership(&w, Mailbox::Inactive, now, false));
+    }
+
+    /// The flip side: a just-merged PR shows in the Inbox grace
+    /// window even when `updated_at` is stale (last polled hours ago,
+    /// then merged on GitHub between polls). The grace clock is
+    /// `closed_at`, not `updated_at`.
+    #[test]
+    fn freshly_merged_pr_in_grace_clocks_off_closed_at() {
+        let now = Utc::now();
+        let mut w = ws_with_updated_at(Some(TaskState::Merged), now - Duration::hours(2));
+        if let Some(pr) = w.pr.as_mut() {
+            pr.closed_at = Some(now - Duration::minutes(5));
+        }
+        assert!(
+            mailbox_membership(&w, Mailbox::Inbox, now, false),
+            "a just-merged PR must show in the Inbox grace window",
+        );
     }
 
     #[test]

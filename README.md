@@ -26,7 +26,7 @@ pilot without disturbing your main inbox.
 ```sh
 git clone https://github.com/AntoineToussaint/pilot.git
 cd pilot
-make setup           # one-shot: download pinned zig 0.15.2 to vendor/zig/
+make setup           # one-shot: download pinned zig 0.15.2 to ~/.cache/pilot/zig/
 make run             # build + run
 ```
 
@@ -55,10 +55,13 @@ make dev-fresh    # wipe ~/.pilot-dev first
 tmux socket — so the two instances share zero state.
 
 **What `make setup` does:**
-- Downloads zig 0.15.2 into `vendor/zig/<host>/`. The Rust bindings
-  are vendored under `crates/libghostty-vt*/`, but the underlying
-  ghostty Zig sources are fetched at build time from
-  github.com/ghostty-org/ghostty (pinned commit).
+- Downloads zig 0.15.2 into a host-level cache (`~/.cache/pilot/zig/<host>/`,
+  override with `PILOT_ZIG_CACHE`). Caching it outside the checkout
+  means every clone and git worktree shares one download instead of
+  each re-fetching ~45MB. The Rust bindings are vendored under
+  `crates/libghostty-vt*/`, but the underlying ghostty Zig sources are
+  fetched at build time from github.com/ghostty-org/ghostty (pinned
+  commit).
 - Verifies `cargo` and `gh` are on PATH.
 
 **Prerequisites:** Rust 1.85+, a C compiler (for bundled SQLite),

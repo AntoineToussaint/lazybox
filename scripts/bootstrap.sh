@@ -2,9 +2,12 @@
 # Bootstrap pilot's build environment.
 #
 # Idempotent. Installs:
-#   - zig 0.15.2 to vendor/zig/<host>/. Used by libghostty's build.zig
+#   - zig 0.15.2 to a HOST-LEVEL cache (default ~/.cache/pilot/zig/,
+#     override with PILOT_ZIG_CACHE). Used by libghostty's build.zig
 #     (which rejects zig >= 0.16). The Makefile prepends this to PATH
-#     so any system zig is ignored.
+#     so any system zig is ignored. Caching outside the checkout means
+#     every clone and git worktree shares one download instead of each
+#     re-fetching ~45MB into its own vendor/zig/.
 #
 # libghostty-rs is vendored under crates/libghostty-vt* — no separate
 # clone needed.
@@ -15,8 +18,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VENDOR="${ROOT}/vendor"
 ZIG_VERSION="0.15.2"
+# Shared cache root, overridable. Keep this default in lockstep with
+# the Makefile's `ZIG_CACHE` so `make build`/`run` (which compute the
+# pinned PATH themselves) find what `make setup` downloaded here.
+ZIG_CACHE="${PILOT_ZIG_CACHE:-${HOME}/.cache/pilot/zig}"
 
 # ── Detect host ─────────────────────────────────────────────────────────
 case "$(uname -s)" in
@@ -32,8 +38,19 @@ esac
 host="${arch}-${os}"
 
 # ── Install zig 0.15.2 ──────────────────────────────────────────────────
-zig_dir="${VENDOR}/zig/${host}-${ZIG_VERSION}"
+zig_dir="${ZIG_CACHE}/${host}-${ZIG_VERSION}"
 zig_bin="${zig_dir}/zig"
+
+# Migrate a pre-existing in-repo install (the old vendor/zig/ layout)
+# into the shared cache so current checkouts don't re-download. Only
+# moves when the cache slot is empty and the legacy binary is intact.
+legacy_dir="${ROOT}/vendor/zig/${host}-${ZIG_VERSION}"
+if [ ! -x "${zig_bin}" ] && [ -x "${legacy_dir}/zig" ]; then
+  echo "migrating zig ${ZIG_VERSION} from ${legacy_dir} → ${zig_dir}"
+  mkdir -p "${ZIG_CACHE}"
+  mv "${legacy_dir}" "${zig_dir}"
+  rmdir "${ROOT}/vendor/zig" "${ROOT}/vendor" 2>/dev/null || true
+fi
 
 if [ -x "${zig_bin}" ]; then
   echo "zig ${ZIG_VERSION}: already at ${zig_bin}"
@@ -47,7 +64,7 @@ else
   # `$(PINNED_PATH)` then falls through to system zig, which on
   # macOS Homebrew is 0.16 and rejects ghostty's `requireZig(0.15.2)`.
   rm -rf "${zig_dir}"
-  mkdir -p "${VENDOR}/zig"
+  mkdir -p "${ZIG_CACHE}"
   url="https://ziglang.org/download/${ZIG_VERSION}/zig-${arch}-${os}-${ZIG_VERSION}.tar.xz"
   tmp="$(mktemp -d)"
   trap "rm -rf ${tmp}" EXIT

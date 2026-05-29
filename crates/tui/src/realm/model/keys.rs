@@ -837,7 +837,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // when the event should be dropped entirely (reverse
                 // mid-burst).
                 let raw_up = matches!(m.kind, MouseEventKind::ScrollUp);
-                let scaled = self.dampen_scroll_step(raw_up, m);
+                let scaled = self.dampen_scroll_step(raw_up);
                 if scaled == 0 {
                     return;
                 }

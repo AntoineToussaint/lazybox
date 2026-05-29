@@ -976,34 +976,45 @@ impl<T: TerminalAdapter> Model<T> {
     /// rows past where the user wanted, and reversing mid-flick
     /// fights the queued events instead of cancelling them.
     ///
-    /// Behaviour:
-    /// - Fresh burst (no prior scroll, or > `BURST_IDLE` since the
-    ///   last event): full STEP, count starts at 1.
-    /// - Sustained same-direction burst: STEP decays — 5 → 3 at
-    ///   event 5, → 1 at event 8, then events past `STOP_AT` are
-    ///   dropped entirely so the OS momentum tail stops the view
-    ///   within ~200 ms instead of trickling for the full 1–2 s.
-    /// - Direction reversal mid-burst: real momentum never reverses,
-    ///   so a reverse-flick is unambiguous user intent. Admit
-    ///   immediately at full STEP (starting a fresh opposite-direction
-    ///   burst) instead of swallowing the press.
+    /// A burst is a run of same-direction events arriving within
+    /// `MOMENTUM_GAP` of each other — i.e. one uninterrupted OS
+    /// momentum stream. Behaviour:
+    /// - OS momentum tail (the run keeps coming at the ~16 ms frame
+    ///   cadence): STEP decays — 5 → 3 at event 5, → 1 at event 8,
+    ///   then events past `STOP_AT` are dropped entirely so the tail
+    ///   stops the view within ~200 ms instead of trickling for the
+    ///   full 1–2 s.
+    /// - Anything that breaks the run — the first scroll, a direction
+    ///   reversal, or a deliberate tick spaced wider than
+    ///   `MOMENTUM_GAP` — starts a fresh burst at full STEP. This is
+    ///   what keeps sustained manual scrolling from decaying into the
+    ///   hard stop and getting silently dropped (#86), and what lets a
+    ///   reverse-flick cancel queued inertia instead of being
+    ///   swallowed.
     ///
     /// The returned isize is always the **magnitude** (positive) of
     /// the scroll step; sign is applied by the caller using
-    /// `raw_up`. `0` means "drop this event."
-    pub(crate) fn dampen_scroll_step(
-        &mut self,
-        is_up: bool,
-        _ev: crossterm::event::MouseEvent,
-    ) -> isize {
-        use std::time::Instant;
+    /// `raw_up`. `0` means "drop this event" and only ever happens to
+    /// the tail of a genuine momentum fling.
+    pub(crate) fn dampen_scroll_step(&mut self, is_up: bool) -> isize {
+        self.dampen_scroll_step_at(is_up, std::time::Instant::now())
+    }
+
+    /// Core of [`Self::dampen_scroll_step`] with the clock injected so
+    /// tests can drive precise inter-event cadences without sleeping.
+    fn dampen_scroll_step_at(&mut self, is_up: bool, now: std::time::Instant) -> isize {
         const STEP_INITIAL: isize = 5;
         const STEP_MID: isize = 3;
         const STEP_TAIL: isize = 1;
-        /// Idle time after which we treat the next event as a fresh
-        /// gesture. macOS inertia events arrive ~16ms apart; 250ms
-        /// is a generous gap that survives a brief stall.
-        const BURST_IDLE: std::time::Duration = std::time::Duration::from_millis(250);
+        /// Max gap between two events for the second to count as a
+        /// continuation of the same OS momentum stream. Inertia events
+        /// arrive at the ~16 ms frame cadence; 60 ms clears that with
+        /// margin while staying well under the spacing of hand-driven
+        /// ticks. A wider gap — a reversal, a deliberate tick, or the
+        /// first scroll in a while — starts a fresh burst at full step,
+        /// so sustained manual scrolling never accumulates toward the
+        /// hard stop and gets dropped (#86).
+        const MOMENTUM_GAP: std::time::Duration = std::time::Duration::from_millis(60);
         /// Within a burst, the step drops at these counts.
         const DECAY_AT: u32 = 5;
         const TAIL_AT: u32 = 8;
@@ -1013,37 +1024,18 @@ impl<T: TerminalAdapter> Model<T> {
         /// window with one frame of slack.
         const STOP_AT: u32 = 12;
 
-        let now = Instant::now();
         let new_dir: i8 = if is_up { -1 } else { 1 };
 
-        // Stale state → fresh burst. `saturating_duration_since`
-        // belts-and-braces against a non-monotonic clock; with
-        // `std::time::Instant` it never actually saturates.
-        let burst = self
-            .scroll_inertia
-            .filter(|s| now.saturating_duration_since(s.last_at) < BURST_IDLE);
+        // A scroll only continues the live momentum stream if it runs
+        // in the same direction AND lands within the frame cadence.
+        // `saturating_duration_since` is belts-and-braces against a
+        // non-monotonic clock; with `std::time::Instant` it never
+        // actually saturates.
+        let continues = self.scroll_inertia.filter(|s| {
+            s.dir == new_dir && now.saturating_duration_since(s.last_at) <= MOMENTUM_GAP
+        });
 
-        match burst {
-            None => {
-                self.scroll_inertia = Some(ScrollInertia {
-                    dir: new_dir,
-                    count: 1,
-                    last_at: now,
-                });
-                STEP_INITIAL
-            }
-            Some(s) if s.dir != new_dir => {
-                // Real momentum never reverses — a reverse-flick is
-                // unambiguous user intent. Start a fresh burst in
-                // the new direction and admit immediately at full
-                // step instead of swallowing the press.
-                self.scroll_inertia = Some(ScrollInertia {
-                    dir: new_dir,
-                    count: 1,
-                    last_at: now,
-                });
-                STEP_INITIAL
-            }
+        match continues {
             Some(mut s) => {
                 s.count = s.count.saturating_add(1);
                 s.last_at = now;
@@ -1058,6 +1050,14 @@ impl<T: TerminalAdapter> Model<T> {
                 };
                 self.scroll_inertia = Some(s);
                 step
+            }
+            None => {
+                self.scroll_inertia = Some(ScrollInertia {
+                    dir: new_dir,
+                    count: 1,
+                    last_at: now,
+                });
+                STEP_INITIAL
             }
         }
     }

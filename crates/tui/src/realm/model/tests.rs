@@ -198,58 +198,74 @@ mod effects_tests {
         assert!(m.active_removal_prompt.is_none());
     }
 
-    /// Helper for the scroll damper tests: build a dummy mouse
-    /// event. The damper only inspects `is_up` (passed separately)
-    /// + the timestamps it reads via `Instant::now()`, so the
-    /// per-event mouse data doesn't matter.
-    fn dummy_wheel() -> crossterm::event::MouseEvent {
-        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-        MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        }
-    }
+    /// Inter-event cadence of the OS momentum stream (~16 ms frame
+    /// rate). Gaps this tight accumulate the burst toward the hard
+    /// stop.
+    const MOMENTUM_GAP: std::time::Duration = std::time::Duration::from_millis(16);
+    /// Inter-event cadence of deliberate hand-driven ticks, wider than
+    /// the damper's 60 ms momentum threshold — each one restarts the
+    /// burst.
+    const USER_GAP: std::time::Duration = std::time::Duration::from_millis(120);
 
-    /// Fresh gesture (no prior scroll) returns the full STEP.
+    /// Fresh gesture (no prior scroll) returns the full STEP. Exercises
+    /// the public wrapper that reads the real clock.
     #[test]
     fn dampen_scroll_step_fresh_gesture_returns_initial_step() {
         let mut m = build_model();
-        assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 5);
+        assert_eq!(m.dampen_scroll_step(false), 5);
     }
 
-    /// Sustained same-direction burst decays the step. Events 1-4
-    /// stay at full STEP (5), events 5-7 drop to MID (3), events
-    /// 8-11 drop to TAIL (1), event 12+ is dropped entirely (0).
+    /// A momentum stream (tight ~16 ms cadence) decays the step.
+    /// Events 1-4 stay at full STEP (5), events 5-7 drop to MID (3),
+    /// events 8-11 drop to TAIL (1).
     #[test]
-    fn dampen_scroll_step_decays_within_sustained_burst() {
+    fn dampen_scroll_step_decays_within_momentum_stream() {
         let mut m = build_model();
-        for _ in 0..4 {
-            assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 5);
+        let base = std::time::Instant::now();
+        let at = |n: u32| base + MOMENTUM_GAP * n;
+        for i in 0..4 {
+            assert_eq!(m.dampen_scroll_step_at(false, at(i)), 5);
         }
-        for _ in 0..3 {
-            assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 3);
+        for i in 4..7 {
+            assert_eq!(m.dampen_scroll_step_at(false, at(i)), 3);
         }
-        for _ in 0..4 {
-            assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 1);
+        for i in 7..11 {
+            assert_eq!(m.dampen_scroll_step_at(false, at(i)), 1);
         }
     }
 
-    /// Past `STOP_AT` (event 12) the dampener returns 0, killing the
-    /// OS momentum tail so the view actually stops within the
+    /// Past `STOP_AT` (event 12) a momentum stream returns 0, killing
+    /// the OS momentum tail so the view actually stops within the
     /// issue's 100–200 ms acceptance window instead of trickling
     /// onward at STEP=1 for the full 1–2 s tail.
     #[test]
-    fn dampen_scroll_step_hard_stops_past_stop_at() {
+    fn dampen_scroll_step_momentum_tail_hard_stops_past_stop_at() {
         let mut m = build_model();
+        let base = std::time::Instant::now();
         // Saturate the burst (11 events still admit at TAIL=1).
-        for _ in 0..11 {
-            let _ = m.dampen_scroll_step(false, dummy_wheel());
+        for i in 0..11 {
+            let _ = m.dampen_scroll_step_at(false, base + MOMENTUM_GAP * i);
         }
         // Event 12 onwards: dropped.
-        for _ in 0..30 {
-            assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 0);
+        for i in 11..41 {
+            assert_eq!(m.dampen_scroll_step_at(false, base + MOMENTUM_GAP * i), 0);
+        }
+    }
+
+    /// Regression for #86: deliberate ticks spaced wider than the
+    /// momentum cadence must never decay or drop. Each tick restarts
+    /// the burst, so even 40 sustained scrolls keep returning the full
+    /// step — only the OS momentum tail is allowed to stop.
+    #[test]
+    fn dampen_scroll_step_sustained_user_ticks_never_drop() {
+        let mut m = build_model();
+        let base = std::time::Instant::now();
+        for i in 0..40 {
+            assert_eq!(
+                m.dampen_scroll_step_at(false, base + USER_GAP * i),
+                5,
+                "user tick {i} must stay at full step, never decay or drop",
+            );
         }
     }
 
@@ -261,14 +277,15 @@ mod effects_tests {
     #[test]
     fn dampen_scroll_step_direction_reversal_admits_immediately() {
         let mut m = build_model();
-        for _ in 0..6 {
-            let _ = m.dampen_scroll_step(false, dummy_wheel());
+        let base = std::time::Instant::now();
+        for i in 0..6 {
+            let _ = m.dampen_scroll_step_at(false, base + MOMENTUM_GAP * i);
         }
         // Reverse: admit at full step (no dropped event).
-        assert_eq!(m.dampen_scroll_step(true, dummy_wheel()), 5);
+        assert_eq!(m.dampen_scroll_step_at(true, base + MOMENTUM_GAP * 6), 5);
         // The reversal also restarts the burst, so the next
         // same-direction event stays at full step.
-        assert_eq!(m.dampen_scroll_step(true, dummy_wheel()), 5);
+        assert_eq!(m.dampen_scroll_step_at(true, base + MOMENTUM_GAP * 7), 5);
     }
 
     /// Reverse-flick rescues a saturated burst — after the hard stop
@@ -278,25 +295,25 @@ mod effects_tests {
     #[test]
     fn dampen_scroll_step_reverse_admits_after_hard_stop() {
         let mut m = build_model();
-        for _ in 0..20 {
-            let _ = m.dampen_scroll_step(false, dummy_wheel());
+        let base = std::time::Instant::now();
+        for i in 0..20 {
+            let _ = m.dampen_scroll_step_at(false, base + MOMENTUM_GAP * i);
         }
-        assert_eq!(m.dampen_scroll_step(true, dummy_wheel()), 5);
+        assert_eq!(m.dampen_scroll_step_at(true, base + MOMENTUM_GAP * 20), 5);
     }
 
-    /// After `BURST_IDLE` of inactivity, the next event is treated
-    /// as a fresh gesture. We can't time-travel without injecting a
-    /// clock, but we can prove the freshness path indirectly: a
-    /// burst built up then explicitly cleared (None) returns to
-    /// full step on the next event.
+    /// A long idle resets a saturated burst: after a momentum stream
+    /// has decayed to the hard stop, the next event past the pause is
+    /// a fresh gesture at full step.
     #[test]
-    fn dampen_scroll_step_after_explicit_clear_starts_fresh() {
+    fn dampen_scroll_step_resets_after_idle() {
         let mut m = build_model();
-        for _ in 0..10 {
-            let _ = m.dampen_scroll_step(false, dummy_wheel());
+        let base = std::time::Instant::now();
+        for i in 0..15 {
+            let _ = m.dampen_scroll_step_at(false, base + MOMENTUM_GAP * i);
         }
-        m.scroll_inertia = None;
-        assert_eq!(m.dampen_scroll_step(false, dummy_wheel()), 5);
+        let after_idle = base + MOMENTUM_GAP * 14 + std::time::Duration::from_millis(300);
+        assert_eq!(m.dampen_scroll_step_at(false, after_idle), 5);
     }
 
     /// Returning to the terminal pane with a single click restores the

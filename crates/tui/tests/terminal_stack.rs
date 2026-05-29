@@ -235,6 +235,108 @@ fn set_active_session_resets_tab_idx() {
     assert_eq!(t.active_tab_idx(), 0, "reset on session change");
 }
 
+#[test]
+fn agents_order_before_shells_regardless_of_spawn_order() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    // Shell spawns first (lower id), agent second — agent must still
+    // land on the far left.
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.on_event(&spawned(2, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.on_event(&spawned(3, "o/r#1", TerminalKind::Shell));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    assert_eq!(
+        t.visible_terminals(),
+        vec![TerminalId(2), TerminalId(1), TerminalId(3)],
+        "agent first, then shells by id"
+    );
+}
+
+#[test]
+fn returning_to_session_restores_last_focused_pane() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
+    t.on_event(&spawned(3, "o/r#2", TerminalKind::Shell));
+
+    t.set_active_session(Some(sk("o/r#1")));
+    // Focus the shell (tab 1) in the first workspace.
+    t.set_active_tab(1);
+    assert_eq!(t.active_terminal_id(), Some(TerminalId(2)));
+
+    // Leave for another workspace, then come back.
+    t.set_active_session(Some(sk("o/r#2")));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    assert_eq!(
+        t.active_terminal_id(),
+        Some(TerminalId(2)),
+        "focus returns to the shell, not the first pane"
+    );
+}
+
+#[test]
+fn restored_focus_tracks_terminal_not_index() {
+    // The remembered pane is keyed by terminal id, so a reorder of the
+    // visible set (here: an agent spawning to the left after we leave)
+    // doesn't drag focus onto a different terminal.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
+    t.on_event(&spawned(9, "o/r#2", TerminalKind::Shell));
+
+    t.set_active_session(Some(sk("o/r#1")));
+    t.set_active_tab(1); // focus shell id 2 (tab 1)
+    assert_eq!(t.active_terminal_id(), Some(TerminalId(2)));
+
+    t.set_active_session(Some(sk("o/r#2")));
+    // A late-arriving agent jumps to the far left of o/r#1, shifting
+    // every shell's index by one.
+    t.on_event(&spawned(5, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    assert_eq!(
+        t.active_terminal_id(),
+        Some(TerminalId(2)),
+        "still focused on shell id 2 despite the index shift"
+    );
+}
+
+#[test]
+fn removed_workspace_forgets_its_remembered_focus() {
+    // Returning to a re-created workspace must not restore a pane from
+    // a previous incarnation — even when a fresh terminal happens to
+    // reuse the remembered id at a different position.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
+    t.on_event(&spawned(3, "o/r#2", TerminalKind::Shell));
+
+    t.set_active_session(Some(sk("o/r#1")));
+    t.set_active_tab(1); // focus shell id 2 (tab 1)
+    assert_eq!(t.active_terminal_id(), Some(TerminalId(2)));
+
+    // Leave (records o/r#1 -> id 2), then the workspace is removed.
+    t.set_active_session(Some(sk("o/r#2")));
+    t.on_event(&Event::WorkspaceRemoved(pilot_core::WorkspaceKey::new(
+        "o/r#1",
+    )));
+
+    // A new o/r#1 appears; id 2 is reused, this time as the shell that
+    // sorts to the right of the agent (tab 1). A stale memory would
+    // drag focus onto it.
+    t.on_event(&spawned(99, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    assert_eq!(t.active_tab_idx(), 0, "stale focus was forgotten");
+    assert_eq!(
+        t.active_terminal_id(),
+        Some(TerminalId(99)),
+        "fresh workspace lands on the first pane, not the reused id"
+    );
+}
+
 // ── Key routing ────────────────────────────────────────────────────────
 
 #[test]

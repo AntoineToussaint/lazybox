@@ -173,6 +173,12 @@ pub struct TerminalStack {
     /// Cleared at the start of every render so removed terminals
     /// don't leave stale hit targets.
     tab_strip_hits: Vec<(usize, std::ops::Range<u16>, u16)>,
+    /// Last-focused terminal per session. Recorded when we leave a
+    /// session so returning restores the pane the user was last on
+    /// instead of snapping back to the first. Keyed by terminal id
+    /// (not tab index) so it survives the agent-first reordering of
+    /// `visible_terminals`.
+    last_focused: HashMap<SessionKey, TerminalId>,
 }
 
 /// Direction of a pending split. `Vertical` = `|` = side-by-side =
@@ -540,6 +546,7 @@ impl TerminalStack {
             pending_split: None,
             pending_resizes: Vec::new(),
             tab_strip_hits: Vec::new(),
+            last_focused: HashMap::new(),
         }
     }
 
@@ -609,29 +616,42 @@ impl TerminalStack {
     }
 
     /// AppRoot calls this whenever the sidebar selection changes.
-    /// Also resets the active tab to 0 so switching sessions doesn't
-    /// dump the user on a tab index that happens to still be valid
-    /// but represents a totally different terminal.
+    /// Restores the tab the user last focused in the session we're
+    /// entering (falling back to the first pane), and records where
+    /// focus was in the session we're leaving so a later return lands
+    /// on the same pane.
     pub fn set_active_session(&mut self, session: Option<SessionKey>) {
-        let changed = self.active_session != session;
-        if changed {
-            self.active_tab_idx = 0;
-            // Drop the user's explicit collapse override on session
-            // change — each session gets its own auto-default.
-            self.collapse_user_set = false;
+        if self.active_session == session {
+            return;
         }
-        self.active_session = session;
-        if changed {
-            self.auto_collapse_on_emptiness();
+        // Capture focus before the swap — `focused_terminal_id` reads
+        // the session we're leaving.
+        let focused = self.focused_terminal_id();
+        if let (Some(prev), Some(focused)) = (
+            std::mem::replace(&mut self.active_session, session),
+            focused,
+        ) {
+            self.last_focused.insert(prev, focused);
         }
+        self.active_tab_idx = self
+            .active_session
+            .as_ref()
+            .and_then(|sk| self.last_focused.get(sk).copied())
+            .and_then(|id| self.visible_terminals().iter().position(|t| *t == id))
+            .unwrap_or(0);
+        // Drop the user's explicit collapse override on session
+        // change — each session gets its own auto-default.
+        self.collapse_user_set = false;
+        self.auto_collapse_on_emptiness();
     }
 
     pub fn active_session(&self) -> Option<&SessionKey> {
         self.active_session.as_ref()
     }
 
-    /// TerminalIds visible in the current session, in stable order
-    /// (by u64 id so tab positions are deterministic).
+    /// TerminalIds visible in the current session, in stable order:
+    /// agents first (far left), then shells / log tails, ties broken
+    /// by u64 id so tab positions are deterministic.
     pub fn visible_terminals(&self) -> Vec<TerminalId> {
         let Some(sk) = &self.active_session else {
             return vec![];
@@ -642,7 +662,13 @@ impl TerminalStack {
             .filter(|(_, slot)| slot.session_key == *sk)
             .map(|(id, _)| *id)
             .collect();
-        ids.sort_by_key(|id| id.0);
+        ids.sort_by_key(|id| {
+            let agent = self
+                .terminals
+                .get(id)
+                .is_some_and(|slot| matches!(slot.kind, TerminalKind::Agent(_)));
+            (!agent, id.0)
+        });
         ids
     }
 
@@ -1557,6 +1583,10 @@ impl TerminalStack {
                 let key_str = workspace_key.as_str();
                 self.terminals
                     .retain(|_, slot| slot.session_key.as_str() != key_str);
+                // Forget remembered focus for the gone workspace so a
+                // re-created one with the same key starts fresh instead
+                // of restoring a pane from a previous incarnation.
+                self.last_focused.retain(|sk, _| sk.as_str() != key_str);
                 self.clamp_active_tab();
                 self.auto_collapse_on_emptiness();
             }

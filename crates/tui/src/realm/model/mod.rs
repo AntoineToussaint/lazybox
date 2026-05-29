@@ -254,6 +254,16 @@ pub struct Model<T: TerminalAdapter> {
     /// `Event::ProjectRemoved` drops entries. Stage 2 stores them
     /// here; stages 3+ render headers from this map.
     pub projects: std::collections::BTreeMap<pilot_core::ProjectKey, pilot_core::Project>,
+    /// Project keys *this client* synthesized from `selected_scopes`
+    /// in `refresh_subscribed_projects` — placeholder headers for
+    /// repos the user subscribed to that the daemon hasn't surfaced a
+    /// workspace for yet. Tracked apart from daemon-authoritative
+    /// projects so that when the user *unsubscribes* a repo we can drop
+    /// its placeholder (the daemon never had a record for it, so no
+    /// `ProjectRemoved` will ever arrive). A daemon `ProjectUpserted` /
+    /// `Snapshot` for the same key promotes it to authoritative and
+    /// removes it from this set — see `events.rs`.
+    synthesized_projects: std::collections::BTreeSet<pilot_core::ProjectKey>,
     /// IPC client for forwarding pane-emitted commands to the daemon.
     pub client: Client,
     /// Watches the inbound daemon-event channel depth after each
@@ -571,6 +581,7 @@ impl<T: TerminalAdapter> Model<T> {
             right: Right::new(RIGHT_PID),
             terminals: Terminals::new(TERMINALS_PID),
             projects: std::collections::BTreeMap::new(),
+            synthesized_projects: std::collections::BTreeSet::new(),
             client,
             event_backlog: helpers::BacklogMonitor::default(),
             redraw: true,
@@ -891,7 +902,10 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(p) = &self.setup.persisted else {
             return;
         };
-        let mut changed = false;
+        // The repo-level project keys the user is currently
+        // subscribed to, mapped to their display name (`owner/repo`).
+        let mut desired: std::collections::BTreeMap<pilot_core::ProjectKey, String> =
+            std::collections::BTreeMap::new();
         for set in p.selected_scopes.values() {
             for scope in set {
                 // `provider:owner/repo` → ProjectKey::github(owner,
@@ -912,14 +926,37 @@ impl<T: TerminalAdapter> Model<T> {
                     "linear" => pilot_core::ProjectKey::linear(rest),
                     _ => continue,
                 };
-                if !self.projects.contains_key(&pk) {
-                    self.projects.insert(
-                        pk.clone(),
-                        pilot_core::Project::new(pk, rest, chrono::Utc::now()),
-                    );
-                    changed = true;
-                }
+                desired.insert(pk, rest.to_string());
             }
+        }
+
+        let mut changed = false;
+        // Add a placeholder header for each freshly-subscribed repo.
+        for (pk, name) in &desired {
+            if !self.projects.contains_key(pk) {
+                self.projects.insert(
+                    pk.clone(),
+                    pilot_core::Project::new(pk.clone(), name.clone(), chrono::Utc::now()),
+                );
+                self.synthesized_projects.insert(pk.clone());
+                changed = true;
+            }
+        }
+        // Drop placeholders for repos the user just unsubscribed. Only
+        // remove keys WE synthesized — daemon-authoritative projects
+        // are owned by `ProjectUpserted` / `ProjectRemoved` and must
+        // survive a scope edit (a whole-org subscription surfaces repos
+        // we never placed here, and "no scopes" means "all").
+        let stale: Vec<pilot_core::ProjectKey> = self
+            .synthesized_projects
+            .iter()
+            .filter(|k| !desired.contains_key(*k))
+            .cloned()
+            .collect();
+        for pk in stale {
+            self.projects.remove(&pk);
+            self.synthesized_projects.remove(&pk);
+            changed = true;
         }
         if changed {
             self.sidebar.apply_projects(self.projects.clone());

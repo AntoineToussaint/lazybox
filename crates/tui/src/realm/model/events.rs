@@ -71,6 +71,10 @@ impl<T: TerminalAdapter> Model<T> {
         // updated map to the sidebar component.
         if let IpcEvent::ProjectUpserted(p) = &event {
             self.projects.insert(p.key.clone(), (**p).clone());
+            // Daemon owns this project now — stop treating it as a
+            // client-side placeholder so a later scope edit won't yank
+            // it out from under the daemon's `ProjectRemoved`.
+            self.synthesized_projects.remove(&p.key);
             self.sidebar.apply_projects(self.projects.clone());
             // Hand-off from Shift-N → CreateProject: the project
             // just landed in the sidebar, but its RepoHeader row
@@ -101,6 +105,7 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcEvent::Snapshot { projects, .. } = &event {
             for p in projects {
                 self.projects.insert(p.key.clone(), p.clone());
+                self.synthesized_projects.remove(&p.key);
             }
             self.sidebar.apply_projects(self.projects.clone());
         }

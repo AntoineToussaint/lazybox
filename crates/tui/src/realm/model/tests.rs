@@ -739,6 +739,106 @@ mod backlog_monitor_tests {
 }
 
 #[cfg(test)]
+mod subscribed_projects_tests {
+    //! `refresh_subscribed_projects` add/remove contract — the
+    //! placeholder headers pilot synthesizes for narrowed repo
+    //! subscriptions before the daemon surfaces a workspace.
+    use super::super::*;
+    use pilot_core::{PersistedSetup, Project, ProjectKey};
+    use pilot_ipc::{Event as IpcEvent, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn persisted_with_scopes(scopes: &[&str]) -> PersistedSetup {
+        let mut set = std::collections::BTreeSet::new();
+        for s in scopes {
+            set.insert((*s).to_string());
+        }
+        let mut selected_scopes = std::collections::BTreeMap::new();
+        selected_scopes.insert("github".to_string(), set);
+        PersistedSetup {
+            selected_scopes,
+            ..Default::default()
+        }
+    }
+
+    /// Subscribing to a narrowed repo synthesizes a placeholder
+    /// header; unsubscribing it removes the header again.
+    #[test]
+    fn unsubscribing_a_repo_drops_its_placeholder() {
+        let mut m = build_model();
+        let pk = ProjectKey::github("acme", "widget");
+
+        m.setup.persisted = Some(persisted_with_scopes(&["github:acme/widget"]));
+        m.refresh_subscribed_projects();
+        assert!(m.projects.contains_key(&pk), "placeholder should appear");
+
+        // User removes the repo scope.
+        m.setup.persisted = Some(persisted_with_scopes(&[]));
+        m.refresh_subscribed_projects();
+        assert!(
+            !m.projects.contains_key(&pk),
+            "placeholder should be removed once unsubscribed"
+        );
+    }
+
+    /// A daemon `ProjectUpserted` promotes the placeholder to an
+    /// authoritative record; a subsequent scope removal must NOT yank
+    /// it client-side — the daemon owns its lifecycle now.
+    #[test]
+    fn promoted_project_survives_scope_removal() {
+        let mut m = build_model();
+        let pk = ProjectKey::github("acme", "widget");
+
+        m.setup.persisted = Some(persisted_with_scopes(&["github:acme/widget"]));
+        m.refresh_subscribed_projects();
+
+        // Daemon finds a workspace → authoritative upsert.
+        m.handle_daemon_event(IpcEvent::ProjectUpserted(Box::new(Project::new(
+            pk.clone(),
+            "acme/widget",
+            chrono::Utc::now(),
+        ))));
+
+        // Scope removed, but the daemon-owned project stays put until
+        // the daemon broadcasts its own ProjectRemoved.
+        m.setup.persisted = Some(persisted_with_scopes(&[]));
+        m.refresh_subscribed_projects();
+        assert!(
+            m.projects.contains_key(&pk),
+            "daemon-authoritative project must not be dropped by a scope edit"
+        );
+    }
+
+    /// Whole-org subscriptions never synthesize a placeholder, so
+    /// org-discovered projects are left untouched by a refresh.
+    #[test]
+    fn org_level_scope_leaves_discovered_projects_alone() {
+        let mut m = build_model();
+        let discovered = ProjectKey::github("acme", "found-by-polling");
+        m.projects.insert(
+            discovered.clone(),
+            Project::new(
+                discovered.clone(),
+                "acme/found-by-polling",
+                chrono::Utc::now(),
+            ),
+        );
+
+        m.setup.persisted = Some(persisted_with_scopes(&["github:acme"]));
+        m.refresh_subscribed_projects();
+        assert!(
+            m.projects.contains_key(&discovered),
+            "whole-org discovered project must survive refresh"
+        );
+    }
+}
+
+#[cfg(test)]
 mod base64_tests {
     use super::super::helpers::base64_encode;
 

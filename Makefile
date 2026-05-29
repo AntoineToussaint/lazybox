@@ -29,11 +29,17 @@ else
   HOST_ARCH := unknown
 endif
 ZIG_VERSION := 0.15.2
+ZIG_SLUG := $(HOST_ARCH)-$(HOST_OS)-$(ZIG_VERSION)
 # Pinned zig lives in a HOST-LEVEL cache, not inside the checkout, so
 # every clone and worktree shares one download. Override the cache
 # root with `PILOT_ZIG_CACHE` (forwarded to bootstrap.sh by `setup`).
 ZIG_CACHE ?= $(HOME)/.cache/pilot/zig
-ZIG_DIR := $(ZIG_CACHE)/$(HOST_ARCH)-$(HOST_OS)-$(ZIG_VERSION)
+CACHE_ZIG_DIR := $(ZIG_CACHE)/$(ZIG_SLUG)
+# Resolve zig from either a per-worktree local install or the shared
+# cache. A local vendor/zig wins when present (lets a worktree pin its
+# own zig); otherwise use the cache `setup` populates.
+LOCAL_ZIG_DIR := vendor/zig/$(ZIG_SLUG)
+ZIG_DIR := $(if $(wildcard $(LOCAL_ZIG_DIR)/zig),$(LOCAL_ZIG_DIR),$(CACHE_ZIG_DIR))
 PINNED_PATH := $(abspath $(ZIG_DIR)):$(PATH)
 
 .PHONY: all setup build release run run-fresh run-test run-connect dev dev-fresh test lint clean distclean install help
@@ -113,9 +119,9 @@ install-hooks: ## Activate the in-tree .githooks/* (one-time per clone).
 clean: ## Clean cargo build artifacts (preserves the shared zig cache).
 	@cargo clean
 
-distclean: clean ## Clean cargo + the shared pinned-zig cache for this host.
-	@rm -rf vendor   # legacy in-repo location, if a stale one lingers
-	@rm -rf "$(ZIG_DIR)"
+distclean: clean ## Clean cargo + the local and shared pinned-zig installs for this host.
+	@rm -rf vendor   # per-worktree local install (and legacy layout)
+	@rm -rf "$(CACHE_ZIG_DIR)"
 
 install: release ## Install to ~/.cargo/bin.
 	@cp target/release/pilot ~/.cargo/bin/pilot

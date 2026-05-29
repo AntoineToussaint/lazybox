@@ -10,18 +10,19 @@
 
 set -euo pipefail
 
-# Honor pilot's pinned zig if present — same trick the Makefile uses
-# so anything the hook spawns picks up zig 0.15.2 instead of whatever
-# brew put on PATH (ghostty's build.zig rejects 0.16). `make setup`
-# drops the binary under a host-specific dir; glob for it rather than
-# assuming a fixed path. As of the shared-cache change that dir lives
-# in `${PILOT_ZIG_CACHE:-~/.cache/pilot/zig}/<arch>-<os>-<ver>/` (one
-# download shared across all worktrees); we still check the legacy
-# in-repo `vendor/zig/` so an un-migrated checkout keeps working.
+# Honor pilot's pinned zig if present — same resolution run.sh and the
+# Makefile use so anything the hook spawns picks up zig 0.15.2 instead
+# of whatever brew put on PATH (ghostty's build.zig rejects 0.16).
+# `make setup` drops the binary under a host-specific dir; glob for it
+# rather than assuming a fixed path. A per-worktree `vendor/zig/` wins
+# when present (a worktree can pin its own zig); otherwise fall back to
+# the shared cache at `${PILOT_ZIG_CACHE:-~/.cache/pilot/zig}/` (one
+# download shared across all worktrees).
 repo_root="$(git rev-parse --show-toplevel)"
 zig_cache="${PILOT_ZIG_CACHE:-${HOME}/.cache/pilot/zig}"
 zig_bin=""
-for root in "${zig_cache}" "${repo_root}/vendor/zig"; do
+for root in "${repo_root}/vendor/zig" "${zig_cache}"; do
+    [ -d "${root}" ] || continue
     zig_bin="$(find "${root}" -maxdepth 2 -name zig -type f 2>/dev/null | head -n1)"
     [ -n "${zig_bin}" ] && break
 done

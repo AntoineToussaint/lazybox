@@ -9,6 +9,10 @@
 #     every clone and git worktree shares one download instead of each
 #     re-fetching ~45MB into its own vendor/zig/.
 #
+#     Set PILOT_ZIG_LOCAL=1 to install into this worktree's vendor/zig/
+#     instead — run.sh and the Makefile prefer a local install over the
+#     shared cache when one is present.
+#
 # libghostty-rs is vendored under crates/libghostty-vt* — no separate
 # clone needed.
 #
@@ -23,6 +27,11 @@ ZIG_VERSION="0.15.2"
 # the Makefile's `ZIG_CACHE` so `make build`/`run` (which compute the
 # pinned PATH themselves) find what `make setup` downloaded here.
 ZIG_CACHE="${PILOT_ZIG_CACHE:-${HOME}/.cache/pilot/zig}"
+# PILOT_ZIG_LOCAL=1 installs into this worktree's vendor/zig/ instead
+# of the shared cache. run.sh and the Makefile prefer a local install.
+if [ "${PILOT_ZIG_LOCAL:-}" = "1" ]; then
+  ZIG_CACHE="${ROOT}/vendor/zig"
+fi
 
 # ── Detect host ─────────────────────────────────────────────────────────
 case "$(uname -s)" in

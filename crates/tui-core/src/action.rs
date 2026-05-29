@@ -501,9 +501,9 @@ impl ActionDef {
             },
             ActionKind::SelectRow => &Self {
                 kind: ActionKind::SelectRow,
-                default_keys: "v",
+                default_keys: "Space",
                 label: "select row",
-                describe: "Toggle the focused activity row in/out of the multi-select set.",
+                describe: "Toggle the focused activity row in/out of the multi-select set (also `v`).",
                 section: Section::Activity,
             },
             ActionKind::ToggleDescription => &Self {

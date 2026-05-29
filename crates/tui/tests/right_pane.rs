@@ -622,14 +622,34 @@ fn enter_toggles_collapse() {
 }
 
 #[test]
-fn space_toggles_collapse() {
+fn space_toggles_row_selection_not_collapse() {
+    // Space is the discoverable multi-select key (the list-UI
+    // convention) — it toggles the focused row's selection and must
+    // NOT collapse the section (that's Enter's job).
     let mut rp = RightPane::new(PaneId::new(1));
     rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 3)));
     rp.handle_key(
         KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
         &mut Vec::new(),
     );
-    assert!(rp.activity_collapsed());
+    assert!(
+        !rp.activity_collapsed(),
+        "Space must not collapse the section",
+    );
+    assert_eq!(
+        rp.selected_activity_indices(),
+        vec![0],
+        "Space selects the focused row",
+    );
+    // Pressing Space again deselects it.
+    rp.handle_key(
+        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        &mut Vec::new(),
+    );
+    assert!(
+        rp.selected_activity_indices().is_empty(),
+        "Space again deselects the focused row",
+    );
 }
 
 #[test]

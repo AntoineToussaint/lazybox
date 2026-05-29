@@ -705,6 +705,13 @@ impl RightPane {
         v
     }
 
+    /// Drop the multi-select set. Called after `w` consumes the
+    /// selection so the rows don't stay highlighted once the agent
+    /// has been spawned with them.
+    pub fn clear_activity_selection(&mut self) {
+        self.feed.clear_selection();
+    }
+
     fn render_header(&self, area: Rect, frame: &mut Frame) {
         let theme = crate::theme::current();
         let Some(workspace) = &self.workspace else {
@@ -1215,17 +1222,13 @@ impl RightPane {
     pub fn handle_key(&mut self, key: KeyEvent, cmds: &mut Vec<Command>) -> PaneOutcome {
         // Toggle keys work without a workspace too — collapse state is
         // owned by the pane, not the workspace.
-        match (key.code, key.modifiers) {
-            // `Enter` / `Space` toggle the activity section. The
-            // earlier `o` binding was a third synonym that the user
-            // flagged as clutter — `Enter` is universal, `Space` is
-            // a useful one-handed alternative; a third lowercase
-            // letter for the same action is just noise.
-            (KeyCode::Enter, _) | (KeyCode::Char(' '), KeyModifiers::NONE) => {
-                self.set_activity_collapsed(!self.activity_collapsed);
-                return PaneOutcome::Consumed;
-            }
-            _ => {}
+        // `Enter` toggles the activity section. `Space` is reserved
+        // for per-row multi-select (the list-UI convention) and
+        // handled further down once we know a workspace exists and
+        // the section is expanded.
+        if key.code == KeyCode::Enter {
+            self.set_activity_collapsed(!self.activity_collapsed);
+            return PaneOutcome::Consumed;
         }
 
         // `z` undoes the most recent auto-mark-read, regardless of
@@ -1304,11 +1307,14 @@ impl RightPane {
                 self.clamp_scroll_to_cursor();
                 PaneOutcome::Consumed
             }
-            // `v` toggles the focused activity row into / out of the
-            // selection set. `f` consumes the set (or the cursor row
-            // when it's empty) and spawns the default agent with a
-            // pre-built "address these comments" prompt.
-            (KeyCode::Char('v'), KeyModifiers::NONE) => {
+            // `Space` (and the vim-style `v`) toggle the focused
+            // activity row into / out of the selection set. `Space`
+            // is the discoverable convention surfaced in the hint
+            // bar; `v` stays for muscle memory. `w` then consumes the
+            // set (or the cursor row when it's empty) and spawns the
+            // default agent with a pre-built "address these comments"
+            // prompt.
+            (KeyCode::Char(' '), KeyModifiers::NONE) | (KeyCode::Char('v'), KeyModifiers::NONE) => {
                 if !workspace.activity.is_empty() {
                     let c = self.feed.cursor;
                     self.feed.toggle_select(c);

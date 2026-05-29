@@ -295,6 +295,13 @@ impl<T: TerminalAdapter> Model<T> {
                     if self.pending_refresh_ack {
                         self.pending_refresh_ack = false;
                         self.flash_info(format!("✓ sync ok — {count} tasks from {source}"));
+                    } else if self.sync_error_active {
+                        // Sync recovered on an auto-cycle: the previous
+                        // "✗ sync failed" banner is sticky (Permanent),
+                        // so clear it now that a poll succeeded — leaving
+                        // it up would falsely imply sync is still broken.
+                        self.sync_error_active = false;
+                        self.status.notice = None;
                     }
                     self.redraw = true;
                 }
@@ -319,7 +326,7 @@ impl<T: TerminalAdapter> Model<T> {
                     // worked.
                     if self.pending_refresh_ack {
                         self.pending_refresh_ack = false;
-                        self.flash_error(format!("✗ sync failed — {source}: {message}"));
+                        self.flash_sync_error(format!("✗ sync failed — {source}: {message}"));
                     }
                 }
                 _ => {}

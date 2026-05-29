@@ -305,6 +305,14 @@ pub struct Model<T: TerminalAdapter> {
     /// anything happen?"). Cleared on the next PollCompleted OR a
     /// ProviderError for the same source.
     pending_refresh_ack: bool,
+    /// `true` while the footer notice is a provider "✗ sync failed"
+    /// banner (Permanent severity, so it never auto-fades). Lets the
+    /// next successful `PollCompleted` clear the stale banner once
+    /// sync recovers — otherwise a transient failure left the red
+    /// notice up forever even though syncing was healthy again. Any
+    /// other `flash`/`flash_*` call resets it to `false`, so we only
+    /// clear the notice when it's still the sync-error we set.
+    sync_error_active: bool,
     /// Whether pilot is capturing mouse events. Toggled by F8 /
     /// Alt-s. When `false`, pilot has issued `DisableMouseCapture`
     /// so the host terminal regains native text selection (which
@@ -609,6 +617,7 @@ impl<T: TerminalAdapter> Model<T> {
             last_click: None,
             terminal_user_typed_since_focus: false,
             pending_refresh_ack: false,
+            sync_error_active: false,
             mouse_capture_on: true,
             terminal_selection: None,
             preselect: None,
@@ -1109,12 +1118,24 @@ impl<T: TerminalAdapter> Model<T> {
         );
     }
 
+    /// Like `flash_error`, but marks the notice as a provider
+    /// "sync failed" banner so the next successful `PollCompleted`
+    /// can clear it once sync recovers. See [`Self::sync_error_active`].
+    pub fn flash_sync_error(&mut self, msg: impl Into<String>) {
+        self.flash_error(msg);
+        self.sync_error_active = true;
+    }
+
     pub fn flash(
         &mut self,
         msg: impl Into<String>,
         severity: crate::realm::components::footer::NoticeSeverity,
     ) {
         use crate::realm::components::footer::Notice;
+        // Any fresh notice supersedes a sync-error banner, so the
+        // "clear on recovery" flag only stays armed while the
+        // sync-error notice is the one actually on screen.
+        self.sync_error_active = false;
         self.status.notice = Some(Notice::new(msg, severity));
         self.redraw = true;
     }

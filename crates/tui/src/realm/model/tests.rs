@@ -48,6 +48,44 @@ mod effects_tests {
         assert!(matches!(cmds[1], IpcCommand::Refresh));
     }
 
+    /// A manual-refresh sync failure paints a sticky "✗ sync failed"
+    /// banner; the next successful poll (auto-cycle) must clear it so
+    /// a recovered sync doesn't leave the red notice up forever.
+    #[test]
+    fn provider_error_banner_clears_on_next_successful_poll() {
+        use crate::realm::components::footer::NoticeSeverity;
+        use pilot_ipc::Event as IpcEvent;
+
+        let mut m = build_model();
+        // PollCompleted/ProviderError are only processed when the
+        // initial polling modal is gone.
+        m.status.polling = None;
+
+        // Simulate Shift-R, then a failing poll for that refresh.
+        m.pending_refresh_ack = true;
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: "github".into(),
+            message: "boom".into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+        assert!(m.sync_error_active, "sync error should be armed");
+        let n = m.status.notice.as_ref().expect("banner set");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("sync failed"));
+
+        // Sync recovers on a later auto-cycle (no pending ack).
+        m.handle_daemon_event(IpcEvent::PollCompleted {
+            source: "github".into(),
+            count: 3,
+        });
+        assert!(!m.sync_error_active, "flag cleared on recovery");
+        assert!(
+            m.status.notice.is_none(),
+            "stale sync-failed banner should be cleared"
+        );
+    }
+
     /// Empty body short-circuits — no command produced, the
     /// modal is still popped (internal state), and the pending
     /// reply target is cleared. The whitespace case is handled

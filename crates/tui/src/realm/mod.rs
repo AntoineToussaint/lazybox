@@ -45,3 +45,8 @@ pub mod user_event;
 
 pub use model::{Id, Model, Msg};
 pub use user_event::UserEvent;
+
+/// Two clicks on the same target within this window count as a
+/// double-click. Shared by the pane mouse router (`model::keys`) and
+/// the modal button handlers so they can't drift apart.
+pub(crate) const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(400);

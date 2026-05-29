@@ -16,6 +16,7 @@
 //! keeps mod.rs focused on the `Model` struct + its constructors.
 
 use super::{Model, PaneFocus};
+use crate::realm::UserEvent;
 use pilot_ipc::{Client, Event as IpcEvent};
 use std::time::Duration;
 use tuirealm::application::PollStrategy;
@@ -540,57 +541,18 @@ fn dispatch_event<T: TerminalAdapter>(model: &mut Model<T>, event: crossterm::ev
             if model.modal_stack.is_empty() {
                 model.handle_pane_key(realm_key);
             } else {
-                let _ = model.modal_event_tx.send(RealmEvent::Keyboard(realm_key));
-                // ChannelPort is polled by the listener thread every
-                // 10ms, so a tight 15ms window often expires before
-                // the listener delivers the event we just pushed —
-                // the keypress sits in the channel and isn't acted on
-                // until the user presses another key. The Confirm
-                // modal showed this loudly: "Y not responsive; Esc
-                // worked after a few tries".
-                //
-                // Poll in a short loop with a 150ms deadline so we
-                // keep checking until messages arrive or the user
-                // perceives latency. 150ms is well under the human-
-                // noticeable threshold for key feedback but long
-                // enough to absorb the 10ms listener cadence + jitter.
-                let deadline = std::time::Instant::now() + Duration::from_millis(150);
-                let mut handled = false;
-                loop {
-                    match model.app.tick(PollStrategy::Once(Duration::ZERO)) {
-                        Ok(messages) if !messages.is_empty() => {
-                            for msg in messages {
-                                model.update(msg);
-                            }
-                            handled = true;
-                            break;
-                        }
-                        Ok(_) => {}
-                        Err(_) => break,
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-                // After the first tick lands, drain anything else the
-                // modal pushed in the same window — a single tuirealm
-                // `Cmd` can fan out into multiple `Msg`s and we don't
-                // want them to straggle into the next keypress.
-                if handled && let Ok(messages) = model.app.tick(PollStrategy::Once(Duration::ZERO))
-                {
-                    for msg in messages {
-                        model.update(msg);
-                    }
-                }
-                // Modals can mutate internal state without producing a
-                // `Msg`, so force a redraw too.
-                model.redraw = true;
+                forward_to_modal(model, RealmEvent::Keyboard(realm_key));
             }
         }
         crossterm::event::Event::Mouse(m) => {
             if model.modal_stack.is_empty() {
                 model.handle_mouse(m);
+            } else if let Some(realm_mouse) = crossterm_mouse_to_realm(m) {
+                // A modal owns input — route button presses to it so
+                // its buttons respond to clicks. Only presses are
+                // forwarded; drag/move/scroll noise stays out of the
+                // modal's event queue.
+                forward_to_modal(model, RealmEvent::Mouse(realm_mouse));
             }
         }
         crossterm::event::Event::Paste(text) => {
@@ -610,8 +572,88 @@ fn dispatch_event<T: TerminalAdapter>(model: &mut Model<T>, event: crossterm::ev
     }
 }
 
+/// Push a modal-bound event into the `ChannelPort` and pump the
+/// `Application` until it produces a `Msg` (or a 150ms deadline lapses).
+///
+/// ChannelPort is polled by the listener thread every 10ms, so a tight
+/// window often expires before the listener delivers the event we just
+/// pushed — it would then sit in the channel and not be acted on until
+/// the next input. The Confirm modal showed this loudly: "Y not
+/// responsive; Esc worked after a few tries". 150ms is well under the
+/// human-noticeable threshold for input feedback but long enough to
+/// absorb the 10ms listener cadence + jitter.
+fn forward_to_modal<T: TerminalAdapter>(model: &mut Model<T>, event: RealmEvent<UserEvent>) {
+    let _ = model.modal_event_tx.send(event);
+    let deadline = std::time::Instant::now() + Duration::from_millis(150);
+    let mut handled = false;
+    loop {
+        match model.app.tick(PollStrategy::Once(Duration::ZERO)) {
+            Ok(messages) if !messages.is_empty() => {
+                for msg in messages {
+                    model.update(msg);
+                }
+                handled = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // After the first tick lands, drain anything else the modal pushed
+    // in the same window — a single tuirealm `Cmd` can fan out into
+    // multiple `Msg`s and we don't want them to straggle into the next
+    // input event.
+    if handled && let Ok(messages) = model.app.tick(PollStrategy::Once(Duration::ZERO)) {
+        for msg in messages {
+            model.update(msg);
+        }
+    }
+    // Modals can mutate internal state without producing a `Msg`, so
+    // force a redraw too.
+    model.redraw = true;
+}
+
+/// Translate crossterm's modifier bitflags into tuirealm's. Pilot only
+/// distinguishes Shift / Control / Alt — the rest (Super, Hyper, …) are
+/// dropped.
+fn convert_modifiers(m: crossterm::event::KeyModifiers) -> KeyModifiers {
+    use crossterm::event::KeyModifiers as CKM;
+    let mut out = KeyModifiers::empty();
+    out.set(KeyModifiers::SHIFT, m.contains(CKM::SHIFT));
+    out.set(KeyModifiers::CONTROL, m.contains(CKM::CONTROL));
+    out.set(KeyModifiers::ALT, m.contains(CKM::ALT));
+    out
+}
+
+/// Lift a crossterm mouse press into tuirealm's `MouseEvent`. Returns
+/// `None` for everything but button-down — modals only care about
+/// clicks, and forwarding drag/move/scroll would flood the channel.
+fn crossterm_mouse_to_realm(
+    m: crossterm::event::MouseEvent,
+) -> Option<tuirealm::event::MouseEvent> {
+    use crossterm::event::{MouseButton as CMB, MouseEventKind as CMK};
+    use tuirealm::event::{MouseButton as RMB, MouseEventKind as RMK};
+
+    let kind = match m.kind {
+        CMK::Down(CMB::Left) => RMK::Down(RMB::Left),
+        CMK::Down(CMB::Right) => RMK::Down(RMB::Right),
+        CMK::Down(CMB::Middle) => RMK::Down(RMB::Middle),
+        _ => return None,
+    };
+    Some(tuirealm::event::MouseEvent {
+        kind,
+        modifiers: convert_modifiers(m.modifiers),
+        column: m.column,
+        row: m.row,
+    })
+}
+
 fn crossterm_to_realm(key: crossterm::event::KeyEvent) -> RealmKey {
-    use crossterm::event::{KeyCode as CKC, KeyModifiers as CKM};
+    use crossterm::event::KeyCode as CKC;
     let code = match key.code {
         CKC::Char(c) => Key::Char(c),
         CKC::Enter => Key::Enter,
@@ -632,17 +674,7 @@ fn crossterm_to_realm(key: crossterm::event::KeyEvent) -> RealmKey {
         CKC::F(n) => Key::Function(n),
         _ => Key::Null,
     };
-    let mut mods = KeyModifiers::empty();
-    if key.modifiers.contains(CKM::SHIFT) {
-        mods |= KeyModifiers::SHIFT;
-    }
-    if key.modifiers.contains(CKM::CONTROL) {
-        mods |= KeyModifiers::CONTROL;
-    }
-    if key.modifiers.contains(CKM::ALT) {
-        mods |= KeyModifiers::ALT;
-    }
-    RealmKey::new(code, mods)
+    RealmKey::new(code, convert_modifiers(key.modifiers))
 }
 
 /// Write OSC 52 clipboard-set to the host terminal's stdout. The host

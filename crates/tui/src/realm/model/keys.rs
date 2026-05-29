@@ -702,15 +702,13 @@ impl<T: TerminalAdapter> Model<T> {
                             // click_to_select above so
                             // `toggle_repo_at_cursor` operates on
                             // the just-clicked header.
-                            const DOUBLE_CLICK_WINDOW: std::time::Duration =
-                                std::time::Duration::from_millis(400);
                             let is_double = matches!(button, crossterm::event::MouseButton::Left)
                                 && self
                                     .last_click
                                     .map(|(c, r, t)| {
                                         c == m.column
                                             && r == m.row
-                                            && t.elapsed() <= DOUBLE_CLICK_WINDOW
+                                            && t.elapsed() <= crate::realm::DOUBLE_CLICK_WINDOW
                                     })
                                     .unwrap_or(false);
                             if is_double && self.sidebar.cursor_on_repo_header() {
@@ -737,15 +735,13 @@ impl<T: TerminalAdapter> Model<T> {
                         let _ = button;
                     }
                     if focus == PaneFocus::Right {
-                        const DOUBLE_CLICK_WINDOW: std::time::Duration =
-                            std::time::Duration::from_millis(400);
                         let is_double = matches!(button, crossterm::event::MouseButton::Left)
                             && self
                                 .last_click
                                 .map(|(c, r, t)| {
                                     c == m.column
                                         && r == m.row
-                                        && t.elapsed() <= DOUBLE_CLICK_WINDOW
+                                        && t.elapsed() <= crate::realm::DOUBLE_CLICK_WINDOW
                                 })
                                 .unwrap_or(false);
                         let handled = if is_double {

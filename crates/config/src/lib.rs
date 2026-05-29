@@ -66,6 +66,10 @@ pub struct Config {
     /// Auto-spawn-on-`@pilot`-mention settings. See [`MentionConfig`].
     #[serde(default)]
     pub mention: MentionConfig,
+    /// Auto-inject fix work on CI failure / merge conflict. See
+    /// [`AutoFixConfig`]. Off by default.
+    #[serde(default)]
+    pub auto_fix: AutoFixConfig,
 }
 
 /// `setup:` block — wizard-driven user config. Mirrors
@@ -572,6 +576,79 @@ pub struct MentionConfig {
     pub allowed_logins: Vec<String>,
 }
 
+// ─── Auto-fix on CI failure / merge conflict ───────────────────────────────
+
+/// Auto-inject fix work when a PR you authored fails CI or develops a
+/// merge conflict — pilot spawns an agent pointed at the failure and
+/// posts a brief PR comment explaining why, no manual `@pilot` needed.
+///
+/// **Opt-in.** `enabled` defaults to `false`: this pushes commits to
+/// your PRs with no human nudge, so you turn it on deliberately. Only
+/// PRs you authored are ever touched, never a third party's.
+///
+/// ```yaml
+/// auto_fix:
+///   enabled: true
+///   max_attempts: 3       # per PR, per failure-kind, per window
+///   cooldown: 1h          # min gap between attempts on the same PR
+///   window: 24h           # rolling budget window
+///   opt_out_labels: [no-auto-fix, do-not-pilot]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoFixConfig {
+    /// Master switch. Default `false` (opt-in).
+    pub enabled: bool,
+    /// Labels that opt a PR out entirely (case-insensitive).
+    pub opt_out_labels: Vec<String>,
+    /// Max attempts per PR, per failure-kind, per `window`.
+    pub max_attempts: u32,
+    /// Minimum gap between two attempts on the same PR+kind.
+    #[serde(with = "humantime_serde")]
+    pub cooldown: Duration,
+    /// Rolling window the `max_attempts` budget is measured over.
+    #[serde(with = "humantime_serde")]
+    pub window: Duration,
+}
+
+impl Default for AutoFixConfig {
+    fn default() -> Self {
+        // Mirror `pilot_core::AutoFixSettings::default()` so the two
+        // can't drift; the conversion below is the single bridge.
+        let d = pilot_core::AutoFixSettings::default();
+        Self {
+            enabled: d.enabled,
+            opt_out_labels: d.opt_out_labels,
+            max_attempts: d.max_attempts,
+            cooldown: d.cooldown,
+            window: d.window,
+        }
+    }
+}
+
+/// Hard floor on the auto-fix cooldown. A cooldown shorter than the
+/// poll interval (default 60s) would let every sweep re-fire — spawning
+/// `max_attempts` agents and posting `max_attempts` comments within a
+/// couple of minutes. We clamp to this floor so an accidental small (or
+/// zero) `cooldown:` value can't turn into a comment storm; the
+/// max-attempts cap bounds it further.
+const MIN_AUTO_FIX_COOLDOWN: Duration = Duration::from_secs(60);
+
+impl AutoFixConfig {
+    /// Convert the YAML form into the runtime [`pilot_core::AutoFixSettings`]
+    /// the polling layer consumes. Clamps `cooldown` up to
+    /// `MIN_AUTO_FIX_COOLDOWN` so a too-small value can't spam.
+    pub fn to_settings(&self) -> pilot_core::AutoFixSettings {
+        pilot_core::AutoFixSettings {
+            enabled: self.enabled,
+            opt_out_labels: self.opt_out_labels.clone(),
+            max_attempts: self.max_attempts,
+            cooldown: self.cooldown.max(MIN_AUTO_FIX_COOLDOWN),
+            window: self.window,
+        }
+    }
+}
+
 // ─── Provider configs ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -875,6 +952,41 @@ repos:
         assert_eq!(m.placement, PlacementSpec::Above);
         let written = serde_yaml::to_string(&cfg).unwrap();
         assert!(written.contains("placement: above"));
+    }
+
+    #[test]
+    fn auto_fix_defaults_to_off_when_section_absent() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(!cfg.auto_fix.enabled, "auto-fix must be opt-in");
+        assert_eq!(cfg.auto_fix.max_attempts, 3);
+        // Default matches the core settings so the two can't drift.
+        assert_eq!(
+            cfg.auto_fix.to_settings(),
+            pilot_core::AutoFixSettings::default()
+        );
+    }
+
+    #[test]
+    fn auto_fix_round_trips() {
+        let yaml = r#"
+auto_fix:
+  enabled: true
+  max_attempts: 5
+  cooldown: 30m
+  window: 12h
+  opt_out_labels: [skip-pilot]
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        let s = cfg.auto_fix.to_settings();
+        assert!(s.enabled);
+        assert_eq!(s.max_attempts, 5);
+        assert_eq!(s.cooldown, Duration::from_secs(30 * 60));
+        assert_eq!(s.window, Duration::from_secs(12 * 3600));
+        assert_eq!(s.opt_out_labels, vec!["skip-pilot".to_string()]);
+        // Survives a serialize → reparse cycle.
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(reparsed.auto_fix.to_settings(), s);
     }
 
     #[test]

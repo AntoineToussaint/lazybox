@@ -132,6 +132,14 @@ impl MockBackend {
         map.get(key).map(|s| s.argv.clone())
     }
 
+    /// Every argv passed to `spawn()` so far, in no particular order.
+    /// For tests that drive a spawn through several layers and can't
+    /// easily predict the generated backend session key.
+    pub async fn all_argv(&self) -> Vec<Vec<String>> {
+        let map = self.inner.sessions.lock().await;
+        map.values().map(|s| s.argv.clone()).collect()
+    }
+
     /// Environment passed to `spawn()` for this session.
     pub async fn env_for(&self, key: &str) -> Option<Vec<(String, String)>> {
         let map = self.inner.sessions.lock().await;

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Context passed to `Agent::spawn` / `resume`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SpawnCtx {
     pub session_key: String,
     pub worktree: PathBuf,
@@ -685,10 +685,6 @@ pub mod builtins {
         }
     }
 
-    /// Quick-and-dirty ANSI stripper for state detection. We don't
-    /// need correctness for rendering (libghostty-vt does that) — just
-    /// enough to make pattern matches survive cursor moves and color
-    /// codes interleaved with the literal text.
     /// Detect Claude's ASCII selection-arrow at ANY numbered option:
     /// `> 0.`–`> 9.` or `> 0)`–`> 9)`.
     ///

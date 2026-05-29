@@ -22,6 +22,7 @@
 //! `last_viewed_at` all survive the poll. We do it inline here since
 //! there's only one place sessions enter the system.
 
+mod autofix;
 mod handlers;
 mod mutate;
 mod scheduler;
@@ -41,7 +42,7 @@ pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 use crate::ServerConfig;
 use chrono::Utc;
 use futures::FutureExt;
-use pilot_core::{ProviderConfig, Task, Workspace, WorkspaceKey};
+use pilot_core::{AutoFixKind, ProviderConfig, Task, Workspace, WorkspaceKey};
 use pilot_gh::GhClient;
 use pilot_ipc::Event;
 use pilot_linear::LinearClient;
@@ -200,6 +201,11 @@ pub struct GhSource {
     /// viewer's login added as a default when the YAML list is
     /// empty. Empty here disables the feature entirely.
     mention_allowed_logins: std::collections::BTreeSet<String>,
+    /// Auto-fix-on-failure settings, resolved by `sources_for` from
+    /// `config.yaml::auto_fix`. When `enabled` is false (the default)
+    /// the auto-fix scan is skipped entirely. See
+    /// `pilot_core::autofix`.
+    auto_fix: pilot_core::AutoFixSettings,
     /// Side channel for actions the source wants the polling tick to
     /// take after `fetch()` returns — today, auto-spawn requests
     /// triggered by `@pilot` mentions. Populated inside `fetch` and
@@ -263,6 +269,31 @@ pub enum ProviderAction {
         /// trace it back to a specific comment.
         reason: String,
     },
+    /// Auto-fix a PR that's failing CI or conflicting with its base.
+    /// Surfaced by the auto-fix scan (`evaluate_auto_fix`) during a
+    /// fetch; the dispatcher applies the stateful cooldown /
+    /// max-attempts guard, posts a brief PR comment, and spawns the
+    /// agent with `prompt`. The pure eligibility guards already ran in
+    /// the source; everything carried here is what the dispatcher
+    /// needs without re-deriving it from a `Task`.
+    AutoFixPr {
+        session_key: pilot_core::SessionKey,
+        agent_id: String,
+        prompt: Option<String>,
+        /// `owner/name` — for the PR comment.
+        repo: String,
+        /// PR number — for the PR comment.
+        pr_number: u64,
+        /// CI failure vs merge conflict: picks the comment wording and
+        /// namespaces the attempt counter.
+        kind: AutoFixKind,
+        /// Cooldown / max-attempts thresholds, carried from the
+        /// source so the dispatcher (which only has `&ServerConfig`)
+        /// doesn't have to reload config.
+        settings: pilot_core::AutoFixSettings,
+        /// Free-text reason for the trace log.
+        reason: String,
+    },
 }
 
 impl GhSource {
@@ -272,6 +303,7 @@ impl GhSource {
         scopes: std::collections::BTreeSet<String>,
         bus: tokio::sync::broadcast::Sender<Event>,
         mention_allowed_logins: std::collections::BTreeSet<String>,
+        auto_fix: pilot_core::AutoFixSettings,
         scheduling: RoundRobinPick,
     ) -> Self {
         Self {
@@ -280,6 +312,7 @@ impl GhSource {
             scopes,
             bus,
             mention_allowed_logins,
+            auto_fix,
             pending_actions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             scheduling,
             // Default to Full so a never-fetched source doesn't
@@ -310,6 +343,62 @@ impl GhSource {
             source: "github".into(),
             message,
         });
+    }
+
+    /// Scan freshly-fetched tasks for auto-fix triggers and queue an
+    /// [`ProviderAction::AutoFixPr`] for each eligible PR. Called from
+    /// BOTH `fetch_full` and `fetch_incremental` (unlike `@pilot`
+    /// mention scanning, which needs the full GraphQL comment tree) —
+    /// the CI / mergeable signals it reads live on every `Task`, so a
+    /// notifications-driven incremental fetch fires auto-fix just as
+    /// fast as a full sweep. The pure guards run here; the stateful
+    /// cooldown / max-attempts guard runs in `dispatch_action` (it
+    /// needs the store).
+    ///
+    /// Cheap no-op when the feature is disabled — the common case —
+    /// so callers can invoke it unconditionally.
+    fn queue_auto_fix_actions(&self, tasks: &[Task]) {
+        if !self.auto_fix.enabled {
+            return;
+        }
+        let mut queued = 0usize;
+        let mut pending = self
+            .pending_actions
+            .lock()
+            .expect("GhSource.pending_actions poisoned");
+        for task in tasks {
+            let Some(kind) = pilot_core::evaluate_auto_fix(task, &self.auto_fix) else {
+                continue;
+            };
+            // Need a repo + numeric PR id to comment + key the counter.
+            let Some(repo) = task.repo.clone() else {
+                continue;
+            };
+            let Some(pr_number) = task_number_from_key(&task.id.key) else {
+                continue;
+            };
+            let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(task));
+            let prompt = match kind {
+                AutoFixKind::CiFailure => pilot_core::prompts::build_fix_ci_prompt(task),
+                AutoFixKind::MergeConflict => pilot_core::prompts::build_fix_conflict_prompt(task),
+            };
+            let reason = format!("auto-fix ({}) on {repo}#{pr_number}", kind.describe());
+            tracing::info!(%reason, %session_key, "queued auto-fix");
+            pending.push(ProviderAction::AutoFixPr {
+                session_key,
+                agent_id: DEFAULT_AGENT_ID.to_string(),
+                prompt: Some(prompt),
+                repo,
+                pr_number,
+                kind,
+                settings: self.auto_fix.clone(),
+                reason,
+            });
+            queued += 1;
+        }
+        if queued > 0 {
+            self.emit_progress(format!("Queued {queued} auto-fix action(s)"));
+        }
     }
 
     /// Heavy `involves:USER` GraphQL sweep — the historical fetch path,
@@ -525,6 +614,10 @@ impl GhSource {
         );
         self.emit_progress(format!("{} tasks kept after filter", kept.len()));
 
+        // Auto-fix scan: queue fix-CI / resolve-conflict spawns for
+        // eligible PRs. Drained + dispatched alongside mention spawns.
+        self.queue_auto_fix_actions(&kept);
+
         // Mark sweep complete BEFORE returning so the next tick's
         // `should_full_sweep` check sees fresh data.
         self.client.mark_full_sweep_done();
@@ -634,6 +727,11 @@ impl GhSource {
             "{} task(s) refreshed via notifications",
             kept.len()
         ));
+        // Auto-fix fires on the fast path too: the CI / mergeable
+        // signals it reads are on every Task, so a notification-driven
+        // CI-failure flip kicks off a fix without waiting for the next
+        // full sweep.
+        self.queue_auto_fix_actions(&kept);
         log_rate_budget(&self.client);
         Ok(Some(kept))
     }
@@ -681,7 +779,16 @@ fn task_number_from_key(key: &str) -> Option<u64> {
 /// a second one. We rely on that rather than re-implementing the
 /// check here, so the auto-spawn path and the user-pressed `w` path
 /// have IDENTICAL semantics.
-async fn dispatch_action(config: &ServerConfig, source_name: &str, action: ProviderAction) {
+/// `gh` is the cached client for this tick (cloned from `TickState`),
+/// used by the auto-fix arm to post the "pilot is fixing…" PR comment.
+/// `None` when no GitHub source ran this tick — the comment is then
+/// skipped (best-effort), but the spawn still fires.
+async fn dispatch_action(
+    config: &ServerConfig,
+    source_name: &str,
+    gh: Option<&GhClient>,
+    action: ProviderAction,
+) {
     match action {
         ProviderAction::AutoSpawnAgent {
             session_key,
@@ -710,6 +817,132 @@ async fn dispatch_action(config: &ServerConfig, source_name: &str, action: Provi
                 true,
             )
             .await;
+        }
+        ProviderAction::AutoFixPr {
+            session_key,
+            agent_id,
+            prompt,
+            repo,
+            pr_number,
+            kind,
+            settings,
+            reason,
+        } => {
+            let term_kind = pilot_ipc::TerminalKind::Agent(agent_id.clone());
+            // If a fix agent is ALREADY running on this PR, let it
+            // finish — don't burn an attempt, post a duplicate "I'm
+            // fixing this" comment, or no-op-spawn on top of it. The
+            // trigger (red CI / conflict) persists across polls and a
+            // fix can take longer than the cooldown, so without this
+            // check a slow agent would silently exhaust the budget +
+            // spam the PR while it's actually still working. Uses the
+            // SAME singleton definition `handle_spawn` uses to collapse
+            // duplicate spawns, so the two stay consistent.
+            if let Some(existing) =
+                crate::spawn_handler::find_existing_singleton(config, &session_key, &term_kind)
+                    .await
+            {
+                tracing::info!(
+                    source = source_name,
+                    %session_key,
+                    ?kind,
+                    ?existing,
+                    "auto-fix: agent already running on this PR — skipping (no attempt burned)"
+                );
+                return;
+            }
+            // Stateful guard: cooldown + max-attempts, persisted so it
+            // survives restarts. Runs HERE (not in the source) because
+            // it needs the store, which `TaskSource::fetch` doesn't get.
+            let decision = autofix::check_and_record(
+                config.store.as_ref(),
+                session_key.as_str(),
+                kind,
+                &settings,
+                Utc::now(),
+            );
+            match decision {
+                autofix::AttemptDecision::Cooldown => {
+                    tracing::info!(
+                        source = source_name,
+                        %session_key,
+                        ?kind,
+                        "auto-fix within cooldown — skipping this sweep"
+                    );
+                }
+                autofix::AttemptDecision::Exhausted { notify } => {
+                    tracing::warn!(
+                        source = source_name,
+                        %session_key,
+                        ?kind,
+                        max = settings.max_attempts,
+                        "auto-fix budget exhausted — surfacing for manual attention"
+                    );
+                    if notify && let Some(gh) = gh {
+                        let opt_out = settings
+                            .opt_out_labels
+                            .first()
+                            .map(String::as_str)
+                            .unwrap_or("no-auto-fix");
+                        let hours = settings.window.as_secs() / 3600;
+                        let body = format!(
+                            "🛟 pilot hit its auto-fix limit on this PR \
+                             ({max} attempts at {what} in the last {hours}h) and is \
+                             backing off — this one needs a human. Push a fix yourself, \
+                             or add the `{opt_out}` label to silence auto-fix here.",
+                            max = settings.max_attempts,
+                            what = kind.describe(),
+                        );
+                        if let Err(e) = gh.post_issue_comment(&repo, pr_number, &body).await {
+                            tracing::warn!(
+                                "auto-fix: failed to post exhausted notice on {repo}#{pr_number}: {e}"
+                            );
+                        }
+                    }
+                }
+                autofix::AttemptDecision::Proceed { attempt, max } => {
+                    tracing::info!(
+                        source = source_name,
+                        %session_key,
+                        %agent_id,
+                        %reason,
+                        attempt,
+                        max,
+                        "auto-fixing PR (spawning agent)"
+                    );
+                    // Post the "why work just started" comment BEFORE
+                    // spawning so the user sees pilot's note even if the
+                    // agent races to push first. Best-effort: a failed
+                    // comment never blocks the fix.
+                    if let Some(gh) = gh {
+                        let body = format!(
+                            "🤖 pilot is {what} on this PR (auto-fix attempt {attempt}/{max}). \
+                             I'll push to this branch when it's sorted.",
+                            what = kind.describe(),
+                        );
+                        if let Err(e) = gh.post_issue_comment(&repo, pr_number, &body).await {
+                            tracing::warn!(
+                                "auto-fix: failed to post kickoff comment on {repo}#{pr_number}: {e}"
+                            );
+                        }
+                    }
+                    crate::spawn_handler::handle_spawn(
+                        config,
+                        session_key,
+                        None,
+                        term_kind,
+                        None,
+                        prompt,
+                        // Unattended auto-fix spawn — the agent has to
+                        // clear the first-run workspace-trust dialog on
+                        // the fresh worktree (else the injected fix
+                        // prompt lands in the trust chooser) and push a
+                        // fix without a human to approve its edits.
+                        true,
+                    )
+                    .await;
+                }
+            }
         }
     }
 }
@@ -1148,14 +1381,23 @@ pub async fn sources_for(
                         // viewer", which mirrors the design doc's MVP
                         // scope (only the local pilot user's own
                         // issues + comments count).
-                        let mut mention_allowed: std::collections::BTreeSet<String> =
-                            pilot_config::Config::load()
-                                .ok()
-                                .map(|c| c.mention.allowed_logins.into_iter().collect())
-                                .unwrap_or_default();
+                        // Load config ONCE for both the mention
+                        // allowlist and the auto-fix settings so we
+                        // don't read the YAML twice per tick.
+                        let cfg = pilot_config::Config::load().ok();
+                        let mut mention_allowed: std::collections::BTreeSet<String> = cfg
+                            .as_ref()
+                            .map(|c| c.mention.allowed_logins.iter().cloned().collect())
+                            .unwrap_or_default();
                         if mention_allowed.is_empty() && !viewer.is_empty() {
                             mention_allowed.insert(viewer.clone());
                         }
+                        // Auto-fix settings (off unless the user opted
+                        // in via `auto_fix.enabled: true`).
+                        let auto_fix = cfg
+                            .as_ref()
+                            .map(|c| c.auto_fix.to_settings())
+                            .unwrap_or_default();
                         // Round-robin scheduling. Pre-fetch we:
                         //   1. Prune stale cursor entries so repos
                         //      the user stopped touching age out
@@ -1199,6 +1441,7 @@ pub async fn sources_for(
                             scopes,
                             bus: bus.clone(),
                             mention_allowed_logins: mention_allowed,
+                            auto_fix,
                             pending_actions: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                             scheduling,
                             // Default to Full so a never-fetched
@@ -1503,8 +1746,12 @@ pub async fn tick_with_state(
                         "dispatching provider actions"
                     );
                 }
+                // Clone the cached GitHub client (Arc-backed, cheap) so
+                // the auto-fix arm can post its PR comment without
+                // borrowing `state` across the dispatch await.
+                let gh = state.gh_client.clone();
                 for action in actions {
-                    dispatch_action(config, source.name(), action).await;
+                    dispatch_action(config, source.name(), gh.as_ref(), action).await;
                 }
             }
             Err(e) => {

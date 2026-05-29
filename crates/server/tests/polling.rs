@@ -2944,3 +2944,175 @@ fn readmit_is_noop_without_mentions() {
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].id.key, kept[0].id.key);
 }
+
+#[tokio::test]
+async fn tick_dispatches_auto_fix_action_spawns_agent() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let mut bus_rx = config.bus.subscribe();
+
+    let task = make_task("o/r#202");
+    let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(&task));
+    let action = polling::ProviderAction::AutoFixPr {
+        session_key: session_key.clone(),
+        agent_id: "claude".to_string(),
+        prompt: Some("Fix the failing CI".to_string()),
+        repo: "o/r".to_string(),
+        pr_number: 202,
+        kind: pilot_core::AutoFixKind::CiFailure,
+        settings: pilot_core::AutoFixSettings {
+            enabled: true,
+            ..Default::default()
+        },
+        reason: "auto-fix (fixing CI) on o/r#202".to_string(),
+    };
+
+    let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
+        name: "github".into(),
+        tasks: vec![task],
+        actions: std::sync::Mutex::new(vec![action]),
+    });
+    polling::tick(&config, &[source]).await;
+
+    let mut saw_spawn = false;
+    while let Ok(evt) = bus_rx.try_recv() {
+        if let Event::TerminalSpawned {
+            session_key: sk, ..
+        } = evt
+        {
+            assert_eq!(sk, session_key, "auto-fix spawned in the PR's workspace");
+            saw_spawn = true;
+        }
+    }
+    assert!(
+        saw_spawn,
+        "AutoFixPr action under its attempt budget must trigger TerminalSpawned"
+    );
+
+    // The auto-fix agent runs unattended on a possibly-fresh worktree,
+    // so it must be launched with `--dangerously-skip-permissions` —
+    // otherwise the first-run workspace-trust dialog eats the injected
+    // fix prompt and any later Edit/Bash approval deadlocks the run.
+    let argvs = mock.all_argv().await;
+    assert!(
+        argvs
+            .iter()
+            .any(|a| a.first().map(String::as_str) == Some("claude")
+                && a.iter().any(|s| s == "--dangerously-skip-permissions")),
+        "auto-fix spawn must pass --dangerously-skip-permissions; got {argvs:?}"
+    );
+}
+
+#[tokio::test]
+async fn tick_auto_fix_respects_exhausted_budget() {
+    // `max_attempts: 0` means the very first dispatch is already over
+    // budget — the dispatcher must NOT spawn. Proves the stateful
+    // cooldown / max-attempts guard actually gates the spawn (not just
+    // the pure eligibility check).
+    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let mut bus_rx = config.bus.subscribe();
+
+    let task = make_task("o/r#303");
+    let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(&task));
+    let action = polling::ProviderAction::AutoFixPr {
+        session_key,
+        agent_id: "claude".to_string(),
+        prompt: Some("Fix the failing CI".to_string()),
+        repo: "o/r".to_string(),
+        pr_number: 303,
+        kind: pilot_core::AutoFixKind::CiFailure,
+        settings: pilot_core::AutoFixSettings {
+            enabled: true,
+            max_attempts: 0,
+            ..Default::default()
+        },
+        reason: "auto-fix (fixing CI) on o/r#303".to_string(),
+    };
+
+    let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
+        name: "github".into(),
+        tasks: vec![task],
+        actions: std::sync::Mutex::new(vec![action]),
+    });
+    polling::tick(&config, &[source]).await;
+
+    let mut saw_spawn = false;
+    let mut saw_upsert = false;
+    while let Ok(evt) = bus_rx.try_recv() {
+        match evt {
+            Event::TerminalSpawned { .. } => saw_spawn = true,
+            Event::WorkspaceUpserted(_) => saw_upsert = true,
+            _ => {}
+        }
+    }
+    assert!(saw_upsert, "the task should still upsert normally");
+    assert!(
+        !saw_spawn,
+        "an exhausted auto-fix budget must NOT spawn an agent"
+    );
+}
+
+#[tokio::test]
+async fn auto_fix_skips_and_burns_no_attempt_while_agent_already_running() {
+    // Regression: the trigger persists across polls and a fix can run
+    // longer than the cooldown. If a fix agent is already running on
+    // the PR, a subsequent auto-fix dispatch must skip BEFORE touching
+    // the attempt counter — otherwise a slow agent silently exhausts
+    // the budget + spams duplicate "I'm fixing this" comments.
+    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let task = make_task("o/r#404");
+    let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(&task));
+    let make_action = || polling::ProviderAction::AutoFixPr {
+        session_key: session_key.clone(),
+        agent_id: "claude".to_string(),
+        prompt: Some("Fix CI".to_string()),
+        repo: "o/r".to_string(),
+        pr_number: 404,
+        kind: pilot_core::AutoFixKind::CiFailure,
+        settings: pilot_core::AutoFixSettings {
+            enabled: true,
+            ..Default::default()
+        },
+        reason: "auto-fix (fixing CI) on o/r#404".to_string(),
+    };
+
+    // Tick 1: no agent yet → spawns + records attempt 1.
+    let src1: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
+        name: "github".into(),
+        tasks: vec![task.clone()],
+        actions: std::sync::Mutex::new(vec![make_action()]),
+    });
+    polling::tick(&config, &[src1]).await;
+
+    // Tick 2: the agent is now running → must skip without spawning
+    // again or burning another attempt.
+    let mut bus_rx = config.bus.subscribe();
+    let src2: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
+        name: "github".into(),
+        tasks: vec![task.clone()],
+        actions: std::sync::Mutex::new(vec![make_action()]),
+    });
+    polling::tick(&config, &[src2]).await;
+
+    let mut saw_spawn = false;
+    while let Ok(evt) = bus_rx.try_recv() {
+        if let Event::TerminalSpawned { .. } = evt {
+            saw_spawn = true;
+        }
+    }
+    assert!(
+        !saw_spawn,
+        "auto-fix must not spawn a second agent while one is already running"
+    );
+
+    // The attempt counter must still read 1 — tick 2 skipped before
+    // `check_and_record`. (AttemptRecord is private; assert on the JSON.)
+    let rec = config
+        .store
+        .get_kv(&format!("autofix:{}:ci", session_key.as_str()))
+        .unwrap()
+        .expect("attempt record persisted on the first dispatch");
+    assert!(
+        rec.contains("\"attempts\":1"),
+        "tick 2 must NOT increment the attempt counter (got: {rec})"
+    );
+}

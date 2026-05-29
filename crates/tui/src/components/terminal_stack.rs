@@ -1952,7 +1952,7 @@ impl TerminalStack {
         });
     }
 
-    /// Render the "you ▸ <recap>" pin into `area`. Dim styling so
+    /// Render the `you ▸ <recap>` pin into `area`. Dim styling so
     /// the line reads as chrome / recap, not as fresh agent output
     /// the user has to parse. Truncates with `…` when the message
     /// overflows the row width — same affordance the empty-state

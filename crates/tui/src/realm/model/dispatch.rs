@@ -141,11 +141,14 @@ impl<T: TerminalAdapter> Model<T> {
                 // `w` must honor it from any focus — otherwise pressing
                 // `w` after multi-selecting silently ignores the
                 // selection when the sidebar (or terminal) has focus.
+                // Reading it here is sound because `set_workspace`
+                // clears the selection whenever the workspace key
+                // changes, so the right pane's indices always belong
+                // to the sidebar's currently-selected workspace.
                 let default_agent = self.sidebar.default_agent().to_string();
-                let workspace = self.sidebar.selected_workspace().cloned();
+                let workspace = self.sidebar.selected_workspace();
                 let selected = self.right.selected_activity_indices();
-                let intent =
-                    crate::intent::resolve_work(workspace.as_ref(), &selected, &default_agent);
+                let intent = crate::intent::resolve_work(workspace, &selected, &default_agent);
                 if let crate::intent::Intent::SpawnAgent {
                     workspace_key,
                     agent_id,

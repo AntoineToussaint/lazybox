@@ -138,7 +138,9 @@ mouse-click any pane to focus it, mouse-drag splitters to resize.
 
 **TerminalStack**: all keys forward to the PTY. `]]` (configurable
 escape sequence) returns to the sidebar; `Ctrl-c` is forwarded as an
-interrupt.
+interrupt. `]<key>` opens the snippet picker (see
+[`docs/snippets.md`](docs/snippets.md)) — fuzzy-filters by snippet
+key, auto-submits when the filter uniquely matches.
 
 ## Conventions
 

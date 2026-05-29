@@ -168,9 +168,16 @@ impl<T: TerminalAdapter> Model<T> {
         // Terminal-pane escape sequence (`]]` by default). Two
         // consecutive presses of the escape char inside a terminal
         // return focus to the sidebar instead of forwarding to the
-        // PTY. The first `]` is held back; if a non-`]` key arrives
-        // before the second `]`, the held char is flushed to the PTY
-        // first so the user's `]` isn't silently swallowed.
+        // PTY. The first `]` is held back via `escape_latch`; if a
+        // non-`]` key arrives before the second `]`, we either:
+        //   - mount the snippet picker (issue #40), when the
+        //     follow-up is a printable char AND a snippet library
+        //     is configured, OR
+        //   - flush the held `]` + the new key to the PTY, so
+        //     typing patterns like `]a` aren't lost when there are
+        //     no snippets.
+        // The `]]` escape always wins because the `Key::Char(']')`
+        // branch is checked first.
         if self.focus == PaneFocus::Terminals
             && key.modifiers.is_empty()
             && matches!(key.code, Key::Char(c) if c == self.ui_defaults.terminal_escape_char)
@@ -186,9 +193,26 @@ impl<T: TerminalAdapter> Model<T> {
         }
         if self.focus == PaneFocus::Terminals && self.escape_latch.is_armed() {
             self.escape_latch.disarm();
-            // Non-`]` key arrived after a held `]` — flush the held
-            // char to the PTY before the new key, so typing patterns
-            // like `]a` aren't lost.
+            // Snippet trigger wins over flush-to-PTY when:
+            //   - a snippet library is configured, AND
+            //   - the follow-up key is a printable char with no
+            //     modifiers (Ctrl-X, F-keys, arrows pass through
+            //     to the PTY).
+            // The mounted picker captures further typing; that's
+            // why we return early. If we didn't, the post-mount
+            // pane-dispatch below would also forward this key to
+            // the PTY — duplicating it once into the picker and
+            // once into the agent's input.
+            if !self.snippets.is_empty()
+                && let Key::Char(c) = key.code
+                && !c.is_control()
+            {
+                self.mount_snippet_picker(c.to_string());
+                self.redraw = true;
+                return;
+            }
+            // Non-`]` key + no snippet match → flush the held `]`
+            // to the PTY before the new key.
             let mut held_cmds: Vec<IpcCommand> = Vec::new();
             let held = crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char(self.ui_defaults.terminal_escape_char),
@@ -246,6 +270,9 @@ impl<T: TerminalAdapter> Model<T> {
                 pilot_tui_core::action::ActionKind::OpenHelp => Some(Action::OpenHelp),
                 pilot_tui_core::action::ActionKind::OpenSettings => Some(Action::OpenSettings),
                 pilot_tui_core::action::ActionKind::JumpToAsking => Some(Action::JumpToAsking),
+                pilot_tui_core::action::ActionKind::JumpToFailingCi => {
+                    Some(Action::JumpToFailingCi)
+                }
                 _ => None,
             };
             if let Some(action) = action {

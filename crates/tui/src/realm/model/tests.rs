@@ -415,6 +415,427 @@ mod effects_tests {
         let cmds = m.handle_choice_picked(vec![]);
         assert!(cmds.is_empty());
     }
+
+    /// Helper: load a snippets collection from an inline YAML
+    /// string via the tmpfile path. Lets per-test fixtures stay
+    /// self-contained without each one re-deriving a tmp path.
+    fn snippets_from_yaml(label: &str, yaml: &str) -> pilot_config::Snippets {
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "pilot-snippets-test-{}-{label}",
+            std::process::id(),
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let tmp = tmp_dir.join("snippets.yaml");
+        std::fs::write(&tmp, yaml).unwrap();
+        pilot_config::Snippets::load_from(&tmp, pilot_config::SnippetOrigin::Global).unwrap()
+    }
+
+    /// Snippet picker: picking a row with NO active terminal drops
+    /// silently (the warning lands in the footer hint, not the
+    /// command stream). The modal still pops + slot clears.
+    #[test]
+    fn choice_picked_on_snippet_picker_without_terminal_returns_no_commands() {
+        let mut m = build_model();
+        m.snippets = snippets_from_yaml(
+            "no-terminal",
+            r#"
+snippets:
+  rev:
+    description: Review
+    body: review body
+"#,
+        );
+        // Stash the picker's view of "row 0 → key `rev`" directly.
+        // The handler reads from `snippet_choices` to recover the
+        // chosen key, then looks up the snippet via `self.snippets`.
+        m.snippet_choices = vec!["rev".into()];
+        m.modal_stack.push(Id::SnippetPicker);
+        let cmds = m.handle_choice_picked(vec![0]);
+        // No active terminal → no Write emitted. Snippet stash +
+        // modal both clear regardless of dispatch outcome.
+        assert!(cmds.is_empty(), "no command without an active terminal");
+        assert!(m.snippet_choices.is_empty(), "snippet stash cleared");
+        assert!(
+            !matches!(m.modal_stack.last(), Some(Id::SnippetPicker)),
+            "modal popped"
+        );
+    }
+
+    /// apply_snippets seeds the model collection. Sanity check
+    /// that the lookup path resolves.
+    #[test]
+    fn apply_snippets_makes_entries_visible_to_lookup() {
+        let loaded = snippets_from_yaml(
+            "apply",
+            r#"
+snippets:
+  rev:
+    description: Review the diff
+    body: please review
+"#,
+        );
+        let mut m = build_model();
+        m.apply_snippets(loaded);
+        assert!(!m.snippets.is_empty());
+        assert_eq!(m.snippets.len(), 1);
+        let rev = m.snippets.get("rev").expect("rev exists");
+        assert_eq!(rev.description, "Review the diff");
+        assert_eq!(rev.body, "please review");
+    }
+
+    /// mount_snippet_picker with an empty collection flashes a hint
+    /// and refuses to mount — no Id::SnippetPicker on the stack.
+    /// This is the "user typed `]<key>` but never configured any
+    /// snippets" UX.
+    #[test]
+    fn mount_snippet_picker_with_empty_collection_skips_mount() {
+        let mut m = build_model();
+        m.mount_snippet_picker(String::new());
+        assert!(
+            !matches!(m.modal_stack.last(), Some(Id::SnippetPicker)),
+            "empty snippet library shouldn't open a picker"
+        );
+        assert!(
+            m.snippet_choices.is_empty(),
+            "no snippets configured → no choice slot",
+        );
+    }
+
+    /// mount_snippet_picker populates `snippet_choices` with the
+    /// picker's row keys, in the same order the picker rendered
+    /// them (alphabetical via the underlying BTreeMap). This is
+    /// the contract `handle_choice_picked` relies on.
+    #[test]
+    fn mount_snippet_picker_stashes_keys_in_render_order() {
+        let mut m = build_model();
+        m.apply_snippets(snippets_from_yaml(
+            "render-order",
+            r#"
+snippets:
+  zeta:
+    description: last
+    body: z
+  alpha:
+    description: first
+    body: a
+"#,
+        ));
+        m.mount_snippet_picker(String::new());
+        assert!(matches!(m.modal_stack.last(), Some(Id::SnippetPicker)));
+        assert_eq!(m.snippet_choices, vec!["alpha".to_string(), "zeta".into()]);
+    }
+}
+
+#[cfg(test)]
+mod input_starvation_tests {
+    //! Regression: a chatty agent must NEVER block the keyboard.
+    //!
+    //! The daemon emits one `TerminalOutput` per PTY chunk into an
+    //! *unbounded* channel. The run loop used to drain it with an
+    //! unbounded `while let Ok(..)`, so under sustained agent output
+    //! `try_recv` never returned `Empty`, the loop never reached the
+    //! keyboard read, and the user "couldn't type in the agent" until
+    //! the burst ended. `drain_daemon_events` now caps the work per
+    //! iteration so control ALWAYS returns to the input read — input
+    //! starvation is impossible by construction. These tests freeze
+    //! that bound.
+    use super::super::Model;
+    use super::super::helpers::{MAX_EVENTS_PER_TICK, drain_daemon_events};
+    use pilot_ipc::{Event, TerminalId, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn flood(server: &pilot_ipc::Connection, n: usize) {
+        for seq in 0..n {
+            let _ = server.tx.send(Event::TerminalOutput {
+                terminal_id: TerminalId(1),
+                bytes: b"streaming output chunk\n".to_vec(),
+                seq: seq as u64,
+            });
+        }
+    }
+
+    /// A single drain processes AT MOST one tick's worth of events and
+    /// reports a backlog, leaving the rest queued — proof the loop
+    /// falls through to the keyboard read instead of spinning on
+    /// output forever.
+    #[test]
+    fn flood_does_not_drain_everything_in_one_tick() {
+        let (client, server) = channel::pair();
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+
+        let flooded = MAX_EVENTS_PER_TICK * 4;
+        flood(&server, flooded);
+
+        // One iteration's drain: must report a backlog (more queued)…
+        assert!(
+            drain_daemon_events(&mut m),
+            "drain should signal a backlog when the channel is over the cap"
+        );
+        // …and must have left events behind (didn't drain everything).
+        assert!(
+            m.client.rx.try_recv().is_ok(),
+            "events must remain queued after one bounded drain — \
+             otherwise the keyboard read is starved"
+        );
+    }
+
+    /// Repeated drains eventually empty the channel and report no
+    /// backlog — the cap throttles per-tick, it doesn't drop events.
+    #[test]
+    fn repeated_drains_eventually_empty_the_channel() {
+        let (client, server) = channel::pair();
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+
+        let flooded = MAX_EVENTS_PER_TICK * 4;
+        flood(&server, flooded);
+
+        // Bound the loop generously above the minimum needed (4) so a
+        // genuinely stuck drain trips the assert instead of hanging.
+        let mut backlog = true;
+        let mut iterations = 0;
+        while backlog {
+            backlog = drain_daemon_events(&mut m);
+            iterations += 1;
+            assert!(iterations <= 64, "drain never converged — possible spin");
+        }
+        // Channel fully consumed, no event left behind.
+        assert!(m.client.rx.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod coalesce_tests {
+    //! `coalesce_adjacent_output` collapses a streaming burst into one
+    //! dispatch per terminal — this is what keeps memory bounded under
+    //! a chatty agent. The merge must be byte-for-byte faithful and
+    //! must NOT reorder across terminals or non-output events.
+    use super::super::helpers::coalesce_adjacent_output;
+    use pilot_ipc::{Event, TerminalId};
+
+    fn out(id: u64, bytes: &[u8], seq: u64) -> Event {
+        Event::TerminalOutput {
+            terminal_id: TerminalId(id),
+            bytes: bytes.to_vec(),
+            seq,
+        }
+    }
+
+    /// A run of same-terminal output merges into ONE event carrying
+    /// the concatenated bytes and the LAST chunk's seq.
+    #[test]
+    fn adjacent_same_terminal_runs_merge_with_last_seq() {
+        let input = vec![out(1, b"hel", 10), out(1, b"lo ", 11), out(1, b"world", 12)];
+        let merged = coalesce_adjacent_output(input);
+        assert_eq!(merged.len(), 1);
+        match &merged[0] {
+            Event::TerminalOutput {
+                terminal_id,
+                bytes,
+                seq,
+            } => {
+                assert_eq!(*terminal_id, TerminalId(1));
+                assert_eq!(bytes, b"hello world");
+                assert_eq!(*seq, 12, "merged event carries the last chunk's seq");
+            }
+            other => panic!("expected one TerminalOutput, got {other:?}"),
+        }
+    }
+
+    /// Output for a different terminal ends the run — no cross-terminal
+    /// merging, and order is preserved.
+    #[test]
+    fn different_terminals_do_not_merge() {
+        let input = vec![out(1, b"a", 1), out(2, b"b", 1), out(1, b"c", 2)];
+        let merged = coalesce_adjacent_output(input);
+        assert_eq!(merged.len(), 3, "no merge across terminals");
+        // Order preserved: t1, t2, t1.
+        let ids: Vec<u64> = merged
+            .iter()
+            .map(|e| match e {
+                Event::TerminalOutput { terminal_id, .. } => terminal_id.0,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(ids, vec![1, 2, 1]);
+    }
+
+    /// A non-output event between two same-terminal outputs breaks the
+    /// run — ordering relative to other events is never disturbed.
+    #[test]
+    fn non_output_event_breaks_the_run() {
+        let input = vec![
+            out(1, b"before", 1),
+            Event::TerminalExited {
+                terminal_id: TerminalId(1),
+                exit_code: Some(0),
+            },
+            out(1, b"after", 2),
+        ];
+        let merged = coalesce_adjacent_output(input);
+        assert_eq!(merged.len(), 3, "the Exited event must not be absorbed");
+        assert!(matches!(merged[1], Event::TerminalExited { .. }));
+    }
+
+    /// Empty input is a no-op.
+    #[test]
+    fn empty_input_yields_empty() {
+        assert!(coalesce_adjacent_output(Vec::new()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod backlog_monitor_tests {
+    //! The monitor is the leak detector: it watches the residual
+    //! channel depth after each drain and only escalates when the
+    //! backlog climbs to a new high — a steady stream of rising
+    //! residuals is "the consumer is falling behind".
+    use super::super::helpers::BacklogMonitor;
+
+    /// A clear (residual 0) resets the consecutive-backlog streak.
+    #[test]
+    fn clearing_resets_the_streak() {
+        let mut m = BacklogMonitor::default();
+        m.observe(50);
+        m.observe(80);
+        assert_eq!(m.consecutive_backlog_ticks(), 2);
+        m.observe(0);
+        assert_eq!(m.consecutive_backlog_ticks(), 0, "streak resets on clear");
+    }
+
+    /// A backlog that climbs tick-over-tick raises the streak and the
+    /// high-water mark — the signal a leak detector keys on.
+    #[test]
+    fn growing_backlog_tracks_streak_and_hwm() {
+        let mut m = BacklogMonitor::default();
+        for depth in [200usize, 700, 1500, 4000] {
+            m.observe(depth);
+        }
+        assert_eq!(m.consecutive_backlog_ticks(), 4);
+        assert_eq!(m.hwm(), 4000, "high-water mark tracks the worst depth");
+    }
+
+    /// The high-water mark never regresses when depth dips but stays
+    /// non-zero — a transient dip isn't "recovered".
+    #[test]
+    fn hwm_is_monotonic_across_dips() {
+        let mut m = BacklogMonitor::default();
+        m.observe(3000);
+        m.observe(100);
+        assert_eq!(m.hwm(), 3000);
+        assert_eq!(
+            m.consecutive_backlog_ticks(),
+            2,
+            "still backlogged, no clear"
+        );
+    }
+}
+
+#[cfg(test)]
+mod subscribed_projects_tests {
+    //! `refresh_subscribed_projects` add/remove contract — the
+    //! placeholder headers pilot synthesizes for narrowed repo
+    //! subscriptions before the daemon surfaces a workspace.
+    use super::super::*;
+    use pilot_core::{PersistedSetup, Project, ProjectKey};
+    use pilot_ipc::{Event as IpcEvent, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn persisted_with_scopes(scopes: &[&str]) -> PersistedSetup {
+        let mut set = std::collections::BTreeSet::new();
+        for s in scopes {
+            set.insert((*s).to_string());
+        }
+        let mut selected_scopes = std::collections::BTreeMap::new();
+        selected_scopes.insert("github".to_string(), set);
+        PersistedSetup {
+            selected_scopes,
+            ..Default::default()
+        }
+    }
+
+    /// Subscribing to a narrowed repo synthesizes a placeholder
+    /// header; unsubscribing it removes the header again.
+    #[test]
+    fn unsubscribing_a_repo_drops_its_placeholder() {
+        let mut m = build_model();
+        let pk = ProjectKey::github("acme", "widget");
+
+        m.setup.persisted = Some(persisted_with_scopes(&["github:acme/widget"]));
+        m.refresh_subscribed_projects();
+        assert!(m.projects.contains_key(&pk), "placeholder should appear");
+
+        // User removes the repo scope.
+        m.setup.persisted = Some(persisted_with_scopes(&[]));
+        m.refresh_subscribed_projects();
+        assert!(
+            !m.projects.contains_key(&pk),
+            "placeholder should be removed once unsubscribed"
+        );
+    }
+
+    /// A daemon `ProjectUpserted` promotes the placeholder to an
+    /// authoritative record; a subsequent scope removal must NOT yank
+    /// it client-side — the daemon owns its lifecycle now.
+    #[test]
+    fn promoted_project_survives_scope_removal() {
+        let mut m = build_model();
+        let pk = ProjectKey::github("acme", "widget");
+
+        m.setup.persisted = Some(persisted_with_scopes(&["github:acme/widget"]));
+        m.refresh_subscribed_projects();
+
+        // Daemon finds a workspace → authoritative upsert.
+        m.handle_daemon_event(IpcEvent::ProjectUpserted(Box::new(Project::new(
+            pk.clone(),
+            "acme/widget",
+            chrono::Utc::now(),
+        ))));
+
+        // Scope removed, but the daemon-owned project stays put until
+        // the daemon broadcasts its own ProjectRemoved.
+        m.setup.persisted = Some(persisted_with_scopes(&[]));
+        m.refresh_subscribed_projects();
+        assert!(
+            m.projects.contains_key(&pk),
+            "daemon-authoritative project must not be dropped by a scope edit"
+        );
+    }
+
+    /// Whole-org subscriptions never synthesize a placeholder, so
+    /// org-discovered projects are left untouched by a refresh.
+    #[test]
+    fn org_level_scope_leaves_discovered_projects_alone() {
+        let mut m = build_model();
+        let discovered = ProjectKey::github("acme", "found-by-polling");
+        m.projects.insert(
+            discovered.clone(),
+            Project::new(
+                discovered.clone(),
+                "acme/found-by-polling",
+                chrono::Utc::now(),
+            ),
+        );
+
+        m.setup.persisted = Some(persisted_with_scopes(&["github:acme"]));
+        m.refresh_subscribed_projects();
+        assert!(
+            m.projects.contains_key(&discovered),
+            "whole-org discovered project must survive refresh"
+        );
+    }
 }
 
 #[cfg(test)]

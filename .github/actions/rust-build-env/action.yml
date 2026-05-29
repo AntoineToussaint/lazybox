@@ -1,0 +1,45 @@
+# Sets up the toolchain pilot needs to compile its workspace: Zig
+# (for the vendored libghostty-vt-sys build.rs), libc++ on Linux (so
+# the Zig-built static archive links), and the Rust stable
+# toolchain + sccache-style Cargo cache.
+#
+# Used by every CI job that invokes `cargo build`/`test`/`clippy`/
+# `doc`. Jobs that don't compile workspace code (`deny`, `typos`,
+# `machete`, `fmt`) skip this and just install what they need.
+
+name: rust-build-env
+description: Install Zig, C toolchain, Rust stable, and Cargo cache.
+
+inputs:
+  rust-components:
+    description: Extra rustup components, comma-separated (e.g. "clippy" or "rustfmt").
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install Zig 0.15.2
+      uses: mlugg/setup-zig@v2
+      with:
+        version: "0.15.2"
+
+    - name: Install C toolchain (Linux)
+      if: runner.os == 'Linux'
+      # The Zig-built ghostty static archive vendors simdutf /
+      # highway / std::optional from libc++ (LLVM's C++ stdlib,
+      # symbols namespaced `std::__1::`), NOT libstdc++ (GNU's,
+      # `std::__cxx11::`). Linking with -lstdc++ leaves every libc++
+      # symbol unresolved (`std::__1::basic_string`, `typeinfo for
+      # std::bad_optional_access`, `hwy::Abort`, …). Install libc++
+      # + libc++abi so the build script can link them.
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
+
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: ${{ inputs.rust-components }}
+
+    - uses: Swatinem/rust-cache@v2

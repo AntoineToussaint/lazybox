@@ -321,54 +321,128 @@ struct TerminalSlot {
     /// scroll the prompt off-screen. `None` until the user has
     /// submitted at least one message in this terminal.
     last_user_message: Option<String>,
+    /// Launched in no-permission / bypass mode (autonomous session
+    /// running unattended). Drives the "no-perms" badge in the tab
+    /// strip so it's obvious which sessions skip approval prompts.
+    no_permission: bool,
 }
 
 impl TerminalSlot {
-    /// Apply a user keystroke to the composing buffer + last-message
-    /// state. Mirrors how the agent's own prompt-line reads keys:
-    ///   - printable Char → append
-    ///   - Backspace → pop
-    ///   - Enter → commit (Shift-Enter inserts a newline instead,
-    ///     matching Claude Code's "newline-without-submit" binding)
-    ///   - Ctrl-C / Ctrl-U / Esc → clear the line
+    /// Append one char to the composing buffer when it fits within
+    /// [`COMPOSING_CAP`]; silently drop it otherwise. The bound is the
+    /// whole point — a runaway auto-typer (or a pathological paste)
+    /// can't grow the buffer without limit.
+    fn push_composing(&mut self, c: char) {
+        if self.composing.len() + c.len_utf8() <= COMPOSING_CAP {
+            self.composing.push(c);
+        }
+    }
+
+    /// Commit the trimmed composing buffer as the latest user message
+    /// and reset it for the next prompt. An all-whitespace buffer is
+    /// ignored, so mashing Enter on an empty prompt (e.g. dismissing
+    /// an agent approval) doesn't blank out the recap.
+    fn commit_composing(&mut self) {
+        let trimmed = self.composing.trim();
+        if !trimmed.is_empty() {
+            self.last_user_message = Some(trimmed.to_string());
+        }
+        self.composing.clear();
+    }
+
+    /// Feed the *exact bytes* that are about to be written to this
+    /// terminal's PTY into the composing buffer + last-message state.
+    /// Every submit path — raw keystrokes, snippet expansion,
+    /// programmatic sends — funnels its payload through a
+    /// `Command::Write`, so parsing that byte stream is the one place
+    /// the recap can't drift from what the agent actually received.
     ///
-    /// Other keys (arrows, function keys, Tab) leave both buffers
-    /// untouched — they don't change the literal text the user is
-    /// composing. Per-char appends respect [`COMPOSING_CAP`] so a
-    /// rogue auto-typer can't grow the buffer unbounded.
-    fn apply_user_key(&mut self, key: &KeyEvent) {
-        use KeyCode::*;
-        let mods = key.modifiers;
-        match key.code {
-            Char(c) => {
-                if mods.contains(KeyModifiers::CONTROL) {
-                    if c == 'c' || c == 'u' {
-                        self.composing.clear();
+    /// Interprets the stream the way the agent's own line editor sees
+    /// it:
+    ///   - printable text → append (respecting [`COMPOSING_CAP`])
+    ///   - CR (`\r`) → commit the trimmed buffer as the latest message
+    ///   - LF (`\n`) → soft newline (kept in the buffer, no submit) —
+    ///     this is how a multi-line snippet body arrives
+    ///   - `ESC \r` / `ESC \n` (Shift-Enter) → soft newline, no submit
+    ///   - DEL / BS → erase one char
+    ///   - Ctrl-C / Ctrl-U → clear the line
+    ///   - lone ESC (no following byte) → clear the line (prompt reset)
+    ///   - `ESC [ … ` (CSI) / `ESC O …` (SS3) sequences — arrows,
+    ///     mouse reports, Delete — are skipped; they aren't literal
+    ///     composed text. Any other `ESC`-prefixed meta sequence drops
+    ///     just the `ESC` and keeps parsing, so a stray escape can
+    ///     never silently wipe an in-flight prompt.
+    ///
+    /// **Contract:** each call must carry one *complete* logical write
+    /// (a single keystroke's bytes, or a full one-shot command).
+    /// Sequences are not buffered across calls, so an escape sequence
+    /// or multi-byte codepoint split between two invocations would be
+    /// mis-framed. Bracketed-paste *payloads* must not be routed here —
+    /// they are captured separately via [`Self::append_paste`], so this
+    /// never sees an `ESC[200~ … ESC[201~` body. Decoding is lossy
+    /// UTF-8: the recap is display-only, so a stray invalid byte
+    /// degrades to U+FFFD rather than dropping the write.
+    fn record_pty_bytes(&mut self, bytes: &[u8]) {
+        // ECMA-48: a CSI sequence runs until its final byte, which
+        // lies in 0x40..=0x7e. Intermediate / parameter bytes are all
+        // below that range, so the first byte in it terminates.
+        const CSI_FINAL: std::ops::RangeInclusive<char> = '@'..='~';
+
+        let text = String::from_utf8_lossy(bytes);
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\x1b' => match chars.peek() {
+                    // CSI: `ESC [ … final`. Consume up to and
+                    // including the final byte. This also swallows
+                    // bracketed-paste markers (`ESC[200~`/`201~`),
+                    // the Delete key, and mouse reports.
+                    Some('[') => {
+                        chars.next();
+                        while let Some(&n) = chars.peek() {
+                            chars.next();
+                            if CSI_FINAL.contains(&n) {
+                                break;
+                            }
+                        }
                     }
-                } else if self.composing.len() + c.len_utf8() <= COMPOSING_CAP {
-                    self.composing.push(c);
+                    // SS3: `ESC O <final>` (cursor keys in app mode).
+                    Some('O') => {
+                        chars.next();
+                        chars.next();
+                    }
+                    // Shift-Enter arrives as `ESC \r` (see
+                    // `key_to_bytes`): a newline in the prompt without
+                    // a submit.
+                    Some('\r' | '\n') => {
+                        chars.next();
+                        self.push_composing('\n');
+                    }
+                    // Lone Esc (the real Esc key is a single 0x1b) →
+                    // reset the line.
+                    None => self.composing.clear(),
+                    // Unrecognised `ESC`-prefixed meta sequence: drop
+                    // only the ESC and let the next char be parsed
+                    // normally, rather than nuking the buffer.
+                    Some(_) => {}
+                },
+                // CR is the submit. LF is only ever a soft newline
+                // here (Enter maps to CR, never LF), so a multi-line
+                // snippet body commits once, on its trailing CR, not
+                // at each embedded newline.
+                '\r' => self.commit_composing(),
+                '\n' => self.push_composing('\n'),
+                // DEL / Backspace.
+                '\x7f' | '\x08' => {
+                    self.composing.pop();
                 }
+                // Ctrl-C / Ctrl-U wipe the in-flight line.
+                '\x03' | '\x15' => self.composing.clear(),
+                // Other control chars (Tab, etc.) don't change the
+                // literal text being composed.
+                c if c.is_control() => {}
+                c => self.push_composing(c),
             }
-            Enter => {
-                if mods.contains(KeyModifiers::SHIFT) {
-                    if self.composing.len() < COMPOSING_CAP {
-                        self.composing.push('\n');
-                    }
-                } else {
-                    let trimmed = self.composing.trim();
-                    if !trimmed.is_empty() {
-                        self.last_user_message = Some(trimmed.to_string());
-                    }
-                    self.composing.clear();
-                }
-            }
-            Backspace => {
-                self.composing.pop();
-            }
-            Esc => {
-                self.composing.clear();
-            }
-            _ => {}
         }
     }
 
@@ -1086,7 +1160,12 @@ impl TerminalStack {
         slot.last_seq = seq;
     }
 
-    fn make_slot(session_key: SessionKey, kind: TerminalKind, last_seq: u64) -> TerminalSlot {
+    fn make_slot(
+        session_key: SessionKey,
+        kind: TerminalKind,
+        last_seq: u64,
+        no_permission: bool,
+    ) -> TerminalSlot {
         let vt = TerminalVt::new().expect("libghostty-vt init");
         TerminalSlot {
             session_key,
@@ -1098,6 +1177,7 @@ impl TerminalStack {
             last_rendered_size: None,
             composing: String::new(),
             last_user_message: None,
+            no_permission,
         }
     }
 
@@ -1136,6 +1216,20 @@ impl TerminalStack {
             && matches!(slot.kind, TerminalKind::Agent(_))
         {
             slot.append_paste(text);
+        }
+    }
+
+    /// Mirror bytes written straight to a terminal's PTY — bypassing
+    /// the per-keystroke `handle_key` path — into the recap state.
+    /// Used by callers that synthesise a full command and submit it in
+    /// one shot (snippet expansion writes the body + a trailing `\r`),
+    /// which would otherwise leave the "you ▸ …" recap showing the
+    /// previous message. No-op for non-Agent terminals.
+    pub fn record_pty_write(&mut self, id: TerminalId, bytes: &[u8]) {
+        if let Some(slot) = self.terminals.get_mut(&id)
+            && matches!(slot.kind, TerminalKind::Agent(_))
+        {
+            slot.record_pty_bytes(bytes);
         }
     }
 
@@ -1207,6 +1301,16 @@ impl TerminalStack {
             Binding {
                 keys: std::borrow::Cow::Borrowed("Ctrl-c"),
                 label: std::borrow::Cow::Borrowed("interrupt"),
+            },
+            // Snippet picker entry point (issue #40). `]<key>` opens
+            // the picker pre-filled with the typed char; typing a
+            // full snippet key auto-submits its body to the agent.
+            // The leading `]` is shared with the LeaveTerminal escape
+            // (`]]`) — the second `]` wins, anything else opens the
+            // picker.
+            Binding {
+                keys: std::borrow::Cow::Borrowed("]<key>"),
+                label: std::borrow::Cow::Borrowed("snippets"),
             },
         ]
     }
@@ -1287,15 +1391,17 @@ impl TerminalStack {
         let Some(bytes) = key_to_bytes(&key) else {
             return PaneOutcome::Consumed;
         };
-        // Mirror the keystroke into our own composing buffer so the
-        // pinned "you ▸ …" recap reflects the latest submitted
-        // message. Scoped to Agent terminals — shells don't have a
-        // single semantic "user prompt", so the recap would be noisy
-        // (every cd, every grep) and surprising.
+        // Mirror the exact bytes we're about to ship into our own
+        // composing buffer so the pinned "you ▸ …" recap reflects the
+        // latest submitted message. Parsing the byte stream (rather
+        // than the `KeyEvent`) keeps the recap in lock-step with what
+        // the agent receives. Scoped to Agent terminals — shells don't
+        // have a single semantic "user prompt", so the recap would be
+        // noisy (every cd, every grep) and surprising.
         if let Some(slot) = self.terminals.get_mut(&id)
             && matches!(slot.kind, TerminalKind::Agent(_))
         {
-            slot.apply_user_key(&key);
+            slot.record_pty_bytes(&bytes);
         }
         cmds.push(Command::Write {
             terminal_id: id,
@@ -1309,8 +1415,12 @@ impl TerminalStack {
             Event::Snapshot { terminals, .. } => {
                 self.terminals.clear();
                 for snap in terminals {
-                    let mut slot =
-                        Self::make_slot(snap.session_key.clone(), snap.kind.clone(), snap.last_seq);
+                    let mut slot = Self::make_slot(
+                        snap.session_key.clone(),
+                        snap.kind.clone(),
+                        snap.last_seq,
+                        snap.no_permission,
+                    );
                     // Replay the daemon-side ring through the VT so
                     // the cell grid reflects what was on screen
                     // before this client connected.
@@ -1324,8 +1434,9 @@ impl TerminalStack {
                 terminal_id,
                 session_key,
                 kind,
+                no_permission,
             } => {
-                let slot = Self::make_slot(session_key.clone(), kind.clone(), 0);
+                let slot = Self::make_slot(session_key.clone(), kind.clone(), 0, *no_permission);
                 self.terminals.insert(*terminal_id, slot);
                 // A fresh terminal arrived for the active session —
                 // expand so the user actually sees it. We bypass the
@@ -1477,7 +1588,7 @@ impl TerminalStack {
         // tab label occupies for click-hit-testing.
         let mut cursor: u16 = title_area.x + title_prefix.chars().count() as u16;
         for (i, id) in visible.iter().enumerate() {
-            let (icon, label, is_asking) = self
+            let (icon, label, is_asking, no_permission) = self
                 .terminals
                 .get(id)
                 .map(|s| {
@@ -1490,9 +1601,9 @@ impl TerminalStack {
                         _ => crate::components::icons::SHELL,
                     };
                     let asking = matches!(s.agent_state, pilot_ipc::AgentState::Asking);
-                    (icon, Self::tab_label(&s.kind), asking)
+                    (icon, Self::tab_label(&s.kind), asking, s.no_permission)
                 })
-                .unwrap_or((crate::components::icons::SHELL, "?".into(), false));
+                .unwrap_or((crate::components::icons::SHELL, "?".into(), false, false));
             let is_active = i == self.active_tab_idx;
             let style = if is_active && focused {
                 Style::default()
@@ -1528,6 +1639,17 @@ impl TerminalStack {
                     Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
                 ));
                 cursor = cursor.saturating_add(asking_text.chars().count() as u16);
+            }
+            // No-permission / bypass mode: this session auto-accepts
+            // tool-use prompts and runs unattended. Flag it so the user
+            // can tell at a glance which tabs aren't gated by approvals.
+            if no_permission {
+                let noperm_text = " ⚠ no-perms";
+                title_spans.push(Span::styled(
+                    noperm_text,
+                    Style::default().fg(theme.warn).add_modifier(Modifier::DIM),
+                ));
+                cursor = cursor.saturating_add(noperm_text.chars().count() as u16);
             }
         }
         frame.render_widget(Paragraph::new(Line::from(title_spans)), title_area);
@@ -1850,20 +1972,23 @@ impl TerminalStack {
     ) {
         let _ = focused; // ghostty-vt doesn't render focus chrome itself
         if let Some(slot) = self.terminals.get_mut(&id) {
-            // Carve off one row for the pinned "you ▸ <recap>" line
-            // when this is an agent terminal with a remembered last
-            // user message. Refuses to take the row at h ≤ 1 — leaves
-            // every cell for the agent grid rather than blank-out the
-            // pane entirely on a 1-row split.
+            // Carve off two rows for the pinned "you ▸ <recap>" line
+            // plus a blank spacer below it, when this is an agent
+            // terminal with a remembered last user message. The recap
+            // sits on row 0, row 1 stays blank so the agent output
+            // doesn't visually run into it, and the body starts at row
+            // 2. Refuses to take the rows at h < 3 — leaves every cell
+            // for the agent grid rather than crowd out the pane on a
+            // tiny split.
             let show_recap = matches!(slot.kind, TerminalKind::Agent(_))
                 && slot.last_user_message.is_some()
-                && rect.height >= 2;
+                && rect.height >= 3;
             let body = if show_recap {
                 Rect {
                     x: rect.x,
-                    y: rect.y + 1,
+                    y: rect.y + 2,
                     width: rect.width,
-                    height: rect.height - 1,
+                    height: rect.height - 2,
                 }
             } else {
                 rect

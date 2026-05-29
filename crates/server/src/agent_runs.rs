@@ -61,10 +61,7 @@ pub async fn handle_start_agent_run(
         repo: None,
         pr_number: None,
         env: Default::default(),
-        // Streaming agent-run path manages approvals via its own
-        // structured protocol (DecideAgentApproval), not the PTY
-        // permission prompts — no CLI bypass flag needed.
-        autonomous: false,
+        skip_permissions: false,
     };
     let argv = agent_impl.spawn(&spawn_ctx);
     let Some((program, extra_args)) = argv.split_first() else {

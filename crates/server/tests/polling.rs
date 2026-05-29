@@ -242,6 +242,56 @@ impl TaskSource for IncrementalSource {
     }
 }
 
+// ── serve-loop responsiveness during a poll ─────────────────────────
+
+/// Regression: the daemon serve loop must never freeze while a GitHub
+/// poll is in flight.
+///
+/// `set_focused_workspace` runs INLINE on the single-task serve loop
+/// for every `FocusWorkspace` / `MarkRead` (i.e. every sidebar
+/// navigation). `run_one_tick` holds `poll_state` for the ENTIRE poll
+/// cycle — up to ~17s on a slow GitHub fetch. Before the fix this
+/// handler did `poll_state.lock().await`, so during a sync it blocked
+/// the serve loop for the whole fetch, queueing every keystroke `Write`
+/// and `Spawn` behind it: "can't type in the agent / can't start a
+/// shell while GitHub syncs, then it unblocks when the sync finishes."
+/// (Modal input kept working because it never leaves the TUI.)
+///
+/// With `try_lock` the handler returns immediately when a poll holds
+/// the lock, so the serve loop stays responsive.
+#[tokio::test]
+async fn set_focused_workspace_never_blocks_on_an_in_flight_poll() {
+    let config = ServerConfig::in_memory();
+    let task = make_task("o/r#42");
+    let workspace = pilot_core::Workspace::from_task(task.clone(), Utc::now());
+    polling::upsert(&config, task).await;
+
+    // Simulate an in-flight poll tick holding the lock across its
+    // network fetch, exactly like `run_one_tick` does.
+    let held = config.poll_state.lock().await;
+
+    // The inline handler must return promptly rather than wait on the
+    // held lock. Pre-fix this hangs until `held` drops; the 2s timeout
+    // turns that hang into a clean failure instead of a stuck test.
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        polling::set_focused_workspace(&config, &workspace.key),
+    )
+    .await;
+    assert!(
+        res.is_ok(),
+        "set_focused_workspace blocked while a poll held poll_state — \
+         the 'frozen during GitHub sync' regression is back"
+    );
+
+    // The hint was skipped (not silently applied) while the lock was
+    // held: focused_repo is still unset.
+    assert!(
+        held.round_robin.focused_repo.is_none(),
+        "focus hint must be skipped, not applied, while a poll holds the lock"
+    );
+}
+
 // ── tick() / upsert() ───────────────────────────────────────────────
 
 #[tokio::test]
@@ -1521,6 +1571,105 @@ async fn rescope_with_exhaustive_scope_still_deletes_stale() {
         "Exhaustive scope must still delete stale workspaces: {after:?}",
     );
     assert!(after.iter().any(|k| k.contains("current")));
+}
+
+#[test]
+fn gh_polled_scope_downgrades_to_preserve_all_on_partial_sweep() {
+    use polling::{PolledScope, gh_polled_scope};
+    // Clean global sweep → Exhaustive (rescope may delete stale rows).
+    assert_eq!(
+        gh_polled_scope(true, &[], false),
+        PolledScope::Exhaustive,
+        "a clean global sweep authoritatively covers everything",
+    );
+    // Clean round-robin tick → only the queried repos are authoritative.
+    assert_eq!(
+        gh_polled_scope(false, &["owner/a".into()], false),
+        PolledScope::Repos(vec!["owner/a".into()]),
+    );
+    // PARTIAL sweep (e.g. PR query errored, issues OK) → empty
+    // coverage so rescope preserves EVERY github workspace this tick.
+    // This is the guard against a PR vanishing because one poll
+    // hiccupped rather than because it merged/closed. The `run_global`
+    // flag is irrelevant once the sweep is partial.
+    assert_eq!(
+        gh_polled_scope(true, &[], true),
+        PolledScope::Repos(Vec::new()),
+        "a partial global sweep must NOT claim exhaustive coverage",
+    );
+    assert_eq!(
+        gh_polled_scope(false, &["owner/a".into()], true),
+        PolledScope::Repos(Vec::new()),
+        "a partial round-robin tick must preserve all, not just unqueried repos",
+    );
+}
+
+#[tokio::test]
+async fn rescope_preserves_prs_when_pr_fetch_partially_failed() {
+    // End-to-end guard for the "PRs disappear on a flaky poll" bug.
+    // When the PR query errors but the issue query succeeds, the
+    // GitHub client returns issues-only `Ok(..)` to keep the inbox
+    // alive — so the freshly-polled set contains NO PRs. If the
+    // source reported `Exhaustive`, rescope would read every stored
+    // PR as "fell out of scope" and delete it. The partial-sweep
+    // guard makes the source report empty coverage
+    // (`gh_polled_scope(.., partial=true)` → `Repos([])`), so the PR
+    // survives until a clean sweep can speak to its real state.
+    use pilot_core::{TaskId, WorkspaceKey};
+    let config = ServerConfig::in_memory();
+
+    let mut pr_task = make_task("owner/repo#7");
+    pr_task.id = TaskId {
+        source: "github".into(),
+        key: "owner/repo#7".into(),
+    };
+    pr_task.repo = Some("owner/repo".into());
+    pr_task.url = "https://github.com/owner/repo/pull/7".into();
+
+    let mut issue_task = make_task("owner/repo#8");
+    issue_task.id = TaskId {
+        source: "github".into(),
+        key: "owner/repo#8".into(),
+    };
+    issue_task.repo = Some("owner/repo".into());
+    issue_task.url = "https://github.com/owner/repo/issues/8".into();
+
+    polling::upsert(&config, pr_task.clone()).await;
+    polling::upsert(&config, issue_task.clone()).await;
+
+    // The partial sweep returned only the issue; the PR query failed.
+    // The source reports the downgraded scope it would compute via
+    // `gh_polled_scope(run_global=true, repos=[], partial=true)`.
+    let outcome = polling::TickOutcome {
+        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+            &issue_task,
+        ))],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::from([(
+            "github".into(),
+            polling::gh_polled_scope(true, &[], true),
+        )]),
+        all_full: true,
+    };
+    polling::rescope(&config, &outcome).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(
+        after.iter().any(|k| k.contains("repo-7")),
+        "PR workspace MUST survive a partial sweep where the PR query failed: {after:?}",
+    );
+    assert!(
+        after.iter().any(|k| k.contains("repo-8")),
+        "issue workspace should also be preserved on a partial sweep: {after:?}",
+    );
 }
 
 #[tokio::test]

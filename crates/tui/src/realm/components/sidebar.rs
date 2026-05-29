@@ -248,6 +248,13 @@ impl Sidebar {
         self.inner.focus_next_asking_workspace()
     }
 
+    /// Move the cursor onto the next workspace whose PR has failing
+    /// CI, wrapping around. Returns true when a target was found.
+    /// Backs the `Shift-F` global key.
+    pub fn focus_next_failing_ci_workspace(&mut self) -> bool {
+        self.inner.focus_next_failing_ci_workspace()
+    }
+
     /// State-aware short list for the footer hint bar. Catalog-driven;
     /// `overrides` carries the user's `ui.action_keys` map (empty when
     /// untouched) and flows into the catalog's `effective_keys_display`.

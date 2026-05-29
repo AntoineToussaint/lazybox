@@ -212,9 +212,10 @@ fn merged_workspace_hidden() {
 fn rows_are_grouped_by_repo_with_headers() {
     let mut s = Sidebar::new(PaneId::new(1));
     // Flip to Recent sort so the visible list has only RepoHeader
-    // rows + Workspace rows (no RoleHeader interleaving). The
-    // default ByRoleSplit injects RoleHeader rows between groups,
-    // which shifts the expected index assertions in this test.
+    // rows + Workspace rows (no KindHeader interleaving). The
+    // default ByRoleSplit injects KindHeader rows between PR and
+    // issue groups, which shifts the expected index assertions in
+    // this test.
     while s.sort_mode() != pilot_tui::components::sidebar::SortMode::Recent {
         s.cycle_sort_mode();
     }
@@ -253,7 +254,7 @@ fn cursor_walks_through_repo_headers() {
     // no session key (selected_session_key is None on them).
     //
     // Flip to Recent sort so the layout is just headers + workspaces
-    // (no RoleHeader interleaving from the default ByRoleSplit mode).
+    // (no KindHeader interleaving from the default ByRoleSplit mode).
     let mut s = Sidebar::new(PaneId::new(1));
     while s.sort_mode() != pilot_tui::components::sidebar::SortMode::Recent {
         s.cycle_sort_mode();
@@ -944,7 +945,7 @@ fn action_keys_on_repo_header_are_silent_noops() {
     // hide the bindings, but the handlers are the safety net.
     //
     // Flip to Recent so cursor lands cleanly on a RepoHeader at
-    // row 0 (rather than going through a RoleHeader in the default
+    // row 0 (rather than going through a KindHeader in the default
     // ByRoleSplit mode).
     let mut s = Sidebar::new(PaneId::new(1));
     while s.sort_mode() != pilot_tui::components::sidebar::SortMode::Recent {
@@ -1568,6 +1569,76 @@ fn bang_jumps_to_next_asking_workspace() {
     let moved = s.focus_next_asking_workspace();
     assert!(moved, "must report a move when a target exists");
     assert_eq!(s.selected_session_key(), Some(&k2));
+}
+
+#[test]
+fn shift_f_jumps_to_next_failing_ci_workspace() {
+    // Three PRs, only #2 has failing CI. Cursor starts on #1.
+    // `focus_next_failing_ci_workspace` (what `Shift-F` invokes)
+    // should land on #2.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let w1 = Workspace::from_task(
+        pr_task_with_ci("owner/repo", "o/r#1", CiStatus::Success),
+        now,
+    );
+    let mut t2 = pr_task_with_ci("owner/repo", "o/r#2", CiStatus::Failure);
+    t2.updated_at = now - Duration::seconds(1);
+    let w2 = Workspace::from_task(t2, now);
+    let mut t3 = pr_task_with_ci("owner/repo", "o/r#3", CiStatus::Success);
+    t3.updated_at = now - Duration::seconds(2);
+    let w3 = Workspace::from_task(t3, now);
+    let k2 = ws_key(&w2);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w1, w2, w3],
+        terminals: vec![],
+        projects: vec![],
+    });
+
+    let moved = s.focus_next_failing_ci_workspace();
+    assert!(moved, "must report a move when a failing PR exists");
+    assert_eq!(s.selected_session_key(), Some(&k2));
+}
+
+#[test]
+fn shift_f_treats_mixed_ci_as_failing() {
+    // Mixed CI (some checks fail) is just as actionable as a full
+    // failure — `Shift-F` must stop on it too.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let w = Workspace::from_task(pr_task_with_ci("owner/repo", "o/r#1", CiStatus::Mixed), now);
+    let k = ws_key(&w);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w],
+        terminals: vec![],
+        projects: vec![],
+    });
+    assert!(s.focus_next_failing_ci_workspace());
+    assert_eq!(s.selected_session_key(), Some(&k));
+}
+
+#[test]
+fn shift_f_is_a_noop_when_no_ci_is_failing() {
+    // No broken PRs → cursor stays put and the call reports false so
+    // the dispatcher can flash "no failing PRs" instead of redrawing.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let w = Workspace::from_task(
+        pr_task_with_ci("owner/repo", "o/r#1", CiStatus::Success),
+        now,
+    );
+    let starting_key = ws_key(&w);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w],
+        terminals: vec![],
+        projects: vec![],
+    });
+    let before = s.selected_session_key().cloned();
+    assert_eq!(before.as_ref(), Some(&starting_key));
+
+    let moved = s.focus_next_failing_ci_workspace();
+    assert!(!moved);
+    assert_eq!(s.selected_session_key().cloned(), before);
 }
 
 #[test]

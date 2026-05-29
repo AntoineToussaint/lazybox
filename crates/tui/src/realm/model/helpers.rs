@@ -16,7 +16,7 @@
 //! keeps mod.rs focused on the `Model` struct + its constructors.
 
 use super::{Model, PaneFocus};
-use pilot_ipc::Client;
+use pilot_ipc::{Client, Event as IpcEvent};
 use std::time::Duration;
 use tuirealm::application::PollStrategy;
 use tuirealm::event::{Event as RealmEvent, Key, KeyEvent as RealmKey, KeyModifiers};
@@ -275,12 +275,171 @@ pub fn run_loop_with_model<T: TerminalAdapter>(mut model: Model<T>) -> anyhow::R
     result
 }
 
+/// Hard cap on how many daemon events one loop iteration may process
+/// before it MUST fall through to the keyboard read. The daemon emits
+/// one `TerminalOutput` event per PTY chunk into an *unbounded*
+/// channel, so a chatty agent (Claude Code streaming) can push events
+/// faster than we drain them. An unbounded `while let Ok(..)` drain
+/// then never sees `Empty`, the loop never reaches the input read, and
+/// the user "can't type in the agent" until the burst ends. Bounding
+/// the drain makes that input starvation impossible BY DESIGN: every
+/// iteration services the keyboard within ~one frame no matter how
+/// much output is in flight. Leftover events ride to the next
+/// iteration (which is entered immediately — see `had_backlog`).
+pub(super) const MAX_EVENTS_PER_TICK: usize = 256;
+/// Wall-clock companion to the count cap: even cheap events add up, so
+/// stop draining once we've spent this long regardless of count. Keeps
+/// the keyboard responsive even if event handling is briefly slow.
+const DRAIN_BUDGET: Duration = Duration::from_millis(8);
+
+/// Drain queued daemon events, bounded by [`MAX_EVENTS_PER_TICK`] and
+/// [`DRAIN_BUDGET`], coalescing adjacent same-terminal `TerminalOutput`
+/// into a single dispatch before handling. Returns `true` when a cap
+/// was hit with events still likely queued, so the caller can skip the
+/// idle poll-wait and loop straight back — output keeps flowing at
+/// full speed while the keyboard is still checked between every batch.
+///
+/// Coalescing is what keeps memory bounded under a chatty agent: the
+/// daemon emits one event per PTY chunk, and `vt.feed(a); vt.feed(b)`
+/// is identical to `vt.feed(a ++ b)` (the parser is a byte stream), so
+/// merging a streaming burst collapses hundreds of tiny events into one
+/// `append_output` per terminal. The residual depth left in the
+/// channel after the drain is handed to [`BacklogMonitor`] so a
+/// consumer that's falling behind surfaces in the log.
+pub(super) fn drain_daemon_events<T: TerminalAdapter>(model: &mut Model<T>) -> bool {
+    let start = std::time::Instant::now();
+    let mut collected: Vec<IpcEvent> = Vec::new();
+    let mut backlog = false;
+    while let Ok(evt) = model.client.rx.try_recv() {
+        collected.push(evt);
+        if collected.len() >= MAX_EVENTS_PER_TICK || start.elapsed() >= DRAIN_BUDGET {
+            // Hit a cap — there may be more queued. Signal a backlog so
+            // the loop comes right back here after servicing input.
+            backlog = true;
+            break;
+        }
+    }
+    for evt in coalesce_adjacent_output(collected) {
+        model.handle_daemon_event(evt);
+    }
+    // Whatever is still queued after this drain is the backlog the
+    // consumer hasn't caught up on — feed it to the monitor.
+    let residual = model.client.rx.len();
+    model.event_backlog.observe(residual);
+    backlog
+}
+
+/// Merge runs of consecutive `TerminalOutput` events that target the
+/// same terminal into one event carrying the concatenated bytes and
+/// the last chunk's `seq`. Order is otherwise preserved exactly — only
+/// *adjacent* same-terminal output is merged, so an interleaved event
+/// for another terminal (or any non-output event) ends the run. Pure;
+/// unit-tested in `coalesce_tests`.
+pub(super) fn coalesce_adjacent_output(events: Vec<IpcEvent>) -> Vec<IpcEvent> {
+    let mut out: Vec<IpcEvent> = Vec::with_capacity(events.len());
+    for evt in events {
+        match evt {
+            IpcEvent::TerminalOutput {
+                terminal_id,
+                bytes,
+                seq,
+            } => {
+                if let Some(IpcEvent::TerminalOutput {
+                    terminal_id: prev_id,
+                    bytes: prev_bytes,
+                    seq: prev_seq,
+                }) = out.last_mut()
+                    && *prev_id == terminal_id
+                {
+                    // Same terminal as the tail run — extend it.
+                    prev_bytes.extend_from_slice(&bytes);
+                    *prev_seq = seq;
+                    continue;
+                }
+                out.push(IpcEvent::TerminalOutput {
+                    terminal_id,
+                    bytes,
+                    seq,
+                });
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Depth above which a non-empty post-drain backlog is treated as the
+/// consumer falling behind (vs. an ordinary single-frame burst).
+const BACKLOG_WARN_THRESHOLD: usize = 1024;
+
+/// Watches the inbound daemon-event channel for a backlog that doesn't
+/// drain — the signature of the TUI consuming slower than the daemon
+/// produces (a runaway producer, or a handler leaking time). Logging
+/// only: it never blocks or drops, it just makes "we're falling
+/// behind" visible in `/tmp/pilot.log` instead of silent.
+///
+/// Healthy bursty load is silent — a warning fires only when the
+/// residual climbs to a NEW high above [`BACKLOG_WARN_THRESHOLD`], so
+/// a steady stream of warnings with a rising `residual` is the leak
+/// signal.
+#[derive(Default)]
+pub(super) struct BacklogMonitor {
+    /// Highest residual depth seen so far. Gates warnings to genuine
+    /// new highs.
+    hwm: usize,
+    /// Consecutive drains that left the channel non-empty. A
+    /// monotonically climbing count alongside a rising `residual` means
+    /// the consumer never catches up.
+    consecutive_backlog_ticks: u32,
+}
+
+impl BacklogMonitor {
+    /// Record the channel depth left after a drain. `residual` is the
+    /// number of events still queued.
+    pub(super) fn observe(&mut self, residual: usize) {
+        if residual == 0 {
+            if self.consecutive_backlog_ticks > 0 {
+                tracing::debug!(
+                    ticks = self.consecutive_backlog_ticks,
+                    hwm = self.hwm,
+                    "daemon-event backlog cleared"
+                );
+            }
+            self.consecutive_backlog_ticks = 0;
+            return;
+        }
+        self.consecutive_backlog_ticks = self.consecutive_backlog_ticks.saturating_add(1);
+        if residual > self.hwm {
+            self.hwm = residual;
+            if residual >= BACKLOG_WARN_THRESHOLD {
+                tracing::warn!(
+                    residual,
+                    consecutive_ticks = self.consecutive_backlog_ticks,
+                    "daemon-event backlog growing — TUI consuming slower than the \
+                     daemon produces (runaway producer or leak)"
+                );
+            }
+        }
+    }
+
+    /// Test/diagnostic accessor: current consecutive-backlog streak.
+    #[cfg(test)]
+    pub(super) fn consecutive_backlog_ticks(&self) -> u32 {
+        self.consecutive_backlog_ticks
+    }
+
+    /// Test/diagnostic accessor: highest residual depth seen.
+    #[cfg(test)]
+    pub(super) fn hwm(&self) -> usize {
+        self.hwm
+    }
+}
+
 fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
     while !model.quit {
-        // 1. Drain inbound daemon events (cheap try_recv).
-        while let Ok(evt) = model.client.rx.try_recv() {
-            model.handle_daemon_event(evt);
-        }
+        // 1. Drain inbound daemon events — BOUNDED so heavy PTY output
+        // can never starve keyboard input (see `drain_daemon_events`).
+        let had_backlog = drain_daemon_events(model);
 
         // 2. Polling-modal spinner heartbeat + retryable notice fade.
         if let Some(msg) = model.polling_tick() {
@@ -336,8 +495,19 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         // active scroll burst, this loop runs as fast as the
         // render + daemon-roundtrip allows, which is what gives
         // the progressive-scroll feel.
+        //
+        // When the daemon drain hit its cap (`had_backlog`), there are
+        // more events waiting — poll with ZERO timeout so we service
+        // any pending key immediately and then loop straight back to
+        // drain the rest. That keeps output flowing at full speed
+        // without ever blocking the keyboard behind it.
         const POLL_IDLE: Duration = Duration::from_millis(16);
-        if let Ok(true) = crossterm::event::poll(POLL_IDLE)
+        let poll_for = if had_backlog {
+            Duration::ZERO
+        } else {
+            POLL_IDLE
+        };
+        if let Ok(true) = crossterm::event::poll(poll_for)
             && let Ok(event) = crossterm::event::read()
         {
             dispatch_event(model, event);

@@ -1,0 +1,89 @@
+# cargo-deny config — gates the workspace on RustSec advisories,
+# license policy, banned/duplicated dependencies, and source
+# allowlists. Run with:
+#
+#     cargo deny check advisories bans licenses sources
+#
+# CI runs the same command via EmbarkStudios/cargo-deny-action in
+# `.github/workflows/ci.yml`.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# ── advisories ────────────────────────────────────────────────────────
+# RustSec advisory database (default `db-urls`). Severities map to
+# "error" by default. The `ignore` list documents advisories we
+# accept on a transitive dep — each entry should name *why* we
+# can't fix it here and what would unblock removal.
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # bincode 1.x is unmaintained as of 2025. We use it via
+    # pilot-ipc for length-prefixed framing on the Unix-socket
+    # transport. Moving to bincode 2.x or postcard is a non-trivial
+    # wire-format change tracked separately — ignore until that
+    # lands.
+    "RUSTSEC-2025-0141",
+    # `serial` 0.4 is unmaintained (last release 2017). Pulled in
+    # transitively by portable-pty 0.8; we don't use the serial
+    # functionality. Bound to portable-pty's upstream choices.
+    "RUSTSEC-2017-0008",
+]
+
+# ── licenses ──────────────────────────────────────────────────────────
+# Allow only OSI-approved / commonly-vetted licenses. Add to `allow`
+# (not `exceptions`) when a new dep with a not-yet-listed license
+# lands — the allow list is the source of truth.
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    # webpki-roots (via reqwest/octocrab) ships under CDLA-Permissive-2.0,
+    # which is OSI-compatible and explicitly designed for data
+    # distributions (the trust-root set is data, not code).
+    "CDLA-Permissive-2.0",
+]
+exceptions = []
+
+# Ignores license/no-license findings on workspace crates that set
+# `publish = false`. Pilot's internal crates inherit `license =
+# "MIT"` from `[workspace.package]`, so this is belt-and-suspenders.
+[licenses.private]
+ignore = true
+
+# ── bans ──────────────────────────────────────────────────────────────
+# `multiple-versions = "warn"` — duplicate versions are common in a
+# transitive graph this size and tightening to "deny" would block
+# routine bumps. Promote once we've de-duplicated the obvious ones.
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace path dependencies (`pilot-core = { path = "..." }`) get a
+# synthesized `version = "*"` in the resolved manifest. That's
+# expected and not a real wildcard pin.
+allow-wildcard-paths = true
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
+
+# ── sources ───────────────────────────────────────────────────────────
+# Only crates.io and explicitly listed git remotes are allowed.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -7,7 +7,7 @@
 //!
 //! - **Retryable** — transient: network hiccup, 5xx, rate limit.
 //!   Polling logs and retries on the next cycle. The user sees a
-//!   terse "<provider> hiccup, retrying" hint, not a full stack.
+//!   terse "`<provider>` hiccup, retrying" hint, not a full stack.
 //! - **Auth** — credentials are wrong / expired. Polling surfaces it
 //!   loud (`Event::ProviderError`) with a user-facing message; user
 //!   must rotate their token. Not retried until they do.

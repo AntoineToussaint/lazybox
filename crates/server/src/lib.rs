@@ -44,7 +44,7 @@ use crate::backend::{RawPtyBackend, SessionBackend, TmuxBackend};
 use pilot_agents::Registry;
 use pilot_ipc::{AgentRunId, Connection, Event, TerminalId};
 use pilot_store::{MemoryStore, SqliteStore, Store};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -178,7 +178,7 @@ pub const BUS_CAPACITY: usize = 1024;
 /// reader never sees a terminals entry without a matching meta).
 ///
 /// The only co-holding site today is
-/// [`spawn_handler::freeze_runners_in_session`]; that's why this
+/// `spawn_handler::freeze_runners_in_session`; that's why this
 /// constant exists, as a discoverable name future callers can grep.
 pub const TERMINAL_MAP_LOCK_ORDER: &str =
     "terminals → terminal_meta → terminal_sessions → agent_states";
@@ -232,6 +232,12 @@ pub struct ServerConfig {
     /// `TerminalExited`.
     pub terminal_meta:
         Arc<Mutex<HashMap<TerminalId, (pilot_core::SessionKey, pilot_ipc::TerminalKind)>>>,
+    /// Terminals launched in no-permission / bypass mode (autonomous
+    /// sessions). Populated by `handle_spawn` when a spawn skips
+    /// permission prompts; read by `snapshot_terminals` so a
+    /// reconnecting client can re-render the indicator. Cleaned on
+    /// `TerminalExited` alongside the other per-terminal maps.
+    pub no_permission_terminals: Arc<Mutex<HashSet<TerminalId>>>,
     /// Structured stream-json agent runs. Keyed by wire-side run id.
     pub agent_runs: Arc<Mutex<HashMap<AgentRunId, agent_runs::AgentRunHandle>>>,
     /// Process-wide structured run id allocator.
@@ -332,6 +338,7 @@ impl ServerConfig {
             terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
             agent_states: Arc::new(Mutex::new(HashMap::new())),
             terminal_meta: Arc::new(Mutex::new(HashMap::new())),
+            no_permission_terminals: Arc::new(Mutex::new(HashSet::new())),
             agent_runs: Arc::new(Mutex::new(HashMap::new())),
             next_agent_run_id: Arc::new(AtomicU64::new(1)),
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),
@@ -476,9 +483,25 @@ impl Server {
                         pilot_ipc::Command::RemoveProviderCredential { .. } => "RemoveProviderCredential",
                         pilot_ipc::Command::ListProviderCredentials { .. } => "ListProviderCredentials",
                         pilot_ipc::Command::CleanWorktrees => "CleanWorktrees",
+                        pilot_ipc::Command::InspectWorktrees => "InspectWorktrees",
+                        pilot_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
                         pilot_ipc::Command::Shutdown => "Shutdown",
                     };
                     tracing::info!("daemon ← {label}");
+                    // Time how long the serve loop spends INLINE on this
+                    // command. `tokio::select!` is single-task: while a
+                    // handler `.await`s (or worse, makes a synchronous
+                    // blocking call like a parking_lot store-mutex
+                    // acquire), NO other command — including the `Write`
+                    // keystrokes that drive the terminal — can be
+                    // serviced. The known-slow handlers detach via
+                    // `tokio::spawn` and return here in microseconds; a
+                    // handler that shows up SLOW below is one that's
+                    // wedging the loop (the "can't type while GitHub
+                    // syncs" class of bug — see issue #34). This is the
+                    // breadcrumb that tells us WHICH command, not just
+                    // "the app froze".
+                    let cmd_started = std::time::Instant::now();
                     match cmd {
                         pilot_ipc::Command::Subscribe => {
                             // Offload the SQLite scans (issue #34: pre-fix
@@ -557,10 +580,10 @@ impl Server {
                                 kind,
                                 cwd,
                                 initial_prompt,
-                                // Interactive spawn: the user pressed `s`/`f`
-                                // and is watching this terminal, so leave the
-                                // permission prompts in place — they surface
-                                // in the TUI for the user to approve.
+                                // User-initiated spawn (sidebar `c`,
+                                // `f`-for-fix, split shell). Interactive
+                                // sessions keep permission prompts on —
+                                // the human is right there to approve.
                                 false,
                             )
                             .await;
@@ -893,6 +916,34 @@ impl Server {
                                 polling::handle_clean_worktrees(&cfg).await;
                             });
                         }
+                        pilot_ipc::Command::InspectWorktrees => {
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_inspect_worktrees(&cfg).await;
+                            });
+                        }
+                        pilot_ipc::Command::DeleteOrphanedWorktree { path, force } => {
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_delete_orphaned_worktree(&cfg, path, force).await;
+                            });
+                        }
+                    }
+                    // Anything that held the single serve-loop task for
+                    // more than a couple frames blocked every other
+                    // command behind it. Warn loudly with the label so
+                    // a "frozen during sync" report points straight at
+                    // the offending handler instead of a guessing game.
+                    let cmd_ms = cmd_started.elapsed().as_millis();
+                    if cmd_ms >= 50 {
+                        tracing::warn!(
+                            command = label,
+                            ms = cmd_ms,
+                            "daemon serve loop BLOCKED on inline command handler — \
+                             all other commands (incl. keystroke Writes) stalled this long"
+                        );
+                    } else {
+                        tracing::debug!(command = label, ms = cmd_ms, "daemon → handled");
                     }
                 }
                 bus = bus_rx.recv() => {

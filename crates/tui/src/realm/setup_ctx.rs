@@ -37,6 +37,11 @@ pub enum SettingsAction {
     /// terminal. Inbox rows stay. Dispatches `Command::CleanWorktrees`
     /// after a confirm prompt.
     CleanWorktrees,
+    /// Admin: open the worktree inspector — lists every worktree
+    /// pilot finds on disk, flags orphans by reason, surfaces
+    /// uncommitted / unpushed work, lets the user delete per-row or
+    /// bulk-delete the clearly-safe set.
+    InspectWorktrees,
 }
 
 impl SettingsAction {
@@ -48,6 +53,7 @@ impl SettingsAction {
             Self::EditAgents => "Edit agents (claude / codex / cursor / …)".into(),
             Self::FullSetup => "Run the full setup wizard".into(),
             Self::CleanWorktrees => "Clean worktrees (free disk, keep inbox)".into(),
+            Self::InspectWorktrees => "Inspect worktrees…".into(),
         }
     }
 }

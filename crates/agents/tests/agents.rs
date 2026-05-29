@@ -15,7 +15,7 @@ fn sample_ctx() -> SpawnCtx {
         repo: Some("o/r".into()),
         pr_number: Some("1".into()),
         env: HashMap::new(),
-        autonomous: false,
+        skip_permissions: false,
     }
 }
 
@@ -41,16 +41,10 @@ fn claude_spawn_and_resume_argv() {
 }
 
 #[test]
-fn claude_autonomous_spawn_skips_permissions() {
-    // Unattended pilot spawns (auto-fix / auto-spawn-on-mention) run
-    // with no human at the terminal: the agent must clear the first-
-    // run workspace-trust dialog on a fresh worktree (otherwise the
-    // injected prompt lands in the trust chooser and is lost) and
-    // push edits without anyone to approve them. Both gates are
-    // bypassed by `--dangerously-skip-permissions`.
+fn claude_skip_permissions_appends_bypass_flag() {
     let agent = Claude;
     let ctx = SpawnCtx {
-        autonomous: true,
+        skip_permissions: true,
         ..sample_ctx()
     };
     assert_eq!(
@@ -59,6 +53,7 @@ fn claude_autonomous_spawn_skips_permissions() {
             "claude".to_string(),
             "--dangerously-skip-permissions".to_string()
         ],
+        "autonomous (skip_permissions) spawn must bypass tool-use prompts"
     );
     assert_eq!(
         agent.resume(&ctx),
@@ -67,7 +62,7 @@ fn claude_autonomous_spawn_skips_permissions() {
             "--continue".to_string(),
             "--dangerously-skip-permissions".to_string()
         ],
-        "resume must keep both --continue and the permission bypass"
+        "resume must carry the bypass flag too so a resumed autonomous session stays unattended"
     );
 }
 

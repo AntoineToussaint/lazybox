@@ -283,6 +283,7 @@ pub async fn handle_spawn(
     let terminals_map = config.terminals.clone();
     let term_sessions_map = config.terminal_sessions.clone();
     let agent_states_map = config.agent_states.clone();
+    let agent_detect_resets_map = config.agent_detect_resets.clone();
     let terminal_meta_map = config.terminal_meta.clone();
     let no_permission_map = config.no_permission_terminals.clone();
     let store_for_pump = config.store.clone();
@@ -538,6 +539,34 @@ pub async fn handle_spawn(
             check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
         }
         while let Some(chunk) = sub.live.recv().await {
+            // The user just answered an InputNeeded prompt (Enter while
+            // the `?` pill was up). Drop the accumulated detection
+            // buffer so the just-answered prompt's markers can't
+            // re-fire InputNeeded on this fresh chunk. See the
+            // `agent_detect_resets` field doc for why this is safe — a
+            // prompt that's genuinely still up gets re-rendered and
+            // re-detected from the post-answer output.
+            //
+            // Only agent terminals are ever inserted into the set (the
+            // optimistic flip in `handle_write` gates on InputNeeded,
+            // which shells never reach), so skip the per-chunk lock
+            // entirely for shells. Bind the `remove` result before the
+            // `if` so the MutexGuard drops at the `;` rather than being
+            // held across the body — the temporary-lifetime footgun the
+            // `TERMINAL_MAP_LOCK_ORDER` note warns about (harmless today
+            // with no await in the body, a latent deadlock the moment
+            // one is added).
+            if agent_for_pump.is_some() {
+                let answered = agent_detect_resets_map.lock().await.remove(&id_for_pump);
+                if answered {
+                    state_buf.clear();
+                    last_input_needed_at = None;
+                    tracing::debug!(
+                        terminal_id = ?id_for_pump,
+                        "user answered prompt; clearing agent-state detection buffer",
+                    );
+                }
+            }
             maybe_emit_state_change(
                 agent_for_pump.as_ref(),
                 &mut state_buf,
@@ -576,6 +605,7 @@ pub async fn handle_spawn(
         terminals_map.lock().await.remove(&id_for_pump);
         term_sessions_map.lock().await.remove(&id_for_pump);
         agent_states_map.lock().await.remove(&id_for_pump);
+        agent_detect_resets_map.lock().await.remove(&id_for_pump);
         terminal_meta_map.lock().await.remove(&id_for_pump);
         no_permission_map.lock().await.remove(&id_for_pump);
         let _ = store_for_pump.delete_kv(&format!("terminal:{key_for_pump}"));
@@ -1379,6 +1409,14 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
         .lock()
         .await
         .insert(terminal_id, pilot_ipc::AgentState::Working);
+    // Tell the output pump to drop its detection buffer on the next
+    // chunk. Without this the just-answered prompt's markers linger in
+    // the rolling window and re-fire InputNeeded on the very next
+    // chunk — reverting this optimistic flip and pinning the `?` pill
+    // back on until ~16 KiB of fresh output finally evicts the stale
+    // prompt. (The regression behind issue #101: "the ? won't go away
+    // after I answer.")
+    config.agent_detect_resets.lock().await.insert(terminal_id);
     tracing::debug!(
         ?terminal_id,
         "user pressed Enter; optimistically flipping InputNeeded → Working"

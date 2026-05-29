@@ -238,6 +238,21 @@ pub struct ServerConfig {
     /// reconnecting client can re-render the indicator. Cleaned on
     /// `TerminalExited` alongside the other per-terminal maps.
     pub no_permission_terminals: Arc<Mutex<HashSet<TerminalId>>>,
+    /// Terminals whose agent-state detection buffer should be dropped
+    /// on the pump's next output chunk. Set by `handle_write` when the
+    /// user submits an answer to an `InputNeeded` prompt (Enter while
+    /// the `?` pill is up); consumed (and cleared) by the output pump.
+    ///
+    /// Without this, the just-answered prompt's markers (`❯`, the
+    /// numbered options, `Esc to cancel`, `do you want to …`) linger in
+    /// the rolling detection window and re-fire `InputNeeded` on the
+    /// very next chunk — so the `?` pill reappears the instant after
+    /// the user answers and never clears until ~16 KiB of fresh output
+    /// evicts the stale prompt. Dropping the buffer here lets detection
+    /// restart from post-answer output. Safe: if the prompt is
+    /// genuinely still up, Claude re-renders it and the fresh chunk
+    /// re-establishes `InputNeeded`.
+    pub agent_detect_resets: Arc<Mutex<HashSet<TerminalId>>>,
     /// Structured stream-json agent runs. Keyed by wire-side run id.
     pub agent_runs: Arc<Mutex<HashMap<AgentRunId, agent_runs::AgentRunHandle>>>,
     /// Process-wide structured run id allocator.
@@ -339,6 +354,7 @@ impl ServerConfig {
             agent_states: Arc::new(Mutex::new(HashMap::new())),
             terminal_meta: Arc::new(Mutex::new(HashMap::new())),
             no_permission_terminals: Arc::new(Mutex::new(HashSet::new())),
+            agent_detect_resets: Arc::new(Mutex::new(HashSet::new())),
             agent_runs: Arc::new(Mutex::new(HashMap::new())),
             next_agent_run_id: Arc::new(AtomicU64::new(1)),
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),

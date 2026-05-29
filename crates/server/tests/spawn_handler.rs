@@ -644,3 +644,116 @@ async fn wedged_session_does_not_block_subscribe_or_subsequent_spawn() {
     .await
     .expect("deadline");
 }
+
+/// Regression for issue #101: after the user answers a prompt, the
+/// `?` ("input-needed") pill must CLEAR and stay cleared — it must not
+/// snap back the instant the next output chunk arrives.
+///
+/// Symptom pre-fix: the daemon flips InputNeeded → Working when the
+/// user presses Enter, but the just-answered prompt's markers (`❯`,
+/// the numbered options, `Esc to cancel`) still sit in the rolling
+/// detection buffer. The very next chunk re-runs the detector over
+/// that stale text, re-detects InputNeeded, and broadcasts it again —
+/// so the pill reappears and never clears until ~16 KiB of fresh
+/// output finally evicts the prompt. The user "can't tell which
+/// session needs me" because every just-answered session keeps the `?`.
+///
+/// The fix drops the detection buffer when the user submits an answer
+/// (see `ServerConfig::agent_detect_resets`), so detection restarts
+/// from post-answer output. This test drives the full live path:
+/// prompt → InputNeeded, answer → Working, then a small follow-up
+/// chunk with no prompt markers — and asserts the state lands on Idle,
+/// never bouncing back to InputNeeded.
+#[tokio::test]
+async fn answering_a_prompt_clears_input_needed_and_does_not_bounce_back() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        // 1. A permission chooser shows up → detector flags InputNeeded.
+        mock.emit(
+            &key,
+            concat!(
+                "Do you want to create MEMORY.md?\n",
+                "❯ 1. Yes\n",
+                "  2. No\n",
+                "Esc to cancel",
+            ),
+        )
+        .await;
+        let asked = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: pilot_ipc::AgentState::InputNeeded,
+                        ..
+                    }
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            asked.is_some(),
+            "permission chooser must be detected as InputNeeded"
+        );
+
+        // 2. User answers (select option 1, Enter). The optimistic flip
+        //    clears the pill immediately → Working.
+        client
+            .send(Command::Write {
+                terminal_id,
+                bytes: b"1\r".to_vec(),
+            })
+            .unwrap();
+        let working = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: pilot_ipc::AgentState::Working,
+                        ..
+                    }
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            working.is_some(),
+            "answering must optimistically flip InputNeeded → Working"
+        );
+
+        // 3. Claude acts on the answer and emits a small, prompt-free
+        //    follow-up. Pre-fix this chunk re-detected the STALE chooser
+        //    still in the buffer and bounced back to InputNeeded.
+        mock.emit(&key, "Created the file.\nAll done.").await;
+
+        // The next state transition must be Idle, NOT InputNeeded — the
+        // pill is gone and stays gone.
+        let next = wait_for(
+            &mut client,
+            |e| matches!(e, Event::AgentState { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("a follow-up AgentState transition must arrive");
+        match next {
+            Event::AgentState { state, .. } => assert_eq!(
+                state,
+                pilot_ipc::AgentState::Idle,
+                "after answering, the prompt-free follow-up must settle to Idle, \
+                 not bounce back to InputNeeded (the #101 stale-buffer regression)"
+            ),
+            _ => unreachable!(),
+        }
+    })
+    .await
+    .expect("deadline");
+}

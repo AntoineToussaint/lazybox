@@ -133,6 +133,19 @@ pub enum Id {
     /// Confirm dialog before firing `Command::CleanWorktrees`.
     /// Picked from the Settings palette; Yes → dispatch.
     CleanWorktreesConfirm,
+    /// Loading screen mounted while we wait for the daemon to reply
+    /// to `Command::InspectWorktrees`. Swapped out for `InspectList`
+    /// when `Event::WorktreesInspected` arrives.
+    InspectLoading,
+    /// Choice modal listing every worktree the inspector reported,
+    /// with a special first row for "Delete all N safe worktrees".
+    /// Picking a row routes through `pending_inspect_rows` →
+    /// `InspectConfirm` for a final per-row destructive prompt.
+    InspectList,
+    /// Confirm for the per-row delete picked from `InspectList`.
+    /// The target row lives in `pending_inspect_target`;
+    /// `Msg::Confirmed(true)` dispatches `DeleteOrphanedWorktree`.
+    InspectConfirm,
     /// Unified confirm modal for any destructive catalog action.
     /// `Model::dispatch_action` routes here when
     /// `ActionDef::is_destructive()` is true; the pending `Action`
@@ -141,6 +154,12 @@ pub enum Id {
     /// modals (MergePrConfirm, the kill latch, …) — one modal id,
     /// one Yes-handler, one place to remember.
     ActionConfirm,
+    /// Snippet picker mounted from the terminal pane on `]<key>`.
+    /// Filter input + scrollable snippet list. `Msg::ChoicePicked`
+    /// resolves the picked row to a snippet body, which the
+    /// dispatcher writes to the active terminal followed by `\r`
+    /// (auto-submit). See `realm::components::snippet_picker`.
+    SnippetPicker,
 }
 
 /// App-level message vocabulary for modals + globals.
@@ -235,8 +254,23 @@ pub struct Model<T: TerminalAdapter> {
     /// `Event::ProjectRemoved` drops entries. Stage 2 stores them
     /// here; stages 3+ render headers from this map.
     pub projects: std::collections::BTreeMap<pilot_core::ProjectKey, pilot_core::Project>,
+    /// Project keys *this client* synthesized from `selected_scopes`
+    /// in `refresh_subscribed_projects` — placeholder headers for
+    /// repos the user subscribed to that the daemon hasn't surfaced a
+    /// workspace for yet. Tracked apart from daemon-authoritative
+    /// projects so that when the user *unsubscribes* a repo we can drop
+    /// its placeholder (the daemon never had a record for it, so no
+    /// `ProjectRemoved` will ever arrive). A daemon `ProjectUpserted` /
+    /// `Snapshot` for the same key promotes it to authoritative and
+    /// removes it from this set — see `events.rs`.
+    synthesized_projects: std::collections::BTreeSet<pilot_core::ProjectKey>,
     /// IPC client for forwarding pane-emitted commands to the daemon.
     pub client: Client,
+    /// Watches the inbound daemon-event channel depth after each
+    /// drain. A backlog that climbs tick-over-tick means the TUI is
+    /// consuming slower than the daemon produces — the signature of a
+    /// runaway producer or a leak. See `helpers::BacklogMonitor`.
+    event_backlog: helpers::BacklogMonitor,
     pub redraw: bool,
     pub quit: bool,
     /// Setup wizard / settings palette / editor-open state — see
@@ -410,6 +444,13 @@ pub struct Model<T: TerminalAdapter> {
     /// the `Msg::Confirmed` handler. None when no destructive
     /// confirm is currently up.
     pending_action_confirm: Option<pilot_tui_core::action::Action>,
+    /// Latest inspector report driving the `InspectList` modal. The
+    /// first slot in the Choice modal is the "delete all safe"
+    /// shortcut, hence the wrapper enum on indices.
+    pending_inspect_rows: Vec<pilot_ipc::WorktreeInspectionDto>,
+    /// Row picked from `InspectList`, waiting on the `InspectConfirm`
+    /// confirm modal. Consumed by `Msg::Confirmed(true)`.
+    pending_inspect_target: Option<pilot_ipc::WorktreeInspectionDto>,
     /// Project the next `Id::NewWorkspace` submit should land the
     /// new workspace under. Set by `mount_new_workspace_input(pk)`
     /// from the focused-project resolver, consumed by
@@ -422,6 +463,18 @@ pub struct Model<T: TerminalAdapter> {
     /// j/k (RepoHeader rows are skipped by `move_cursor_by`) and the
     /// user has no clear next step.
     pending_focus_project_name: Option<String>,
+    /// Loaded + merged snippet collection (`<pilot_home>/snippets.yaml`
+    /// + `<cwd>/.pilot/snippets.yaml`). Populated at startup by
+    /// `apply_snippets`; the terminal-pane `]` latch reads this to
+    /// decide whether to mount the picker. Empty when neither file
+    /// exists (the typical first-run state).
+    pub(crate) snippets: pilot_config::Snippets,
+    /// Snapshot of the snippet keys the active SnippetPicker is
+    /// showing — indexed by `Msg::ChoicePicked` to recover the
+    /// underlying entry via `self.snippets.get(...)`. Cleared on
+    /// mount/unmount. Storing keys (not full rows) avoids cloning
+    /// the snippet body twice on every picker mount.
+    pub(crate) snippet_choices: Vec<String>,
     /// Inertia damper for trackpad scroll. macOS sends ~20-50 wheel
     /// events per flick (the OS inertia phase); each one moves the
     /// viewport `STEP` rows, so a single gesture scrolls hundreds of
@@ -528,7 +581,9 @@ impl<T: TerminalAdapter> Model<T> {
             right: Right::new(RIGHT_PID),
             terminals: Terminals::new(TERMINALS_PID),
             projects: std::collections::BTreeMap::new(),
+            synthesized_projects: std::collections::BTreeSet::new(),
             client,
+            event_backlog: helpers::BacklogMonitor::default(),
             redraw: true,
             quit: false,
             setup: SetupCtx::new(),
@@ -564,8 +619,12 @@ impl<T: TerminalAdapter> Model<T> {
             pending_sidebar_context: None,
             action_key_overrides: std::collections::BTreeMap::new(),
             pending_action_confirm: None,
+            pending_inspect_rows: Vec::new(),
+            pending_inspect_target: None,
             pending_new_workspace_project: None,
             pending_focus_project_name: None,
+            snippets: pilot_config::Snippets::default(),
+            snippet_choices: Vec::new(),
             scroll_inertia: None,
         }
     }
@@ -778,6 +837,43 @@ impl<T: TerminalAdapter> Model<T> {
         self.right.apply_ui_defaults(ui);
     }
 
+    /// Install the loaded snippet collection. Called from the
+    /// startup path in `main.rs` after `Snippets::load_merged`. The
+    /// terminal-pane `]<key>` latch reads from `self.snippets`
+    /// directly, so this is the only handoff needed.
+    pub fn apply_snippets(&mut self, snippets: pilot_config::Snippets) {
+        self.snippets = snippets;
+    }
+
+    /// Mount the snippet picker with an initial filter (typically
+    /// the single char the user typed after `]`). Picker rows are
+    /// derived from the model's snippet collection; their keys are
+    /// stashed in `self.snippet_choices` so `handle_choice_picked`
+    /// can resolve a picked index back to a snippet via
+    /// `self.snippets.get(...)` without re-running the filter.
+    pub(crate) fn mount_snippet_picker(&mut self, initial_filter: String) {
+        use crate::realm::components::snippet_picker::{PickerRow, SnippetPicker};
+        if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
+            return;
+        }
+        if self.snippets.is_empty() {
+            // The user typed `]<key>` expecting a snippet and there
+            // are none. Flash a hint pointing at the snippets file
+            // so they know how to configure one.
+            self.flash_info("no snippets configured — add some to ~/.pilot/snippets.yaml");
+            return;
+        }
+        let mut rows = Vec::with_capacity(self.snippets.len());
+        let mut keys = Vec::with_capacity(self.snippets.len());
+        for (k, v) in self.snippets.all() {
+            rows.push(PickerRow::new(k, v));
+            keys.push(k.to_string());
+        }
+        self.snippet_choices = keys;
+        let picker = SnippetPicker::new(rows, initial_filter);
+        self.mount_modal(Id::SnippetPicker, picker);
+    }
+
     /// Apply catalog-driven action key overrides (`ui.action_keys`).
     /// Map of snake_case `ActionKind` names → key-spec strings;
     /// catalog lookups in `find_action_for_chord` consult this map
@@ -806,7 +902,10 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(p) = &self.setup.persisted else {
             return;
         };
-        let mut changed = false;
+        // The repo-level project keys the user is currently
+        // subscribed to, mapped to their display name (`owner/repo`).
+        let mut desired: std::collections::BTreeMap<pilot_core::ProjectKey, String> =
+            std::collections::BTreeMap::new();
         for set in p.selected_scopes.values() {
             for scope in set {
                 // `provider:owner/repo` → ProjectKey::github(owner,
@@ -827,14 +926,37 @@ impl<T: TerminalAdapter> Model<T> {
                     "linear" => pilot_core::ProjectKey::linear(rest),
                     _ => continue,
                 };
-                if !self.projects.contains_key(&pk) {
-                    self.projects.insert(
-                        pk.clone(),
-                        pilot_core::Project::new(pk, rest, chrono::Utc::now()),
-                    );
-                    changed = true;
-                }
+                desired.insert(pk, rest.to_string());
             }
+        }
+
+        let mut changed = false;
+        // Add a placeholder header for each freshly-subscribed repo.
+        for (pk, name) in &desired {
+            if !self.projects.contains_key(pk) {
+                self.projects.insert(
+                    pk.clone(),
+                    pilot_core::Project::new(pk.clone(), name.clone(), chrono::Utc::now()),
+                );
+                self.synthesized_projects.insert(pk.clone());
+                changed = true;
+            }
+        }
+        // Drop placeholders for repos the user just unsubscribed. Only
+        // remove keys WE synthesized — daemon-authoritative projects
+        // are owned by `ProjectUpserted` / `ProjectRemoved` and must
+        // survive a scope edit (a whole-org subscription surfaces repos
+        // we never placed here, and "no scopes" means "all").
+        let stale: Vec<pilot_core::ProjectKey> = self
+            .synthesized_projects
+            .iter()
+            .filter(|k| !desired.contains_key(*k))
+            .cloned()
+            .collect();
+        for pk in stale {
+            self.projects.remove(&pk);
+            self.synthesized_projects.remove(&pk);
+            changed = true;
         }
         if changed {
             self.sidebar.apply_projects(self.projects.clone());
@@ -996,7 +1118,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal_boxed(id, Box::new(component));
     }
 
-    /// Same as [`mount_modal`] but accepts an already-boxed
+    /// Same as [`Self::mount_modal`] but accepts an already-boxed
     /// component. Use this when the caller has a
     /// `Box<dyn AppComponent>` (e.g. setup-flow runners that
     /// dispatch on a polymorphic boxed step).
@@ -1112,7 +1234,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::Editor, modal);
     }
 
-    /// Route a [`ClickTarget`] produced by a right-click in the agent
+    /// Route a [`crate::components::terminal_stack::ClickTarget`] produced by a right-click in the agent
     /// view to the right opener: URLs and `#N` / `owner/repo#N` issue
     /// references go to the system browser; file paths open in the
     /// configured editor (jumping to `line:col` when present).
@@ -1315,6 +1437,7 @@ impl<T: TerminalAdapter> Model<T> {
         }
         actions.push(SettingsAction::EditProviders);
         actions.push(SettingsAction::EditAgents);
+        actions.push(SettingsAction::InspectWorktrees);
         actions.push(SettingsAction::CleanWorktrees);
         actions.push(SettingsAction::FullSetup);
         actions
@@ -1343,6 +1466,10 @@ impl<T: TerminalAdapter> Model<T> {
             }
             SettingsAction::CleanWorktrees => {
                 self.mount_clean_worktrees_confirm();
+                return;
+            }
+            SettingsAction::InspectWorktrees => {
+                self.start_inspect_worktrees();
                 return;
             }
         };

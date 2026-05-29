@@ -1,4 +1,4 @@
-//! HTTP proxy server. Listens on 127.0.0.1:<ephemeral>, forwards every
+//! HTTP proxy server. Listens on `127.0.0.1:<ephemeral>`, forwards every
 //! request to a configured upstream (Anthropic or OpenAI), and emits
 //! a `ProxyRecord` after each request-response round-trip.
 //!

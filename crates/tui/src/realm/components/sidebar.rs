@@ -68,7 +68,7 @@ impl Sidebar {
     /// **Why drain here and not inside the inner sidebar?** The
     /// inner sidebar is constructed directly in unit tests (`cargo
     /// test`) — if it called `osascript` itself, every test that
-    /// drove an `AgentState::Asking` event would spam the user's
+    /// drove an `AgentState::InputNeeded` event would spam the user's
     /// notification center. Keeping the IO side-effect in this
     /// wrapper (which production code goes through; tests don't)
     /// keeps the inner sidebar fully deterministic.
@@ -253,6 +253,13 @@ impl Sidebar {
     /// was found. Backs the `!` global key.
     pub fn focus_next_asking_workspace(&mut self) -> bool {
         self.inner.focus_next_asking_workspace()
+    }
+
+    /// Move the cursor onto the next workspace whose PR has failing
+    /// CI, wrapping around. Returns true when a target was found.
+    /// Backs the `Shift-F` global key.
+    pub fn focus_next_failing_ci_workspace(&mut self) -> bool {
+        self.inner.focus_next_failing_ci_workspace()
     }
 
     /// State-aware short list for the footer hint bar. Catalog-driven;

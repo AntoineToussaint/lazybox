@@ -31,9 +31,10 @@ pub use scheduler::{
 };
 
 pub use handlers::{
-    ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_fetch_pr_details,
-    handle_fetch_repo_labels, handle_merge_pr, handle_request_reviewers, handle_set_assignees,
-    handle_set_labels, post_reply, prefetch_top_pr_details,
+    ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_delete_orphaned_worktree,
+    handle_fetch_pr_details, handle_fetch_repo_labels, handle_inspect_worktrees, handle_merge_pr,
+    handle_request_reviewers, handle_set_assignees, handle_set_labels, post_reply,
+    prefetch_top_pr_details,
 };
 pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 
@@ -88,7 +89,7 @@ pub trait TaskSource: Send + Sync + 'static {
     /// owned by a source whose scope this tick is authoritative for
     /// are candidates for removal.
     ///
-    /// Default is [`PolledScope::Repos(Vec::new())`] — "I covered no
+    /// Default is [`PolledScope::Repos`]`(Vec::new())` — "I covered no
     /// repos authoritatively this tick", so `rescope` preserves every
     /// stored workspace owned by this source. The destructive choice
     /// ([`PolledScope::Exhaustive`]) requires an explicit override so
@@ -151,6 +152,30 @@ pub enum PolledScope {
     Repos(Vec<String>),
 }
 
+/// Decide what coverage the GitHub source reports to `rescope` for a
+/// tick, given the round-robin scheduling decision and whether the
+/// sweep was a PARTIAL success (one of PRs/Issues errored).
+///
+/// `partial` is the override that closes the data-loss hole: when the
+/// PR side fails, the client returns issues-only `Ok(..)` to keep the
+/// inbox alive. If we still reported `Exhaustive`, `rescope` would
+/// read "PRs not in the polled set" as "PRs fell out of scope" and
+/// DELETE every PR — a PR vanishing because one poll hiccupped, not
+/// because it merged/closed. On a partial sweep we report empty
+/// coverage (`Repos([])`, matching no stored workspace) so the whole
+/// github inbox is preserved this tick; the next clean sweep
+/// reconciles legitimately-gone rows.
+pub fn gh_polled_scope(run_global: bool, repos: &[String], partial: bool) -> PolledScope {
+    if partial {
+        return PolledScope::Repos(Vec::new());
+    }
+    if run_global {
+        PolledScope::Exhaustive
+    } else {
+        PolledScope::Repos(repos.to_vec())
+    }
+}
+
 /// `GhClient` adapter. The filter narrows the upstream result by
 /// role and item type before they reach the daemon's upsert path —
 /// disabled roles / types never become Workspaces. `scopes` further
@@ -194,6 +219,27 @@ pub struct GhSource {
     /// strictly in sequence (fetch resolves, THEN last_fetch_kind), so
     /// there's no contention.
     last_kind: std::sync::Mutex<FetchMode>,
+    /// Whether the last full sweep was a PARTIAL success — one side
+    /// (PRs or Issues) errored while the other returned results, so
+    /// `fetch` returned `Ok` with only half the inbox to keep the
+    /// rest alive. Read by [`TaskSource::polled_scope`] AFTER `fetch`
+    /// resolves.
+    ///
+    /// Why this gates deletion: when the PR side fails, the client
+    /// returns issues-only `Ok(..)` (see
+    /// `GhClient::fetch_round_robin_with_status_and_mentions`). If
+    /// `polled_scope` still claimed [`PolledScope::Exhaustive`],
+    /// `rescope` would conclude every stored PR "fell out of scope"
+    /// and DELETE it — a PR vanishing not because it closed, but
+    /// because one poll hiccupped. A PR only legitimately leaves the
+    /// inbox when it's merged/closed, falls out of the search
+    /// (un-involved, un-requested), or the user re-scopes — never
+    /// because a fetch failed. On a partial sweep we therefore report
+    /// "no authoritative coverage" so rescope preserves everything
+    /// this tick; the next clean sweep deletes anything genuinely
+    /// gone. Initialized `false` (a never-fetched source isn't
+    /// partial).
+    last_coverage_partial: std::sync::Mutex<bool>,
 }
 
 /// Out-of-band action a `TaskSource` may surface alongside the
@@ -239,6 +285,7 @@ impl GhSource {
             // Default to Full so a never-fetched source doesn't
             // accidentally block rescope.
             last_kind: std::sync::Mutex::new(FetchMode::Full),
+            last_coverage_partial: std::sync::Mutex::new(false),
         }
     }
 
@@ -247,6 +294,13 @@ impl GhSource {
             .last_kind
             .lock()
             .expect("GhSource.last_kind mutex poisoned") = kind;
+    }
+
+    fn set_coverage_partial(&self, partial: bool) {
+        *self
+            .last_coverage_partial
+            .lock()
+            .expect("GhSource.last_coverage_partial mutex poisoned") = partial;
     }
 
     fn emit_progress(&self, message: impl Into<String>) {
@@ -272,8 +326,13 @@ impl GhSource {
     async fn fetch_full(&self) -> Result<Vec<Task>, pilot_core::ProviderError> {
         let want_prs = self.filter.pr_enabled();
         let want_issues = self.filter.issue_enabled();
+        // The issue query also runs to scan for `@pilot` mentions even
+        // when issue *display* is off (the GitHub default is PR-only) —
+        // see `GhClient::should_query_issues` (issue #50). Mirror that
+        // here so the full sweep doesn't early-return before the scan.
+        let scan_issues = want_issues || !self.mention_allowed_logins.is_empty();
 
-        let plan = match (want_prs, want_issues) {
+        let plan = match (want_prs, scan_issues) {
             (true, true) => "PRs + Issues",
             (true, false) => "PRs",
             (false, true) => "Issues",
@@ -306,7 +365,7 @@ impl GhSource {
                 ));
             }
         }
-        if want_issues {
+        if scan_issues {
             self.emit_progress(format!("Issue query: {}", self.client.issue_search_query()));
         }
 
@@ -321,6 +380,12 @@ impl GhSource {
             )
             .await
             .map_err(pilot_core::ProviderError::from)?;
+        // Record whether this sweep was partial so `polled_scope`
+        // downgrades from `Exhaustive` to "no authoritative coverage"
+        // — otherwise rescope would delete the half of the inbox the
+        // failed side couldn't return (e.g. every PR when the PR
+        // query errored). See `last_coverage_partial`.
+        self.set_coverage_partial(partial_warning.is_some());
         // Surface partial sync failures to the user — one side
         // succeeded, the other errored, we kept the inbox alive but
         // the visible row set is incomplete. Without this notice the
@@ -375,6 +440,14 @@ impl GhSource {
         // separately so the async pass owns it (the loop below moves
         // mentions into the queue).
         let mut react_targets: Vec<String> = Vec::with_capacity(mentions.len());
+        // Issues an allowed user `@pilot`-tagged this sweep. Re-admitted
+        // into `kept` below so the auto-spawn always lands in a real
+        // issue workspace/worktree, even when the display filter (role /
+        // scope / issue-display-off) would drop the row — otherwise
+        // `handle_spawn` finds no workspace and spawns the agent in
+        // pilot's own cwd with no branch (issue #50). See
+        // `readmit_mentioned_tasks`.
+        let mut mentioned_tasks: Vec<Task> = Vec::new();
         {
             let mut pending = self
                 .pending_actions
@@ -401,6 +474,7 @@ impl GhSource {
                 };
                 let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(task));
                 let prompt = Some(pilot_core::prompts::build_implement_issue_prompt(task));
+                mentioned_tasks.push(task.clone());
                 let reason = format!(
                     "@pilot mention by {} on {}#{} ({})",
                     mention.triggered_by_login,
@@ -445,7 +519,10 @@ impl GhSource {
         }
 
         self.emit_progress(format!("Got {} raw items, applying filters…", raw.len()));
-        let kept = filter_github_tasks(raw, &self.filter, &self.scopes);
+        let kept = readmit_mentioned_tasks(
+            filter_github_tasks(raw, &self.filter, &self.scopes),
+            mentioned_tasks,
+        );
         self.emit_progress(format!("{} tasks kept after filter", kept.len()));
 
         // Mark sweep complete BEFORE returning so the next tick's
@@ -627,6 +704,10 @@ async fn dispatch_action(config: &ServerConfig, source_name: &str, action: Provi
                 pilot_ipc::TerminalKind::Agent(agent_id),
                 None,
                 prompt,
+                // Autonomous `@pilot` spawn — launch unattended with
+                // permission prompts disabled (subject to the
+                // `agent.autonomous_skip_permissions` toggle).
+                true,
             )
             .await;
         }
@@ -644,11 +725,11 @@ impl TaskSource for GhSource {
     /// #34: without this, `rescope` would treat unpolled repos as
     /// "fell out of scope" and delete their workspaces every warm tick.
     fn polled_scope(&self) -> PolledScope {
-        if self.scheduling.run_global {
-            PolledScope::Exhaustive
-        } else {
-            PolledScope::Repos(self.scheduling.repos.clone())
-        }
+        let partial = *self
+            .last_coverage_partial
+            .lock()
+            .expect("GhSource.last_coverage_partial mutex poisoned");
+        gh_polled_scope(self.scheduling.run_global, &self.scheduling.repos, partial)
     }
     fn drain_actions(&self) -> Vec<ProviderAction> {
         let mut guard = self
@@ -951,6 +1032,25 @@ pub fn filter_github_tasks(
         .collect()
 }
 
+/// Re-admit `@pilot`-mentioned issue tasks that `filter_github_tasks`
+/// dropped, so an auto-spawn lands in a real workspace/worktree.
+///
+/// The `@pilot` mention is an explicit, high-intent trigger: the user
+/// asked pilot to work on this exact issue. The passive display filter
+/// (role / scope / issue-display-off) must not prevent the issue's
+/// workspace from being created — otherwise `dispatch_action` →
+/// `handle_spawn` finds no workspace and spawns the agent in pilot's
+/// own cwd with no branch (the issue #50 symptom). Tasks already in
+/// `kept` are left as-is (dedup on `TaskId`); the rest are appended.
+pub fn readmit_mentioned_tasks(mut kept: Vec<Task>, mentioned: Vec<Task>) -> Vec<Task> {
+    for task in mentioned {
+        if !kept.iter().any(|k| k.id == task.id) {
+            kept.push(task);
+        }
+    }
+    kept
+}
+
 /// Drop Linear tasks whose role isn't enabled. Linear has no
 /// PRs-vs-Issues distinction — flat `role.*` keys.
 pub fn filter_linear_tasks(tasks: Vec<Task>, filter: &ProviderConfig) -> Vec<Task> {
@@ -1104,6 +1204,7 @@ pub async fn sources_for(
                             // Default to Full so a never-fetched
                             // source doesn't accidentally block rescope.
                             last_kind: std::sync::Mutex::new(FetchMode::Full),
+                            last_coverage_partial: std::sync::Mutex::new(false),
                         }));
                     }
                     Err(e) => tracing::warn!("github client init failed: {e}"),
@@ -2809,14 +2910,43 @@ pub async fn set_focused_workspace(config: &ServerConfig, key: &WorkspaceKey) {
     else {
         return;
     };
-    let mut state = config.poll_state.lock().await;
-    let prev = state.round_robin.focused_repo.replace(repo.to_string());
-    if prev.as_deref() != Some(repo) {
-        tracing::debug!(
-            workspace_key = %key.as_str(),
-            repo,
-            "round-robin focus updated"
-        );
+    // Best-effort round-robin focus hint — NEVER block here.
+    //
+    // This runs INLINE on the daemon serve loop for every
+    // `FocusWorkspace` / `MarkRead`, i.e. on every sidebar navigation.
+    // `run_one_tick` holds `poll_state` for the ENTIRE poll cycle (the
+    // comment there says so explicitly) — up to ~17s on a slow GitHub
+    // fetch. A blocking `.lock().await` here would therefore wedge the
+    // single-task serve loop for that whole window, queueing every
+    // keystroke `Write` and `Spawn` behind it. That is the
+    // user-visible "can't type in the agent / can't start a shell while
+    // GitHub syncs, then it unblocks when the sync finishes" bug:
+    // modal input still works (TUI-only, no daemon round-trip) but
+    // anything that needs the daemon stalls.
+    //
+    // The hint only steers WHICH repo the NEXT poll prioritizes, so if
+    // a poll is already mid-flight (lock held) we simply skip the
+    // update. `try_lock` makes that explicit and keeps the serve loop
+    // responsive no matter how long the active tick runs.
+    match config.poll_state.try_lock() {
+        Ok(mut state) => {
+            let prev = state.round_robin.focused_repo.replace(repo.to_string());
+            if prev.as_deref() != Some(repo) {
+                tracing::debug!(
+                    workspace_key = %key.as_str(),
+                    repo,
+                    "round-robin focus updated"
+                );
+            }
+        }
+        Err(_) => {
+            tracing::debug!(
+                workspace_key = %key.as_str(),
+                repo,
+                "poll tick holds poll_state — skipping round-robin focus hint to keep \
+                 the serve loop responsive (keystrokes/spawns must not wait on the sync)"
+            );
+        }
     }
 }
 

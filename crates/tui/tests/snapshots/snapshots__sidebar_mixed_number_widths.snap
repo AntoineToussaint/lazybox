@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/snapshots.rs
+expression: rendered
+---
+ PILOT  3  [7d]
+ f [all]  o [split]
+
+ ────────────────────────────────────
+
+   ▾  owner/repo
+     I Issues
+   ▸ ○7   A   task: o/r#7         1mo
+     ○42  A   task: o/r#42        1mo
+     ○312 A   task: o/r#312       1mo

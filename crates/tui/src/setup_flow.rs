@@ -566,6 +566,29 @@ impl SetupRunner {
                 // org and lose every prior narrowed subscription.
                 let picked_orgs: BTreeSet<String> = picked.iter().map(|s| s.id.clone()).collect();
                 let prefixes: Vec<String> = picked_orgs.iter().map(|o| format!("{o}/")).collect();
+                // Snapshot which picked orgs were ALREADY subscribed
+                // (org-level or via any narrowed repo) BEFORE this edit.
+                // We only force the repo-narrowing step for orgs the
+                // user is *adding* now — re-confirming or removing other
+                // orgs must NOT drag the user through the repo picker of
+                // an org they left untouched.
+                let already_subscribed: BTreeSet<String> = {
+                    let existing = self
+                        .accumulator
+                        .selected_scopes
+                        .get(&provider_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    picked_orgs
+                        .iter()
+                        .filter(|org_id| {
+                            let prefix = format!("{org_id}/");
+                            existing.contains(*org_id)
+                                || existing.iter().any(|id| id.starts_with(&prefix))
+                        })
+                        .cloned()
+                        .collect()
+                };
                 let existing = self
                     .accumulator
                     .selected_scopes
@@ -587,9 +610,14 @@ impl SetupRunner {
                         existing.insert(org_id.clone());
                     }
                 }
-                // Queue the repo picker for each picked org so the
-                // user can optionally narrow.
+                // Queue the repo picker only for NEWLY-added orgs so the
+                // user can optionally narrow them. Orgs that were already
+                // subscribed keep their settled (possibly narrowed)
+                // scopes and are not re-walked.
                 for s in &picked {
+                    if already_subscribed.contains(&s.id) {
+                        continue;
+                    }
                     self.pending_repo_pickers.push_back((
                         provider_id.clone(),
                         s.id.clone(),
@@ -612,7 +640,13 @@ impl SetupRunner {
                         .selected_scopes
                         .entry(provider_id)
                         .or_default();
-                    entry.remove(&parent_id);
+                    // Replace this org's subscription with exactly the
+                    // picked repos: drop the whole-org entry AND any
+                    // previously-narrowed repo under it, then re-add the
+                    // current picks. Without clearing the old repos,
+                    // un-ticking one would leave its stale entry behind.
+                    let prefix = format!("{parent_id}/");
+                    entry.retain(|id| *id != parent_id && !id.starts_with(&prefix));
                     for s in picked {
                         entry.insert(s.id);
                     }
@@ -1448,5 +1482,165 @@ mod tests {
         assert!(!after.contains("github:doomed"));
         assert!(!after.contains("github:doomed/repo-a"));
         assert!(after.contains("github:keepme/repo-x"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_an_org_does_not_walk_kept_orgs_repos() {
+        // Regression: un-ticking one org used to drag the user through
+        // the repo picker of every *other* still-subscribed org. The
+        // repo picker must only be queued for NEWLY-added orgs.
+        use std::sync::Arc;
+        let mut prior: BTreeSet<String> = BTreeSet::new();
+        prior.insert("github:doomed".into());
+        prior.insert("github:keepme/repo-x".into());
+        let mut outcome = SetupOutcome::default_enabled(report());
+        outcome.selected_scopes.insert("github".into(), prior);
+
+        let sources: Arc<Vec<Box<dyn ScopeSource>>> = Arc::new(Vec::new());
+        let mut runner = SetupRunner {
+            accumulator: outcome,
+            sources,
+            pending_filters: VecDeque::new(),
+            pending_scopes: VecDeque::new(),
+            pending_repo_pickers: VecDeque::new(),
+            expecting: ExpectingStep::ScopePickFor("github".into()),
+            current_choice: None,
+        };
+        let items = vec![
+            Scope {
+                id: "github:doomed".into(),
+                label: "doomed".into(),
+                parent: None,
+                kind: pilot_core::ScopeKind::Org,
+            },
+            Scope {
+                id: "github:keepme".into(),
+                label: "keepme".into(),
+                parent: None,
+                kind: pilot_core::ScopeKind::Org,
+            },
+        ];
+        runner.current_choice = Some(CurrentChoice::ScopePick(items));
+
+        // Keep only `keepme` (already subscribed) — `doomed` removed.
+        let _step = runner.step_choice_picked(vec![1]);
+
+        // `keepme` was already subscribed, so no repo picker is queued.
+        assert!(
+            runner.pending_repo_pickers.is_empty(),
+            "kept-but-unchanged org should not re-walk its repos: {:?}",
+            runner.pending_repo_pickers
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn newly_added_org_queues_its_repo_picker() {
+        // The flip side: adding a brand-new org still queues its repo
+        // picker so the user can optionally narrow it.
+        use std::sync::Arc;
+        let mut prior: BTreeSet<String> = BTreeSet::new();
+        prior.insert("github:keepme/repo-x".into());
+        let mut outcome = SetupOutcome::default_enabled(report());
+        outcome.selected_scopes.insert("github".into(), prior);
+
+        let sources: Arc<Vec<Box<dyn ScopeSource>>> = Arc::new(Vec::new());
+        let mut runner = SetupRunner {
+            accumulator: outcome,
+            sources,
+            pending_filters: VecDeque::new(),
+            pending_scopes: VecDeque::new(),
+            pending_repo_pickers: VecDeque::new(),
+            expecting: ExpectingStep::ScopePickFor("github".into()),
+            current_choice: None,
+        };
+        let items = vec![
+            Scope {
+                id: "github:keepme".into(),
+                label: "keepme".into(),
+                parent: None,
+                kind: pilot_core::ScopeKind::Org,
+            },
+            Scope {
+                id: "github:fresh".into(),
+                label: "fresh".into(),
+                parent: None,
+                kind: pilot_core::ScopeKind::Org,
+            },
+        ];
+        runner.current_choice = Some(CurrentChoice::ScopePick(items));
+
+        let _step = runner.step_choice_picked(vec![0, 1]);
+
+        // The flow immediately advances into the repo-loading step for
+        // the first newly-added org (`fresh`); the already-subscribed
+        // `keepme` is never walked. Anything still queued plus the
+        // active step must reference only `fresh`.
+        let mut walked: Vec<String> = runner
+            .pending_repo_pickers
+            .iter()
+            .map(|(_, id, _)| id.clone())
+            .collect();
+        if let ExpectingStep::RepoLoadFor(_, parent_id, _) = &runner.expecting {
+            walked.push(parent_id.clone());
+        }
+        assert_eq!(
+            walked,
+            vec!["github:fresh".to_string()],
+            "only the freshly-added org should be walked through repos"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn un_ticking_a_repo_removes_it_from_scopes() {
+        // Regression: narrowing an org's repos used to only ADD picks,
+        // never clearing previously-subscribed repos — so un-ticking a
+        // repo left its stale entry (and its sidebar header) behind.
+        use std::sync::Arc;
+        let mut prior: BTreeSet<String> = BTreeSet::new();
+        prior.insert("github:acme/keep".into());
+        prior.insert("github:acme/drop".into());
+        let mut outcome = SetupOutcome::default_enabled(report());
+        outcome.selected_scopes.insert("github".into(), prior);
+
+        let sources: Arc<Vec<Box<dyn ScopeSource>>> = Arc::new(Vec::new());
+        let mut runner = SetupRunner {
+            accumulator: outcome,
+            sources,
+            pending_filters: VecDeque::new(),
+            pending_scopes: VecDeque::new(),
+            pending_repo_pickers: VecDeque::new(),
+            expecting: ExpectingStep::RepoPickFor("github".into(), "github:acme".into()),
+            current_choice: None,
+        };
+        let items = vec![
+            Scope {
+                id: "github:acme/keep".into(),
+                label: "keep".into(),
+                parent: Some("acme".into()),
+                kind: pilot_core::ScopeKind::Repo,
+            },
+            Scope {
+                id: "github:acme/drop".into(),
+                label: "drop".into(),
+                parent: Some("acme".into()),
+                kind: pilot_core::ScopeKind::Repo,
+            },
+        ];
+        runner.current_choice = Some(CurrentChoice::RepoPick(items));
+
+        // Keep only `keep`; `drop` is un-ticked.
+        let _step = runner.step_choice_picked(vec![0]);
+
+        let after = runner
+            .accumulator
+            .selected_scopes
+            .get("github")
+            .cloned()
+            .unwrap_or_default();
+        assert!(after.contains("github:acme/keep"));
+        assert!(
+            !after.contains("github:acme/drop"),
+            "un-ticked repo should be removed: {after:?}"
+        );
     }
 }

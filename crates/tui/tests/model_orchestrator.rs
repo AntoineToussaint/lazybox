@@ -797,6 +797,7 @@ fn w_on_issue_with_running_claude_injects_implement_prompt() {
         terminal_id: TerminalId(7),
         session_key: SessionKey::from(&ws_key),
         kind: TerminalKind::Agent("claude".into()),
+        no_permission: false,
     });
 
     // TerminalSpawned auto-focuses the terminal pane. In real usage
@@ -878,6 +879,7 @@ fn w_on_issue_from_right_pane_also_injects() {
         terminal_id: TerminalId(7),
         session_key: SessionKey::from(&ws_key),
         kind: TerminalKind::Agent("claude".into()),
+        no_permission: false,
     });
 
     // Get to the right pane. TerminalSpawned auto-focused terminals;

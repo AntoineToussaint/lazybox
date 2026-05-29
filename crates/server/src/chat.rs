@@ -220,7 +220,7 @@ pub struct RouterState {
     /// only if the message wasn't in a known thread.
     thread_to_terminal: HashMap<String, TerminalId>,
     /// `terminal_id → last instant we saw PTY output`. Updated on
-    /// every `TerminalOutput` bus event. When `AgentState::Asking`
+    /// every `TerminalOutput` bus event. When `AgentState::InputNeeded`
     /// fires the dispatcher reads this to label notifications as
     /// "paused" (recent output) vs "done" (quiet for a while).
     last_output_at: HashMap<TerminalId, Instant>,

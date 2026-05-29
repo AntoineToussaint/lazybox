@@ -12,10 +12,13 @@ set -euo pipefail
 
 # Honor pilot's vendored zig if present — same trick the Makefile
 # uses so anything the hook spawns picks up zig 0.15.2 instead of
-# whatever brew put on PATH.
+# whatever brew put on PATH. `make setup` drops the binary under a
+# host-specific dir (vendor/zig/<arch>-<os>-<ver>/zig), so glob for
+# it rather than assuming a fixed path.
 repo_root="$(git rev-parse --show-toplevel)"
-if [ -x "${repo_root}/vendor/zig/zig" ]; then
-    export PATH="${repo_root}/vendor/zig:${PATH}"
+zig_bin="$(find "${repo_root}/vendor/zig" -maxdepth 2 -name zig -type f 2>/dev/null | head -n1)"
+if [ -n "${zig_bin}" ]; then
+    export PATH="$(dirname "${zig_bin}"):${PATH}"
 fi
 
 # 1. Format check — fastest, fails most often. Same invocation

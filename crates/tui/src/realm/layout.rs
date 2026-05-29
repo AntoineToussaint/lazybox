@@ -202,7 +202,7 @@ pub(crate) fn clamp_pct(raw: i16) -> u16 {
 
 /// Hard cap on the sidebar's column count. Past this, no matter
 /// what `sidebar_pct` says, extra horizontal space goes to the
-/// right pane. The sidebar's longest natural row (`⇄#1234 A ●
+/// right pane. The sidebar's longest natural row (`⇄1234 A ●
 /// long title here    C CONFLICT  1d`) is around 90 cols; 100
 /// gives a small margin without leaving the sidebar dominating an
 /// ultra-wide monitor.
@@ -214,7 +214,7 @@ pub(crate) const SIDEBAR_MAX_COLS: u16 = 100;
 
 /// Minimum sidebar width even on a narrow terminal — below this
 /// the row content is unreadable. Picked to fit the
-/// `⇄#NNN A …` prefix plus a meaningful slice of the title.
+/// `⇄NNN A …` prefix plus a meaningful slice of the title.
 pub(crate) const SIDEBAR_MIN_COLS: u16 = 30;
 
 /// Compute the three pane rects (sidebar / right-top / right-bottom).

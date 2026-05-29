@@ -13,6 +13,12 @@ pub struct SpawnCtx {
     pub repo: Option<String>,
     pub pr_number: Option<String>,
     pub env: HashMap<String, String>,
+    /// Launch the agent with tool-use permission prompts disabled
+    /// ("no-permission" / bypass mode) so it runs unattended. Set only
+    /// for pilot-spawned autonomous sessions; honored by agents that
+    /// support a bypass flag (Claude → `--dangerously-skip-permissions`).
+    /// Agents without one ignore it.
+    pub skip_permissions: bool,
 }
 
 pub trait Agent: Send + Sync {
@@ -172,6 +178,152 @@ pub mod detect {
     pub fn contains_paired(text: &str, choices: &[&str], questions: &[&str]) -> bool {
         contains_any(text, choices) && contains_any(text, questions)
     }
+
+    /// Conversational "asking" detection — issue #58.
+    ///
+    /// A SEPARATE code path from the structural permission-dialog
+    /// detection (issue #26). The structural path keys off harness
+    /// UI shape: the `❯ 1. … 2. …` chooser arrow, the `Esc to
+    /// cancel` footer, numbered-option menus. This path keys off
+    /// Claude's OWN conversational text — the model ending its turn
+    /// with a freeform question and parking on it:
+    ///
+    ///   "Want me to proceed?"
+    ///   "Should I also update the tests?"
+    ///   "Let me know if you'd like me to continue."
+    ///   "Which would you prefer?"
+    ///
+    /// There's no menu and no footer here, so the structural matchers
+    /// never fire. Today those sessions look idle in pilot when
+    /// they're actually waiting on the user.
+    ///
+    /// ## Tuning: recall over precision
+    ///
+    /// A false positive costs one needlessly-flagged session (cheap —
+    /// the user glances and dismisses). A false negative leaves a
+    /// session sitting idle indefinitely while it actually waits on
+    /// input (expensive). So this detector deliberately leans toward
+    /// flagging: any last conversational line ending in `?`, or
+    /// containing a known confirmation/clarification phrase, counts.
+    pub mod conversational {
+        /// Confirmation / clarification phrases that signal Claude is
+        /// soliciting input even when the line does NOT end in `?`
+        /// (e.g. "Let me know if you'd like me to continue."). Matched
+        /// case-insensitively as a substring of the last conversational
+        /// line. Documented and auditable in one place; the
+        /// fixture suite (`PROMPT_FIXTURES` in `tests/agents.rs`) pins
+        /// one shape per phrase class.
+        ///
+        /// Lowercase. Some entries carry a trailing space to avoid
+        /// matching inside longer words ("should i " won't fire on
+        /// "shoulder"); the `?`-terminated forms ("Should I?") are
+        /// caught by the ends-with-`?` rule instead. Entries are the
+        /// shortest distinctive stem of each shape — "would you like"
+        /// also catches "would you like me to …", "let me know" also
+        /// catches "let me know if / whether / how / your thoughts" —
+        /// so we don't carry redundant longer variants.
+        pub const CONVERSATIONAL_ASK_PHRASES: &[&str] = &[
+            "want me to",
+            "should i ",
+            "shall i ",
+            "do you want",
+            "would you like",
+            "let me know",
+            "which one",
+            "which would you prefer",
+            "ok to ",
+            "okay to ",
+        ];
+
+        /// True when `text` (post-ANSI-strip) ends parked on a
+        /// conversational ask. Scans the tail of the buffer from the
+        /// bottom, skips Claude's rendered UI chrome (input-box
+        /// borders, the empty prompt line, the footer hint strip), and
+        /// tests the last line of actual conversational content.
+        pub fn is_conversational_ask(text: &str) -> bool {
+            // Bound to the tail (~2 KiB) so a flush full of streamed
+            // output doesn't drag the heuristic back to a question
+            // from several screens ago. Round `tail_start` UP to the
+            // next char boundary — Claude renders multi-byte glyphs
+            // (`●`, box-drawing `─`, the middle-dot `·`) and slicing
+            // mid-sequence would panic.
+            let mut tail_start = text.len().saturating_sub(2048);
+            while tail_start < text.len() && !text.is_char_boundary(tail_start) {
+                tail_start += 1;
+            }
+            text[tail_start..]
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|l| !is_chrome_line(l))
+                .is_some_and(line_is_ask)
+        }
+
+        /// A single conversational line is an ask when it ends with a
+        /// question mark (the model parked on a question) or contains
+        /// one of the known confirmation/clarification phrases. The
+        /// `?` check runs first so the common case allocates nothing.
+        fn line_is_ask(line: &str) -> bool {
+            if line.ends_with('?') {
+                return true;
+            }
+            let lower = line.to_lowercase();
+            CONVERSATIONAL_ASK_PHRASES.iter().any(|p| lower.contains(p))
+        }
+
+        /// Lines that are Claude's rendered UI chrome rather than
+        /// conversational content. The ask sits ABOVE the input box in
+        /// the transcript, so we skip the box borders, the empty
+        /// prompt line, and the footer hint / mode-indicator strip to
+        /// reach it. A line of actual prose never starts with a
+        /// box-drawing glyph and never carries these footer markers.
+        ///
+        /// This is load-bearing for RECALL: the footer sits below the
+        /// input box, so the bottom-up scan hits it first. A footer
+        /// line we fail to recognise as chrome becomes the apparent
+        /// "last content line" and masks the real ask above it — a
+        /// false negative, the expensive failure mode. Hence the
+        /// generous marker list.
+        fn is_chrome_line(line: &str) -> bool {
+            if line.is_empty() {
+                return true;
+            }
+            let lower = line.to_lowercase();
+            if lower.contains("esc to cancel")
+                || lower.contains("tab to amend")
+                || lower.contains("for shortcuts")
+                || lower.contains("ctrl+")
+                || lower.contains("shift+")
+                || lower.contains("bypass permissions")
+                || lower.contains("accept edits")
+                || lower.contains("auto-accept")
+                || lower.contains("plan mode on")
+            {
+                return true;
+            }
+            // Leading glyphs that only ever open a chrome line: the
+            // input-box borders (`╭│╰` …), the tool-output gutter
+            // (`⎿`), the mode-indicator arrow (`⏵⏵ accept edits`), and
+            // the bare prompt marker (`>`).
+            matches!(
+                line.chars().next(),
+                Some(
+                    '╭' | '╮'
+                        | '╰'
+                        | '╯'
+                        | '│'
+                        | '─'
+                        | '┌'
+                        | '┐'
+                        | '└'
+                        | '┘'
+                        | '>'
+                        | '⎿'
+                        | '⏵'
+                )
+            )
+        }
+    }
 }
 
 pub mod builtins {
@@ -223,11 +375,19 @@ pub mod builtins {
         fn display_name(&self) -> &'static str {
             "Claude Code"
         }
-        fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
-            vec!["claude".into()]
+        fn spawn(&self, ctx: &SpawnCtx) -> Vec<String> {
+            let mut argv = vec!["claude".into()];
+            if ctx.skip_permissions {
+                argv.push("--dangerously-skip-permissions".into());
+            }
+            argv
         }
-        fn resume(&self, _ctx: &SpawnCtx) -> Vec<String> {
-            vec!["claude".into(), "--continue".into()]
+        fn resume(&self, ctx: &SpawnCtx) -> Vec<String> {
+            let mut argv = vec!["claude".into(), "--continue".into()];
+            if ctx.skip_permissions {
+                argv.push("--dangerously-skip-permissions".into());
+            }
+            argv
         }
 
         /// Claude Code's input area batches rapid byte arrival as a
@@ -388,38 +548,18 @@ pub mod builtins {
                 }
             }
 
-            // Cheap last-resort heuristic: if the most recent non-
-            // empty line ends with `?`, the model is most likely
-            // soliciting input. Tighter than scanning the whole
-            // buffer for `?` (false-positives on chat output that
-            // includes a question mid-paragraph); the *last* line is
-            // load-bearing because claude renders the prompt at the
-            // bottom of the screen. Skips lines that are just the
-            // footer hint (`Esc to cancel · …`) since those carry no
-            // question even on idle screens. Bound the search to the
-            // tail of the buffer (the last ~1 KB) so a flush full of
-            // chat output doesn't drag the heuristic back to a
-            // long-ago question.
-            // `tail_start` rounded UP to the next char boundary so
-            // we never slice into the middle of a multi-byte UTF-8
-            // sequence — claude renders Unicode glyphs (box-drawing
-            // `─`, the choice arrow `❯`, the middle-dot separator
-            // `·`) that span 2-3 bytes each. Slicing at a raw byte
-            // index inside one of those was the source of a
-            // `byte index N is not a char boundary` panic that
-            // killed the per-terminal pump task and silently
-            // disabled state detection until daemon restart.
-            let mut tail_start = s.len().saturating_sub(1024);
-            while tail_start < s.len() && !s.is_char_boundary(tail_start) {
-                tail_start += 1;
-            }
-            if let Some(last_non_empty) = s[tail_start..]
-                .lines()
-                .rev()
-                .map(str::trim)
-                .find(|l| !l.is_empty() && !looks_like_footer_hint(l))
-                && looks_like_prompt_question(last_non_empty)
-            {
+            // Conversational asks (issue #58) — a SEPARATE code path
+            // from the structural matchers above. Everything before
+            // this point keys off harness UI shape (chooser arrow,
+            // `Esc to cancel` footer, numbered menus). This last
+            // branch keys off Claude's own conversational text: the
+            // model ending its turn parked on a freeform question
+            // ("Want me to proceed?", "Should I also do X?", "Let me
+            // know if you'd like me to continue."). No menu, no
+            // footer — so none of the structural branches fire, and
+            // these sessions previously looked idle. Tuned for recall
+            // (see `detect::conversational`).
+            if super::detect::conversational::is_conversational_ask(&s) {
                 return Some(AgentState::InputNeeded);
             }
 
@@ -543,49 +683,6 @@ pub mod builtins {
     /// need correctness for rendering (libghostty-vt does that) — just
     /// enough to make pattern matches survive cursor moves and color
     /// codes interleaved with the literal text.
-    /// Tighter `?`-heuristic gate: the line ends with `?` AND looks
-    /// like an actual prompt rather than prose chat output. Without
-    /// this, every claude response containing "Is this right?" or
-    /// "Want me to proceed?" mid-paragraph triggered Asking, and
-    /// the 8s Asking→Active hysteresis amplified each blip into a
-    /// visible-for-8-seconds false positive in the sidebar pill.
-    ///
-    /// Heuristics (all must hold):
-    /// - ends with `?`.
-    /// - <= 80 chars long — real prompts are short; multi-clause
-    ///   prose questions are longer.
-    /// - doesn't contain a period followed by uppercase mid-line
-    ///   (`.[A-Z]` strongly suggests "two sentences, last one
-    ///   happens to end with `?`" — prose, not a prompt).
-    fn looks_like_prompt_question(line: &str) -> bool {
-        if !line.ends_with('?') {
-            return false;
-        }
-        if line.chars().count() > 80 {
-            return false;
-        }
-        // Sentence-break heuristic: a `.` (or `!`) followed by
-        // optional whitespace + an uppercase letter strongly
-        // suggests "two sentences, last one happens to end with
-        // `?`" — that's prose narration, not a real prompt.
-        // Catches both `.Word` and `. Word` shapes.
-        let chars: Vec<char> = line.chars().collect();
-        for (i, c) in chars.iter().enumerate() {
-            if *c != '.' && *c != '!' {
-                continue;
-            }
-            // Walk past whitespace to find the next non-space char.
-            let mut j = i + 1;
-            while j < chars.len() && chars[j].is_whitespace() {
-                j += 1;
-            }
-            if j < chars.len() && chars[j].is_ascii_uppercase() {
-                return false;
-            }
-        }
-        true
-    }
-
     /// Detect Claude's ASCII selection-arrow at ANY numbered option:
     /// `> 0.`–`> 9.` or `> 0)`–`> 9)`.
     ///
@@ -612,23 +709,6 @@ pub mod builtins {
     /// `detect_ready_for_prompt` veto).
     fn has_numbered_chooser_options(s: &str) -> bool {
         (s.contains("1.") || s.contains("1)")) && (s.contains("2.") || s.contains("2)"))
-    }
-
-    /// Recognize lines that are claude's UI footer / hint strip.
-    /// The last-line-ends-with-? heuristic skips these because they
-    /// can appear unchanged on idle screens (e.g. `Esc to cancel`
-    /// after the user already answered the previous prompt) and
-    /// would otherwise look like a question.
-    fn looks_like_footer_hint(line: &str) -> bool {
-        let lower = line.to_lowercase();
-        lower.contains("esc to cancel")
-            || lower.contains("esc to interrupt")
-            || lower.contains("tab to amend")
-            || lower.contains("ctrl+")
-            || lower.contains("shift+")
-            || lower.starts_with("⎿")
-            || lower.starts_with(">")
-            || lower.starts_with("│")
     }
 
     fn strip_ansi_lossy(bytes: &[u8]) -> String {

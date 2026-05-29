@@ -123,6 +123,9 @@ pub enum Action {
     /// Jump the sidebar cursor to the next workspace whose agent
     /// is in `Asking` state (`!`). Wraps around.
     JumpToAsking,
+    /// Jump the sidebar cursor to the next workspace whose PR has
+    /// failing / mixed CI (`Shift-F`). Wraps around.
+    JumpToFailingCi,
     /// Begin the two-press quit chord. Single-press from a remap
     /// just fires.
     Quit,
@@ -155,7 +158,7 @@ pub enum ScrollDirection {
 /// Static definition of an action's user-facing surface.
 ///
 /// One per `Action` variant — looked up via [`ActionDef::for_action`]
-/// or iterated whole via [`ActionDef::ALL`].
+/// or iterated whole via [`ActionDef::all`].
 #[derive(Debug, Clone, Copy)]
 pub struct ActionDef {
     /// What the action does, abstractly.
@@ -210,6 +213,7 @@ pub enum ActionKind {
     OpenHelp,
     OpenSettings,
     JumpToAsking,
+    JumpToFailingCi,
     Quit,
     DetachPane,
     ResizeSplitter,
@@ -257,6 +261,7 @@ impl Action {
             Action::OpenHelp => ActionKind::OpenHelp,
             Action::OpenSettings => ActionKind::OpenSettings,
             Action::JumpToAsking => ActionKind::JumpToAsking,
+            Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
             Action::Quit => ActionKind::Quit,
             Action::DetachPane => ActionKind::DetachPane,
             Action::ResizeSplitter(_) => ActionKind::ResizeSplitter,
@@ -318,6 +323,13 @@ impl ActionDef {
                 default_keys: "!",
                 label: "next asking",
                 describe: "Jump the sidebar cursor to the next workspace whose agent is waiting on input.",
+                section: Section::Global,
+            },
+            ActionKind::JumpToFailingCi => &Self {
+                kind: ActionKind::JumpToFailingCi,
+                default_keys: "Shift-F",
+                label: "next failing",
+                describe: "Jump the sidebar cursor to the next PR whose CI is failing.",
                 section: Section::Global,
             },
             ActionKind::Quit => &Self {
@@ -547,6 +559,7 @@ impl ActionDef {
             ActionKind::OpenSettings,
             ActionKind::OpenHelp,
             ActionKind::JumpToAsking,
+            ActionKind::JumpToFailingCi,
             ActionKind::DetachPane,
             ActionKind::ResizeSplitter,
             ActionKind::Quit,
@@ -843,6 +856,7 @@ impl ActionKind {
             ActionKind::OpenHelp => "open_help",
             ActionKind::OpenSettings => "open_settings",
             ActionKind::JumpToAsking => "jump_to_asking",
+            ActionKind::JumpToFailingCi => "jump_to_failing_ci",
             ActionKind::Quit => "quit",
             ActionKind::DetachPane => "detach_pane",
             ActionKind::ResizeSplitter => "resize_splitter",
@@ -963,6 +977,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&pilot_core::Workspace>)
         | ActionKind::OpenHelp
         | ActionKind::OpenSettings
         | ActionKind::JumpToAsking
+        | ActionKind::JumpToFailingCi
         | ActionKind::Quit
         | ActionKind::DetachPane
         | ActionKind::ResizeSplitter

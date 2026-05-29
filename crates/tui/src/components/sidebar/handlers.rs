@@ -296,6 +296,7 @@ impl Sidebar {
                 terminal_id,
                 session_key,
                 kind,
+                ..
             } => {
                 self.running_terminals
                     .insert(*terminal_id, (session_key.clone(), kind.clone()));

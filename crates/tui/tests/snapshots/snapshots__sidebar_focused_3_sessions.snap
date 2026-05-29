@@ -1,6 +1,5 @@
 ---
 source: crates/tui/tests/snapshots.rs
-assertion_line: 99
 expression: rendered
 ---
  PILOT  3  [7d]
@@ -9,7 +8,7 @@ expression: rendered
  ────────────────────────────────────
 
    ▾  owner/repo
-     A author
-   ▸ ○#1 A   task: o/r#1          1mo
-     ○#2 A   task: o/r#2          1mo
-     ○#3 A   task: o/r#3          1mo
+     I Issues
+   ▸ ○1 A   task: o/r#1           1mo
+     ○2 A   task: o/r#2           1mo
+     ○3 A   task: o/r#3           1mo

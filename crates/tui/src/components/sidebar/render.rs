@@ -199,17 +199,22 @@ impl Sidebar {
         };
 
         let row_budget = inner_width as usize;
-        // Pre-pass: compute the widest `#NNN` across visible workspace
+        // Pre-pass: compute the widest `NNN` across visible workspace
         // rows so every row pads to the same column. Without this,
         // `#7204 R` and `#31 R` had different role-letter positions
         // and the whole column visibly jittered.
         //
-        // Width is `1` (the `#`) + digit count of `n`, computed via
-        // `ilog10` so the hot path doesn't allocate a String per row.
-        // The natural width is the floor — no extra "separator"
-        // padding — so the glyph in column 1 sits flush against the
-        // number (`⇄#18`, not `⇄  #18`); see issue #42. The role
-        // cell that follows brings its own leading space.
+        // Width is the digit count of `n` (no `#` prefix — issue #67;
+        // the type glyph in column 1 now carries the issue-vs-PR
+        // signal), computed via `ilog10` so the hot path doesn't
+        // allocate a String per row. The natural width is the floor —
+        // no extra "separator" padding (issue #42). Flush spacing on
+        // EVERY row (`⇄18`, not `⇄  18`) is then a property of the
+        // column being LEFT-aligned: the deficit pads on the right,
+        // after the number, so the glyph never gets a leading gap
+        // regardless of digit count. A right-aligned column padded the
+        // short rows on the left and reopened that gap — issue #65. The
+        // role cell that follows brings its own leading space.
         let max_pr_num_width = self
             .visible
             .iter()
@@ -219,11 +224,11 @@ impl Sidebar {
                     .get(k)
                     .and_then(|w| w.primary_task())
                     .and_then(crate::components::task_label::pr_number)
-                    .map(|n| 2 + n.checked_ilog10().unwrap_or(0) as usize),
+                    .map(|n| 1 + n.checked_ilog10().unwrap_or(0) as usize),
                 _ => None,
             })
             .max()
-            .unwrap_or(2);
+            .unwrap_or(1);
         // Column spec for workspace rows — built once per render
         // (max_pr_num_width is fixed across rows in this pass).
         let workspace_columns = crate::components::workspace_row::build_columns(max_pr_num_width);
@@ -303,13 +308,13 @@ impl Sidebar {
                     let _ = row_budget;
                     Line::from(spans)
                 }
-                VisibleRow::RoleHeader(role) => {
-                    // Indented role section header, sitting between
-                    // the repo header and the workspace rows of that
-                    // role. Borrowed visual from the role badge so
-                    // the colour matches the per-row letter.
-                    let (letter, color) =
-                        crate::components::sidebar::pills::role_badge(theme, *role);
+                VisibleRow::KindHeader(kind) => {
+                    // Indented PR/Issue section header, sitting
+                    // between the repo header and the workspace rows
+                    // of that kind. Distinct from `RepoHeader` by
+                    // indent + leading marker; the chip-coloured
+                    // marker mirrors the per-row PR/issue pills so
+                    // the eye lines them up.
                     let is_cursor = i == self.cursor;
                     let row_bg = if is_cursor && focused {
                         Some(theme.row_focused())
@@ -319,21 +324,21 @@ impl Sidebar {
                         None
                     };
                     let caret = if is_cursor { "▸ " } else { "  " };
-                    let label = match role {
-                        pilot_core::TaskRole::Author => "author",
-                        pilot_core::TaskRole::Reviewer => "reviewer",
-                        pilot_core::TaskRole::Assignee => "assignee",
-                        pilot_core::TaskRole::Mentioned => "mentioned",
+                    let color = match kind {
+                        WorkspaceKind::Pr => theme.success,
+                        WorkspaceKind::Issue => theme.hover,
                     };
+                    let marker = kind.header_marker();
+                    let label = kind.header_label();
                     let mut spans: Vec<Span> = vec![
                         Span::styled(
                             caret.to_string(),
                             row_bg.unwrap_or_default().fg(theme.text_dim),
                         ),
-                        // Two-space indent so role headers tuck under
+                        // Two-space indent so kind headers tuck under
                         // their parent repo header visually.
                         Span::raw("  "),
-                        Span::styled(format!("{letter} "), row_bg.unwrap_or_default().fg(color)),
+                        Span::styled(format!("{marker} "), row_bg.unwrap_or_default().fg(color)),
                         Span::styled(
                             label,
                             row_bg
@@ -343,6 +348,7 @@ impl Sidebar {
                         ),
                     ];
                     if let Some(bg) = row_bg {
+                        // caret + 2-space indent + "X " marker + label.
                         let used = caret.chars().count() + 2 + 2 + label.chars().count();
                         if used < row_budget {
                             spans.push(Span::styled(" ".repeat(row_budget - used), bg));

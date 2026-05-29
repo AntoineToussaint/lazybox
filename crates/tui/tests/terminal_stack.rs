@@ -33,6 +33,7 @@ fn spawned(id: u64, session: &str, kind: TerminalKind) -> Event {
         terminal_id: TerminalId(id),
         session_key: sk(session),
         kind,
+        no_permission: false,
     }
 }
 
@@ -173,6 +174,7 @@ fn snapshot_replaces_all_terminals() {
             kind: TerminalKind::Shell,
             replay: b"\x1b[0mhi\n".to_vec(),
             last_seq: 42,
+            no_permission: false,
         }],
         projects: vec![],
     });
@@ -449,6 +451,35 @@ fn render_shows_tab_bar_and_content() {
 }
 
 #[test]
+fn render_shows_no_perms_badge_for_autonomous_session() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&Event::TerminalSpawned {
+        terminal_id: TerminalId(1),
+        session_key: sk("o/r#1"),
+        kind: TerminalKind::Agent("claude".into()),
+        no_permission: true,
+    });
+    t.set_active_session(Some(sk("o/r#1")));
+    let out = render_to_string(&mut t, 60, 10, true);
+    assert!(
+        out.contains("no-perms"),
+        "autonomous session must show the no-permission badge; got:\n{out}"
+    );
+}
+
+#[test]
+fn render_omits_no_perms_badge_for_interactive_session() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+    let out = render_to_string(&mut t, 60, 10, true);
+    assert!(
+        !out.contains("no-perms"),
+        "interactive session must not show the no-permission badge; got:\n{out}"
+    );
+}
+
+#[test]
 fn render_tab_bar_updates_after_cycle() {
     let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
@@ -710,10 +741,12 @@ fn ctrl_w_arms_consumes_only_the_prefix() {
 // ── Pinned "you ▸ …" recap ─────────────────────────────────────────────
 //
 // The recap header shows the latest message the user submitted to an
-// agent, pinned above the agent's terminal grid. Tracking lives at
-// keystroke level — the user types into the PTY, we mirror chars into
-// our own buffer, commit on Enter, and render that as a one-line
-// summary above the agent.
+// agent, pinned above the agent's terminal grid. Tracking lives at the
+// byte level — we mirror the exact bytes written to the PTY into our
+// own buffer, commit on CR, and render that as a one-line summary
+// above the agent. Parsing the bytes (rather than the KeyEvent) keeps
+// the recap in lock-step with what the agent receives, including
+// one-shot writes like snippet expansion.
 
 fn type_str(t: &mut TerminalStack, s: &str) {
     let mut cmds = Vec::new();
@@ -942,6 +975,93 @@ fn record_paste_is_noop_on_shell() {
 }
 
 #[test]
+fn record_pty_write_updates_recap_for_one_shot_commands() {
+    // Snippet expansion (and other programmatic sends) write a full
+    // command + a trailing CR straight to the PTY, bypassing the
+    // key-by-key path. The recap must still refresh to that command —
+    // this is the desync the issue (#68) is about.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    type_str(&mut t, "typed message");
+    let mut cmds = Vec::new();
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    assert_eq!(t.last_user_message_of(TerminalId(1)), Some("typed message"));
+
+    // A snippet fires straight at the PTY: body + `\r`.
+    t.record_pty_write(TerminalId(1), b"run the tests\r");
+    assert_eq!(t.last_user_message_of(TerminalId(1)), Some("run the tests"));
+    assert_eq!(t.composing_of(TerminalId(1)), Some(""));
+}
+
+#[test]
+fn record_pty_write_treats_embedded_newlines_as_soft() {
+    // A multi-line snippet body arrives as `line1\nline2\r`; only the
+    // trailing CR submits, so the whole body commits once rather than
+    // committing the first line and dropping the rest.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    t.record_pty_write(TerminalId(1), b"line1\nline2\r");
+    assert_eq!(t.last_user_message_of(TerminalId(1)), Some("line1\nline2"));
+}
+
+#[test]
+fn record_pty_write_skips_escape_sequences() {
+    // Arrow keys / mouse reports reach the PTY as CSI sequences. They
+    // must be skipped, not appended as literal `[D` garbage into the
+    // composing buffer.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    // "ab", left-arrow (ESC [ D), "c", then submit.
+    t.record_pty_write(TerminalId(1), b"ab\x1b[Dc\r");
+    assert_eq!(t.last_user_message_of(TerminalId(1)), Some("abc"));
+}
+
+#[test]
+fn record_pty_write_unknown_meta_escape_does_not_wipe_buffer() {
+    // A stray `ESC`-prefixed sequence that isn't CSI/SS3 (e.g. an
+    // Alt-combo) must drop only the ESC and keep parsing — it must
+    // never silently clear an in-flight prompt. Only a *lone* ESC
+    // (the real Esc key) resets the line.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    // "a", ESC+x (meta), "b", submit → the ESC is dropped, the rest
+    // composes normally.
+    t.record_pty_write(TerminalId(1), b"a\x1bxb\r");
+    assert_eq!(t.last_user_message_of(TerminalId(1)), Some("axb"));
+}
+
+#[test]
+fn ctrl_u_clears_composing_without_commit() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    type_str(&mut t, "scratch");
+    let mut cmds = Vec::new();
+    t.handle_key(ctrl('u'), &mut cmds);
+    assert_eq!(t.composing_of(TerminalId(1)), Some(""));
+    assert_eq!(t.last_user_message_of(TerminalId(1)), None);
+}
+
+#[test]
+fn record_pty_write_is_noop_on_shell() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    t.record_pty_write(TerminalId(1), b"ls -la\r");
+    assert_eq!(t.last_user_message_of(TerminalId(1)), None);
+}
+
+#[test]
 fn render_pins_recap_above_agent_grid() {
     let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
@@ -1050,6 +1170,47 @@ fn render_summary_collapses_internal_newlines() {
     assert!(
         out.contains("you ▸ line one line two"),
         "newline collapsed to space; got:\n{out}"
+    );
+}
+
+#[test]
+fn render_inserts_blank_spacer_between_recap_and_agent_grid() {
+    // Issue #68: the recap used to sit on the row directly above the
+    // agent grid, so output ran straight into it. There must be a
+    // blank spacer row between the "you ▸ …" line and the first row
+    // of agent output.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    // Put output on the agent's grid so the body's first row is
+    // distinguishable from the blank spacer.
+    t.on_event(&Event::TerminalOutput {
+        terminal_id: TerminalId(1),
+        bytes: b"AGENTLINE".to_vec(),
+        seq: 1,
+    });
+    type_str(&mut t, "do the thing");
+    let mut cmds = Vec::new();
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+
+    let out = render_to_string(&mut t, 60, 10, true);
+    let lines: Vec<&str> = out.lines().collect();
+    let recap_idx = lines
+        .iter()
+        .position(|l| l.contains("you ▸ do the thing"))
+        .unwrap_or_else(|| panic!("recap row present; got:\n{out}"));
+    assert!(
+        lines[recap_idx + 1].trim().is_empty(),
+        "row below recap must be a blank spacer; got:\n{out}"
+    );
+    let agent_idx = lines
+        .iter()
+        .position(|l| l.contains("AGENTLINE"))
+        .unwrap_or_else(|| panic!("agent output present; got:\n{out}"));
+    assert!(
+        agent_idx >= recap_idx + 2,
+        "agent output must start below the spacer; got:\n{out}"
     );
 }
 

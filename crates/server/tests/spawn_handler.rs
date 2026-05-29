@@ -88,6 +88,108 @@ async fn spawn_shell_emits_terminal_spawned_event() {
     .await
     .expect("deadline");
 }
+/// Acceptance: user-initiated interactive sessions still get prompts.
+/// A `Command::Spawn` is always interactive, so the spawned claude must
+/// NOT carry `--dangerously-skip-permissions` and the spawn event must
+/// report `no_permission: false`, regardless of the autonomous toggle.
+#[tokio::test]
+async fn interactive_claude_spawn_keeps_permission_prompts() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        client
+            .send(Command::Spawn {
+                session_key: "test:ws-1".into(),
+                session_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                initial_prompt: None,
+            })
+            .unwrap();
+        let spawned = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("TerminalSpawned arrived");
+        match spawned {
+            Event::TerminalSpawned { no_permission, .. } => {
+                assert!(!no_permission, "interactive sessions keep prompts on");
+            }
+            _ => unreachable!(),
+        }
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+        assert_eq!(
+            mock.argv_for(&key).await.unwrap(),
+            vec!["claude".to_string()],
+            "interactive claude must not get the bypass flag",
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// Acceptance: an autonomous spawn propagates its no-permission decision
+/// consistently across the spawned argv, the `TerminalSpawned` event,
+/// and the reconnection snapshot. The decision value itself (on by
+/// default) is pinned by the `skip_permissions_for` unit test; here we
+/// pin that whatever the daemon decided reaches all three surfaces in
+/// lockstep — so the UI badge can never disagree with the real argv.
+#[tokio::test]
+async fn autonomous_spawn_wires_no_permission_consistently() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut bus_rx = config.bus.subscribe();
+        let cwd = std::env::temp_dir().to_string_lossy().to_string();
+        pilot_server::spawn_handler::handle_spawn(
+            &config,
+            "test:ws-auto".into(),
+            None,
+            TerminalKind::Agent("claude".into()),
+            Some(cwd),
+            None,
+            true, // autonomous
+        )
+        .await;
+
+        let mut event_flag = None;
+        while let Ok(ev) = bus_rx.try_recv() {
+            if let Event::TerminalSpawned { no_permission, .. } = ev {
+                event_flag = Some(no_permission);
+                break;
+            }
+        }
+        let event_flag = event_flag.expect("TerminalSpawned broadcast");
+
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+        let argv_flag = mock
+            .argv_for(&key)
+            .await
+            .unwrap()
+            .iter()
+            .any(|a| a == "--dangerously-skip-permissions");
+
+        let snapshot_flag = pilot_server::spawn_handler::snapshot_terminals(&config)
+            .await
+            .into_iter()
+            .next()
+            .expect("one snapshot")
+            .no_permission;
+
+        assert_eq!(
+            event_flag, argv_flag,
+            "spawn event's no_permission must match the actual claude argv",
+        );
+        assert_eq!(
+            snapshot_flag, argv_flag,
+            "reconnection snapshot must match the actual claude argv",
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
 #[tokio::test]
 async fn unknown_agent_id_emits_provider_error() {
     timeout(TEST_DEADLINE, async {
@@ -297,6 +399,85 @@ async fn recover_sessions_reattaches_survivors() {
             .expect("bus event")
             .expect("not closed");
         assert!(matches!(evt, Event::TerminalSpawned { .. }));
+    })
+    .await
+    .expect("deadline");
+}
+
+/// Regression / smoke check for the **ingest-into-agent** path
+/// (issue #50). When work is handed to an agent — either by the user
+/// pressing `w` or by the `@pilot`-mention auto-spawn — the agent is
+/// `Spawn`ed with an `initial_prompt`. The daemon must actually
+/// deliver that prompt to the agent's terminal once it's ready to
+/// receive input; if it doesn't, the agent starts but never learns
+/// what work to do (exactly the "ingest is broken" symptom).
+///
+/// This drives the full path through `handle_spawn`: spawn a Claude
+/// agent with an initial prompt, drive the synthetic "input box is
+/// ready" output so the inject task fires, then assert the prompt
+/// bytes (and the separate submit keystroke) reached the backend.
+#[tokio::test]
+async fn spawn_with_initial_prompt_delivers_work_to_agent() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+
+        const WORK: &str = "Implement GitHub issue #50: ingest is broken.";
+        client
+            .send(Command::Spawn {
+                session_key: "test:ws-ingest".into(),
+                session_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                initial_prompt: Some(WORK.into()),
+            })
+            .unwrap();
+        let _ = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("TerminalSpawned arrived");
+
+        // One mocked session: the Claude agent we just spawned.
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        // Drive Claude's "ready for a pasted prompt" screen: the input
+        // box footer (the paired `Esc to cancel` / `Tab to amend`
+        // markers `detect_ready_for_prompt` keys on) with no permission
+        // gate up. Without it the inject only fires on the slow
+        // settle/hard-deadline fallback.
+        mock.emit(&key, b"Esc to cancel  Tab to amend").await;
+
+        // Poll the backend's write log until the work prompt shows up
+        // (the inject task runs on its own tokio task).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let joined = loop {
+            let joined = mock
+                .writes_for(&key)
+                .await
+                .into_iter()
+                .flatten()
+                .collect::<Vec<u8>>();
+            let done = String::from_utf8_lossy(&joined).contains(WORK) && joined.contains(&b'\r');
+            if done || tokio::time::Instant::now() >= deadline {
+                break joined;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let text = String::from_utf8_lossy(&joined);
+        assert!(
+            text.contains(WORK),
+            "agent never received the work prompt; backend writes = {text:?}"
+        );
+        // Claude's prompt is committed by a separate `\r` submit after
+        // the paste settles — without it the prompt sits unsent in the
+        // input box.
+        assert!(
+            joined.contains(&b'\r'),
+            "work prompt was pasted but never submitted (no Enter keystroke); writes = {text:?}"
+        );
     })
     .await
     .expect("deadline");

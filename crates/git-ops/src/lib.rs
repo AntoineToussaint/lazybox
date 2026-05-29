@@ -6,6 +6,9 @@
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+mod inspect;
+pub use inspect::{OrphanReason, TrackedSession, WorktreeInspection};
+
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
     #[error("git command failed: {0}")]
@@ -90,6 +93,15 @@ impl WorktreeManager {
         }
     }
 
+    /// The directory this manager was constructed against — typically
+    /// `<state_root>/`, with `repos/` (bare clones) and `worktrees/`
+    /// (per-task checkouts) as siblings underneath. Crate-private so
+    /// the inspector can compose paths without leaking the layout to
+    /// every downstream caller.
+    pub(crate) fn base_dir(&self) -> &Path {
+        &self.base_dir
+    }
+
     /// Default base dir: `<PILOT_HOME>/v2/` (default `~/.pilot/v2/`).
     ///
     /// v2-rooted so all of pilot's on-disk state — `state.db`, the
@@ -127,7 +139,7 @@ impl WorktreeManager {
         self.checkout_at(&wt_path, owner, repo, branch).await
     }
 
-    /// Same as [`checkout`] but with an explicit target path. Used by
+    /// Same as [`Self::checkout`] but with an explicit target path. Used by
     /// pilot's session model where the worktree path is derived from a
     /// stable session UUID — `<state_root>/worktrees/<uuid>` — and
     /// must never depend on owner/repo/branch (so renames + branch
@@ -228,7 +240,7 @@ impl WorktreeManager {
             .await
     }
 
-    /// Same as [`checkout_new_branch`] but with an explicit target path.
+    /// Same as [`Self::checkout_new_branch`] but with an explicit target path.
     /// Used by pilot's session model where the worktree path is derived
     /// from a stable session UUID and must not depend on branch names
     /// (so a branch rename inside the worktree doesn't relocate the
@@ -491,7 +503,7 @@ impl WorktreeManager {
     /// Idempotent for inline scripts (re-run with matching content
     /// is a no-op; differing content rewrites). For linked scripts
     /// re-applying a matching symlink is a no-op; a conflicting one
-    /// errors — same contract as [`apply_mounts`].
+    /// errors — same contract as [`Self::apply_mounts`].
     ///
     /// Returns the first failure (rest are skipped). Best-effort
     /// retry is the caller's job.
@@ -699,7 +711,10 @@ async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
 /// pilot is ever launched from inside another git worktree (or
 /// `cargo test` from one), the subprocess would operate on the
 /// inherited repo instead of the bare clone we're targeting.
-fn apply_git_env(cmd: &mut Command) -> &mut Command {
+///
+/// `pub(crate)` so the inspector module can apply the same hygienic
+/// env to its read-only probes.
+pub(crate) fn apply_git_env(cmd: &mut Command) -> &mut Command {
     cmd.env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_FLUSH", "1")
         .env_remove("GIT_DIR")

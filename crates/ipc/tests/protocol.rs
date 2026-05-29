@@ -174,6 +174,16 @@ fn all_commands() -> Vec<Command> {
             session_key: key.clone(),
         },
         Command::Refresh,
+        Command::CleanWorktrees,
+        Command::InspectWorktrees,
+        Command::DeleteOrphanedWorktree {
+            path: std::path::PathBuf::from("/tmp/wt"),
+            force: false,
+        },
+        Command::DeleteOrphanedWorktree {
+            path: std::path::PathBuf::from("/tmp/wt-dirty"),
+            force: true,
+        },
         Command::Shutdown,
     ]
 }
@@ -198,6 +208,7 @@ fn all_events() -> Vec<Event> {
                 kind: TerminalKind::Agent("claude".into()),
                 replay: b"replay-bytes".to_vec(),
                 last_seq: 42,
+                no_permission: true,
             }],
             projects: vec![],
         },
@@ -217,6 +228,7 @@ fn all_events() -> Vec<Event> {
             terminal_id: TerminalId(2),
             session_key: key.clone(),
             kind: TerminalKind::Shell,
+            no_permission: false,
         },
         Event::TerminalOutput {
             terminal_id: TerminalId(2),
@@ -346,6 +358,37 @@ fn all_events() -> Vec<Event> {
         Event::Notification {
             title: "hi".into(),
             body: "body".into(),
+        },
+        Event::CleanWorktreesCompleted {
+            removed: 3,
+            skipped: 1,
+        },
+        Event::WorktreesInspected {
+            inspections: vec![],
+        },
+        Event::WorktreesInspected {
+            inspections: vec![pilot_ipc::WorktreeInspectionDto {
+                path: std::path::PathBuf::from("/tmp/wt"),
+                bare_path: Some(std::path::PathBuf::from("/tmp/repos/o/r.git")),
+                branch: Some("feat".into()),
+                session_id: Some("12345678".into()),
+                reasons: vec!["untracked".into(), "branch-deleted-upstream".into()],
+                size_bytes: 4096,
+                last_modified_unix: Some(1_700_000_000),
+                has_uncommitted_changes: true,
+                has_unpushed_commits: false,
+                is_safe_to_delete: false,
+            }],
+        },
+        Event::OrphanedWorktreeDeleted {
+            path: std::path::PathBuf::from("/tmp/wt"),
+            ok: true,
+            error: None,
+        },
+        Event::OrphanedWorktreeDeleted {
+            path: std::path::PathBuf::from("/tmp/wt"),
+            ok: false,
+            error: Some("has uncommitted changes".into()),
         },
     ]
 }

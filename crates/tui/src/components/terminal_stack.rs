@@ -907,14 +907,16 @@ impl TerminalStack {
         // terminal's CONTENT-area coords. The render path puts the
         // terminal grid at `inner = Rect { x: rect.x + 1, y: rect.y
         // + 3 }` (border on the left, tab strip + divider on top —
-        // see `TerminalStack::render`). Selection coords came from
-        // crossterm in screen-absolute space; subtracting only
-        // `rect.x/y` left them 1 column too far right and 3 rows
-        // too high, so every copied line was actually the row 3
-        // ABOVE what the user highlighted. Bug user reported as
-        // "doesn't copy what I selected."
+        // see `TerminalStack::render`), then `render_one_terminal`
+        // carves the recap rows off the top of that body. Selection
+        // coords came from crossterm in screen-absolute space, so we
+        // undo every offset the renderer applied — skipping the recap
+        // rows is what keeps an agent terminal's copy aligned with the
+        // highlight instead of pulling the row below it.
         let inner_x = rect.x.saturating_add(1);
-        let inner_y = rect.y.saturating_add(3);
+        let body_height = rect.height.saturating_sub(3);
+        let recap = Self::recap_rows(slot, body_height);
+        let inner_y = rect.y.saturating_add(3).saturating_add(recap);
         // Normalize: anchor (anchor_x, anchor_y) is the row-then-
         // column "earlier" endpoint of the selection — i.e. the
         // smaller (y, x) pair. The other endpoint is the focus.
@@ -1006,9 +1008,9 @@ impl TerminalStack {
     /// Drives right-click-to-open: the click coordinates arrive in
     /// the same frame-space the renderer used, so we translate the
     /// same way `extract_text` does (skip the pane border + tab strip
-    /// via `inner_x = rect.x + 1`, `inner_y = rect.y + 3`). Single-row
-    /// only — wrapped tokens aren't detected (per the issue: "stay
-    /// simple, terminal URLs/paths are virtually always on one row").
+    /// + any recap rows via `recap_rows`). Single-row only — wrapped
+    /// tokens aren't detected (per the issue: "stay simple, terminal
+    /// URLs/paths are virtually always on one row").
     pub fn target_at(
         &mut self,
         rect: tuirealm::ratatui::layout::Rect,
@@ -1018,7 +1020,9 @@ impl TerminalStack {
         let id = self.focused_terminal_id()?;
         let slot = self.terminals.get_mut(&id)?;
         let inner_x = rect.x.saturating_add(1);
-        let inner_y = rect.y.saturating_add(3);
+        let body_height = rect.height.saturating_sub(3);
+        let recap = Self::recap_rows(slot, body_height);
+        let inner_y = rect.y.saturating_add(3).saturating_add(recap);
         if col < inner_x || row < inner_y {
             return None;
         }
@@ -1973,6 +1977,23 @@ impl TerminalStack {
         frame.render_widget(Paragraph::new(line), area);
     }
 
+    /// Rows carved off the top of a terminal's body for the pinned
+    /// "you ▸ <recap>" line plus a blank spacer below it: 2 for an
+    /// agent terminal with a remembered last user message, 0 for
+    /// everything else. `body_height` is the height of the grid area
+    /// (the rect handed to [`render_one_terminal`], already inside the
+    /// tab strip + divider) — the recap is refused below 3 rows so a
+    /// tiny split keeps every cell for the agent grid. This is the one
+    /// source of truth for the offset: the render path and the
+    /// selection/click coordinate mappers all read it so they map the
+    /// same rows.
+    fn recap_rows(slot: &TerminalSlot, body_height: u16) -> u16 {
+        let show_recap = matches!(slot.kind, TerminalKind::Agent(_))
+            && slot.last_user_message.is_some()
+            && body_height >= 3;
+        if show_recap { 2 } else { 0 }
+    }
+
     /// Render a single terminal slot full-rect. Used by both the
     /// tabs path and the splits path's leaf case.
     fn render_one_terminal(
@@ -1984,28 +2005,24 @@ impl TerminalStack {
     ) {
         let _ = focused; // ghostty-vt doesn't render focus chrome itself
         if let Some(slot) = self.terminals.get_mut(&id) {
-            // Carve off two rows for the pinned "you ▸ <recap>" line
-            // plus a blank spacer below it, when this is an agent
-            // terminal with a remembered last user message. The recap
+            // Carve off the recap rows (see `recap_rows`): the recap
             // sits on row 0, row 1 stays blank so the agent output
             // doesn't visually run into it, and the body starts at row
-            // 2. Refuses to take the rows at h < 3 — leaves every cell
-            // for the agent grid rather than crowd out the pane on a
-            // tiny split.
-            let show_recap = matches!(slot.kind, TerminalKind::Agent(_))
-                && slot.last_user_message.is_some()
-                && rect.height >= 3;
-            let body = if show_recap {
+            // 2.
+            let recap = Self::recap_rows(slot, rect.height);
+            let body = if recap > 0 {
                 Rect {
                     x: rect.x,
-                    y: rect.y + 2,
+                    y: rect.y + recap,
                     width: rect.width,
-                    height: rect.height - 2,
+                    height: rect.height - recap,
                 }
             } else {
                 rect
             };
-            if show_recap && let Some(msg) = slot.last_user_message.as_deref() {
+            if recap > 0
+                && let Some(msg) = slot.last_user_message.as_deref()
+            {
                 let header_rect = Rect {
                     x: rect.x,
                     y: rect.y,
@@ -2803,5 +2820,79 @@ mod osc52_tests {
         // against treating `521;…` as `52;1;…`.
         let bytes = b"\x1b]521;data\x07";
         assert!(osc52_ranges(bytes).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod extract_text_offset_tests {
+    use super::*;
+    use ratatui::layout::Rect;
+
+    /// Build a single-terminal stack focused on a freshly-fed grid.
+    /// Each entry in `lines` lands on its own grid row (row 0, row 1,
+    /// …) so a selection that maps to the wrong row copies a
+    /// recognisably different string.
+    fn stack_with(
+        kind: TerminalKind,
+        last_user_message: Option<&str>,
+        lines: &[&str],
+    ) -> TerminalStack {
+        let sk = SessionKey::new("session");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot = TerminalStack::make_slot(sk.clone(), kind, 0, false);
+        let mut payload = String::new();
+        for line in lines {
+            payload.push_str(line);
+            payload.push_str("\r\n");
+        }
+        slot.vt.feed(payload.as_bytes());
+        slot.last_user_message = last_user_message.map(str::to_string);
+        stack.terminals.insert(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+        stack
+    }
+
+    #[test]
+    fn agent_recap_maps_selection_to_highlighted_row() {
+        let mut stack = stack_with(
+            TerminalKind::Agent("claude".into()),
+            Some("do the thing"),
+            &["line0", "line1", "line2", "line3"],
+        );
+        // Border + tab strip + divider (3) plus the recap's 2 rows put
+        // the grid top at screen row 5, so a click there is grid row 0.
+        // Before the recap rows were accounted for this returned
+        // "line2" — the row two below the highlight.
+        let text = stack.extract_text(Rect::new(0, 0, 80, 30), (1, 5), (10, 5));
+        assert_eq!(text, "line0");
+    }
+
+    #[test]
+    fn shell_maps_selection_to_highlighted_row() {
+        let mut stack = stack_with(TerminalKind::Shell, None, &["line0", "line1", "line2"]);
+        // No recap: grid top stays at screen row 3.
+        let text = stack.extract_text(Rect::new(0, 0, 80, 30), (1, 3), (10, 3));
+        assert_eq!(text, "line0");
+    }
+
+    #[test]
+    fn agent_without_remembered_message_has_no_recap_offset() {
+        let mut stack = stack_with(
+            TerminalKind::Agent("claude".into()),
+            None,
+            &["line0", "line1"],
+        );
+        let text = stack.extract_text(Rect::new(0, 0, 80, 30), (1, 3), (10, 3));
+        assert_eq!(text, "line0");
+    }
+
+    #[test]
+    fn recap_rows_refused_when_body_too_short() {
+        let sk = SessionKey::new("session");
+        let slot = TerminalStack::make_slot(sk, TerminalKind::Agent("claude".into()), 0, false);
+        let mut slot = slot;
+        slot.last_user_message = Some("hi".into());
+        assert_eq!(TerminalStack::recap_rows(&slot, 2), 0);
+        assert_eq!(TerminalStack::recap_rows(&slot, 3), 2);
     }
 }

@@ -1668,24 +1668,15 @@ fn extract_closes_issues(pr: &GqlPr, pr_repo: &str) -> Vec<TaskId> {
             }
         }
     }
-    // Fallback: title parsing. Repo defaults to the PR's own repo
-    // (`pr_repo` — extracted from the PR's URL by the caller) —
-    // title closing-keywords almost always reference same-repo
-    // issues. Cross-repo references in titles use the fully-qualified
-    // `owner/repo#N` syntax that this parser doesn't handle yet —
-    // left out by design.
-    for n in parse_closes_from_title(&pr.title) {
-        let id = TaskId {
-            source: "github".into(),
-            key: format!("{pr_repo}#{n}"),
-        };
-        if !out.contains(&id) {
-            out.push(id);
-        }
-    }
-    // Bare `(#N)` references in the title — same-repo, resolved to
-    // issues downstream (see source 3 above).
-    for n in parse_bare_refs_from_title(&pr.title) {
+    // Title parsing (sources 2 + 3). Both name the PR's own repo
+    // (`pr_repo`, extracted from the PR's URL by the caller) — title
+    // references almost always point at same-repo issues. Cross-repo
+    // references use the fully-qualified `owner/repo#N` syntax that
+    // neither title parser handles yet, left out by design.
+    let title_refs = parse_closes_from_title(&pr.title)
+        .into_iter()
+        .chain(parse_bare_refs_from_title(&pr.title));
+    for n in title_refs {
         let id = TaskId {
             source: "github".into(),
             key: format!("{pr_repo}#{n}"),
@@ -2919,6 +2910,18 @@ mod tests {
         let task = pr_to_task(&pr, "alice");
         let keys: Vec<&str> = task.closes_issues.iter().map(|t| t.key.as_str()).collect();
         // #1 from graphql (deduped against title's #1) + #2 from title.
+        assert_eq!(keys, vec!["o/r#1", "o/r#2"]);
+    }
+
+    /// A title can mix a closing keyword and a bare reference; both
+    /// sources contribute and the result is deduped in title order.
+    #[test]
+    fn extract_closes_issues_combines_keyword_and_bare_title_refs() {
+        let mut pr = make_pr(100, "alice");
+        pr.title = "feat: thing (closes #1) (#2) and again (#1)".into();
+        pr.closing_issues_references = None;
+        let task = pr_to_task(&pr, "alice");
+        let keys: Vec<&str> = task.closes_issues.iter().map(|t| t.key.as_str()).collect();
         assert_eq!(keys, vec!["o/r#1", "o/r#2"]);
     }
 

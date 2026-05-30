@@ -1627,7 +1627,7 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
     }
 }
 
-/// Build the `closes_issues` list for a PR Task. Two sources,
+/// Build the `closes_issues` list for a PR Task. Three sources,
 /// merged:
 ///
 /// 1. GitHub's structured `closingIssuesReferences` field — the
@@ -1640,6 +1640,15 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
 ///    `feat: add foo (closes #31)` in the title without restating
 ///    it in the body; GitHub's auto-linker doesn't always pick
 ///    that up, especially for cross-fork or manually-edited PRs.
+/// 3. Bare parenthesized references in the PR TITLE — `add foo
+///    (#98)`. This keyword-less `(#N)` convention is ubiquitous
+///    (including GitHub's own squash-merge suffix), and users
+///    expect it to link the issue. `#N` syntax is shared between
+///    issues and PRs, so this list is a *candidate* set: the
+///    collapse step (`merge_closing_issue_workspaces`) resolves
+///    each entry against tracked ISSUE workspaces only and drops
+///    anything that turns out to be a PR. That downstream filter
+///    is what makes parsing bare references safe.
 ///
 /// We deliberately do NOT parse PR BODY text. Body shares `#N`
 /// syntax between issues and PRs and contains arbitrary prose,
@@ -1659,13 +1668,15 @@ fn extract_closes_issues(pr: &GqlPr, pr_repo: &str) -> Vec<TaskId> {
             }
         }
     }
-    // Fallback: title parsing. Repo defaults to the PR's own repo
-    // (`pr_repo` — extracted from the PR's URL by the caller) —
-    // title closing-keywords almost always reference same-repo
-    // issues. Cross-repo references in titles use the fully-qualified
-    // `owner/repo#N` syntax that this parser doesn't handle yet —
-    // left out by design.
-    for n in parse_closes_from_title(&pr.title) {
+    // Title parsing (sources 2 + 3). Both name the PR's own repo
+    // (`pr_repo`, extracted from the PR's URL by the caller) — title
+    // references almost always point at same-repo issues. Cross-repo
+    // references use the fully-qualified `owner/repo#N` syntax that
+    // neither title parser handles yet, left out by design.
+    let title_refs = parse_closes_from_title(&pr.title)
+        .into_iter()
+        .chain(parse_bare_refs_from_title(&pr.title));
+    for n in title_refs {
         let id = TaskId {
             source: "github".into(),
             key: format!("{pr_repo}#{n}"),
@@ -1751,6 +1762,78 @@ pub(crate) fn parse_closes_from_title(title: &str) -> Vec<u64> {
         i += 1;
     }
     out
+}
+
+/// Scan a PR title for bare parenthesized issue references —
+/// `add foo (#98)`, `(#1, #2)` — with no closing keyword. Returns
+/// the numbers in title order, deduped.
+///
+/// To avoid mistaking prose like `(see #5 for context)` for a
+/// reference, the parenthesized group must contain ONLY references:
+/// `#digits` items separated by commas and/or whitespace, nothing
+/// else. `(closes #31)` is rejected here (the leading keyword fails
+/// the "only references" test) — `parse_closes_from_title` already
+/// covers that form.
+///
+/// `#N` is shared between issues and PRs, so these are *candidates*:
+/// the caller's collapse step resolves each against tracked ISSUE
+/// workspaces and ignores PRs.
+pub(crate) fn parse_bare_refs_from_title(title: &str) -> Vec<u64> {
+    let bytes = title.as_bytes();
+    let mut out: Vec<u64> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'(' {
+            i += 1;
+            continue;
+        }
+        let inner_start = i + 1;
+        let mut j = inner_start;
+        while j < bytes.len() && bytes[j] != b')' {
+            j += 1;
+        }
+        if j >= bytes.len() {
+            break; // no closing paren — nothing more to match
+        }
+        if let Some(nums) = parse_ref_group(&title[inner_start..j]) {
+            for n in nums {
+                if !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+        }
+        i = j + 1;
+    }
+    out
+}
+
+/// Parse the inside of a parenthesized group as a pure list of
+/// `#N` references separated by commas/whitespace. Returns `None`
+/// the moment any other character appears, so only `(#98)`-style
+/// groups — not prose parentheticals — are treated as references.
+fn parse_ref_group(inner: &str) -> Option<Vec<u64>> {
+    let bytes = inner.as_bytes();
+    let mut nums: Vec<u64> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'\t' | b',' => i += 1,
+            b'#' => {
+                let num_start = i + 1;
+                let mut j = num_start;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j == num_start {
+                    return None; // `#` with no digits
+                }
+                nums.push(inner[num_start..j].parse::<u64>().ok()?);
+                i = j;
+            }
+            _ => return None, // any other content → not a pure ref group
+        }
+    }
+    if nums.is_empty() { None } else { Some(nums) }
 }
 
 /// Comprehensive needs_reply: check unresolved threads, latest issue comment,
@@ -2828,6 +2911,101 @@ mod tests {
         let keys: Vec<&str> = task.closes_issues.iter().map(|t| t.key.as_str()).collect();
         // #1 from graphql (deduped against title's #1) + #2 from title.
         assert_eq!(keys, vec!["o/r#1", "o/r#2"]);
+    }
+
+    /// A title can mix a closing keyword and a bare reference; both
+    /// sources contribute and the result is deduped in title order.
+    #[test]
+    fn extract_closes_issues_combines_keyword_and_bare_title_refs() {
+        let mut pr = make_pr(100, "alice");
+        pr.title = "feat: thing (closes #1) (#2) and again (#1)".into();
+        pr.closing_issues_references = None;
+        let task = pr_to_task(&pr, "alice");
+        let keys: Vec<&str> = task.closes_issues.iter().map(|t| t.key.as_str()).collect();
+        assert_eq!(keys, vec!["o/r#1", "o/r#2"]);
+    }
+
+    // ── Bare `(#N)` title references (no closing keyword) ──────────
+
+    /// The core form from the issue: `… (#98)` with no keyword.
+    #[test]
+    fn parse_bare_refs_from_title_basic() {
+        assert_eq!(
+            parse_bare_refs_from_title("Instrument the sync pipeline (#98)"),
+            vec![98]
+        );
+        assert_eq!(parse_bare_refs_from_title("(#7)"), vec![7]);
+    }
+
+    /// Multiple references inside one group, comma- or space-separated.
+    #[test]
+    fn parse_bare_refs_from_title_multiple_in_group() {
+        assert_eq!(parse_bare_refs_from_title("foo (#1, #2)"), vec![1, 2]);
+        assert_eq!(parse_bare_refs_from_title("foo (#3 #4)"), vec![3, 4]);
+    }
+
+    /// Dedupe + title order preserved across groups.
+    #[test]
+    fn parse_bare_refs_from_title_dedupes_in_order() {
+        assert_eq!(
+            parse_bare_refs_from_title("a (#5) b (#2) c (#5)"),
+            vec![5, 2]
+        );
+    }
+
+    /// Prose parentheticals are NOT references — the group must hold
+    /// only `#N` tokens.
+    #[test]
+    fn parse_bare_refs_from_title_ignores_prose() {
+        assert_eq!(
+            parse_bare_refs_from_title("Refactor (see #5 for spec)"),
+            Vec::<u64>::new()
+        );
+        assert_eq!(
+            parse_bare_refs_from_title("Speed up parser (now 3x faster)"),
+            Vec::<u64>::new()
+        );
+    }
+
+    /// A bare `#N` outside parentheses is left alone — only the
+    /// parenthesized convention counts.
+    #[test]
+    fn parse_bare_refs_from_title_requires_parens() {
+        assert_eq!(
+            parse_bare_refs_from_title("Add foo for #98"),
+            Vec::<u64>::new()
+        );
+    }
+
+    /// `(closes #31)` is handled by the keyword parser, not this one —
+    /// the keyword breaks the "only references" rule here.
+    #[test]
+    fn parse_bare_refs_from_title_skips_keyword_groups() {
+        assert_eq!(
+            parse_bare_refs_from_title("foo (closes #31)"),
+            Vec::<u64>::new()
+        );
+    }
+
+    /// Unbalanced / empty parens don't panic or match.
+    #[test]
+    fn parse_bare_refs_from_title_handles_degenerate_input() {
+        assert_eq!(parse_bare_refs_from_title("foo (#5"), Vec::<u64>::new());
+        assert_eq!(parse_bare_refs_from_title("foo ()"), Vec::<u64>::new());
+        assert_eq!(parse_bare_refs_from_title("foo (#)"), Vec::<u64>::new());
+    }
+
+    /// End-to-end: the issue's repro. Title carries a bare `(#98)`,
+    /// GitHub linked nothing → the bare-ref path populates
+    /// `closes_issues` with the same-repo issue.
+    #[test]
+    fn extract_closes_issues_picks_up_bare_title_reference() {
+        let mut pr = make_pr(112, "alice");
+        pr.title = "Instrument the sync pipeline for latency debugging (#98)".into();
+        pr.closing_issues_references = None;
+        let task = pr_to_task(&pr, "alice");
+        let keys: Vec<&str> = task.closes_issues.iter().map(|t| t.key.as_str()).collect();
+        assert_eq!(keys, vec!["o/r#98"]);
     }
 
     // ── Query-shape regression guards ─────────────────────────────

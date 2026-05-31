@@ -517,48 +517,6 @@ fn yn_pattern_constant_matches_every_published_variant() {
 }
 
 #[test]
-fn conversational_ask_phrase_constant_each_entry_fires() {
-    use pilot_agents::agent::detect::conversational;
-    // Every documented phrase, used in a minimal sentence ending in
-    // a statement (no trailing `?`), must trigger the conversational
-    // detector via the phrase list alone. Guards against an
-    // accidental drop from CONVERSATIONAL_ASK_PHRASES and proves the
-    // non-`?` recall path (e.g. "Let me know if …").
-    for phrase in conversational::CONVERSATIONAL_ASK_PHRASES {
-        let line = format!("Sure, {phrase} that for you now.");
-        assert!(
-            conversational::is_conversational_ask(&line),
-            "CONVERSATIONAL_ASK_PHRASES entry {phrase:?} must fire is_conversational_ask",
-        );
-    }
-}
-
-#[test]
-fn conversational_ask_skips_input_box_chrome_to_reach_question() {
-    use pilot_agents::agent::detect::conversational;
-    // The ask sits above the rendered input box; the detector must
-    // skip the borders + footer to find it.
-    let buf = concat!(
-        "● Should I also update the docs?\n",
-        "╭───────────────╮\n",
-        "│ >             │\n",
-        "╰───────────────╯\n",
-        "  ? for shortcuts",
-    );
-    assert!(conversational::is_conversational_ask(buf));
-}
-
-#[test]
-fn conversational_ask_ignores_question_above_a_closing_statement() {
-    use pilot_agents::agent::detect::conversational;
-    // Only the LAST conversational line is load-bearing — a question
-    // earlier in the turn must not fire once the turn closes on a
-    // statement.
-    let buf = "Why is it slow? The cache is cold.\nFixed it — all green.";
-    assert!(!conversational::is_conversational_ask(buf));
-}
-
-#[test]
 fn claude_detects_standalone_proceed_prompt_lowercase() {
     // Regression: the user reported a real `Do you want to proceed?`
     // bash-permission prompt going undetected. The paired matcher
@@ -603,25 +561,14 @@ fn claude_standalone_does_not_fire_on_chat_context() {
 }
 
 #[test]
-fn claude_detects_question_via_last_line_ends_with_qmark() {
-    // Last-resort heuristic: if the most recent non-footer line ends
-    // with `?`, claude is most likely asking. Catches prompts that
-    // don't match any of the specific patterns (custom approval UIs,
-    // future claude prompt shapes, etc.).
+fn claude_freeform_question_is_idle_not_input_needed() {
+    // Issue #122: a turn that merely ends on a `?` is NOT a structural
+    // prompt — no chooser, no permission footer — so it must read Idle.
+    // The old last-line-ends-with-`?` heuristic flagged this as
+    // InputNeeded and was the dominant false-positive source (it fired
+    // on finished agents whose summary ended in a question).
     let agent = Claude;
     let buf = b"I checked the file.\nShall I delete the cache directory?";
-    assert_eq!(agent.detect_state(buf), Some(AgentState::InputNeeded));
-}
-
-#[test]
-fn claude_question_heuristic_skips_quoted_continuation_lines() {
-    // Lines prefixed with `>` are claude's quote-block UI for echoing
-    // a prior prompt or a code-block continuation. They commonly end
-    // in `?` (because the prior prompt was a question) but the
-    // ACTUAL current state isn't Asking. The heuristic must skip
-    // them and look at the next non-quote line.
-    let agent = Claude;
-    let buf = b"> Why does this happen?\nReading the file to find out.";
     assert_eq!(agent.detect_state(buf), Some(AgentState::Idle));
 }
 
@@ -637,16 +584,12 @@ fn claude_question_heuristic_stays_idle_on_plain_streaming() {
 }
 
 #[test]
-fn claude_detect_state_handles_multibyte_at_tail_boundary() {
-    // Regression: the `?`-heuristic's `s[tail_start..]` was raw-byte
-    // slicing, which panicked when `tail_start` landed inside a
-    // multi-byte UTF-8 codepoint (`─` is 3 bytes; claude renders
-    // it heavily for box-drawing borders). The panic killed the
-    // per-terminal pump task and the user's host terminal got
-    // stuck in raw mode with the alt screen still up.
-    //
-    // Construct a buffer where the natural 1024-byte tail boundary
-    // hits the middle of a multi-byte character.
+fn claude_detect_state_handles_multibyte_buffer() {
+    // Belt-and-braces: detect_state must never panic on a buffer dense
+    // with multi-byte glyphs (`─` is 3 bytes; claude renders it heavily
+    // for box-drawing borders). A panic here would kill the
+    // per-terminal pump task and leave the host terminal stuck in raw
+    // mode with the alt screen still up.
     let agent = Claude;
     let mut buf = Vec::new();
     // 1000 bytes of padding + 30 box-drawing dashes (90 bytes of
@@ -663,37 +606,31 @@ fn claude_detect_state_handles_multibyte_at_tail_boundary() {
 }
 
 #[test]
-fn claude_conversational_ask_fires_on_long_clarifying_question() {
-    // Issue #58 reverses the earlier precision-first tradeoff: a
-    // long-form clarifying question ("…so we extract the inner type
-    // or keep it inline?") is a genuine ask the user must answer,
-    // even though it's >80 chars. Recall over precision — a stuck
-    // "needs input" pill is cheaper than a session sitting idle
-    // forever while it actually waits on the user.
+fn claude_freeform_conversational_asks_are_idle() {
+    // Issue #122 reverses #58's recall-over-precision tradeoff: a
+    // freeform conversational ask with NO structural prompt marker
+    // (no chooser, no permission footer) now reads Idle. These were
+    // the dominant false-positive engine — agents routinely end a turn
+    // on prose that ends in `?` or a confirmation phrase while nothing
+    // is actually blocking — and they fired spurious desktop
+    // notifications (#110).
     let agent = Claude;
-    let buf = b"Reading through the file now to figure out which of the three \
-                possible refactors would land us the cleanest API surface, so \
-                we extract the inner type or keep it inline?";
-    assert_eq!(agent.detect_state(buf), Some(AgentState::InputNeeded));
-}
-
-#[test]
-fn claude_conversational_ask_fires_on_want_me_to_after_a_statement() {
-    // The poster-child #58 case: Claude finishes a turn with a
-    // statement followed by a confirmation ask. The old sentence-
-    // break heuristic suppressed this as "prose"; #58 flags it —
-    // the model is plainly waiting on the user.
-    let agent = Claude;
-    let buf = b"I've finished the implementation. Want me to run the tests now?";
-    assert_eq!(agent.detect_state(buf), Some(AgentState::InputNeeded));
-}
-
-#[test]
-fn claude_conversational_ask_fires_on_short_prompts() {
-    // Belt-and-braces: the canonical short prompt still fires.
-    let agent = Claude;
-    let buf = b"Some context above\nProceed with the rewrite?";
-    assert_eq!(agent.detect_state(buf), Some(AgentState::InputNeeded));
+    for buf in [
+        "I've finished the implementation. Want me to run the tests now?".as_bytes(),
+        "Some context above\nProceed with the rewrite?".as_bytes(),
+        "Should I also update the tests for this change?".as_bytes(),
+        "Let me know if you'd like me to continue.".as_bytes(),
+        b"Reading through the file now to figure out which of the three \
+          possible refactors would land us the cleanest API surface, so \
+          we extract the inner type or keep it inline?",
+    ] {
+        assert_eq!(
+            agent.detect_state(buf),
+            Some(AgentState::Idle),
+            "freeform ask must read Idle: {:?}",
+            String::from_utf8_lossy(buf),
+        );
+    }
 }
 
 // ── Prompt-shape fixture suite ─────────────────────────────────────────
@@ -865,13 +802,23 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
         ),
         expected: AgentState::InputNeeded,
     },
-    // ── Working shapes — the streaming pulser ────────────────────
+    // ── Working shapes — the live status line ────────────────────
     PromptFixture {
         // Claude's bottom status line while the model streams /
-        // a tool runs. The `(esc to interrupt)` hint is the stable
+        // a tool runs. The `(esc to interrupt)` hint is one stable
         // signal; the leading glyph cycles and isn't matched.
         name: "working_streaming_status_line",
         buffer: "✻ Cogitating… (8s · ↑ 412 tokens · esc to interrupt)",
+        expected: AgentState::Working,
+    },
+    PromptFixture {
+        // The dogfooding format (issue #122): the newer status line
+        // replaces the interrupt hint with a phase suffix. The
+        // `(<elapsed> · … tokens …)` live counter is the signal here —
+        // proves Working detection no longer depends on the literal
+        // `esc to interrupt`.
+        name: "working_status_line_phase_suffix_no_interrupt_hint",
+        buffer: "✦ Gusting… (2m 2s · ↓ 7.2k tokens · thinking some more)",
         expected: AgentState::Working,
     },
     PromptFixture {
@@ -944,8 +891,7 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
     },
     PromptFixture {
         // A `?` appears mid-paragraph but the turn ends on a
-        // statement — only the LAST conversational line is load-
-        // bearing, so the earlier question must NOT fire Asking.
+        // statement. No structural prompt marker → Idle.
         name: "idle_question_mid_paragraph_not_last_line",
         buffer: concat!(
             "Why does this matter? Because the cache is cold on first run.\n",
@@ -953,17 +899,36 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
         ),
         expected: AgentState::Idle,
     },
-    // ── Conversational asks (issue #58) ──────────────────────────
-    // Claude's OWN freeform asks ending a turn — no menu, no
-    // footer, just the model parked on a question. Separate code
-    // path from the structural matchers above; one fixture per
-    // documented phrase shape in `CONVERSATIONAL_ASK_PHRASES`
-    // plus the ends-with-`?` rule. Tuned for recall.
     PromptFixture {
-        // The canonical case from the issue, rendered with the
-        // input box + footer below it. The conversational detector
-        // must skip the box chrome to reach the ask line above.
-        name: "conversational_want_me_to_with_input_box",
+        // The concrete repro from issue #122: a finished agent —
+        // completion summary ending in a CI URL, the `Brewed for`
+        // done-marker, and the injected prompt still parked in the
+        // composer. No chooser, no working status line → Idle. Pre-fix
+        // the conversational-ask path mis-read the composer / summary
+        // as a pending question and flagged InputNeeded.
+        name: "idle_finished_with_parked_prompt_in_composer",
+        buffer: concat!(
+            "● Pushed the fix. CI: https://github.com/o/r/actions/runs/123\n",
+            "✻ Brewed for 4m 21s\n",
+            "╭──────────────────────────────────╮\n",
+            "│ ❯ watch CI until it passes        │\n",
+            "╰──────────────────────────────────╯\n",
+            "  ? for shortcuts",
+        ),
+        expected: AgentState::Idle,
+    },
+    // ── Freeform conversational asks — deliberately Idle (#122) ───
+    // Claude's OWN freeform asks ending a turn — no menu, no footer,
+    // just prose parked on a question. Issue #58 once flagged these
+    // for recall; #122 reverses that — they were the dominant
+    // false-positive engine (and fired spurious notifications), and a
+    // freeform `?` is not reliably distinguishable from a finished
+    // turn. They now read Idle. Kept as controls so a future change
+    // can't silently re-introduce the false positive.
+    PromptFixture {
+        // The canonical #58 case, rendered with the input box + footer
+        // below it. No structural marker anywhere → Idle.
+        name: "freeform_want_me_to_with_input_box_is_idle",
         buffer: concat!(
             "● Want me to proceed?\n",
             "\n",
@@ -972,80 +937,26 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
             "╰─────────────────────────────────────────╯\n",
             "  ? for shortcuts",
         ),
-        expected: AgentState::InputNeeded,
+        expected: AgentState::Idle,
     },
     PromptFixture {
-        // Hardening: the footer below the input box is a standalone
-        // mode indicator (`⏵⏵ accept edits on`) with no "for
-        // shortcuts" text. The bottom-up scan must still recognise it
-        // as chrome and reach the ask above — otherwise the footer
-        // masquerades as the last content line and the ask is missed.
-        name: "conversational_ask_above_mode_indicator_footer",
-        buffer: concat!(
-            "● Should I run the test suite now?\n",
-            "╭─────────────────────────────────────────╮\n",
-            "│ >                                         │\n",
-            "╰─────────────────────────────────────────╯\n",
-            "  ⏵⏵ accept edits on",
-        ),
-        expected: AgentState::InputNeeded,
-    },
-    PromptFixture {
-        name: "conversational_should_i",
-        buffer: "Should I also update the tests for this change?",
-        expected: AgentState::InputNeeded,
-    },
-    PromptFixture {
-        name: "conversational_do_you_want",
-        buffer: "Do you want me to update the changelog too?",
-        expected: AgentState::InputNeeded,
-    },
-    PromptFixture {
-        name: "conversational_shall_i",
-        buffer: "Shall I continue with the next file?",
-        expected: AgentState::InputNeeded,
-    },
-    PromptFixture {
-        // Ends with `.`, not `?` — caught by the phrase list
-        // ("let me know if"), not the ends-with-`?` rule.
-        name: "conversational_let_me_know",
+        // Ends with `.`, not `?`, and carries a confirmation phrase —
+        // the old phrase-list path. Now Idle.
+        name: "freeform_let_me_know_is_idle",
         buffer: "Let me know if you'd like me to continue.",
-        expected: AgentState::InputNeeded,
+        expected: AgentState::Idle,
     },
     PromptFixture {
-        name: "conversational_would_you_like_me_to",
-        buffer: "Would you like me to refactor the helper as well?",
-        expected: AgentState::InputNeeded,
-    },
-    PromptFixture {
-        // Bare one-word confirmation asks.
-        name: "conversational_proceed_bare",
+        // Bare one-word confirmation ask. Now Idle.
+        name: "freeform_proceed_bare_is_idle",
         buffer: "Proceed?",
-        expected: AgentState::InputNeeded,
+        expected: AgentState::Idle,
     },
     PromptFixture {
-        name: "conversational_continue_bare",
-        buffer: "Continue?",
-        expected: AgentState::InputNeeded,
-    },
-    PromptFixture {
-        name: "conversational_ok_to",
-        buffer: "Ok to push these changes to the branch?",
-        expected: AgentState::InputNeeded,
-    },
-    PromptFixture {
-        name: "conversational_which_one",
-        buffer: "Which one should I start with?",
-        expected: AgentState::InputNeeded,
-    },
-    PromptFixture {
-        // Long clarifying prose ending in a choice question. Under
-        // the old precision-first heuristic this was suppressed for
-        // being >80 chars; issue #58 flips the tradeoff toward
-        // recall, and this is a genuine ask the user must answer.
-        name: "conversational_long_prose_ends_with_question",
+        // Long clarifying prose ending in a choice question. Now Idle.
+        name: "freeform_long_prose_ends_with_question_is_idle",
         buffer: "I have a few approaches in mind: refactor the loop, extract a helper, or inline the whole thing. Which would you prefer?",
-        expected: AgentState::InputNeeded,
+        expected: AgentState::Idle,
     },
 ];
 

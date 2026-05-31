@@ -67,12 +67,10 @@ pub trait Agent: Send + Sync {
     /// Distinct from `detect_state` because the binary
     /// Active/Asking state is too coarse — `Asking` includes both
     /// "Y/N permission gate" (paste would be eaten) AND "idle input
-    /// box with a question in chat history" (paste is fine).
-    /// `detect_state`'s loose heuristics (last line ends with `?`)
-    /// power the `?` sidebar pill, where false positives are
-    /// harmless. The inject path can't tolerate them — a false
-    /// Asking made the inject wait 60s on every spawn before
-    /// shipping the paste.
+    /// box with a question in chat history" (paste is fine). This
+    /// check vetoes only on a live permission gate / chooser, so a
+    /// quiet input box reports ready immediately — no false-positive
+    /// 60s inject wait on every spawn.
     ///
     /// Default `false` — agents that don't override never report
     /// ready, so the spawn-time injector falls back to its time-
@@ -178,152 +176,6 @@ pub mod detect {
     pub fn contains_paired(text: &str, choices: &[&str], questions: &[&str]) -> bool {
         contains_any(text, choices) && contains_any(text, questions)
     }
-
-    /// Conversational "asking" detection — issue #58.
-    ///
-    /// A SEPARATE code path from the structural permission-dialog
-    /// detection (issue #26). The structural path keys off harness
-    /// UI shape: the `❯ 1. … 2. …` chooser arrow, the `Esc to
-    /// cancel` footer, numbered-option menus. This path keys off
-    /// Claude's OWN conversational text — the model ending its turn
-    /// with a freeform question and parking on it:
-    ///
-    ///   "Want me to proceed?"
-    ///   "Should I also update the tests?"
-    ///   "Let me know if you'd like me to continue."
-    ///   "Which would you prefer?"
-    ///
-    /// There's no menu and no footer here, so the structural matchers
-    /// never fire. Today those sessions look idle in pilot when
-    /// they're actually waiting on the user.
-    ///
-    /// ## Tuning: recall over precision
-    ///
-    /// A false positive costs one needlessly-flagged session (cheap —
-    /// the user glances and dismisses). A false negative leaves a
-    /// session sitting idle indefinitely while it actually waits on
-    /// input (expensive). So this detector deliberately leans toward
-    /// flagging: any last conversational line ending in `?`, or
-    /// containing a known confirmation/clarification phrase, counts.
-    pub mod conversational {
-        /// Confirmation / clarification phrases that signal Claude is
-        /// soliciting input even when the line does NOT end in `?`
-        /// (e.g. "Let me know if you'd like me to continue."). Matched
-        /// case-insensitively as a substring of the last conversational
-        /// line. Documented and auditable in one place; the
-        /// fixture suite (`PROMPT_FIXTURES` in `tests/agents.rs`) pins
-        /// one shape per phrase class.
-        ///
-        /// Lowercase. Some entries carry a trailing space to avoid
-        /// matching inside longer words ("should i " won't fire on
-        /// "shoulder"); the `?`-terminated forms ("Should I?") are
-        /// caught by the ends-with-`?` rule instead. Entries are the
-        /// shortest distinctive stem of each shape — "would you like"
-        /// also catches "would you like me to …", "let me know" also
-        /// catches "let me know if / whether / how / your thoughts" —
-        /// so we don't carry redundant longer variants.
-        pub const CONVERSATIONAL_ASK_PHRASES: &[&str] = &[
-            "want me to",
-            "should i ",
-            "shall i ",
-            "do you want",
-            "would you like",
-            "let me know",
-            "which one",
-            "which would you prefer",
-            "ok to ",
-            "okay to ",
-        ];
-
-        /// True when `text` (post-ANSI-strip) ends parked on a
-        /// conversational ask. Scans the tail of the buffer from the
-        /// bottom, skips Claude's rendered UI chrome (input-box
-        /// borders, the empty prompt line, the footer hint strip), and
-        /// tests the last line of actual conversational content.
-        pub fn is_conversational_ask(text: &str) -> bool {
-            // Bound to the tail (~2 KiB) so a flush full of streamed
-            // output doesn't drag the heuristic back to a question
-            // from several screens ago. Round `tail_start` UP to the
-            // next char boundary — Claude renders multi-byte glyphs
-            // (`●`, box-drawing `─`, the middle-dot `·`) and slicing
-            // mid-sequence would panic.
-            let mut tail_start = text.len().saturating_sub(2048);
-            while tail_start < text.len() && !text.is_char_boundary(tail_start) {
-                tail_start += 1;
-            }
-            text[tail_start..]
-                .lines()
-                .rev()
-                .map(str::trim)
-                .find(|l| !is_chrome_line(l))
-                .is_some_and(line_is_ask)
-        }
-
-        /// A single conversational line is an ask when it ends with a
-        /// question mark (the model parked on a question) or contains
-        /// one of the known confirmation/clarification phrases. The
-        /// `?` check runs first so the common case allocates nothing.
-        fn line_is_ask(line: &str) -> bool {
-            if line.ends_with('?') {
-                return true;
-            }
-            let lower = line.to_lowercase();
-            CONVERSATIONAL_ASK_PHRASES.iter().any(|p| lower.contains(p))
-        }
-
-        /// Lines that are Claude's rendered UI chrome rather than
-        /// conversational content. The ask sits ABOVE the input box in
-        /// the transcript, so we skip the box borders, the empty
-        /// prompt line, and the footer hint / mode-indicator strip to
-        /// reach it. A line of actual prose never starts with a
-        /// box-drawing glyph and never carries these footer markers.
-        ///
-        /// This is load-bearing for RECALL: the footer sits below the
-        /// input box, so the bottom-up scan hits it first. A footer
-        /// line we fail to recognise as chrome becomes the apparent
-        /// "last content line" and masks the real ask above it — a
-        /// false negative, the expensive failure mode. Hence the
-        /// generous marker list.
-        fn is_chrome_line(line: &str) -> bool {
-            if line.is_empty() {
-                return true;
-            }
-            let lower = line.to_lowercase();
-            if lower.contains("esc to cancel")
-                || lower.contains("tab to amend")
-                || lower.contains("for shortcuts")
-                || lower.contains("ctrl+")
-                || lower.contains("shift+")
-                || lower.contains("bypass permissions")
-                || lower.contains("accept edits")
-                || lower.contains("auto-accept")
-                || lower.contains("plan mode on")
-            {
-                return true;
-            }
-            // Leading glyphs that only ever open a chrome line: the
-            // input-box borders (`╭│╰` …), the tool-output gutter
-            // (`⎿`), the mode-indicator arrow (`⏵⏵ accept edits`), and
-            // the bare prompt marker (`>`).
-            matches!(
-                line.chars().next(),
-                Some(
-                    '╭' | '╮'
-                        | '╰'
-                        | '╯'
-                        | '│'
-                        | '─'
-                        | '┌'
-                        | '┐'
-                        | '└'
-                        | '┘'
-                        | '>'
-                        | '⎿'
-                        | '⏵'
-                )
-            )
-        }
-    }
 }
 
 pub mod builtins {
@@ -415,19 +267,26 @@ pub mod builtins {
             Some(vec![b'\r'])
         }
 
-        /// Claude Code's three observable states, in one detector:
+        /// Claude Code's three observable states, in one detector.
+        /// Ordered most-specific first; the priority is deliberate —
+        /// a live permission chooser outranks the working status line,
+        /// which outranks the quiet input box.
         ///
-        /// - **`InputNeeded`** — a permission chooser, Y/N gate, or a
-        ///   conversational question is on screen (issues #26 / #58).
-        ///   Recognised by the chooser arrow + numbered options, the
-        ///   `Esc to cancel` permission footer, the standalone
-        ///   `do you want to …` phrases, or the last-line-ends-with-?
-        ///   heuristic — all via the shared `super::detect` helpers.
-        /// - **`Working`** — the model is streaming or a tool is
-        ///   running. Claude paints a pulsing glyph + `(esc to
-        ///   interrupt)` in its bottom status line ONLY while busy;
-        ///   that hint is the per-agent "working" pulser the side
-        ///   panel keys off.
+        /// - **`InputNeeded`** — ONLY structural prompt markers (issue
+        ///   #122): the chooser arrow + numbered options, the
+        ///   `Esc to cancel` permission footer (without the input
+        ///   box's `Tab to amend`), the standalone `do you want to …`
+        ///   consent phrases, or a bare yes/no pairing. Freeform
+        ///   conversational asks ("Want me to …?", a line that merely
+        ///   ends in `?`) are NOT flagged — they were the dominant
+        ///   false-positive source and also fired spurious desktop
+        ///   notifications (#110).
+        /// - **`Working`** — Claude paints a live status line ONLY
+        ///   while busy: `✦ Gusting… (2m 2s · ↓ 7.2k tokens · …)`.
+        ///   Its presence is the reliable "working" pulser the side
+        ///   panel keys off — far more robust than the old
+        ///   `esc to interrupt`-only match, which the newer phase
+        ///   suffix sometimes replaces.
         /// - **`Idle`** — the input box is drawn with nothing pending,
         ///   or the output is plain non-interactive text.
         ///
@@ -539,49 +398,28 @@ pub mod builtins {
             }
 
             // Working: the model is streaming or a tool is running.
-            // Claude shows a pulsing glyph + `(esc to interrupt)` in
-            // its bottom status line ONLY while busy — that hint is the
-            // per-agent "working" pulser we key off (the glyph itself
-            // cycles `·`/`✻`/`✽`/… and is unreliable to match; the
-            // accompanying interrupt hint is stable for the whole
-            // streaming / tool-run window).
+            // Claude paints a live status line ONLY while busy —
+            // `✦ Gusting… (2m 2s · ↓ 7.2k tokens · thinking some
+            // more)`. Its presence is the signal (`working_status_pos`
+            // anchors on the `esc to interrupt` hint and the
+            // `(<elapsed> · … tokens …)` live counter); the leading
+            // glyph itself cycles `·`/`✻`/`✽`/… and is unreliable to
+            // match directly.
             //
-            // Recency guard: when Claude finishes and redraws the idle
-            // input box, its `Tab to amend` footer is painted AFTER the
-            // (now stale) `esc to interrupt` still sitting in the
-            // rolling detection buffer. Treat the agent as working only
-            // when the interrupt hint is the MORE RECENT of the two
-            // bottom-line markers. Without this, a just-finished agent
-            // would look busy forever: it sits idle and quiet, so the
-            // buffer never appends enough new bytes to evict the stale
-            // hint. This keeps the state honest — matching what the PTY
-            // is actually doing, not what it was doing a minute ago.
-            //
-            // Known limitation (acceptable, best-effort like the rest
-            // of this detector): if the literal "esc to interrupt" is
-            // echoed in chat/scrollback BELOW the last input box (e.g.
-            // a pasted transcript), it can read as Working for one
-            // detection window before the next render evicts it.
-            if let Some(work_pos) = lower.rfind("esc to interrupt") {
-                let idle_pos = lower.rfind("tab to amend");
-                if idle_pos.is_none_or(|ip| work_pos > ip) {
-                    return Some(AgentState::Working);
-                }
-            }
-
-            // Conversational asks (issue #58) — a SEPARATE code path
-            // from the structural matchers above. Everything before
-            // this point keys off harness UI shape (chooser arrow,
-            // `Esc to cancel` footer, numbered menus). This last
-            // branch keys off Claude's own conversational text: the
-            // model ending its turn parked on a freeform question
-            // ("Want me to proceed?", "Should I also do X?", "Let me
-            // know if you'd like me to continue."). No menu, no
-            // footer — so none of the structural branches fire, and
-            // these sessions previously looked idle. Tuned for recall
-            // (see `detect::conversational`).
-            if super::detect::conversational::is_conversational_ask(&s) {
-                return Some(AgentState::InputNeeded);
+            // Recency guard: the detection buffer is the append-only
+            // PTY byte stream, so a finished agent's last status line
+            // still sits in it — but Claude redraws the idle input box
+            // AFTER it. Treat the agent as working only when the status
+            // line is the MORE RECENT of the two bottom-line markers
+            // (status line vs the idle box's `Tab to amend` /
+            // `? for shortcuts` footer). Without this a just-finished
+            // agent would look busy forever: it sits idle and quiet, so
+            // the buffer never appends enough new bytes to evict the
+            // stale status line.
+            if let Some(work_pos) = working_status_pos(&lower)
+                && idle_box_pos(&lower).is_none_or(|ip| work_pos > ip)
+            {
+                return Some(AgentState::Working);
             }
 
             // Nothing pending and not streaming: the input box is drawn
@@ -726,6 +564,54 @@ pub mod builtins {
     /// `detect_ready_for_prompt` veto).
     fn has_numbered_chooser_options(s: &str) -> bool {
         (s.contains("1.") || s.contains("1)")) && (s.contains("2.") || s.contains("2)"))
+    }
+
+    /// Byte offset of the most recent live "working" status-line
+    /// marker in `lower` (the ANSI-stripped, lowercased buffer), or
+    /// `None` when nothing in the buffer says Claude is busy.
+    ///
+    /// Claude renders a status line ONLY while streaming / running a
+    /// tool: `✦ Gusting… (2m 2s · ↓ 7.2k tokens · thinking some more)`
+    /// or `✻ Cogitating… (8s · ↑ 412 tokens · esc to interrupt)`. We
+    /// anchor on its two stable shapes — the `esc to interrupt`
+    /// interrupt hint, and the `(<elapsed> · … tokens …)` live counter
+    /// (a single line carrying both the `·` separator and the word
+    /// `tokens`). The newer status line sometimes shows a phase suffix
+    /// (`· thinking some more`) instead of the interrupt hint, so the
+    /// counter shape is what keeps detection robust. Requiring `·` and
+    /// `tokens` on the SAME line avoids a cross-line false match (a
+    /// `tokens` in chat prose plus a `·` in the idle footer).
+    fn working_status_pos(lower: &str) -> Option<usize> {
+        let interrupt = lower.rfind("esc to interrupt");
+        let counter = last_line_pos(lower, |l| l.contains('·') && l.contains("tokens"));
+        [interrupt, counter].into_iter().flatten().max()
+    }
+
+    /// Byte offset of the most recent idle input-box footer in
+    /// `lower`. Claude draws this footer only once it's done and
+    /// waiting at the prompt, so it's the recency anchor that beats a
+    /// stale status line still sitting in the append-only buffer.
+    fn idle_box_pos(lower: &str) -> Option<usize> {
+        [lower.rfind("tab to amend"), lower.rfind("? for shortcuts")]
+            .into_iter()
+            .flatten()
+            .max()
+    }
+
+    /// Start offset of the last line satisfying `pred`. Walks the
+    /// buffer once, keeping line boundaries (`split_inclusive`) so the
+    /// returned offset is comparable against `rfind` positions in the
+    /// same string.
+    fn last_line_pos(s: &str, pred: impl Fn(&str) -> bool) -> Option<usize> {
+        let mut best = None;
+        let mut offset = 0;
+        for line in s.split_inclusive('\n') {
+            if pred(line) {
+                best = Some(offset);
+            }
+            offset += line.len();
+        }
+        best
     }
 
     fn strip_ansi_lossy(bytes: &[u8]) -> String {

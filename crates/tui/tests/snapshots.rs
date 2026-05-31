@@ -62,6 +62,12 @@ fn make_task(key: &str, minutes_old: i64) -> Task {
 }
 
 fn render_to_string(component: &mut Sidebar, w: u16, h: u16, focused: bool) -> String {
+    // Pin render's "now" to the same fixed clock the fixtures are
+    // anchored to, so relative timestamps (`10m`, `2h`, …) are stable
+    // regardless of when the test runs. Without this the ages drift
+    // with wall-clock time and the golden snapshots rot (e.g. `1mo`
+    // silently becomes `2mo` a month later).
+    component.set_now_override(fixed_time());
     let backend = TestBackend::new(w, h);
     let mut term = Terminal::new(backend).unwrap();
     term.draw(|frame| {

@@ -115,8 +115,9 @@ pub enum AgentState {
     /// Actively producing output / running a tool right now — the
     /// agent's status line shows a streaming spinner / pulser.
     Working,
-    /// Paused waiting on the user: a permission gate, Y/N prompt, or
-    /// a conversational question (see issues #26 / #58).
+    /// Paused waiting on the user at a structural prompt: a permission
+    /// gate, chooser, or Y/N prompt (see issues #26 / #122). Freeform
+    /// conversational asks are deliberately not flagged.
     InputNeeded,
     /// Neither working nor waiting — done, idle, or no signal. The
     /// safe default for any agent that can't tell.

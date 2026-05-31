@@ -396,6 +396,13 @@ pub struct Sidebar {
     /// Same idea for the sort chip on row 1, sitting to the right of
     /// the filter chip. Click cycles the sort mode.
     sort_chip_rect: Option<Rect>,
+    /// Test-only override for the "now" reference `render` uses to
+    /// format relative timestamps (`1mo`, `2d`, …). Production leaves
+    /// this `None` and reads the wall clock; golden snapshot tests set
+    /// it via [`Sidebar::set_now_override`] so the rendered ages don't
+    /// drift as real time passes (otherwise a `1mo` row silently
+    /// becomes `2mo` a month later and breaks the snapshot).
+    now_override: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// A queued user-facing notification that the outer (IO-aware) layer
@@ -450,7 +457,15 @@ impl Sidebar {
             last_working_spin: None,
             filter_chip_rect: None,
             sort_chip_rect: None,
+            now_override: None,
         }
+    }
+
+    /// Pin the "now" reference used to format relative timestamps so
+    /// golden snapshots stay stable regardless of when the test runs.
+    /// Intended for tests only; production reads the wall clock.
+    pub fn set_now_override(&mut self, now: chrono::DateTime<chrono::Utc>) {
+        self.now_override = Some(now);
     }
 
     /// Advance the "working" spinner if any agent is working and the

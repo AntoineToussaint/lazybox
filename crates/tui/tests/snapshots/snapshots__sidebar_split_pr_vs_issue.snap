@@ -9,7 +9,7 @@ expression: rendered
 
    ▾  owner/repo
      P PRs
-   ▸ ⇄ 10 A   task: o/r#10        1mo
+   ▸ ⇄ 10 A   task: o/r#10         5m
      I Issues
-     ○ 11 A   task: o/r#11        1mo
-     ○ 12 A   task: o/r#12        1mo
+     ○ 11 A   task: o/r#11        30m
+     ○ 12 A   task: o/r#12         1h

@@ -2122,6 +2122,46 @@ async fn live_issue_session_stalls_merge_and_emits_pending_event() {
     assert!(saw_pending, "expected a WorkspaceMergePending broadcast");
 }
 #[tokio::test]
+async fn merge_collapse_does_not_deadlock_while_poll_state_held() {
+    // Regression for the issue-131 sync stall. `run_one_tick` holds
+    // `poll_state` across the entire tick, and the issue→PR collapse
+    // runs deep inside `upsert`. When that collapse reached back for
+    // the same (non-reentrant `tokio::sync::Mutex`) `poll_state` to
+    // record its merge-prompt dedupe, the upsert self-deadlocked
+    // until the per-task timeout fired — ~15s per PR-that-closes-a-
+    // live-issue, every tick, so sync never finished, those PRs'
+    // CI/state updates never landed, and the collapse never ran.
+    // The dedupe memory now lives behind its own lock, so the upsert
+    // completes promptly even while the tick guard is held.
+    let config = ServerConfig::in_memory();
+    let mut bus = config.bus.subscribe();
+    let (issue_key, _session_id) = seed_issue_with_session(&config, "o/r#71").await;
+
+    // Hold the guard exactly as `run_one_tick` does for the whole tick.
+    let guard = config.poll_state.lock().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])),
+    )
+    .await
+    .expect("upsert deadlocked while poll_state was held (issue #131)");
+    drop(guard);
+
+    // Behaviour is otherwise unchanged: the live-session issue still
+    // stalls the merge and emits the pending prompt.
+    assert!(
+        config.store.get_workspace(&issue_key).unwrap().is_some(),
+        "issue workspace must NOT auto-merge while it has live sessions",
+    );
+    let mut saw_pending = false;
+    while let Ok(evt) = bus.try_recv() {
+        if matches!(evt, Event::WorkspaceMergePending { .. }) {
+            saw_pending = true;
+        }
+    }
+    assert!(saw_pending, "expected a WorkspaceMergePending broadcast");
+}
+#[tokio::test]
 async fn confirm_merge_accept_runs_the_merge() {
     // After the user says "yes" to the prompt, the merge runs the
     // same as the silent path: sessions move, terminal_meta rebadges,

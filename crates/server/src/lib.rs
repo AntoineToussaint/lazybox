@@ -273,6 +273,12 @@ pub struct ServerConfig {
     /// dismiss, and 30s later the long-lived loop would re-prompt
     /// (each has its own `TickState`).
     pub poll_state: Arc<Mutex<polling::TickState>>,
+    /// Issue→PR merge-prompt dedupe memory. Deliberately separate from
+    /// `poll_state`: the collapse path that touches it runs inside an
+    /// `upsert` that already holds `poll_state` for the whole tick, so
+    /// sharing the lock self-deadlocks (non-reentrant
+    /// `tokio::sync::Mutex`). See [`polling::MergePromptMemory`].
+    pub merge_prompts: Arc<Mutex<polling::MergePromptMemory>>,
     /// Authenticated user logins per provider source ("github" →
     /// "AntoineToussaint"). Populated by the polling layer when
     /// each provider client initializes; consumed by the Subscribe
@@ -361,6 +367,7 @@ impl ServerConfig {
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),
             default_principal_id: pilot_ipc::PrincipalId::local(),
             poll_state: Arc::new(Mutex::new(polling::TickState::default())),
+            merge_prompts: Arc::new(Mutex::new(polling::MergePromptMemory::default())),
             viewer_identities: Arc::new(std::sync::Mutex::new(Vec::new())),
             poll_wake: Arc::new(tokio::sync::Notify::new()),
         }

@@ -1542,20 +1542,6 @@ pub struct TickState {
     /// workspace can produce a fresh prompt later if it falls out
     /// of scope again.
     prompted_out_of_scope: std::collections::HashSet<String>,
-    /// Issue workspace keys we've already broadcast
-    /// `WorkspaceMergePending` for, with the timestamp of the last
-    /// emission. Pre-fix this was a `HashSet` that stayed pinned
-    /// until the matching `Command::ConfirmMerge` arrived — a user
-    /// who Esc-dismissed the modal then never saw it again until
-    /// daemon restart. Now: re-prompt after `MERGE_REPROMPT_AFTER`
-    /// so dismissals self-heal. Entries are still removed on
-    /// explicit confirm/reject so accepted/rejected pairs don't
-    /// re-fire.
-    pub(crate) prompted_merge: std::collections::HashMap<String, std::time::Instant>,
-    /// Issue workspace keys for which the user replied "no" to the
-    /// merge prompt. We don't re-prompt this session — the user can
-    /// always merge by hand via the future adopt-sessions flow.
-    pub(crate) rejected_merge: std::collections::HashSet<String>,
     /// Persistent GhClient across ticks. WITHOUT this, every tick
     /// rebuilds the client via `GhClient::from_credential`, which
     /// resets the inner `RateBudget` to its full-bucket / no-remote-
@@ -1582,6 +1568,36 @@ pub struct TickState {
     /// — adding TTL pruning or a dynamic-N knob doesn't touch this
     /// struct.
     pub round_robin: RoundRobinState,
+}
+
+/// Issue→PR merge-prompt dedupe memory, kept in its OWN lock —
+/// deliberately NOT a field of [`TickState`].
+///
+/// The collapse path that reads/writes it (`merge_closing_issue_workspaces`)
+/// runs deep inside `upsert`, which `run_one_tick` calls while it is
+/// *already* holding the `poll_state` guard for the whole tick.
+/// `poll_state` is a `tokio::sync::Mutex` (not reentrant), so reaching
+/// back for it there self-deadlocks until the per-task upsert timeout
+/// fires — the symptom being PRs that close an issue with a live
+/// session stalling ~15s every tick (sync never finishes, CI/state
+/// updates for those PRs never land, and the collapse never happens).
+/// Giving this memory a separate lock breaks that cycle. Do not fold
+/// these fields back into `TickState`.
+#[derive(Default)]
+pub struct MergePromptMemory {
+    /// Issue workspace keys we've already broadcast
+    /// `WorkspaceMergePending` for, with the timestamp of the last
+    /// emission. A `HashSet` would stay pinned until the matching
+    /// `Command::ConfirmMerge` arrived — a user who Esc-dismissed the
+    /// modal then never saw it again until daemon restart. Re-prompt
+    /// after `MERGE_REPROMPT_AFTER` so dismissals self-heal. Entries
+    /// are removed on explicit confirm/reject so accepted/rejected
+    /// pairs don't re-fire.
+    pub(crate) prompted: std::collections::HashMap<String, std::time::Instant>,
+    /// Issue workspace keys for which the user replied "no" to the
+    /// merge prompt. We don't re-prompt this session — the user can
+    /// always merge by hand via the future adopt-sessions flow.
+    pub(crate) rejected: std::collections::HashSet<String>,
 }
 
 pub async fn tick_with_state(
@@ -2401,8 +2417,12 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
     // Hold the lock across the entire tick — `sources_for` needs
     // mutable access to the cached GhClient, then `tick_with_state`
     // needs `&mut state` for the debounce / prompted-set bookkeeping.
-    // No other writer needs the lock briefly during a tick, so this
-    // is safe and avoids the lock-twice + state-drift risk.
+    // INVARIANT: nothing reachable from this guard may re-acquire
+    // `poll_state` — it's a non-reentrant `tokio::sync::Mutex`, so a
+    // re-lock self-deadlocks until a downstream timeout fires. The
+    // merge-collapse path inside `upsert` used to do exactly that;
+    // its dedupe memory now lives behind `config.merge_prompts` (see
+    // `MergePromptMemory`) precisely to keep that promise.
     let mut state = config.poll_state.lock().await;
     let sources = sources_for(
         &setup,
@@ -2904,25 +2924,25 @@ async fn merge_closing_issue_workspaces(config: &ServerConfig, workspace: &mut W
         }
 
         // Live-session safety net: stall and prompt rather than
-        // silently absorbing the user's running work. `prompted_merge`
+        // silently absorbing the user's running work. `merge_prompts`
         // dedupes so a user staring at the modal doesn't see fresh
-        // copies every 60s; `rejected_merge` is the "no, leave them
+        // copies every 60s; its `rejected` set is the "no, leave them
         // separate" pin until pilot restarts.
         if !issue_ws.sessions.is_empty() {
             let issue_key_str = issue_key.as_str().to_string();
             let should_prompt = {
-                let mut state = config.poll_state.lock().await;
-                if state.rejected_merge.contains(&issue_key_str) {
+                let mut prompts = config.merge_prompts.lock().await;
+                if prompts.rejected.contains(&issue_key_str) {
                     false
                 } else {
                     let now = std::time::Instant::now();
-                    let stale = state
-                        .prompted_merge
+                    let stale = prompts
+                        .prompted
                         .get(&issue_key_str)
                         .map(|prev| now.duration_since(*prev) >= MERGE_REPROMPT_AFTER)
                         .unwrap_or(true);
                     if stale {
-                        state.prompted_merge.insert(issue_key_str, now);
+                        prompts.prompted.insert(issue_key_str, now);
                         true
                     } else {
                         false
@@ -2980,11 +3000,11 @@ pub async fn handle_confirm_merge(
     accept: bool,
 ) {
     {
-        let mut state = config.poll_state.lock().await;
-        state.prompted_merge.remove(issue_workspace_key.as_str());
+        let mut prompts = config.merge_prompts.lock().await;
+        prompts.prompted.remove(issue_workspace_key.as_str());
         if !accept {
-            state
-                .rejected_merge
+            prompts
+                .rejected
                 .insert(issue_workspace_key.as_str().to_string());
         }
     }
@@ -3092,9 +3112,9 @@ pub async fn handle_collapse_into_pr(config: &ServerConfig, issue_workspace_key:
     // Clear any dedupe state so the modal pipeline doesn't re-fire
     // a duplicate prompt right after this completes.
     {
-        let mut state = config.poll_state.lock().await;
-        state.prompted_merge.remove(issue_workspace_key.as_str());
-        state.rejected_merge.remove(issue_workspace_key.as_str());
+        let mut prompts = config.merge_prompts.lock().await;
+        prompts.prompted.remove(issue_workspace_key.as_str());
+        prompts.rejected.remove(issue_workspace_key.as_str());
     }
 
     // Reuse the confirm-accept path — same end-state, one

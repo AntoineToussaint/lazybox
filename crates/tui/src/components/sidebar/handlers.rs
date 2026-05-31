@@ -211,7 +211,7 @@ impl Sidebar {
                     duration,
                 } = intent
                 {
-                    let until = chrono::Utc::now()
+                    let until = self.now()
                         + chrono::Duration::from_std(duration)
                             .unwrap_or(chrono::Duration::days(365));
                     cmds.push(Command::Snooze { session_key, until });

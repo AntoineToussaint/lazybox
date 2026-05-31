@@ -461,8 +461,21 @@ impl Sidebar {
         }
     }
 
-    /// Pin the "now" reference used to format relative timestamps so
-    /// golden snapshots stay stable regardless of when the test runs.
+    /// The sidebar's single source of "now". Every time-dependent
+    /// decision — relative-timestamp rendering, the mailbox
+    /// grace-window classification, snooze deadlines, the optimistic
+    /// merge stamp — reads the clock through here so they all agree
+    /// within a frame and so a test can pin them with
+    /// [`set_now_override`](Self::set_now_override). Production leaves
+    /// the override `None` and reads the wall clock.
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        self.now_override.unwrap_or_else(chrono::Utc::now)
+    }
+
+    /// Pin the clock [`now`](Self::now) returns so golden snapshots and
+    /// time-sensitive behavior stay deterministic regardless of when
+    /// the test runs. Set it *before* feeding events so the
+    /// visible-set classification observes the same instant as render.
     /// Intended for tests only; production reads the wall clock.
     pub fn set_now_override(&mut self, now: chrono::DateTime<chrono::Utc>) {
         self.now_override = Some(now);
@@ -549,6 +562,8 @@ impl Sidebar {
     /// pill should reflect that NOW, not 30s from now when the next
     /// poll rebroadcasts the workspace.
     pub fn mark_workspace_merged(&mut self, key: &pilot_core::WorkspaceKey) {
+        // Read the clock before the mutable borrow of `workspaces`.
+        let now = self.now();
         let sk: SessionKey = key.into();
         if let Some(workspace) = self.workspaces.get_mut(&sk) {
             if let Some(pr) = workspace.pr.as_mut() {
@@ -556,7 +571,7 @@ impl Sidebar {
                 // Stamp the close moment so the grace window keys off
                 // it (not the stale `updated_at`) until the next poll
                 // backfills GitHub's real `closedAt`.
-                pr.closed_at = Some(chrono::Utc::now());
+                pr.closed_at = Some(now);
             }
             self.recompute_visible();
         }
@@ -1290,7 +1305,7 @@ impl Sidebar {
                 collapsed_repos: &self.collapsed_repos,
                 attention: &self.attention,
                 agents_asking: &self.agents_asking,
-                now: chrono::Utc::now(),
+                now: self.now(),
             },
         );
         self.visible = outcome.visible;

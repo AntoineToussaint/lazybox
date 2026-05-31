@@ -275,9 +275,12 @@ pub struct ServerConfig {
     pub poll_state: Arc<Mutex<polling::TickState>>,
     /// Issue→PR merge-prompt dedupe memory. Deliberately separate from
     /// `poll_state`: the collapse path that touches it runs inside an
-    /// `upsert` that already holds `poll_state` for the whole tick, so
-    /// sharing the lock self-deadlocks (non-reentrant
-    /// `tokio::sync::Mutex`). See [`polling::MergePromptMemory`].
+    /// `upsert`, and sharing `poll_state`'s non-reentrant
+    /// `tokio::sync::Mutex` self-deadlocked when the tick held that
+    /// guard across the upsert loop (#131/#132). A tick no longer holds
+    /// `poll_state` across its body (#133), but `upsert` staying
+    /// decoupled from it is worth keeping. See
+    /// [`polling::MergePromptMemory`].
     pub merge_prompts: Arc<Mutex<polling::MergePromptMemory>>,
     /// Authenticated user logins per provider source ("github" →
     /// "AntoineToussaint"). Populated by the polling layer when

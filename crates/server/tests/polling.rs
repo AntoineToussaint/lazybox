@@ -250,16 +250,18 @@ impl TaskSource for IncrementalSource {
 ///
 /// `set_focused_workspace` runs INLINE on the single-task serve loop
 /// for every `FocusWorkspace` / `MarkRead` (i.e. every sidebar
-/// navigation). `run_one_tick` holds `poll_state` for the ENTIRE poll
-/// cycle — up to ~17s on a slow GitHub fetch. Before the fix this
-/// handler did `poll_state.lock().await`, so during a sync it blocked
-/// the serve loop for the whole fetch, queueing every keystroke `Write`
-/// and `Spawn` behind it: "can't type in the agent / can't start a
-/// shell while GitHub syncs, then it unblocks when the sync finishes."
-/// (Modal input kept working because it never leaves the TUI.)
+/// navigation). Before the fix this handler did `poll_state.lock()
+/// .await`, so while a poll held `poll_state` it blocked the serve loop
+/// for the whole fetch, queueing every keystroke `Write` and `Spawn`
+/// behind it: "can't type in the agent / can't start a shell while
+/// GitHub syncs, then it unblocks when the sync finishes." (Modal input
+/// kept working because it never leaves the TUI.)
 ///
-/// With `try_lock` the handler returns immediately when a poll holds
-/// the lock, so the serve loop stays responsive.
+/// A tick now checks `poll_state` OUT rather than holding it across the
+/// cycle (#133), so it is held only in sub-millisecond windows — but
+/// the handler must STILL be non-blocking under any holder, which
+/// `try_lock` guarantees. This test holds the guard manually to stand
+/// in for one of those windows.
 #[tokio::test]
 async fn set_focused_workspace_never_blocks_on_an_in_flight_poll() {
     let config = ServerConfig::in_memory();
@@ -2161,6 +2163,81 @@ async fn merge_collapse_does_not_deadlock_while_poll_state_held() {
     }
     assert!(saw_pending, "expected a WorkspaceMergePending broadcast");
 }
+
+// ── poll_state checkout/restore (issue #133) ────────────────────────
+
+/// Issue #133: a poll tick checks `poll_state` OUT for its duration
+/// (`checkout_poll_state`) instead of holding the guard across the
+/// whole fetch + upsert. While the state is checked out the guard is
+/// FREE, so the serve loop's own `poll_state` users — the detached
+/// `fetch_pr_details` client cache, the round-robin focus hint — can
+/// acquire it mid-sync instead of stalling behind a ~17s fetch, and
+/// nothing reachable from `upsert` can deadlock by re-acquiring a guard
+/// the tick is holding, because it holds none. Reverting `run_one_tick`
+/// to a held-across-the-tick guard would make this `try_lock` fail.
+#[tokio::test]
+async fn checkout_poll_state_frees_the_guard_for_the_tick() {
+    let config = ServerConfig::in_memory();
+    let state = polling::checkout_poll_state(&config).await;
+    assert!(
+        config.poll_state.try_lock().is_ok(),
+        "poll_state must be free while a tick holds the checked-out state (#133)",
+    );
+    polling::restore_poll_state(&config, state).await;
+}
+
+/// `restore_poll_state` must fold back a `focused_repo` recorded by the
+/// serve loop's focus hint WHILE the tick had the state checked out —
+/// that is the user's latest sidebar navigation and must steer the next
+/// tick's round-robin, not be clobbered by the value the tick carried
+/// out.
+#[tokio::test]
+async fn restore_poll_state_keeps_a_concurrent_focus_hint() {
+    let config = ServerConfig::in_memory();
+    let task = make_task("o/r#42");
+    let workspace = pilot_core::Workspace::from_task(task.clone(), Utc::now());
+    polling::upsert(&config, task).await;
+
+    // Tick checks the state out (empty round-robin); a sidebar
+    // navigation then fires the focus hint into the now-free poll_state.
+    let state = polling::checkout_poll_state(&config).await;
+    polling::set_focused_workspace(&config, &workspace.key).await;
+
+    polling::restore_poll_state(&config, state).await;
+    let restored = config.poll_state.lock().await;
+    assert_eq!(
+        restored.round_robin.focused_repo.as_deref(),
+        Some("o/r"),
+        "a focus hint recorded mid-tick must survive restore (#133)",
+    );
+}
+
+/// Checkout→restore round-trips the cross-tick state: the value the
+/// tick carried out is written back so the NEXT tick still sees it
+/// (the round-robin cursor / counter, the client cache, the
+/// already-prompted sets). Guards against a "fix" that drops the
+/// restore.
+#[tokio::test]
+async fn checkout_restore_round_trips_cross_tick_state() {
+    let config = ServerConfig::in_memory();
+    {
+        let mut s = config.poll_state.lock().await;
+        s.round_robin.tick = 7;
+        s.round_robin.focused_repo = Some("o/seed".into());
+    }
+    let state = polling::checkout_poll_state(&config).await;
+    // Checked out → the live slot is reset to default.
+    assert_eq!(config.poll_state.lock().await.round_robin.tick, 0);
+
+    polling::restore_poll_state(&config, state).await;
+    let restored = config.poll_state.lock().await;
+    assert_eq!(
+        restored.round_robin.tick, 7,
+        "tick counter must survive the checkout/restore round-trip",
+    );
+    assert_eq!(restored.round_robin.focused_repo.as_deref(), Some("o/seed"));
+}
+
 #[tokio::test]
 async fn confirm_merge_accept_runs_the_merge() {
     // After the user says "yes" to the prompt, the merge runs the

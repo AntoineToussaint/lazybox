@@ -1574,15 +1574,16 @@ pub struct TickState {
 /// deliberately NOT a field of [`TickState`].
 ///
 /// The collapse path that reads/writes it (`merge_closing_issue_workspaces`)
-/// runs deep inside `upsert`, which `run_one_tick` calls while it is
-/// *already* holding the `poll_state` guard for the whole tick.
-/// `poll_state` is a `tokio::sync::Mutex` (not reentrant), so reaching
-/// back for it there self-deadlocks until the per-task upsert timeout
-/// fires — the symptom being PRs that close an issue with a live
-/// session stalling ~15s every tick (sync never finishes, CI/state
-/// updates for those PRs never land, and the collapse never happens).
-/// Giving this memory a separate lock breaks that cycle. Do not fold
-/// these fields back into `TickState`.
+/// runs deep inside `upsert`. When that memory lived in `TickState` and
+/// the tick held `poll_state` across the whole upsert loop, the collapse
+/// reaching back for the same non-reentrant `tokio::sync::Mutex`
+/// self-deadlocked until the per-task upsert timeout fired — PRs closing
+/// a live-session issue stalling ~15s every tick (issue #131). Two
+/// independent guards now prevent that: this memory has its own lock
+/// (#132), and `run_one_tick` no longer holds `poll_state` across the
+/// tick at all (#133, see `checkout_poll_state`). Keep both — `upsert`
+/// staying decoupled from `poll_state` is a useful invariant on its own.
+/// Do not fold these fields back into `TickState`.
 #[derive(Default)]
 pub struct MergePromptMemory {
     /// Issue workspace keys we've already broadcast
@@ -2406,6 +2407,53 @@ pub struct TickSummary {
     pub all_full: bool,
 }
 
+/// Check the cross-tick [`TickState`] OUT of `config.poll_state`,
+/// returning an owned copy and leaving a `default()` in its place.
+/// Paired with [`restore_poll_state`].
+///
+/// This is the structural fix for the issue #133 footgun. `run_one_tick`
+/// used to hold the `poll_state` guard across the ENTIRE tick — every
+/// network fetch, every per-task `upsert`, rescope. Two problems
+/// followed:
+///
+/// 1. **Re-entrant deadlock.** `poll_state` is a non-reentrant
+///    `tokio::sync::Mutex`. Anything reachable from the deep `upsert`
+///    call chain that reached back for `poll_state.lock().await`
+///    self-deadlocked until a downstream timeout fired — the
+///    merge-collapse path did exactly that (issue #131). Holding the
+///    guard for the whole tick made re-introducing that trivial.
+/// 2. **Serve-loop starvation.** The serve loop's own `poll_state`
+///    users — the detached `fetch_pr_details` client cache, the
+///    round-robin focus hint — blocked behind a ~17s GitHub fetch, so
+///    typing in an agent / opening a session stalled until the sync
+///    finished.
+///
+/// Checking the state out instead means the guard is FREE for the
+/// fetch + upsert duration. The driver loop runs ticks serially
+/// (`run_one_tick` is awaited to completion before the next), so no
+/// other tick contends for the checked-out state; the only concurrent
+/// writer is the focus hint, which [`restore_poll_state`] folds back in.
+pub async fn checkout_poll_state(config: &ServerConfig) -> TickState {
+    std::mem::take(&mut *config.poll_state.lock().await)
+}
+
+/// Restore a [`TickState`] checked out by [`checkout_poll_state`].
+///
+/// While the state was checked out, the serve loop's round-robin focus
+/// hint (`set_focused_workspace`) may have recorded a fresh
+/// `focused_repo` into the now-default state behind `poll_state`. That
+/// is the user's latest sidebar navigation and must steer the NEXT
+/// tick's round-robin, so we prefer it over the value the tick carried
+/// out. Every other `TickState` field is owned exclusively by the tick,
+/// so the checked-out copy is authoritative for them.
+pub async fn restore_poll_state(config: &ServerConfig, mut state: TickState) {
+    let mut guard = config.poll_state.lock().await;
+    if guard.round_robin.focused_repo.is_some() {
+        state.round_robin.focused_repo = guard.round_robin.focused_repo.take();
+    }
+    *guard = state;
+}
+
 pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
     let setup = match pilot_config::Config::load() {
         Ok(c) => crate::persisted_from_config(&c),
@@ -2414,20 +2462,32 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
             return TickSummary::default();
         }
     };
-    // Hold the lock across the entire tick — `sources_for` needs
-    // mutable access to the cached GhClient, then `tick_with_state`
-    // needs `&mut state` for the debounce / prompted-set bookkeeping.
-    // INVARIANT: nothing reachable from this guard may re-acquire
-    // `poll_state` — it's a non-reentrant `tokio::sync::Mutex`, so a
-    // re-lock self-deadlocks until a downstream timeout fires. The
-    // merge-collapse path inside `upsert` used to do exactly that;
-    // its dedupe memory now lives behind `config.merge_prompts` (see
-    // `MergePromptMemory`) precisely to keep that promise.
-    let mut state = config.poll_state.lock().await;
+    // Check the cross-tick `TickState` OUT of `poll_state` for the
+    // duration of this tick instead of holding the guard across it.
+    // INVARIANT (issue #133): the `poll_state` guard is FREE for the
+    // entire fetch + upsert call chain, so nothing reachable from
+    // `upsert` can block on a guard we're holding (we hold none), and
+    // the serve loop's own `poll_state` users stay responsive while a
+    // slow sync runs. See `checkout_poll_state`.
+    let mut state = checkout_poll_state(config).await;
+    let summary = run_tick_inner(config, &setup, &mut state).await;
+    restore_poll_state(config, state).await;
+    summary
+}
+
+/// The body of one poll tick, operating on a `state` checked out of
+/// `poll_state`. Builds the source list, ticks, rescopes. Split out of
+/// `run_one_tick` so the checkout/restore of `poll_state` brackets it
+/// cleanly (see `checkout_poll_state`).
+async fn run_tick_inner(
+    config: &ServerConfig,
+    setup: &pilot_core::PersistedSetup,
+    state: &mut TickState,
+) -> TickSummary {
     let sources = sources_for(
-        &setup,
+        setup,
         config.bus.clone(),
-        &mut state,
+        state,
         config.viewer_identities.clone(),
     )
     .await;
@@ -2449,7 +2509,7 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
             source_scopes: std::collections::HashMap::new(),
             all_full: true,
         };
-        rescope_with_state(config, &outcome, &mut state).await;
+        rescope_with_state(config, &outcome, state).await;
         return TickSummary::default();
     }
     // Overall tick cap — defense in depth. Each sub-step already has
@@ -2463,7 +2523,7 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
     const TICK_OVERALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
     let outcome = match tokio::time::timeout(
         TICK_OVERALL_TIMEOUT,
-        tick_with_state(config, &sources, &mut state),
+        tick_with_state(config, &sources, state),
     )
     .await
     {
@@ -2501,15 +2561,14 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
         saw_unknown_mergeable: outcome.saw_unknown_mergeable,
         all_full: outcome.all_full,
     };
-    rescope_with_state(config, &outcome, &mut state).await;
-    // (Prefetch of top-N PR details — implemented but disabled
-    // until the underlying sync stability work lands. The spawn
-    // was re-locking `poll_state` which is held by the very tick
-    // we're trying to finish; conceptually fine because the
-    // outer guard drops on return, but layering "background
-    // fetch fan-out" on top of "single sync is fragile" was the
-    // wrong order. Re-enable once the next-tick cadence is
-    // visibly healthy in `/tmp/pilot.log`.)
+    rescope_with_state(config, &outcome, state).await;
+    // (Prefetch of top-N PR details — implemented but disabled until
+    // the underlying sync stability work lands. The spawn re-locked
+    // `poll_state`; with the tick no longer holding it across the
+    // upsert loop (#133) that is no longer a deadlock risk, but
+    // layering "background fetch fan-out" on top of "single sync is
+    // fragile" was the wrong order. Re-enable once the next-tick
+    // cadence is visibly healthy in `/tmp/pilot.log`.)
     summary
 }
 
@@ -3303,20 +3362,18 @@ pub async fn set_focused_workspace(config: &ServerConfig, key: &WorkspaceKey) {
     //
     // This runs INLINE on the daemon serve loop for every
     // `FocusWorkspace` / `MarkRead`, i.e. on every sidebar navigation.
-    // `run_one_tick` holds `poll_state` for the ENTIRE poll cycle (the
-    // comment there says so explicitly) — up to ~17s on a slow GitHub
-    // fetch. A blocking `.lock().await` here would therefore wedge the
-    // single-task serve loop for that whole window, queueing every
-    // keystroke `Write` and `Spawn` behind it. That is the
-    // user-visible "can't type in the agent / can't start a shell while
-    // GitHub syncs, then it unblocks when the sync finishes" bug:
-    // modal input still works (TUI-only, no daemon round-trip) but
-    // anything that needs the daemon stalls.
-    //
-    // The hint only steers WHICH repo the NEXT poll prioritizes, so if
-    // a poll is already mid-flight (lock held) we simply skip the
-    // update. `try_lock` makes that explicit and keeps the serve loop
-    // responsive no matter how long the active tick runs.
+    // A poll tick now checks `poll_state` OUT for its duration rather
+    // than holding the guard across the whole cycle (#133): the tick
+    // only holds it for the sub-millisecond `mem::take` / restore in
+    // `checkout_poll_state` / `restore_poll_state`, running the fetch +
+    // upsert on an owned copy. So this `try_lock` usually succeeds even
+    // mid-sync. We still use `try_lock` rather than `.lock().await`,
+    // though: `handle_fetch_pr_details` also acquires `poll_state` (and
+    // may build a client under it), and a blocking acquire here would
+    // wedge the single-task serve loop behind ANY holder, queueing every
+    // keystroke `Write` and `Spawn` — the "can't type in the agent while
+    // GitHub syncs" regression. The hint only steers WHICH repo the NEXT
+    // poll prioritizes, so skipping it under contention costs nothing.
     match config.poll_state.try_lock() {
         Ok(mut state) => {
             let prev = state.round_robin.focused_repo.replace(repo.to_string());

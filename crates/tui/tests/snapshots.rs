@@ -61,6 +61,19 @@ fn make_task(key: &str, minutes_old: i64) -> Task {
     }
 }
 
+/// A sidebar whose clock is pinned to [`fixed_time`] from the start, so
+/// every time-dependent path — the visible-set classification driven by
+/// `on_event` *and* the relative timestamps produced by render — sees
+/// the same fixed instant. Pinning here (before any event) rather than
+/// just before render keeps the snapshots stable no matter when the test
+/// runs; otherwise the ages drift with wall-clock time and the golden
+/// files rot (e.g. `1mo` silently becomes `2mo` a month later).
+fn sidebar() -> Sidebar {
+    let mut s = Sidebar::new(PaneId::new(1));
+    s.set_now_override(fixed_time());
+    s
+}
+
 fn render_to_string(component: &mut Sidebar, w: u16, h: u16, focused: bool) -> String {
     let backend = TestBackend::new(w, h);
     let mut term = Terminal::new(backend).unwrap();
@@ -84,7 +97,7 @@ fn render_to_string(component: &mut Sidebar, w: u16, h: u16, focused: bool) -> S
 
 #[test]
 fn sidebar_golden_render_focused() {
-    let mut s = Sidebar::new(PaneId::new(1));
+    let mut s = sidebar();
     // Build three workspaces with known ages so sort order is
     // deterministic in the snapshot.
     s.on_event(&Event::Snapshot {
@@ -108,7 +121,7 @@ fn sidebar_golden_render_focused() {
 /// the right instead, keeping the flush spacing from drifting back.
 #[test]
 fn sidebar_golden_render_mixed_number_widths() {
-    let mut s = Sidebar::new(PaneId::new(1));
+    let mut s = sidebar();
     s.on_event(&Event::Snapshot {
         workspaces: vec![
             Workspace::from_task(make_task("o/r#7", 10), fixed_time()),
@@ -128,7 +141,7 @@ fn sidebar_golden_render_mixed_number_widths() {
 /// under the same repo and locks the resulting layout.
 #[test]
 fn sidebar_golden_render_split_pr_vs_issue() {
-    let mut s = Sidebar::new(PaneId::new(1));
+    let mut s = sidebar();
     let mut pr = make_task("o/r#10", 5);
     pr.url = "https://github.com/o/r/pull/10".into();
     let mut issue_a = make_task("o/r#11", 30);
@@ -158,7 +171,7 @@ fn sidebar_golden_render_split_pr_vs_issue() {
 #[test]
 fn sidebar_golden_render_recent_pr_and_issue_mixed() {
     use pilot_tui::components::sidebar::SortMode;
-    let mut s = Sidebar::new(PaneId::new(1));
+    let mut s = sidebar();
     while s.sort_mode() != SortMode::Recent {
         s.cycle_sort_mode();
     }
@@ -183,7 +196,7 @@ fn sidebar_golden_render_recent_pr_and_issue_mixed() {
 
 #[test]
 fn sidebar_golden_render_unfocused() {
-    let mut s = Sidebar::new(PaneId::new(1));
+    let mut s = sidebar();
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(make_task("o/r#1", 10), fixed_time())],
         terminals: vec![],
@@ -195,7 +208,7 @@ fn sidebar_golden_render_unfocused() {
 
 #[test]
 fn sidebar_golden_render_empty() {
-    let mut s = Sidebar::new(PaneId::new(1));
+    let mut s = sidebar();
     let rendered = render_to_string(&mut s, 40, 5, true);
     insta::assert_snapshot!("sidebar_empty", rendered);
 }

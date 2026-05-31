@@ -271,6 +271,31 @@ fn claude_not_ready_during_trust_folder_prompt() {
     assert!(!agent.detect_ready_for_prompt(trust.as_bytes()));
 }
 
+/// Claude has an authoritative readiness detector, so the spawn-time
+/// injector must gate on it — never blind-write past the folder-trust
+/// prompt on a settle timer.
+#[test]
+fn claude_inject_requires_ready() {
+    assert!(Claude.inject_requires_ready());
+}
+
+/// Agents that rely on the default always-false
+/// `detect_ready_for_prompt` must NOT gate the injector, or every
+/// inject would stall to the hard deadline.
+#[test]
+fn detectorless_agents_do_not_require_ready() {
+    assert!(!Codex.inject_requires_ready());
+    assert!(!Cursor.inject_requires_ready());
+    let generic = GenericCli {
+        id: "custom",
+        display_name: "Custom",
+        spawn_cmd: vec!["custom-bin".into()],
+        resume_cmd: None,
+        asking_patterns: vec![],
+    };
+    assert!(!generic.inject_requires_ready());
+}
+
 #[test]
 fn claude_detects_choice_arrow() {
     // Claude's permission / tool-approval / multi-choice UI renders

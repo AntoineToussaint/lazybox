@@ -18,7 +18,7 @@ impl Sidebar {
         //   row 4: blank
         //   row 5+: content
         let theme = crate::theme::current();
-        let now = chrono::Utc::now();
+        let now = self.now();
         let mailbox_label = match self.mailbox {
             Mailbox::Inbox => "PILOT",
             Mailbox::Inactive => "INACTIVE",

@@ -82,6 +82,22 @@ pub trait Agent: Send + Sync {
         false
     }
 
+    /// Whether the spawn-time prompt injector must hold off pasting
+    /// until `detect_ready_for_prompt` reports ready. Agents with an
+    /// authoritative readiness detector (Claude — input box drawn AND
+    /// no folder-trust / permission gate up) override to `true`, so
+    /// the time-based settle fallback can never paste the work-context
+    /// prompt into a still-visible trust dialog.
+    ///
+    /// Agents that rely on the default always-false
+    /// `detect_ready_for_prompt` keep `false`: for them the detector
+    /// never reports ready, so gating the injector on it would stall
+    /// every inject to the hard deadline. They keep the first-output +
+    /// settle path instead.
+    fn inject_requires_ready(&self) -> bool {
+        false
+    }
+
     /// Encode a prompt as bytes the daemon should write to the PTY.
     /// Most agents accept plain text + a newline; some need bracketed
     /// paste or specific control sequences.
@@ -637,6 +653,10 @@ pub mod builtins {
             {
                 return false;
             }
+            true
+        }
+
+        fn inject_requires_ready(&self) -> bool {
             true
         }
     }

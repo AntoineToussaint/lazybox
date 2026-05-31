@@ -472,7 +472,7 @@ impl Sidebar {
         self.now_override.unwrap_or_else(chrono::Utc::now)
     }
 
-    /// Pin the clock [`now`](Self::now) returns so golden snapshots and
+    /// Pin the clock `now()` returns so golden snapshots and
     /// time-sensitive behavior stay deterministic regardless of when
     /// the test runs. Set it *before* feeding events so the
     /// visible-set classification observes the same instant as render.

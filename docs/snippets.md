@@ -135,8 +135,10 @@ snippets:
   terminal focused, nothing is sent and pilot flashes a hint to open a
   session first.
 - **No snippets configured.** If neither file defines any snippets,
-  the picker does not open and pilot flashes a hint that no snippets
-  are configured yet.
+  the `]` prefix isn't treated as a snippet trigger at all — whatever
+  you type after it passes straight through to the terminal as literal
+  text (and `]]` still leaves the pane). The picker only opens once at
+  least one snippet exists.
 - **Reload.** Files are read once at startup. Restart pilot after
   creating, editing, or deleting a snippet.
 - **Malformed YAML.** A file that fails to parse is skipped with a

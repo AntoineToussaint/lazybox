@@ -644,10 +644,13 @@ pub async fn handle_spawn(
             // Fallback ladder (each step has its own deadline):
             //   1. ready_signal — preferred path, fires within
             //      seconds of claude finishing its banner.
-            //   2. first_output + SETTLE — if no agent override
-            //      for detect_ready_for_prompt, or claude renders
-            //      the input box without our detector matching,
-            //      we still write after 600ms past first byte.
+            //   2. first_output + SETTLE — for agents whose
+            //      detector never reports ready (default impl),
+            //      we still write 600ms past first byte. Agents
+            //      with an authoritative readiness detector
+            //      (`inject_requires_ready`) SKIP this rung — a
+            //      blind settle-write would land the paste in
+            //      claude's folder-trust prompt if it's still up.
             //   3. HARD_DEADLINE — last resort, inject blindly so
             //      a cold-start hang doesn't silently lose the
             //      user's prompt.
@@ -659,38 +662,19 @@ pub async fn handle_spawn(
                 "initial_prompt: waiting for agent ready signal",
             );
 
-            // Race the tight ready_signal against the broad
-            // first_output + settle fallback. Whichever fires
-            // first wins; if neither, HARD_DEADLINE caps the wait.
-            let ready_notify = ready_signal.notified();
-            let first_output_notify = first_output.notified();
-            tokio::select! {
-                _ = tokio::time::timeout(HARD_DEADLINE, ready_notify) => {
-                    tracing::info!(
-                        terminal_id = ?id,
-                        "initial_prompt: ready signal fired — writing immediately",
-                    );
-                }
-                _ = async {
-                    // Fallback: wait for first output, then SETTLE.
-                    // This catches agents without a
-                    // detect_ready_for_prompt override AND covers
-                    // detector misses (e.g. Claude renders the
-                    // input box in a way our pattern doesn't
-                    // match yet).
-                    let _ = tokio::time::timeout(HARD_DEADLINE, first_output_notify).await;
-                    tokio::time::sleep(SETTLE).await;
-                } => {
-                    tracing::info!(
-                        terminal_id = ?id,
-                        "initial_prompt: first-output + settle path — writing now",
-                    );
-                }
-            }
+            let trigger = await_inject_window(
+                agent.inject_requires_ready(),
+                &ready_signal,
+                &first_output,
+                HARD_DEADLINE,
+                SETTLE,
+            )
+            .await;
             tracing::info!(
                 terminal_id = ?id,
                 paste_len = paste.len(),
-                "initial_prompt: writing paste to backend",
+                ?trigger,
+                "initial_prompt: inject window cleared — writing paste to backend",
             );
             if let Err(e) = backend.write(&backend_key, &paste).await {
                 tracing::warn!(
@@ -716,6 +700,62 @@ pub async fn handle_spawn(
                 }
             }
         });
+    }
+}
+
+/// Which rung of the inject ladder released the spawn-time paste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InjectTrigger {
+    /// The pump's `detect_ready_for_prompt` signal fired — input box
+    /// drawn, no permission / trust gate up.
+    Ready,
+    /// First-output + settle fallback (agents without an authoritative
+    /// readiness detector).
+    Settle,
+    /// `hard_deadline` elapsed; we paste blindly rather than lose the
+    /// prompt to a cold-start hang.
+    Deadline,
+}
+
+/// Block until it's safe to paste the spawn-time prompt.
+///
+/// Two regimes, chosen by `requires_ready`:
+///
+/// - `true` — the agent has an authoritative readiness detector
+///   (Claude: input box drawn AND no folder-trust / permission gate).
+///   Wait for the pump's `ready` signal and fall back to
+///   `hard_deadline` only as a last resort. The time-based settle is
+///   deliberately NOT honored here: if the folder-trust prompt is
+///   still on screen when the settle timer expires, a blind paste
+///   types the work-context prompt into the trust dialog instead of
+///   the input box.
+/// - `false` — detector-less agents whose `detect_ready_for_prompt`
+///   never reports ready. Race `ready` against a first-output +
+///   `settle` timer so the prompt still injects promptly.
+async fn await_inject_window(
+    requires_ready: bool,
+    ready: &tokio::sync::Notify,
+    first_output: &tokio::sync::Notify,
+    hard_deadline: std::time::Duration,
+    settle: std::time::Duration,
+) -> InjectTrigger {
+    let ready_notify = ready.notified();
+    if requires_ready {
+        return match tokio::time::timeout(hard_deadline, ready_notify).await {
+            Ok(()) => InjectTrigger::Ready,
+            Err(_) => InjectTrigger::Deadline,
+        };
+    }
+    let first_output_notify = first_output.notified();
+    tokio::select! {
+        r = tokio::time::timeout(hard_deadline, ready_notify) => match r {
+            Ok(()) => InjectTrigger::Ready,
+            Err(_) => InjectTrigger::Deadline,
+        },
+        _ = async {
+            let _ = tokio::time::timeout(hard_deadline, first_output_notify).await;
+            tokio::time::sleep(settle).await;
+        } => InjectTrigger::Settle,
     }
 }
 
@@ -2086,5 +2126,75 @@ mod tests {
     fn derive_branch_for_branchless_github_without_hash() {
         let t = task_for("github", "acme/widget");
         assert_eq!(derive_branch_for_branchless(&t), "pilot/github-acme-widget");
+    }
+
+    const HARD: std::time::Duration = std::time::Duration::from_secs(10);
+    const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
+
+    /// Gated agents (Claude) must NOT release on the settle timer:
+    /// the folder-trust prompt may still be up. Even with first output
+    /// already seen and well past the settle window, the inject window
+    /// stays closed until the ready signal — proven here by the helper
+    /// outlasting a timeout that's longer than SETTLE but shorter than
+    /// HARD_DEADLINE.
+    #[tokio::test(start_paused = true)]
+    async fn gated_agent_ignores_settle_timer() {
+        let ready = tokio::sync::Notify::new();
+        let first_output = tokio::sync::Notify::new();
+        first_output.notify_waiters();
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            await_inject_window(true, &ready, &first_output, HARD, SETTLE),
+        )
+        .await;
+        assert!(
+            res.is_err(),
+            "gated path must not write while no ready signal has fired",
+        );
+    }
+
+    /// Gated agents release as soon as the ready signal fires, well
+    /// before the hard deadline.
+    #[tokio::test(start_paused = true)]
+    async fn gated_agent_releases_on_ready() {
+        let ready = tokio::sync::Notify::new();
+        let first_output = tokio::sync::Notify::new();
+        let trigger = tokio::select! {
+            t = await_inject_window(true, &ready, &first_output, HARD, SETTLE) => t,
+            _ = async {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                ready.notify_waiters();
+                std::future::pending::<()>().await;
+            } => unreachable!(),
+        };
+        assert_eq!(trigger, InjectTrigger::Ready);
+    }
+
+    /// Gated agents with a stuck readiness detector still inject at the
+    /// hard deadline rather than silently dropping the prompt.
+    #[tokio::test(start_paused = true)]
+    async fn gated_agent_falls_back_to_deadline() {
+        let ready = tokio::sync::Notify::new();
+        let first_output = tokio::sync::Notify::new();
+        let trigger = await_inject_window(true, &ready, &first_output, HARD, SETTLE).await;
+        assert_eq!(trigger, InjectTrigger::Deadline);
+    }
+
+    /// Detector-less agents keep the first-output + settle path: with
+    /// no ready signal ever, they still inject one settle past the
+    /// first byte instead of waiting the full hard deadline.
+    #[tokio::test(start_paused = true)]
+    async fn detectorless_agent_writes_on_settle() {
+        let ready = tokio::sync::Notify::new();
+        let first_output = tokio::sync::Notify::new();
+        let trigger = tokio::select! {
+            t = await_inject_window(false, &ready, &first_output, HARD, SETTLE) => t,
+            _ = async {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                first_output.notify_waiters();
+                std::future::pending::<()>().await;
+            } => unreachable!(),
+        };
+        assert_eq!(trigger, InjectTrigger::Settle);
     }
 }

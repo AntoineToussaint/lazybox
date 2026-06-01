@@ -2044,6 +2044,25 @@ mod tests {
     }
 
     #[test]
+    fn argv_for_claude_carries_skip_flag_per_toggle() {
+        let config = ServerConfig::with_store(std::sync::Arc::new(pilot_store::MemoryStore::new()));
+        let kind = TerminalKind::Agent("claude".into());
+        let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
+
+        let with_skip = argv_for(&config, &kind, &cwd, true).expect("claude registered");
+        assert_eq!(
+            with_skip,
+            vec![
+                "claude".to_string(),
+                "--dangerously-skip-permissions".to_string()
+            ]
+        );
+
+        let without_skip = argv_for(&config, &kind, &cwd, false).expect("claude registered");
+        assert_eq!(without_skip, vec!["claude".to_string()]);
+    }
+
+    #[test]
     fn env_for_repo_case_sensitive() {
         let mut cfg = pilot_config::Config::default();
         let mut env = std::collections::BTreeMap::new();

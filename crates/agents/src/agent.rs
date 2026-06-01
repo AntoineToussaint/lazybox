@@ -14,8 +14,9 @@ pub struct SpawnCtx {
     pub pr_number: Option<String>,
     pub env: HashMap<String, String>,
     /// Launch the agent with tool-use permission prompts disabled
-    /// ("no-permission" / bypass mode) so it runs unattended. Set only
-    /// for pilot-spawned autonomous sessions; honored by agents that
+    /// ("no-permission" / bypass mode). Set for pilot-spawned autonomous
+    /// sessions, and for interactive sessions when the user opts in via
+    /// the `agent.skip_permissions` toggle. Honored by agents that
     /// support a bypass flag (Claude → `--dangerously-skip-permissions`).
     /// Agents without one ignore it.
     pub skip_permissions: bool,
@@ -330,5 +331,60 @@ pub mod builtins {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::builtins::Claude;
+    use super::{Agent, SpawnCtx};
+
+    const SKIP_FLAG: &str = "--dangerously-skip-permissions";
+
+    #[test]
+    fn claude_spawn_carries_skip_flag_only_when_opted_in() {
+        let claude = Claude;
+
+        let off = SpawnCtx {
+            skip_permissions: false,
+            ..Default::default()
+        };
+        assert_eq!(claude.spawn(&off), vec!["claude".to_string()]);
+
+        let on = SpawnCtx {
+            skip_permissions: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            claude.spawn(&on),
+            vec!["claude".to_string(), SKIP_FLAG.to_string()]
+        );
+    }
+
+    #[test]
+    fn claude_resume_carries_skip_flag_only_when_opted_in() {
+        let claude = Claude;
+
+        let off = SpawnCtx {
+            skip_permissions: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            claude.resume(&off),
+            vec!["claude".to_string(), "--continue".to_string()]
+        );
+
+        let on = SpawnCtx {
+            skip_permissions: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            claude.resume(&on),
+            vec![
+                "claude".to_string(),
+                "--continue".to_string(),
+                SKIP_FLAG.to_string()
+            ]
+        );
     }
 }

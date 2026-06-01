@@ -212,3 +212,30 @@ fn sidebar_golden_render_empty() {
     let rendered = render_to_string(&mut s, 40, 5, true);
     insta::assert_snapshot!("sidebar_empty", rendered);
 }
+
+/// Which-key popup for the github leader group (#126). Locks the
+/// `g · github` panel layout — title row plus one `key  label` row
+/// per group member, anchored bottom-left above the footer.
+#[test]
+fn which_key_github_group_golden_render() {
+    use pilot_tui::realm::components::which_key;
+    use pilot_tui_core::action::ActionGroup;
+    let backend = TestBackend::new(40, 12);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|frame| {
+        which_key::render(frame, Rect::new(0, 0, 40, 12), ActionGroup::Github);
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    let rendered = (0..buf.area.height)
+        .map(|y| {
+            let mut row = String::new();
+            for x in 0..buf.area.width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            row.trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!("which_key_github_group", rendered);
+}

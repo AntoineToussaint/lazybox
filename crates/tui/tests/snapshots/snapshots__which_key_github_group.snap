@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/snapshots.rs
+expression: rendered
+---
+
+
+
+
+ g · github
+  m  merge PR
+  v  reviewers
+  a  assignees
+  l  labels
+  o  open in browser

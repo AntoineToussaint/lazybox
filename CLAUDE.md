@@ -132,7 +132,11 @@ detach focused pane to a new window, `Shift-arrows` resize splitters,
 mouse-click any pane to focus it, mouse-drag splitters to resize.
 
 **Sidebar**: `j/k` navigate, `Enter` open, `c` claude, `b` shell,
-`x` codex, `u` cursor, `m` mark read, `/` search.
+`x` codex, `u` cursor, `m` mark read, `/` search. `g` is a leader
+key that opens the **github** group as a two-step chord (which-key
+popup): `g m` merge, `g v` reviewers, `g a` assignees, `g l` labels,
+`g o` open in browser. The legacy `Shift-{M,V,G,L,O}` keys remain as
+direct aliases.
 
 **RightPane (Activity)**: `j/k` scroll, `g/G` top/bottom.
 

@@ -242,6 +242,60 @@ impl PrefixLatch {
     }
 }
 
+/// Operator-pending "leader" latch — fifth member of the latch
+/// family, backing the grouped two-step (leader-key) chords from
+/// issue #126. The first key of the chord arms it with the selected
+/// group `G`; the next key picks the action within that group.
+///
+/// Unlike `DoubleTapLatch` it is deliberately NOT timed: it stays
+/// armed until the next key arrives (vim operator-pending style). A
+/// timed second-key window — like the existing 1s quit / escape
+/// windows — risks the "laggy or misfires" failure mode the issue
+/// flags, and the which-key popup gives the user an explicit pending-
+/// state cue instead of a hidden clock.
+///
+/// Contract:
+/// - `arm(group)` selects the pending group (replacing any prior one).
+/// - `pending()` exposes it for the which-key popup without consuming.
+/// - `take()` reads-and-disarms — the second keystroke resolves the
+///   chord exactly once whether or not it names a valid in-group key.
+/// - `disarm()` force-clears (context change / cancel).
+#[derive(Debug, Default, Clone)]
+pub struct LeaderLatch<G> {
+    armed: Option<G>,
+}
+
+impl<G: Clone> LeaderLatch<G> {
+    pub fn new() -> Self {
+        Self { armed: None }
+    }
+
+    /// Arm with the group selected by the leader key. A second leader
+    /// press before the action key just re-selects.
+    pub fn arm(&mut self, group: G) {
+        self.armed = Some(group);
+    }
+
+    /// Currently armed group, for rendering the which-key popup.
+    pub fn pending(&self) -> Option<&G> {
+        self.armed.as_ref()
+    }
+
+    pub fn is_armed(&self) -> bool {
+        self.armed.is_some()
+    }
+
+    /// Read-and-disarm. Returns the armed group (if any) and clears,
+    /// so the action-selector keystroke resolves the chord once.
+    pub fn take(&mut self) -> Option<G> {
+        self.armed.take()
+    }
+
+    pub fn disarm(&mut self) {
+        self.armed = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,6 +494,50 @@ mod tests {
     fn double_tap_disarm_clears() {
         let mut l = DoubleTapLatch::new();
         l.tap(std::time::Duration::from_secs(1));
+        l.disarm();
+        assert!(!l.is_armed());
+    }
+
+    // ── LeaderLatch tests ────────────────────────────────────────
+
+    #[test]
+    fn leader_starts_disarmed() {
+        let l: LeaderLatch<&'static str> = LeaderLatch::new();
+        assert!(!l.is_armed());
+        assert_eq!(l.pending(), None);
+    }
+
+    #[test]
+    fn leader_arm_then_pending_exposes_group_without_consuming() {
+        let mut l: LeaderLatch<&'static str> = LeaderLatch::new();
+        l.arm("github");
+        assert!(l.is_armed());
+        assert_eq!(l.pending(), Some(&"github"));
+        // pending() must not consume — the popup reads it every frame.
+        assert!(l.is_armed());
+    }
+
+    #[test]
+    fn leader_take_reads_and_disarms() {
+        let mut l: LeaderLatch<&'static str> = LeaderLatch::new();
+        l.arm("github");
+        assert_eq!(l.take(), Some("github"));
+        assert!(!l.is_armed(), "take must clear the latch");
+        assert_eq!(l.take(), None, "second take is empty");
+    }
+
+    #[test]
+    fn leader_re_arm_replaces_group() {
+        let mut l: LeaderLatch<&'static str> = LeaderLatch::new();
+        l.arm("github");
+        l.arm("workspace");
+        assert_eq!(l.pending(), Some(&"workspace"));
+    }
+
+    #[test]
+    fn leader_disarm_clears() {
+        let mut l: LeaderLatch<&'static str> = LeaderLatch::new();
+        l.arm("github");
         l.disarm();
         assert!(!l.is_armed());
     }

@@ -31,6 +31,47 @@ impl<T: TerminalAdapter> Model<T> {
     /// global escapes, and forwards everything else to the focused
     /// pane wrapper.
     pub(super) fn handle_pane_key(&mut self, key: RealmKey) {
+        // ── Grouped two-step (leader-key) chord, issue #126 ─────────
+        // When a group leader is armed, THIS key is the action
+        // selector — resolved before anything else so the second
+        // press never leaks to a pane or PTY. A matching in-group key
+        // fires its action through the unified `dispatch_action`;
+        // anything else (Esc, an unmapped key) just cancels, which is
+        // the which-key convention.
+        if let Some(group) = self.leader.take() {
+            self.redraw = true;
+            if let Key::Char(c) = key.code
+                && key.modifiers.is_empty()
+                && let Some(action) = leader_action(group, c)
+            {
+                self.q_latch.disarm();
+                let mut cmds = self.dispatch_action(&action);
+                self.sync_panes();
+                for cmd in cmds.drain(..) {
+                    let rewritten = self.rewrite_spawn_to_inject(cmd);
+                    self.send_cmd(rewritten);
+                }
+            }
+            return;
+        }
+        // Arm a group leader. Sidebar-only for this first cut: the
+        // github group's leader (`g`) is unbound there, and its
+        // actions all target the focused workspace, so a workspace
+        // must be selected — otherwise `g` falls through to its
+        // normal (no-op) handling. The original `Shift-*` aliases for
+        // these actions stay live everywhere; this is purely additive.
+        if self.focus == PaneFocus::Sidebar
+            && key.modifiers.is_empty()
+            && let Key::Char(c) = key.code
+            && let Some(group) = pilot_tui_core::action::ActionGroup::from_leader(c)
+            && self.sidebar.selected_workspace_key().is_some()
+        {
+            self.q_latch.disarm();
+            self.leader.arm(group);
+            self.redraw = true;
+            return;
+        }
+
         match key.code {
             // Tab cycles panes — but ONLY when the active pane has
             // no PTY swallowing keys. Inside a terminal with a live
@@ -346,6 +387,13 @@ impl<T: TerminalAdapter> Model<T> {
     /// hint bar to show "press q again" briefly).
     pub fn q_arm_pending(&self) -> bool {
         self.q_latch.is_armed()
+    }
+
+    /// The armed leader-chord group, if any. Drives the which-key
+    /// popup in `view`; also a test/inspection hook for the #126
+    /// grouped chords.
+    pub fn leader_pending(&self) -> Option<pilot_tui_core::action::ActionGroup> {
+        self.leader.pending().copied()
     }
 
     /// Read-only accessor — which pane currently has focus. Used by
@@ -874,5 +922,24 @@ impl<T: TerminalAdapter> Model<T> {
             }
             _ => {}
         }
+    }
+}
+
+/// Resolve the runtime `Action` for the in-group key `c` within
+/// `group` (issue #126). The github group's actions all carry no
+/// payload, so this is a direct `ActionKind` → `Action` translation;
+/// returns `None` when the key isn't bound in the group.
+fn leader_action(
+    group: pilot_tui_core::action::ActionGroup,
+    c: char,
+) -> Option<pilot_tui_core::action::Action> {
+    use pilot_tui_core::action::{Action, ActionKind};
+    match group.action_for_key(c)? {
+        ActionKind::MergePr => Some(Action::MergePr),
+        ActionKind::RequestReviewers => Some(Action::RequestReviewers),
+        ActionKind::AddAssignees => Some(Action::AddAssignees),
+        ActionKind::ManageLabels => Some(Action::ManageLabels),
+        ActionKind::OpenInBrowser => Some(Action::OpenInBrowser),
+        _ => None,
     }
 }

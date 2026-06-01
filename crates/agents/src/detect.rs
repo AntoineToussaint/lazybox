@@ -317,7 +317,7 @@ fn last_line_pos(s: &str, pred: impl Fn(&str) -> bool) -> Option<usize> {
 /// untouched and decode once at the end so the patterns can search for
 /// it literally.
 ///
-/// Every `ESC`-introduced run is dropped wholesale via [`skip_escape`];
+/// Every `ESC`-introduced run is dropped wholesale via `skip_escape`;
 /// the parser handles the four families tmux/Claude emit (CSI, OSC, the
 /// DCS/SOS/PM/APC string family, and charset designators) so none of
 /// their payload bytes leak into the searched text. Malformed or

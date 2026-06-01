@@ -48,11 +48,10 @@ mod effects_tests {
         assert!(matches!(cmds[1], IpcCommand::Refresh));
     }
 
-    /// A manual-refresh sync failure paints a sticky "✗ sync failed"
-    /// banner; the next successful poll (auto-cycle) must clear it so
-    /// a recovered sync doesn't leave the red notice up forever.
-    #[test]
-    fn provider_error_banner_clears_on_next_successful_poll() {
+    /// Arm a sticky "✗ sync failed" banner for `source` the way a
+    /// failed manual refresh (Shift-R) does, and assert it landed.
+    /// Returns the model ready for the recovery half of each test.
+    fn model_with_sync_error(source: &str) -> Model<tuirealm::terminal::TestTerminalAdapter> {
         use crate::realm::components::footer::NoticeSeverity;
         use pilot_ipc::Event as IpcEvent;
 
@@ -61,28 +60,102 @@ mod effects_tests {
         // initial polling modal is gone.
         m.status.polling = None;
 
-        // Simulate Shift-R, then a failing poll for that refresh.
         m.pending_refresh_ack = true;
         m.handle_daemon_event(IpcEvent::ProviderError {
-            source: "github".into(),
+            source: source.into(),
             message: "boom".into(),
             detail: String::new(),
             kind: "retryable".into(),
         });
-        assert!(m.sync_error_active, "sync error should be armed");
+
+        assert_eq!(
+            m.sync_error_source.as_deref(),
+            Some(source),
+            "sync error should be armed for {source}"
+        );
         let n = m.status.notice.as_ref().expect("banner set");
         assert_eq!(n.severity, NoticeSeverity::Permanent);
         assert!(n.message.contains("sync failed"));
+        m
+    }
+
+    /// A manual-refresh sync failure paints a sticky "✗ sync failed"
+    /// banner; the next successful poll (auto-cycle) from the *same*
+    /// provider must clear it so a recovered sync doesn't leave the
+    /// red notice up forever.
+    #[test]
+    fn provider_error_banner_clears_on_next_successful_poll() {
+        use pilot_ipc::Event as IpcEvent;
+
+        let mut m = model_with_sync_error("github");
 
         // Sync recovers on a later auto-cycle (no pending ack).
         m.handle_daemon_event(IpcEvent::PollCompleted {
             source: "github".into(),
             count: 3,
         });
-        assert!(!m.sync_error_active, "flag cleared on recovery");
+        assert!(m.sync_error_source.is_none(), "flag cleared on recovery");
         assert!(
             m.status.notice.is_none(),
             "stale sync-failed banner should be cleared"
+        );
+    }
+
+    /// The banner is owned by the provider that failed. A successful
+    /// poll from a *different* provider (pilot polls GitHub, Linear and
+    /// Slack concurrently) must NOT erase a still-valid failure banner.
+    #[test]
+    fn provider_error_banner_survives_other_providers_poll() {
+        use pilot_ipc::Event as IpcEvent;
+
+        let mut m = model_with_sync_error("github");
+
+        // A different provider's auto-cycle succeeds while GitHub is
+        // still down.
+        m.handle_daemon_event(IpcEvent::PollCompleted {
+            source: "linear".into(),
+            count: 7,
+        });
+        assert_eq!(
+            m.sync_error_source.as_deref(),
+            Some("github"),
+            "github banner must stay armed when linear recovers"
+        );
+        let n = m.status.notice.as_ref().expect("github banner still up");
+        assert!(n.message.contains("sync failed"));
+
+        // …and GitHub's own recovery still clears it.
+        m.handle_daemon_event(IpcEvent::PollCompleted {
+            source: "github".into(),
+            count: 1,
+        });
+        assert!(m.sync_error_source.is_none());
+        assert!(m.status.notice.is_none());
+    }
+
+    /// Any unrelated notice supersedes the sync-error banner and
+    /// disarms the "clear on recovery" tag — otherwise a later poll
+    /// would wrongly clear whatever notice is now on screen.
+    #[test]
+    fn unrelated_notice_disarms_sync_error_tag() {
+        use pilot_ipc::Event as IpcEvent;
+
+        let mut m = model_with_sync_error("github");
+
+        m.flash_info("something else happened");
+        assert!(
+            m.sync_error_source.is_none(),
+            "a fresh notice must disarm the sync-error tag"
+        );
+
+        // A subsequent GitHub poll must leave the new notice intact.
+        m.handle_daemon_event(IpcEvent::PollCompleted {
+            source: "github".into(),
+            count: 2,
+        });
+        assert!(
+            m.status.notice.is_some(),
+            "the unrelated notice must not be cleared by recovery logic"
         );
     }
 

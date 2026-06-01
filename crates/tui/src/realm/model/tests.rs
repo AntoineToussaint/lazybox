@@ -956,3 +956,86 @@ mod base64_tests {
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
     }
 }
+
+#[cfg(test)]
+mod modal_input_responsiveness_tests {
+    //! Regression for #90: the out-of-scope Confirm modal froze the
+    //! app during sync. The dispatcher used to forward each modal key
+    //! to the listener channel and then busy-wait up to 150ms for the
+    //! reply, blocking daemon-event draining and rendering on every
+    //! keystroke. Forwarding must now return immediately and arm a
+    //! redraw window so even no-`Msg` keys (Confirm arrows, Input
+    //! typing) still repaint.
+    use super::super::Id;
+    use super::super::Model;
+    use pilot_core::WorkspaceKey;
+    use pilot_ipc::{Event as IpcEvent, channel};
+    use tuirealm::event::{Event as RealmEvent, Key, KeyEvent, KeyModifiers};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn key(code: Key) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn mount_out_of_scope_confirm(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+        m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
+            workspace_key: WorkspaceKey::new("github:o/r#1"),
+            label: "o/r#1".into(),
+            title: None,
+            active_terminal_count: 1,
+        });
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+    }
+
+    /// Forwarding a modal key returns immediately (no 150ms busy-wait)
+    /// and arms the redraw window so the run loop repaints the modal
+    /// even when the key produces no `Msg`.
+    #[test]
+    fn forwarding_a_modal_key_is_nonblocking_and_arms_redraw() {
+        let mut m = build_model();
+        mount_out_of_scope_confirm(&mut m);
+        assert!(
+            !m.modal_redraw_pending(),
+            "no redraw window before any modal key is forwarded",
+        );
+
+        // Left arrow toggles the Confirm's highlight — a key that
+        // mutates the modal WITHOUT emitting a Msg, the case the old
+        // forced `redraw = true` covered.
+        let t = std::time::Instant::now();
+        m.forward_modal_event(RealmEvent::Keyboard(key(Key::Left)));
+        assert!(
+            t.elapsed() < std::time::Duration::from_millis(50),
+            "forwarding must not block the dispatcher (old code waited 150ms/key)",
+        );
+        assert!(
+            m.modal_redraw_pending(),
+            "a redraw window must be armed so the no-Msg key still repaints",
+        );
+        // The toggle must not have dismissed the modal.
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+    }
+
+    /// The redraw window is one-shot per keystroke window: once its
+    /// deadline elapses, `modal_redraw_pending` reports false and clears
+    /// itself so an idle modal stops re-rendering.
+    #[test]
+    fn redraw_window_clears_after_it_elapses() {
+        let mut m = build_model();
+        mount_out_of_scope_confirm(&mut m);
+        m.forward_modal_event(RealmEvent::Keyboard(key(Key::Left)));
+        assert!(m.modal_redraw_pending());
+        // The window is well under a second; wait it out and confirm
+        // the loop would stop forcing redraws.
+        std::thread::sleep(std::time::Duration::from_millis(160));
+        assert!(
+            !m.modal_redraw_pending(),
+            "an elapsed redraw window must clear so an idle modal isn't redrawn forever",
+        );
+    }
+}

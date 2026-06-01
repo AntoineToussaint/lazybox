@@ -422,10 +422,17 @@ pub struct AgentSection {
     /// work) with permission prompts disabled — `claude
     /// --dangerously-skip-permissions` — so the agent runs unattended
     /// instead of blocking on every tool-use approval. Only affects
-    /// autonomous spawns; interactive sessions the user opens always
-    /// keep prompts on. Default on; flip to `false` to force prompts on
-    /// every session.
+    /// autonomous spawns; interactive sessions the user opens are
+    /// governed by `skip_permissions` instead. Default on; flip to
+    /// `false` to force prompts on every autonomous session.
     pub autonomous_skip_permissions: bool,
+    /// Launch interactive sessions the user opens themselves (the `c`
+    /// spawn) with permission prompts disabled too — `claude
+    /// --dangerously-skip-permissions`. Off by default: the prompt is
+    /// the human-in-the-loop guard for a session a human is driving.
+    /// Flip on via Settings → "Skip permission prompts" to run your
+    /// own Claude sessions unattended.
+    pub skip_permissions: bool,
 }
 
 impl Default for AgentSection {
@@ -433,6 +440,7 @@ impl Default for AgentSection {
         Self {
             config: pilot_core::AgentConfig::default(),
             autonomous_skip_permissions: true,
+            skip_permissions: false,
         }
     }
 }
@@ -947,6 +955,26 @@ repos:
         assert!(
             !reparsed.agent.autonomous_skip_permissions,
             "flipping the toggle off survives a save/load round-trip"
+        );
+    }
+
+    /// Interactive skip-permissions is off by default and round-trips
+    /// so a user can opt their own sessions into bypass mode.
+    #[test]
+    fn interactive_skip_permissions_defaults_off_and_round_trips() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(
+            !cfg.agent.skip_permissions,
+            "interactive sessions keep prompts on by default"
+        );
+
+        let mut opted_in = Config::default();
+        opted_in.agent.skip_permissions = true;
+        let written = serde_yaml::to_string(&opted_in).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert!(
+            reparsed.agent.skip_permissions,
+            "opting interactive sessions into skip mode survives a round-trip"
         );
     }
 

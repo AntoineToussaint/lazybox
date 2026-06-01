@@ -31,6 +31,10 @@ pub enum SettingsAction {
     EditProviders,
     /// Re-run the agents picker.
     EditAgents,
+    /// Toggle `agent.skip_permissions` — whether interactive Claude
+    /// sessions launch with `--dangerously-skip-permissions`. Carries
+    /// the current value so the dispatcher knows which way to flip.
+    ToggleSkipPermissions { enabled: bool },
     /// Bail out and run the full splash → providers → agents → … wizard.
     FullSetup,
     /// Admin: wipe every worktree whose session has no live
@@ -51,6 +55,10 @@ impl SettingsAction {
             Self::EditFilters { label, .. } => format!("Edit roles + filters · {label}"),
             Self::EditProviders => "Edit providers (github / linear / …)".into(),
             Self::EditAgents => "Edit agents (claude / codex / cursor / …)".into(),
+            Self::ToggleSkipPermissions { enabled } => format!(
+                "Skip permission prompts for your sessions · {}",
+                if *enabled { "on" } else { "off" }
+            ),
             Self::FullSetup => "Run the full setup wizard".into(),
             Self::CleanWorktrees => "Clean worktrees (free disk, keep inbox)".into(),
             Self::InspectWorktrees => "Inspect worktrees…".into(),
@@ -118,5 +126,24 @@ impl SetupCtx {
             pending_editor_workspace: None,
             on_complete: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SettingsAction;
+
+    #[test]
+    fn skip_permissions_label_reflects_state() {
+        assert!(
+            SettingsAction::ToggleSkipPermissions { enabled: false }
+                .label()
+                .ends_with("off")
+        );
+        assert!(
+            SettingsAction::ToggleSkipPermissions { enabled: true }
+                .label()
+                .ends_with("on")
+        );
     }
 }

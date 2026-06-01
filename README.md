@@ -345,13 +345,16 @@ there to answer tool-use approval prompts. So those sessions launch
 Claude Code with `--dangerously-skip-permissions` ("no-permission"
 mode), and the tab strip flags them with a `⚠ no-perms` badge so it's
 obvious which sessions aren't gated by approvals. Sessions you open
-yourself (`c` in the sidebar, `f`-for-fix) always keep prompts on —
-the approval *is* the human-in-the-loop guard. Flip the default off to
-force prompts on every session:
+yourself (`c` in the sidebar, `f`-for-fix) keep prompts on by default —
+the approval *is* the human-in-the-loop guard. Flip the autonomous
+default off to force prompts on every autonomous session, or opt your
+own interactive sessions into bypass mode (also toggleable from
+Settings → "Skip permission prompts for your sessions"):
 
 ```yaml
 agent:
-  autonomous_skip_permissions: false
+  autonomous_skip_permissions: false  # prompt even autonomous runs
+  skip_permissions: true              # bypass on sessions you open too
 ```
 
 The bypass works under both Claude subscription login (Pro/Max) and an

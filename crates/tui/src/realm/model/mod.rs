@@ -1437,6 +1437,12 @@ impl<T: TerminalAdapter> Model<T> {
         }
         actions.push(SettingsAction::EditProviders);
         actions.push(SettingsAction::EditAgents);
+        let skip_permissions = pilot_config::Config::load()
+            .map(|c| c.agent.skip_permissions)
+            .unwrap_or(false);
+        actions.push(SettingsAction::ToggleSkipPermissions {
+            enabled: skip_permissions,
+        });
         actions.push(SettingsAction::InspectWorktrees);
         actions.push(SettingsAction::CleanWorktrees);
         actions.push(SettingsAction::FullSetup);
@@ -1449,6 +1455,20 @@ impl<T: TerminalAdapter> Model<T> {
     /// by main.rs) handles persistence on Finish.
     pub fn dispatch_settings_action(&mut self, action: SettingsAction) {
         use crate::setup_flow::{PartialEntry, SetupRunner};
+        // Config toggles write straight to YAML — they don't need the
+        // cached detection inputs the wizard flows below depend on.
+        if let SettingsAction::ToggleSkipPermissions { enabled } = action {
+            let now = !enabled;
+            match pilot_config::Config::save_with(|c| c.agent.skip_permissions = now) {
+                Ok(()) => self.flash_info(if now {
+                    "skip permission prompts: on — new sessions launch with --dangerously-skip-permissions"
+                } else {
+                    "skip permission prompts: off — new sessions prompt before each tool use"
+                }),
+                Err(e) => self.flash_info(format!("couldn't save config: {e}")),
+            }
+            return;
+        }
         let Some((report, sources)) = self.setup.inputs.clone() else {
             tracing::warn!("dispatch_settings_action: no cached inputs");
             return;
@@ -1472,6 +1492,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.start_inspect_worktrees();
                 return;
             }
+            SettingsAction::ToggleSkipPermissions { .. } => return,
         };
         // Pre-seed the accumulator from persisted state so partial
         // flows don't drop the user's other-provider config.

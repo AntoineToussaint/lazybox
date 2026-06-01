@@ -8,6 +8,7 @@
 //! default, but `screen`, `zellij`, or raw PTYs can slot in.
 
 pub mod agent;
+pub mod detect;
 pub mod session_wrapper;
 
 pub use agent::{Agent, Registry, SpawnCtx};

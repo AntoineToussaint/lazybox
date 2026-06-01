@@ -125,6 +125,11 @@ pub async fn handle_spawn(
     // The flag works under both Claude subscription login and an API
     // key; the only bypass restriction is no-root/sudo, which the
     // worktree sessions satisfy.
+    // Wall-clock origin for the spawn → inject timing trace. Every
+    // milestone below logs `elapsed_ms` against this so the "long delay
+    // between `w` and the prompt being injected" is measurable from
+    // `/tmp/pilot.log` instead of guessed at (#142).
+    let t0 = std::time::Instant::now();
     let cfg = pilot_config::Config::load().unwrap_or_default();
     let skip_permissions = skip_permissions_for(autonomous, &cfg);
     tracing::info!(
@@ -174,6 +179,14 @@ pub async fn handle_spawn(
                 }
             }
         };
+    // Session + worktree are resolved here — for a fresh issue this is
+    // where a cold clone / `git fetch` / setup script gets paid
+    // synchronously, so surfacing the elapsed time makes the otherwise-
+    // silent worktree provisioning cost visible.
+    tracing::info!(
+        elapsed_ms = t0.elapsed().as_millis(),
+        "handle_spawn: session/worktree resolved",
+    );
     let argv = match argv_for(config, &kind, &cwd_path, skip_permissions) {
         Some(a) => a,
         None => {
@@ -223,7 +236,11 @@ pub async fn handle_spawn(
             return;
         }
     };
-    tracing::info!(%backend_key, "handle_spawn: backend.spawn ok");
+    tracing::info!(
+        %backend_key,
+        elapsed_ms = t0.elapsed().as_millis(),
+        "handle_spawn: backend.spawn ok",
+    );
 
     let terminal_id = alloc_terminal_id();
     // Insert the auxiliary maps BEFORE the primary `terminals` map.
@@ -315,6 +332,9 @@ pub async fn handle_spawn(
     let ready_signal_for_pump = ready_signal.clone();
     let ready_signal_for_inject = ready_signal.clone();
     let session_key_for_pump = session_key.clone();
+    // `Instant` is Copy, so both the pump and inject tasks get their own
+    // copy of the spawn origin for the timing trace.
+    let t0_for_pump = t0;
     // Broadcast BEFORE spawning the pump task. Otherwise a
     // fast-exiting terminal (e.g. a command that immediately
     // errors) can fire `TerminalExited` from the pump before this
@@ -583,6 +603,11 @@ pub async fn handle_spawn(
             if !signaled_first_output {
                 first_output_signal_for_pump.notify_one();
                 signaled_first_output = true;
+                tracing::info!(
+                    terminal_id = ?id_for_pump,
+                    elapsed_ms = t0_for_pump.elapsed().as_millis(),
+                    "handle_spawn: first PTY output",
+                );
             }
             check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
             let _ = bus.send(Event::TerminalOutput {
@@ -631,6 +656,7 @@ pub async fn handle_spawn(
         let id = terminal_id;
         let first_output = first_output_signal_for_inject;
         let ready_signal = ready_signal_for_inject;
+        let t0_for_inject = t0;
         tokio::spawn(async move {
             // Wait for the agent's input box to be drawn AND no
             // permission gate to be up — i.e. "claude is genuinely
@@ -675,6 +701,7 @@ pub async fn handle_spawn(
                 terminal_id = ?id,
                 paste_len = paste.len(),
                 ?trigger,
+                elapsed_ms = t0_for_inject.elapsed().as_millis(),
                 "initial_prompt: inject window cleared — writing paste to backend",
             );
             if let Err(e) = backend.write(&backend_key, &paste).await {
@@ -832,7 +859,14 @@ async fn resolve_or_create_session(
     let kind_for_session = session_kind_from_terminal(kind);
     let path = worktree_path_for_session(&workspace, 0);
 
+    let prov_start = std::time::Instant::now();
     let provisioned = provision_worktree(&workspace, &path).await;
+    tracing::info!(
+        elapsed_ms = prov_start.elapsed().as_millis(),
+        ok = provisioned.is_ok(),
+        worktree = %path.display(),
+        "provision_worktree complete",
+    );
     if let Err(e) = &provisioned {
         // Real-checkout failed (no GH access, branch missing, network
         // hiccup) — fall back to an empty dir so spawn works. Surface

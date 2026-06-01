@@ -259,6 +259,29 @@ fn claude_not_ready_when_input_box_absent() {
     assert!(!agent.detect_ready_for_prompt(booting));
 }
 
+/// Regression for the spawn-time injection delay (#142): the newer
+/// Claude composer renders only `? for shortcuts` as its footer — NOT
+/// the older `Esc to cancel · Tab to amend` pair the previous readiness
+/// check required. With that strict pair the ready signal never fired
+/// on a healthy idle screen and the injector rode its 10s hard
+/// deadline. Readiness now keys off "composer drawn + state isn't
+/// asking", so the `? for shortcuts`-only footer reports ready.
+#[test]
+fn claude_ready_for_prompt_with_short_composer_footer() {
+    let agent = Claude;
+    let idle = concat!(
+        "● All set.\n",
+        "╭─────────────────────────────────────────╮\n",
+        "│ >                                         │\n",
+        "╰─────────────────────────────────────────╯\n",
+        "  ? for shortcuts",
+    );
+    assert!(
+        agent.detect_ready_for_prompt(idle.as_bytes()),
+        "an idle composer with only the `? for shortcuts` footer must report ready"
+    );
+}
+
 /// Trust-folder prompt without the chooser arrow (older claude
 /// builds, alt phrasings) still blocks the "ready" signal —
 /// otherwise the original `y eats my prompt` race comes back.

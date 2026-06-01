@@ -120,7 +120,8 @@ pub async fn handle_spawn(
     // tool-use permission prompts disabled so the agent runs unattended
     // — there's no human nearby to approve. Gated by config so a
     // paranoid user can force prompts on every session. Interactive
-    // spawns never bypass: the prompt IS the human-in-the-loop guard.
+    // spawns keep the prompt as the human-in-the-loop guard unless the
+    // user opts in via `agent.skip_permissions` (Settings toggle).
     // The flag works under both Claude subscription login and an API
     // key; the only bypass restriction is no-root/sudo, which the
     // worktree sessions satisfy.
@@ -1063,11 +1064,16 @@ fn collect_repo_env(config: &ServerConfig, session_key: &SessionKey) -> Vec<(Str
 }
 
 /// Whether a spawn should launch in no-permission / bypass mode.
-/// Only autonomous (pilot-spawned) sessions are eligible, and only
-/// when the `agent.autonomous_skip_permissions` toggle is on (default).
-/// Pure so tests don't need a real YAML on disk.
+/// Autonomous (pilot-spawned) sessions follow `autonomous_skip_permissions`
+/// (default on); interactive sessions the user opens follow the
+/// separate `skip_permissions` toggle (default off). Pure so tests
+/// don't need a real YAML on disk.
 pub(crate) fn skip_permissions_for(autonomous: bool, cfg: &pilot_config::Config) -> bool {
-    autonomous && cfg.agent.autonomous_skip_permissions
+    if autonomous {
+        cfg.agent.autonomous_skip_permissions
+    } else {
+        cfg.agent.skip_permissions
+    }
 }
 
 /// Pure-data lookup so tests don't need a real YAML on disk.
@@ -1979,21 +1985,28 @@ mod tests {
     }
 
     #[test]
-    fn skip_permissions_only_for_autonomous_when_enabled() {
+    fn skip_permissions_follows_per_kind_toggles() {
         let mut cfg = pilot_config::Config::default();
-        // Default config has the toggle on.
+        // Defaults: autonomous on, interactive off.
         assert!(cfg.agent.autonomous_skip_permissions);
+        assert!(!cfg.agent.skip_permissions);
 
-        // Autonomous + toggle on → bypass.
+        // Autonomous + autonomous-toggle on → bypass.
         assert!(skip_permissions_for(true, &cfg));
-        // Interactive never bypasses, even with the toggle on — the
-        // prompt is the human-in-the-loop guard.
+        // Interactive defaults off → keep the prompt.
         assert!(!skip_permissions_for(false, &cfg));
 
-        // Paranoid user flips the toggle off → no session bypasses.
+        // User opts interactive sessions into skip mode.
+        cfg.agent.skip_permissions = true;
+        assert!(skip_permissions_for(false, &cfg));
+        // ...and that's independent of the autonomous toggle.
+        assert!(skip_permissions_for(true, &cfg));
+
+        // Paranoid user flips the autonomous toggle off; interactive
+        // skip is unaffected by it.
         cfg.agent.autonomous_skip_permissions = false;
         assert!(!skip_permissions_for(true, &cfg));
-        assert!(!skip_permissions_for(false, &cfg));
+        assert!(skip_permissions_for(false, &cfg));
     }
 
     #[test]

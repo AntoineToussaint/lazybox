@@ -134,20 +134,38 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///    whatever sits to its left (status pill or, when status is
 ///    empty, the title flex padding).
 pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
+    // Drop order when the sidebar is too narrow to fit every column:
+    // lower priority sheds first. The issue number + title (and the
+    // type glyph that tells issue-from-PR, and the destructive
+    // snooze-confirm chrome) are kept; secondary columns drop in the
+    // order the issue calls out — timestamps, then status chips, then
+    // indicators — so the title elides to `…` only after they're gone.
+    const P_TIME: u8 = 10;
+    const P_STATUS: u8 = 20;
+    const P_LABELS: u8 = 30;
+    const P_UNREAD: u8 = 40;
+    const P_BADGE_SHELL: u8 = 50;
+    const P_BADGE_AGENT: u8 = 60;
+    const P_ROLE: u8 = 70;
+    const P_STATE: u8 = 80;
+    // The title should keep at least this many cells before any
+    // secondary column is allowed to crowd it out — below this a
+    // title is just a word fragment + `…` and tells you nothing.
+    const TITLE_MIN: usize = 20;
     vec![
-        Column::fixed(4),                // 0: prefix
-        Column::fixed(2),                // 1: type glyph + trailing space separator
+        Column::fixed(4),                          // 0: prefix
+        Column::fixed(2),                          // 1: type glyph + trailing space separator
         Column::fixed(max_pr_num_width), // 2: pr_num (left-aligned, one space off the glyph)
-        Column::fixed(2),                // 3: role (" R" or blank)
-        Column::fixed(3),                // 4: state slot (" ? "/" ⠋ "/blank, reserved)
-        Column::flex(0),                 // 5: title
-        Column::max(0),                  // 6: labels
-        Column::max(0),                  // 7: kill_mark
-        Column::max(0).right(),          // 8: unread
-        Column::max(0),                  // 9: badge_agent
-        Column::max(0),                  // 10: badge_shell (carries its own leading space)
-        Column::max(0).right(),          // 11: status
-        Column::max(0).right(),          // 12: time (carries its own leading space)
+        Column::fixed(2).priority(P_ROLE), // 3: role (" R" or blank)
+        Column::fixed(3).priority(P_STATE), // 4: state slot (" ? "/" ⠋ "/blank, reserved)
+        Column::flex(TITLE_MIN),         // 5: title
+        Column::max(0).priority(P_LABELS), // 6: labels
+        Column::max(0),                  // 7: kill_mark (destructive confirm — never shed)
+        Column::max(0).right().priority(P_UNREAD), // 8: unread
+        Column::max(0).priority(P_BADGE_AGENT), // 9: badge_agent
+        Column::max(0).priority(P_BADGE_SHELL), // 10: badge_shell (carries its own leading space)
+        Column::max(0).right().priority(P_STATUS), // 11: status
+        Column::max(0).right().priority(P_TIME), // 12: time (carries its own leading space)
     ]
 }
 
@@ -1015,6 +1033,99 @@ mod tests {
         assert_eq!(
             same_window, "   ",
             "row B did not reserve the ` C ` column at the same x as row A",
+        );
+    }
+
+    /// Regression for issue #130: a wide pane keeps every column —
+    /// the narrow-width shedding must NOT kick in when everything
+    /// fits. Status pill, time, and the full title all render.
+    #[test]
+    fn wide_width_keeps_status_time_and_title() {
+        let mut task = make_task("owner/repo#42", "Fix the broken sidebar layout");
+        task.ci = CiStatus::Failure; // " CI FAIL " status pill
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let columns = build_columns(2);
+        let rows = vec![build_row(&ctx)];
+        let lines = crate::components::table::render_table(&rows, &columns, 100);
+        let line: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(line.contains("42"), "number missing on wide pane: {line:?}");
+        assert!(
+            line.contains("Fix the broken sidebar layout"),
+            "title truncated on wide pane: {line:?}",
+        );
+        assert!(
+            line.contains("CI FAIL"),
+            "status pill missing on wide pane: {line:?}"
+        );
+    }
+
+    /// Regression for issue #130: at a narrow width the row still
+    /// shows the item number + a useful slice of the title. The
+    /// secondary columns (time, then status) shed out before the
+    /// title is squeezed — the bug was the title collapsing to a lone
+    /// `…` while the status pill / glyph stayed put.
+    #[test]
+    fn narrow_width_keeps_number_and_title_drops_status_first() {
+        let mut task = make_task("owner/repo#42", "Fix the broken sidebar layout");
+        task.ci = CiStatus::Failure;
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let columns = build_columns(2);
+        let rows = vec![build_row(&ctx)];
+        let lines = crate::components::table::render_table(&rows, &columns, 40);
+        let line: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            line.contains("42"),
+            "item number dropped at narrow width: {line:?}"
+        );
+        assert!(
+            line.contains("Fix the broken"),
+            "title squeezed to nothing at narrow width: {line:?}",
+        );
+        assert!(
+            !line.contains("CI FAIL"),
+            "status pill should shed before the title is crowded: {line:?}",
+        );
+    }
+
+    /// Regression for issue #130: at a tiny width even the role /
+    /// state indicators shed, and the title finally elides with `…` —
+    /// but the item number is still there, so the row is identifiable
+    /// (the bug rendered `⬤ … C` with no number/title at all).
+    #[test]
+    fn tiny_width_preserves_number_and_elides_title_last() {
+        let mut task = make_task("owner/repo#42", "Fix the broken sidebar layout");
+        task.ci = CiStatus::Failure;
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.asking = true; // state slot wants width too
+        let columns = build_columns(2);
+        let rows = vec![build_row(&ctx)];
+        let lines = crate::components::table::render_table(&rows, &columns, 22);
+        let line: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            line.contains("42"),
+            "number must survive at tiny width: {line:?}"
+        );
+        assert!(
+            line.contains("Fix the"),
+            "title head must survive: {line:?}"
+        );
+        assert!(
+            line.contains('…'),
+            "title should elide at tiny width: {line:?}"
+        );
+        assert!(
+            !line.contains("CI FAIL"),
+            "status pill must be gone: {line:?}"
+        );
+        assert!(
+            !line.contains('?'),
+            "state slot must shed before the title: {line:?}"
         );
     }
 

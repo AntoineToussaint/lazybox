@@ -50,11 +50,22 @@ pub enum Align {
     Right,
 }
 
+/// Default column priority — high, so a column is kept until every
+/// lower-priority column has been dropped. Callers opt INTO being
+/// shed first by lowering this with [`Column::priority`].
+pub const DEFAULT_PRIORITY: u8 = u8::MAX;
+
 /// One column's spec.
 #[derive(Debug, Clone, Copy)]
 pub struct Column {
     pub width: ColumnWidth,
     pub align: Align,
+    /// Drop order when the row is too narrow to fit every column.
+    /// Lower priority columns are dropped (set to width 0) FIRST so
+    /// the high-priority ones keep their space. Flex columns are never
+    /// dropped — they shrink to their `min` and then elide with `…`.
+    /// Defaults to [`DEFAULT_PRIORITY`] (kept until last).
+    pub priority: u8,
 }
 
 impl Column {
@@ -62,6 +73,7 @@ impl Column {
         Self {
             width: ColumnWidth::Fixed(width),
             align: Align::Left,
+            priority: DEFAULT_PRIORITY,
         }
     }
 
@@ -69,6 +81,7 @@ impl Column {
         Self {
             width: ColumnWidth::Max { min },
             align: Align::Left,
+            priority: DEFAULT_PRIORITY,
         }
     }
 
@@ -76,6 +89,7 @@ impl Column {
         Self {
             width: ColumnWidth::Flex { min },
             align: Align::Left,
+            priority: DEFAULT_PRIORITY,
         }
     }
 
@@ -83,6 +97,13 @@ impl Column {
     /// padding spaces fill the left side. Chainable: `Column::fixed(4).right()`.
     pub fn right(mut self) -> Self {
         self.align = Align::Right;
+        self
+    }
+
+    /// Set the drop priority — lower is dropped first when the table is
+    /// too narrow to fit every column. Chainable: `Column::max(0).priority(10)`.
+    pub fn priority(mut self, priority: u8) -> Self {
+        self.priority = priority;
         self
     }
 }
@@ -94,10 +115,18 @@ impl Column {
 /// Algorithm:
 ///   1. Fixed columns take their declared width.
 ///   2. Max columns take `max(min, max-across-rows-of-cell-width)`.
-///   3. Flex columns share whatever's left equally, never less
-///      than their `min`. When the table is narrower than the sum
-///      of fixed+max+flex-min, Flex columns return their `min` and
-///      the row simply overflows — caller's choice whether to clip.
+///   3. Flex columns claim their `min` up front.
+///   4. If the natural widths overflow `total_width`, shed the
+///      lowest-[`priority`](Column::priority) non-flex columns (set
+///      them to 0) one at a time until the row fits or there's
+///      nothing droppable left. This is what makes a narrow sidebar
+///      degrade gracefully — secondary columns (time, status,
+///      indicators) drop out before the title is squeezed to a lone
+///      `…`. Flex columns are never dropped here.
+///   5. Whatever space is left over goes to the Flex columns, split
+///      equally. If even the kept columns + flex mins still overflow
+///      (extremely narrow pane), the flex columns shrink below their
+///      min — down to 0 — and the renderer elides their content.
 ///
 /// `cell_widths[row][col]` is the natural width of the cell's
 /// content in cells. Empty for an empty table.
@@ -135,19 +164,57 @@ pub fn compute_widths(
         }
     }
 
-    // Distribute remaining space across Flex columns. If consumed
-    // already exceeds total_width, every flex stays at min and the
-    // caller deals with overflow (truncation).
-    if flex_indices.is_empty() || consumed >= total_width {
+    // Too narrow: shed the lowest-priority non-flex columns (widest
+    // would be cheapest, but priority order is what the caller asked
+    // for) until the row fits or nothing droppable remains. Dropping
+    // a whole column rather than half-rendering it keeps chip-like
+    // content (status pills, badges) legible — a clipped `REVIE…`
+    // pill carries no signal.
+    if consumed > total_width {
+        let mut droppable: Vec<usize> = (0..n)
+            .filter(|&i| {
+                !flex_indices.contains(&i)
+                    && widths[i] > 0
+                    && columns[i].priority < DEFAULT_PRIORITY
+            })
+            .collect();
+        droppable.sort_by_key(|&i| columns[i].priority);
+        for i in droppable {
+            if consumed <= total_width {
+                break;
+            }
+            consumed -= widths[i];
+            widths[i] = 0;
+        }
+    }
+
+    if flex_indices.is_empty() {
         return widths;
     }
-    let remaining = total_width - consumed;
-    let per_flex = remaining / flex_indices.len();
-    let leftover = remaining % flex_indices.len();
-    for (idx, &col_idx) in flex_indices.iter().enumerate() {
-        widths[col_idx] += per_flex;
-        if idx < leftover {
-            widths[col_idx] += 1;
+
+    if consumed <= total_width {
+        // Hand the slack to the flex columns, split equally.
+        let remaining = total_width - consumed;
+        let per_flex = remaining / flex_indices.len();
+        let leftover = remaining % flex_indices.len();
+        for (idx, &col_idx) in flex_indices.iter().enumerate() {
+            widths[col_idx] += per_flex;
+            if idx < leftover {
+                widths[col_idx] += 1;
+            }
+        }
+    } else {
+        // Even the kept columns + flex mins overflow. Reclaim the
+        // excess from the flex columns themselves (down to 0); the
+        // renderer truncates the remaining title with `…`.
+        let mut excess = consumed - total_width;
+        for &col_idx in &flex_indices {
+            let reduce = widths[col_idx].min(excess);
+            widths[col_idx] -= reduce;
+            excess -= reduce;
+            if excess == 0 {
+                break;
+            }
         }
     }
     widths
@@ -455,12 +522,48 @@ mod tests {
     }
 
     #[test]
-    fn flex_stays_at_min_when_overflow() {
-        // Fixed 60 + flex_min 50 = 110, total = 100 → flex stays at 50,
-        // caller clips.
+    fn flex_shrinks_below_min_when_no_droppable_columns_fit() {
+        // Fixed 60 + flex_min 50 = 110, total = 100. The fixed column
+        // has DEFAULT_PRIORITY (not droppable), so the flex column
+        // absorbs the 10-cell overflow and shrinks to 40 — the
+        // renderer then elides its content with `…` instead of letting
+        // the row overflow and clip without warning.
         let cols = [Column::fixed(60), Column::flex(50)];
         let widths = compute_widths(&cols, &[], 100);
-        assert_eq!(widths, vec![60, 50]);
+        assert_eq!(widths, vec![60, 40]);
+    }
+
+    #[test]
+    fn low_priority_columns_drop_before_flex_shrinks() {
+        // Fixed 10 (kept) + max 20 (low priority) + flex_min 30 = 60,
+        // total = 40. The max column is dropped (priority < default),
+        // freeing its 20 cells; the flex then keeps its full min.
+        let cols = [
+            Column::fixed(10),
+            Column::max(20).priority(10),
+            Column::flex(30),
+        ];
+        let widths = compute_widths(&cols, &[vec![0, 20, 0]], 40);
+        assert_eq!(widths, vec![10, 0, 30]);
+    }
+
+    #[test]
+    fn columns_drop_in_ascending_priority_order() {
+        // Two droppable max columns; only enough overflow to need one.
+        // The lower-priority one (5) goes first; the higher (50) stays.
+        let cols = [
+            Column::fixed(10),
+            Column::max(8).priority(50),
+            Column::max(8).priority(5),
+            Column::flex(10),
+        ];
+        // 10 + 8 + 8 + 10 = 36, total = 30 → must shed 6+. Dropping the
+        // priority-5 column frees 8 → fits. priority-50 column survives.
+        let widths = compute_widths(&cols, &[vec![0, 8, 8, 0]], 30);
+        assert_eq!(widths[2], 0, "lowest-priority column should drop first");
+        assert_eq!(widths[1], 8, "higher-priority column should survive");
+        // Flex reclaims the slack freed by the drop.
+        assert_eq!(widths[3], 30 - 10 - 8);
     }
 
     #[test]

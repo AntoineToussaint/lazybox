@@ -423,30 +423,27 @@ mod capture_tests {
     use super::*;
     use std::io::Write;
 
+    /// Both the unset→`None` and set→`Some` cases live in ONE test on
+    /// purpose. `set_var`/`remove_var` mutate process-global state, so
+    /// splitting them into two `#[test]` fns would let `cargo test`'s
+    /// thread pool run them concurrently — a libc env data race (the
+    /// reason these calls are `unsafe` in edition 2024) and a flaky
+    /// cross-test read. A single test serialises the mutations.
+    ///
+    /// SAFETY: no other test in this crate reads or writes
+    /// `PILOT_CAPTURE_PTY`, and within this test the calls are strictly
+    /// ordered with no concurrent environment access; the prior value
+    /// is restored on exit.
     #[test]
-    fn open_capture_is_none_when_var_unset() {
-        // SAFETY: this test serialises on the PILOT_CAPTURE_PTY var,
-        // which no other test reads or writes; it restores nothing
-        // because the var is left unset.
+    fn open_capture_respects_pilot_capture_pty_var() {
         let prior = std::env::var_os("PILOT_CAPTURE_PTY");
+
         unsafe {
             std::env::remove_var("PILOT_CAPTURE_PTY");
         }
-        assert!(open_capture(Some(123)).is_none());
-        if let Some(p) = prior {
-            unsafe {
-                std::env::set_var("PILOT_CAPTURE_PTY", p);
-            }
-        }
-    }
+        assert!(open_capture(Some(123)).is_none(), "unset var → no capture");
 
-    #[test]
-    fn open_capture_writes_to_pid_keyed_file() {
         let dir = tempfile::TempDir::new().unwrap();
-        // SAFETY: see `open_capture_is_none_when_var_unset` — these two
-        // tests are the only ones touching this var. Restore the prior
-        // value (if any) on exit so neither leaks into the other.
-        let prior = std::env::var_os("PILOT_CAPTURE_PTY");
         unsafe {
             std::env::set_var("PILOT_CAPTURE_PTY", dir.path());
         }
@@ -455,7 +452,8 @@ mod capture_tests {
         f.flush().unwrap();
         drop(f);
         let captured = std::fs::read(dir.path().join("pty-4242.bin")).unwrap();
-        assert_eq!(captured, b"\x1b[2Khello");
+        assert_eq!(captured, b"\x1b[2Khello", "raw bytes written verbatim");
+
         unsafe {
             match prior {
                 Some(p) => std::env::set_var("PILOT_CAPTURE_PTY", p),

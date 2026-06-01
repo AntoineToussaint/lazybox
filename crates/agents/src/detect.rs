@@ -96,8 +96,16 @@ pub fn contains_paired(text: &str, choices: &[&str], questions: &[&str]) -> bool
 /// daemon notice every transition between the three states; without it
 /// the cached state would stick at its last value.
 pub fn claude_state(recent_output: &[u8]) -> Option<AgentState> {
-    let s = strip_ansi_lossy(recent_output);
+    // Always `Some`. The inner `&str` form lets `claude_ready_for_prompt`
+    // reuse the classification without stripping ANSI a second time.
+    Some(claude_state_of(&strip_ansi_lossy(recent_output)))
+}
 
+/// [`claude_state`] over an already-ANSI-stripped buffer. Returns
+/// `AgentState` directly (never the outer `Option`): every path
+/// classifies, so callers that hold the stripped string skip the
+/// redundant strip + decode.
+fn claude_state_of(s: &str) -> AgentState {
     // tmux paints the screen by absolute cursor position, so the bytes
     // pilot sees arrive in TEMPORAL order: a single visual line
     // `❯ 1. Yes` can land in the buffer as
@@ -119,10 +127,10 @@ pub fn claude_state(recent_output: &[u8]) -> Option<AgentState> {
     // ASCII arrow accepted on ANY option (`> 1.`, `> 2.`, `> 3.`, …) —
     // the user moves the cursor with j/k, and claude re-renders the
     // arrow at the new option.
-    let has_arrow = s.contains('❯') || has_ascii_chooser_arrow(&s);
-    let has_chooser = has_numbered_chooser_options(&s);
+    let has_arrow = s.contains('❯') || has_ascii_chooser_arrow(s);
+    let has_chooser = has_numbered_chooser_options(s);
     if has_arrow && has_chooser {
-        return Some(AgentState::InputNeeded);
+        return AgentState::InputNeeded;
     }
 
     // Permission-chooser footer: `Esc to cancel` rendered alongside a
@@ -138,7 +146,7 @@ pub fn claude_state(recent_output: &[u8]) -> Option<AgentState> {
     // to be absent is exactly the distinction the branch's design
     // always intended.
     if s.contains("Esc to cancel") && !s.contains("Tab to amend") && has_chooser {
-        return Some(AgentState::InputNeeded);
+        return AgentState::InputNeeded;
     }
 
     // Standalone high-confidence prompts. These exact phrases appear
@@ -146,14 +154,14 @@ pub fn claude_state(recent_output: &[u8]) -> Option<AgentState> {
     // so phrasing variants both match without expanding the table.
     let lower = s.to_lowercase();
     if contains_any(&lower, CLAUDE_STANDALONE_PROMPT_PHRASES) {
-        return Some(AgentState::InputNeeded);
+        return AgentState::InputNeeded;
     }
 
     // Paired fallback for bare yes/no prompts (no arrow UI) + older
     // prompt shapes. Question phrases ANY-ed with choice markers — both
     // must be present in the buffer.
     if contains_paired(
-        &s,
+        s,
         &["1. Yes", "1) Yes", "(y/n)", "[y/n]"],
         &[
             "Do you want",
@@ -164,7 +172,7 @@ pub fn claude_state(recent_output: &[u8]) -> Option<AgentState> {
             "Proceed?",
         ],
     ) {
-        return Some(AgentState::InputNeeded);
+        return AgentState::InputNeeded;
     }
 
     // Working: the model is streaming or a tool is running. Claude
@@ -176,12 +184,12 @@ pub fn claude_state(recent_output: &[u8]) -> Option<AgentState> {
     if let Some(work_pos) = working_status_pos(&lower)
         && idle_box_pos(&lower).is_none_or(|ip| work_pos > ip)
     {
-        return Some(AgentState::Working);
+        return AgentState::Working;
     }
 
     // Nothing pending and not streaming: the input box is drawn and
     // quiet, or the output is plain non-interactive text.
-    Some(AgentState::Idle)
+    AgentState::Idle
 }
 
 /// Claude is ready to receive a pasted prompt when its input box (the
@@ -202,13 +210,18 @@ pub fn claude_state(recent_output: &[u8]) -> Option<AgentState> {
 /// Y/N answer." Returning false means "wait — the banner isn't done OR a
 /// gate is up."
 pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
+    // Strip once and share the result with the state classifier — this
+    // runs on every output chunk while the spawn-time injector polls for
+    // readiness, so a second strip of the (up to 16 KiB) buffer is wasted
+    // work on a hot path.
+    let s = strip_ansi_lossy(recent_output);
     // A live chooser / permission / standalone-consent prompt means a
     // paste would be eaten by the gate. The state model already
     // recognises every one of those shapes.
-    if claude_state(recent_output) == Some(AgentState::InputNeeded) {
+    if claude_state_of(&s) == AgentState::InputNeeded {
         return false;
     }
-    let lower = strip_ansi_lossy(recent_output).to_lowercase();
+    let lower = s.to_lowercase();
     // Folder-trust prompts don't always render as a numbered chooser
     // (older builds, alt phrasings), so `claude_state` can read them as
     // Idle. Veto explicitly — pasting the work prompt into the trust
@@ -295,48 +308,202 @@ fn last_line_pos(s: &str, pred: impl Fn(&str) -> bool) -> Option<usize> {
     best
 }
 
-/// Filter out ANSI CSI / OSC escape sequences, then UTF-8-decode the
-/// remainder.
+/// Filter out ANSI escape sequences, then UTF-8-decode the remainder.
 ///
 /// Earlier this function pushed `bytes[i] as char` — that mangled
 /// multi-byte UTF-8 glyphs like Claude's choice arrow `❯` (U+276F, 3
 /// bytes) into three separate Latin-1 chars, so any pattern containing
-/// the glyph silently failed to match. We need the raw glyph preserved
-/// so the patterns can search for it literally.
+/// the glyph silently failed to match. We keep the raw glyph bytes
+/// untouched and decode once at the end so the patterns can search for
+/// it literally.
+///
+/// Every `ESC`-introduced run is dropped wholesale via [`skip_escape`];
+/// the parser handles the four families tmux/Claude emit (CSI, OSC, the
+/// DCS/SOS/PM/APC string family, and charset designators) so none of
+/// their payload bytes leak into the searched text. Malformed or
+/// truncated sequences are consumed safely to the end of the buffer
+/// rather than panicking — a half-arrived chunk is the common case on a
+/// live PTY.
 pub fn strip_ansi_lossy(bytes: &[u8]) -> String {
     let mut filtered: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == 0x1b {
+            i = skip_escape(bytes, i);
+        } else {
+            filtered.push(bytes[i]);
             i += 1;
-            if i >= bytes.len() {
-                break;
-            }
-            let intro = bytes[i];
-            i += 1;
-            if intro == b'[' {
-                while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
-                    i += 1;
-                }
-                if i < bytes.len() {
-                    i += 1;
-                }
-            } else if intro == b']' {
-                while i < bytes.len() && bytes[i] != 0x07 {
-                    if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-                        i += 2;
-                        break;
-                    }
-                    i += 1;
-                }
-                if i < bytes.len() && bytes[i] == 0x07 {
-                    i += 1;
-                }
-            }
-            continue;
         }
-        filtered.push(bytes[i]);
-        i += 1;
     }
     String::from_utf8_lossy(&filtered).into_owned()
+}
+
+/// Advance past one escape sequence whose `ESC` (0x1b) is at `start`.
+/// Returns the index of the first byte *after* the sequence — i.e. the
+/// next byte the caller should treat as content. Recognises the four
+/// families that actually reach pilot through tmux:
+///
+///   - **CSI** `ESC [ … <final 0x40–0x7e>` — SGR colour, cursor moves.
+///   - **OSC** `ESC ] … <BEL | ST>` — window title, hyperlinks.
+///   - **string** `ESC (P|X|^|_) … <BEL | ST>` — DCS / SOS / PM / APC.
+///     tmux wraps app passthrough in DCS, so the payload must be dropped,
+///     not leaked into the matched text as stray characters.
+///   - **charset** `ESC (|)|*|+ <one byte>` — G0–G3 designators.
+///
+/// Anything else is treated as a two-byte escape (`ESC c`, `ESC =`,
+/// `ESC 7`, …): drop `ESC` plus the single introducer. A lone trailing
+/// `ESC` consumes just itself.
+fn skip_escape(bytes: &[u8], start: usize) -> usize {
+    debug_assert_eq!(bytes.get(start), Some(&0x1b));
+    let mut i = start + 1;
+    let Some(&intro) = bytes.get(i) else {
+        return i; // lone trailing ESC
+    };
+    i += 1;
+    match intro {
+        b'[' => {
+            // CSI: parameter / intermediate bytes until a final byte.
+            while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1; // consume the final byte
+            }
+            i
+        }
+        b']' | b'P' | b'X' | b'^' | b'_' => skip_string_terminated(bytes, i),
+        b'(' | b')' | b'*' | b'+' => (i + 1).min(bytes.len()), // + one charset byte
+        _ => i,                                                // two-byte escape, already consumed
+    }
+}
+
+/// Advance past the body of a string-terminated escape (OSC / DCS / SOS /
+/// PM / APC) starting at `i` (the first byte after the introducer),
+/// consuming the terminator. The body ends at BEL (0x07) or ST
+/// (`ESC \`); an unterminated body runs to the end of the buffer.
+fn skip_string_terminated(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        match bytes[i] {
+            0x07 => return i + 1,                                     // BEL
+            0x1b if bytes.get(i + 1) == Some(&b'\\') => return i + 2, // ST
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit coverage for the pure primitives. The agent-level tests in
+    //! `tests/agents.rs` and the real-byte corpus in
+    //! `tests/detect_fixtures.rs` cover composition and live wire shapes;
+    //! these pin the building blocks — above all `strip_ansi_lossy`, the
+    //! `pub` function every detector sits on, which until now was only
+    //! exercised transitively.
+    use super::*;
+
+    #[test]
+    fn strip_passes_plain_text_through_unchanged() {
+        assert_eq!(strip_ansi_lossy(b""), "");
+        assert_eq!(strip_ansi_lossy(b"hello world"), "hello world");
+    }
+
+    #[test]
+    fn strip_removes_csi_sgr_and_cursor_moves() {
+        // SGR colour + erase-line + cursor home, interleaved with text.
+        assert_eq!(strip_ansi_lossy(b"\x1b[31mred\x1b[0m"), "red");
+        assert_eq!(strip_ansi_lossy(b"\x1b[2Khello"), "hello");
+        assert_eq!(strip_ansi_lossy(b"a\x1b[1;2Hb"), "ab");
+    }
+
+    #[test]
+    fn strip_preserves_multibyte_glyphs() {
+        // The regression this function was rewritten for: the chooser
+        // arrow `❯` (U+276F, 3 bytes) must survive intact so patterns can
+        // match it literally. Wrap it in CSI runs to mimic a real repaint.
+        let raw = b"\x1b[38;5;2m\xe2\x9d\xaf\x1b[0m 1. Yes";
+        assert_eq!(strip_ansi_lossy(raw), "❯ 1. Yes");
+    }
+
+    #[test]
+    fn strip_removes_osc_terminated_by_bel_or_st() {
+        // OSC 0 (window title) — both terminators occur in the wild.
+        assert_eq!(strip_ansi_lossy(b"\x1b]0;title\x07keep"), "keep");
+        assert_eq!(strip_ansi_lossy(b"\x1b]0;title\x1b\\keep"), "keep");
+    }
+
+    #[test]
+    fn strip_drops_dcs_string_family_payload() {
+        // tmux wraps app passthrough in DCS (`ESC P … ST`). Pre-hardening
+        // the introducer was dropped but the payload leaked as text,
+        // which could inject stray `tokens`/digits into the matched
+        // buffer. The whole run — including the body — must vanish.
+        assert_eq!(strip_ansi_lossy(b"\x1bPtmux;data\x1b\\visible"), "visible");
+        // SOS / PM / APC share the string terminator.
+        assert_eq!(strip_ansi_lossy(b"\x1b^priv\x07ok"), "ok");
+        assert_eq!(strip_ansi_lossy(b"\x1b_app\x1b\\ok"), "ok");
+    }
+
+    #[test]
+    fn strip_drops_charset_designator_second_byte() {
+        // `ESC ( B` selects the ASCII charset for G0. Pre-hardening the
+        // `B` leaked; now the full two-byte designator is dropped.
+        assert_eq!(strip_ansi_lossy(b"\x1b(Bplain"), "plain");
+        assert_eq!(strip_ansi_lossy(b"\x1b)0graphics"), "graphics");
+    }
+
+    #[test]
+    fn strip_drops_two_byte_escapes() {
+        // `ESC c` (full reset) and friends carry no payload.
+        assert_eq!(strip_ansi_lossy(b"\x1bcfresh"), "fresh");
+    }
+
+    #[test]
+    fn strip_handles_truncated_sequences_without_panicking() {
+        // Half-arrived chunks are the common case on a live PTY. None of
+        // these may panic; the dangling escape is consumed to the end.
+        assert_eq!(strip_ansi_lossy(b"text\x1b"), "text"); // lone trailing ESC
+        assert_eq!(strip_ansi_lossy(b"text\x1b[31"), "text"); // CSI, no final byte
+        assert_eq!(strip_ansi_lossy(b"text\x1b]0;unterminated"), "text"); // OSC, no terminator
+        assert_eq!(strip_ansi_lossy(b"text\x1bPdcs-no-st"), "text"); // DCS, no terminator
+    }
+
+    #[test]
+    fn ascii_chooser_arrow_detects_any_option_and_ignores_short_buffers() {
+        assert!(has_ascii_chooser_arrow("> 1. Yes"));
+        assert!(has_ascii_chooser_arrow("foo\n> 3) No"));
+        assert!(!has_ascii_chooser_arrow(">1.")); // no space — not the arrow
+        assert!(!has_ascii_chooser_arrow("> a.")); // not a digit
+        assert!(!has_ascii_chooser_arrow(">")); // shorter than the 4-byte window
+    }
+
+    #[test]
+    fn numbered_chooser_requires_both_first_and_second_option() {
+        assert!(has_numbered_chooser_options("1. Yes\n2. No"));
+        assert!(has_numbered_chooser_options("1) a\n2) b"));
+        assert!(!has_numbered_chooser_options("1. only one option")); // no `2.`/`2)`
+    }
+
+    #[test]
+    fn last_line_pos_returns_start_offset_of_final_match() {
+        // Two matching lines — the offset of the LATER one wins, and it's
+        // a byte offset comparable against `rfind` in the same string.
+        let s = "x marks\nfirst hit\nfiller\nsecond hit\n";
+        let pos = last_line_pos(s, |l| l.contains("hit")).unwrap();
+        assert_eq!(&s[pos..pos + "second hit".len()], "second hit");
+        assert_eq!(last_line_pos(s, |l| l.contains("absent")), None);
+    }
+
+    #[test]
+    fn working_status_position_reflects_recency_order() {
+        // The recency guard in `claude_state_of` compares these two
+        // offsets. Inputs are pre-lowercased, as the callers pass them.
+        // Status line AFTER the idle footer → working is the more recent.
+        let work_recent = "esc to cancel · tab to amend\n✻ (8s · 412 tokens · esc to interrupt)";
+        assert!(working_status_pos(work_recent) > idle_box_pos(work_recent));
+        // Idle footer AFTER a now-stale status line → footer is the more
+        // recent, so the agent reads as done rather than forever-busy.
+        let idle_recent = "✻ (esc to interrupt)\ndone\n? for shortcuts";
+        assert!(working_status_pos(idle_recent) < idle_box_pos(idle_recent));
+    }
 }

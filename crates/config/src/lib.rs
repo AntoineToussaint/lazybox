@@ -189,6 +189,14 @@ pub struct UiSection {
     /// catalog-driven approach.
     #[serde(default)]
     pub action_keys: std::collections::BTreeMap<String, String>,
+    /// Whether the user has already seen the in-app feature tour.
+    /// Set `true` the first time the tour is dismissed or finished
+    /// so it doesn't re-launch on every boot; re-invokable on demand
+    /// via the tour shortcut regardless. Defaults to `false` so a
+    /// brand-new install (or one upgraded into the tour feature)
+    /// gets the walkthrough once.
+    #[serde(default)]
+    pub tour_seen: bool,
 }
 
 /// Concrete UI settings with every `Option<T>` from `UiSection`
@@ -975,6 +983,23 @@ repos:
         assert!(
             reparsed.agent.skip_permissions,
             "opting interactive sessions into skip mode survives a round-trip"
+        );
+    }
+
+    /// The feature-tour "seen" flag defaults to false (so a fresh
+    /// install gets the walkthrough) and round-trips once set.
+    #[test]
+    fn tour_seen_defaults_false_and_round_trips() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(!cfg.ui.tour_seen, "tour should be unseen on a fresh config");
+
+        let mut seen = Config::default();
+        seen.ui.tour_seen = true;
+        let written = serde_yaml::to_string(&seen).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert!(
+            reparsed.ui.tour_seen,
+            "marking the tour seen survives a save/load round-trip"
         );
     }
 

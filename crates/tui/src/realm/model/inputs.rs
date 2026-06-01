@@ -637,6 +637,11 @@ impl<T: TerminalAdapter> Model<T> {
                 if !sources.is_empty() {
                     self.show_polling(sources);
                 }
+                // First-run users land here after completing the
+                // wizard — surface the feature tour now (no-op when
+                // it's already been seen, or when this Finish came
+                // from a partial Settings flow on a returning user).
+                self.maybe_mount_tour();
             }
             RunnerStep::Cancel => {
                 self.unmount_setup_modal();

@@ -19,3 +19,4 @@ pub mod snippet_picker;
 pub mod splash;
 pub mod terminals;
 pub mod textarea;
+pub mod tour;

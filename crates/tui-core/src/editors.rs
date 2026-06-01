@@ -67,6 +67,7 @@ fn builtin_editors() -> Vec<EditorTemplate> {
         template("windsurf", "Windsurf", "windsurf"),
         template("fleet", "JetBrains Fleet", "fleet"),
         template("idea", "IntelliJ IDEA", "idea"),
+        template("gram", "Gram", "gram"),
     ]
 }
 
@@ -363,6 +364,17 @@ mod tests {
         );
         // No line → no --goto (a plain open).
         assert_eq!(open_file_args(&t, "/a/b.rs", None, None), vec!["/a/b.rs"]);
+    }
+
+    #[test]
+    fn gram_is_a_builtin_editor() {
+        let gram = builtin_editors()
+            .into_iter()
+            .find(|e| e.id == "gram")
+            .expect("gram builtin present");
+        assert_eq!(gram.display, "Gram");
+        assert_eq!(gram.command, "gram");
+        assert_eq!(gram.args, vec!["{path}"]);
     }
 
     #[test]

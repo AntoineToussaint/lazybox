@@ -258,8 +258,8 @@ Per-user config lives at `~/.pilot/config.yaml`. The setup wizard
 nuking state.
 
 **Editors** (the `e` shortcut): pilot detects Zed / VS Code /
-Cursor / Windsurf / Fleet / IDEA at startup. Add custom entries
-or override builtins via `editors:`:
+Cursor / Windsurf / Fleet / IDEA / Gram at startup. Add custom
+entries or override builtins via `editors:`:
 
 ```yaml
 editors:

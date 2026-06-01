@@ -1322,6 +1322,7 @@ pub async fn sources_for(
     bus: tokio::sync::broadcast::Sender<Event>,
     state: &mut TickState,
     viewer_identities: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    gh_client_cache: std::sync::Arc<std::sync::Mutex<Option<GhClient>>>,
 ) -> Vec<Box<dyn TaskSource>> {
     let mut sources: Vec<Box<dyn TaskSource>> = Vec::new();
 
@@ -1336,9 +1337,13 @@ pub async fn sources_for(
                 // GhSource we hand out below) remain visible to the
                 // cached copy and vice versa.
                 let cred_source = cred.source.clone();
-                let cached = state
-                    .gh_client
-                    .take()
+                // Clone the cached client out under a brief std-lock and
+                // release before any `.await` — the cache lock must never
+                // span the `from_credential` network call (issue #92).
+                let cached = gh_client_cache
+                    .lock()
+                    .expect("gh_client_cache poisoned")
+                    .clone()
                     .filter(|c| c.credential_source() == cred_source.as_str());
                 let client_result: Result<GhClient, _> = match cached {
                     Some(existing) => Ok(existing),
@@ -1391,7 +1396,8 @@ pub async fn sources_for(
                                 let _ = bus.send(Event::ViewerIdentities { logins: snapshot });
                             }
                         }
-                        state.gh_client = Some(client.clone());
+                        *gh_client_cache.lock().expect("gh_client_cache poisoned") =
+                            Some(client.clone());
                         // Resolve the `@pilot` allowlist. Empty YAML
                         // list → fall back to "just the authenticated
                         // viewer", which mirrors the design doc's MVP
@@ -1515,7 +1521,15 @@ pub async fn default_sources(
     // need the cached value visible to other connections.
     let mut throwaway_state = TickState::default();
     let throwaway_viewers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    sources_for(&setup, bus, &mut throwaway_state, throwaway_viewers).await
+    let throwaway_client_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
+    sources_for(
+        &setup,
+        bus,
+        &mut throwaway_state,
+        throwaway_viewers,
+        throwaway_client_cache,
+    )
+    .await
 }
 
 /// Run one poll tick: every source is called once and its tasks are
@@ -1542,20 +1556,6 @@ pub struct TickState {
     /// workspace can produce a fresh prompt later if it falls out
     /// of scope again.
     prompted_out_of_scope: std::collections::HashSet<String>,
-    /// Persistent GhClient across ticks. WITHOUT this, every tick
-    /// rebuilds the client via `GhClient::from_credential`, which
-    /// resets the inner `RateBudget` to its full-bucket / no-remote-
-    /// observation default. Result: the "GitHub said remaining=50,
-    /// don't fire more requests" knowledge from the last tick is
-    /// thrown away, and the new tick's first request flies blind
-    /// straight into a 429. Reuse the client (and its budget Arc)
-    /// across ticks so observations carry over; only swap when the
-    /// credential SOURCE changes (env-var renamed, gh auth login
-    /// switched accounts). A token rotation under the same source
-    /// still requires a daemon restart — acceptable trade-off given
-    /// how rare that is and how invasive validating each tick would
-    /// be.
-    gh_client: Option<GhClient>,
     /// PR node-ids whose review-thread details we've already prefetched
     /// this daemon session. Prevents the post-tick prefetch path from
     /// re-firing `fetch_pr_details` on every poll cycle for the same
@@ -1789,9 +1789,13 @@ pub async fn tick_with_state(
                     );
                 }
                 // Clone the cached GitHub client (Arc-backed, cheap) so
-                // the auto-fix arm can post its PR comment without
-                // borrowing `state` across the dispatch await.
-                let gh = state.gh_client.clone();
+                // the auto-fix arm can post its PR comment. Read from the
+                // dedicated cache lock, not `poll_state` (issue #92).
+                let gh = config
+                    .gh_client_cache
+                    .lock()
+                    .expect("gh_client_cache poisoned")
+                    .clone();
                 for action in actions {
                     dispatch_action(config, source.name(), gh.as_ref(), action).await;
                 }
@@ -2489,6 +2493,7 @@ async fn run_tick_inner(
         config.bus.clone(),
         state,
         config.viewer_identities.clone(),
+        config.gh_client_cache.clone(),
     )
     .await;
     if sources.is_empty() {

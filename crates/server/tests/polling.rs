@@ -2214,9 +2214,8 @@ async fn restore_poll_state_keeps_a_concurrent_focus_hint() {
 
 /// Checkout→restore round-trips the cross-tick state: the value the
 /// tick carried out is written back so the NEXT tick still sees it
-/// (the round-robin cursor / counter, the client cache, the
-/// already-prompted sets). Guards against a "fix" that drops the
-/// restore.
+/// (the round-robin cursor / counter, the already-prompted sets).
+/// Guards against a "fix" that drops the restore.
 #[tokio::test]
 async fn checkout_restore_round_trips_cross_tick_state() {
     let config = ServerConfig::in_memory();
@@ -2236,6 +2235,33 @@ async fn checkout_restore_round_trips_cross_tick_state() {
         "tick counter must survive the checkout/restore round-trip",
     );
     assert_eq!(restored.round_robin.focused_repo.as_deref(), Some("o/seed"));
+}
+
+// ── gh_client lives outside poll_state (issue #92) ──────────────────
+
+/// Issue #92: the long-lived GitHub client lives in its OWN lock
+/// (`gh_client_cache`), not inside `poll_state`. Before the split, every
+/// `poll_state` holder that needed the client — the poll tick, the
+/// detached `fetch_pr_details` — reached it through the `poll_state`
+/// guard, and on a cold cache rebuilt it via `from_credential` (a network
+/// call) while still holding that guard. #133 made the cold path the
+/// common case by emptying `poll_state`'s copy for the whole tick. With
+/// the client in a separate `std::sync::Mutex`, reaching it never touches
+/// `poll_state`: a poll holding `poll_state` (or having checked it out for
+/// a tick) can't stall a concurrent client lookup, and the cold-cache
+/// rebuild never spans `from_credential` under a held guard. Folding the
+/// client back into `poll_state` would make this lookup-under-held-guard
+/// fail.
+#[tokio::test]
+async fn gh_client_cache_is_independent_of_poll_state() {
+    let config = ServerConfig::in_memory();
+    // Simulate a tick holding poll_state (the pre-#133 worst case) /
+    // the brief checkout window.
+    let _poll_state_held = config.poll_state.lock().await;
+    assert!(
+        config.gh_client_cache.try_lock().is_ok(),
+        "gh_client_cache must be reachable without poll_state (#92)",
+    );
 }
 
 #[tokio::test]

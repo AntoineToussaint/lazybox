@@ -484,6 +484,15 @@ pub struct Model<T: TerminalAdapter> {
     /// from the prior gesture instead of fighting it. `None` when no
     /// recent scroll.
     pub(crate) scroll_inertia: Option<ScrollInertia>,
+    /// Deadline until which the run loop keeps re-rendering after a
+    /// modal-bound key/paste was forwarded to the listener channel.
+    /// The listener delivers those events asynchronously (~10ms port
+    /// cadence) and many modal keys mutate state without emitting a
+    /// `Msg` (Confirm arrows, Input typing), so a `Msg`-gated redraw
+    /// would miss them. Arming a short window covers the async hop
+    /// without blocking the loop. `None` when no modal input is in
+    /// flight. See `forward_modal_event`.
+    modal_redraw_until: Option<std::time::Instant>,
 }
 
 /// State tracked for the trackpad-scroll damper (see
@@ -537,6 +546,13 @@ pub struct Preselect {
 use crate::realm::layout::{LayoutCtx, pane_areas};
 use crate::realm::setup_ctx::{SettingsAction, SetupCtx};
 use crate::realm::status_ctx::StatusCtx;
+
+/// How long the run loop keeps re-rendering after a modal-bound key is
+/// forwarded to the listener channel. Generous multiple of the 10ms
+/// port-poll cadence plus a few render frames, so the asynchronously-
+/// delivered key is always reflected on screen even when it produces
+/// no `Msg`. See `Model::forward_modal_event`.
+const MODAL_REDRAW_WINDOW: Duration = Duration::from_millis(120);
 
 /// How long the first `q` stays armed waiting for the second tap.
 // `Q_DOUBLE_TAP_WINDOW` retired — value lives on `ui_defaults`
@@ -626,6 +642,7 @@ impl<T: TerminalAdapter> Model<T> {
             snippets: pilot_config::Snippets::default(),
             snippet_choices: Vec::new(),
             scroll_inertia: None,
+            modal_redraw_until: None,
         }
     }
 }
@@ -1136,6 +1153,34 @@ impl<T: TerminalAdapter> Model<T> {
         self.modal_stack.push(id.clone());
         let _ = self.app.active(&id);
         self.redraw = true;
+    }
+
+    /// Forward a modal-bound event (key or paste) to the listener's
+    /// `ChannelPort` and arm the redraw window. The listener thread
+    /// delivers the event to the mounted modal on its own ~10ms
+    /// cadence and the next run-loop `tick` picks up any resulting
+    /// `Msg` — so this never blocks the dispatcher. The window exists
+    /// because modal keys that mutate state without emitting a `Msg`
+    /// (Confirm arrows, Input typing) leave nothing for the tick to
+    /// observe; rendering across the short window guarantees the
+    /// change is shown without a per-keystroke busy-wait.
+    pub(crate) fn forward_modal_event(&mut self, ev: RealmEvent<UserEvent>) {
+        let _ = self.modal_event_tx.send(ev);
+        self.modal_redraw_until = Some(std::time::Instant::now() + MODAL_REDRAW_WINDOW);
+    }
+
+    /// Whether a forwarded modal event is still inside its redraw
+    /// window. Clears the window once it has elapsed so an idle modal
+    /// stops re-rendering. Called once per run-loop iteration.
+    pub(crate) fn modal_redraw_pending(&mut self) -> bool {
+        match self.modal_redraw_until {
+            Some(deadline) if std::time::Instant::now() < deadline => true,
+            Some(_) => {
+                self.modal_redraw_until = None;
+                false
+            }
+            None => false,
+        }
     }
 
     /// Drain a handler's returned IPC commands into `send_cmd`.

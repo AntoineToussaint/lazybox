@@ -16,7 +16,6 @@
 //! keeps mod.rs focused on the `Model` struct + its constructors.
 
 use super::{Model, PaneFocus};
-use crate::realm::UserEvent;
 use pilot_ipc::{Client, Event as IpcEvent};
 use std::time::Duration;
 use tuirealm::application::PollStrategy;
@@ -502,6 +501,15 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             }
         }
 
+        // A modal key just forwarded to the listener is delivered
+        // asynchronously and may mutate the modal without producing a
+        // `Msg` (Confirm arrows, Input typing). Re-render across the
+        // short window armed by `forward_modal_event` so the change
+        // shows up without blocking on it above.
+        if model.modal_redraw_pending() {
+            model.redraw = true;
+        }
+
         // 4. Render if dirty — before the blocking input read so the
         // user sees their last action immediately.
         if model.redraw {
@@ -580,7 +588,17 @@ fn dispatch_event<T: TerminalAdapter>(model: &mut Model<T>, event: crossterm::ev
             if model.modal_stack.is_empty() {
                 model.handle_pane_key(realm_key);
             } else {
-                forward_to_modal(model, RealmEvent::Keyboard(realm_key));
+                // Hand the key to the listener channel and return
+                // immediately — the run loop's `app.tick` delivers the
+                // resulting `Msg` on a later iteration. Blocking here
+                // (the old 150ms busy-wait) froze the dispatcher on
+                // every keystroke, which is exactly when the
+                // out-of-scope Confirm modal is shown during sync:
+                // daemon events backed up and keys (incl. `Y`) appeared
+                // to drop. `forward_modal_event` arms a redraw window
+                // so the modal still re-renders for keys that mutate
+                // state without emitting a `Msg`.
+                model.forward_modal_event(RealmEvent::Keyboard(realm_key));
             }
         }
         crossterm::event::Event::Mouse(m) => {
@@ -590,8 +608,10 @@ fn dispatch_event<T: TerminalAdapter>(model: &mut Model<T>, event: crossterm::ev
                 // A modal owns input — route button presses to it so
                 // its buttons respond to clicks. Only presses are
                 // forwarded; drag/move/scroll noise stays out of the
-                // modal's event queue.
-                forward_to_modal(model, RealmEvent::Mouse(realm_mouse));
+                // modal's event queue. Forwarded non-blocking like keys
+                // (see the keyboard arm) so the dispatcher never stalls
+                // on modal input.
+                model.forward_modal_event(RealmEvent::Mouse(realm_mouse));
             }
         }
         crossterm::event::Event::Paste(text) => {
@@ -604,56 +624,11 @@ fn dispatch_event<T: TerminalAdapter>(model: &mut Model<T>, event: crossterm::ev
                 // Modal owns input — forward as raw text via the
                 // modal event channel. The textarea modal will see
                 // this as a multi-char paste and insert at cursor.
-                let _ = model.modal_event_tx.send(RealmEvent::Paste(text));
+                model.forward_modal_event(RealmEvent::Paste(text));
             }
         }
         _ => {}
     }
-}
-
-/// Push a modal-bound event into the `ChannelPort` and pump the
-/// `Application` until it produces a `Msg` (or a 150ms deadline lapses).
-///
-/// ChannelPort is polled by the listener thread every 10ms, so a tight
-/// window often expires before the listener delivers the event we just
-/// pushed — it would then sit in the channel and not be acted on until
-/// the next input. The Confirm modal showed this loudly: "Y not
-/// responsive; Esc worked after a few tries". 150ms is well under the
-/// human-noticeable threshold for input feedback but long enough to
-/// absorb the 10ms listener cadence + jitter.
-fn forward_to_modal<T: TerminalAdapter>(model: &mut Model<T>, event: RealmEvent<UserEvent>) {
-    let _ = model.modal_event_tx.send(event);
-    let deadline = std::time::Instant::now() + Duration::from_millis(150);
-    let mut handled = false;
-    loop {
-        match model.app.tick(PollStrategy::Once(Duration::ZERO)) {
-            Ok(messages) if !messages.is_empty() => {
-                for msg in messages {
-                    model.update(msg);
-                }
-                handled = true;
-                break;
-            }
-            Ok(_) => {}
-            Err(_) => break,
-        }
-        if std::time::Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    // After the first tick lands, drain anything else the modal pushed
-    // in the same window — a single tuirealm `Cmd` can fan out into
-    // multiple `Msg`s and we don't want them to straggle into the next
-    // input event.
-    if handled && let Ok(messages) = model.app.tick(PollStrategy::Once(Duration::ZERO)) {
-        for msg in messages {
-            model.update(msg);
-        }
-    }
-    // Modals can mutate internal state without producing a `Msg`, so
-    // force a redraw too.
-    model.redraw = true;
 }
 
 /// Translate crossterm's modifier bitflags into tuirealm's. Pilot only

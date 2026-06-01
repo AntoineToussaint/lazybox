@@ -20,3 +20,4 @@ pub mod splash;
 pub mod terminals;
 pub mod textarea;
 pub mod tour;
+pub mod which_key;

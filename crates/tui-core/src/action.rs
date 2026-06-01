@@ -233,6 +233,76 @@ pub enum Section {
     Terminal,
 }
 
+/// A *leader group* for the grouped two-step (leader-key) chords from
+/// issue #126: the first key picks the group, the second picks an
+/// action within it. The point is to free the single-letter namespace
+/// — actions slot into a group instead of fighting for a top-level
+/// letter — and to make the bindings self-documenting through a
+/// which-key popup that appears once the leader is pressed.
+///
+/// Only `Github` is wired today. It collapses the awkward
+/// `Shift-M` / `Shift-V` / `Shift-G` / `Shift-L` / `Shift-O` cluster
+/// (which the issue calls out as modifier-inconsistent) into a single
+/// `g`-led chord: `g m` merge, `g v` reviewers, `g a` assignees,
+/// `g l` labels, `g o` open-in-browser. The original `Shift-*` keys
+/// stay live as direct aliases during the transition — this is purely
+/// additive. The taxonomy is meant to grow (workspace lifecycle,
+/// activity, terminal/tiles) as the rest of the catalog migrates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ActionGroup {
+    /// GitHub / PR actions on the focused workspace.
+    Github,
+}
+
+impl ActionGroup {
+    /// Leader key that opens this group's which-key popup. Single
+    /// char, no modifiers — pressed first, then the in-group key.
+    pub fn leader(self) -> char {
+        match self {
+            ActionGroup::Github => 'g',
+        }
+    }
+
+    /// Short title shown at the top of the which-key popup.
+    pub fn title(self) -> &'static str {
+        match self {
+            ActionGroup::Github => "github",
+        }
+    }
+
+    /// Resolve a group from its leader key, or `None` when the key
+    /// isn't a group leader.
+    pub fn from_leader(c: char) -> Option<Self> {
+        match c {
+            'g' => Some(ActionGroup::Github),
+            _ => None,
+        }
+    }
+
+    /// The actions in this group, in popup display order, each paired
+    /// with the in-group key that fires it (the SECOND press of the
+    /// chord). In-group keys are unique within a group.
+    pub fn members(self) -> &'static [(char, ActionKind)] {
+        match self {
+            ActionGroup::Github => &[
+                ('m', ActionKind::MergePr),
+                ('v', ActionKind::RequestReviewers),
+                ('a', ActionKind::AddAssignees),
+                ('l', ActionKind::ManageLabels),
+                ('o', ActionKind::OpenInBrowser),
+            ],
+        }
+    }
+
+    /// Look up the action bound to the in-group key `c`, if any.
+    pub fn action_for_key(self, c: char) -> Option<ActionKind> {
+        self.members()
+            .iter()
+            .find(|(k, _)| *k == c)
+            .map(|(_, kind)| *kind)
+    }
+}
+
 impl Action {
     pub fn kind(&self) -> ActionKind {
         match self {
@@ -1262,6 +1332,52 @@ mod tests {
         assert!(availability(ActionKind::Refresh, None));
         assert!(availability(ActionKind::OpenHelp, None));
         assert!(availability(ActionKind::NewWorkspace, None));
+    }
+
+    #[test]
+    fn group_leader_round_trips() {
+        // `from_leader` is the inverse of `leader`.
+        let group = ActionGroup::Github;
+        assert_eq!(ActionGroup::from_leader(group.leader()), Some(group));
+        // A non-leader key resolves to nothing.
+        assert_eq!(ActionGroup::from_leader('q'), None);
+    }
+
+    #[test]
+    fn group_members_resolve_to_real_catalog_entries() {
+        // Every (key, kind) in a group must have a catalog def and be
+        // reachable via `action_for_key`. Catches a member that names
+        // an ActionKind the group's chord can't actually fire.
+        let group = ActionGroup::Github;
+        for (key, kind) in group.members() {
+            assert_eq!(group.action_for_key(*key), Some(*kind));
+            // `for_kind` panics on an unmatched variant, so this also
+            // asserts the kind is a real catalog entry.
+            let _ = ActionDef::for_kind(*kind);
+        }
+    }
+
+    #[test]
+    fn group_in_keys_are_unique() {
+        // Two members sharing an in-group key would make the second
+        // unreachable — the chord would always fire the first match.
+        let group = ActionGroup::Github;
+        let mut keys: Vec<char> = group.members().iter().map(|(k, _)| *k).collect();
+        keys.sort_unstable();
+        let before = keys.len();
+        keys.dedup();
+        assert_eq!(before, keys.len(), "{group:?} has duplicate in-group keys");
+    }
+
+    #[test]
+    fn github_group_excludes_its_own_leader_key() {
+        // `g` is the leader; an in-group key of `g` would be
+        // ambiguous (`g g`). Guard against it.
+        let g = ActionGroup::Github;
+        assert!(
+            g.members().iter().all(|(k, _)| *k != g.leader()),
+            "in-group key collides with the leader",
+        );
     }
 
     #[test]

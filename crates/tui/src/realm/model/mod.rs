@@ -293,6 +293,12 @@ pub struct Model<T: TerminalAdapter> {
     /// second `q` within `ui_defaults.quit_double_tap_window` quits.
     /// Any other key disarms via `q_latch.disarm()`.
     q_latch: crate::confirm_latch::DoubleTapLatch,
+    /// Grouped two-step (leader-key) chord state, issue #126. A group
+    /// leader key (`g` for the github group) arms it; the next key
+    /// picks an action within the group and fires it through the
+    /// unified `dispatch_action`. Drives the which-key popup in
+    /// `view`. Operator-pending, not timed — see `LeaderLatch`.
+    leader: crate::confirm_latch::LeaderLatch<pilot_tui_core::action::ActionGroup>,
     /// Last left-click position + timestamp. A second left-click on
     /// the same row within `DOUBLE_CLICK_WINDOW` is treated as a
     /// double-click; the right pane's double-click handler then
@@ -633,6 +639,7 @@ impl<T: TerminalAdapter> Model<T> {
             setup: SetupCtx::new(),
             modal_event_tx,
             q_latch: crate::confirm_latch::DoubleTapLatch::new(),
+            leader: crate::confirm_latch::LeaderLatch::new(),
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
             last_click: None,
             terminal_user_typed_since_focus: false,
@@ -1769,6 +1776,15 @@ impl<T: TerminalAdapter> Model<T> {
                 polling_status.as_ref().map(|(s, l)| (*s, l.as_str())),
                 notice.as_ref(),
             );
+
+            // Which-key popup for an armed leader chord (#126). Drawn
+            // above the footer but below any modal — in practice the
+            // two never co-occur (arming doesn't mount a modal, and
+            // the leader is consumed before a modal-mounting action
+            // fires), so z-order is moot.
+            if let Some(group) = self.leader.pending().copied() {
+                crate::realm::components::which_key::render(f, area, group);
+            }
 
             // Modal stack last (highest z-order).
             if let Some(top) = self.modal_stack.last() {

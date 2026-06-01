@@ -387,6 +387,10 @@ async fn run_embedded_realm(
             &ui_defaults,
         );
         model.apply_action_key_overrides(user_config.ui.action_keys.clone());
+        // Arm the feature tour for anyone who hasn't seen it. It
+        // launches on wizard Finish for first-run users, or at startup
+        // (just below) for returning ones.
+        model.set_auto_tour(!user_config.ui.tour_seen);
         // Snippets — global (`<pilot_home>/snippets.yaml`) merged
         // with the cwd's `.pilot/snippets.yaml` (repo wins on key
         // conflict). Cwd is "wherever the user launched pilot from",
@@ -396,6 +400,11 @@ async fn run_embedded_realm(
         model = model.with_splits(user_config.ui.sidebar_pct, user_config.ui.right_top_pct);
         if let Some((report, sources)) = wizard_seed {
             model.start_setup_wizard(report, sources);
+        } else {
+            // Returning user — setup already done, so there's no
+            // wizard to finish behind. Surface the tour now if it
+            // hasn't been seen (e.g. an upgrade into this feature).
+            model.maybe_mount_tour();
         }
         pilot_tui::realm::model::run_loop_with_model(model)
     })

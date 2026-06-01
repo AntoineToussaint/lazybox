@@ -118,6 +118,8 @@ pub enum Action {
     Refresh,
     /// Open the `?` help modal.
     OpenHelp,
+    /// Launch the in-app feature tour / guided walkthrough.
+    OpenTour,
     /// Open the `,` Settings palette.
     OpenSettings,
     /// Jump the sidebar cursor to the next workspace whose agent
@@ -211,6 +213,7 @@ pub enum ActionKind {
     CyclePane,
     Refresh,
     OpenHelp,
+    OpenTour,
     OpenSettings,
     JumpToAsking,
     JumpToFailingCi,
@@ -259,6 +262,7 @@ impl Action {
             Action::CyclePane => ActionKind::CyclePane,
             Action::Refresh => ActionKind::Refresh,
             Action::OpenHelp => ActionKind::OpenHelp,
+            Action::OpenTour => ActionKind::OpenTour,
             Action::OpenSettings => ActionKind::OpenSettings,
             Action::JumpToAsking => ActionKind::JumpToAsking,
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
@@ -309,6 +313,13 @@ impl ActionDef {
                 default_keys: "?",
                 label: "help",
                 describe: "Show this list of shortcuts.",
+                section: Section::Global,
+            },
+            ActionKind::OpenTour => &Self {
+                kind: ActionKind::OpenTour,
+                default_keys: "Shift-T",
+                label: "tour",
+                describe: "Launch the guided feature walkthrough (inbox, work, snippets, navigation, config).",
                 section: Section::Global,
             },
             ActionKind::OpenSettings => &Self {
@@ -558,6 +569,7 @@ impl ActionDef {
             ActionKind::Refresh,
             ActionKind::OpenSettings,
             ActionKind::OpenHelp,
+            ActionKind::OpenTour,
             ActionKind::JumpToAsking,
             ActionKind::JumpToFailingCi,
             ActionKind::DetachPane,
@@ -854,6 +866,7 @@ impl ActionKind {
             ActionKind::CyclePane => "cycle_pane",
             ActionKind::Refresh => "refresh",
             ActionKind::OpenHelp => "open_help",
+            ActionKind::OpenTour => "open_tour",
             ActionKind::OpenSettings => "open_settings",
             ActionKind::JumpToAsking => "jump_to_asking",
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
@@ -975,6 +988,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&pilot_core::Workspace>)
         | ActionKind::CyclePane
         | ActionKind::Refresh
         | ActionKind::OpenHelp
+        | ActionKind::OpenTour
         | ActionKind::OpenSettings
         | ActionKind::JumpToAsking
         | ActionKind::JumpToFailingCi

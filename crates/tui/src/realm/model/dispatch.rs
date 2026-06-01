@@ -331,6 +331,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenHelp => {
                 self.mount_help();
             }
+            Action::OpenTour => {
+                self.mount_tour();
+            }
             Action::OpenSettings => {
                 self.open_settings();
             }

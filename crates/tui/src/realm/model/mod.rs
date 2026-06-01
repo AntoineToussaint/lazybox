@@ -160,12 +160,20 @@ pub enum Id {
     /// dispatcher writes to the active terminal followed by `\r`
     /// (auto-submit). See `realm::components::snippet_picker`.
     SnippetPicker,
+    /// In-app feature tour (issue #146). Stepped walkthrough card,
+    /// launched on first run (gated by `ui.tour_seen`) and on demand
+    /// via the tour shortcut. `Msg::TourFinished` marks it seen +
+    /// pops. See `realm::components::tour`.
+    Tour,
 }
 
 /// App-level message vocabulary for modals + globals.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Msg {
     SplashConfirmed,
+    /// The feature tour was dismissed or finished — mark it seen so
+    /// it doesn't re-launch, and pop the modal.
+    TourFinished,
     AppClose,
     Confirmed(bool),
     InputSubmitted(String),
@@ -475,6 +483,12 @@ pub struct Model<T: TerminalAdapter> {
     /// mount/unmount. Storing keys (not full rows) avoids cloning
     /// the snippet body twice on every picker mount.
     pub(crate) snippet_choices: Vec<String>,
+    /// Set at startup from `ui.tour_seen` (inverted): `true` means
+    /// the feature tour should auto-launch once the panes are
+    /// visible. Cleared the moment the tour mounts so it never
+    /// double-fires; manual `Shift-T` invocation ignores it. See
+    /// `maybe_mount_tour` / `mount_tour`.
+    auto_tour_pending: bool,
     /// Inertia damper for trackpad scroll. macOS sends ~20-50 wheel
     /// events per flick (the OS inertia phase); each one moves the
     /// viewport `STEP` rows, so a single gesture scrolls hundreds of
@@ -641,6 +655,7 @@ impl<T: TerminalAdapter> Model<T> {
             pending_focus_project_name: None,
             snippets: pilot_config::Snippets::default(),
             snippet_choices: Vec::new(),
+            auto_tour_pending: false,
             scroll_inertia: None,
             modal_redraw_until: None,
         }
@@ -860,6 +875,45 @@ impl<T: TerminalAdapter> Model<T> {
     /// directly, so this is the only handoff needed.
     pub fn apply_snippets(&mut self, snippets: pilot_config::Snippets) {
         self.snippets = snippets;
+    }
+
+    /// Arm the auto-launch of the feature tour. `main.rs` passes
+    /// `!ui.tour_seen` so a brand-new install (or one upgraded into
+    /// the feature) gets the walkthrough once. `maybe_mount_tour`
+    /// consumes the flag at the right moment (after setup, or at
+    /// startup for returning users).
+    pub fn set_auto_tour(&mut self, pending: bool) {
+        self.auto_tour_pending = pending;
+    }
+
+    /// Launch the tour now if it's armed. Idempotent — mounting
+    /// clears the flag, so this is safe to call from multiple boot
+    /// paths (returning-user startup and first-run wizard finish).
+    pub fn maybe_mount_tour(&mut self) {
+        if self.auto_tour_pending {
+            self.mount_tour();
+        }
+    }
+
+    /// Mount the feature-tour overlay. Used by the `Shift-T` shortcut
+    /// (always) and by `maybe_mount_tour` (when armed). Clears the
+    /// auto-launch flag so it can't re-fire.
+    pub(crate) fn mount_tour(&mut self) {
+        use crate::realm::components::tour::Tour;
+        self.auto_tour_pending = false;
+        if matches!(self.modal_stack.last(), Some(Id::Tour)) {
+            return;
+        }
+        self.mount_modal(Id::Tour, Tour::new());
+    }
+
+    /// Persist `ui.tour_seen = true` so the tour stops auto-launching.
+    /// Best-effort: a write failure just means it may re-prompt next
+    /// boot, which is harmless.
+    fn mark_tour_seen(&mut self) {
+        if let Err(e) = pilot_config::Config::save_with(|c| c.ui.tour_seen = true) {
+            tracing::warn!("save tour_seen failed: {e}");
+        }
     }
 
     /// Mount the snippet picker with an initial filter (typically
@@ -1700,6 +1754,10 @@ impl<T: TerminalAdapter> Model<T> {
                     // without a runner, just pop it.
                     self.pop_modal();
                 }
+            }
+            Msg::TourFinished => {
+                self.mark_tour_seen();
+                self.pop_modal();
             }
             Msg::AppClose => {
                 self.quit = true;

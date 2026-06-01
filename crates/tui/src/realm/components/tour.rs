@@ -5,7 +5,7 @@
 //! snippet system (`]<key>`), navigation, and where config lives.
 //!
 //! Launched automatically the first time pilot boots into the panes
-//! (tracked by `~/.pilot/config.yaml::ui.tour_seen`) and re-invokable
+//! (tracked by `~/.pilot/config.yaml::ui.tour_seen`) and re-invocable
 //! on demand via the tour shortcut. It is a plain modal: it owns
 //! input while mounted but every key either advances, retreats, or
 //! exits, so it never traps focus (mind #90). Any exit — finishing

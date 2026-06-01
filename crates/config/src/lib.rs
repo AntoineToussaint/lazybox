@@ -191,7 +191,7 @@ pub struct UiSection {
     pub action_keys: std::collections::BTreeMap<String, String>,
     /// Whether the user has already seen the in-app feature tour.
     /// Set `true` the first time the tour is dismissed or finished
-    /// so it doesn't re-launch on every boot; re-invokable on demand
+    /// so it doesn't re-launch on every boot; re-invocable on demand
     /// via the tour shortcut regardless. Defaults to `false` so a
     /// brand-new install (or one upgraded into the tour feature)
     /// gets the walkthrough once.

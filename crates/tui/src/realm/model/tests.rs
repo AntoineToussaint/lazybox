@@ -1132,6 +1132,33 @@ mod modal_input_responsiveness_tests {
         assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
     }
 
+    /// Shift-D opens the read-only sync-status window, and a
+    /// non-navigation key inside it pops it back off. Exercises the
+    /// catalog → dispatch → mount wiring end to end.
+    #[test]
+    fn shift_d_opens_and_closes_sync_status_window() {
+        let mut m = build_model();
+        // Seed one success + one failure so the window has content.
+        m.handle_daemon_event(IpcEvent::PollCompleted {
+            source: "github".into(),
+            count: 7,
+        });
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: "github".into(),
+            message: "rate limit exceeded".into(),
+            detail: "403 from api.github.com".into(),
+            kind: "retryable".into(),
+        });
+
+        assert!(m.top_modal().is_none(), "no modal before Shift-D");
+        m.dispatch_key(KeyEvent::new(Key::Char('D'), KeyModifiers::SHIFT));
+        assert_eq!(m.top_modal(), Some(&Id::SyncStatus));
+
+        // Esc (a non-navigation key) dismisses it via the modal pipeline.
+        m.dispatch_modal_key(key(Key::Esc));
+        assert!(m.top_modal().is_none(), "Esc closes the sync-status window",);
+    }
+
     /// The redraw window is one-shot per keystroke window: once its
     /// deadline elapses, `modal_redraw_pending` reports false and clears
     /// itself so an idle modal stops re-rendering.

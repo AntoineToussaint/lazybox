@@ -120,6 +120,8 @@ pub enum Action {
     OpenHelp,
     /// Launch the in-app feature tour / guided walkthrough.
     OpenTour,
+    /// Open the debug / sync-status window (Shift+D).
+    OpenSyncStatus,
     /// Open the `,` Settings palette.
     OpenSettings,
     /// Jump the sidebar cursor to the next workspace whose agent
@@ -214,6 +216,7 @@ pub enum ActionKind {
     Refresh,
     OpenHelp,
     OpenTour,
+    OpenSyncStatus,
     OpenSettings,
     JumpToAsking,
     JumpToFailingCi,
@@ -263,6 +266,7 @@ impl Action {
             Action::Refresh => ActionKind::Refresh,
             Action::OpenHelp => ActionKind::OpenHelp,
             Action::OpenTour => ActionKind::OpenTour,
+            Action::OpenSyncStatus => ActionKind::OpenSyncStatus,
             Action::OpenSettings => ActionKind::OpenSettings,
             Action::JumpToAsking => ActionKind::JumpToAsking,
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
@@ -320,6 +324,13 @@ impl ActionDef {
                 default_keys: "Shift-T",
                 label: "tour",
                 describe: "Launch the guided feature walkthrough (inbox, work, snippets, navigation, config).",
+                section: Section::Global,
+            },
+            ActionKind::OpenSyncStatus => &Self {
+                kind: ActionKind::OpenSyncStatus,
+                default_keys: "Shift-D",
+                label: "sync status",
+                describe: "Show recent provider-sync outcomes, last poll times, and errors.",
                 section: Section::Global,
             },
             ActionKind::OpenSettings => &Self {
@@ -570,6 +581,7 @@ impl ActionDef {
             ActionKind::OpenSettings,
             ActionKind::OpenHelp,
             ActionKind::OpenTour,
+            ActionKind::OpenSyncStatus,
             ActionKind::JumpToAsking,
             ActionKind::JumpToFailingCi,
             ActionKind::DetachPane,
@@ -867,6 +879,7 @@ impl ActionKind {
             ActionKind::Refresh => "refresh",
             ActionKind::OpenHelp => "open_help",
             ActionKind::OpenTour => "open_tour",
+            ActionKind::OpenSyncStatus => "open_sync_status",
             ActionKind::OpenSettings => "open_settings",
             ActionKind::JumpToAsking => "jump_to_asking",
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
@@ -989,6 +1002,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&pilot_core::Workspace>)
         | ActionKind::Refresh
         | ActionKind::OpenHelp
         | ActionKind::OpenTour
+        | ActionKind::OpenSyncStatus
         | ActionKind::OpenSettings
         | ActionKind::JumpToAsking
         | ActionKind::JumpToFailingCi

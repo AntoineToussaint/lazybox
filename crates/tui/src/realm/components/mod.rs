@@ -17,6 +17,7 @@ pub mod right;
 pub mod sidebar;
 pub mod snippet_picker;
 pub mod splash;
+pub mod sync_status;
 pub mod terminals;
 pub mod textarea;
 pub mod tour;

@@ -1120,7 +1120,7 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Like `flash_error`, but marks the notice as a provider
     /// "sync failed" banner so the next successful `PollCompleted`
-    /// can clear it once sync recovers. See [`Self::sync_error_active`].
+    /// can clear it once sync recovers. See the `sync_error_active` field.
     pub fn flash_sync_error(&mut self, msg: impl Into<String>) {
         self.flash_error(msg);
         self.sync_error_active = true;

@@ -82,6 +82,63 @@ fn format_size(n: u64) -> String {
     }
 }
 
+/// "N running terminal(s)" with correct pluralization.
+fn terminals_phrase(count: usize) -> String {
+    if count == 1 {
+        "1 running terminal".to_string()
+    } else {
+        format!("{count} running terminals")
+    }
+}
+
+/// Confirm copy for an out-of-scope workspace with live terminals.
+/// Trims the title so a verbose PR description doesn't make the modal
+/// three lines tall — 80 chars + an ellipsis fits the dynamic-height
+/// Confirm cleanly.
+fn out_of_scope_copy(prompt: &super::RemovalPrompt) -> String {
+    let phrase = terminals_phrase(prompt.terminal_count);
+    let label = &prompt.label;
+    match prompt.title.as_deref().filter(|s| !s.is_empty()) {
+        Some(t) => {
+            let title_short = if t.chars().count() > 80 {
+                let truncated: String = t.chars().take(79).collect();
+                format!("{truncated}…")
+            } else {
+                t.to_string()
+            };
+            format!(
+                "{label} \"{title_short}\" is no longer in your filter scope but has {phrase} — kill and remove?"
+            )
+        }
+        None => {
+            format!("{label} is no longer in your filter scope but has {phrase} — kill and remove?")
+        }
+    }
+}
+
+/// Confirm copy for a merged PR. Always names the worktree deletion;
+/// appends a warning when there are live terminals or local
+/// (uncommitted/unpushed) work, since "yes" force-deletes regardless.
+fn merged_removal_copy(prompt: &super::RemovalPrompt) -> String {
+    let label = &prompt.label;
+    let mut warnings: Vec<String> = Vec::new();
+    if prompt.terminal_count > 0 {
+        warnings.push(terminals_phrase(prompt.terminal_count));
+    }
+    if prompt.has_local_work {
+        warnings.push("uncommitted or unpushed work".to_string());
+    }
+    if warnings.is_empty() {
+        format!("{label} was merged — remove workspace and delete its worktree?")
+    } else {
+        format!(
+            "{label} was merged — remove workspace and delete its worktree? \
+             Warning: it has {} that will be lost.",
+            warnings.join(" and "),
+        )
+    }
+}
+
 fn format_age_short(unix_secs: Option<u64>) -> String {
     let Some(t) = unix_secs else {
         return "—".into();
@@ -505,46 +562,26 @@ impl<T: TerminalAdapter> Model<T> {
         );
     }
 
-    /// If there's a queued "out-of-scope workspace has active
-    /// sessions" prompt and no modal is currently up, mount it. The
-    /// user's answer (Y → kill, N/Esc → keep) is handled in the
-    /// `Msg::Confirmed` / `Msg::ModalDismissed` arms.
+    /// If there's a queued workspace-removal prompt and no modal is
+    /// currently up, mount it. Copy depends on the prompt's
+    /// [`RemovalReason`]; the user's answer (Y → remove, N/Esc → keep)
+    /// is handled in the `Msg::Confirmed` / `Msg::ModalDismissed` arms.
     pub(super) fn maybe_mount_next_removal_prompt(&mut self) {
+        use super::RemovalReason;
         use crate::realm::components::confirm::Confirm;
 
         if !self.modal_stack.is_empty() {
             return;
         }
-        let Some((workspace_key, label, title, count)) = self.pending_removal_prompts.pop_front()
-        else {
+        let Some(prompt) = self.pending_removal_prompts.pop_front() else {
             return;
         };
-        let terminals_phrase = if count == 1 {
-            "1 running terminal".to_string()
-        } else {
-            format!("{count} running terminals")
+        let copy = match prompt.reason {
+            RemovalReason::OutOfScope => out_of_scope_copy(&prompt),
+            RemovalReason::Merged => merged_removal_copy(&prompt),
         };
-        // Trim the title so a verbose PR description doesn't make the
-        // modal three lines tall. 80 chars + an ellipsis fits within
-        // the dynamic-height Confirm modal cleanly.
-        let runner_label = match title.as_deref().filter(|s| !s.is_empty()) {
-            Some(t) => {
-                let title_short = if t.chars().count() > 80 {
-                    let truncated: String = t.chars().take(79).collect();
-                    format!("{truncated}…")
-                } else {
-                    t.to_string()
-                };
-                format!(
-                    "{label} \"{title_short}\" is no longer in your filter scope but has {terminals_phrase} — kill and remove?"
-                )
-            }
-            None => format!(
-                "{label} is no longer in your filter scope but has {terminals_phrase} — kill and remove?"
-            ),
-        };
-        let modal = Confirm::new(runner_label).default_no();
-        self.active_removal_prompt = Some(workspace_key);
+        let modal = Confirm::new(copy).default_no();
+        self.active_removal_prompt = Some((prompt.workspace_key, prompt.reason));
         self.mount_modal(Id::RemoveOutOfScope, modal);
     }
 
@@ -885,6 +922,37 @@ mod tests {
             has_unpushed_commits: unpushed,
             is_safe_to_delete: false,
         }
+    }
+
+    fn merged_prompt(terminal_count: usize, has_local_work: bool) -> super::super::RemovalPrompt {
+        super::super::RemovalPrompt {
+            workspace_key: pilot_core::WorkspaceKey::new("github:o/r#7"),
+            label: "o/r#7".into(),
+            title: None,
+            terminal_count,
+            reason: super::super::RemovalReason::Merged,
+            has_local_work,
+        }
+    }
+
+    /// Clean merge with no live terminals → a plain ask, no warning.
+    #[test]
+    fn merged_copy_clean_has_no_warning() {
+        let copy = merged_removal_copy(&merged_prompt(0, false));
+        assert_eq!(
+            copy,
+            "o/r#7 was merged — remove workspace and delete its worktree?"
+        );
+    }
+
+    /// Live terminals + local work → both are named in a single
+    /// "will be lost" warning so the user knows what `yes` destroys.
+    #[test]
+    fn merged_copy_warns_about_terminals_and_local_work() {
+        let copy = merged_removal_copy(&merged_prompt(2, true));
+        assert!(copy.contains("2 running terminals"), "got: {copy}");
+        assert!(copy.contains("uncommitted or unpushed work"), "got: {copy}");
+        assert!(copy.contains("will be lost"), "got: {copy}");
     }
 
     /// The bulk-shortcut row renders as a single distinctive line so

@@ -836,33 +836,187 @@ pub(crate) async fn delete_orphaned_worktree_with(
     }
 }
 
-/// Auto-reap the worktrees behind a freshly-merged PR's sessions.
+/// React to a PR transitioning open→merged. Called once per merge
+/// from the upsert path — see [`super::merged_transition_pr_number`].
 ///
-/// Gated behind `worktree.auto_cleanup_merged` (off by default).
-/// Called from the upsert path when a PR transitions to merged — see
-/// [`super::merged_transition_pr_number`]. Loads the config fresh so a
-/// user flipping the toggle takes effect without a restart, then
-/// delegates to [`cleanup_merged_worktrees_with`] against the default
-/// base.
-pub async fn cleanup_merged_worktrees(config: &ServerConfig, key: &WorkspaceKey, pr_number: u64) {
-    let enabled = pilot_config::Config::load()
+/// Two paths, chosen by `worktree.auto_cleanup_merged` (loaded fresh
+/// so the toggle takes effect without a restart):
+/// - **on** — reap safe worktrees silently (the opt-in #74 behavior),
+///   via [`cleanup_merged_worktrees_with`].
+/// - **off** (default) — inspect the backing worktree(s) and emit
+///   [`Event::MergedPrRemovable`] so the TUI prompts the user. Their
+///   "yes" returns as `Command::RemoveMergedWorkspace`.
+pub async fn on_merged_pr(config: &ServerConfig, key: &WorkspaceKey, pr_number: u64) {
+    let mgr = pilot_git_ops::WorktreeManager::default_base();
+    let auto = pilot_config::Config::load()
         .map(|c| c.worktree.auto_cleanup_merged)
         .unwrap_or(false);
-    if !enabled {
-        return;
+    if auto {
+        cleanup_merged_worktrees_with(config, &mgr, key, pr_number).await;
+    } else {
+        prompt_merged_pr_removal_with(config, &mgr, key).await;
     }
-    cleanup_merged_worktrees_with(
-        config,
-        &pilot_git_ops::WorktreeManager::default_base(),
-        key,
-        pr_number,
-    )
-    .await
 }
 
-/// Test seam for [`cleanup_merged_worktrees`] — same contract, an
-/// explicit manager (tempdir-rooted in tests), and no config gate so
-/// the caller decides when cleanup runs.
+/// Inspect a merged PR workspace's backing worktrees and emit
+/// [`Event::MergedPrRemovable`] so the TUI can prompt. Read-only — no
+/// deletion happens until the user confirms (which comes back as
+/// `Command::RemoveMergedWorkspace`). `has_local_work` is set when any
+/// session worktree has uncommitted or unpushed work, so the modal can
+/// warn before the force-delete.
+///
+/// No-op for a session-less workspace: there's no worktree to delete
+/// and no terminal to kill, so the only thing removal would do is drop
+/// the merged tracking row — which the user can do with `Shift-X`
+/// without being nagged.
+pub(crate) async fn prompt_merged_pr_removal_with(
+    config: &ServerConfig,
+    mgr: &pilot_git_ops::WorktreeManager,
+    key: &WorkspaceKey,
+) {
+    let Some(workspace) = load_workspace(config, key) else {
+        return;
+    };
+    if workspace.sessions.is_empty() {
+        return;
+    }
+
+    let label = workspace
+        .primary_task()
+        .map(|t| t.id.key.clone())
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| key.as_str().to_string());
+    let active_terminal_count = count_live_terminals(config, key).await;
+
+    let session_paths = workspace_worktree_paths(&workspace);
+    let tracked = collect_tracked_sessions(config);
+    let has_local_work = match mgr.inspect_worktrees(&tracked).await {
+        Ok(rows) => rows.iter().any(|row| {
+            session_paths.contains(&canon(&row.path))
+                && (row.has_uncommitted_changes || row.has_unpushed_commits)
+        }),
+        Err(e) => {
+            tracing::warn!(workspace = %key, "prompt_merged_pr_removal: inspect failed: {e}");
+            false
+        }
+    };
+
+    tracing::info!(
+        workspace = %key,
+        active = active_terminal_count,
+        has_local_work,
+        "merged PR — prompting for workspace + worktree removal"
+    );
+    let _ = config.bus.send(Event::MergedPrRemovable {
+        workspace_key: key.clone(),
+        label,
+        active_terminal_count,
+        has_local_work,
+    });
+}
+
+/// Handle `Command::RemoveMergedWorkspace`: the user confirmed the
+/// merged-PR removal modal. Snapshot the worktree paths, kill the
+/// sessions + drop the row via [`super::delete_workspace`], then
+/// force-delete the now-idle worktree directories — the deletion
+/// `delete_workspace` (used by `Shift-X`) deliberately skips.
+pub async fn remove_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
+    remove_merged_workspace_with(config, &pilot_git_ops::WorktreeManager::default_base(), key).await
+}
+
+/// Test seam for [`remove_merged_workspace`] — explicit manager so
+/// tests can root it at a tempdir without mutating `PILOT_HOME`.
+pub(crate) async fn remove_merged_workspace_with(
+    config: &ServerConfig,
+    mgr: &pilot_git_ops::WorktreeManager,
+    key: &WorkspaceKey,
+) {
+    // Capture the worktree paths before the row is gone —
+    // `delete_workspace` drops the store record (and with it the
+    // session → path mapping we need to find the dirs).
+    let session_paths = load_workspace(config, key)
+        .map(|w| workspace_worktree_paths(&w))
+        .unwrap_or_default();
+
+    // Kills backing terminals, removes the row, and records the archive
+    // so the next poll doesn't resurrect the merged workspace.
+    super::delete_workspace(config, key).await;
+
+    if session_paths.is_empty() {
+        return;
+    }
+
+    // The terminals are dead now, so the dirs aren't a live process's
+    // cwd — inspect to recover each worktree's bare clone (needed for
+    // `git worktree remove`), then force-delete. The confirm modal
+    // already warned about any uncommitted/unpushed work.
+    let tracked = collect_tracked_sessions(config);
+    let inspections = match mgr.inspect_worktrees(&tracked).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(workspace = %key, "remove_merged_workspace: inspect failed: {e}");
+            return;
+        }
+    };
+    for row in &inspections {
+        if !session_paths.contains(&canon(&row.path)) {
+            continue;
+        }
+        match mgr.delete_inspected(row, /*force=*/ true).await {
+            Ok(()) => {
+                tracing::info!(
+                    workspace = %key,
+                    worktree = %row.path.display(),
+                    "remove_merged_workspace: removed worktree",
+                );
+                let _ = config.bus.send(Event::OrphanedWorktreeDeleted {
+                    path: row.path.clone(),
+                    ok: true,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    worktree = %row.path.display(),
+                    "remove_merged_workspace: delete failed: {e}",
+                );
+            }
+        }
+    }
+}
+
+/// Canonicalize a path for cross-referencing inspector rows (reported
+/// straight from `read_dir`) against a session's stored
+/// `worktree_path` — the two can differ purely by symlink resolution
+/// (macOS `/var` → `/private/var`, a symlinked `PILOT_HOME`, …).
+fn canon(p: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Canonicalized set of every session's worktree path in a workspace.
+fn workspace_worktree_paths(
+    workspace: &Workspace,
+) -> std::collections::HashSet<std::path::PathBuf> {
+    workspace
+        .sessions
+        .iter()
+        .map(|s| canon(&s.worktree_path))
+        .collect()
+}
+
+/// Count live terminals (PTY/tmux sessions) bound to a workspace key,
+/// via the authoritative `terminal_meta` map.
+async fn count_live_terminals(config: &ServerConfig, key: &WorkspaceKey) -> usize {
+    let meta = config.terminal_meta.lock().await;
+    meta.values()
+        .filter(|(sk, _)| sk.as_str() == key.as_str())
+        .count()
+}
+
+/// Silent worktree reaper for the opt-in `auto_cleanup_merged` path —
+/// the cleanup half of [`on_merged_pr`]. Explicit manager
+/// (tempdir-rooted in tests) and no config gate so the caller decides
+/// when cleanup runs.
 ///
 /// Only removes worktrees the inspector flags `is_safe_to_delete`
 /// (clean tree, pushed, unlocked — typically the merged branch was
@@ -1696,5 +1850,113 @@ mod inspect_tests {
         assert!(wt.exists(), "live session's worktree must be preserved");
         let reloaded = load_workspace(&config, &key).expect("workspace");
         assert_eq!(reloaded.sessions.len(), 1, "live session must be retained");
+    }
+
+    /// Default (no auto-cleanup) path: a clean merged worktree emits
+    /// `MergedPrRemovable` with `has_local_work = false` so the modal
+    /// asks without a data-loss warning — and nothing is deleted yet.
+    #[tokio::test]
+    async fn prompt_emits_removable_for_clean_merged_worktree() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "clean", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        prompt_merged_pr_removal_with(&config, &mgr, &key).await;
+
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        let Event::MergedPrRemovable {
+            label,
+            has_local_work,
+            active_terminal_count,
+            ..
+        } = evt
+        else {
+            unreachable!()
+        };
+        assert_eq!(label, "o/r#1");
+        assert!(!has_local_work, "clean worktree must not warn");
+        assert_eq!(active_terminal_count, 0);
+        assert!(wt.exists(), "prompt must not delete anything");
+    }
+
+    /// A merged worktree with uncommitted work flags
+    /// `has_local_work = true` so the confirm modal warns before the
+    /// force-delete.
+    #[tokio::test]
+    async fn prompt_flags_local_work_for_dirty_merged_worktree() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "dirty", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        prompt_merged_pr_removal_with(&config, &mgr, &key).await;
+
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        let Event::MergedPrRemovable { has_local_work, .. } = evt else {
+            unreachable!()
+        };
+        assert!(has_local_work, "dirty worktree must warn before delete");
+    }
+
+    /// On confirm, `remove_merged_workspace_with` deletes the worktree
+    /// AND drops the row (the worktree deletion `delete_workspace`
+    /// alone skips), broadcasting `WorkspaceRemoved`.
+    #[tokio::test]
+    async fn remove_merged_deletes_worktree_and_row() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "remove", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        remove_merged_workspace_with(&config, &mgr, &key).await;
+
+        drain_until(&mut rx, |e| matches!(e, Event::WorkspaceRemoved(_))).await;
+        assert!(!wt.exists(), "merged worktree should be deleted");
+        assert!(
+            load_workspace(&config, &key).is_none(),
+            "row should be removed"
+        );
+    }
+
+    /// Confirming removal force-deletes even a worktree with
+    /// uncommitted work — the modal already warned. (Contrast with
+    /// `cleanup_preserves_dirty_merged_worktree`, the silent path,
+    /// which keeps it.)
+    #[tokio::test]
+    async fn remove_merged_force_deletes_dirty_worktree() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "remove-dirty", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+
+        remove_merged_workspace_with(&config, &mgr, &key).await;
+
+        assert!(!wt.exists(), "force-delete must remove the dirty worktree");
+        assert!(
+            load_workspace(&config, &key).is_none(),
+            "row should be gone"
+        );
     }
 }

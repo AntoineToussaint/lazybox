@@ -48,6 +48,24 @@ impl<T: TerminalAdapter> Model<T> {
         self.terminal_user_typed_since_focus = false;
     }
 
+    /// True when `workspace_key` is already the active removal prompt
+    /// or sitting in the queue. The daemon dedupes per-process, but a
+    /// re-emit (daemon restart, a Shift-M `PrMerged` racing the poll's
+    /// `MergedPrRemovable`) could otherwise stack duplicate prompts —
+    /// belt and braces.
+    fn removal_already_pending(&self, workspace_key: &pilot_core::WorkspaceKey) -> bool {
+        let active = self
+            .active_removal_prompt
+            .as_ref()
+            .map(|(k, _)| k == workspace_key)
+            .unwrap_or(false);
+        let queued = self
+            .pending_removal_prompts
+            .iter()
+            .any(|p| &p.workspace_key == workspace_key);
+        active || queued
+    }
+
     /// Forward an inbound daemon event into all three panes. Each
     /// pane decides whether the event is relevant. After the very
     /// first Snapshot, apply any pending CLI preselect. Also feeds
@@ -132,22 +150,16 @@ impl<T: TerminalAdapter> Model<T> {
             // dedupes per-process, but a daemon restart would reset
             // its state and could spam the same prompt. Belt and
             // braces.
-            let already_active = self
-                .active_removal_prompt
-                .as_ref()
-                .map(|k| k == workspace_key)
-                .unwrap_or(false);
-            let already_queued = self
-                .pending_removal_prompts
-                .iter()
-                .any(|(k, _, _, _)| k == workspace_key);
-            if !already_active && !already_queued {
-                self.pending_removal_prompts.push_back((
-                    workspace_key.clone(),
-                    label.clone(),
-                    title.clone(),
-                    *active_terminal_count,
-                ));
+            if !self.removal_already_pending(workspace_key) {
+                self.pending_removal_prompts
+                    .push_back(super::RemovalPrompt {
+                        workspace_key: workspace_key.clone(),
+                        label: label.clone(),
+                        title: title.clone(),
+                        terminal_count: *active_terminal_count,
+                        reason: super::RemovalReason::OutOfScope,
+                        has_local_work: false,
+                    });
                 self.maybe_mount_next_removal_prompt();
                 self.redraw = true;
             }
@@ -211,31 +223,40 @@ impl<T: TerminalAdapter> Model<T> {
         {
             self.sidebar.mark_workspace_merged(workspace_key);
             self.flash_info(format!("merged {pr_label}"));
-            // Queue a "remove merged workspace?" prompt. Reuses the
-            // existing RemoveOutOfScope confirm flow (Kill on Yes,
-            // keep on No) — same UX, just triggered after a merge
-            // instead of an out-of-scope detection. Active-terminal
-            // count from sidebar lookup so the message reads truthfully.
-            let already_active = self
-                .active_removal_prompt
-                .as_ref()
-                .map(|k| k == workspace_key)
-                .unwrap_or(false);
-            let already_queued = self
-                .pending_removal_prompts
-                .iter()
-                .any(|(k, _, _, _)| k == workspace_key);
-            if !already_active && !already_queued {
-                self.pending_removal_prompts.push_back((
-                    workspace_key.clone(),
-                    pr_label.clone(),
-                    Some(format!("PR {pr_label} merged — remove workspace?")),
-                    0,
-                ));
-                self.maybe_mount_next_removal_prompt();
-            }
+            // The removal prompt is NOT queued here. Both user-initiated
+            // (Shift-M) and externally-merged PRs are surfaced by the
+            // daemon's open→merged transition, which emits a single
+            // `MergedPrRemovable` (with worktree-safety info this event
+            // lacks). The `Refresh` below wakes that poll so the prompt
+            // follows within a few seconds.
             self.send_cmd(IpcCommand::Refresh);
             self.redraw = true;
+            return;
+        }
+        // The daemon detected a PR merge and wants the user to decide
+        // whether to remove the workspace + delete its worktree. Queue
+        // it onto the shared removal-prompt machinery (reason
+        // `Merged`), deduped against any already-active/queued prompt.
+        if let IpcEvent::MergedPrRemovable {
+            workspace_key,
+            label,
+            active_terminal_count,
+            has_local_work,
+        } = &event
+        {
+            if !self.removal_already_pending(workspace_key) {
+                self.pending_removal_prompts
+                    .push_back(super::RemovalPrompt {
+                        workspace_key: workspace_key.clone(),
+                        label: label.clone(),
+                        title: None,
+                        terminal_count: *active_terminal_count,
+                        reason: super::RemovalReason::Merged,
+                        has_local_work: *has_local_work,
+                    });
+                self.maybe_mount_next_removal_prompt();
+                self.redraw = true;
+            }
             return;
         }
         // Clear the lazy-fetch dedupe entry when a workspace is

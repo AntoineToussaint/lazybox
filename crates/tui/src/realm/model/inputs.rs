@@ -543,11 +543,18 @@ impl<T: TerminalAdapter> Model<T> {
         let mut cmds = Vec::new();
         match top {
             Some(Id::RemoveOutOfScope) => {
-                let target = self.active_removal_prompt.take();
-                if yes && let Some(workspace_key) = target {
-                    // Kill terminals + delete workspace.
+                if let Some((workspace_key, reason)) = self.active_removal_prompt.take()
+                    && yes
+                {
                     let session_key: pilot_core::SessionKey = (&workspace_key).into();
-                    cmds.push(IpcCommand::Kill { session_key });
+                    // Out-of-scope: drop the row + kill terminals (worktree
+                    // left on disk). Merged: also delete the worktree.
+                    cmds.push(match reason {
+                        super::RemovalReason::OutOfScope => IpcCommand::Kill { session_key },
+                        super::RemovalReason::Merged => {
+                            IpcCommand::RemoveMergedWorkspace { session_key }
+                        }
+                    });
                 }
             }
             Some(Id::MergeConfirm) => {

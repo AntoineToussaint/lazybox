@@ -82,10 +82,12 @@ pub enum Id {
     /// previous component at this id and mounts the next; only one
     /// setup step is ever live.
     Setup,
-    /// Confirm dialog asking the user to remove a workspace that fell
-    /// out of scope while having running terminals. The pending
-    /// workspace_key lives in `pending_removal_prompt` so the
-    /// `Msg::Confirmed(true)` handler knows what to delete.
+    /// Confirm dialog for removing a workspace — either one that fell
+    /// out of scope while having running terminals, or one whose PR
+    /// just merged (see `RemovalReason`). The pending key + reason
+    /// live in `active_removal_prompt`; `Msg::Confirmed(true)` reads
+    /// the reason to pick the right command (`Kill` vs.
+    /// `RemoveMergedWorkspace`).
     RemoveOutOfScope,
     /// Confirm dialog asking the user to merge an issue workspace
     /// (that has live sessions) into the PR that closes it. The
@@ -169,6 +171,40 @@ pub enum Id {
     /// scrollable view of recent provider-sync outcomes built from
     /// `self.status.sync`. No pending state — dismiss just pops it.
     SyncStatus,
+}
+
+/// Why a workspace-removal confirm prompt is being shown. Both
+/// reasons share the `Id::RemoveOutOfScope` modal + the
+/// `pending_removal_prompts` queue but differ in copy and in which
+/// command "yes" dispatches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemovalReason {
+    /// Workspace fell out of filter scope but still has live
+    /// terminals. Yes → `Command::Kill` (drop row + kill terminals,
+    /// worktree left on disk).
+    OutOfScope,
+    /// The PR merged. Yes → `Command::RemoveMergedWorkspace` (kill
+    /// sessions, delete the worktree, drop the row).
+    Merged,
+}
+
+/// One queued workspace-removal prompt. Surfaced one at a time as a
+/// Confirm modal by `maybe_mount_next_removal_prompt`.
+#[derive(Debug, Clone)]
+pub(crate) struct RemovalPrompt {
+    pub(crate) workspace_key: pilot_core::WorkspaceKey,
+    /// Compact `owner/repo#N` identifier for the modal copy.
+    pub(crate) label: String,
+    /// Primary task title (out-of-scope only) rendered inline so the
+    /// user recognizes the work. `None` for the merged path, which
+    /// keys off the label alone.
+    pub(crate) title: Option<String>,
+    /// Live terminals removal would kill — quoted back in the copy.
+    pub(crate) terminal_count: usize,
+    pub(crate) reason: RemovalReason,
+    /// Merged path: any backing worktree has uncommitted/unpushed
+    /// work, so the copy warns before the force-delete.
+    pub(crate) has_local_work: bool,
 }
 
 /// App-level message vocabulary for modals + globals.
@@ -400,16 +436,16 @@ pub struct Model<T: TerminalAdapter> {
     /// The duration each picker option maps to. Order MUST match
     /// the labels rendered in `mount_snooze_picker`.
     snooze_choices: Vec<std::time::Duration>,
-    /// Workspaces that fell out of scope (filter / scope change) but
-    /// have running terminals — the daemon won't auto-remove those.
-    /// Each `WorkspaceOutOfScope` event lands here; one at a time
-    /// gets surfaced as a Confirm modal so the user decides whether
-    /// to kill the running sessions.
-    pending_removal_prompts:
-        std::collections::VecDeque<(pilot_core::WorkspaceKey, String, Option<String>, usize)>,
-    /// Workspace currently being prompted about. Set when the
-    /// RemoveOutOfScope modal mounts; consumed by `Msg::Confirmed`.
-    active_removal_prompt: Option<pilot_core::WorkspaceKey>,
+    /// Queued workspace-removal prompts — either out-of-scope
+    /// workspaces with running terminals (`WorkspaceOutOfScope`) or
+    /// merged PRs (`MergedPrRemovable`). The daemon won't auto-remove
+    /// either; each lands here and one at a time gets surfaced as a
+    /// Confirm modal so the user decides. See [`RemovalReason`].
+    pending_removal_prompts: std::collections::VecDeque<RemovalPrompt>,
+    /// Workspace + reason currently being prompted about. Set when the
+    /// RemoveOutOfScope modal mounts; consumed by `Msg::Confirmed`,
+    /// which uses the reason to pick the command to dispatch.
+    active_removal_prompt: Option<(pilot_core::WorkspaceKey, RemovalReason)>,
     /// Pending issue→PR merge prompts. Daemon stalls a merge when
     /// the issue has live sessions and emits
     /// `WorkspaceMergePending`; we queue here and surface one at a

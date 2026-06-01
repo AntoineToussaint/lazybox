@@ -35,7 +35,7 @@ pub use handlers::{
     ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_delete_orphaned_worktree,
     handle_fetch_pr_details, handle_fetch_repo_labels, handle_inspect_worktrees, handle_merge_pr,
     handle_request_reviewers, handle_set_assignees, handle_set_labels, post_reply,
-    prefetch_top_pr_details,
+    prefetch_top_pr_details, remove_merged_workspace,
 };
 pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 
@@ -2676,12 +2676,13 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
     //    that won't survive restart.
     commit_upsert(config, key, workspace);
 
-    // 4. CLEANUP: the PR just merged → reap its safe-to-delete
-    //    worktrees (gated behind `worktree.auto_cleanup_merged`).
-    //    Runs after the commit so cleanup re-reads the freshly
-    //    persisted session set.
+    // 4. MERGED: the PR just merged → either reap its safe-to-delete
+    //    worktrees silently (when `worktree.auto_cleanup_merged` is
+    //    on) or prompt the user to remove the workspace + worktree
+    //    (the default). Runs after the commit so it re-reads the
+    //    freshly persisted session set.
     if let Some(pr_number) = merged_pr_to_clean {
-        handlers::cleanup_merged_worktrees(config, key, pr_number).await;
+        handlers::on_merged_pr(config, key, pr_number).await;
     }
 }
 

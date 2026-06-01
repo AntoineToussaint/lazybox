@@ -219,7 +219,7 @@ mod effects_tests {
     fn confirmed_yes_on_remove_out_of_scope_returns_kill() {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#1");
-        m.active_removal_prompt = Some(ws_key.clone());
+        m.active_removal_prompt = Some((ws_key.clone(), super::super::RemovalReason::OutOfScope));
         m.modal_stack.push(Id::RemoveOutOfScope);
         let cmds = m.handle_confirmed(true);
         assert_eq!(cmds.len(), 1);
@@ -231,12 +231,62 @@ mod effects_tests {
         }
     }
 
+    /// `y` on a merged-PR removal confirm produces
+    /// `RemoveMergedWorkspace` (not `Kill`) — the merged path also
+    /// deletes the worktree on the daemon side.
+    #[test]
+    fn confirmed_yes_on_merged_removal_returns_remove_merged_workspace() {
+        let mut m = build_model();
+        let ws_key = WorkspaceKey::new("github:o/r#1");
+        m.active_removal_prompt = Some((ws_key.clone(), super::super::RemovalReason::Merged));
+        m.modal_stack.push(Id::RemoveOutOfScope);
+        let cmds = m.handle_confirmed(true);
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::RemoveMergedWorkspace { session_key } => {
+                assert_eq!(session_key, &SessionKey::from(&ws_key));
+            }
+            other => panic!("expected RemoveMergedWorkspace, got {other:?}"),
+        }
+    }
+
+    /// A `MergedPrRemovable` event mounts the removal confirm (reason
+    /// `Merged`), and a re-emit for the same workspace doesn't stack a
+    /// second prompt — the daemon's one-shot transition plus this
+    /// dedupe keep it to a single ask.
+    #[test]
+    fn merged_pr_removable_mounts_confirm_and_dedupes() {
+        use pilot_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        let ev = || IpcEvent::MergedPrRemovable {
+            workspace_key: WorkspaceKey::new("github:o/r#1"),
+            label: "o/r#1".into(),
+            active_terminal_count: 0,
+            has_local_work: false,
+        };
+        m.handle_daemon_event(ev());
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+        assert!(matches!(
+            m.active_removal_prompt,
+            Some((_, super::super::RemovalReason::Merged))
+        ));
+
+        m.handle_daemon_event(ev());
+        assert!(
+            m.pending_removal_prompts.is_empty(),
+            "re-emit must not stack a second prompt"
+        );
+    }
+
     /// `n` on RemoveOutOfScope clears the slot without producing
     /// a Kill — user said no, daemon doesn't need to hear about it.
     #[test]
     fn confirmed_no_on_remove_out_of_scope_returns_no_commands() {
         let mut m = build_model();
-        m.active_removal_prompt = Some(WorkspaceKey::new("github:o/r#1"));
+        m.active_removal_prompt = Some((
+            WorkspaceKey::new("github:o/r#1"),
+            super::super::RemovalReason::OutOfScope,
+        ));
         m.modal_stack.push(Id::RemoveOutOfScope);
         let cmds = m.handle_confirmed(false);
         assert!(cmds.is_empty());
@@ -302,7 +352,10 @@ mod effects_tests {
     #[test]
     fn modal_dismissed_on_remove_out_of_scope_clears_slot_silently() {
         let mut m = build_model();
-        m.active_removal_prompt = Some(WorkspaceKey::new("github:o/r#1"));
+        m.active_removal_prompt = Some((
+            WorkspaceKey::new("github:o/r#1"),
+            super::super::RemovalReason::OutOfScope,
+        ));
         m.modal_stack.push(Id::RemoveOutOfScope);
         let cmds = m.handle_modal_dismissed();
         assert!(cmds.is_empty());

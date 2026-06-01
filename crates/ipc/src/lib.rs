@@ -353,6 +353,16 @@ pub enum Command {
     Kill {
         session_key: SessionKey,
     },
+    /// Answer to a `MergedPrRemovable` event (the user confirmed the
+    /// "this PR merged — remove its workspace and worktree?" modal).
+    /// Kills the workspace's sessions, force-deletes its backing
+    /// worktree directories, then drops the row — the worktree
+    /// deletion `Kill` deliberately skips. `force` is implied by the
+    /// confirm modal having warned about any uncommitted/unpushed
+    /// work, so the daemon always reaps the dirs here.
+    RemoveMergedWorkspace {
+        session_key: SessionKey,
+    },
     /// Delete a Project: kill every workspace under it (which kills
     /// every backing terminal) then drop the Project record. The
     /// daemon broadcasts `WorkspaceRemoved` for each workspace then
@@ -733,6 +743,28 @@ pub enum Event {
     PrMerged {
         workspace_key: pilot_core::WorkspaceKey,
         pr_label: String,
+    },
+    /// A PR just transitioned open→merged and its workspace is a
+    /// candidate for removal. Emitted once per merge (the upsert path
+    /// only acts on the open→merged transition, so a re-poll of an
+    /// already-merged PR doesn't re-fire). The daemon has inspected
+    /// the backing worktree(s); the TUI prompts the user — reusing
+    /// the removal-confirm modal — and, on yes, replies with
+    /// `Command::RemoveMergedWorkspace`. On no it does nothing and the
+    /// merge won't re-prompt (the transition is already persisted).
+    ///
+    /// Suppressed when `worktree.auto_cleanup_merged` is enabled — that
+    /// opt-in path reaps safe worktrees silently instead.
+    MergedPrRemovable {
+        workspace_key: pilot_core::WorkspaceKey,
+        /// Compact `owner/repo#N` form for the confirm modal copy.
+        label: String,
+        /// Live terminals that removal would kill. Quoted back so the
+        /// user knows what they'd lose.
+        active_terminal_count: usize,
+        /// Any backing worktree has uncommitted or unpushed work. The
+        /// modal warns when set; removal force-deletes regardless.
+        has_local_work: bool,
     },
     /// Response to `Command::FetchRepoLabels`. Carries the
     /// repository's full label set (name + color) so the TUI's

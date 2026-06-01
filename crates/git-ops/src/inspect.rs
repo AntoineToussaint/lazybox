@@ -264,8 +264,71 @@ impl WorktreeManager {
             return Ok(());
         };
 
-        self.remove_by_path(bare, &inspection.path).await
+        self.remove_by_path(bare, &inspection.path).await?;
+
+        // `git worktree remove` only drops the working tree — the
+        // `refs/heads/<branch>` ref survives. Now that the worktree is
+        // gone, reap the local branch too, so merged / abandoned
+        // feature branches don't pile up in the bare clone (issue #160).
+        if let Some(branch) = inspection.branch.as_deref() {
+            delete_local_branch(bare, branch).await;
+        }
+        Ok(())
     }
+}
+
+/// Best-effort removal of the local branch ref left behind after a
+/// worktree is deleted. Two guards keep it safe:
+///   - never delete the bare clone's HEAD branch (`main`/`master`/…),
+///     which every other worktree shares — deleting it would orphan
+///     them all;
+///   - lean on git's own refusal to delete a branch still checked out
+///     in another worktree.
+///
+/// Failures are logged and swallowed: a leftover branch is cosmetic and
+/// must never fail the worktree removal it follows.
+async fn delete_local_branch(bare: &Path, branch: &str) {
+    if bare_head_branch(bare).await.as_deref() == Some(branch) {
+        return;
+    }
+    let result = apply_git_env(
+        Command::new("git")
+            .current_dir(bare)
+            .args(["branch", "-D", branch]),
+    )
+    .output()
+    .await;
+    match result {
+        Ok(o) if !o.status.success() => tracing::debug!(
+            branch,
+            stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+            "leftover local branch not deleted after worktree removal",
+        ),
+        Err(e) => tracing::debug!(
+            branch,
+            error = %e,
+            "git branch -D failed after worktree removal",
+        ),
+        _ => {}
+    }
+}
+
+/// The branch the bare clone's HEAD points at — the default branch
+/// (`main`/`master`/…). `None` on detached HEAD or any git failure.
+async fn bare_head_branch(bare: &Path) -> Option<String> {
+    let output = apply_git_env(Command::new("git").current_dir(bare).args([
+        "symbolic-ref",
+        "--short",
+        "HEAD",
+    ]))
+    .output()
+    .await
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!name.is_empty()).then_some(name)
 }
 
 async fn inspect_one(

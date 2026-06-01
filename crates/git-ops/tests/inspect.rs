@@ -368,6 +368,98 @@ async fn prunable_metadata_surfaces_as_synthetic_row() {
     );
 }
 
+/// Does the bare clone still hold a local branch ref?
+async fn local_branch_exists(fx: &Fixture, branch: &str) -> bool {
+    tokio::process::Command::new("git")
+        .current_dir(&fx.bare)
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// After a worktree is reaped, its local branch ref is dropped too —
+/// otherwise merged feature branches accumulate in the bare clone
+/// forever (issue #160).
+#[tokio::test]
+async fn delete_inspected_reaps_local_branch() {
+    let fx = setup_fixture().await;
+    let wt = add_wt(&fx, "feature", "feature", "main").await;
+    assert!(local_branch_exists(&fx, "feature").await, "branch set up");
+
+    let report = mgr(&fx).inspect_worktrees(&[]).await.unwrap();
+    let row = report
+        .iter()
+        .find(|r| r.path.ends_with("feature"))
+        .expect("feature row")
+        .clone();
+    mgr(&fx).delete_inspected(&row, true).await.unwrap();
+
+    assert!(!wt.exists(), "worktree removed");
+    assert!(
+        !local_branch_exists(&fx, "feature").await,
+        "orphaned local branch should be deleted with its worktree"
+    );
+}
+
+/// The issue's exact shape: `main` is checked out in one worktree while
+/// a feature worktree is reaped from another. Reaping the feature must
+/// drop the feature branch but never touch `main` — the branch the bare
+/// clone's HEAD points at, shared by the other worktree.
+#[tokio::test]
+async fn delete_inspected_preserves_default_branch_checked_out_elsewhere() {
+    let fx = setup_fixture().await;
+    let main_wt = add_wt(&fx, "mainwt", "main", "main").await;
+    let feature_wt = add_wt(&fx, "feature", "feature", "main").await;
+
+    let report = mgr(&fx).inspect_worktrees(&[]).await.unwrap();
+    let row = report
+        .iter()
+        .find(|r| r.path.ends_with("feature"))
+        .expect("feature row")
+        .clone();
+    mgr(&fx).delete_inspected(&row, true).await.unwrap();
+
+    assert!(!feature_wt.exists(), "feature worktree removed");
+    assert!(
+        !local_branch_exists(&fx, "feature").await,
+        "feature branch reaped"
+    );
+    assert!(main_wt.exists(), "main worktree untouched");
+    assert!(
+        local_branch_exists(&fx, "main").await,
+        "default branch must survive its worktree reaping"
+    );
+}
+
+/// Reaping a worktree that itself has the default branch checked out
+/// must not delete `main` — even with no other worktree holding it.
+#[tokio::test]
+async fn delete_inspected_never_deletes_default_branch() {
+    let fx = setup_fixture().await;
+    let main_wt = add_wt(&fx, "mainwt", "main", "main").await;
+
+    let report = mgr(&fx).inspect_worktrees(&[]).await.unwrap();
+    let row = report
+        .iter()
+        .find(|r| r.path.ends_with("mainwt"))
+        .expect("main row")
+        .clone();
+    mgr(&fx).delete_inspected(&row, true).await.unwrap();
+
+    assert!(!main_wt.exists(), "worktree removed");
+    assert!(
+        local_branch_exists(&fx, "main").await,
+        "default branch must never be deleted on worktree reaping"
+    );
+}
+
 /// Bulk safety: with a mix of safe + unsafe entries, only the safe
 /// ones get deleted when the caller filters on `is_safe_to_delete`.
 #[tokio::test]

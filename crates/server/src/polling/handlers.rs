@@ -471,27 +471,37 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
     // and observations carry across calls — same logic as the
     // long-lived poll loop. Without this we'd build a fresh client
     // for every user-triggered fetch.
-    let client = {
-        let mut state = config.poll_state.lock().await;
-        match state.gh_client.clone() {
-            Some(c) => c,
-            None => {
-                let cred = match pilot_gh::credential_chain().resolve(pilot_gh::SOURCE).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!("fetch_pr_details credentials: {e}");
-                        return;
-                    }
-                };
-                match GhClient::from_credential(cred).await {
-                    Ok(c) => {
-                        state.gh_client = Some(c.clone());
-                        c
-                    }
-                    Err(e) => {
-                        tracing::warn!("fetch_pr_details client init: {e}");
-                        return;
-                    }
+    // Clone the cached client out under a brief std-lock. The lock is
+    // released before any `.await` — building a fresh client on a cold
+    // cache must not hold a lock across the `from_credential` network
+    // call (issue #92). The cache lives outside `poll_state` so this
+    // never contends with a running poll tick.
+    let cached = config
+        .gh_client_cache
+        .lock()
+        .expect("gh_client_cache poisoned")
+        .clone();
+    let client = match cached {
+        Some(c) => c,
+        None => {
+            let cred = match pilot_gh::credential_chain().resolve(pilot_gh::SOURCE).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("fetch_pr_details credentials: {e}");
+                    return;
+                }
+            };
+            match GhClient::from_credential(cred).await {
+                Ok(c) => {
+                    *config
+                        .gh_client_cache
+                        .lock()
+                        .expect("gh_client_cache poisoned") = Some(c.clone());
+                    c
+                }
+                Err(e) => {
+                    tracing::warn!("fetch_pr_details client init: {e}");
+                    return;
                 }
             }
         }
@@ -990,9 +1000,14 @@ pub async fn prefetch_top_pr_details(
     const PREFETCH_TOP_N: usize = 5;
     const PREFETCH_CONCURRENCY: usize = 3;
 
-    // Reuse the persistent GhClient from the tick. If absent (linear-
-    // only setup, or auth failed earlier), prefetch is a no-op.
-    let Some(client) = state.gh_client.clone() else {
+    // Reuse the persistent GhClient cache. If absent (linear-only
+    // setup, or auth failed earlier), prefetch is a no-op.
+    let Some(client) = config
+        .gh_client_cache
+        .lock()
+        .expect("gh_client_cache poisoned")
+        .clone()
+    else {
         return;
     };
 

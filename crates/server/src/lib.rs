@@ -273,6 +273,28 @@ pub struct ServerConfig {
     /// dismiss, and 30s later the long-lived loop would re-prompt
     /// (each has its own `TickState`).
     pub poll_state: Arc<Mutex<polling::TickState>>,
+    /// Long-lived GitHub client, cached across ticks in its OWN lock —
+    /// deliberately NOT a field of `poll_state` (issue #92). WITHOUT a
+    /// persistent client, every tick (and every user-triggered
+    /// `fetch_pr_details`) would rebuild it via
+    /// `GhClient::from_credential`, resetting the inner `RateBudget` to
+    /// its full-bucket / no-remote-observation default — the "GitHub said
+    /// remaining=50, back off" knowledge from the last call is thrown
+    /// away and the next request flies blind into a 429. We reuse the
+    /// client (and its budget `Arc`) and only rebuild when the credential
+    /// SOURCE changes.
+    ///
+    /// Why its own `std::sync::Mutex` rather than living in `poll_state`:
+    /// `handle_fetch_pr_details` and the poll tick both need this client,
+    /// and the cold-cache path builds it with a network `.await`. Holding
+    /// `poll_state` across that build re-creates the exact serve-loop
+    /// stall #91/#92 fight — and #133's `checkout_poll_state` made it
+    /// worse by emptying `poll_state`'s copy for the whole tick, so every
+    /// concurrent fetch hit the rebuild path. Keeping the client here
+    /// means reaching it is a brief `std::sync::Mutex` clone-out that
+    /// never blocks on `poll_state` and never spans the `from_credential`
+    /// await.
+    pub gh_client_cache: Arc<std::sync::Mutex<Option<pilot_gh::GhClient>>>,
     /// Issue→PR merge-prompt dedupe memory. Deliberately separate from
     /// `poll_state`: the collapse path that touches it runs inside an
     /// `upsert`, and sharing `poll_state`'s non-reentrant
@@ -370,6 +392,7 @@ impl ServerConfig {
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),
             default_principal_id: pilot_ipc::PrincipalId::local(),
             poll_state: Arc::new(Mutex::new(polling::TickState::default())),
+            gh_client_cache: Arc::new(std::sync::Mutex::new(None)),
             merge_prompts: Arc::new(Mutex::new(polling::MergePromptMemory::default())),
             viewer_identities: Arc::new(std::sync::Mutex::new(Vec::new())),
             poll_wake: Arc::new(tokio::sync::Notify::new()),

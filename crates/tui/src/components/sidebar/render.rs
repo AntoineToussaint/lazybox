@@ -189,13 +189,19 @@ impl Sidebar {
         }
 
         // Content starts at row 5 (skipping a blank row for breathing
-        // room above the first item).
+        // room above the first item). When the `/` search bar is open
+        // it claims the bottom row, so the list loses one line — the
+        // bar is pinned to the bottom (fzf-style) so the repo tree
+        // doesn't shift as the user types.
         const HEADER_HEIGHT: u16 = 5;
+        let search_bar = self.search.is_some() && area.height > HEADER_HEIGHT;
         let inner = Rect {
             x: area.x + l_pad,
             y: area.y + HEADER_HEIGHT,
             width: inner_width,
-            height: area.height.saturating_sub(HEADER_HEIGHT),
+            height: area
+                .height
+                .saturating_sub(HEADER_HEIGHT + u16::from(search_bar)),
         };
 
         let row_budget = inner_width as usize;
@@ -304,6 +310,22 @@ impl Sidebar {
                                     .add_modifier(Modifier::BOLD),
                             ));
                         }
+                        // While a search filters THIS project, surface
+                        // the match count so the header reads as a
+                        // result tally rather than a vanished tree.
+                        if self
+                            .search
+                            .as_ref()
+                            .is_some_and(|q| !q.query.is_empty() && q.scope == *name)
+                        {
+                            spans.push(Span::styled(
+                                format!("  {} match", s.active),
+                                row_bg
+                                    .unwrap_or_default()
+                                    .fg(theme.accent)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        }
                     }
                     let _ = row_budget;
                     Line::from(spans)
@@ -397,6 +419,30 @@ impl Sidebar {
 
         let para = Paragraph::new(lines);
         frame.render_widget(para, inner);
+
+        // Bottom search bar (fzf-style). `/query` while editing, with a
+        // caret; once `Enter` keeps the filter applied the caret drops
+        // and a hint reminds the user `/` re-edits and `esc` clears.
+        if search_bar && let Some(s) = self.search.as_ref() {
+            let bar = Rect::new(area.x + l_pad, area.y + area.height - 1, inner_width, 1);
+            let mut spans = vec![
+                Span::styled("/", Style::default().fg(theme.accent)),
+                Span::styled(s.query.clone(), Style::default().fg(theme.text_strong)),
+            ];
+            if s.editing {
+                spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
+                spans.push(Span::styled(
+                    "  esc clear",
+                    Style::default().fg(theme.text_dim),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    "  / edit · esc clear",
+                    Style::default().fg(theme.text_dim),
+                ));
+            }
+            frame.render_widget(Paragraph::new(Line::from(spans)), bar);
+        }
     }
 
     /// Build & lay out every visible workspace row in one

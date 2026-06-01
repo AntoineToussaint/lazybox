@@ -31,6 +31,20 @@ impl<T: TerminalAdapter> Model<T> {
     /// global escapes, and forwards everything else to the focused
     /// pane wrapper.
     pub(super) fn handle_pane_key(&mut self, key: RealmKey) {
+        // The sidebar's `/` search bar, while open, owns every
+        // keystroke — route them straight in before pane / catalog /
+        // global dispatch so typing a query (`f`, `s`, `Tab`, …) edits
+        // text instead of firing a shortcut (including arming a leader
+        // chord below). `Esc` / `Enter` close it from inside the same
+        // handler.
+        if self.focus == PaneFocus::Sidebar && self.sidebar.search_editing() {
+            self.sidebar.handle_search_key(realm_key_to_crossterm(&key));
+            // Filtering may have moved the selection; keep the right
+            // pane / terminals in step.
+            self.sync_panes();
+            self.redraw = true;
+            return;
+        }
         // ── Grouped two-step (leader-key) chord, issue #126 ─────────
         // When a group leader is armed, THIS key is the action
         // selector — resolved before anything else so the second

@@ -7,7 +7,7 @@
 //! no way to tell from the UI.
 //!
 //! Read-only: navigation keys scroll the log; any other key dismisses.
-//! Built from a snapshot of the [`SyncLog`](crate::realm::status_ctx)
+//! Built from a snapshot of the `SyncLog` (`crate::realm::status_ctx`)
 //! at mount, with `now` captured once so the relative ages don't drift
 //! while the window is open.
 

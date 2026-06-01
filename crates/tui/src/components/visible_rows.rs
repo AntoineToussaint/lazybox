@@ -14,8 +14,8 @@
 //! this function is purely the rebuild half.
 
 use crate::components::sidebar::{
-    Mailbox, RepoSummary, RoleFilter, SortMode, VisibleRow, WorkspaceKind, mailbox_membership,
-    role_rank,
+    Mailbox, RepoSummary, RoleFilter, SearchState, SortMode, VisibleRow, WorkspaceKind,
+    mailbox_membership, role_rank,
 };
 use pilot_core::{Project, ProjectKey, SessionKey, Workspace};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -51,6 +51,11 @@ pub struct ComputeInputs<'a> {
     pub attention: &'a pilot_config::AttentionConfig,
     pub agents_asking: &'a HashSet<SessionKey>,
     pub now: chrono::DateTime<chrono::Utc>,
+    /// Free-text search scoped to one project, or `None`. When `Some`
+    /// with a non-empty query, workspaces whose `group_label` matches
+    /// `scope` are kept only if they fuzzy-match; other projects pass
+    /// through untouched. See [`search_matches`].
+    pub search: Option<&'a SearchState>,
 }
 
 const NO_REPO: &str = "(no repo)";
@@ -69,6 +74,14 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
             mailbox_membership(w, input.mailbox, input.now, input.show_inactive_in_inbox)
         })
         .filter(|(_, w)| input.role_filter.accepts(w.primary_task().map(|t| t.role)))
+        // Scoped free-text search: only the matching project's rows
+        // are filtered; every other project stays fully visible.
+        .filter(|(_, w)| match input.search {
+            Some(s) if !s.query.is_empty() && group_label(w, input.projects) == s.scope => {
+                search_matches(&s.query, w)
+            }
+            _ => true,
+        })
         .collect();
 
     // Step 2: bucket by project. A workspace's parent project is
@@ -212,6 +225,38 @@ fn group_label(w: &Workspace, projects: &BTreeMap<ProjectKey, Project>) -> Strin
     NO_REPO.to_string()
 }
 
+/// Does `query` match `w`? Case-insensitive fuzzy (subsequence) match
+/// on the workspace's displayed title, OR a substring match on its
+/// PR/issue number. A leading `#` on the query is ignored so both
+/// `100` and `#100` find issue #100. An empty query (after trimming)
+/// matches everything — callers guard against that, but it keeps the
+/// function total.
+pub fn search_matches(query: &str, w: &Workspace) -> bool {
+    let q = query.trim().trim_start_matches('#').to_lowercase();
+    if q.is_empty() {
+        return true;
+    }
+    let task = w.primary_task();
+    if let Some(n) = task.and_then(crate::components::task_label::pr_number)
+        && n.to_string().contains(&q)
+    {
+        return true;
+    }
+    // Same title the workspace row renders: task title, else the
+    // workspace's own name.
+    let title = task
+        .map(|t| t.title.as_str())
+        .unwrap_or_else(|| w.name.as_str());
+    is_subsequence(&title.to_lowercase(), &q)
+}
+
+/// True when every char of `needle` appears in `haystack` in order
+/// (not necessarily contiguous) — the fzf-style loose match.
+fn is_subsequence(haystack: &str, needle: &str) -> bool {
+    let mut hay = haystack.chars();
+    needle.chars().all(|nc| hay.any(|hc| hc == nc))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +328,7 @@ mod tests {
             attention,
             agents_asking: asking,
             now: fixed_time(),
+            search: None,
         }
     }
 
@@ -495,5 +541,146 @@ mod tests {
         let projects = BTreeMap::new();
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert_eq!(out.summaries.get("owner/r").unwrap().active, 3);
+    }
+
+    /// Build a workspace in `repo` with the given issue/PR `num` and
+    /// display title — enough to exercise search matching.
+    fn titled(key: &str, repo: &str, num: u64, title: &str) -> Workspace {
+        let mut w = workspace_with_task(key, Some(repo), 10);
+        w.key = WorkspaceKey(key.into());
+        // `workspace_with_task` seeds a GitHub issue (no PR slot), so
+        // the primary task lives in `gh_issues`.
+        if let Some(t) = w.gh_issues.get_mut(0) {
+            t.id.key = format!("{repo}#{num}");
+            t.title = title.into();
+        }
+        w.name = title.into();
+        w
+    }
+
+    fn search(scope: &str, query: &str) -> SearchState {
+        SearchState {
+            scope: scope.into(),
+            query: query.into(),
+            editing: true,
+        }
+    }
+
+    /// Query keeps fuzzy title matches in the scoped project, hides
+    /// the rest.
+    #[test]
+    fn search_filters_scoped_project_by_title() {
+        let mut ws = HashMap::new();
+        for w in [
+            titled("k1", "owner/r", 1, "Add search bar"),
+            titled("k2", "owner/r", 2, "Fix flaky test"),
+        ] {
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = pilot_config::AttentionConfig::default();
+        let asking = HashSet::new();
+        let projects = BTreeMap::new();
+        let s = search("owner/r", "search");
+        let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        i.search = Some(&s);
+        let out = compute_visible(i);
+        let keys: Vec<&str> = out
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, vec!["k1"]);
+        assert_eq!(out.summaries.get("owner/r").unwrap().active, 1);
+    }
+
+    /// A bare number matches the issue/PR number (with or without `#`).
+    #[test]
+    fn search_matches_on_number() {
+        let mut ws = HashMap::new();
+        for w in [
+            titled("k1", "owner/r", 100, "Alpha"),
+            titled("k2", "owner/r", 7, "Beta"),
+        ] {
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = pilot_config::AttentionConfig::default();
+        let asking = HashSet::new();
+        let projects = BTreeMap::new();
+        let s = search("owner/r", "#100");
+        let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        i.search = Some(&s);
+        let out = compute_visible(i);
+        let keys: Vec<&str> = out
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, vec!["k1"]);
+    }
+
+    /// The search only filters its scoped project — workspaces in
+    /// other projects stay fully visible.
+    #[test]
+    fn search_leaves_other_projects_untouched() {
+        let mut ws = HashMap::new();
+        for w in [
+            titled("k1", "owner/a", 1, "Add search"),
+            titled("k2", "owner/a", 2, "Unrelated"),
+            titled("k3", "owner/b", 3, "Unrelated"),
+        ] {
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = pilot_config::AttentionConfig::default();
+        let asking = HashSet::new();
+        let projects = BTreeMap::new();
+        let s = search("owner/a", "search");
+        let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        i.search = Some(&s);
+        let out = compute_visible(i);
+        // owner/a is filtered to k1; owner/b keeps its row regardless.
+        assert_eq!(out.summaries.get("owner/a").unwrap().active, 1);
+        assert_eq!(out.summaries.get("owner/b").unwrap().active, 1);
+    }
+
+    /// An empty query is a no-op even when search state is present.
+    #[test]
+    fn empty_query_shows_full_tree() {
+        let mut ws = HashMap::new();
+        for w in [
+            titled("k1", "owner/r", 1, "Alpha"),
+            titled("k2", "owner/r", 2, "Beta"),
+        ] {
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = pilot_config::AttentionConfig::default();
+        let asking = HashSet::new();
+        let projects = BTreeMap::new();
+        let s = search("owner/r", "");
+        let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        i.search = Some(&s);
+        let out = compute_visible(i);
+        assert_eq!(out.summaries.get("owner/r").unwrap().active, 2);
+    }
+
+    #[test]
+    fn search_matches_is_case_insensitive_subsequence() {
+        let w = titled("k1", "owner/r", 1, "Add Search Filter Bar");
+        assert!(search_matches("sfb", &w)); // subsequence across words
+        assert!(search_matches("FILTER", &w)); // case-insensitive
+        assert!(!search_matches("zzz", &w));
     }
 }

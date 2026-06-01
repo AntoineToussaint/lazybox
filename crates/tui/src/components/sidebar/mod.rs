@@ -269,6 +269,26 @@ pub enum VisibleRow {
     },
 }
 
+/// Free-text search scoped to a single project (repo group). Invoked
+/// with `/` and filters that project's PRs + Issues live as the user
+/// types — fuzzy match on title, substring match on number. Other
+/// projects are left untouched (the search is deliberately scoped to
+/// one group, not global).
+///
+/// `editing` is true while the bottom input bar is capturing
+/// keystrokes (between `/` and `Enter`/`Esc`). `Enter` keeps the
+/// query applied but stops capturing so j/k navigates the results;
+/// `Esc` clears the query and closes the bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchState {
+    /// Repo-header label the search is scoped to — matched against
+    /// `visible_rows::group_label` so only that project's rows are
+    /// filtered. Captured from the row under the cursor when `/` opens.
+    pub scope: String,
+    pub query: String,
+    pub editing: bool,
+}
+
 /// Per-repo summary line shown in the collapsible header.
 #[derive(Debug, Clone, Default)]
 pub struct RepoSummary {
@@ -403,6 +423,10 @@ pub struct Sidebar {
     /// drift as real time passes (otherwise a `1mo` row silently
     /// becomes `2mo` a month later and breaks the snapshot).
     now_override: Option<chrono::DateTime<chrono::Utc>>,
+    /// Free-text filter scoped to the focused project. `None` when no
+    /// search is in flight; `Some` while the `/` input bar is open or
+    /// a query stays applied after `Enter`. See [`SearchState`].
+    search: Option<SearchState>,
 }
 
 /// A queued user-facing notification that the outer (IO-aware) layer
@@ -458,6 +482,7 @@ impl Sidebar {
             filter_chip_rect: None,
             sort_chip_rect: None,
             now_override: None,
+            search: None,
         }
     }
 
@@ -1049,6 +1074,101 @@ impl Sidebar {
         self.workspaces.values()
     }
 
+    /// Repo-header label the cursor currently sits under — the nearest
+    /// `RepoHeader` at or above the cursor row. `None` when there's no
+    /// header above (empty list). Drives the search scope: `/` filters
+    /// exactly this project's rows.
+    fn focused_repo_header(&self) -> Option<String> {
+        self.visible
+            .iter()
+            .take(self.cursor + 1)
+            .rev()
+            .find_map(|r| match r {
+                VisibleRow::RepoHeader(name) => Some(name.clone()),
+                _ => None,
+            })
+    }
+
+    /// Open (or re-focus) the `/` search bar, scoped to the project
+    /// under the cursor. Re-pressing `/` while a query for the same
+    /// project is already applied resumes editing it; targeting a
+    /// different project starts fresh. No-op when the cursor isn't
+    /// under any project header.
+    pub fn open_search(&mut self) {
+        let Some(scope) = self.focused_repo_header() else {
+            return;
+        };
+        match self.search.as_mut() {
+            Some(s) if s.scope == scope => s.editing = true,
+            _ => {
+                self.search = Some(SearchState {
+                    scope,
+                    query: String::new(),
+                    editing: true,
+                });
+            }
+        }
+    }
+
+    /// True while the `/` input bar is capturing keystrokes. The
+    /// orchestrator routes keys straight here (bypassing pane / catalog
+    /// dispatch) so typing a query never triggers a shortcut.
+    pub fn search_editing(&self) -> bool {
+        self.search.as_ref().is_some_and(|s| s.editing)
+    }
+
+    /// The active search state, if any (query may be empty). Read by
+    /// `render` to draw the bottom bar and the per-project match count.
+    pub fn search(&self) -> Option<&SearchState> {
+        self.search.as_ref()
+    }
+
+    /// Feed one keystroke into the open search bar. Printable chars
+    /// extend the query, `Backspace` trims it, `Enter` keeps the query
+    /// applied while closing the editor, `Esc` clears + closes. Each
+    /// query mutation rebuilds the visible list so filtering is live.
+    pub fn handle_search_key(&mut self, key: KeyEvent) {
+        let mut query_changed = false;
+        match key.code {
+            KeyCode::Esc => {
+                if self.search.is_some() {
+                    self.search = None;
+                    query_changed = true;
+                }
+            }
+            KeyCode::Enter => {
+                // Empty query → nothing to keep, so Enter just closes.
+                // Otherwise drop out of editing but leave the filter on.
+                let empty = self.search.as_ref().is_some_and(|s| s.query.is_empty());
+                if empty {
+                    self.search = None;
+                    query_changed = true;
+                } else if let Some(s) = self.search.as_mut() {
+                    s.editing = false;
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(s) = self.search.as_mut() {
+                    s.query.pop();
+                    query_changed = true;
+                }
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                if let Some(s) = self.search.as_mut() {
+                    s.query.push(c);
+                    query_changed = true;
+                }
+            }
+            _ => {}
+        }
+        if query_changed {
+            self.recompute_visible();
+        }
+    }
+
     /// Look up the display label of a project by key. Used by the
     /// destructive-delete confirm modal so the prompt reads
     /// "Delete project foo/bar" instead of the raw key. Returns
@@ -1306,6 +1426,7 @@ impl Sidebar {
                 attention: &self.attention,
                 agents_asking: &self.agents_asking,
                 now: self.now(),
+                search: self.search.as_ref(),
             },
         );
         self.visible = outcome.visible;

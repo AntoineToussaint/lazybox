@@ -239,6 +239,16 @@ impl Sidebar {
                 PaneOutcome::Consumed
             }
 
+            // `/` opens the incremental search bar scoped to the
+            // focused project. Once open, the orchestrator routes
+            // keystrokes straight to `handle_search_key` (see
+            // `Model::handle_pane_key`) so the query captures keys
+            // that would otherwise fire shortcuts.
+            (KeyCode::Char('/'), KeyModifiers::NONE) => {
+                self.open_search();
+                PaneOutcome::Consumed
+            }
+
             // ── Mailbox cycle (Inbox → Inactive → Snoozed → Inbox)
             (KeyCode::Char('S'), m) if m.contains(KeyModifiers::SHIFT) => {
                 self.mailbox = match self.mailbox {

@@ -138,6 +138,19 @@ impl Sidebar {
         self.focused = focused;
     }
 
+    /// True while the `/` search bar is capturing keystrokes. The
+    /// orchestrator checks this before its normal key routing so a
+    /// query can swallow keys that would otherwise fire shortcuts.
+    pub fn search_editing(&self) -> bool {
+        self.inner.search_editing()
+    }
+
+    /// Feed one keystroke into the open search bar. See
+    /// `Sidebar::handle_search_key`.
+    pub fn handle_search_key(&mut self, key: crossterm::event::KeyEvent) {
+        self.inner.handle_search_key(key);
+    }
+
     /// Read currently selected workspace key (for selection projection).
     pub fn selected_workspace_key(&self) -> Option<&pilot_core::SessionKey> {
         self.inner.selected_session_key()

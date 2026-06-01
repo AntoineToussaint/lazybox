@@ -1354,3 +1354,114 @@ mod role_filter_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod search_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use pilot_core::Workspace;
+
+    fn issue_ws(key: &str, title: &str) -> Workspace {
+        let mut t = base_task();
+        t.id.key = key.into();
+        t.title = title.into();
+        // `/issues/` URL routes through `classify` into the gh_issues
+        // slot so the workspace is a plain issue (no PR).
+        t.url = format!("https://github.com/o/r/issues/{key}");
+        let mut w = Workspace::from_task(t, chrono::Utc::now());
+        w.name = title.into();
+        w
+    }
+
+    fn sidebar_with_issues(items: &[(&str, &str)]) -> Sidebar {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        for (key, title) in items {
+            let w = issue_ws(key, title);
+            sb.workspaces.insert(SessionKey::from(&w.key), w);
+        }
+        sb.recompute_visible();
+        sb
+    }
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn type_query(sb: &mut Sidebar, q: &str) {
+        for c in q.chars() {
+            sb.handle_search_key(key(c));
+        }
+    }
+
+    /// `/` opens the bar scoped to the focused project, in editing mode.
+    #[test]
+    fn slash_opens_search_scoped_to_focused_project() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        let mut cmds = Vec::new();
+        sb.handle_key(key('/'), &mut cmds);
+        assert!(sb.search_editing());
+        let s = sb.search().expect("search state present");
+        assert_eq!(s.scope, "o/r");
+        assert!(s.query.is_empty());
+    }
+
+    /// Typing filters the project's rows live; non-matches drop out.
+    #[test]
+    fn typing_filters_visible_rows() {
+        let mut sb = sidebar_with_issues(&[("1", "Add search bar"), ("2", "Fix flaky test")]);
+        assert_eq!(sb.workspace_count(), 2);
+        let mut cmds = Vec::new();
+        sb.handle_key(key('/'), &mut cmds);
+        type_query(&mut sb, "search");
+        assert_eq!(sb.workspace_count(), 1, "only the matching row survives");
+    }
+
+    /// `Enter` keeps the filter applied but stops capturing keys.
+    #[test]
+    fn enter_keeps_filter_and_exits_editing() {
+        let mut sb = sidebar_with_issues(&[("1", "Add search bar"), ("2", "Fix flaky test")]);
+        let mut cmds = Vec::new();
+        sb.handle_key(key('/'), &mut cmds);
+        type_query(&mut sb, "search");
+        sb.handle_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!sb.search_editing(), "Enter exits editing mode");
+        assert!(sb.search().is_some(), "filter stays applied");
+        assert_eq!(sb.workspace_count(), 1);
+    }
+
+    /// `Esc` clears the query and restores the full tree.
+    #[test]
+    fn esc_clears_search_and_restores_tree() {
+        let mut sb = sidebar_with_issues(&[("1", "Add search bar"), ("2", "Fix flaky test")]);
+        let mut cmds = Vec::new();
+        sb.handle_key(key('/'), &mut cmds);
+        type_query(&mut sb, "search");
+        assert_eq!(sb.workspace_count(), 1);
+        sb.handle_search_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(sb.search().is_none());
+        assert_eq!(sb.workspace_count(), 2, "full tree restored");
+    }
+
+    /// Backspace shrinks the query and re-widens the result set.
+    #[test]
+    fn backspace_widens_results() {
+        let mut sb = sidebar_with_issues(&[("1", "Add search bar"), ("2", "Fix flaky test")]);
+        let mut cmds = Vec::new();
+        sb.handle_key(key('/'), &mut cmds);
+        type_query(&mut sb, "searchx"); // matches nothing
+        assert_eq!(sb.workspace_count(), 0);
+        sb.handle_search_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(sb.workspace_count(), 1, "back to a matching prefix");
+    }
+
+    /// Enter with an empty query just closes the bar (nothing to keep).
+    #[test]
+    fn enter_on_empty_query_closes_bar() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        let mut cmds = Vec::new();
+        sb.handle_key(key('/'), &mut cmds);
+        sb.handle_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(sb.search().is_none());
+    }
+}

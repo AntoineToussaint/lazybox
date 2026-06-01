@@ -276,6 +276,26 @@ impl<T: TerminalAdapter> Model<T> {
         if let Some(p) = self.status.polling.as_mut() {
             p.feed_daemon_event(&event);
         }
+        // Durable sync-attempt log feeding the sync-status window.
+        // Recorded for every cycle regardless of whether the polling
+        // modal / footer spinner is up — those are transient, this is
+        // the session-scoped history. Spawn failures also arrive as
+        // `ProviderError` (with a `spawn*` source) but aren't sync
+        // attempts, so they're filtered out.
+        match &event {
+            IpcEvent::PollCompleted { source, count } => {
+                self.status.sync.note_completed(source, *count);
+            }
+            IpcEvent::ProviderError {
+                source,
+                message,
+                detail,
+                kind,
+            } if !source.starts_with("spawn") => {
+                self.status.sync.note_error(source, kind, message, detail);
+            }
+            _ => {}
+        }
         // Background-poll indicator. Lights up whenever the daemon
         // emits PollProgress (any cycle, initial or not); clears on
         // PollCompleted. Visible only after the initial Polling modal

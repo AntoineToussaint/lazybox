@@ -488,6 +488,23 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::Help, Help::from_catalog(&self.action_key_overrides));
     }
 
+    /// Build + mount the debug / sync-status window from the current
+    /// `SyncLog` snapshot. Idempotent: re-pressing the key while it's
+    /// up is a no-op.
+    pub(super) fn mount_sync_status(&mut self) {
+        use crate::realm::components::sync_status::SyncStatus;
+
+        if self.modal_stack.last() == Some(&Id::SyncStatus) {
+            return;
+        }
+        let summary = self.status.sync.latest_per_source();
+        let recent: Vec<_> = self.status.sync.recent().cloned().collect();
+        self.mount_modal(
+            Id::SyncStatus,
+            SyncStatus::new(summary, recent, chrono::Utc::now()),
+        );
+    }
+
     /// If there's a queued "out-of-scope workspace has active
     /// sessions" prompt and no modal is currently up, mount it. The
     /// user's answer (Y → kill, N/Esc → keep) is handled in the

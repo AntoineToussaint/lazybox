@@ -334,6 +334,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenTour => {
                 self.mount_tour();
             }
+            Action::OpenSyncStatus => {
+                self.mount_sync_status();
+            }
             Action::OpenSettings => {
                 self.open_settings();
             }

@@ -165,6 +165,10 @@ pub enum Id {
     /// via the tour shortcut. `Msg::TourFinished` marks it seen +
     /// pops. See `realm::components::tour`.
     Tour,
+    /// Debug / sync-status window (default `Shift-D`). Read-only,
+    /// scrollable view of recent provider-sync outcomes built from
+    /// `self.status.sync`. No pending state — dismiss just pops it.
+    SyncStatus,
 }
 
 /// App-level message vocabulary for modals + globals.

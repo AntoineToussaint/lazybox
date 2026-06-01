@@ -6,7 +6,98 @@
 use crate::realm::components::footer::{Notice, NoticeSeverity};
 use crate::realm::components::polling::Polling;
 use crate::realm::model::Msg;
+use chrono::{DateTime, Utc};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
+
+/// Cap on retained sync-attempt records. Old entries roll off the
+/// front; the sync-status window only ever surfaces recent activity.
+const SYNC_LOG_CAP: usize = 200;
+
+/// Outcome of one completed sync attempt for a provider source.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SyncOutcome {
+    /// Poll finished; `count` tasks matched the source's filter.
+    Ok { count: usize },
+    /// Poll failed. `kind` is the `ProviderErrorKind` string
+    /// ("retryable" / "auth" / "permanent" / ""), `message` the
+    /// one-line summary, `detail` the full diagnostic (may be empty).
+    Err {
+        kind: String,
+        message: String,
+        detail: String,
+    },
+}
+
+/// One recorded sync attempt: which source, when, and how it ended.
+#[derive(Clone, Debug)]
+pub(crate) struct SyncEntry {
+    pub source: String,
+    pub at: DateTime<Utc>,
+    pub outcome: SyncOutcome,
+}
+
+impl SyncEntry {
+    pub fn is_ok(&self) -> bool {
+        matches!(self.outcome, SyncOutcome::Ok { .. })
+    }
+}
+
+/// Rolling history of sync attempts per provider source. Fed from the
+/// daemon's `PollCompleted` / `ProviderError` events; read by the
+/// sync-status window. Session-scoped — not persisted, since the
+/// daemon itself keeps no sync history to replay on reconnect.
+#[derive(Default)]
+pub(crate) struct SyncLog {
+    entries: VecDeque<SyncEntry>,
+}
+
+impl SyncLog {
+    /// Record a terminal sync outcome stamped at `at`.
+    pub fn record(&mut self, source: &str, at: DateTime<Utc>, outcome: SyncOutcome) {
+        self.entries.push_back(SyncEntry {
+            source: source.to_string(),
+            at,
+            outcome,
+        });
+        while self.entries.len() > SYNC_LOG_CAP {
+            self.entries.pop_front();
+        }
+    }
+
+    pub fn note_completed(&mut self, source: &str, count: usize) {
+        self.record(source, Utc::now(), SyncOutcome::Ok { count });
+    }
+
+    pub fn note_error(&mut self, source: &str, kind: &str, message: &str, detail: &str) {
+        self.record(
+            source,
+            Utc::now(),
+            SyncOutcome::Err {
+                kind: kind.to_string(),
+                message: message.to_string(),
+                detail: detail.to_string(),
+            },
+        );
+    }
+
+    /// Recent attempts, most-recent-first.
+    pub fn recent(&self) -> impl Iterator<Item = &SyncEntry> {
+        self.entries.iter().rev()
+    }
+
+    /// Latest attempt per source, sorted by source name. Drives the
+    /// "last sync per provider" summary block — most recent insert
+    /// wins because `entries` is in chronological order.
+    pub fn latest_per_source(&self) -> Vec<SyncEntry> {
+        let mut latest: std::collections::BTreeMap<String, SyncEntry> =
+            std::collections::BTreeMap::new();
+        for e in &self.entries {
+            latest.insert(e.source.clone(), e.clone());
+        }
+        latest.into_values().collect()
+    }
+}
 
 /// How long retryable notices stay visible before fading. Permanent
 /// + auth notices ignore this — they stay until dismissed.
@@ -150,6 +241,11 @@ pub(crate) struct StatusCtx {
     /// `TerminalFocusRequested` lands (or a spawn `ProviderError`, or
     /// the `SPAWN_SPINNER_GUARD` backstop).
     pub spawning: Option<Spawning>,
+    /// Rolling per-source history of sync outcomes. Surfaced by the
+    /// sync-status window so a silently-failing poll (rate limit,
+    /// auth, network) is visible instead of leaving the inbox
+    /// quietly stale.
+    pub sync: SyncLog,
 }
 
 impl StatusCtx {
@@ -160,6 +256,7 @@ impl StatusCtx {
             polling_last_tick: Instant::now(),
             bg_poll: None,
             spawning: None,
+            sync: SyncLog::default(),
         }
     }
 
@@ -523,6 +620,41 @@ mod tests {
         let _ = s.polling_tick();
         let after = s.spawning.as_ref().unwrap().spinner_idx;
         assert_eq!(after, before + 1, "spinner glyph advances on heartbeat");
+    }
+
+    #[test]
+    fn sync_log_records_and_caps() {
+        let mut log = SyncLog::default();
+        for i in 0..(SYNC_LOG_CAP + 10) {
+            log.note_completed("github", i);
+        }
+        // Ring is bounded; oldest entries roll off the front.
+        assert_eq!(log.recent().count(), SYNC_LOG_CAP);
+    }
+
+    #[test]
+    fn sync_log_recent_is_most_recent_first() {
+        let mut log = SyncLog::default();
+        log.note_completed("github", 1);
+        log.note_error("github", "auth", "bad token", "");
+        let recent: Vec<_> = log.recent().collect();
+        assert!(matches!(recent[0].outcome, SyncOutcome::Err { .. }));
+        assert!(recent[0].source == "github");
+        assert!(recent[1].is_ok());
+    }
+
+    #[test]
+    fn sync_log_latest_per_source_keeps_newest_sorted() {
+        let mut log = SyncLog::default();
+        log.note_completed("linear", 3);
+        log.note_completed("github", 1);
+        log.note_error("github", "retryable", "rate limited", "");
+        let latest = log.latest_per_source();
+        // Sorted by source name: github, then linear.
+        assert_eq!(latest[0].source, "github");
+        assert!(matches!(latest[0].outcome, SyncOutcome::Err { .. }));
+        assert_eq!(latest[1].source, "linear");
+        assert!(latest[1].is_ok());
     }
 
     #[test]

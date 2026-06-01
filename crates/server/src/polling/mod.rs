@@ -1653,27 +1653,25 @@ pub async fn tick_with_state(
                     fetch_ms,
                     "sync: fetch complete"
                 );
-                // 0-result polls are almost always misconfiguration —
-                // wrong scope, no role enabled, filter narrowed too far.
-                // Log loudly + surface a one-shot info notice so a
-                // returning user with an empty inbox knows whether
-                // "nothing matches" or "something's wrong with config."
+                // A 0-result poll is a SUCCESSFUL query that happens to
+                // match nothing — not a failure. It's usually benign
+                // (filter/scope matches no open work right now) and
+                // sometimes a transient GitHub hiccup that returns 200
+                // with an empty `search.nodes`. Either way the query
+                // didn't error, so we must NOT raise a `ProviderError`:
+                // doing so painted a sticky red "✗ sync failed" banner
+                // (Permanent severity, never auto-fades) on a healthy
+                // sync — especially jarring right after a manual
+                // Shift-R. We still log loudly for diagnostics, and the
+                // `PollCompleted { count: 0 }` below lets the TUI show a
+                // calm "✓ sync ok — 0 tasks" notice instead.
                 if count == 0 {
                     tracing::warn!(
                         source = source.name(),
-                        "poll returned 0 tasks — check `,` Settings: filter roles + selected \
-                         scopes both have to match SOMETHING in the user's repos. /tmp/pilot.log \
-                         has the exact GraphQL query string above."
+                        "poll returned 0 tasks — if unexpected, check `,` Settings: filter roles \
+                         + selected scopes both have to match SOMETHING in the user's repos. \
+                         /tmp/pilot.log has the exact GraphQL query string above."
                     );
-                    let _ = config.bus.send(Event::ProviderError {
-                        source: source.name().to_string(),
-                        message: format!(
-                            "{} returned 0 tasks — check filter + scope in `,` Settings",
-                            source.name()
-                        ),
-                        detail: "the exact GraphQL query is logged in /tmp/pilot.log".into(),
-                        kind: "retryable".into(),
-                    });
                 }
                 // Per-task wall-clock cap. The git-op `run_git_in`
                 // timeout (30s) already guards against hung subprocs,

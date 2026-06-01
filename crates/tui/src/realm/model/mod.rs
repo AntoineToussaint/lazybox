@@ -313,6 +313,20 @@ pub struct Model<T: TerminalAdapter> {
     /// anything happen?"). Cleared on the next PollCompleted OR a
     /// ProviderError for the same source.
     pending_refresh_ack: bool,
+    /// `Some(source)` while the footer notice is a provider "✗ sync
+    /// failed" banner (Permanent severity, so it never auto-fades),
+    /// naming the provider whose poll failed. Lets the next successful
+    /// `PollCompleted` *from that same provider* clear the stale banner
+    /// once its sync recovers — otherwise a transient failure left the
+    /// red notice up forever even though syncing was healthy again.
+    ///
+    /// Tracking the source (not just a bool) matters because pilot
+    /// polls several providers concurrently (GitHub, Linear, Slack): a
+    /// successful Linear poll must not erase a still-valid GitHub
+    /// failure banner. Any other `flash`/`flash_*` call resets it to
+    /// `None`, so we only clear the notice when it's still the
+    /// sync-error we set.
+    sync_error_source: Option<String>,
     /// Whether pilot is capturing mouse events. Toggled by F8 /
     /// Alt-s. When `false`, pilot has issued `DisableMouseCapture`
     /// so the host terminal regains native text selection (which
@@ -623,6 +637,7 @@ impl<T: TerminalAdapter> Model<T> {
             last_click: None,
             terminal_user_typed_since_focus: false,
             pending_refresh_ack: false,
+            sync_error_source: None,
             mouse_capture_on: true,
             terminal_selection: None,
             preselect: None,
@@ -1163,12 +1178,45 @@ impl<T: TerminalAdapter> Model<T> {
         );
     }
 
+    /// Like `flash_error`, but tags the notice as a provider "sync
+    /// failed" banner owned by `source`, so the next successful
+    /// `PollCompleted` from that same provider can clear it once sync
+    /// recovers. See the `sync_error_source` field and
+    /// [`Self::clear_sync_error_if_recovered`].
+    pub fn flash_sync_error(&mut self, source: &str, msg: impl Into<String>) {
+        self.flash_error(msg);
+        // `flash` (called via `flash_error`) just reset the flag to
+        // `None`; re-arm it *after* so the banner is attributed to the
+        // provider that actually failed.
+        self.sync_error_source = Some(source.to_string());
+    }
+
+    /// Clear the sticky "✗ sync failed" banner iff it's still on
+    /// screen *and* it belongs to `source` — i.e. the provider that
+    /// failed is the one that just recovered. A poll from any other
+    /// provider leaves the banner untouched. Returns `true` if a
+    /// banner was cleared (caller can skip a redundant redraw flag).
+    pub fn clear_sync_error_if_recovered(&mut self, source: &str) -> bool {
+        if self.sync_error_source.as_deref() == Some(source) {
+            self.sync_error_source = None;
+            self.status.notice = None;
+            self.redraw = true;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn flash(
         &mut self,
         msg: impl Into<String>,
         severity: crate::realm::components::footer::NoticeSeverity,
     ) {
         use crate::realm::components::footer::Notice;
+        // Any fresh notice supersedes a sync-error banner, so the
+        // "clear on recovery" tag only stays armed while the
+        // sync-error notice is the one actually on screen.
+        self.sync_error_source = None;
         self.status.notice = Some(Notice::new(msg, severity));
         self.redraw = true;
     }

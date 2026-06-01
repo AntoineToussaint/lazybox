@@ -478,12 +478,30 @@ fn upsert_by_id(list: &mut Vec<Task>, task: Task) {
 /// difference, but the post-workspace-open lazy-fetch IS authoritative
 /// (it pulls the field directly) and a refresh there will reset to
 /// the new truth.
+///
+/// `mergeable` follows the same shape with `Unknown` as its "empty"
+/// sentinel. GitHub computes mergeability lazily and *evicts* it
+/// between requests: a PR we last saw as `Conflicting` comes back
+/// `mergeable: UNKNOWN` on the next inbox scan until GitHub
+/// recomputes. Letting that `Unknown` win clobbers the conflict
+/// verdict, so the CONFLICT badge blinks off on the very next poll
+/// even though nothing changed. Keep the last known verdict until a
+/// poll reports a real one. `is_behind_base` rides the same
+/// `mergeStateStatus` computation (`UNKNOWN` for both at once), so it
+/// is only meaningful when `mergeable` resolved — preserve it on the
+/// same condition.
 fn preserve_lazy_pr_fields(mut incoming: Task, existing: &Task) -> Task {
     if incoming.closes_issues.is_empty() && !existing.closes_issues.is_empty() {
         incoming.closes_issues = existing.closes_issues.clone();
     }
     if incoming.checks.is_empty() && !existing.checks.is_empty() {
         incoming.checks = existing.checks.clone();
+    }
+    if incoming.mergeable == crate::Mergeable::Unknown
+        && existing.mergeable != crate::Mergeable::Unknown
+    {
+        incoming.mergeable = existing.mergeable;
+        incoming.is_behind_base = existing.is_behind_base;
     }
     incoming
 }
@@ -1203,6 +1221,64 @@ mod tests {
             "checks must survive an inbox-scan-shaped re-poll",
         );
         assert_eq!(pr_ref.checks[0].name, "lint");
+    }
+
+    /// Regression for the "merge conflicts are not detected
+    /// correctly" bug: GitHub evicts computed mergeability between
+    /// polls, so a conflicting PR comes back `mergeable: UNKNOWN` on
+    /// the next inbox scan. Without preservation the CONFLICT verdict
+    /// (and the BEHIND signal it shares a computation with) blinks off
+    /// every other poll. The last known verdict must survive an
+    /// `Unknown` re-poll.
+    #[test]
+    fn attach_pr_preserves_mergeable_when_incoming_is_unknown() {
+        let mut first = pr("o/r#1");
+        first.mergeable = crate::Mergeable::Conflicting;
+        first.is_behind_base = true;
+        let mut ws = Workspace::from_task(first, now());
+
+        // Next poll: GitHub hasn't recomputed mergeability yet.
+        let mut next = pr("o/r#1");
+        next.mergeable = crate::Mergeable::Unknown;
+        next.is_behind_base = false;
+        ws.attach_task(next);
+
+        let pr_ref = ws.pr.as_ref().unwrap();
+        assert_eq!(
+            pr_ref.mergeable,
+            crate::Mergeable::Conflicting,
+            "conflict verdict must survive an UNKNOWN re-poll",
+        );
+        assert!(
+            pr_ref.is_behind_base,
+            "behind-base must ride the same UNKNOWN preservation",
+        );
+    }
+
+    /// Inverse: a real verdict (even `Mergeable`, the "no conflict"
+    /// answer) always wins over the stored one. Preservation only
+    /// guards against `Unknown` clobbering known state — it is not a
+    /// sticky cache that pins the first conflict forever.
+    #[test]
+    fn attach_pr_mergeable_known_verdict_overwrites_stored() {
+        let mut first = pr("o/r#1");
+        first.mergeable = crate::Mergeable::Conflicting;
+        first.is_behind_base = true;
+        let mut ws = Workspace::from_task(first, now());
+
+        // Next poll: conflict resolved, GitHub reports a real verdict.
+        let mut next = pr("o/r#1");
+        next.mergeable = crate::Mergeable::Mergeable;
+        next.is_behind_base = false;
+        ws.attach_task(next);
+
+        let pr_ref = ws.pr.as_ref().unwrap();
+        assert_eq!(
+            pr_ref.mergeable,
+            crate::Mergeable::Mergeable,
+            "a resolved verdict must replace the stale conflict",
+        );
+        assert!(!pr_ref.is_behind_base);
     }
 
     /// Inverse: when the new PR DOES carry lazy fields (lazy-fetch

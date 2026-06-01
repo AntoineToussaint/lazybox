@@ -151,87 +151,16 @@ impl Registry {
 
 /// Shared pattern primitives for agent state detection.
 ///
-/// Every agent's `detect_state` walks a small set of well-known
-/// markers in the recent PTY output to classify "is the agent
-/// asking the user something?" The vocabulary repeats:
-///
-/// - **Bare yes/no markers** (`[y/n]`, `(y/n)`, …) — used by Codex,
-///   Cursor, and most YAML-configured CLIs. Single substring match
-///   is enough confidence: these don't show up in chat output.
-///
-/// - **Paired patterns** — at least one *choice marker* AND at
-///   least one *question phrase*. Used by Claude: "Do you want to"
-///   alone is too weak (chat output could include it), so we pair
-///   it with `1. Yes` / `(y/n)` / `[y/n]` to raise confidence.
-///
-/// - **Footer markers** — UI footers some agents render ONLY while
-///   waiting on input (Claude's `Esc to cancel · Tab to amend`).
-///   The most reliable signal: when present, the agent is asking.
-///
-/// Adding a new built-in agent should be a config-style declaration
-/// — declare the agent's pattern shape using these helpers — rather
-/// than writing yet another bespoke matcher with its own
-/// substring-soup logic.
-pub mod detect {
-    /// Standard bare yes/no prompt markers. Used by every CLI that
-    /// doesn't have a custom approval UI (Codex, Cursor, most
-    /// GenericCli configs). Order doesn't matter — substring search.
-    pub const YN_PROMPT_PATTERNS: &[&str] = &["[y/n]", "(y/n)", "[Y/n]", "[y/N]"];
-
-    /// Substring "any-of" match. Plain text in; bytes should be
-    /// passed through `strip_ansi_lossy` first so escape sequences
-    /// don't split the markers.
-    pub fn contains_any(text: &str, patterns: &[&str]) -> bool {
-        patterns.iter().any(|p| text.contains(p))
-    }
-
-    /// Two-stage check: at least one `choice` marker AND at least
-    /// one `question` phrase. Pairing raises confidence — neither
-    /// alone is enough to distinguish "agent is asking" from "the
-    /// agent's chat output mentions the same phrase."
-    pub fn contains_paired(text: &str, choices: &[&str], questions: &[&str]) -> bool {
-        contains_any(text, choices) && contains_any(text, questions)
-    }
-}
+/// The detection vocabulary — ANSI stripping, chooser/footer/status
+/// matching, and the Claude state machine — lives in [`crate::detect`]
+/// as pure functions over `&[u8]` so it can be exercised against
+/// captured real PTY bytes, not just synthetic strings. Re-exported
+/// here under the historical `agent::detect` path the built-ins and
+/// tests reach for.
+pub use crate::detect;
 
 pub mod builtins {
     use super::*;
-
-    /// Standalone phrases that are unambiguously Claude blocking on
-    /// user input — no chat context realistically produces them, so
-    /// matching one is enough confidence to flag `Asking`. Lowercase;
-    /// matched against `s.to_lowercase()` so phrasing variants
-    /// ("Do you want to Proceed?" vs "Do you want to proceed?") both
-    /// fire without expanding the table.
-    ///
-    /// Each entry maps to one prompt shape. Keep in sync with the
-    /// fixture-driven test suite (`PROMPT_FIXTURES` in
-    /// `tests/agents.rs`) so every documented shape has explicit
-    /// coverage. Shapes covered, by tool:
-    ///   - Write tool          → "do you want to create"
-    ///   - Edit / MultiEdit    → "do you want to make this edit"
-    ///   - file overwrites     → "do you want to overwrite"
-    ///   - bash / file deletes → "do you want to delete"
-    ///   - Bash approval       → "do you want to allow"
-    ///   - plan-mode exit      → "do you want to proceed?"
-    ///   - continue chat       → "do you want to continue?"
-    ///   - apply diff/patch    → "do you want to apply"
-    ///   - tool consent        → "do you want to enable"
-    ///   - retry on failure    → "do you want to retry"
-    ///   - settings edit       → "do you want to edit its own settings"
-    const CLAUDE_STANDALONE_PROMPT_PHRASES: &[&str] = &[
-        "do you want to proceed?",
-        "do you want to continue?",
-        "do you want to apply",
-        "do you want to allow",
-        "do you want to enable",
-        "do you want to retry",
-        "do you want to create",
-        "do you want to make this edit",
-        "do you want to overwrite",
-        "do you want to delete",
-        "do you want to edit its own settings",
-    ];
 
     #[derive(Default)]
     pub struct Claude;
@@ -283,215 +212,18 @@ pub mod builtins {
             Some(vec![b'\r'])
         }
 
-        /// Claude Code's three observable states, in one detector.
-        /// Ordered most-specific first; the priority is deliberate —
-        /// a live permission chooser outranks the working status line,
-        /// which outranks the quiet input box.
-        ///
-        /// - **`InputNeeded`** — ONLY structural prompt markers (issue
-        ///   #122): the chooser arrow + numbered options, the
-        ///   `Esc to cancel` permission footer (without the input
-        ///   box's `Tab to amend`), the standalone `do you want to …`
-        ///   consent phrases, or a bare yes/no pairing. Freeform
-        ///   conversational asks ("Want me to …?", a line that merely
-        ///   ends in `?`) are NOT flagged — they were the dominant
-        ///   false-positive source and also fired spurious desktop
-        ///   notifications (#110).
-        /// - **`Working`** — Claude paints a live status line ONLY
-        ///   while busy: `✦ Gusting… (2m 2s · ↓ 7.2k tokens · …)`.
-        ///   Its presence is the reliable "working" pulser the side
-        ///   panel keys off — far more robust than the old
-        ///   `esc to interrupt`-only match, which the newer phase
-        ///   suffix sometimes replaces.
-        /// - **`Idle`** — the input box is drawn with nothing pending,
-        ///   or the output is plain non-interactive text.
-        ///
-        /// Returning `Some(_)` on every path (rather than `None`) lets
-        /// the daemon notice every transition between the three states;
-        /// without it the cached state would stick at its last value.
+        /// Claude Code's three observable states. Delegates to the pure
+        /// [`crate::detect::claude_state`] so the logic is exercisable
+        /// against captured real PTY bytes, not just synthetic strings.
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
-            let s = strip_ansi_lossy(recent_output);
-
-            // Pilot wraps every agent in tmux. The tmux client paints
-            // the screen by absolute cursor position, so the bytes
-            // pilot sees arrive in TEMPORAL order: a single visual
-            // line `❯ 1. Yes` can land in the buffer as
-            // `<cursor-move>❯<cursor-move> <cursor-move>1.<…>Yes` and
-            // strip_ansi removes the CSI runs but NOT the absolute
-            // positioning gap that may be filled with other content.
-            // So strict substring matching for `❯ 1.` fails even when
-            // the prompt is visually on screen.
-            //
-            // Generalized matcher: the arrow `❯` ANYWHERE in the
-            // buffer paired with a numbered-choice shape (any `1.` /
-            // `1)` followed by a text option AND any `2.` / `2)`)
-            // catches every chooser claude renders today: permission
-            // prompts, tool-approval, multi-choice continuations,
-            // custom yes/no — anything with at least two numbered
-            // options. The `2.` / `2)` second requirement filters out
-            // chat lists that happen to start with `1.` (the second
-            // option is the giveaway: a chooser is always followed
-            // immediately by `2.`).
-            //
-            // ASCII arrow accepted on ANY option (`> 1.`, `> 2.`,
-            // `> 3.`, …) — the user moves the cursor with j/k, and
-            // claude re-renders the arrow at the new option. Earlier
-            // we only matched `> 1.`, which silently missed the Write
-            // permission dialog when the default selection was
-            // option 2 ("Yes, and allow Claude to edit its own
-            // settings for this session").
-            let has_arrow = s.contains('❯') || has_ascii_chooser_arrow(&s);
-            let has_chooser = has_numbered_chooser_options(&s);
-            if has_arrow && has_chooser {
-                return Some(AgentState::InputNeeded);
-            }
-
-            // Permission-chooser footer: `Esc to cancel` rendered
-            // alongside a numbered-options shape (`1.` + `2.`). The
-            // permission dialog uses a SHORTER footer than the input
-            // box ("Esc to cancel" alone, without "Tab to amend"), so
-            // the input-box paired check above doesn't fire. Pairing
-            // `Esc to cancel` with the chooser shape is still high-
-            // confidence — both halves are UI-specific markers that
-            // never co-occur in chat output. This is the path that
-            // catches the Write/Edit/Bash permission dialog even when
-            // the ASCII arrow lands on option 2 or 3 (so the
-            // arrow+options branch above misses it) and the
-            // `do you want to <verb>` standalone phrase scrolled off
-            // the detection window's tail.
-            //
-            // CRITICAL: gate on the ABSENCE of `Tab to amend`. The
-            // idle input box's footer is `Esc to cancel · Tab to amend
-            // · ctrl+e to explain` — it ALSO contains `Esc to cancel`.
-            // So an idle agent with any `1.` / `2.` in its recent
-            // scrollback (numbered lists, version strings like `1.2`,
-            // changelog bullets — extremely common) used to satisfy
-            // `Esc to cancel && has_chooser` and false-fire InputNeeded
-            // while the agent was actually sitting idle. A real
-            // permission dialog REPLACES the input box, so its footer is
-            // the SHORT `Esc to cancel` WITHOUT `Tab to amend`; requiring
-            // `Tab to amend` to be absent is exactly the distinction the
-            // branch's design always intended. This was a major source
-            // of the "the ? pill is on sessions that aren't asking"
-            // false positives (issue #101).
-            if s.contains("Esc to cancel") && !s.contains("Tab to amend") && has_chooser {
-                return Some(AgentState::InputNeeded);
-            }
-
-            // Standalone high-confidence prompts. These exact phrases
-            // appear only when claude is blocking on user input —
-            // there's no realistic chat context that produces them.
-            // Lowercase comparison so phrasing variants ("Do you
-            // want to proceed?" vs "Do you want to Proceed?") both
-            // match without expanding the table. Without this the
-            // bash-permission prompt was missed entirely on long
-            // outputs where the `❯` glyph got pushed off the
-            // detection window's tail.
-            let lower = s.to_lowercase();
-            if CLAUDE_STANDALONE_PROMPT_PHRASES
-                .iter()
-                .any(|p| lower.contains(p))
-            {
-                return Some(AgentState::InputNeeded);
-            }
-
-            // Paired fallback for bare yes/no prompts (no arrow UI) +
-            // older prompt shapes. Question phrases ANY-ed with choice
-            // markers — both must be present in the buffer.
-            if super::detect::contains_paired(
-                &s,
-                &["1. Yes", "1) Yes", "(y/n)", "[y/n]"],
-                &[
-                    "Do you want",
-                    "Allow Claude",
-                    "Allow Bash",
-                    "Approve",
-                    "Continue?",
-                    "Proceed?",
-                ],
-            ) {
-                return Some(AgentState::InputNeeded);
-            }
-
-            // Working: the model is streaming or a tool is running.
-            // Claude paints a live status line ONLY while busy —
-            // `✦ Gusting… (2m 2s · ↓ 7.2k tokens · thinking some
-            // more)`. Its presence is the signal (`working_status_pos`
-            // anchors on the `esc to interrupt` hint and the
-            // `(<elapsed> · … tokens …)` live counter); the leading
-            // glyph itself cycles `·`/`✻`/`✽`/… and is unreliable to
-            // match directly.
-            //
-            // Recency guard: the detection buffer is the append-only
-            // PTY byte stream, so a finished agent's last status line
-            // still sits in it — but Claude redraws the idle input box
-            // AFTER it. Treat the agent as working only when the status
-            // line is the MORE RECENT of the two bottom-line markers
-            // (status line vs the idle box's `Tab to amend` /
-            // `? for shortcuts` footer). Without this a just-finished
-            // agent would look busy forever: it sits idle and quiet, so
-            // the buffer never appends enough new bytes to evict the
-            // stale status line.
-            if let Some(work_pos) = working_status_pos(&lower)
-                && idle_box_pos(&lower).is_none_or(|ip| work_pos > ip)
-            {
-                return Some(AgentState::Working);
-            }
-
-            // Nothing pending and not streaming: the input box is drawn
-            // and quiet, or the output is plain non-interactive text.
-            // Returning `Some(Idle)` (not the trait default `None`)
-            // lets the daemon flip Working / InputNeeded → Idle when
-            // the agent goes quiet.
-            Some(AgentState::Idle)
+            detect::claude_state(recent_output)
         }
 
-        /// Claude is ready to receive a pasted prompt when:
-        ///   1. The input-box footer is on screen (`Esc to cancel` +
-        ///      `Tab to amend` paired markers — Claude renders these
-        ///      ONLY while waiting at the prompt input).
-        ///   2. No permission chooser / Y-N gate is currently up
-        ///      (the high-confidence `❯ 1. ... 2. ...` arrow-plus-
-        ///      numbered-options pattern, OR known trust-folder
-        ///      strings).
-        ///
-        /// Returning true means "paste arrives in the input buffer,
-        /// not as a Y/N answer." Returning false means "wait — the
-        /// banner isn't done OR a permission gate is up."
+        /// Whether Claude is ready to receive a pasted prompt — input
+        /// box drawn, no permission / trust gate up. Delegates to
+        /// [`crate::detect::claude_ready_for_prompt`].
         fn detect_ready_for_prompt(&self, recent_output: &[u8]) -> bool {
-            let s = strip_ansi_lossy(recent_output);
-            // Input-box must be visible.
-            let has_input_box =
-                super::detect::contains_paired(&s, &["Esc to cancel"], &["Tab to amend"]);
-            if !has_input_box {
-                return false;
-            }
-            // Permission / chooser must NOT be visible. Same arrow-
-            // plus-numbered-options pattern `detect_state` uses for
-            // high-confidence Asking detection, plus the trust-folder
-            // string Claude shows on first run.
-            let has_arrow = s.contains('❯') || has_ascii_chooser_arrow(&s);
-            let has_chooser = has_numbered_chooser_options(&s);
-            if has_arrow && has_chooser {
-                return false;
-            }
-            // Permission-chooser footer signal — same shape
-            // `detect_state` uses to flag Asking when the ASCII arrow
-            // sits on option 2/3 instead of option 1.
-            if s.contains("Esc to cancel") && has_chooser {
-                return false;
-            }
-            let lower = s.to_lowercase();
-            if lower.contains("trust this folder")
-                || lower.contains("do you trust the files")
-                || lower.contains("do you want to proceed?")
-                || lower.contains("do you want to allow")
-                || lower.contains("do you want to create")
-                || lower.contains("do you want to make this edit")
-            {
-                return false;
-            }
-            true
+            detect::claude_ready_for_prompt(recent_output)
         }
 
         fn inject_requires_ready(&self) -> bool {
@@ -518,9 +250,9 @@ pub mod builtins {
         /// through the shared `super::detect` helpers so a new
         /// Codex prompt phrasing just appends to the slice.
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
-            let s = strip_ansi_lossy(recent_output);
-            if super::detect::contains_any(&s, super::detect::YN_PROMPT_PATTERNS)
-                || super::detect::contains_any(&s, &["approve?"])
+            let s = detect::strip_ansi_lossy(recent_output);
+            if detect::contains_any(&s, detect::YN_PROMPT_PATTERNS)
+                || detect::contains_any(&s, &["approve?"])
             {
                 return Some(AgentState::InputNeeded);
             }
@@ -548,135 +280,14 @@ pub mod builtins {
         /// UI markers. Shares the standard `YN_PROMPT_PATTERNS`
         /// slice with Codex / GenericCli.
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
-            let s = strip_ansi_lossy(recent_output);
-            if super::detect::contains_any(&s, super::detect::YN_PROMPT_PATTERNS) {
+            let s = detect::strip_ansi_lossy(recent_output);
+            if detect::contains_any(&s, detect::YN_PROMPT_PATTERNS) {
                 return Some(AgentState::InputNeeded);
             }
             // No Cursor "working" pulser is recognised yet — fall back
             // to `Idle`, never falsely busy.
             Some(AgentState::Idle)
         }
-    }
-
-    /// Detect Claude's ASCII selection-arrow at ANY numbered option:
-    /// `> 0.`–`> 9.` or `> 0)`–`> 9)`.
-    ///
-    /// Earlier we only matched `> 1.` literally — that quietly missed
-    /// permission dialogs whose default selection is option 2
-    /// ("Yes, and allow Claude to edit its own settings for this
-    /// session") because the cursor renders as `> 2.`, not `> 1.`.
-    /// `windows(4)` walks the byte stream once with no allocations.
-    /// ASCII-only sentinels (`>`, ` `, digit, `.`, `)`) are safe to
-    /// scan against raw bytes — these values never appear inside a
-    /// multi-byte UTF-8 sequence.
-    fn has_ascii_chooser_arrow(s: &str) -> bool {
-        s.as_bytes().windows(4).any(|w| {
-            w[0] == b'>' && w[1] == b' ' && w[2].is_ascii_digit() && (w[3] == b'.' || w[3] == b')')
-        })
-    }
-
-    /// Numbered-chooser shape: at least one `1.` / `1)` AND at least
-    /// one `2.` / `2)` in the buffer. The chooser is always followed
-    /// by `2.` — that's what distinguishes it from a chat list that
-    /// happens to start with `1.`. Used by every Claude detection
-    /// branch that needs to know "is there a chooser on screen?"
-    /// (arrow + options, `Esc to cancel` + options, and the symmetric
-    /// `detect_ready_for_prompt` veto).
-    fn has_numbered_chooser_options(s: &str) -> bool {
-        (s.contains("1.") || s.contains("1)")) && (s.contains("2.") || s.contains("2)"))
-    }
-
-    /// Byte offset of the most recent live "working" status-line
-    /// marker in `lower` (the ANSI-stripped, lowercased buffer), or
-    /// `None` when nothing in the buffer says Claude is busy.
-    ///
-    /// Claude renders a status line ONLY while streaming / running a
-    /// tool: `✦ Gusting… (2m 2s · ↓ 7.2k tokens · thinking some more)`
-    /// or `✻ Cogitating… (8s · ↑ 412 tokens · esc to interrupt)`. We
-    /// anchor on its two stable shapes — the `esc to interrupt`
-    /// interrupt hint, and the `(<elapsed> · … tokens …)` live counter
-    /// (a single line carrying both the `·` separator and the word
-    /// `tokens`). The newer status line sometimes shows a phase suffix
-    /// (`· thinking some more`) instead of the interrupt hint, so the
-    /// counter shape is what keeps detection robust. Requiring `·` and
-    /// `tokens` on the SAME line avoids a cross-line false match (a
-    /// `tokens` in chat prose plus a `·` in the idle footer).
-    fn working_status_pos(lower: &str) -> Option<usize> {
-        let interrupt = lower.rfind("esc to interrupt");
-        let counter = last_line_pos(lower, |l| l.contains('·') && l.contains("tokens"));
-        [interrupt, counter].into_iter().flatten().max()
-    }
-
-    /// Byte offset of the most recent idle input-box footer in
-    /// `lower`. Claude draws this footer only once it's done and
-    /// waiting at the prompt, so it's the recency anchor that beats a
-    /// stale status line still sitting in the append-only buffer.
-    fn idle_box_pos(lower: &str) -> Option<usize> {
-        [lower.rfind("tab to amend"), lower.rfind("? for shortcuts")]
-            .into_iter()
-            .flatten()
-            .max()
-    }
-
-    /// Start offset of the last line satisfying `pred`. Walks the
-    /// buffer once, keeping line boundaries (`split_inclusive`) so the
-    /// returned offset is comparable against `rfind` positions in the
-    /// same string.
-    fn last_line_pos(s: &str, pred: impl Fn(&str) -> bool) -> Option<usize> {
-        let mut best = None;
-        let mut offset = 0;
-        for line in s.split_inclusive('\n') {
-            if pred(line) {
-                best = Some(offset);
-            }
-            offset += line.len();
-        }
-        best
-    }
-
-    fn strip_ansi_lossy(bytes: &[u8]) -> String {
-        // Filter out ANSI CSI / OSC escape sequences in-place, then
-        // UTF-8-decode the remainder. Earlier this function pushed
-        // `bytes[i] as char` — that mangled multi-byte UTF-8 glyphs
-        // like Claude's choice arrow `❯` (U+276F, 3 bytes) into three
-        // separate Latin-1 chars, so any pattern containing the
-        // glyph silently failed to match. We need the raw glyph
-        // preserved so the patterns can search for it literally.
-        let mut filtered: Vec<u8> = Vec::with_capacity(bytes.len());
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == 0x1b {
-                i += 1;
-                if i >= bytes.len() {
-                    break;
-                }
-                let intro = bytes[i];
-                i += 1;
-                if intro == b'[' {
-                    while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
-                        i += 1;
-                    }
-                    if i < bytes.len() {
-                        i += 1;
-                    }
-                } else if intro == b']' {
-                    while i < bytes.len() && bytes[i] != 0x07 {
-                        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-                            i += 2;
-                            break;
-                        }
-                        i += 1;
-                    }
-                    if i < bytes.len() && bytes[i] == 0x07 {
-                        i += 1;
-                    }
-                }
-                continue;
-            }
-            filtered.push(bytes[i]);
-            i += 1;
-        }
-        String::from_utf8_lossy(&filtered).into_owned()
     }
 
     /// User-defined agent loaded from YAML. Kept minimal — spawn cmd +

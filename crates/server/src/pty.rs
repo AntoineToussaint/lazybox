@@ -213,6 +213,13 @@ impl DaemonPty {
         let reader_finished = finished.clone();
         let reader_notify = finished_notify.clone();
         let reader_seq = last_seq.clone();
+        // Raw-byte capture for building the detector fixture corpus. When
+        // `PILOT_CAPTURE_PTY=<dir>` is set we dump every chunk — exactly
+        // the bytes the state detector scrapes — to disk before any ring
+        // or broadcast processing. Keyed by child pid so concurrent
+        // sessions land in separate files. Off by default; never on a
+        // production path.
+        let mut capture = open_capture(child_pid);
         std::thread::Builder::new()
             .name("pilot-server-pty".into())
             .spawn(move || {
@@ -222,6 +229,9 @@ impl DaemonPty {
                     match reader.read(&mut buf) {
                         Ok(0) => break, // EOF — child exited
                         Ok(n) => {
+                            if let Some(f) = capture.as_mut() {
+                                let _ = f.write_all(&buf[..n]);
+                            }
                             let bytes: Arc<[u8]> = Arc::from(&buf[..n]);
                             let seq = reader_seq.fetch_add(1, Ordering::SeqCst) + 1;
                             // Ring write uses blocking lock; this thread is
@@ -367,6 +377,91 @@ impl DaemonPty {
     /// (seq counts chunks, not bytes).
     pub async fn total_written(&self) -> u64 {
         self.ring.lock().await.total_written
+    }
+}
+
+/// Open a per-PTY capture file when `PILOT_CAPTURE_PTY=<dir>` is set,
+/// else `None`. The dir is created if missing; an unset var or any IO
+/// error disables capture silently (a warn for the error) — capture is
+/// a developer aid, never load-bearing. Keyed by child pid so two
+/// concurrent sessions don't interleave into one file. When pid is
+/// unknown we fall back to a fixed name and append, so a single session
+/// still captures.
+fn open_capture(child_pid: Option<u32>) -> Option<std::fs::File> {
+    let dir = std::env::var_os("PILOT_CAPTURE_PTY")?;
+    let dir = PathBuf::from(dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!("PILOT_CAPTURE_PTY: create {} failed: {e}", dir.display());
+        return None;
+    }
+    let name = match child_pid {
+        Some(pid) => format!("pty-{pid}.bin"),
+        None => "pty-unknown.bin".to_string(),
+    };
+    let path = dir.join(name);
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(f) => {
+            tracing::info!(
+                "PILOT_CAPTURE_PTY: capturing raw PTY bytes to {}",
+                path.display()
+            );
+            Some(f)
+        }
+        Err(e) => {
+            tracing::warn!("PILOT_CAPTURE_PTY: open {} failed: {e}", path.display());
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn open_capture_is_none_when_var_unset() {
+        // SAFETY: this test serialises on the PILOT_CAPTURE_PTY var,
+        // which no other test reads or writes; it restores nothing
+        // because the var is left unset.
+        let prior = std::env::var_os("PILOT_CAPTURE_PTY");
+        unsafe {
+            std::env::remove_var("PILOT_CAPTURE_PTY");
+        }
+        assert!(open_capture(Some(123)).is_none());
+        if let Some(p) = prior {
+            unsafe {
+                std::env::set_var("PILOT_CAPTURE_PTY", p);
+            }
+        }
+    }
+
+    #[test]
+    fn open_capture_writes_to_pid_keyed_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // SAFETY: see `open_capture_is_none_when_var_unset` — these two
+        // tests are the only ones touching this var. Restore the prior
+        // value (if any) on exit so neither leaks into the other.
+        let prior = std::env::var_os("PILOT_CAPTURE_PTY");
+        unsafe {
+            std::env::set_var("PILOT_CAPTURE_PTY", dir.path());
+        }
+        let mut f = open_capture(Some(4242)).expect("capture file opens when var is set");
+        f.write_all(b"\x1b[2Khello").unwrap();
+        f.flush().unwrap();
+        drop(f);
+        let captured = std::fs::read(dir.path().join("pty-4242.bin")).unwrap();
+        assert_eq!(captured, b"\x1b[2Khello");
+        unsafe {
+            match prior {
+                Some(p) => std::env::set_var("PILOT_CAPTURE_PTY", p),
+                None => std::env::remove_var("PILOT_CAPTURE_PTY"),
+            }
+        }
     }
 }
 

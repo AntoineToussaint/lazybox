@@ -93,6 +93,27 @@ const FIXTURES: &[ByteFixture] = &[
         expected: AgentState::Working,
         ready: false,
     },
+    // #156 false positive: a parked `❯` prompt in the composer above a
+    // prose numbered list fired InputNeeded on an idle screen. The
+    // composer footer is the most recent bottom-of-screen marker, so no
+    // live chooser can be up — must read Idle.
+    ByteFixture {
+        name: "false_positive_prose_list",
+        bytes: include_bytes!("fixtures/false_positive_prose_list.bin"),
+        expected: AgentState::Idle,
+        ready: true,
+    },
+    // #156 false-negative guard: a live permission chooser rendered
+    // below a now-stale composer footer still in the detect window. The
+    // chooser markers are more recent than the footer, so it must still
+    // fire InputNeeded — a naive "composer visible → not asking" veto
+    // would miss it.
+    ByteFixture {
+        name: "permission_below_stale_composer",
+        bytes: include_bytes!("fixtures/permission_below_stale_composer.bin"),
+        expected: AgentState::InputNeeded,
+        ready: false,
+    },
 ];
 
 #[test]

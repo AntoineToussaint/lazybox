@@ -469,19 +469,27 @@ pub async fn handle_spawn(
             // it on the next. Without this guard the pill flickers
             // every few seconds while Claude is genuinely still
             // waiting. Only damp the edge that LEAVES InputNeeded —
-            // a transient ticker chunk that scrolls the prompt out of
-            // buffer shouldn't drop "needs input" to Working/Idle.
-            if current == Some(pilot_ipc::AgentState::InputNeeded)
-                && new_state != pilot_ipc::AgentState::InputNeeded
-                && let Some(t) = last_input_needed_at
-                && t.elapsed() < hysteresis
-            {
+            // and only when the new reading is the ambiguous
+            // fall-through. A clear signal that the prompt is gone — a
+            // live Working status line, or an idle composer the
+            // readiness probe affirmatively recognizes — is honored
+            // immediately, so a wrong InputNeeded can't stick for the
+            // full window once Claude is visibly streaming or idle.
+            let clear_exit_signal = new_state == pilot_ipc::AgentState::Working
+                || (new_state == pilot_ipc::AgentState::Idle
+                    && agent.detect_ready_for_prompt(detect_window));
+            if should_suppress_input_needed_exit(
+                current,
+                new_state,
+                clear_exit_signal,
+                last_input_needed_at.map(|t| t.elapsed()),
+                hysteresis,
+            ) {
                 tracing::debug!(
                     terminal_id = ?id,
                     ?new_state,
-                    "state hysteresis: suppressing InputNeeded → {:?} (only {:?} since last InputNeeded)",
+                    "state hysteresis: suppressing InputNeeded → {:?}",
                     new_state,
-                    t.elapsed(),
                 );
                 return;
             }
@@ -1108,6 +1116,30 @@ pub(crate) fn skip_permissions_for(autonomous: bool, cfg: &pilot_config::Config)
     } else {
         cfg.agent.skip_permissions
     }
+}
+
+/// Hysteresis decision for the edge that LEAVES `InputNeeded`.
+///
+/// Claude's status-bar ticker can scroll the prompt out of the detect
+/// window for a single chunk, flipping the reading to Idle even though
+/// Claude is genuinely still waiting; without damping, the `?` pill
+/// flickers off and back. But a (possibly wrong) `InputNeeded` must NOT
+/// stick for the full hysteresis window once a CLEAR signal says
+/// otherwise — a live `Working` status line or an affirmatively-drawn
+/// idle composer. So the transient is damped ONLY when the new reading
+/// is the ambiguous fall-through (`clear_exit_signal == false`); a
+/// positive marker is honored immediately. Returns true to suppress.
+fn should_suppress_input_needed_exit(
+    current: Option<pilot_ipc::AgentState>,
+    new_state: pilot_ipc::AgentState,
+    clear_exit_signal: bool,
+    since_last_input_needed: Option<std::time::Duration>,
+    hysteresis: std::time::Duration,
+) -> bool {
+    current == Some(pilot_ipc::AgentState::InputNeeded)
+        && new_state != pilot_ipc::AgentState::InputNeeded
+        && !clear_exit_signal
+        && since_last_input_needed.is_some_and(|e| e < hysteresis)
 }
 
 /// Pure-data lookup so tests don't need a real YAML on disk.
@@ -2016,6 +2048,63 @@ mod tests {
     fn env_for_repo_returns_empty_when_repo_not_configured() {
         let cfg = pilot_config::Config::default();
         assert!(env_for_repo(&cfg, "no/such-repo").is_empty());
+    }
+
+    #[test]
+    fn hysteresis_damps_only_ambiguous_input_needed_exit() {
+        use pilot_ipc::AgentState::{Idle, InputNeeded, Working};
+        let hyst = std::time::Duration::from_secs(8);
+        let recent = Some(std::time::Duration::from_secs(1));
+        let stale = Some(std::time::Duration::from_secs(9));
+
+        // Ambiguous fall-through to Idle within the window → damp.
+        assert!(should_suppress_input_needed_exit(
+            Some(InputNeeded),
+            Idle,
+            false,
+            recent,
+            hyst,
+        ));
+        // A clear signal (live Working / affirmative idle composer) is
+        // honored immediately, even within the window.
+        assert!(!should_suppress_input_needed_exit(
+            Some(InputNeeded),
+            Working,
+            true,
+            recent,
+            hyst,
+        ));
+        assert!(!should_suppress_input_needed_exit(
+            Some(InputNeeded),
+            Idle,
+            true,
+            recent,
+            hyst,
+        ));
+        // Past the window → no damping regardless.
+        assert!(!should_suppress_input_needed_exit(
+            Some(InputNeeded),
+            Idle,
+            false,
+            stale,
+            hyst,
+        ));
+        // Never damp transitions that aren't leaving InputNeeded.
+        assert!(!should_suppress_input_needed_exit(
+            Some(Working),
+            Idle,
+            false,
+            recent,
+            hyst,
+        ));
+        // No prior InputNeeded timestamp → nothing to damp.
+        assert!(!should_suppress_input_needed_exit(
+            Some(InputNeeded),
+            Idle,
+            false,
+            None,
+            hyst,
+        ));
     }
 
     #[test]

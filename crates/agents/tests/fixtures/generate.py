@@ -214,3 +214,46 @@ write("idle_with_numbered_list.bin", [
     cup(18, 1), sgr(90), "│".encode("utf-8"), RESET, b" > \r\n",
     cup(20, 1), sgr(2), "Esc to cancel · Tab to amend · ctrl+e to explain".encode("utf-8"), RESET,
 ])
+
+# ── FALSE POSITIVE (#156): prose numbered list + a parked `❯` prompt ──────
+# The screen is idle: the agent printed a numbered list in its prose and a
+# `❯`-prefixed prompt is parked in the composer awaiting the user. The old
+# detector saw `❯` (anywhere) + `1.`/`2.` (anywhere) and fired InputNeeded
+# on this quiet screen. The composer footer (`? for shortcuts`) is the most
+# recent bottom-of-screen marker, so a live chooser cannot be up — it must
+# read Idle.
+write("false_positive_prose_list.bin", [
+    cup(12, 1), CLEAR_LINE,
+    sgr(2), "●".encode("utf-8"), RESET, b" Here's the rollout plan:\r\n",
+    cup(13, 1), b"  1. Ship the parser refactor\r\n",
+    cup(14, 1), b"  2. Backfill the fixtures\r\n",
+    cup(15, 1), b"  3. Flip the flag\r\n",
+    cup(18, 1), sgr(90), "╭──────────────────────────────────╮".encode("utf-8"), RESET, b"\r\n",
+    sgr(90), "│".encode("utf-8"), RESET,
+    " ❯ ship it when CI is green        ".encode("utf-8"),
+    sgr(90), "│".encode("utf-8"), RESET, b"\r\n",
+    sgr(90), "╰──────────────────────────────────╯".encode("utf-8"), RESET, b"\r\n",
+    cup(21, 3), sgr(2, 90), b"? for shortcuts", RESET,
+])
+
+# ── FALSE NEGATIVE GUARD (#156): live chooser BELOW a stale composer ──────
+# A real permission dialog renders below a now-stale composer footer still
+# sitting in the detect window (the user typed, Claude went to work, then
+# hit a permission gate — all within one 16 KiB window). The chooser
+# markers are MORE RECENT than the stale `? for shortcuts`, so recency must
+# still fire InputNeeded. A naive "composer footer present → not asking"
+# veto would wrongly miss this; the position-based gate gets it right.
+write("permission_below_stale_composer.bin", [
+    cup(8, 1), sgr(2), "● Running the build…".encode("utf-8"), RESET, b"\r\n",
+    cup(9, 3), sgr(2, 90), b"? for shortcuts", RESET, b"\r\n",   # stale composer footer
+    cup(11, 1), CLEAR_LINE,
+    sgr(1), b"Allow Bash this command?", RESET, b"\r\n",
+    cup(12, 1), CLEAR_LINE,
+    "  ❯ ".encode("utf-8"),
+    cup(24, 1), CLEAR_LINE,
+    sgr(2), "(3s · 41 tokens)".encode("utf-8"), RESET,
+    cup(12, 5), sgr(7), b"1. Yes", RESET, b"\r\n",
+    cup(13, 5), b"2. Yes, and don't ask again\r\n",
+    cup(14, 5), b"3. No, and tell Claude what to do differently\r\n",
+    cup(16, 1), sgr(2), b"Esc to cancel", RESET,
+])

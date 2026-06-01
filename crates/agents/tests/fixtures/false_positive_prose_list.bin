@@ -1,0 +1,8 @@
+[12;1H[2K[2m●[0m Here's the rollout plan:
+[13;1H  1. Ship the parser refactor
+[14;1H  2. Backfill the fixtures
+[15;1H  3. Flip the flag
+[18;1H[90m╭──────────────────────────────────╮[0m
+[90m│[0m ❯ ship it when CI is green        [90m│[0m
+[90m╰──────────────────────────────────╯[0m
+[21;3H[2;90m? for shortcuts[0m

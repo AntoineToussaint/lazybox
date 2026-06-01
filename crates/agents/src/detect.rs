@@ -133,6 +133,18 @@ fn claude_state_of(s: &str) -> AgentState {
         return AgentState::InputNeeded;
     }
 
+    // Status-bar markers below are matched against `compact` — the
+    // lowercased buffer with ASCII spaces removed. tmux/Claude paint the
+    // bottom status bar by absolute cursor position, so a footer phrase
+    // (`? for shortcuts`, `Esc to cancel`, the `esc to interrupt` hint)
+    // reaches pilot as `?forshortcuts` / `esctocancel` / `esctointerrupt`
+    // — the inter-word gaps are cursor moves, not space bytes. The SAME
+    // phrases printed into scrollback keep their spaces. Comparing the
+    // space-free form matches either rendering; the spaced literal alone
+    // silently never matched the footer, which is why readiness never
+    // signalled and the injector rode its 10s deadline.
+    let compact = compact_lower(s);
+
     // Permission-chooser footer: `Esc to cancel` rendered alongside a
     // numbered-options shape. The permission dialog uses a SHORTER
     // footer than the input box ("Esc to cancel" alone, without "Tab to
@@ -145,33 +157,34 @@ fn claude_state_of(s: &str) -> AgentState {
     // `Esc to cancel` WITHOUT `Tab to amend`; requiring `Tab to amend`
     // to be absent is exactly the distinction the branch's design
     // always intended.
-    if s.contains("Esc to cancel") && !s.contains("Tab to amend") && has_chooser {
+    if compact.contains("esctocancel") && !compact.contains("tabtoamend") && has_chooser {
         return AgentState::InputNeeded;
     }
 
     // Standalone high-confidence prompts. These exact phrases appear
-    // only when claude is blocking on user input. Lowercase comparison
-    // so phrasing variants both match without expanding the table.
-    let lower = s.to_lowercase();
-    if contains_any(&lower, CLAUDE_STANDALONE_PROMPT_PHRASES) {
+    // only when claude is blocking on user input. Matched space-free so
+    // phrasing variants and the footer's stripped spacing both fire
+    // without expanding the table.
+    if contains_any_compact(&compact, CLAUDE_STANDALONE_PROMPT_PHRASES) {
         return AgentState::InputNeeded;
     }
 
     // Paired fallback for bare yes/no prompts (no arrow UI) + older
     // prompt shapes. Question phrases ANY-ed with choice markers — both
     // must be present in the buffer.
-    if contains_paired(
-        s,
-        &["1. Yes", "1) Yes", "(y/n)", "[y/n]"],
-        &[
-            "Do you want",
-            "Allow Claude",
-            "Allow Bash",
-            "Approve",
-            "Continue?",
-            "Proceed?",
-        ],
-    ) {
+    if contains_any_compact(&compact, &["1. Yes", "1) Yes", "(y/n)", "[y/n]"])
+        && contains_any_compact(
+            &compact,
+            &[
+                "Do you want",
+                "Allow Claude",
+                "Allow Bash",
+                "Approve",
+                "Continue?",
+                "Proceed?",
+            ],
+        )
+    {
         return AgentState::InputNeeded;
     }
 
@@ -181,8 +194,10 @@ fn claude_state_of(s: &str) -> AgentState {
     // agent's last status line still sits in it — but Claude redraws the
     // idle input box AFTER it. Treat the agent as working only when the
     // status line is the MORE RECENT of the two bottom-line markers.
-    if let Some(work_pos) = working_status_pos(&lower)
-        && idle_box_pos(&lower).is_none_or(|ip| work_pos > ip)
+    // Both positions are computed in `compact` so their relative order
+    // (all the recency guard needs) is preserved.
+    if let Some(work_pos) = working_status_pos(&compact)
+        && idle_box_pos(&compact).is_none_or(|ip| work_pos > ip)
     {
         return AgentState::Working;
     }
@@ -232,16 +247,47 @@ pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
     // The composer must actually be on screen. The boot banner is also
     // `Idle`, so requiring a composer footer marker excludes it — we
     // don't want to paste into the banner before the input box exists.
-    input_box_visible(&lower)
+    input_box_visible(&compact_lower(&s))
 }
 
 /// Whether Claude's input box (composer) footer is on screen. Claude
 /// draws one of these footers ONLY once it's done streaming and waiting
 /// at the prompt: the long form `Esc to cancel · Tab to amend · …` or
 /// the short newer form `? for shortcuts`. Either is proof the composer
-/// is drawn.
-fn input_box_visible(lower: &str) -> bool {
-    lower.contains("tab to amend") || lower.contains("? for shortcuts")
+/// is drawn. `compact` is the space-free buffer (see [`compact_lower`])
+/// because the live footer is painted by absolute cursor position and
+/// arrives spaceless (`?forshortcuts`).
+fn input_box_visible(compact: &str) -> bool {
+    compact.contains("tabtoamend") || compact.contains("?forshortcuts")
+}
+
+/// Lowercased copy of `s` with ASCII spaces removed. tmux/Claude render
+/// the bottom status bar by absolute cursor position, so a footer phrase
+/// reaches pilot with its inter-word gaps as cursor moves rather than
+/// space bytes (`? for shortcuts` → `?forshortcuts`), while the same
+/// phrase printed into scrollback keeps its spaces. Matching against
+/// this form catches a marker in either rendering. Newlines are
+/// preserved so the per-line working-counter scan still sees line
+/// boundaries.
+fn compact_lower(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c != ' ')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// [`contains_any`] against the space-free buffer, compacting each
+/// pattern the same way (lowercase, spaces removed) so a human-readable
+/// constant table written WITH spaces matches the spaceless wire form.
+fn contains_any_compact(compact: &str, patterns: &[&str]) -> bool {
+    patterns.iter().any(|p| {
+        let needle: String = p
+            .chars()
+            .filter(|c| *c != ' ')
+            .flat_map(char::to_lowercase)
+            .collect();
+        compact.contains(&needle)
+    })
 }
 
 /// Detect Claude's ASCII selection-arrow at ANY numbered option:
@@ -261,33 +307,61 @@ fn has_ascii_chooser_arrow(s: &str) -> bool {
 /// `2.` / `2)` in the buffer. The chooser is always followed by `2.` —
 /// that's what distinguishes it from a chat list that happens to start
 /// with `1.`.
+///
+/// The delimiter must NOT be immediately followed by another ASCII
+/// digit. Without that guard a decimal or dotted version number reads
+/// as a chooser: Claude's own boot banner is `Claude Code v2.1.159`,
+/// whose `2.1`/`1.1` satisfy the bare `1.`+`2.` test, and the composer
+/// prompt glyph `❯` satisfies the arrow test — so a freshly-spawned IDLE
+/// composer (banner still in the detection window) misread as a live
+/// chooser → `InputNeeded`, which both masked the Working/Idle states
+/// and blocked the spawn-time readiness signal. A real option (`1. Yes`,
+/// `2. No`) is followed by a space or letter, never a digit, so the
+/// guard keeps every genuine chooser while rejecting `7.2k`, `4.8`, and
+/// `2.1.159`.
 fn has_numbered_chooser_options(s: &str) -> bool {
-    (s.contains("1.") || s.contains("1)")) && (s.contains("2.") || s.contains("2)"))
+    has_option_marker(s, b'1') && has_option_marker(s, b'2')
+}
+
+/// True if `s` contains `<digit>.` or `<digit>)` where the delimiter is
+/// not immediately followed by another ASCII digit (which would make it
+/// part of a number rather than an option label). ASCII-only sentinels
+/// are safe against raw bytes — none appear inside a multi-byte UTF-8
+/// sequence.
+fn has_option_marker(s: &str, digit: u8) -> bool {
+    let b = s.as_bytes();
+    b.windows(2).enumerate().any(|(i, w)| {
+        w[0] == digit
+            && (w[1] == b'.' || w[1] == b')')
+            && !b.get(i + 2).is_some_and(u8::is_ascii_digit)
+    })
 }
 
 /// Byte offset of the most recent live "working" status-line marker in
-/// `lower` (the ANSI-stripped, lowercased buffer), or `None` when
-/// nothing in the buffer says Claude is busy.
+/// `compact` (the lowercased, space-free buffer — see [`compact_lower`]),
+/// or `None` when nothing in the buffer says Claude is busy.
 ///
 /// Claude renders a status line ONLY while streaming / running a tool:
 /// `✦ Gusting… (2m 2s · ↓ 7.2k tokens · thinking some more)` or
 /// `✻ Cogitating… (8s · ↑ 412 tokens · esc to interrupt)`. We anchor on
-/// its two stable shapes — the `esc to interrupt` interrupt hint, and
-/// the `(<elapsed> · … tokens …)` live counter (a single line carrying
-/// both the `·` separator and the word `tokens`). Requiring `·` and
-/// `tokens` on the SAME line avoids a cross-line false match.
-fn working_status_pos(lower: &str) -> Option<usize> {
-    let interrupt = lower.rfind("esc to interrupt");
-    let counter = last_line_pos(lower, |l| l.contains('·') && l.contains("tokens"));
+/// its two stable shapes — the `esc to interrupt` interrupt hint (which
+/// arrives spaceless as `esctointerrupt` when Claude paints it in the
+/// status bar), and the `(<elapsed> · … tokens …)` live counter (a
+/// single line carrying both the `·` separator and the word `tokens`).
+/// Requiring `·` and `tokens` on the SAME line avoids a cross-line false
+/// match.
+fn working_status_pos(compact: &str) -> Option<usize> {
+    let interrupt = compact.rfind("esctointerrupt");
+    let counter = last_line_pos(compact, |l| l.contains('·') && l.contains("tokens"));
     [interrupt, counter].into_iter().flatten().max()
 }
 
-/// Byte offset of the most recent idle input-box footer in `lower`.
+/// Byte offset of the most recent idle input-box footer in `compact`.
 /// Claude draws this footer only once it's done and waiting at the
 /// prompt, so it's the recency anchor that beats a stale status line
 /// still sitting in the append-only buffer.
-fn idle_box_pos(lower: &str) -> Option<usize> {
-    [lower.rfind("tab to amend"), lower.rfind("? for shortcuts")]
+fn idle_box_pos(compact: &str) -> Option<usize> {
+    [compact.rfind("tabtoamend"), compact.rfind("?forshortcuts")]
         .into_iter()
         .flatten()
         .max()
@@ -485,6 +559,22 @@ mod tests {
     }
 
     #[test]
+    fn numbered_chooser_ignores_version_and_decimal_numbers() {
+        // The `N.` of a version string / decimal is followed by another
+        // digit, so it must NOT read as an option label. Claude's boot
+        // banner carries `Claude Code v2.1.159`, which together with the
+        // composer's `❯` prompt glyph used to misfire an idle composer
+        // as a live chooser.
+        assert!(!has_numbered_chooser_options("Claude Code v2.1.159"));
+        assert!(!has_numbered_chooser_options(
+            "Opus 4.8 · 1.2k tokens · 7.2k"
+        ));
+        // A genuine chooser whose options happen to sit beside a version
+        // banner still fires — the option `N.` is followed by a space.
+        assert!(has_numbered_chooser_options("v2.1.159\n1. Yes\n2. No"));
+    }
+
+    #[test]
     fn last_line_pos_returns_start_offset_of_final_match() {
         // Two matching lines — the offset of the LATER one wins, and it's
         // a byte offset comparable against `rfind` in the same string.
@@ -497,13 +587,30 @@ mod tests {
     #[test]
     fn working_status_position_reflects_recency_order() {
         // The recency guard in `claude_state_of` compares these two
-        // offsets. Inputs are pre-lowercased, as the callers pass them.
+        // offsets in the space-free buffer, as the callers pass it.
         // Status line AFTER the idle footer → working is the more recent.
-        let work_recent = "esc to cancel · tab to amend\n✻ (8s · 412 tokens · esc to interrupt)";
-        assert!(working_status_pos(work_recent) > idle_box_pos(work_recent));
+        let work_recent =
+            compact_lower("esc to cancel · tab to amend\n✻ (8s · 412 tokens · esc to interrupt)");
+        assert!(working_status_pos(&work_recent) > idle_box_pos(&work_recent));
         // Idle footer AFTER a now-stale status line → footer is the more
         // recent, so the agent reads as done rather than forever-busy.
-        let idle_recent = "✻ (esc to interrupt)\ndone\n? for shortcuts";
-        assert!(working_status_pos(idle_recent) < idle_box_pos(idle_recent));
+        let idle_recent = compact_lower("✻ (esc to interrupt)\ndone\n? for shortcuts");
+        assert!(working_status_pos(&idle_recent) < idle_box_pos(&idle_recent));
+    }
+
+    #[test]
+    fn compact_lower_strips_spaces_and_lowercases_but_keeps_newlines() {
+        assert_eq!(compact_lower("? For Shortcuts"), "?forshortcuts");
+        assert_eq!(compact_lower("Esc to cancel"), "esctocancel");
+        assert_eq!(compact_lower("a b\nc d"), "ab\ncd");
+    }
+
+    #[test]
+    fn contains_any_compact_matches_across_stripped_spacing() {
+        // The live footer arrives spaceless; the constant table is
+        // written with spaces. Both compact to the same form.
+        let compact = compact_lower("…doyouwanttoproceed?…");
+        assert!(contains_any_compact(&compact, &["Do you want to proceed?"]));
+        assert!(!contains_any_compact(&compact, &["Do you want to delete"]));
     }
 }

@@ -70,6 +70,29 @@ const FIXTURES: &[ByteFixture] = &[
         expected: AgentState::Idle,
         ready: true,
     },
+    // The genuine fresh-spawn idle screen (#153). Carries the version
+    // banner `v2.1.159` (decimals that look like option labels) + the
+    // composer's `❯` prompt glyph + the spaceless `?forshortcuts`
+    // status-bar footer. Must read Idle AND ready — the combination that
+    // used to misfire InputNeeded and never signal ready, so the
+    // spawn-time injector rode its 10s hard deadline on every start.
+    ByteFixture {
+        name: "claude_real_idle_ready",
+        bytes: include_bytes!("fixtures/claude_real_idle_ready.bin"),
+        expected: AgentState::Idle,
+        ready: true,
+    },
+    // A genuinely active session (#153): scrolling bash output, the live
+    // `(10s · ↓ 137 tokens)` counter, the spaceless `esctointerrupt`
+    // hint — plus the same version banner + composer `❯` that masked the
+    // Working state behind a false InputNeeded. Must read Working, never
+    // ready.
+    ByteFixture {
+        name: "claude_real_working_statusbar",
+        bytes: include_bytes!("fixtures/claude_real_working_statusbar.bin"),
+        expected: AgentState::Working,
+        ready: false,
+    },
 ];
 
 #[test]

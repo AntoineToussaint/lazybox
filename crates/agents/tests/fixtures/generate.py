@@ -133,6 +133,76 @@ write("finished_with_parked_prompt.bin", [
     cup(22, 3), sgr(2, 90), b"? for shortcuts", RESET,
 ])
 
+# ── REAL idle ready screen (captured from claude 2.1.x) ──────────────────
+# The genuine fresh-spawn idle screen, reproduced from a real PILOT_CAPTURE_PTY
+# dump. Two properties broke detection until #153:
+#   1. The boot banner carries the version `Claude Code v2.1.159`; its
+#      `2.1`/`1.1` decimals satisfied the bare `1.`+`2.` chooser test, and
+#      the composer prompt glyph `❯` satisfied the arrow test — so an IDLE
+#      composer misread as a live chooser (InputNeeded), masking Idle/Working
+#      and blocking the readiness signal.
+#   2. The composer footer is painted into the status bar by ABSOLUTE cursor
+#      position, so `? for shortcuts` arrives with NO space bytes between the
+#      tokens (`?forshortcuts`). The spaced literal never matched, readiness
+#      never fired, and the injector rode its 10s deadline EVERY spawn.
+# This fixture must report Idle AND ready.
+def spaceless_footer():
+    # Each token placed at an absolute column → strip_ansi yields the tokens
+    # concatenated with no spaces, exactly as the live status bar arrives.
+    return [
+        cup(40, 1), CLEAR_LINE,
+        sgr(2, 90), b"?", cup(40, 3), b"for", cup(40, 7), b"shortcuts", RESET,
+        cup(40, 17), "·".encode("utf-8"),
+        cup(40, 19), "←".encode("utf-8"), cup(40, 21), b"for", cup(40, 25), b"agents",
+        cup(40, 90), "●".encode("utf-8"), cup(40, 92), b"high",
+        cup(40, 97), "·".encode("utf-8"), cup(40, 99), b"/effort",
+    ]
+
+
+write("claude_real_idle_ready.bin", [
+    HIDE_CUR,
+    ESC + b"[2J", cup(1, 1),
+    sgr(1, 34), "╭─── Claude Code v2.1.159 ─────────────────────────────╮".encode("utf-8"), RESET, b"\r\n",
+    sgr(34), "│".encode("utf-8"), RESET, b"  Welcome back!   ",
+    sgr(34), "│".encode("utf-8"), RESET, b"\r\n",
+    sgr(34), "│".encode("utf-8"), RESET, b"  Opus 4.8 (1M context)  ",
+    sgr(34), "│".encode("utf-8"), RESET, b"\r\n",
+    sgr(34), "╰──────────────────────────────────────────────────────╯".encode("utf-8"), RESET, b"\r\n",
+    cup(20, 1), CLEAR_LINE,
+    "────────────────────────────────────────────────────────".encode("utf-8"), b"\r\n",
+    cup(21, 1), "❯ ".encode("utf-8"),
+    sgr(2), b"Try \"fix lint errors\"", RESET, b"\r\n",
+    cup(22, 1), "────────────────────────────────────────────────────────".encode("utf-8"), b"\r\n",
+    *spaceless_footer(),
+    SHOW_CUR,
+])
+
+# ── REAL active-work transcript (captured from claude 2.1.x) ─────────────
+# A genuinely-streaming session: bash output scrolling, the live status
+# line (`✻ … (Ns · ↓ N tokens)`), the spaceless interrupt hint in the
+# status bar, AND — crucially — the same version banner + composer `❯` that
+# used to misfire InputNeeded. Must report Working, not InputNeeded, and
+# must NOT report ready.
+write("claude_real_working_statusbar.bin", [
+    cup(1, 1),
+    sgr(1, 34), b"Claude Code v2.1.159", RESET, b"\r\n",
+    cup(6, 1), "⏺".encode("utf-8"), b" Bash(for i in 1 2 3; do echo step $i; sleep 1; done)\r\n",
+    cup(7, 1), b"  step 1\r\n",
+    cup(8, 1), b"  step 2\r\n",
+    cup(20, 1), CLEAR_LINE,
+    sgr(35), "✻".encode("utf-8"), RESET, b" ",
+    sgr(1), b"Simmering", RESET,
+    "… ".encode("utf-8"),
+    sgr(2), "(10s · ↓ 137 tokens)".encode("utf-8"), RESET, b"\r\n",
+    cup(22, 1), "────────────────────────────────────────────────────────".encode("utf-8"), b"\r\n",
+    cup(23, 1), "❯ ".encode("utf-8"), b"\r\n",
+    cup(24, 1), "────────────────────────────────────────────────────────".encode("utf-8"), b"\r\n",
+    # interrupt hint painted spaceless into the status bar
+    cup(40, 1), CLEAR_LINE,
+    sgr(2), b"esc", cup(40, 4), b"to", cup(40, 6), b"interrupt", RESET,
+    cup(40, 90), "●".encode("utf-8"), cup(40, 92), b"high",
+])
+
 # ── numbered list above an idle composer: must NOT be read as a chooser ──
 # Long idle footer carries BOTH `Esc to cancel` and `Tab to amend`; the
 # scrollback has a `1.`/`2.` list. The permission-footer branch must stay

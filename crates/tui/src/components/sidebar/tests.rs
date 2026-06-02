@@ -1238,6 +1238,74 @@ mod role_filter_tests {
     }
 
     #[test]
+    fn classify_buckets_empty_workspace_as_other_not_issue() {
+        // A sandbox/scratch workspace has no PR and no issues. It must
+        // NOT fall through to the `Issue` bucket — it has no type, so
+        // it belongs in `Other` (issue #195).
+        use crate::components::sidebar::WorkspaceKind;
+        let now = chrono::Utc::now();
+        let empty = Workspace::empty(pilot_core::WorkspaceKey::new("research"), "main", now);
+        assert_eq!(WorkspaceKind::classify(&empty), WorkspaceKind::Other);
+        assert_eq!(WorkspaceKind::Other.header_label(), "Other");
+
+        let pr = Workspace::from_task(
+            {
+                let mut t = base_task();
+                t.url = "https://github.com/o/r/pull/1".into();
+                t
+            },
+            now,
+        );
+        assert_eq!(WorkspaceKind::classify(&pr), WorkspaceKind::Pr);
+
+        let issue = Workspace::from_task(
+            {
+                let mut t = base_task();
+                t.url = "https://github.com/o/r/issues/2".into();
+                t
+            },
+            now,
+        );
+        assert_eq!(WorkspaceKind::classify(&issue), WorkspaceKind::Issue);
+    }
+
+    #[test]
+    fn by_role_split_puts_empty_workspace_under_other_header() {
+        // Regression for issue #195: a sandbox workspace (no PR, no
+        // issues) used to render under the `Issues` header with the
+        // `I` glyph. It must get its own `Other` section instead.
+        use crate::components::sidebar::WorkspaceKind;
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let now = chrono::Utc::now();
+
+        let empty_ws = Workspace::empty(pilot_core::WorkspaceKey::new("research"), "main", now);
+        let key = SessionKey::from(&empty_ws.key);
+        sb.workspaces.insert(key.clone(), empty_ws);
+
+        sb.recompute_visible();
+        assert_eq!(sb.sort_mode(), SortMode::ByRoleSplit);
+
+        let headers: Vec<WorkspaceKind> = sb
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::KindHeader(k) => Some(*k),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            headers.contains(&WorkspaceKind::Other),
+            "empty workspace must get an Other header — got {:?}",
+            sb.visible
+        );
+        assert!(
+            !headers.contains(&WorkspaceKind::Issue),
+            "empty workspace must never be bucketed as an Issue — got {:?}",
+            sb.visible
+        );
+    }
+
+    #[test]
     fn kind_headers_only_appear_in_split_mode() {
         // PR + issue fixture, but in Recent + ByRole modes the kind
         // headers must NOT appear — they're a ByRoleSplit-only

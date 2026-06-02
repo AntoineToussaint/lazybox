@@ -127,30 +127,34 @@ impl SortMode {
 }
 
 /// Which kind of work a workspace primarily represents. Used by the
-/// `[split]` sort mode to bucket each repo into a `PRs` section
-/// and an `Issues` section. A workspace with an attached PR is a
-/// `Pr` regardless of whether it also links issues — the PR is what
-/// the user typically interacts with first; everything else
-/// (GitHub issues, Linear tickets, empty workspaces) falls under
-/// `Issue`.
+/// `[split]` sort mode to bucket each repo into a `PRs` section, an
+/// `Issues` section, and an `Other` section. A workspace with an
+/// attached PR is a `Pr` regardless of whether it also links issues —
+/// the PR is what the user typically interacts with first; GitHub
+/// issues and Linear tickets are `Issue`; an empty scratch workspace
+/// (no PR, no issues) is `Other` so it isn't mislabeled as an issue.
 ///
 /// Variant order matters: `Pr` is declared first so the derived
-/// `Ord` puts PRs ahead of issues — same intent the `[split]` mode
-/// needs when partitioning the list.
+/// `Ord` puts PRs ahead of issues ahead of untyped — same intent the
+/// `[split]` mode needs when partitioning the list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WorkspaceKind {
     Pr,
     Issue,
+    Other,
 }
 
 impl WorkspaceKind {
-    /// Classify a workspace. Anything with a PR slot filled wins;
-    /// otherwise the workspace is treated as an issue bucket.
+    /// Classify a workspace. A filled PR slot wins; otherwise any
+    /// attached issue (GitHub or Linear) makes it an issue bucket; a
+    /// workspace with no task at all is `Other`.
     pub fn classify(w: &pilot_core::Workspace) -> Self {
         if w.pr.is_some() {
             WorkspaceKind::Pr
-        } else {
+        } else if !w.gh_issues.is_empty() || !w.linear_issues.is_empty() {
             WorkspaceKind::Issue
+        } else {
+            WorkspaceKind::Other
         }
     }
 
@@ -159,16 +163,20 @@ impl WorkspaceKind {
         match self {
             WorkspaceKind::Pr => "PRs",
             WorkspaceKind::Issue => "Issues",
+            WorkspaceKind::Other => "Other",
         }
     }
 
     /// Single-letter marker rendered before the header label —
     /// mirrors the per-row `[PR]` / `[I]` pill colouring so the
     /// section header lines up visually with the rows under it.
+    /// Untyped workspaces have no per-row glyph, so the section gets
+    /// a neutral dot rather than a type letter.
     pub fn header_marker(self) -> char {
         match self {
             WorkspaceKind::Pr => 'P',
             WorkspaceKind::Issue => 'I',
+            WorkspaceKind::Other => '·',
         }
     }
 }

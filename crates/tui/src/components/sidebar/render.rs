@@ -349,6 +349,7 @@ impl Sidebar {
                     let color = match kind {
                         WorkspaceKind::Pr => theme.success,
                         WorkspaceKind::Issue => theme.hover,
+                        WorkspaceKind::Other => theme.text_dim,
                     };
                     let marker = kind.header_marker();
                     let label = kind.header_label();

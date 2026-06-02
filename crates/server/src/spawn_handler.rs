@@ -1772,7 +1772,7 @@ pub async fn recover_sessions(config: &ServerConfig) {
 /// Persist the `(session_key, kind)` pairing for `backend_key` to the
 /// store under `terminal:{backend_key}`. Read back in `recover_sessions`
 /// after a pilot restart.
-async fn persist_terminal_meta(
+pub(crate) async fn persist_terminal_meta(
     config: &ServerConfig,
     backend_key: &str,
     session_key: &SessionKey,

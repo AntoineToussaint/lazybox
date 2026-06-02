@@ -3110,13 +3110,20 @@ pub async fn handle_confirm_merge(
     absorb_issue_workspace(config, &mut pr_ws, issue_ws).await;
     crate::spawn_handler::migrate_session_paths_if_needed(config, &mut pr_ws).await;
 
+    // Persist the PR — now carrying the moved sessions — BEFORE dropping
+    // the issue record. If we deleted first and crashed before the
+    // commit, the session would exist in neither stored workspace and be
+    // lost on the next start. Commit-then-delete leaves the session
+    // recoverable under the PR key throughout the window.
+    let pr_key = pr_ws.key.clone();
+    commit_upsert(config, &pr_key, pr_ws);
+
     if let Err(e) = config.store.delete_workspace(&issue_workspace_key) {
         tracing::warn!(
             issue_workspace = %issue_workspace_key,
             "delete_workspace during ConfirmMerge failed: {e}"
         );
     }
-    let pr_key = pr_ws.key.clone();
     let _ = config
         .bus
         .send(Event::WorkspaceRemoved(issue_workspace_key.clone()));
@@ -3126,7 +3133,6 @@ pub async fn handle_confirm_merge(
         issue_label,
         pr_label,
     });
-    commit_upsert(config, &pr_key, pr_ws);
 }
 
 /// Manual issue→PR collapse triggered by the user. Resolves the
@@ -3277,11 +3283,46 @@ async fn absorb_issue_workspace(
         pr_workspace.attach_task(issue_task.clone());
     }
 
-    let mut meta = config.terminal_meta.lock().await;
-    for (_tid, entry) in meta.iter_mut() {
-        if entry.0 == issue_session_key {
-            entry.0 = pr_session_key.clone();
-        }
+    rebadge_terminals(config, &issue_session_key, &pr_session_key).await;
+}
+
+/// Repoint every terminal currently keyed to `from` so it belongs to
+/// `to` — both the in-memory `terminal_meta` map AND the persisted
+/// `terminal:{backend_key}` record `recover_sessions` reads at startup.
+///
+/// The persisted record is the easy one to forget: rebadging only the
+/// in-memory map leaves a live PTY attached to its new workspace until
+/// the next daemon restart, at which point `recover_sessions` reattaches
+/// it under the OLD session_key. After an issue→PR collapse that old
+/// workspace is gone, so the session is orphaned — the "session lost on
+/// merge" bug. Updating both keeps the handoff durable across restarts.
+async fn rebadge_terminals(
+    config: &ServerConfig,
+    from: &pilot_core::SessionKey,
+    to: &pilot_core::SessionKey,
+) {
+    let rebadged: Vec<(pilot_ipc::TerminalId, pilot_ipc::TerminalKind)> = {
+        let mut meta = config.terminal_meta.lock().await;
+        meta.iter_mut()
+            .filter(|(_, entry)| entry.0 == *from)
+            .map(|(tid, entry)| {
+                entry.0 = to.clone();
+                (*tid, entry.1.clone())
+            })
+            .collect()
+    };
+    if rebadged.is_empty() {
+        return;
+    }
+    let backend_keys: Vec<(String, pilot_ipc::TerminalKind)> = {
+        let terminals = config.terminals.lock().await;
+        rebadged
+            .into_iter()
+            .filter_map(|(tid, kind)| terminals.get(&tid).map(|bk| (bk.clone(), kind)))
+            .collect()
+    };
+    for (backend_key, kind) in &backend_keys {
+        crate::spawn_handler::persist_terminal_meta(config, backend_key, to, kind).await;
     }
 }
 

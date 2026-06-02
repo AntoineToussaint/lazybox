@@ -2297,6 +2297,86 @@ async fn confirm_merge_accept_runs_the_merge() {
     assert_eq!(moved.workspace_key, pr_key);
 }
 #[tokio::test]
+async fn closing_pr_transfers_live_session_durably_to_pr() {
+    // Regression for #173: a LIVE session on the issue must reparent
+    // onto the closing PR — including across a daemon restart. The
+    // in-memory `terminal_meta` rebadge alone wasn't enough: the
+    // persisted `terminal:{backend_key}` record `recover_sessions`
+    // reads at startup kept pointing at the (now-deleted) issue
+    // workspace, so a restart orphaned the terminal and the session
+    // vanished. Assert the persisted record follows the session to the
+    // PR key.
+    use pilot_core::{SessionKey, WorkspaceKey};
+    use pilot_ipc::{TerminalId, TerminalKind};
+
+    let config = ServerConfig::in_memory();
+    let (issue_key, session_id) = seed_issue_with_session(&config, "o/r#71").await;
+
+    // Stand up a live terminal on the issue: in-memory maps + the
+    // persisted record, exactly as `handle_spawn` would have left them.
+    let issue_session_key: SessionKey = (&issue_key).into();
+    let backend_key = "pilot-test-o-r-71-claude";
+    config.terminal_meta.lock().await.insert(
+        TerminalId(7),
+        (issue_session_key.clone(), TerminalKind::Shell),
+    );
+    config
+        .terminals
+        .lock()
+        .await
+        .insert(TerminalId(7), backend_key.to_string());
+    config
+        .store
+        .set_kv(
+            &format!("terminal:{backend_key}"),
+            &serde_json::to_string(&(issue_session_key.as_str(), TerminalKind::Shell)).unwrap(),
+        )
+        .unwrap();
+
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+    let pr_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+        "o/r#141",
+        &["o/r#71"],
+    )));
+    polling::handle_confirm_merge(&config, issue_key.clone(), pr_key.clone(), true).await;
+
+    // The session record moved to the PR…
+    let pr_ws: pilot_core::Workspace = {
+        let record = config.store.get_workspace(&pr_key).unwrap().unwrap();
+        serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
+    };
+    assert!(
+        pr_ws.sessions.iter().any(|s| s.id == session_id),
+        "session record must move to the PR workspace",
+    );
+
+    // …and so did the live terminal, in memory…
+    let pr_session_key: SessionKey = (&pr_key).into();
+    {
+        let meta = config.terminal_meta.lock().await;
+        assert_eq!(
+            meta.get(&TerminalId(7)).expect("terminal kept").0,
+            pr_session_key,
+            "in-memory terminal_meta must repoint at the PR",
+        );
+    }
+
+    // …and the PERSISTED record `recover_sessions` reads on the next
+    // start now resolves to the PR, not the deleted issue workspace.
+    let raw = config
+        .store
+        .get_kv(&format!("terminal:{backend_key}"))
+        .unwrap()
+        .expect("persisted terminal record must survive the merge");
+    let (persisted_key, _kind): (String, TerminalKind) = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        persisted_key,
+        pr_session_key.as_str(),
+        "persisted terminal record must follow the session to the PR (else a \
+         restart reattaches it under the deleted issue workspace and loses it)",
+    );
+}
+#[tokio::test]
 async fn adopt_sessions_moves_sessions_between_workspaces() {
     use pilot_core::WorkspaceKey;
 

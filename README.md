@@ -249,6 +249,8 @@ crates/
 See [`CLAUDE.md`](CLAUDE.md) for the long-form architecture notes
 and [`DESIGN.md`](DESIGN.md) for the rationale behind the
 client/daemon split + the pane / modal / component tiers.
+[`docs/features/`](docs/features/) is a per-feature dev catalog —
+what each piece does, where it lives, and how to test it.
 
 ## Configuration
 

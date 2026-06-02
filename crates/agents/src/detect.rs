@@ -140,7 +140,7 @@ fn claude_state_of(s: &str, compact: &str) -> AgentState {
     // absence heuristic for the permission branch: it FIRES correctly
     // when a real dialog renders below a now-stale composer footer still
     // sitting in the detect window.
-    let chooser_live = chooser_pos(compact).is_some_and(|cp| idle_pos.is_none_or(|ip| cp >= ip));
+    let chooser_live = marker_at_least_as_recent(chooser_pos(compact), idle_pos);
 
     // tmux paints the screen by absolute cursor position, so the bytes
     // pilot sees arrive in TEMPORAL order: a single visual line
@@ -196,26 +196,36 @@ fn claude_state_of(s: &str, compact: &str) -> AgentState {
     // Standalone high-confidence prompts. These exact phrases appear
     // only when claude is blocking on user input. Matched space-free so
     // phrasing variants and the footer's stripped spacing both fire
-    // without expanding the table.
-    if contains_any_compact(compact, CLAUDE_STANDALONE_PROMPT_PHRASES) {
+    // without expanding the table. Recency-gated like the chooser
+    // branches (#191): a consent phrase left in scrollback above a
+    // finished turn's composer footer is stale, not a live prompt.
+    if marker_at_least_as_recent(
+        last_compact_match_pos(compact, CLAUDE_STANDALONE_PROMPT_PHRASES),
+        idle_pos,
+    ) {
         return AgentState::InputNeeded;
     }
 
     // Paired fallback for bare yes/no prompts (no arrow UI) + older
     // prompt shapes. Question phrases ANY-ed with choice markers — both
-    // must be present in the buffer.
-    if contains_any_compact(compact, &["1. Yes", "1) Yes", "(y/n)", "[y/n]"])
-        && contains_any_compact(
-            compact,
-            &[
-                "Do you want",
-                "Allow Claude",
-                "Allow Bash",
-                "Approve",
-                "Continue?",
-                "Proceed?",
-            ],
-        )
+    // must be present in the buffer, and the most-recent of the two must
+    // be at least as recent as the composer footer (#191) so a stale
+    // pairing scrolled above a finished turn's footer doesn't fire.
+    let choice_pos = last_compact_match_pos(compact, &["1. Yes", "1) Yes", "(y/n)", "[y/n]"]);
+    let question_pos = last_compact_match_pos(
+        compact,
+        &[
+            "Do you want",
+            "Allow Claude",
+            "Allow Bash",
+            "Approve",
+            "Continue?",
+            "Proceed?",
+        ],
+    );
+    if choice_pos.is_some()
+        && question_pos.is_some()
+        && marker_at_least_as_recent(choice_pos.max(question_pos), idle_pos)
     {
         return AgentState::InputNeeded;
     }
@@ -317,21 +327,41 @@ fn compact_lower(s: &str) -> String {
         .collect()
 }
 
-/// [`contains_any`] against the space-free buffer, compacting each
-/// pattern the same way (lowercase, spaces removed) so a human-readable
-/// constant table written WITH spaces matches the spaceless wire form.
+/// Byte offset of the most-recent occurrence of any pattern in `patterns`
+/// within the space-free buffer (each pattern compacted the same way —
+/// lowercase, spaces removed — so a human-readable constant table written
+/// WITH spaces matches the spaceless wire form), or `None` if none match.
+/// The `max` of the per-pattern `rfind` offsets is the recency anchor the
+/// standalone-consent and paired yes/no branches compare against the idle
+/// composer footer, exactly as the chooser branches use [`chooser_pos`].
 ///
 /// One scratch buffer is reused across patterns (cleared, not
-/// reallocated) so a match over an N-entry table costs roughly one
+/// reallocated) so a scan over an N-entry table costs roughly one
 /// allocation total rather than N — this is on the per-chunk detection
 /// hot path.
-fn contains_any_compact(compact: &str, patterns: &[&str]) -> bool {
+fn last_compact_match_pos(compact: &str, patterns: &[&str]) -> Option<usize> {
     let mut needle = String::new();
-    patterns.iter().any(|p| {
-        needle.clear();
-        needle.extend(p.chars().filter(|c| *c != ' ').flat_map(char::to_lowercase));
-        compact.contains(needle.as_str())
-    })
+    patterns
+        .iter()
+        .filter_map(|p| {
+            needle.clear();
+            needle.extend(p.chars().filter(|c| *c != ' ').flat_map(char::to_lowercase));
+            compact.rfind(needle.as_str())
+        })
+        .max()
+}
+
+/// Whether a prompt marker at `marker_pos` is at least as recent (as far
+/// down the append-only buffer) as the idle composer footer at
+/// `idle_pos`. `None` marker → not present, so not live. `None` footer →
+/// no idle anchor, so any present marker is live. This is the recency
+/// gate shared by every prompt branch: the chooser shapes, the
+/// `Esc to cancel` permission footer, the standalone consent phrases, and
+/// the paired yes/no fallback. Without it a prompt phrase left in
+/// scrollback reads as InputNeeded until it scrolls out of the detect
+/// window even though the turn has finished and the composer is redrawn.
+fn marker_at_least_as_recent(marker_pos: Option<usize>, idle_pos: Option<usize>) -> bool {
+    marker_pos.is_some_and(|mp| idle_pos.is_none_or(|ip| mp >= ip))
 }
 
 /// Detect Claude's ASCII selection-arrow at ANY numbered option:
@@ -780,11 +810,50 @@ mod tests {
     }
 
     #[test]
-    fn contains_any_compact_matches_across_stripped_spacing() {
+    fn last_compact_match_pos_matches_across_stripped_spacing() {
         // The live footer arrives spaceless; the constant table is
         // written with spaces. Both compact to the same form.
         let compact = compact_lower("…doyouwanttoproceed?…");
-        assert!(contains_any_compact(&compact, &["Do you want to proceed?"]));
-        assert!(!contains_any_compact(&compact, &["Do you want to delete"]));
+        assert!(last_compact_match_pos(&compact, &["Do you want to proceed?"]).is_some());
+        assert_eq!(
+            last_compact_match_pos(&compact, &["Do you want to delete"]),
+            None
+        );
+        // The offset is the most recent match across the whole table, so
+        // it's comparable against the other recency anchors.
+        let two = compact_lower("do you want to proceed?\nlater do you want to retry?");
+        let pos = last_compact_match_pos(&two, CLAUDE_STANDALONE_PROMPT_PHRASES).unwrap();
+        assert_eq!(pos, two.rfind("doyouwanttoretry").unwrap());
+    }
+
+    #[test]
+    fn standalone_consent_phrase_in_scrollback_is_gated_by_idle_footer() {
+        // #191: a finished turn whose detect window still holds a
+        // standalone consent phrase ABOVE the most-recent composer footer
+        // is stale scrollback, not a live prompt → Idle. The same phrase
+        // with no footer below it (a real prompt) still fires.
+        let stale = "Do you want to proceed?\nProceeding…\ndone\n? for shortcuts";
+        assert_eq!(claude_state(stale.as_bytes()), Some(AgentState::Idle));
+
+        let live = "? for shortcuts\nDo you want to proceed?";
+        assert_eq!(claude_state(live.as_bytes()), Some(AgentState::InputNeeded));
+
+        // No composer footer at all → the phrase is the only marker → live.
+        let bare = "some bash output\nDo you want to proceed?";
+        assert_eq!(claude_state(bare.as_bytes()), Some(AgentState::InputNeeded));
+    }
+
+    #[test]
+    fn paired_yes_no_in_scrollback_is_gated_by_idle_footer() {
+        // #191: the bare yes/no pairing (`Do you want…` + `1. Yes`) left
+        // above the most-recent composer footer is stale → Idle; the same
+        // pairing below a stale footer is a live prompt → InputNeeded.
+        // `Approve` is a paired question marker but NOT a standalone
+        // phrase, so this exercises the paired branch's gate specifically.
+        let stale = "Approve this command?\n1. Yes\n2. No\nok done\n? for shortcuts";
+        assert_eq!(claude_state(stale.as_bytes()), Some(AgentState::Idle));
+
+        let live = "? for shortcuts\nApprove this?\n1. Yes\n2. No";
+        assert_eq!(claude_state(live.as_bytes()), Some(AgentState::InputNeeded));
     }
 }

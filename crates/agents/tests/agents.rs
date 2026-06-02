@@ -140,13 +140,15 @@ fn codex_detects_yn_prompt() {
 
 #[test]
 fn claude_detects_chooser_footer() {
-    // The Claude Code chooser UI is recognisable by its `Esc to
-    // cancel · Tab to amend` footer plus a question phrasing. Both
-    // need to match for InputNeeded; neither alone is sufficient
-    // (chat output could include the phrase).
+    // The Claude Code permission chooser is recognisable by its
+    // `Esc to cancel` footer plus a question phrasing and numbered
+    // options. The dialog REPLACES the composer, so it carries no
+    // `Tab to amend` (that's the idle composer's footer) — with no
+    // composer footer below it the chooser is the most-recent marker
+    // and reads InputNeeded.
     let agent = Claude;
     let buf = b"Do you want to proceed?\n> 1. Yes\n  2. No\n\n\
-                Esc to cancel \xc2\xb7 Tab to amend \xc2\xb7 ctrl+e to explain";
+                Esc to cancel \xc2\xb7 ctrl+e to explain";
     assert_eq!(agent.detect_state(buf), Some(AgentState::InputNeeded));
 }
 

@@ -174,6 +174,19 @@ pub fn render_body(body: &str, width: u16, max_lines: usize) -> Vec<Line<'static
             continue;
         }
 
+        // Thematic break (`---`, `***`, `___`, optionally space-
+        // separated). Render a dim rule like the fence delimiter
+        // instead of letting the literal dashes leak into the feed
+        // as stray "---" segments.
+        if is_thematic_break(raw_line) {
+            out.push(Line::from(Span::styled(
+                "─".repeat(width.max(8) as usize),
+                Style::default().fg(Color::DarkGray),
+            )));
+            prev_emitted_empty = false;
+            continue;
+        }
+
         let is_empty = raw_line.trim().is_empty();
         if is_empty {
             if prev_emitted_empty {
@@ -246,6 +259,30 @@ fn render_inline_line(line: &str) -> Line<'static> {
     }
 
     Line::from(inline_spans(line, Style::default()))
+}
+
+/// CommonMark thematic break: a line of three or more matching
+/// `-`, `*`, or `_` characters, optionally separated by spaces or
+/// tabs, and nothing else. `--` (fewer than three), `- item` (a
+/// list bullet), and `**bold**` are not breaks — the marker run has
+/// to be uniform and unbroken by other glyphs.
+fn is_thematic_break(line: &str) -> bool {
+    let mut marker: Option<char> = None;
+    let mut count = 0usize;
+    for c in line.trim().chars() {
+        match c {
+            '-' | '*' | '_' => {
+                if marker.is_some_and(|m| m != c) {
+                    return false;
+                }
+                marker = Some(c);
+                count += 1;
+            }
+            ' ' | '\t' => {}
+            _ => return false,
+        }
+    }
+    count >= 3
 }
 
 /// `# Title` / `### Title` → `Some("Title")`. Returns `None` if the
@@ -711,6 +748,62 @@ mod tests {
                 .iter()
                 .any(|s| s.style.fg == Some(Color::Cyan))
         );
+    }
+
+    #[test]
+    fn is_thematic_break_recognises_rule_variants() {
+        assert!(is_thematic_break("---"));
+        assert!(is_thematic_break("***"));
+        assert!(is_thematic_break("___"));
+        assert!(is_thematic_break("- - -"));
+        assert!(is_thematic_break("*****"));
+        assert!(is_thematic_break("  ---  "));
+    }
+
+    #[test]
+    fn is_thematic_break_rejects_non_rules() {
+        // Fewer than three markers.
+        assert!(!is_thematic_break("--"));
+        assert!(!is_thematic_break("**"));
+        // A list bullet, not a rule.
+        assert!(!is_thematic_break("- item"));
+        // Mixed markers.
+        assert!(!is_thematic_break("-*-"));
+        // Bold/italic inline, not a rule.
+        assert!(!is_thematic_break("**bold**"));
+        assert!(!is_thematic_break(""));
+    }
+
+    /// Regression for #177: a Markdown thematic break must render as a
+    /// dim horizontal rule, not leak the literal `---` / `***` glyphs
+    /// into the feed as stray "shadow" segments.
+    #[test]
+    fn render_body_renders_thematic_break_as_rule() {
+        let out = render_body("intro\n\n---\n\noutro", 20, 50);
+        let rule = out
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains('─')))
+            .expect("a box-drawing rule line should be present");
+        // No literal dashes survive.
+        let has_literal_dashes = out.iter().any(|l| {
+            let joined: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            joined.contains("---")
+        });
+        assert!(!has_literal_dashes, "literal --- leaked into the output");
+        // The rule is dim grey, matching the fenced-code delimiter.
+        assert_eq!(rule.spans[0].style.fg, Some(Color::DarkGray));
+    }
+
+    /// A `---` inside a fenced code block is code, not a rule — it
+    /// must stay verbatim.
+    #[test]
+    fn render_body_keeps_dashes_inside_code_fence() {
+        let out = render_body("```\n---\n```", 0, 50);
+        let has_literal = out.iter().any(|l| {
+            let joined: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            joined == "---"
+        });
+        assert!(has_literal, "dashes inside a fence must render verbatim");
     }
 
     #[test]

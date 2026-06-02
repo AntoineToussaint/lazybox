@@ -62,6 +62,11 @@ pub async fn handle_start_agent_run(
         pr_number: None,
         env: Default::default(),
         skip_permissions: false,
+        // Structured stream-json runs receive hook events inline via
+        // `--include-hook-events` (see `ClaudeStreamConfig`), so they
+        // don't need the `--settings` hook-command injection the
+        // interactive PTY path uses.
+        hook_settings_path: None,
     };
     let argv = agent_impl.spawn(&spawn_ctx);
     let Some((program, extra_args)) = argv.split_first() else {

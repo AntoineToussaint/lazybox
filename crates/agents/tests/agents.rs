@@ -16,6 +16,7 @@ fn sample_ctx() -> SpawnCtx {
         pr_number: Some("1".into()),
         env: HashMap::new(),
         skip_permissions: false,
+        hook_settings_path: None,
     }
 }
 

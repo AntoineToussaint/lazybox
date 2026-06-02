@@ -254,6 +254,15 @@ pub struct ServerConfig {
     /// genuinely still up, Claude re-renders it and the fresh chunk
     /// re-establishes `InputNeeded`.
     pub agent_detect_resets: Arc<Mutex<HashSet<TerminalId>>>,
+    /// Agent terminals that have reported at least one structured
+    /// lifecycle hook (`Command::IngestHook`). For these, hooks are the
+    /// authoritative source of `Working` / `InputNeeded`; the PTY
+    /// detector only supplies the idle/interrupt fallback the `Stop`
+    /// hook misses (Ctrl-C / Esc don't fire `Stop`). A terminal that
+    /// never reports a hook (old Claude version, hooks disabled,
+    /// non-Claude agent) is absent here and keeps full PTY detection.
+    /// Populated by `handle_ingest_hook`, cleaned on `TerminalExited`.
+    pub hook_driven_terminals: Arc<Mutex<HashSet<TerminalId>>>,
     /// Structured stream-json agent runs. Keyed by wire-side run id.
     pub agent_runs: Arc<Mutex<HashMap<AgentRunId, agent_runs::AgentRunHandle>>>,
     /// Process-wide structured run id allocator.
@@ -387,6 +396,7 @@ impl ServerConfig {
             terminal_meta: Arc::new(Mutex::new(HashMap::new())),
             no_permission_terminals: Arc::new(Mutex::new(HashSet::new())),
             agent_detect_resets: Arc::new(Mutex::new(HashSet::new())),
+            hook_driven_terminals: Arc::new(Mutex::new(HashSet::new())),
             agent_runs: Arc::new(Mutex::new(HashMap::new())),
             next_agent_run_id: Arc::new(AtomicU64::new(1)),
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),
@@ -507,6 +517,7 @@ impl Server {
                     let label = match &cmd {
                         pilot_ipc::Command::Spawn { .. } => "Spawn",
                         pilot_ipc::Command::Close { .. } => "Close",
+                        pilot_ipc::Command::IngestHook { .. } => "IngestHook",
                         pilot_ipc::Command::CreateSession { .. } => "CreateSession",
                         pilot_ipc::Command::Subscribe => "Subscribe",
                         pilot_ipc::Command::Refresh => "Refresh",
@@ -680,6 +691,10 @@ impl Server {
                         }
                         pilot_ipc::Command::Close { terminal_id } => {
                             spawn_handler::handle_close(&self.config, terminal_id).await;
+                        }
+                        pilot_ipc::Command::IngestHook { terminal_id, hook } => {
+                            spawn_handler::handle_ingest_hook(&self.config, terminal_id, hook)
+                                .await;
                         }
                         pilot_ipc::Command::StartAgentRun {
                             session_key,

@@ -16,6 +16,41 @@ use tokio::time::timeout;
 /// so a deadlock is reported as a failure, not a hung suite.
 const TEST_DEADLINE: Duration = Duration::from_secs(5);
 
+/// Point `PILOT_HOME` at an empty temp dir for the lifetime of the
+/// guard, restoring the previous value on drop. `handle_spawn` calls
+/// `pilot_config::Config::load()`, which resolves `~/.pilot/config.yaml`
+/// via `PILOT_HOME`; without this a test that asserts on a config-driven
+/// field (e.g. `skip_permissions`) reads the dev machine's real config
+/// and flakes. An empty dir → `Config::default()`, which is exactly what
+/// CI (no config file) exercises.
+struct IsolatedConfigHome {
+    _tmp: tempfile::TempDir,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl IsolatedConfigHome {
+    fn new() -> Self {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prev = std::env::var_os("PILOT_HOME");
+        // SAFETY: PILOT_HOME is process-global, but within this test
+        // binary only this guard sets it, and an empty dir resolves every
+        // reader to defaults (CI's behaviour) — so even if it leaks to a
+        // concurrent test, that test sees what it'd see in CI. Restored
+        // on drop.
+        unsafe { std::env::set_var("PILOT_HOME", tmp.path()) };
+        Self { _tmp: tmp, prev }
+    }
+}
+
+impl Drop for IsolatedConfigHome {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => unsafe { std::env::set_var("PILOT_HOME", v) },
+            None => unsafe { std::env::remove_var("PILOT_HOME") },
+        }
+    }
+}
+
 /// Drain events until we see one matching `pred` or hit the deadline.
 async fn wait_for<F: FnMut(&Event) -> bool>(
     client: &mut pilot_ipc::Client,
@@ -78,6 +113,172 @@ async fn spawn_and_wait(
     }
 }
 
+/// Build a normalized hook event for a Claude lifecycle event name,
+/// mirroring what `pilot hook-ingest` forwards after parsing Claude's
+/// stdin payload.
+fn hook(kind: pilot_ipc::HookEventKind) -> pilot_ipc::HookEvent {
+    pilot_ipc::HookEvent {
+        kind,
+        session_id: Some("claude-session".into()),
+        cwd: None,
+        tool_name: None,
+        notification: None,
+    }
+}
+
+/// Structured hooks drive Claude's state deterministically through the
+/// full daemon dispatch (`Command::IngestHook` → `handle_ingest_hook` →
+/// `Event::AgentState`), with no PTY output involved at all.
+#[tokio::test]
+async fn ingest_hook_drives_agent_state_transitions() {
+    timeout(TEST_DEADLINE, async {
+        let config = ServerConfig::in_memory();
+        let mut client = subscribed(config).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+
+        // PreToolUse → Working.
+        client
+            .send(Command::IngestHook {
+                terminal_id,
+                hook: hook(pilot_ipc::HookEventKind::PreToolUse),
+            })
+            .unwrap();
+        let ev = wait_for(
+            &mut client,
+            |e| matches!(e, Event::AgentState { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("PreToolUse hook must emit AgentState");
+        assert!(matches!(
+            ev,
+            Event::AgentState {
+                state: pilot_ipc::AgentState::Working,
+                ..
+            }
+        ));
+
+        // A permission Notification → InputNeeded.
+        let mut needs_input = hook(pilot_ipc::HookEventKind::Notification);
+        needs_input.notification = Some("permission_prompt".into());
+        client
+            .send(Command::IngestHook {
+                terminal_id,
+                hook: needs_input,
+            })
+            .unwrap();
+        let ev = wait_for(
+            &mut client,
+            |e| matches!(e, Event::AgentState { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("permission Notification must emit AgentState");
+        assert!(matches!(
+            ev,
+            Event::AgentState {
+                state: pilot_ipc::AgentState::InputNeeded,
+                ..
+            }
+        ));
+
+        // Stop → Idle (the turn finished).
+        client
+            .send(Command::IngestHook {
+                terminal_id,
+                hook: hook(pilot_ipc::HookEventKind::Stop),
+            })
+            .unwrap();
+        let ev = wait_for(
+            &mut client,
+            |e| matches!(e, Event::AgentState { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("Stop hook must emit AgentState");
+        assert!(matches!(
+            ev,
+            Event::AgentState {
+                state: pilot_ipc::AgentState::Idle,
+                ..
+            }
+        ));
+    })
+    .await
+    .expect("deadline");
+}
+
+/// Hooks-primary, PTY-fallback: once a terminal reports a hook, the PTY
+/// detector must stop emitting `Working`/`InputNeeded` for it — those
+/// come from hooks. A PTY permission chooser that would normally fire
+/// `InputNeeded` is suppressed while the hook-derived state stands.
+#[tokio::test]
+async fn hook_driven_terminal_suppresses_pty_input_needed() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        // A hook marks the terminal hook-driven and sets Working.
+        client
+            .send(Command::IngestHook {
+                terminal_id,
+                hook: hook(pilot_ipc::HookEventKind::PreToolUse),
+            })
+            .unwrap();
+        let working = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: pilot_ipc::AgentState::Working,
+                        ..
+                    }
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(working.is_some(), "hook must set Working");
+
+        // Now the PTY paints a permission chooser. On a non-hook terminal
+        // this is the classic InputNeeded trigger; here it must be
+        // suppressed — hooks own that transition.
+        mock.emit(
+            &key,
+            concat!(
+                "Do you want to create MEMORY.md?\n",
+                "❯ 1. Yes\n",
+                "  2. No\n",
+                "Esc to cancel",
+            ),
+        )
+        .await;
+        let leaked = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: pilot_ipc::AgentState::InputNeeded,
+                        ..
+                    }
+                )
+            },
+            Duration::from_millis(500),
+        )
+        .await;
+        assert!(
+            leaked.is_none(),
+            "PTY chooser must NOT flip a hook-driven terminal to InputNeeded"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
 #[tokio::test]
 async fn spawn_shell_emits_terminal_spawned_event() {
     timeout(TEST_DEADLINE, async {
@@ -95,6 +296,10 @@ async fn spawn_shell_emits_terminal_spawned_event() {
 #[tokio::test]
 async fn interactive_claude_spawn_keeps_permission_prompts() {
     timeout(TEST_DEADLINE, async {
+        // Resolve config to defaults regardless of the dev machine's real
+        // `~/.pilot/config.yaml`, whose `skip_permissions` toggle would
+        // otherwise flip `no_permission` and flake this assertion.
+        let _home = IsolatedConfigHome::new();
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let mut client = subscribed(config).await;
         client
@@ -120,10 +325,17 @@ async fn interactive_claude_spawn_keeps_permission_prompts() {
             _ => unreachable!(),
         }
         let key = mock.list().await.unwrap().into_iter().next().unwrap();
-        assert_eq!(
-            mock.argv_for(&key).await.unwrap(),
-            vec!["claude".to_string()],
-            "interactive claude must not get the bypass flag",
+        let argv = mock.argv_for(&key).await.unwrap();
+        assert_eq!(argv.first().map(String::as_str), Some("claude"));
+        assert!(
+            !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+            "interactive claude must not get the bypass flag: {argv:?}",
+        );
+        // Claude is launched with a pilot-generated hooks settings file so
+        // it reports state through structured lifecycle hooks.
+        assert!(
+            argv.iter().any(|a| a == "--settings"),
+            "claude must launch with --settings for hook injection: {argv:?}",
         );
     })
     .await

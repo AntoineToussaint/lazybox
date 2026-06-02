@@ -9,6 +9,8 @@
 
 pub mod agent;
 pub mod detect;
+pub mod hook;
+pub mod hook_settings;
 pub mod session_wrapper;
 
 pub use agent::{Agent, Registry, SpawnCtx};

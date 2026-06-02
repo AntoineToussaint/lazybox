@@ -124,6 +124,47 @@ pub enum AgentState {
     Idle,
 }
 
+/// A normalized lifecycle hook fired by an agent, decoupled from the
+/// agent's wire JSON. Claude Code emits these via configured hooks
+/// (`Stop`, `Notification`, `PreToolUse`, …); pilot injects a hook
+/// command at spawn so the daemon receives deterministic state signals
+/// instead of screen-scraping the PTY. The wire JSON → `HookEvent`
+/// translation lives in `pilot_agents::hook`; mapping `HookEvent` →
+/// [`AgentState`] lives there too. This type is the IPC-stable shape
+/// carried by [`Command::IngestHook`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookEvent {
+    pub kind: HookEventKind,
+    /// The agent's own session id (Claude's `session_id`). Informational
+    /// — pilot correlates by the `terminal_id` it baked into the hook
+    /// command, not this — but captured for the structured-stream path.
+    pub session_id: Option<String>,
+    pub cwd: Option<String>,
+    /// Tool being invoked, for `PreToolUse` / `PostToolUse`.
+    pub tool_name: Option<String>,
+    /// Notification descriptor (`notification_type` or `message`), used
+    /// to distinguish a permission/elicitation prompt from an idle one.
+    pub notification: Option<String>,
+}
+
+/// The lifecycle point a [`HookEvent`] fired at. `Other` is the
+/// catch-all for hook names pilot doesn't map to a state transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HookEventKind {
+    SessionStart,
+    SessionEnd,
+    PreToolUse,
+    PostToolUse,
+    Notification,
+    PermissionRequest,
+    Stop,
+    SubagentStart,
+    SubagentStop,
+    PreCompact,
+    PostCompact,
+    Other,
+}
+
 /// User input sent to a structured agent runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInputMessage {
@@ -349,6 +390,16 @@ pub enum Command {
     },
     Close {
         terminal_id: TerminalId,
+    },
+    /// A lifecycle hook fired by an agent (Claude Code), forwarded by
+    /// the `pilot hook-ingest` helper the daemon injects at spawn. The
+    /// daemon maps it to an [`AgentState`] transition for `terminal_id`
+    /// — deterministic state, no PTY screen-scraping. `terminal_id` is
+    /// the value pilot baked into the hook command, so correlation is
+    /// exact.
+    IngestHook {
+        terminal_id: TerminalId,
+        hook: HookEvent,
     },
     Kill {
         session_key: SessionKey,

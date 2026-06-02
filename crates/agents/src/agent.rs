@@ -20,6 +20,13 @@ pub struct SpawnCtx {
     /// support a bypass flag (Claude → `--dangerously-skip-permissions`).
     /// Agents without one ignore it.
     pub skip_permissions: bool,
+    /// Path to a pilot-generated settings file the agent should launch
+    /// with, when the daemon has wired up structured lifecycle hooks
+    /// for this spawn. Claude appends `--settings <path>`; agents
+    /// without a settings flag ignore it. `None` when hooks aren't
+    /// configured (non-Claude agent, or generation failed) — those fall
+    /// back to PTY-based state detection.
+    pub hook_settings_path: Option<PathBuf>,
 }
 
 pub trait Agent: Send + Sync {
@@ -97,6 +104,27 @@ pub trait Agent: Send + Sync {
         false
     }
 
+    /// Build the settings JSON to launch this agent with so it reports
+    /// state through structured lifecycle hooks instead of (or
+    /// alongside) PTY screen-scraping. `hook_command` is the shell
+    /// command the agent should run on each lifecycle event — pilot's
+    /// `hook-ingest` helper, carrying the terminal id. `user_settings`
+    /// is the user's own parsed settings, merged in so we don't clobber
+    /// their hooks.
+    ///
+    /// The default returns `None`: most agents have no hook system, so
+    /// the daemon writes no settings file and keeps PTY detection. Only
+    /// Claude overrides this. The daemon writes the returned JSON to a
+    /// per-session file and sets [`SpawnCtx::hook_settings_path`].
+    fn build_hook_settings(
+        &self,
+        hook_command: &str,
+        user_settings: Option<&serde_json::Value>,
+    ) -> Option<serde_json::Value> {
+        let _ = (hook_command, user_settings);
+        None
+    }
+
     /// Encode a prompt as bytes the daemon should write to the PTY.
     /// Most agents accept plain text + a newline; some need bracketed
     /// paste or specific control sequences.
@@ -163,6 +191,18 @@ pub use crate::detect;
 pub mod builtins {
     use super::*;
 
+    /// Append `--settings <path>` when the daemon generated a hooks
+    /// settings file for this spawn. Claude's `--settings` accepts a
+    /// file path and takes precedence over user/project settings — the
+    /// daemon has already merged the user's hooks into that file (see
+    /// [`crate::hook_settings`]), so nothing is clobbered.
+    fn push_settings_flag(argv: &mut Vec<String>, ctx: &SpawnCtx) {
+        if let Some(path) = &ctx.hook_settings_path {
+            argv.push("--settings".into());
+            argv.push(path.to_string_lossy().into_owned());
+        }
+    }
+
     #[derive(Default)]
     pub struct Claude;
 
@@ -178,6 +218,7 @@ pub mod builtins {
             if ctx.skip_permissions {
                 argv.push("--dangerously-skip-permissions".into());
             }
+            push_settings_flag(&mut argv, ctx);
             argv
         }
         fn resume(&self, ctx: &SpawnCtx) -> Vec<String> {
@@ -185,7 +226,22 @@ pub mod builtins {
             if ctx.skip_permissions {
                 argv.push("--dangerously-skip-permissions".into());
             }
+            push_settings_flag(&mut argv, ctx);
             argv
+        }
+
+        /// Wire pilot's hook command into a settings file Claude
+        /// launches with, merging the user's existing hooks. Delegates
+        /// to [`crate::hook_settings::build_settings`].
+        fn build_hook_settings(
+            &self,
+            hook_command: &str,
+            user_settings: Option<&serde_json::Value>,
+        ) -> Option<serde_json::Value> {
+            Some(crate::hook_settings::build_settings(
+                user_settings,
+                hook_command,
+            ))
         }
 
         /// Claude Code's input area batches rapid byte arrival as a
@@ -385,6 +441,58 @@ mod tests {
                 "--continue".to_string(),
                 SKIP_FLAG.to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn claude_appends_settings_flag_when_hook_path_set() {
+        let claude = Claude;
+        let ctx = SpawnCtx {
+            hook_settings_path: Some(std::path::PathBuf::from("/run/hooks/settings-7.json")),
+            ..Default::default()
+        };
+        assert_eq!(
+            claude.spawn(&ctx),
+            vec![
+                "claude".to_string(),
+                "--settings".to_string(),
+                "/run/hooks/settings-7.json".to_string(),
+            ]
+        );
+        assert_eq!(
+            claude.resume(&ctx),
+            vec![
+                "claude".to_string(),
+                "--continue".to_string(),
+                "--settings".to_string(),
+                "/run/hooks/settings-7.json".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_build_hook_settings_wires_command() {
+        let claude = Claude;
+        let settings = claude
+            .build_hook_settings("pilot hook-ingest --terminal 7", None)
+            .expect("claude supports hooks");
+        assert_eq!(
+            settings["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "pilot hook-ingest --terminal 7"
+        );
+    }
+
+    #[test]
+    fn non_claude_agents_have_no_hook_settings() {
+        assert!(
+            super::builtins::Codex
+                .build_hook_settings("x", None)
+                .is_none()
+        );
+        assert!(
+            super::builtins::Cursor
+                .build_hook_settings("x", None)
+                .is_none()
         );
     }
 }

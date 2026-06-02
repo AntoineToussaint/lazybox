@@ -59,11 +59,17 @@ fn alloc_terminal_id() -> TerminalId {
 
 /// Build the argv for `kind`. None means we don't know how to spawn
 /// it (unknown agent id, etc.) — handled by emitting a ProviderError.
+///
+/// `hook_settings_path` is the per-session settings file the daemon
+/// generated for an agent that reports state through structured hooks
+/// (Claude). It's threaded into [`SpawnCtx`] so the agent's argv builder
+/// can append its settings flag; `None` for agents without hook support.
 fn argv_for(
     config: &ServerConfig,
     kind: &TerminalKind,
     cwd: &Option<PathBuf>,
     skip_permissions: bool,
+    hook_settings_path: Option<PathBuf>,
 ) -> Option<Vec<String>> {
     match kind {
         TerminalKind::Agent(agent_id) => {
@@ -77,6 +83,7 @@ fn argv_for(
                 pr_number: None,
                 env: Default::default(),
                 skip_permissions,
+                hook_settings_path,
             };
             Some(agent.spawn(&ctx))
         }
@@ -85,6 +92,77 @@ fn argv_for(
             Some(vec![shell])
         }
         TerminalKind::LogTail { path } => Some(vec!["tail".into(), "-F".into(), path.clone()]),
+    }
+}
+
+/// Absolute path to the per-terminal Claude settings file pilot writes
+/// at spawn. Deterministic in `terminal_id` so the pump can delete it on
+/// exit without bookkeeping a map.
+fn hook_settings_path(terminal_id: TerminalId) -> PathBuf {
+    pilot_core::paths::runtime_dir()
+        .join("hooks")
+        .join(format!("settings-{}.json", terminal_id.0))
+}
+
+/// The shell command Claude runs on each lifecycle hook. Uses the
+/// running pilot binary's absolute path (so it works regardless of
+/// `$PATH` inside the agent's environment) and bakes in the terminal id
+/// pilot allocated, so the daemon correlates the hook back to this exact
+/// terminal with no guessing.
+fn hook_command(terminal_id: TerminalId) -> String {
+    let exe = std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "pilot".to_string());
+    format!("\"{exe}\" hook-ingest --terminal {}", terminal_id.0)
+}
+
+/// Read and parse the user's `~/.claude/settings.json`, if present, so
+/// the generated settings file can merge their existing hooks instead of
+/// silently overriding them (Claude's `--settings` takes precedence over
+/// user scope). Any error (missing file, bad JSON) → `None`, which the
+/// generator treats as "no user hooks."
+fn read_user_claude_settings() -> Option<serde_json::Value> {
+    let home = std::env::var_os("HOME")?;
+    let path = PathBuf::from(home).join(".claude").join("settings.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Generate and write the per-session hooks settings file for an agent
+/// that supports structured lifecycle hooks. Returns the path to pass via
+/// the agent's settings flag, or `None` when the agent has no hook
+/// support or writing failed (in which case the spawn proceeds without
+/// hooks and falls back to PTY detection).
+fn write_hook_settings(
+    config: &ServerConfig,
+    kind: &TerminalKind,
+    terminal_id: TerminalId,
+) -> Option<PathBuf> {
+    let TerminalKind::Agent(agent_id) = kind else {
+        return None;
+    };
+    let agent = config.agents.get(agent_id)?;
+    let command = hook_command(terminal_id);
+    let user = read_user_claude_settings();
+    let settings = agent.build_hook_settings(&command, user.as_ref())?;
+    let path = hook_settings_path(terminal_id);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!("hook settings: create_dir_all {}: {e}", parent.display());
+            return None;
+        }
+    }
+    let json = serde_json::to_string_pretty(&settings).ok()?;
+    match std::fs::write(&path, json) {
+        Ok(()) => {
+            tracing::info!(?terminal_id, path = %path.display(), "wrote hook settings file");
+            Some(path)
+        }
+        Err(e) => {
+            tracing::warn!("hook settings: write {}: {e}", path.display());
+            None
+        }
     }
 }
 
@@ -187,7 +265,18 @@ pub async fn handle_spawn(
         elapsed_ms = t0.elapsed().as_millis(),
         "handle_spawn: session/worktree resolved",
     );
-    let argv = match argv_for(config, &kind, &cwd_path, skip_permissions) {
+    // Allocate the terminal id up front so the hook settings file can
+    // bake it into the `pilot hook-ingest --terminal <id>` command —
+    // that gives the daemon an exact, guess-free correlation from a
+    // later hook payload back to this terminal. (The auxiliary/primary
+    // map inserts still happen below, after the backend spawn.)
+    let terminal_id = alloc_terminal_id();
+    // For agents that report state through structured lifecycle hooks
+    // (Claude), generate a per-session settings file wiring our hook
+    // command into every tracked event, then launch with `--settings`.
+    // Agents without hook support get `None` and keep PTY detection.
+    let hook_settings = write_hook_settings(config, &kind, terminal_id);
+    let argv = match argv_for(config, &kind, &cwd_path, skip_permissions, hook_settings) {
         Some(a) => a,
         None => {
             let _ = config.bus.send(Event::provider_error_permanent(
@@ -242,8 +331,9 @@ pub async fn handle_spawn(
         "handle_spawn: backend.spawn ok",
     );
 
-    let terminal_id = alloc_terminal_id();
-    // Insert the auxiliary maps BEFORE the primary `terminals` map.
+    // `terminal_id` was allocated above (before argv) so the hook
+    // settings file could embed it. Insert the auxiliary maps BEFORE the
+    // primary `terminals` map.
     // `snapshot_terminals` iterates `terminals` and looks up meta;
     // doing terminals-last means a snapshot during the gap sees no
     // entry for this id (consistent miss) instead of an entry with
@@ -302,6 +392,7 @@ pub async fn handle_spawn(
     let term_sessions_map = config.terminal_sessions.clone();
     let agent_states_map = config.agent_states.clone();
     let agent_detect_resets_map = config.agent_detect_resets.clone();
+    let hook_driven_map = config.hook_driven_terminals.clone();
     let terminal_meta_map = config.terminal_meta.clone();
     let no_permission_map = config.no_permission_terminals.clone();
     let store_for_pump = config.store.clone();
@@ -401,6 +492,7 @@ pub async fn handle_spawn(
             session_key: &SessionKey,
             last_input_needed_at: &mut Option<std::time::Instant>,
             hysteresis: std::time::Duration,
+            hook_driven: &std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<TerminalId>>>,
         ) {
             const STATE_BUF_CAP: usize = 32 * 1024;
             let Some(agent) = agent else {
@@ -437,6 +529,24 @@ pub async fn handle_spawn(
             let Some(new_state) = agent.detect_state(detect_window) else {
                 return;
             };
+            // Hooks-primary, PTY-fallback. Once a terminal has reported
+            // any structured lifecycle hook, hooks are authoritative for
+            // `Working` / `InputNeeded` (deterministic, no screen-
+            // scraping). The PTY detector then contributes ONLY the
+            // idle/interrupt correction the `Stop` hook can't give us:
+            // Ctrl-C / Esc end Claude's turn without firing `Stop`, so a
+            // hook-driven terminal could otherwise stick at `Working`
+            // forever. We honor a PTY reading only when it's a confident
+            // idle (composer drawn, ready for a prompt). A terminal that
+            // never reported a hook isn't in the set and keeps full PTY
+            // detection unchanged.
+            if hook_driven.lock().await.contains(&id) {
+                let idle_fallback = new_state == pilot_ipc::AgentState::Idle
+                    && agent.detect_ready_for_prompt(detect_window);
+                if !idle_fallback {
+                    return;
+                }
+            }
             // Trace-level on steady-state runs (claude emits 100+
             // chunks/sec during streaming and we don't want to drown
             // the log). Only ELEVATE to debug-level on every Asking
@@ -556,6 +666,7 @@ pub async fn handle_spawn(
                 &session_key_for_pump,
                 &mut last_input_needed_at,
                 INPUT_NEEDED_HYSTERESIS,
+                &hook_driven_map,
             )
             .await;
             let _ = bus.send(Event::TerminalOutput {
@@ -606,6 +717,7 @@ pub async fn handle_spawn(
                 &session_key_for_pump,
                 &mut last_input_needed_at,
                 INPUT_NEEDED_HYSTERESIS,
+                &hook_driven_map,
             )
             .await;
             if !signaled_first_output {
@@ -640,10 +752,17 @@ pub async fn handle_spawn(
         term_sessions_map.lock().await.remove(&id_for_pump);
         agent_states_map.lock().await.remove(&id_for_pump);
         agent_detect_resets_map.lock().await.remove(&id_for_pump);
+        hook_driven_map.lock().await.remove(&id_for_pump);
         terminal_meta_map.lock().await.remove(&id_for_pump);
         no_permission_map.lock().await.remove(&id_for_pump);
         let _ = store_for_pump.delete_kv(&format!("terminal:{key_for_pump}"));
         let _ = store_for_pump.delete_kv(&format!("terminal-noperm:{key_for_pump}"));
+        // Drop the per-session hook settings file we generated at spawn.
+        // Best-effort — a leftover file is harmless (it's overwritten by
+        // the next spawn that reuses the id, which can't happen anyway
+        // since ids are monotonic) but cleaning up keeps the runtime dir
+        // tidy. Reconstructed from the id, no bookkeeping needed.
+        let _ = std::fs::remove_file(hook_settings_path(id_for_pump));
     });
 
     // Schedule prompt injection. Drives the `f`-for-fix flow: the
@@ -1671,6 +1790,69 @@ pub async fn handle_close(config: &ServerConfig, terminal_id: TerminalId) {
     }
 }
 
+/// Handle a `Command::IngestHook`: a structured lifecycle hook fired by
+/// an agent and forwarded by `pilot hook-ingest`. Marks the terminal
+/// hook-driven (so the PTY pump yields `Working`/`InputNeeded` to hooks)
+/// and, when the hook implies a state, broadcasts the transition.
+///
+/// Deduped against the cached `agent_states` so a stream of `PreToolUse`
+/// hooks doesn't re-broadcast `Working` on every tool call — the
+/// `AgentState` event only fires on an actual change, exactly like the
+/// PTY path.
+pub async fn handle_ingest_hook(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    hook: pilot_ipc::HookEvent,
+) {
+    // Resolve the workspace first; an unknown terminal (already exited,
+    // or a stale hook from a process pilot no longer tracks) is dropped
+    // without marking anything hook-driven.
+    let session_key = {
+        let meta = config.terminal_meta.lock().await;
+        match meta.get(&terminal_id) {
+            Some((sk, _)) => sk.clone(),
+            None => {
+                tracing::debug!(?terminal_id, kind = ?hook.kind, "hook for unknown terminal, dropping");
+                return;
+            }
+        }
+    };
+    // From now on this terminal is hook-driven: the PTY detector defers
+    // to hooks for Working/InputNeeded. Done even for events that carry
+    // no state change (e.g. SessionStart) — the signal is "this terminal
+    // speaks hooks", not the specific transition.
+    config
+        .hook_driven_terminals
+        .lock()
+        .await
+        .insert(terminal_id);
+
+    let Some(new_state) = pilot_agents::hook::hook_to_state(&hook) else {
+        return;
+    };
+    let prev = config.agent_states.lock().await.get(&terminal_id).copied();
+    if prev == Some(new_state) {
+        return;
+    }
+    config
+        .agent_states
+        .lock()
+        .await
+        .insert(terminal_id, new_state);
+    tracing::info!(
+        ?terminal_id,
+        %session_key,
+        state = ?new_state,
+        hook = ?hook.kind,
+        "hook → broadcasting Event::AgentState",
+    );
+    let _ = config.bus.send(Event::AgentState {
+        session_key,
+        terminal_id,
+        state: new_state,
+    });
+}
+
 /// Bind already-running backend sessions to fresh wire TerminalIds.
 /// Called once at server startup so pilot restarts don't lose the
 /// agents the user was running.
@@ -2138,7 +2320,7 @@ mod tests {
         let kind = TerminalKind::Agent("claude".into());
         let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
 
-        let with_skip = argv_for(&config, &kind, &cwd, true).expect("claude registered");
+        let with_skip = argv_for(&config, &kind, &cwd, true, None).expect("claude registered");
         assert_eq!(
             with_skip,
             vec![
@@ -2147,8 +2329,27 @@ mod tests {
             ]
         );
 
-        let without_skip = argv_for(&config, &kind, &cwd, false).expect("claude registered");
+        let without_skip = argv_for(&config, &kind, &cwd, false, None).expect("claude registered");
         assert_eq!(without_skip, vec!["claude".to_string()]);
+
+        // With a generated hook settings file, `--settings <path>` is
+        // appended so Claude reports state through structured hooks.
+        let with_hooks = argv_for(
+            &config,
+            &kind,
+            &cwd,
+            false,
+            Some(std::path::PathBuf::from("/run/hooks/settings-1.json")),
+        )
+        .expect("claude registered");
+        assert_eq!(
+            with_hooks,
+            vec![
+                "claude".to_string(),
+                "--settings".to_string(),
+                "/run/hooks/settings-1.json".to_string(),
+            ]
+        );
     }
 
     #[test]

@@ -14,6 +14,9 @@
 //!   pilot slack init              interactive Slack token setup wizard
 //!   pilot slack doctor            read-only validation of an existing setup
 //!   pilot slack prune             archive stale per-(session, agent) channels
+//!   pilot hook-ingest --terminal N  forward a Claude lifecycle hook
+//!                                  payload (stdin JSON) to the daemon;
+//!                                  injected into Claude via --settings
 //!
 //! All arg parsing is intentionally stupid — see `take_flag`.
 
@@ -140,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("server") => server_subcommand(&args[1..]).await,
         Some("slack") => slack_subcommand(&args[1..]).await,
+        Some("hook-ingest") => hook_ingest_subcommand(&args[1..]).await,
         Some("--connect") => {
             let socket_path = args
                 .get(1)
@@ -149,6 +153,54 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => run_embedded_realm(preselect).await,
     }
+}
+
+/// `pilot hook-ingest --terminal <id>` — the command Claude Code runs
+/// on each lifecycle hook (pilot injects it via `--settings` at spawn).
+/// Reads the hook's JSON payload from stdin, normalizes it, and forwards
+/// it to the running daemon over the IPC socket so the daemon can map it
+/// to an `AgentState` transition.
+///
+/// Designed to never disrupt Claude: a missing daemon, a bad payload, or
+/// no terminal id all resolve to a silent no-op (exit 0). A hook command
+/// that errored or hung would stall Claude's turn.
+async fn hook_ingest_subcommand(args: &[String]) -> anyhow::Result<()> {
+    let mut args = args.to_vec();
+    let Some(terminal_id) = take_value(&mut args, "--terminal").and_then(|s| s.parse::<u64>().ok())
+    else {
+        // No terminal id → nothing to correlate. Drain stdin so Claude's
+        // write doesn't block on a full pipe, then exit cleanly.
+        let _ = read_stdin_to_string();
+        return Ok(());
+    };
+
+    let payload = read_stdin_to_string();
+    let Some(hook) = pilot_agents::hook::parse_claude_hook(&payload) else {
+        return Ok(());
+    };
+
+    let command = pilot_ipc::Command::IngestHook {
+        terminal_id: pilot_ipc::TerminalId(terminal_id),
+        hook,
+    };
+
+    // Best-effort forward. Connect, write one framed command, done — no
+    // reply expected. A connect/write error means no daemon is listening
+    // (e.g. hooks fired against a session whose daemon already exited);
+    // that's a no-op, not a failure.
+    if let Ok((_rd, mut wr)) = pilot_ipc::transport::connect(&lifecycle::socket_path()).await {
+        let _ = socket::write_frame(&mut wr, &command).await;
+    }
+    Ok(())
+}
+
+/// Read all of stdin into a string (best-effort; an IO error yields what
+/// was read so far, or an empty string).
+fn read_stdin_to_string() -> String {
+    use std::io::Read;
+    let mut buf = String::new();
+    let _ = std::io::stdin().read_to_string(&mut buf);
+    buf
 }
 
 /// `--key value` and `--key=value` parser. Removes both the flag and

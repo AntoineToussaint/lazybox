@@ -5,9 +5,11 @@
 # OS username) — so its text capture changes on every render and can't be a
 # golden. This tape never spawns a shell. It boots `pilot --test` and opens the
 # `?` help overlay, which is static pilot-owned chrome (the keybinding table).
-# The resulting demo/golden.ascii is byte-stable across renders and across
-# machines, so `git diff --exit-code demo/golden.ascii` only fails when the UI
-# or a keybinding actually changes — i.e. when the demo genuinely went stale.
+# Pilot's own rows are byte-stable across renders, so the demo workflow's
+# `git diff` only fails when the UI or a keybinding actually changes — i.e.
+# when the demo genuinely went stale. (The one exception is row 0, which holds
+# VHS's shell prompt, not pilot UI, and races between '>' and blank on the
+# Linux runner; the workflow normalizes that cell before diffing.)
 #
 # Regenerate alongside pilot.tape whenever the UI changes:
 #   cargo build -p pilot-tui

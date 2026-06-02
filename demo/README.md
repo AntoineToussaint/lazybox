@@ -12,6 +12,11 @@ diff, and guarded against drift by CI.
   overlay only, which is static pilot chrome (no live shell), so its text
   capture is byte-stable and usable as a golden.
 
+For the parts the sandbox tape can't show — live GitHub events, a real
+agent working via `w`, the Slack-from-your-phone loop — see
+[`screencast.md`](screencast.md), a version-controlled shot list for a
+human-recorded screencast.
+
 ## Outputs
 
 | File           | From          | Purpose                                                              |

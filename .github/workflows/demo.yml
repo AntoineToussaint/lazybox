@@ -115,7 +115,17 @@ jobs:
         if: github.event_name == 'pull_request'
         # If the re-rendered golden differs from what's committed, the demo
         # is stale relative to the current UI / keybindings.
+        #
+        # Row 0 caveat: VHS's own shell prompt ('>') sits at row 0 before
+        # `pilot --test` takes the screen, and whether it has scrolled off by
+        # the time VHS captures is a timing race on the Linux runner — the
+        # exact same render flips row 0 between '>' and blank run-to-run. That
+        # cell is VHS chrome, never pilot UI (pilot's chrome starts lower), so
+        # we normalize a lone leading '>' on row 0 of the fresh render to blank
+        # before diffing (the committed file already stores row 0 blank). Rows
+        # 1+ stay byte-exact, so a real UI / keybinding change still fails.
         run: |
+          sed -i '1s/^>$//' demo/golden.ascii
           if ! git diff --exit-code demo/golden.ascii; then
             echo "::error::demo/golden.ascii is stale. The pilot UI or a keybinding changed but the demo was not regenerated."
             echo "Re-render locally and commit the result:"

@@ -121,10 +121,11 @@ impl<T: TerminalAdapter> Model<T> {
     pub fn handle_choice_picked(&mut self, picks: Vec<usize>) -> Vec<IpcCommand> {
         let mut cmds = Vec::new();
         // Snippet picker — pick → write the snippet body to the
-        // active terminal followed by `\r` (auto-submit). The
-        // "expand AND submit" combo is the whole point of the
-        // feature: the user gets to the agent's input in a single
-        // keystroke chord, no intermediate "review then send" step.
+        // active terminal, encoded so the agent submits in one shot
+        // (see `encode_snippet_for_pty`). The "expand AND submit"
+        // combo is the whole point of the feature: the user gets to
+        // the agent's input in a single keystroke chord, no
+        // intermediate "review then send" step.
         if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
             let key = picks
                 .first()
@@ -148,13 +149,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.flash_info("no active terminal — open a session first");
                 return cmds;
             };
-            // Append `\r` so the agent submits. The body itself
-            // may contain embedded newlines (multi-line prompts);
-            // those land verbatim in the input. The trailing `\r`
-            // is what the agent treats as Enter / submit.
-            let mut bytes = Vec::with_capacity(snippet.body.len() + 1);
-            bytes.extend_from_slice(snippet.body.as_bytes());
-            bytes.push(b'\r');
+            let bytes = encode_snippet_for_pty(&snippet.body);
             // Mirror the snippet into the recap tracker — it's a full
             // command submitted in one shot, so without this the
             // pinned "you ▸ …" line would keep showing the previous
@@ -691,4 +686,35 @@ impl<T: TerminalAdapter> Model<T> {
         }
         self.redraw = true;
     }
+}
+
+/// Encode a snippet body for the agent's PTY. Single-line bodies are
+/// raw text plus a trailing `\r` (Enter / submit). Multi-line bodies
+/// are wrapped in a bracketed-paste pair (`ESC[200~ … ESC[201~`) with
+/// embedded newlines rewritten to `\r`, and the submit `\r` placed
+/// *outside* the closing marker.
+///
+/// Without the wrapper, a multi-line burst trips the agent's paste
+/// auto-detection: the trailing `\r` lands inside the paste window and
+/// is buffered as a literal newline rather than submitting. Bracketing
+/// the body makes the agent treat it as one paste, so the `\r` after
+/// `ESC[201~` reads as a clean submit.
+pub(super) fn encode_snippet_for_pty(body: &str) -> Vec<u8> {
+    if !body.contains('\n') {
+        let mut bytes = Vec::with_capacity(body.len() + 1);
+        bytes.extend_from_slice(body.as_bytes());
+        bytes.push(b'\r');
+        return bytes;
+    }
+    let mut out = Vec::with_capacity(body.len() + 16);
+    out.extend_from_slice(b"\x1b[200~");
+    for (i, line) in body.split('\n').enumerate() {
+        if i > 0 {
+            out.push(b'\r');
+        }
+        out.extend_from_slice(line.as_bytes());
+    }
+    out.extend_from_slice(b"\x1b[201~");
+    out.push(b'\r');
+    out
 }

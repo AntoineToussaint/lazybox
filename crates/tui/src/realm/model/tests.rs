@@ -752,6 +752,29 @@ snippets:
         assert!(matches!(m.modal_stack.last(), Some(Id::SnippetPicker)));
         assert_eq!(m.snippet_choices, vec!["alpha".to_string(), "zeta".into()]);
     }
+
+    /// A single-line snippet body is sent raw plus a trailing `\r`.
+    /// No bracketed-paste wrapper — the agent submits it directly.
+    #[test]
+    fn encode_snippet_single_line_is_raw_plus_cr() {
+        let bytes = super::super::inputs::encode_snippet_for_pty("review the diff");
+        assert_eq!(bytes, b"review the diff\r");
+    }
+
+    /// A multi-line body is wrapped in a bracketed-paste pair with
+    /// embedded newlines rewritten to `\r`, and the submit `\r`
+    /// placed *outside* the closing `ESC[201~`. Without the wrapper
+    /// the agent's paste auto-detection swallows the trailing `\r`
+    /// and never submits (issue #204).
+    #[test]
+    fn encode_snippet_multi_line_is_bracketed_paste_with_trailing_cr() {
+        let bytes = super::super::inputs::encode_snippet_for_pty("first line\nsecond line");
+        assert_eq!(bytes, b"\x1b[200~first line\rsecond line\x1b[201~\r");
+        assert!(
+            bytes.ends_with(b"\x1b[201~\r"),
+            "submit CR must land after the close marker, not inside the paste"
+        );
+    }
 }
 
 #[cfg(test)]

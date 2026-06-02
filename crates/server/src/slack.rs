@@ -265,7 +265,15 @@ async fn run(
     // ── Outbound bus ──────────────────────────────────────────────
     let bus_rx = config.bus.subscribe();
 
-    drive(&*provider, &config, &state, bus_rx, inbound_rx).await;
+    drive(
+        &*provider,
+        &config,
+        &state,
+        bus_rx,
+        inbound_rx,
+        &auth.user_id,
+    )
+    .await;
     Ok(())
 }
 
@@ -278,6 +286,7 @@ async fn drive(
     state: &Arc<tokio::sync::Mutex<RouterState>>,
     mut bus_rx: broadcast::Receiver<pilot_ipc::Event>,
     mut inbound_rx: tokio::sync::mpsc::Receiver<InboundEvent>,
+    bot_user_id: &str,
 ) {
     loop {
         tokio::select! {
@@ -294,7 +303,7 @@ async fn drive(
             }
             msg = inbound_rx.recv() => {
                 let Some(msg) = msg else { break };
-                if let Some(normalized) = map_inbound(msg) {
+                if let Some(normalized) = map_inbound(msg, bot_user_id) {
                     chat::handle_inbound(provider, config, state, normalized).await;
                 }
             }
@@ -306,7 +315,11 @@ async fn drive(
 /// provider-agnostic [`ChatInbound`]. Hello → Connected; disconnect
 /// → Disconnected; mention + message both → Message (the chat layer
 /// doesn't care which Slack event delivered the text).
-fn map_inbound(ev: InboundEvent) -> Option<ChatInbound> {
+///
+/// Messages whose author is the bot itself are dropped — a second line
+/// of defense behind `socket.rs`'s `bot_id` filter against pilot's own
+/// posts routing back into the agent.
+fn map_inbound(ev: InboundEvent, bot_user_id: &str) -> Option<ChatInbound> {
     match ev {
         InboundEvent::Hello => Some(ChatInbound::Connected),
         InboundEvent::Disconnect { reason } => Some(ChatInbound::Disconnected { reason }),
@@ -323,13 +336,18 @@ fn map_inbound(ev: InboundEvent) -> Option<ChatInbound> {
             text,
             ts,
             thread_ts,
-        } => Some(ChatInbound::Message {
-            channel,
-            user,
-            text,
-            ts,
-            thread_ts,
-        }),
+        } => {
+            if user == bot_user_id {
+                return None;
+            }
+            Some(ChatInbound::Message {
+                channel,
+                user,
+                text,
+                ts,
+                thread_ts,
+            })
+        }
     }
 }
 
@@ -379,7 +397,7 @@ mod tests {
 
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            drive(&provider, &config, &state, bus_rx, inbound_rx),
+            drive(&provider, &config, &state, bus_rx, inbound_rx, "UBOT"),
         )
         .await
         .expect("drive should return promptly once the bus closes");
@@ -387,15 +405,18 @@ mod tests {
 
     #[test]
     fn map_inbound_hello_becomes_connected() {
-        let out = map_inbound(InboundEvent::Hello).unwrap();
+        let out = map_inbound(InboundEvent::Hello, "UBOT").unwrap();
         assert!(matches!(out, ChatInbound::Connected));
     }
 
     #[test]
     fn map_inbound_disconnect_carries_reason() {
-        let out = map_inbound(InboundEvent::Disconnect {
-            reason: "refresh_requested".to_string(),
-        })
+        let out = map_inbound(
+            InboundEvent::Disconnect {
+                reason: "refresh_requested".to_string(),
+            },
+            "UBOT",
+        )
         .unwrap();
         match out {
             ChatInbound::Disconnected { reason } => {
@@ -407,35 +428,59 @@ mod tests {
 
     #[test]
     fn map_inbound_mention_and_message_normalize_to_message() {
-        let mention = map_inbound(InboundEvent::Mention {
-            channel: "C1".into(),
-            user: "U1".into(),
-            text: "hi".into(),
-            ts: "1.0".into(),
-            thread_ts: None,
-        })
+        let mention = map_inbound(
+            InboundEvent::Mention {
+                channel: "C1".into(),
+                user: "U1".into(),
+                text: "hi".into(),
+                ts: "1.0".into(),
+                thread_ts: None,
+            },
+            "UBOT",
+        )
         .unwrap();
-        let message = map_inbound(InboundEvent::Message {
-            channel: "C1".into(),
-            user: "U1".into(),
-            text: "hi".into(),
-            ts: "1.0".into(),
-            thread_ts: None,
-        })
+        let message = map_inbound(
+            InboundEvent::Message {
+                channel: "C1".into(),
+                user: "U1".into(),
+                text: "hi".into(),
+                ts: "1.0".into(),
+                thread_ts: None,
+            },
+            "UBOT",
+        )
         .unwrap();
         assert!(matches!(mention, ChatInbound::Message { .. }));
         assert!(matches!(message, ChatInbound::Message { .. }));
     }
 
     #[test]
+    fn map_inbound_drops_messages_authored_by_the_bot() {
+        let out = map_inbound(
+            InboundEvent::Message {
+                channel: "C1".into(),
+                user: "UBOT".into(),
+                text: "needs input".into(),
+                ts: "1.0".into(),
+                thread_ts: None,
+            },
+            "UBOT",
+        );
+        assert!(out.is_none());
+    }
+
+    #[test]
     fn map_inbound_carries_thread_ts_through() {
-        let out = map_inbound(InboundEvent::Message {
-            channel: "C1".into(),
-            user: "U1".into(),
-            text: "yes".into(),
-            ts: "2.0".into(),
-            thread_ts: Some("1.0".into()),
-        })
+        let out = map_inbound(
+            InboundEvent::Message {
+                channel: "C1".into(),
+                user: "U1".into(),
+                text: "yes".into(),
+                ts: "2.0".into(),
+                thread_ts: Some("1.0".into()),
+            },
+            "UBOT",
+        )
         .unwrap();
         match out {
             ChatInbound::Message {

@@ -327,6 +327,13 @@ fn parse_events_api(payload: &serde_json::Value) -> Option<InboundEvent> {
             // Slack delivers bot's own messages back as `message`
             // events with `subtype: "bot_message"` or with the bot's
             // user id. Filter those out so we don't infinite-loop.
+            // Posts made via `chat.postMessage` typically arrive with a
+            // `bot_id` set and *no* `bot_message` subtype, so the
+            // subtype check alone lets pilot's own notifications route
+            // back into the agent.
+            if event.get("bot_id").is_some() {
+                return None;
+            }
             let subtype = event.get("subtype").and_then(|v| v.as_str());
             if subtype == Some("bot_message") || subtype == Some("message_changed") {
                 return None;
@@ -493,6 +500,30 @@ mod tests {
             Duration::from_secs(1)
         );
         assert_eq!(b.next_delay(rapid), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn events_api_bot_id_message_without_subtype_is_filtered() {
+        // Posts via `chat.postMessage` with a bot token arrive with
+        // `bot_id` set and *no* `bot_message` subtype — the shape that
+        // slipped past the old subtype-only filter and fed pilot's own
+        // notifications back into the agent.
+        let env: SocketEnvelope = serde_json::from_value(json!({
+            "type": "events_api",
+            "envelope_id": "e4",
+            "payload": {
+                "event": {
+                    "type": "message",
+                    "channel": "C123",
+                    "user": "UBOT",
+                    "bot_id": "B999",
+                    "text": "needs input",
+                    "ts": "1.3",
+                }
+            }
+        }))
+        .unwrap();
+        assert!(env.into_inbound().is_empty());
     }
 
     #[test]

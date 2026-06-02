@@ -33,7 +33,7 @@
 use crate::SlackError;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
@@ -151,10 +151,14 @@ impl SocketModeClient {
         // can drop the socket for many reasons (graceful refresh,
         // upstream maintenance, network blip); we just rebuild.
         let mut backoff = Duration::from_secs(1);
+        let mut clean_close = CleanCloseBackoff::new();
         loop {
+            let started = Instant::now();
             match self.run_once(&tx).await {
                 Ok(()) => {
-                    tracing::info!("slack: socket closed cleanly, reconnecting");
+                    let delay = clean_close.next_delay(started.elapsed());
+                    tracing::info!("slack: socket closed cleanly, reconnecting in {delay:?}");
+                    tokio::time::sleep(delay).await;
                     backoff = Duration::from_secs(1);
                 }
                 Err(e) => {
@@ -210,6 +214,40 @@ impl SocketModeClient {
             }
         }
         Ok(())
+    }
+}
+
+/// Floor delay before reopening after a *clean* socket close, so a
+/// socket that opens then closes cleanly in a tight cycle can't
+/// hot-loop on `apps.connections.open` (which Slack rate-limits).
+///
+/// A healthy, long-lived connection reconnects after the base floor.
+/// Repeated rapid closes (a close sooner than `RAPID_THRESHOLD` after
+/// connecting) escalate the delay toward `CAP`, matching the error
+/// path's 60s ceiling; one long-lived connection resets it.
+struct CleanCloseBackoff {
+    rapid_closes: u32,
+}
+
+impl CleanCloseBackoff {
+    const FLOOR: Duration = Duration::from_secs(1);
+    const RAPID_THRESHOLD: Duration = Duration::from_secs(30);
+    const CAP: Duration = Duration::from_secs(60);
+
+    fn new() -> Self {
+        Self { rapid_closes: 0 }
+    }
+
+    fn next_delay(&mut self, connection_lasted: Duration) -> Duration {
+        if connection_lasted >= Self::RAPID_THRESHOLD {
+            self.rapid_closes = 0;
+            return Self::FLOOR;
+        }
+        // `.min(6)` caps the shift before `CAP` clamps the result, so a
+        // long run of rapid closes can't overflow the exponent.
+        let shift = self.rapid_closes.min(6);
+        self.rapid_closes += 1;
+        (Self::FLOOR * 2u32.pow(shift)).min(Self::CAP)
     }
 }
 
@@ -411,6 +449,50 @@ mod tests {
         }))
         .unwrap();
         assert!(env.into_inbound().is_empty());
+    }
+
+    #[test]
+    fn clean_close_of_healthy_connection_uses_base_floor() {
+        let mut b = CleanCloseBackoff::new();
+        assert_eq!(
+            b.next_delay(Duration::from_secs(120)),
+            Duration::from_secs(1)
+        );
+        // A healthy connection keeps using the floor, never escalating.
+        assert_eq!(
+            b.next_delay(Duration::from_secs(120)),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn rapid_clean_closes_escalate_toward_the_cap() {
+        let mut b = CleanCloseBackoff::new();
+        let rapid = Duration::from_millis(50);
+        assert_eq!(b.next_delay(rapid), Duration::from_secs(1));
+        assert_eq!(b.next_delay(rapid), Duration::from_secs(2));
+        assert_eq!(b.next_delay(rapid), Duration::from_secs(4));
+        assert_eq!(b.next_delay(rapid), Duration::from_secs(8));
+        assert_eq!(b.next_delay(rapid), Duration::from_secs(16));
+        assert_eq!(b.next_delay(rapid), Duration::from_secs(32));
+        // From here the exponent would overshoot; the delay clamps at 60s.
+        assert_eq!(b.next_delay(rapid), Duration::from_secs(60));
+        assert_eq!(b.next_delay(rapid), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_long_lived_connection_resets_the_escalation() {
+        let mut b = CleanCloseBackoff::new();
+        let rapid = Duration::from_millis(50);
+        b.next_delay(rapid);
+        b.next_delay(rapid);
+        assert_eq!(b.next_delay(rapid), Duration::from_secs(4));
+        // One healthy connection drops us back to the floor.
+        assert_eq!(
+            b.next_delay(Duration::from_secs(120)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(b.next_delay(rapid), Duration::from_secs(1));
     }
 
     #[test]

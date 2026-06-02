@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 /// Provider-only slice of [`SlackConfig`] — just the routing knobs
 /// the dispatcher needs. Built from the full config at construction
@@ -258,31 +259,46 @@ async fn run(
     let state = Arc::new(tokio::sync::Mutex::new(RouterState::new()));
 
     // ── Inbound socket ────────────────────────────────────────────
-    let (mut inbound_rx, _socket_handle) = SocketModeClient::new(app_token).start();
+    let (inbound_rx, _socket_handle) = SocketModeClient::new(app_token).start();
 
     // ── Outbound bus ──────────────────────────────────────────────
-    let mut bus_rx = config.bus.subscribe();
+    let bus_rx = config.bus.subscribe();
 
-    // Drive both halves from one task — `select!` over the two
-    // streams keeps state ownership single-threaded.
+    drive(&*provider, &config, &state, bus_rx, inbound_rx).await;
+    Ok(())
+}
+
+/// Drive both halves from one task — `select!` over the two streams
+/// keeps state ownership single-threaded. Returns when either stream
+/// is exhausted (bus closed or inbound socket gone).
+async fn drive(
+    provider: &dyn ChatProvider,
+    config: &ServerConfig,
+    state: &Arc<tokio::sync::Mutex<RouterState>>,
+    mut bus_rx: broadcast::Receiver<pilot_ipc::Event>,
+    mut inbound_rx: tokio::sync::mpsc::Receiver<InboundEvent>,
+) {
     loop {
         tokio::select! {
             biased;
             evt = bus_rx.recv() => {
                 match evt {
-                    Ok(e) => chat::handle_bus_event(&*provider, &config, &state, e).await,
-                    Err(_) => continue, // lagged — broadcast channel skipped events
+                    Ok(e) => chat::handle_bus_event(provider, config, state, e).await,
+                    // Lagged: the broadcast channel skipped events — keep going.
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    // Closed: the bus is gone (shutdown) — stop the loop instead
+                    // of spinning on an arm that will never block again.
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
             msg = inbound_rx.recv() => {
                 let Some(msg) = msg else { break };
                 if let Some(normalized) = map_inbound(msg) {
-                    chat::handle_inbound(&*provider, &config, &state, normalized).await;
+                    chat::handle_inbound(provider, config, state, normalized).await;
                 }
             }
         }
     }
-    Ok(())
 }
 
 /// Normalize Slack's wire-level inbound shape into the chat layer's
@@ -340,6 +356,32 @@ mod tests {
     fn strip_self_mention_leaves_text_alone_if_no_mention() {
         let p = provider();
         assert_eq!(p.strip_self_mention("just text"), "just text");
+    }
+
+    #[tokio::test]
+    async fn drive_returns_when_bus_closes() {
+        use pilot_store::MemoryStore;
+
+        let provider = provider();
+        let config = ServerConfig::with_store(Arc::new(MemoryStore::new()));
+        let state = Arc::new(tokio::sync::Mutex::new(RouterState::new()));
+
+        // A closed bus: drop the only sender so `recv()` yields `Closed`.
+        let (bus_tx, bus_rx) = broadcast::channel::<pilot_ipc::Event>(8);
+        drop(bus_tx);
+
+        // Keep the inbound sender alive so that arm never fires — the
+        // bus arm (polled first under `biased`) is what must stop the
+        // loop. Before the fix a `Closed` bus made the loop `continue`
+        // and spin forever, so this timeout would elapse.
+        let (_inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(8);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            drive(&provider, &config, &state, bus_rx, inbound_rx),
+        )
+        .await
+        .expect("drive should return promptly once the bus closes");
     }
 
     #[test]

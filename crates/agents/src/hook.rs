@@ -68,11 +68,12 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 /// The mapping is deliberately total over the lifecycle:
 ///   - tool use, compaction, and subagent activity all mean the main
 ///     agent is **busy** → [`AgentState::Working`];
-///   - a permission request, or a `Notification` that isn't the idle
-///     prompt, means Claude is **waiting on the user** →
-///     [`AgentState::InputNeeded`];
-///   - `Stop`, `SessionStart`/`SessionEnd`, and an idle `Notification`
-///     all mean the composer is **quiet** → [`AgentState::Idle`].
+///   - a permission request, or a `Notification` whose text asks for
+///     permission or elicitation, means Claude is **waiting on the
+///     user** → [`AgentState::InputNeeded`];
+///   - `Stop`, `SessionStart`/`SessionEnd`, and every other
+///     `Notification` (the idle "waiting for your input" nudge
+///     included) mean the composer is **quiet** → [`AgentState::Idle`].
 ///
 /// `Stop` does NOT fire on a manual interrupt (Ctrl-C / Esc); the
 /// daemon keeps the PTY detector as a fallback for that gap.
@@ -94,16 +95,27 @@ pub fn hook_to_state(event: &HookEvent) -> Option<AgentState> {
     Some(state)
 }
 
-/// Classify a `Notification` payload. The idle prompt (Claude nudging
-/// after a stretch of inactivity) means the composer is sitting ready,
-/// not blocked — that's `Idle`. Everything else (permission prompt,
-/// elicitation dialog, or an unlabelled notification) is Claude
-/// blocking on the user → `InputNeeded`.
+/// Classify a `Notification` payload. A notification only blocks the
+/// user when it asks for permission or surfaces an elicitation dialog;
+/// the idle nudge ("Claude is waiting for your input") and anything
+/// else mean the composer is sitting ready, not blocked → `Idle`.
+///
+/// We match the blocking case affirmatively and default the rest to
+/// `Idle`: Claude's permission/elicitation payloads carry a stable
+/// keyword, while its idle wording does not, so an unrecognized
+/// notification is far more likely to be the idle nudge than a real
+/// prompt — and a real prompt still surfaces via the `PermissionRequest`
+/// hook and the PTY detector fallback.
 fn notification_state(notification: Option<&str>) -> AgentState {
     match notification {
-        Some(n) if n.to_ascii_lowercase().contains("idle") => AgentState::Idle,
-        _ => AgentState::InputNeeded,
+        Some(n) if blocks_on_user(n) => AgentState::InputNeeded,
+        _ => AgentState::Idle,
     }
+}
+
+fn blocks_on_user(notification: &str) -> bool {
+    let n = notification.to_ascii_lowercase();
+    n.contains("permission") || n.contains("elicit")
 }
 
 #[cfg(test)]
@@ -184,6 +196,16 @@ mod tests {
     }
 
     #[test]
+    fn notification_permission_message_is_input_needed() {
+        // The free-text wording Claude actually sends when blocking on a
+        // tool approval.
+        let ev = parse(
+            r#"{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash"}"#,
+        );
+        assert_eq!(hook_to_state(&ev), Some(AgentState::InputNeeded));
+    }
+
+    #[test]
     fn notification_elicitation_is_input_needed() {
         let ev =
             parse(r#"{"hook_event_name":"Notification","notification_type":"elicitation_dialog"}"#);
@@ -191,21 +213,21 @@ mod tests {
     }
 
     #[test]
-    fn notification_idle_prompt_is_idle() {
-        // The idle nudge means the composer is ready, not blocked.
-        let ev = parse(r#"{"hook_event_name":"Notification","notification_type":"idle_prompt"}"#);
-        assert_eq!(hook_to_state(&ev), Some(AgentState::Idle));
-        // Also fires off the free-text `message` field Claude sometimes
-        // uses instead of `notification_type`.
+    fn notification_idle_waiting_for_input_is_idle() {
+        // Claude's real idle nudge after ~60s of inactivity — the
+        // composer is ready, not blocked. This carries no "idle"
+        // substring, which is exactly the misclassification #190 fixed.
         let ev = parse(
-            r#"{"hook_event_name":"Notification","message":"Claude is idle, waiting for input"}"#,
+            r#"{"hook_event_name":"Notification","message":"Claude is waiting for your input"}"#,
         );
         assert_eq!(hook_to_state(&ev), Some(AgentState::Idle));
     }
 
     #[test]
-    fn notification_without_type_defaults_to_input_needed() {
+    fn notification_without_type_defaults_to_idle() {
+        // An unrecognized notification is far more likely the idle nudge
+        // than a real prompt; real prompts say "permission"/"elicit".
         let ev = parse(r#"{"hook_event_name":"Notification"}"#);
-        assert_eq!(hook_to_state(&ev), Some(AgentState::InputNeeded));
+        assert_eq!(hook_to_state(&ev), Some(AgentState::Idle));
     }
 }

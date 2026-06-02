@@ -2111,15 +2111,38 @@ impl TerminalStack {
                 };
                 Self::render_user_message_recap(frame, header_rect, msg);
             }
-            slot.vt.ensure_size(body.width, body.height);
+            // Reserve the rightmost column of the body as a scrollbar
+            // gutter. Held back unconditionally so the PTY width stays
+            // stable — sizing it only when scrollback exists would make
+            // the column flip in and out as output scrolled into
+            // history, forcing a resize storm. The gutter stays blank
+            // until there's something to scroll (the indicator
+            // auto-hides), so an idle terminal just loses one column.
+            let (grid, gutter) = if body.width > 1 {
+                (
+                    Rect {
+                        width: body.width - 1,
+                        ..body
+                    },
+                    Some(Rect {
+                        x: body.x + body.width - 1,
+                        y: body.y,
+                        width: 1,
+                        height: body.height,
+                    }),
+                )
+            } else {
+                (body, None)
+            };
+            slot.vt.ensure_size(grid.width, grid.height);
             // Backend PTY also needs to know the new size — otherwise
             // the shell process keeps writing at its spawn dimensions
             // and the bottom rows go blank as soon as the user scrolls
             // past them. Queue a resize for the App to ship.
-            let new_size = (body.width, body.height);
-            if body.width > 0 && body.height > 0 && slot.last_rendered_size != Some(new_size) {
+            let new_size = (grid.width, grid.height);
+            if grid.width > 0 && grid.height > 0 && slot.last_rendered_size != Some(new_size) {
                 slot.last_rendered_size = Some(new_size);
-                self.pending_resizes.push((id, body.width, body.height));
+                self.pending_resizes.push((id, grid.width, grid.height));
             }
             if let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) {
                 let widget = GhosttyTerminal::new(
@@ -2128,7 +2151,18 @@ impl TerminalStack {
                     &mut slot.vt.cell_iter,
                     &mut slot.vt.shadow,
                 );
-                frame.render_widget(widget, body);
+                frame.render_widget(widget, grid);
+            }
+            if let Some(gutter) = gutter
+                && let Ok(bar) = slot.vt.terminal.scrollbar()
+            {
+                crate::components::scrollbar::render_vertical(
+                    frame,
+                    gutter,
+                    bar.total as usize,
+                    bar.len as usize,
+                    bar.offset as usize,
+                );
             }
         }
     }

@@ -417,8 +417,40 @@ impl Sidebar {
             })
             .collect();
 
-        let para = Paragraph::new(lines);
+        // Row-window the list so the cursor stays on screen. Each
+        // `VisibleRow` is exactly one line, so the scroll offset is a
+        // plain row count — clamp it to keep `cursor` in view, then
+        // bound it to the tail so the last rows can't scroll past the
+        // bottom edge.
+        let total_rows = lines.len();
+        let viewport = inner.height as usize;
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if viewport > 0 && self.cursor >= self.scroll + viewport {
+            self.scroll = self.cursor + 1 - viewport;
+        }
+        let max_scroll = total_rows.saturating_sub(viewport);
+        if self.scroll > max_scroll {
+            self.scroll = max_scroll;
+        }
+
+        let para = Paragraph::new(lines).scroll((self.scroll as u16, 0));
         frame.render_widget(para, inner);
+
+        // Scroll-position indicator in the right padding strip —
+        // auto-hides when the whole list fits.
+        crate::components::scrollbar::render_vertical(
+            frame,
+            Rect::new(
+                area.x + area.width.saturating_sub(2),
+                inner.y,
+                1,
+                inner.height,
+            ),
+            total_rows,
+            viewport,
+            self.scroll,
+        );
 
         // Bottom search bar (fzf-style). `/query` while editing, with a
         // caret; once `Enter` keeps the filter applied the caret drops

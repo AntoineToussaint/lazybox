@@ -618,6 +618,61 @@ fn render_shows_cursor_marker_on_selected_workspace() {
 }
 
 #[test]
+fn render_windows_list_to_keep_cursor_visible_with_scrollbar() {
+    // More workspaces than the content viewport can hold, all in one
+    // repo so the list is a long flat run.
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let workspaces: Vec<_> = (1..=20)
+        .map(|i| {
+            make_workspace(
+                "owner/repo",
+                &format!("o/r#{i}"),
+                now - Duration::minutes(i),
+            )
+        })
+        .collect();
+    s.on_event(&Event::Snapshot {
+        workspaces,
+        terminals: vec![],
+        projects: vec![],
+    });
+
+    // Tall enough for a few rows, far short of all 20 → must scroll.
+    let top = render_to_string(&mut s, 40, 12, true);
+    assert!(
+        top.contains('█'),
+        "overflowing list shows a scrollbar thumb; got:\n{top}"
+    );
+
+    // Drive the cursor to the bottom; the last workspace must be on
+    // screen even though it started well past the fold.
+    for _ in 0..s.visible_count() {
+        s.handle_key(key_code(KeyCode::Down), &mut Vec::new());
+    }
+    let bottom = render_to_string(&mut s, 40, 12, true);
+    let cursor_line = bottom
+        .lines()
+        .find(|l| l.contains('▸'))
+        .unwrap_or_else(|| panic!("expected cursor marker; got:\n{bottom}"));
+    assert!(
+        cursor_line.contains("o/r#20"),
+        "cursor row scrolled into view; got:\n{bottom}"
+    );
+}
+
+#[test]
+fn render_hides_scrollbar_when_list_fits() {
+    // Two workspaces in a viewport with room to spare → no indicator.
+    let mut s = populated_sidebar();
+    let rendered = render_to_string(&mut s, 40, 20, true);
+    assert!(
+        !rendered.contains('█'),
+        "scrollbar auto-hides when everything fits; got:\n{rendered}"
+    );
+}
+
+#[test]
 fn render_mailbox_toggles_title() {
     let mut s = populated_sidebar();
     // PILOT → INACTIVE → SNOOZED; uppercase brand label per V1.

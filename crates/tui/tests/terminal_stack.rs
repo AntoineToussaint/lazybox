@@ -553,6 +553,48 @@ fn render_shows_tab_bar_and_content() {
 }
 
 #[test]
+fn render_shows_scrollbar_when_terminal_has_scrollback() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.set_active_session(Some(sk("o/r#1")));
+    // Size the grid before feeding output so lines land at the
+    // rendered dimensions.
+    render_to_string(&mut t, 60, 10, true);
+    let mut bytes = Vec::new();
+    for i in 0..100 {
+        bytes.extend_from_slice(format!("line {i}\r\n").as_bytes());
+    }
+    t.on_event(&Event::TerminalOutput {
+        terminal_id: TerminalId(1),
+        bytes,
+        seq: 1,
+    });
+    let out = render_to_string(&mut t, 60, 10, true);
+    assert!(
+        out.contains('█'),
+        "terminal with scrollback shows a scrollbar thumb; got:\n{out}"
+    );
+}
+
+#[test]
+fn render_hides_scrollbar_when_terminal_fits() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.set_active_session(Some(sk("o/r#1")));
+    render_to_string(&mut t, 60, 10, true);
+    t.on_event(&Event::TerminalOutput {
+        terminal_id: TerminalId(1),
+        bytes: b"just one line\r\n".to_vec(),
+        seq: 1,
+    });
+    let out = render_to_string(&mut t, 60, 10, true);
+    assert!(
+        !out.contains('█'),
+        "scrollbar auto-hides when content fits; got:\n{out}"
+    );
+}
+
+#[test]
 fn render_shows_no_perms_badge_for_autonomous_session() {
     let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&Event::TerminalSpawned {

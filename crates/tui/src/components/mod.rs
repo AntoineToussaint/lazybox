@@ -6,6 +6,7 @@ pub mod activity_feed;
 pub mod comment_render;
 pub mod icons;
 pub mod right_pane;
+pub mod scrollbar;
 pub mod sidebar;
 pub mod table;
 pub mod task_label;

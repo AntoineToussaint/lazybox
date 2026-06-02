@@ -1112,6 +1112,15 @@ impl RightPane {
         }
 
         frame.render_widget(Paragraph::new(visible), inner);
+        // Scroll-position indicator in the right padding column —
+        // auto-hides when everything fits.
+        crate::components::scrollbar::render_vertical(
+            frame,
+            Rect::new(inner.x + inner.width, inner.y, 1, inner.height),
+            total_lines,
+            window,
+            scroll,
+        );
         self.last_visible_cards = window.max(1);
         self.last_total_lines = total_lines;
         area.height

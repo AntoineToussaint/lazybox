@@ -322,6 +322,10 @@ pub struct Sidebar {
     /// when there is at least one — `recompute_visible` and the
     /// j/k handlers maintain that invariant.
     cursor: usize,
+    /// Index of the topmost `visible` row drawn in the content area.
+    /// The list has no other scroll state — `render` clamps this to
+    /// keep `cursor` on screen, so it follows j/k automatically.
+    scroll: usize,
     mailbox: Mailbox,
     /// Live filter on top of the mailbox. Cycles via `f`. Default
     /// `All` is a no-op; the other variants restrict the visible
@@ -455,6 +459,7 @@ impl Sidebar {
             collapsed_repos: BTreeSet::new(),
             repo_summaries: BTreeMap::new(),
             cursor: 0,
+            scroll: 0,
             mailbox: Mailbox::Inbox,
             role_filter: RoleFilter::default(),
             sort_mode: SortMode::default(),
@@ -806,7 +811,10 @@ impl Sidebar {
         if click_row < area.y + HEADER_HEIGHT {
             return false;
         }
-        let idx = (click_row - area.y - HEADER_HEIGHT) as usize;
+        // Add the scroll offset the renderer applied so a click lands
+        // on the row actually drawn under the cursor, not the row that
+        // would be there at scroll 0.
+        let idx = (click_row - area.y - HEADER_HEIGHT) as usize + self.scroll;
         match self.visible.get(idx) {
             // Headers ARE selectable now (post-Stage-4): the user
             // needs to land cursor on a project header to fire

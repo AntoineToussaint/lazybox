@@ -561,6 +561,29 @@ fn render_lists_comments() {
 }
 
 #[test]
+fn render_shows_scrollbar_when_activity_overflows() {
+    let mut rp = RightPane::new(PaneId::new(1));
+    rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 40)));
+    // Short pane: 40 comments can't fit, so the indicator shows.
+    let rendered = render_to_string(&mut rp, 60, 10, true);
+    assert!(
+        rendered.contains('█'),
+        "overflowing activity shows a scrollbar thumb; got:\n{rendered}"
+    );
+}
+
+#[test]
+fn render_hides_scrollbar_when_activity_fits() {
+    let mut rp = RightPane::new(PaneId::new(1));
+    rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 2)));
+    let rendered = render_to_string(&mut rp, 60, 20, true);
+    assert!(
+        !rendered.contains('█'),
+        "scrollbar auto-hides when activity fits; got:\n{rendered}"
+    );
+}
+
+#[test]
 fn render_empty_activity_collapses_to_header() {
     // Empty activity defaults to collapsed: just the header row, no
     // "(no activity)" placeholder taking up space below it.

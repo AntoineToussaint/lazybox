@@ -621,6 +621,46 @@ fn claude_freeform_question_is_idle_not_input_needed() {
 }
 
 #[test]
+fn claude_done_with_numbered_summary_above_composer_is_idle() {
+    // Issue #164: a turn that ends DONE — a plain summary that happens
+    // to contain a numbered list — sits above the idle composer. The
+    // composer draws its OWN `❯` prompt glyph, so arrow+chooser both
+    // match even though nothing is being asked. The `?` pill must NOT
+    // appear: a DONE/idle agent with no pending question reads Idle.
+    let agent = Claude;
+    let buf = "I've finished the task. Summary of changes:\n\
+               1. Added the chooser recency guard\n\
+               2. Wrote a regression test\n\
+               \n\
+               ❯ \n\
+               ? for shortcuts";
+    assert_eq!(
+        agent.detect_state(buf.as_bytes()),
+        Some(AgentState::Idle),
+        "DONE summary with a numbered list above the composer must clear the asking-set",
+    );
+}
+
+#[test]
+fn claude_live_chooser_after_stale_composer_footer_is_input_needed() {
+    // The recency guard must NOT suppress a genuine chooser whose
+    // composer footer still lingers in the append-only buffer from
+    // BEFORE the turn began. The live arrow is re-rendered AFTER that
+    // stale footer, so it still reads InputNeeded.
+    let agent = Claude;
+    let buf = "❯ previous prompt\n\
+               ? for shortcuts\n\
+               Allow Bash this command?\n\
+               ❯ 1. Yes\n\
+                 2. No\n";
+    assert_eq!(
+        agent.detect_state(buf.as_bytes()),
+        Some(AgentState::InputNeeded),
+        "a live chooser re-rendered after a stale composer footer must still fire",
+    );
+}
+
+#[test]
 fn claude_question_heuristic_stays_idle_on_plain_streaming() {
     // No question mark, no prompt, no working hint → Idle.
     // Belt-and-braces.

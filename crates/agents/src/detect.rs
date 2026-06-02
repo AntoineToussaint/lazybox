@@ -163,6 +163,14 @@ fn claude_state_of(s: &str, compact: &str) -> AgentState {
     // ASCII arrow accepted on ANY option (`> 1.`, `> 2.`, `> 3.`, …) —
     // the user moves the cursor with j/k, and claude re-renders the
     // arrow at the new option.
+    //
+    // The shape match alone is not enough (issue #164): the idle composer
+    // draws its OWN `❯` prompt glyph, so a turn that ends with a numbered
+    // list in the agent's summary (`1. … 2. …`) above the input box
+    // satisfies arrow+chooser even though nothing is being asked. The
+    // `chooser_live` recency gate (computed above) discards that case —
+    // when the idle footer is the more-recent bottom marker the chooser
+    // shape is stale chat and the turn is over.
     let has_arrow = s.contains('❯') || has_ascii_chooser_arrow(s);
     let has_chooser = has_numbered_chooser_options(s);
     if has_arrow && has_chooser && chooser_live {

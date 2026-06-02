@@ -1,0 +1,53 @@
+# Add a repo
+
+Goal: bring a GitHub repository's pull requests and issues into the inbox, then
+narrow the list to the rows that matter to you.
+
+## Prerequisites
+
+- pilot is running (see the [Quickstart](../tutorials/quickstart.md)).
+- `gh auth login` has been run, so `gh auth token` resolves a token with access
+  to the repository.
+
+## Add the repo
+
+You can add a repo in two ways, depending on where you are.
+
+=== "First run"
+
+    On the very first launch the setup wizard walks you through adding your
+    first repository. Follow the prompts; pilot starts polling it immediately.
+
+=== "Any time after"
+
+    Press `,` to open the **settings palette**, then choose the option to add a
+    repository and enter its `owner/name`. pilot begins polling it (default
+    every 60 seconds) and your PRs and issues appear in the sidebar, grouped
+    under that repo.
+
+A repo group can be folded or unfolded with `Space` on the group row.
+
+## Filter by your role
+
+Once rows arrive, you usually don't want all of them at once. From the sidebar:
+
+- Press `f` to cycle the **role filter**:
+  `all → author → reviewer → assignee → mentioned → all`.
+- Press `o` to cycle the **sort order**: `recent → by-role → split`.
+
+So to see only the PRs where you've been asked to review, press `f` until the
+filter reads `reviewer`. Press `Shift-R` at any time to force a manual refresh
+instead of waiting for the next poll.
+
+## Verify
+
+You should now see the repository's rows in the sidebar with unread markers on
+items that have new activity. Selecting a row populates the activity pane on the
+right.
+
+## Related
+
+- Configure polling and other per-repo behaviour in the
+  [configuration reference](../reference/configuration.md).
+- Then [run an agent per workspace](run-an-agent-per-workspace.md) on one of the
+  rows.

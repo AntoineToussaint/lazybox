@@ -121,11 +121,74 @@ fn init_tracing() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Top-level orientation, printed on `pilot -h` / `pilot --help`. Ordered
+/// getting-started-first, with the one destructive flag (`--fresh`) last.
+/// Printed to stdout (not the log file) and exits before the daemon boots,
+/// so `--help` stays fast and clean even when launched in a pipe.
+const HELP: &str = "\
+pilot — a reactive PR inbox in your terminal
+
+Events flow to you: new comments, CI failures, and review requests surface as
+they land. Each task opens a git worktree with an embedded terminal for Claude
+Code, Codex, Cursor, or a shell.
+
+Usage: pilot [OPTIONS] [COMMAND]
+
+Run with no arguments to launch the inbox (an in-process daemon + TUI). The
+first launch walks you through a short setup wizard; press `,` any time to add
+repos, change agents, or edit roles.
+
+Getting started:
+  pilot                     launch the inbox (default)
+  pilot --test              try the UI on a throwaway seeded workspace, no GitHub
+  pilot --help, -h          show this help
+  pilot --version, -V       print the version
+
+Remote & services:
+  pilot server start        run a standalone daemon (for SSH / multi-client)
+  pilot server stop         stop a running standalone daemon
+  pilot server status       show daemon status
+  pilot server api [addr]   JSON HTTP API gateway (default 127.0.0.1:8787)
+  pilot --connect <socket>  attach a TUI to a running daemon
+  pilot slack init          set up the optional Slack mirror
+  pilot slack doctor        validate an existing Slack setup
+
+Advanced:
+  pilot --fresh             wipe ~/.pilot/v2/state.db and re-run setup (destructive)
+
+Credentials come from `gh auth token` by default; set LINEAR_API_KEY for Linear.
+Logs go to /tmp/pilot.log (RUST_LOG=pilot=debug for verbose). State lives in
+~/.pilot/v2/state.db. Docs: https://antoinetoussaint.github.io/pilot/";
+
+/// `-h` / `--help` anywhere in argv. Help is always available regardless of
+/// the rest of the command line, per clig.dev discoverability.
+fn wants_help(args: &[String]) -> bool {
+    args.iter().any(|a| a == "-h" || a == "--help")
+}
+
+/// `-V` / `--version` anywhere in argv.
+fn wants_version(args: &[String]) -> bool {
+    args.iter().any(|a| a == "-V" || a == "--version")
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Resolve --help / --version before init_tracing (which redirects stderr
+    // into the log file and opens the daemon path). These short-circuit to
+    // clean stdout and exit 0, so they work in a pipe and don't touch state.
+    if wants_help(&args) {
+        println!("{HELP}");
+        return Ok(());
+    }
+    if wants_version(&args) {
+        println!("pilot {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     init_tracing()?;
 
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
     let fresh = take_flag(&mut args, "--fresh");
     let test_mode = take_flag(&mut args, "--test");
     let preselect_workspace = take_value(&mut args, "--workspace");
@@ -675,5 +738,29 @@ mod argv_tests {
         let mut a = args(&["--workspace", "foo"]);
         assert!(!take_flag(&mut a, "--fresh"));
         assert_eq!(a, args(&["--workspace", "foo"]));
+    }
+
+    #[test]
+    fn help_and_version_flags_detected_anywhere() {
+        assert!(wants_help(&args(&["--help"])));
+        assert!(wants_help(&args(&["-h"])));
+        assert!(wants_help(&args(&["server", "--help"])));
+        assert!(!wants_help(&args(&["--fresh"])));
+
+        assert!(wants_version(&args(&["--version"])));
+        assert!(wants_version(&args(&["-V"])));
+        assert!(!wants_version(&args(&["-v"]))); // lowercase -v is not the version flag
+    }
+
+    #[test]
+    fn help_text_is_getting_started_first_and_destructive_last() {
+        // Orientation order is a contract: the safe getting-started path comes
+        // before the one destructive flag, per clig.dev help ordering.
+        let getting_started = HELP
+            .find("Getting started:")
+            .expect("getting-started section");
+        let destructive = HELP.find("--fresh").expect("--fresh mention");
+        assert!(getting_started < destructive);
+        assert!(HELP.contains("(destructive)"));
     }
 }

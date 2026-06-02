@@ -85,6 +85,20 @@ attention:
 - **Linear mutations**: `merge` for Linear (issue → state=done) not yet implemented. `add_assignees` works but needs display-name → UUID resolution.
 - **Vendored libghostty**: `crates/libghostty-vt-sys/build.rs` fetches a pinned ghostty commit at build time. Zig 0.15.2 is pinned because newer Zig breaks the upstream `requireZig` check.
 
-## Reporting bugs / asking for features
+## Where to get help
 
-Open an issue. Include the relevant `/tmp/pilot.log` excerpt + `pilot --version`. For terminal-rendering bugs, screenshots are very useful.
+- **Questions, setup help, sharing configs** → [GitHub Discussions](https://github.com/AntoineToussaint/pilot/discussions).
+- **Bugs and feature requests** → [Issues](https://github.com/AntoineToussaint/pilot/issues/new/choose) (use the templates).
+- **Docs & architecture** → the [docs site](https://antoinetoussaint.github.io/pilot/), plus [`CLAUDE.md`](./CLAUDE.md) and `DESIGN.md` for deeper notes.
+
+pilot is pre-1.0, so support is best-effort. See [`SUPPORT.md`](./SUPPORT.md) for the short version.
+
+## Reporting bugs & requesting features
+
+Use the [issue templates](https://github.com/AntoineToussaint/pilot/issues/new/choose) — there's a form for bugs and one for feature requests. For bugs, include:
+
+- The relevant `/tmp/pilot.log` excerpt (re-run with `RUST_LOG=pilot=debug` for verbose output).
+- Your OS (macOS or Linux) and the commit you built from (`git rev-parse HEAD`).
+- For terminal-rendering bugs, a screenshot.
+
+For feature requests, lead with the problem you're hitting, not just the feature you have in mind.

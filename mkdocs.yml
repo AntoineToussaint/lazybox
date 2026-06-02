@@ -1,0 +1,67 @@
+site_name: pilot
+site_url: https://antoinetoussaint.github.io/pilot/
+site_description: A reactive PR inbox in your terminal.
+
+repo_url: https://github.com/AntoineToussaint/pilot
+repo_name: AntoineToussaint/pilot
+
+docs_dir: docs-site
+use_directory_urls: true
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.tabs
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+  - toc:
+      permalink: true
+  - tables
+  - attr_list
+
+nav:
+  - Home: index.md
+  - Tutorials:
+      - tutorials/index.md
+      - Quickstart: tutorials/quickstart.md
+  - How-to guides:
+      - how-to/index.md
+      - Add a repo: how-to/add-a-repo.md
+      - Run an agent per workspace: how-to/run-an-agent-per-workspace.md
+      - Per-repo env and mounts: how-to/per-repo-env-and-mounts.md
+      - Remote over SSH: how-to/remote-over-ssh.md
+      - Mirror to Slack: how-to/mirror-to-slack.md
+  - Reference:
+      - reference/index.md
+      - CLI: reference/cli.md
+      - Keybindings: reference/keybindings.md
+      - Configuration: reference/configuration.md
+  - Explanation:
+      - explanation/index.md
+      - Mental model: explanation/mental-model.md
+      - Architecture: explanation/architecture.md

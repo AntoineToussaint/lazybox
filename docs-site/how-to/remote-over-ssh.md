@@ -1,0 +1,61 @@
+# Remote over SSH
+
+Goal: run the pilot daemon on a remote machine (where your repos and agents
+live) while driving the TUI from your laptop, over a forwarded Unix socket.
+
+By default pilot runs the daemon and TUI in the same process. Out-of-process
+mode splits them: the daemon owns state and IO, and the TUI connects to it over
+a Unix socket carrying length-prefixed bincode. SSH local forwarding (`-L`)
+bridges the two machines.
+
+## Prerequisites
+
+- pilot built and runnable on the remote host (see the
+  [Quickstart](../tutorials/quickstart.md)).
+- SSH access to the remote host.
+
+## 1. Start the daemon on the remote host
+
+SSH into the remote machine and start the server:
+
+```sh
+pilot server start
+pilot server status     # confirm it is up
+```
+
+The daemon listens on a Unix socket. Note its path (it lives under the remote
+host's pilot home; `PILOT_HOME` overrides where pilot writes everything).
+
+## 2. Forward the socket over SSH
+
+From your laptop, forward a local socket path to the remote socket path:
+
+```sh
+ssh -L /tmp/pilot-remote.sock:/path/to/remote/pilot.sock user@remote-host
+```
+
+Keep this SSH session open; it carries the connection.
+
+## 3. Connect the TUI
+
+In another terminal on your laptop, connect the TUI to the forwarded socket:
+
+```sh
+pilot --connect /tmp/pilot-remote.sock
+```
+
+You now have the full inbox and embedded terminals — but the worktrees, polling,
+and agent sessions all run on the remote host.
+
+## Stopping
+
+```sh
+pilot server stop       # run on the remote host
+```
+
+## Related
+
+- The [CLI reference](../reference/cli.md) for `server` subcommands and
+  `--connect`.
+- The [architecture explanation](../explanation/architecture.md) for how the
+  client/daemon split works.

@@ -1,0 +1,69 @@
+name: Bug report
+description: Something in pilot is broken or behaving unexpectedly.
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a report. pilot is pre-1.0 and runs
+        in early-adopter dev mode, so sharp edges are expected — but details help
+        us fix them fast. Please fill in as much as you can.
+
+        A `/tmp/pilot.log` excerpt and the exact commit you built from are the
+        two most useful things you can include.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug. What did you see go wrong?
+      placeholder: The sidebar froze after merging a PR and stopped receiving new events.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: How can we trigger this? Numbered steps are ideal.
+      placeholder: |
+        1. Launch with `make run`
+        2. Open a workspace with `Enter`
+        3. Press `Shift-M` to merge
+        4. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: pilot version / commit
+      description: Output of `pilot --version`, or the `git rev-parse HEAD` of the commit you built from.
+      placeholder: a26b963
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log excerpt
+      description: >
+        Paste the relevant portion of `/tmp/pilot.log` (re-run with
+        `RUST_LOG=pilot=debug` for verbose output). This will be rendered as
+        code, so no backticks needed.
+      render: text
+    validations:
+      required: false

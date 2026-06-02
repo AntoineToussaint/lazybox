@@ -1,0 +1,33 @@
+# ~/.pilot/config.yaml — optional Slack mirror
+#
+# The Slack mirror reflects your pilot inbox into Slack: workspaces and their
+# activity show up as messages so you can keep tabs from your phone or hand a
+# workspace off to a teammate. It is entirely optional.
+#
+# Easiest path: run `pilot slack init` — it walks you through creating the
+# Slack app, granting scopes, and writing the block below for you. Use
+# `pilot slack doctor` to check the connection and `pilot slack prune` to
+# clean up stale per-workspace channels. The schema below is what gets written.
+
+slack:
+  # Bot token (xoxb-...) — from your Slack app's OAuth & Permissions page.
+  bot_token: xoxb-REPLACE-ME           # placeholder, not a real token
+  # App-level token (xapp-...) — needed for Socket Mode event delivery.
+  app_token: xapp-REPLACE-ME           # placeholder, not a real token
+
+  # The channel where pilot posts its top-level inbox/anchor messages.
+  anchor_channel: "#pilot"
+
+  # When true, each workspace gets its own dedicated channel so conversation
+  # about one task stays together. When false, everything threads under the
+  # anchor channel instead.
+  per_workspace_channels: true
+
+# The Slack mirror layers on top of your normal config — keep your repos and
+# providers blocks as they are.
+repos:
+  AntoineToussaint/pilot: {}
+
+providers:
+  github:
+    poll_interval: 60

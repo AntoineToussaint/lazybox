@@ -1,0 +1,93 @@
+# Builds the MkDocs site on every docs change and publishes it to
+# GitHub Pages on push to main. Keeps the published docs from silently
+# drifting from the sources in docs-site/.
+#
+# `mkdocs build --strict` turns broken internal links, missing nav
+# targets, and other build warnings into hard failures, so a PR that
+# breaks a cross-link or forgets a nav entry fails here instead of
+# shipping a broken page.
+#
+# NOTE: deploying requires Pages to be enabled once in repo Settings →
+# Pages → Build and deployment → Source: "GitHub Actions". Without that
+# the deploy job's deploy-pages step will fail.
+
+name: docs
+
+on:
+  pull_request:
+    paths:
+      - "docs-site/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
+  push:
+    branches: [main]
+    paths:
+      - "docs-site/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install docs dependencies
+        run: pip install -r requirements-docs.txt
+      - name: Build site (strict)
+        run: mkdocs build --strict
+
+  deploy:
+    name: deploy
+    # Only publish from main. PRs run `build` above for validation but
+    # never touch the live Pages site.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install docs dependencies
+        run: pip install -r requirements-docs.txt
+      - name: Build site (strict)
+        run: mkdocs build --strict
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  links:
+    name: links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # lychee checks external + internal links in the README and the
+      # docs sources. Pinned to a tagged release (not @master) so the
+      # check is reproducible across re-runs; bump deliberately. fail:
+      # true makes a dead link a hard CI failure.
+      - uses: lycheeverse/lychee-action@v2.4.1
+        with:
+          # Exclude the GitHub Pages domain: it only goes live after the
+          # first deploy job runs on main, so gating PRs on it would be a
+          # chicken-and-egg false failure. Everything else (repo-relative
+          # links, GitHub blob URLs, external references) is still checked.
+          args: --no-progress --exclude 'antoinetoussaint\.github\.io' README.md "docs-site/**/*.md"
+          fail: true

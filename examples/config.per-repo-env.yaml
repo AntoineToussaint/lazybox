@@ -1,0 +1,49 @@
+# ~/.pilot/config.yaml — per-repo environment, mounts, and scripts
+#
+# Each workspace pilot opens is an isolated git worktree with its own embedded
+# terminal. The keys below let you tailor what lands inside every worktree for
+# a given repo: environment variables, symlinked shared directories, and
+# materialized helper scripts. Merge the `repos.<owner/name>` block you need
+# into your existing ~/.pilot/config.yaml.
+
+repos:
+  AntoineToussaint/pilot:
+    # env: injected into every shell and agent PTY spawned in this repo's
+    # worktrees. Use it for service URLs and tool API keys your dev loop needs.
+    # These are plain environment variables — prefer references to a secret
+    # manager over pasting real secrets into config.
+    env:
+      DATABASE_URL: postgres://localhost:5432/pilot_dev
+      OPENAI_API_KEY: sk-REPLACE-ME              # placeholder, not a real key
+      RUST_LOG: pilot=debug
+
+    # mounts: symlink shared directories into each fresh worktree so you do not
+    # re-download or regenerate them per workspace.
+    #   source    — absolute path to the shared directory on your machine
+    #   link_at   — path of the symlink, relative to the worktree root
+    #   placement — `inside` puts the link under the worktree;
+    #                `above`  puts it in the worktree's parent dir (shared
+    #                         across sibling worktrees of the same repo).
+    mounts:
+      - source: /Users/you/data/pilot-fixtures
+        link_at: tests/fixtures
+        placement: inside
+      - source: /Users/you/.cache/pilot-shared
+        link_at: .shared-cache
+        placement: above
+
+    # scripts: materialize executables at <worktree>/_pilot/scripts/<name> in
+    # every worktree. Provide content inline, or point `source` at a file on
+    # disk (see examples/rust-cleanup.sh in this directory).
+    scripts:
+      - name: hello
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          echo "Running inside $(pwd)"
+      - name: cleanup
+        source: /Users/you/pilot/examples/rust-cleanup.sh
+
+providers:
+  github:
+    poll_interval: 60

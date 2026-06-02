@@ -1,0 +1,32 @@
+# ~/.pilot/config.yaml — autonomous agent settings
+#
+# pilot can run Claude Code autonomously to handle work for you — for example
+# when you mention @pilot on a PR/issue, or press `w` ("work") on a workspace
+# to spawn an agent with the right prompt for its state (fix CI, resolve a
+# conflict, address review comments, implement an issue).
+#
+# These flags control whether those agents run with permission prompts. The
+# tradeoff is real: skipping prompts lets the agent move without stopping to
+# ask, but it means the agent acts without per-action confirmation. The blast
+# radius is bounded — each agent is scoped to a single task's git worktree, so
+# it cannot touch your other workspaces, your main checkout, or unrelated
+# repos. It can still push branches and open PRs via `gh`, so review its output.
+
+agent:
+  # Used for autonomous runs (e.g. @pilot work, the `w` key). When true, these
+  # runs launch Claude with --dangerously-skip-permissions. Recommended only if
+  # you are comfortable with worktree-scoped autonomy.
+  autonomous_skip_permissions: true
+
+  # Used for interactive agent sessions you start yourself (`c` for Claude).
+  # When true, those sessions also skip permission prompts. Leave false if you
+  # want to confirm actions while pairing with the agent directly.
+  skip_permissions: false
+
+# Keep your normal config alongside the agent block.
+repos:
+  AntoineToussaint/pilot: {}
+
+providers:
+  github:
+    poll_interval: 60

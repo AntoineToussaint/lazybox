@@ -82,6 +82,19 @@ pub fn detach_child_process(cmd: &mut std::process::Command) {
 /// attention even when pilot isn't the focused app — e.g. Claude
 /// going to `Asking` while the user is reading email.
 ///
+/// Suppressed while pilot's terminal is reported focused (see
+/// [`crate::notify::terminal_is_focused`]) — a banner for what the
+/// user is already looking at is pure noise.
+///
+/// **OSC-capable terminals** (Ghostty / iTerm2 / Kitty / WezTerm):
+/// the banner is emitted as an OSC escape sequence written to the
+/// controlling terminal ([`crate::notify`]). This is preferred over
+/// the subprocess paths below because it reaches the *local* machine
+/// even when pilot runs over SSH, and needs no helper binary.
+///
+/// The subprocess paths below are the fallback for terminals without
+/// OSC notification support (Terminal.app, plain SSH, …):
+///
 /// **macOS**: prefers `terminal-notifier` when it's on PATH — it
 /// ships its own bundle, so the banner carries a real icon and
 /// `-group` collapses repeats into one stack. When it's missing we
@@ -100,6 +113,20 @@ pub fn detach_child_process(cmd: &mut std::process::Command) {
 ///
 /// **Windows**: stub (TODO: PowerShell `New-BurntToastNotification`).
 pub fn notify_user(title: &str, body: &str) {
+    // Don't self-spam: when pilot's own terminal is reported focused
+    // the user is already looking at it. Unknown focus (terminal
+    // never reported it) falls through and still notifies.
+    if crate::notify::terminal_is_focused() {
+        return;
+    }
+    // Prefer the terminal's own OSC notification surface — it reaches
+    // the local machine even when pilot runs over SSH (the subprocess
+    // fallbacks would fire on the remote host, where no one is
+    // looking) and needs no helper binary.
+    if let Some(notifier) = crate::notify::detect_osc_notifier() {
+        crate::notify::emit_osc_notification(notifier, title, body);
+        return;
+    }
     #[cfg(target_os = "macos")]
     {
         // Cache the `terminal-notifier` lookup so we don't spawn

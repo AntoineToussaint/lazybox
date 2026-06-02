@@ -354,32 +354,55 @@ an async future/channel via `tick()`.
 ## Desktop notifications
 
 **Status:** stable
-**Crate(s):** `tui-core` (`src/platform.rs`), `tui` (`components/sidebar/handlers.rs`)
-**Config / flags:** `attention.desktop_notify`
+**Crate(s):** `tui-core` (`src/platform.rs`, `src/notify.rs`), `tui` (`components/sidebar/handlers.rs`)
+**Config / flags:** `attention.desktop_notify` (master), `attention.{unread,ci_failing,review_pending}` (which events notify)
 **Key bindings:** —
 
 ### What it does
-Fires an OS notification when an agent transitions from Working to needing input,
-so you don't have to babysit a long-running session.
+Fires an OS notification when something needs attention while pilot is
+unfocused: an agent transitions to needing input, CI starts failing, a review
+gets requested, or a new comment lands. You don't have to babysit a session or
+keep checking GitHub.
 
 ### How to use it
-On by default. The banner says `pilot — <workspace> needs input`; a footer
-notice also appears in-app. Disable OS banners with `attention.desktop_notify:
-false` (the footer notice stays).
+On by default. Agent prompts read `pilot — <workspace> needs input`; provider
+events read `pilot — CI failing on <workspace>` / `… review requested on …` /
+`… new activity on …`. A footer notice also appears in-app for agent prompts.
+Disable all OS banners with `attention.desktop_notify: false` (the footer notice
+stays). Which provider events notify follows the per-signal `attention` flags
+(`ci_failing`, `review_pending`, `unread`) that already gate the in-app badge.
 
 ### How it works (brief)
-The sidebar detects the Active→Asking edge from `Event::AgentState`
-(`crates/tui/src/components/sidebar/handlers.rs`) and calls
-`platform::notify_user` (`crates/tui-core/src/platform.rs`): macOS prefers
-`terminal-notifier` (grouped) and falls back to `osascript`; Linux uses
-`notify-send`; Windows is a stub.
+Notifications funnel through `platform::notify_user`
+(`crates/tui-core/src/platform.rs`). Triggers: the sidebar detects the
+Active→Asking edge from `Event::AgentState` and the rising edge of attention
+signals on `Event::WorkspaceUpserted`
+(`crates/tui/src/components/sidebar/handlers.rs`).
+
+Delivery prefers the **terminal's own OSC notification sequence**
+(`crates/tui-core/src/notify.rs`): Ghostty / Kitty / WezTerm get OSC 777
+(`ESC]777;notify;TITLE;BODY`), iTerm2 gets OSC 9 (body only), detected via
+`$TERM_PROGRAM`. This reaches the *local* machine even when pilot runs over SSH
+and needs no helper binary. Inside tmux the sequence is wrapped in a
+passthrough envelope (requires `allow-passthrough`, default-on in tmux 3.3a).
+Terminals without OSC support (Terminal.app, plain SSH) fall back to the
+subprocess path: macOS prefers `terminal-notifier` (grouped) then `osascript`;
+Linux uses `notify-send`; Windows is a stub.
+
+Banners are suppressed while pilot's terminal is reported focused (DEC mode
+1004 focus reporting) so it doesn't self-spam — a terminal that never reports
+focus is treated as unfocused so it still notifies.
 
 ### Test checklist
-- [ ] An agent moving Working → InputNeeded fires an OS notification.
+- [ ] An agent moving Working → InputNeeded fires an OS notification while unfocused.
+- [ ] CI flipping green → failing on a tracked workspace fires one banner; staying failing does not re-notify.
+- [ ] A workspace seen for the first time (already failing) does not fire a startup banner.
 - [ ] The in-app footer notice appears regardless of OS banner support.
-- [ ] `attention.desktop_notify: false` suppresses the OS banner but keeps the footer.
-- [ ] No duplicate notification for an agent that's already waiting.
+- [ ] `attention.desktop_notify: false` suppresses every OS banner but keeps the footer.
+- [ ] On Ghostty/iTerm2, the banner appears with no `terminal-notifier` installed.
 
 ### Known sharp edges
-- macOS notifications have no bundle id yet (no custom icon); `terminal-notifier` must be installed for grouped banners, else it falls back to `osascript`.
+- macOS subprocess fallback has no bundle id yet (no custom icon); `terminal-notifier` must be installed for grouped banners, else it falls back to `osascript`.
+- tmux passthrough needs `allow-passthrough on` (default since tmux 3.3a) for OSC banners to reach the outer terminal.
+- A provider-event signal that's already present when a workspace first appears seeds the baseline silently — only the rising edge notifies, so a second unread comment before you've read the first won't re-notify.
 - Windows notifications are not implemented.

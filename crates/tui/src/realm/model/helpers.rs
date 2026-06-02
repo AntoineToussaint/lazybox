@@ -627,6 +627,16 @@ fn dispatch_event<T: TerminalAdapter>(model: &mut Model<T>, event: crossterm::ev
                 model.forward_modal_event(RealmEvent::Paste(text));
             }
         }
+        // Terminal focus changed (DEC mode 1004). Recorded process-
+        // globally so `platform::notify_user` can suppress banners
+        // while pilot is the focused window. No redraw — purely a
+        // notification-gating signal.
+        crossterm::event::Event::FocusGained => {
+            crate::notify::set_terminal_focus(true);
+        }
+        crossterm::event::Event::FocusLost => {
+            crate::notify::set_terminal_focus(false);
+        }
         _ => {}
     }
 }

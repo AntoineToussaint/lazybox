@@ -13,6 +13,7 @@ pub mod agent_attention;
 pub mod confirm_latch;
 pub mod editors;
 pub mod intent;
+pub mod notify;
 pub mod platform;
 pub mod prompts;
 pub mod util;

@@ -1746,6 +1746,90 @@ fn desktop_notify_off_suppresses_os_banner_but_keeps_footer_notice() {
     );
 }
 
+/// Build a workspace for `key` whose primary task is shaped by
+/// `mutate` — lets these tests flip CI / review on an upsert.
+fn workspace_with(key: &str, mutate: impl FnOnce(&mut Task)) -> Workspace {
+    let now = Utc::now();
+    let mut task = make_task("owner/repo", key, now);
+    mutate(&mut task);
+    Workspace::from_task(task, now)
+}
+
+#[test]
+fn ci_failure_transition_enqueues_desktop_notification() {
+    // A workspace we already track flips CI green → failing. That
+    // rising edge must queue exactly one banner; staying failing on
+    // the next poll must not re-notify.
+    let mut s = Sidebar::new(PaneId::new(1));
+    s.on_event(&Event::WorkspaceUpserted(Box::new(workspace_with(
+        "o/r#1",
+        |t| t.ci = CiStatus::Success,
+    ))));
+    let _ = s.drain_pending_notifications();
+
+    let red = workspace_with("o/r#1", |t| t.ci = CiStatus::Failure);
+    s.on_event(&Event::WorkspaceUpserted(Box::new(red.clone())));
+    let queued = s.drain_pending_notifications();
+    assert_eq!(queued.len(), 1, "green→failing must notify once");
+    assert!(
+        queued[0].title.contains("CI failing"),
+        "title should name the signal: {}",
+        queued[0].title
+    );
+
+    s.on_event(&Event::WorkspaceUpserted(Box::new(red)));
+    assert!(
+        s.drain_pending_notifications().is_empty(),
+        "failing→failing must not re-notify",
+    );
+}
+
+#[test]
+fn first_sight_of_workspace_does_not_notify() {
+    // A workspace that arrives already failing (e.g. the daemon's
+    // first upsert for it, or a fresh row from a filter change) seeds
+    // the baseline silently — no startup banner burst.
+    let mut s = Sidebar::new(PaneId::new(1));
+    s.on_event(&Event::WorkspaceUpserted(Box::new(workspace_with(
+        "o/r#1",
+        |t| t.ci = CiStatus::Failure,
+    ))));
+    assert!(
+        s.drain_pending_notifications().is_empty(),
+        "first sight seeds the baseline silently",
+    );
+}
+
+#[test]
+fn ci_failure_transition_respects_desktop_notify_off() {
+    use std::collections::{BTreeSet, HashMap};
+    let mut s = Sidebar::new(PaneId::new(1));
+    s.apply_config(
+        pilot_config::AttentionConfig {
+            desktop_notify: false,
+            ..pilot_config::AttentionConfig::default()
+        },
+        BTreeSet::new(),
+        HashMap::new(),
+        None,
+        &pilot_config::DisplayConfig::default(),
+        &pilot_config::UiDefaults::default(),
+    );
+    s.on_event(&Event::WorkspaceUpserted(Box::new(workspace_with(
+        "o/r#1",
+        |t| t.ci = CiStatus::Success,
+    ))));
+    let _ = s.drain_pending_notifications();
+    s.on_event(&Event::WorkspaceUpserted(Box::new(workspace_with(
+        "o/r#1",
+        |t| t.ci = CiStatus::Failure,
+    ))));
+    assert!(
+        s.drain_pending_notifications().is_empty(),
+        "desktop_notify off must suppress provider-event banners",
+    );
+}
+
 #[test]
 fn bang_jumps_to_next_asking_workspace() {
     // Three workspaces, only #2 is asking. Cursor starts on #1.

@@ -43,7 +43,7 @@ pub mod theme;
 // pilot-tui rebuild. Re-exported at the same paths so existing
 // `pilot_tui::intent::Foo` / `crate::intent::Foo` keeps resolving.
 pub use pilot_tui_core::{
-    agent_attention, confirm_latch, editors, intent, platform, prompts, util,
+    agent_attention, confirm_latch, editors, intent, notify, platform, prompts, util,
 };
 
 pub use pane::{Binding, DetachSpec, PaneId, PaneOutcome};

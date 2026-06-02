@@ -316,6 +316,33 @@ impl Sidebar {
             }
             Event::WorkspaceUpserted(workspace) => {
                 let key: SessionKey = (&workspace.key).into();
+                // Rising-edge desktop notifications. When a workspace
+                // we already track gains an attention signal it
+                // didn't have last poll — CI started failing, a
+                // review got requested, a new comment landed — queue
+                // a banner, gated per-signal by the same `attention`
+                // config that drives the in-app badge plus the
+                // `desktop_notify` master switch. First sight of a
+                // workspace (not yet in the map) seeds the baseline
+                // silently, so a fresh snapshot doesn't fire a burst
+                // of banners on startup. Drained + fired by the
+                // IO-aware wrapper, never by the inner sidebar (tests
+                // must stay subprocess-free). `AgentAsking` is
+                // excluded here — it's delivered via `Event::AgentState`.
+                if self.attention.desktop_notify
+                    && let Some(old) = self.workspaces.get(&key)
+                {
+                    let before = workspace_attention_signals(old, &self.agents_asking);
+                    let after = workspace_attention_signals(workspace, &self.agents_asking);
+                    for signal in after {
+                        if !before.contains(&signal)
+                            && attention_gate(signal, &self.attention)
+                            && let Some(notif) = attention_notification(signal, workspace)
+                        {
+                            self.pending_notifications.push(notif);
+                        }
+                    }
+                }
                 self.workspaces.insert(key, (**workspace).clone());
                 self.recompute_visible();
             }
@@ -424,4 +451,24 @@ impl Sidebar {
             _ => {}
         }
     }
+}
+
+/// Build the desktop notification for a newly-risen attention signal,
+/// or `None` for signals delivered through another path. The title
+/// names the signal + workspace; the body is the underlying task's
+/// title (falling back to the workspace name).
+fn attention_notification(signal: AttentionSignal, w: &Workspace) -> Option<PendingNotification> {
+    let title = match signal {
+        AttentionSignal::CiFailing => format!("pilot — CI failing on {}", w.name),
+        AttentionSignal::ReviewPending => format!("pilot — review requested on {}", w.name),
+        AttentionSignal::Unread => format!("pilot — new activity on {}", w.name),
+        AttentionSignal::Mentioned => format!("pilot — you were mentioned in {}", w.name),
+        // Delivered via `Event::AgentState`, not workspace upserts.
+        AttentionSignal::AgentAsking => return None,
+    };
+    let body = w
+        .primary_task()
+        .map(|t| t.title.clone())
+        .unwrap_or_else(|| w.name.clone());
+    Some(PendingNotification { title, body })
 }

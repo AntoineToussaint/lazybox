@@ -227,7 +227,7 @@ pub fn workspace_attention_signals(
 /// Is `signal` enabled in the user's attention config? Exhaustive
 /// match so a new `AttentionSignal` variant fails to compile until
 /// it's wired up here AND in `AttentionConfig`.
-fn attention_gate(signal: AttentionSignal, cfg: &pilot_config::AttentionConfig) -> bool {
+pub(crate) fn attention_gate(signal: AttentionSignal, cfg: &pilot_config::AttentionConfig) -> bool {
     match signal {
         AttentionSignal::Unread => cfg.unread,
         AttentionSignal::AgentAsking => cfg.agent_asking,

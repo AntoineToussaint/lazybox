@@ -791,6 +791,13 @@ impl Model<CrosstermTerminalAdapter> {
         // below forwards the wrapped sequence to the PTY so the
         // inner program sees it as a single paste.
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste,);
+        // Focus reporting (DEC mode 1004): the host terminal emits
+        // `FocusGained` / `FocusLost` as the user switches windows.
+        // Pilot tracks it so desktop notifications only fire while
+        // pilot is unfocused — a banner for what you're already
+        // looking at is just noise. Terminals that don't support it
+        // never send the events, so notifications keep firing there.
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableFocusChange,);
         // Ask the host terminal to disambiguate modified Enter /
         // Tab / Backspace etc. via the kitty keyboard protocol.
         // Without this, most terminals collapse Shift-Enter into
@@ -1730,6 +1737,9 @@ impl<T: TerminalAdapter> Model<T> {
         // `ESC[200~…ESC[201~` even after pilot exits — every
         // subsequent shell paste shows the literal markers.
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste,);
+        // Drop the focus-reporting request from `new` so the host
+        // terminal stops emitting focus events into the user's shell.
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableFocusChange,);
         // Drop the kitty keyboard protocol bits we pushed in `new`.
         // Skipping this would leak the request into the user's host
         // shell after pilot exits — subsequent commands would still

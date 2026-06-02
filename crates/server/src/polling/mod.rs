@@ -2085,6 +2085,33 @@ pub async fn rescope_with_state(
                 continue;
             }
         }
+        // An out-of-scope ISSUE workspace that still carries sessions
+        // is almost always a just-auto-closed issue whose PR merged
+        // ("Closes #N"): GitHub drops the closed issue from the
+        // open-scope poll, so it lands here before
+        // `merge_closing_issue_workspaces` gets another chance to fold
+        // it in. The silent-delete branch below keys "is anything
+        // running?" off live `terminal_meta` entries, but a session
+        // whose PTY has exited is still a recoverable record in
+        // `sessions` — deleting the workspace would take it (and any
+        // live terminal) with it (issue #202). Collapse it into the
+        // claiming PR instead, the same absorb the confirm-merge path
+        // runs.
+        let collapse_target = stored_ws
+            .as_ref()
+            .filter(|w| w.pr.is_none() && !w.sessions.is_empty())
+            .and_then(|w| w.primary_task())
+            .and_then(|t| pr_workspace_claiming_issue(config, &t.id));
+        if let Some(pr_key) = collapse_target {
+            tracing::info!(
+                issue_workspace = %r.key,
+                pr_workspace = %pr_key,
+                "rescope: collapsing out-of-scope issue with sessions into its PR instead of deleting"
+            );
+            handle_confirm_merge(config, key.clone(), pr_key, true).await;
+            state.prompted_out_of_scope.remove(r.key.as_str());
+            continue;
+        }
         match active_counts.get(r.key.as_str()).copied() {
             None | Some(0) => {
                 // Safe to remove silently: nothing's running.
@@ -3962,5 +3989,194 @@ mod merge_detection_tests {
             TaskState::Merged,
         );
         assert_eq!(merged_transition_pr_number(None, &issue), None);
+    }
+}
+
+#[cfg(test)]
+mod rescope_collapse_tests {
+    use super::*;
+    use pilot_core::{
+        SessionKind, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey, WorkspaceSession,
+    };
+    use pilot_store::Store;
+    use std::sync::Arc;
+
+    fn gh_task(key: &str, url: &str, state: TaskState, closes: Vec<TaskId>) -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: "t".into(),
+            body: None,
+            state,
+            role: TaskRole::Author,
+            ci: pilot_core::CiStatus::None,
+            review: pilot_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: url.into(),
+            repo: Some("o/r".into()),
+            branch: Some("feat".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: pilot_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: closes,
+        }
+    }
+
+    fn seed(store: &pilot_store::MemoryStore, ws: &Workspace) {
+        store
+            .save_workspace(&pilot_store::WorkspaceRecord {
+                key: ws.key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(ws).unwrap()),
+            })
+            .unwrap();
+    }
+
+    fn exhaustive_github_tick(polled: Vec<WorkspaceKey>) -> TickOutcome {
+        let mut source_scopes = std::collections::HashMap::new();
+        source_scopes.insert("github".to_string(), PolledScope::Exhaustive);
+        TickOutcome {
+            polled,
+            any_source_succeeded: true,
+            retry_after_secs: None,
+            saw_unknown_mergeable: false,
+            source_scopes,
+            all_full: true,
+        }
+    }
+
+    /// Regression for #202: a PR merges and GitHub auto-closes its
+    /// `Closes #N` issue. The closed issue drops out of the open-scope
+    /// poll, so the rescope reaper sees it as out-of-scope. Because the
+    /// issue's session has no live `terminal_meta` entry (the PTY
+    /// exited, but the session record survives), the old reaper deleted
+    /// it silently — losing the session. The reaper must instead
+    /// collapse the issue into its claiming PR so the session moves
+    /// across.
+    #[tokio::test]
+    async fn out_of_scope_issue_with_sessions_collapses_into_claiming_pr() {
+        let store = Arc::new(pilot_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let issue_task = gh_task(
+            "o/r#50",
+            "https://github.com/o/r/issues/50",
+            TaskState::Open,
+            vec![],
+        );
+        let mut issue_ws = Workspace::from_task(issue_task.clone(), Utc::now());
+        let session = WorkspaceSession::new(
+            issue_ws.key.clone(),
+            SessionKind::Shell,
+            std::path::PathBuf::from("/nonexistent/worktree"),
+            Utc::now(),
+        );
+        let session_id = session.id;
+        issue_ws.add_session(session);
+        let issue_key = issue_ws.key.clone();
+        seed(&store, &issue_ws);
+
+        let pr_task = gh_task(
+            "o/r#51",
+            "https://github.com/o/r/pull/51",
+            TaskState::Merged,
+            vec![issue_task.id.clone()],
+        );
+        let pr_ws = Workspace::from_task(pr_task, Utc::now());
+        let pr_key = pr_ws.key.clone();
+        seed(&store, &pr_ws);
+
+        // Only the PR is in scope this tick — the auto-closed issue
+        // fell out of the open-item poll.
+        let outcome = exhaustive_github_tick(vec![pr_key.clone()]);
+        let mut state = TickState::default();
+        rescope_with_state(&config, &outcome, &mut state).await;
+
+        // Issue row is gone (collapsed, not lingering)...
+        assert!(
+            load_workspace(&config, &issue_key).is_none(),
+            "issue workspace should be collapsed away"
+        );
+        // ...and its session now lives on the PR workspace.
+        let pr_after = load_workspace(&config, &pr_key).expect("PR workspace survives");
+        assert!(
+            pr_after.sessions.iter().any(|s| s.id == session_id),
+            "session must move onto the PR workspace, not be deleted"
+        );
+        let moved = pr_after
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .unwrap();
+        assert_eq!(
+            moved.workspace_key, pr_key,
+            "moved session must be re-keyed to the PR workspace"
+        );
+    }
+
+    /// Counterpart: an out-of-scope issue with sessions but NO claiming
+    /// PR has nowhere to collapse into, so the reaper must leave the
+    /// existing prompt/silent-delete behavior intact — here, a live
+    /// session is absent from `terminal_meta`, so without a PR the row
+    /// is removed. This pins that the collapse path is gated on a real
+    /// claiming PR and doesn't swallow every out-of-scope issue.
+    #[tokio::test]
+    async fn out_of_scope_issue_without_claiming_pr_is_not_collapsed() {
+        let store = Arc::new(pilot_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let issue_task = gh_task(
+            "o/r#50",
+            "https://github.com/o/r/issues/50",
+            TaskState::Open,
+            vec![],
+        );
+        let mut issue_ws = Workspace::from_task(issue_task, Utc::now());
+        let session = WorkspaceSession::new(
+            issue_ws.key.clone(),
+            SessionKind::Shell,
+            std::path::PathBuf::from("/nonexistent/worktree"),
+            Utc::now(),
+        );
+        issue_ws.add_session(session);
+        let issue_key = issue_ws.key.clone();
+        seed(&store, &issue_ws);
+
+        // A different, unrelated PR is in scope — it does not claim the
+        // issue, so there is no collapse target.
+        let other_pr = gh_task(
+            "o/r#99",
+            "https://github.com/o/r/pull/99",
+            TaskState::Open,
+            vec![],
+        );
+        let other_ws = Workspace::from_task(other_pr, Utc::now());
+        let other_key = other_ws.key.clone();
+        seed(&store, &other_ws);
+
+        let outcome = exhaustive_github_tick(vec![other_key.clone()]);
+        let mut state = TickState::default();
+        rescope_with_state(&config, &outcome, &mut state).await;
+
+        assert!(
+            load_workspace(&config, &issue_key).is_none(),
+            "without a claiming PR the out-of-scope issue follows the normal reaper path"
+        );
     }
 }

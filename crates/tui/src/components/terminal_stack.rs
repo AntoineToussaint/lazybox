@@ -70,16 +70,175 @@ const RECAP_PREFIX: &str = "you ▸ ";
 /// of whitespace become single spaces so multi-line prompts
 /// (Shift-Enter inside Claude) render as `fix bug in foo.rs and
 /// retry` instead of `fix bug in foo.rs⏎and retry` with a visible
-/// gap. Single-pass; no intermediate Vec.
+/// gap.
+///
+/// Dragged/pasted file and image paths injected ahead of the prose
+/// are first collapsed to `[image]` / `[file]` so the recap doesn't
+/// open with a 100-char absolute path. See [`collapse_injected_path`].
 fn summarize_message(msg: &str) -> String {
-    let mut out = String::with_capacity(msg.len());
-    for word in msg.split_whitespace() {
+    let collapsed = collapse_injected_path(msg);
+    let mut out = String::with_capacity(collapsed.len());
+    for word in collapsed.split_whitespace() {
         if !out.is_empty() {
             out.push(' ');
         }
         out.push_str(word);
     }
     out
+}
+
+/// Image file extensions that collapse to `[image]`; everything else
+/// path-shaped collapses to `[file]`.
+const IMAGE_EXTS: [&str; 13] = [
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "tiff", "tif", "heic", "heif", "avif", "ico",
+];
+
+fn is_image_ext(ext: &str) -> bool {
+    IMAGE_EXTS.iter().any(|e| ext.eq_ignore_ascii_case(e))
+}
+
+/// True if `s` opens with an unambiguous path prefix (`/`, `~/`,
+/// `./`, `../`). Same shape the click-target detector requires in
+/// [`find_path_at_byte`], kept in sync so the recap heuristic and the
+/// clickable-path detection agree on what counts as a path.
+fn looks_like_path(s: &str) -> bool {
+    s.starts_with('/') || s.starts_with("~/") || s.starts_with("./") || s.starts_with("../")
+}
+
+/// Extension of the final path segment, ignoring a leading-dot
+/// dotfile (`.bashrc` has no extension).
+fn filename_ext(path: &str) -> Option<&str> {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let (stem, ext) = name.rsplit_once('.')?;
+    (!stem.is_empty()).then_some(ext)
+}
+
+/// Walk from `start` to the first unescaped whitespace, treating
+/// `\ ` as part of the token. Drag-and-drop shells escape spaces in
+/// paths, so `CleanShot\ 2026.png` is one logical token even though
+/// `split_whitespace` would tear it apart.
+fn unescaped_ws_end(msg: &str, start: usize) -> usize {
+    let mut escaped = false;
+    for (rel, c) in msg[start..].char_indices() {
+        if c.is_whitespace() && !escaped {
+            return start + rel;
+        }
+        escaped = c == '\\' && !escaped;
+    }
+    msg.len()
+}
+
+/// Find the first plausible file extension at/after `start`: a `.`
+/// followed by 1–5 alphanumerics that begin with a letter and end at
+/// whitespace or end-of-string. Returns the byte index just past the
+/// extension and the extension itself.
+///
+/// This anchors the path's end even when the path contains *raw*
+/// (unescaped) spaces — e.g. macOS' `…/Application Support/CleanShot
+/// 2026-06-02 at 11.35.48@2x.png` — which a token scan can't bound.
+/// The all-digit guard skips dotted version-ish runs like the `.35`
+/// and `.48` in that timestamp.
+fn first_path_extension(msg: &str, start: usize) -> Option<(usize, &str)> {
+    let hay = &msg[start..];
+    let bytes = hay.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'.' {
+            let s = i + 1;
+            let mut j = s;
+            while j < bytes.len() && bytes[j].is_ascii_alphanumeric() {
+                j += 1;
+            }
+            let after_ok = j >= bytes.len() || bytes[j].is_ascii_whitespace();
+            if (1..=5).contains(&(j - s)) && bytes[s].is_ascii_alphabetic() && after_ok {
+                return Some((start + j, &hay[s..j]));
+            }
+            i = j.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// End byte and placeholder for an injected path beginning at `start`
+/// (a word boundary), or `None` if the token there isn't path-shaped.
+///
+/// `leading` (nothing but whitespace precedes `start`) is the high-
+/// confidence drag/paste position, so any path there collapses. A
+/// path mid-prose only collapses when it carries an image extension —
+/// a typed `/etc/hosts` reference is left intact, but an appended
+/// screenshot path still folds to `[image]`.
+fn detect_path_at(msg: &str, start: usize, leading: bool) -> Option<(usize, &'static str)> {
+    let rest = &msg[start..];
+    let first = rest.chars().next()?;
+
+    if first == '"' || first == '\'' {
+        let inner_start = start + first.len_utf8();
+        let close = msg[inner_start..].find(first)?;
+        let inner = &msg[inner_start..inner_start + close];
+        if !looks_like_path(inner) {
+            return None;
+        }
+        let placeholder = match filename_ext(inner) {
+            Some(ext) if is_image_ext(ext) => "[image]",
+            _ => "[file]",
+        };
+        return Some((inner_start + close + first.len_utf8(), placeholder));
+    }
+
+    if !looks_like_path(rest) {
+        return None;
+    }
+
+    if let Some((end, ext)) = first_path_extension(msg, start) {
+        if is_image_ext(ext) {
+            return Some((end, "[image]"));
+        }
+        if leading {
+            return Some((end, "[file]"));
+        }
+        return None;
+    }
+
+    leading.then(|| (unescaped_ws_end(msg, start), "[file]"))
+}
+
+/// Replace dragged/pasted file paths with `[image]` / `[file]`
+/// placeholders, preserving the surrounding prose. Borrows the input
+/// unchanged when no path is found. Runs on every recap render, so it
+/// is a single left-to-right pass with a bounded extension probe per
+/// path-prefixed token.
+fn collapse_injected_path(msg: &str) -> std::borrow::Cow<'_, str> {
+    let mut result: Option<String> = None;
+    let mut cursor = 0;
+    let mut i = 0;
+    while i < msg.len() {
+        let boundary = i == 0
+            || msg[..i]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_whitespace());
+        if boundary {
+            let leading = msg[..i].chars().all(|c| c.is_whitespace());
+            if let Some((end, placeholder)) = detect_path_at(msg, i, leading) {
+                let out = result.get_or_insert_with(String::new);
+                out.push_str(&msg[cursor..i]);
+                out.push_str(placeholder);
+                cursor = end;
+                i = end;
+                continue;
+            }
+        }
+        i += msg[i..].chars().next().map_or(1, |c| c.len_utf8());
+    }
+    match result {
+        Some(mut out) => {
+            out.push_str(&msg[cursor..]);
+            std::borrow::Cow::Owned(out)
+        }
+        None => std::borrow::Cow::Borrowed(msg),
+    }
 }
 
 /// Outcome of a scroll attempt on the focused terminal. Used by the
@@ -2590,12 +2749,7 @@ fn find_issue_ref_at_byte(row_text: &str, byte_pos: usize) -> Option<ClickTarget
 fn find_path_at_byte(row_text: &str, byte_pos: usize) -> Option<ClickTarget> {
     let (start, end) = token_at_byte(row_text, byte_pos)?;
     let tok = trim_token(&row_text[start..end]);
-    let looks_like_path = tok.starts_with('/')
-        || tok == "~"
-        || tok.starts_with("~/")
-        || tok.starts_with("./")
-        || tok.starts_with("../");
-    if !looks_like_path {
+    if !(tok == "~" || looks_like_path(tok)) {
         return None;
     }
     let (path, line, col) = split_line_col(tok);
@@ -3093,5 +3247,86 @@ mod resync_tests {
             seq: 5,
         });
         assert!(!stack.terminals.contains_key(&TerminalId(99)));
+    }
+}
+
+#[cfg(test)]
+mod summarize_message_tests {
+    use super::summarize_message;
+
+    #[test]
+    fn collapses_whitespace_in_plain_prose() {
+        assert_eq!(
+            summarize_message("fix bug in foo.rs\nand   retry"),
+            "fix bug in foo.rs and retry"
+        );
+    }
+
+    #[test]
+    fn collapses_leading_image_path_with_raw_spaces() {
+        // The motivating case: a CleanShot path with unescaped spaces,
+        // followed by the user's actual prompt.
+        let msg = "/Users/antoine/Library/Application Support/CleanShot/media/media_qjLWRXdkJW/CleanShot 2026-06-02 at 11.35.48@2x.png create an issue: foo";
+        assert_eq!(summarize_message(msg), "[image] create an issue: foo");
+    }
+
+    #[test]
+    fn collapses_escaped_space_image_path() {
+        let msg = "/tmp/CleanShot\\ 2026-06-02\\ at\\ 11.35.48@2x.png describe this";
+        assert_eq!(summarize_message(msg), "[image] describe this");
+    }
+
+    #[test]
+    fn message_that_is_only_an_image_path() {
+        assert_eq!(summarize_message("/tmp/shot.png"), "[image]");
+        assert_eq!(summarize_message("~/Pictures/a.JPEG"), "[image]");
+    }
+
+    #[test]
+    fn message_that_is_only_a_file_path() {
+        assert_eq!(summarize_message("/tmp/report.pdf"), "[file]");
+        // No extension, leading path → still a file.
+        assert_eq!(summarize_message("~/notes/scratch"), "[file]");
+    }
+
+    #[test]
+    fn collapses_quoted_path() {
+        assert_eq!(
+            summarize_message("\"/tmp/my shot.png\" look here"),
+            "[image] look here"
+        );
+    }
+
+    #[test]
+    fn non_image_path_mid_prose_is_left_intact() {
+        // A typed reference, not an injected drag — keep it readable.
+        assert_eq!(
+            summarize_message("check /etc/hosts then restart"),
+            "check /etc/hosts then restart"
+        );
+    }
+
+    #[test]
+    fn appended_image_path_mid_prose_still_collapses() {
+        assert_eq!(
+            summarize_message("look at this ./screenshot.png please"),
+            "look at this [image] please"
+        );
+    }
+
+    #[test]
+    fn dotted_version_run_does_not_anchor_early() {
+        // Ensure the all-digit `.35`/`.48` segments don't terminate the
+        // path before the real `.png` extension.
+        let msg = "/a/b 11.35.48.png go";
+        assert_eq!(summarize_message(msg), "[image] go");
+    }
+
+    #[test]
+    fn plain_prose_with_no_path_is_unchanged() {
+        assert_eq!(
+            summarize_message("just normal text here"),
+            "just normal text here"
+        );
     }
 }

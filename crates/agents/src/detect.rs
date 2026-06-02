@@ -286,13 +286,20 @@ pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
 
 /// Whether Claude's input box (composer) footer is on screen. Claude
 /// draws one of these footers ONLY once it's done streaming and waiting
-/// at the prompt: the long form `Esc to cancel · Tab to amend · …` or
-/// the short newer form `? for shortcuts`. Either is proof the composer
-/// is drawn. `compact` is the space-free buffer (see [`compact_lower`])
-/// because the live footer is painted by absolute cursor position and
-/// arrives spaceless (`?forshortcuts`).
+/// at the prompt: the long form `Esc to cancel · Tab to amend · …`, the
+/// short newer form `? for shortcuts`, or — in any non-default
+/// permission mode — the mode indicator `… on (shift+tab to cycle)`.
+/// Pilot spawns every agent with `--dangerously-skip-permissions`, so
+/// that last form (`bypass permissions on (shift+tab to cycle)`) is the
+/// footer it actually sees; `? for shortcuts` is never drawn in that
+/// mode. Any of the three is proof the composer is drawn. `compact` is
+/// the space-free buffer (see [`compact_lower`]) because the live footer
+/// is painted by absolute cursor position and arrives spaceless
+/// (`?forshortcuts`, `shift+tabtocycle`).
 fn input_box_visible(compact: &str) -> bool {
-    compact.contains("tabtoamend") || compact.contains("?forshortcuts")
+    compact.contains("tabtoamend")
+        || compact.contains("?forshortcuts")
+        || compact.contains("shift+tabtocycle")
 }
 
 /// Lowercased copy of `s` with ASCII spaces removed. tmux/Claude render
@@ -432,11 +439,23 @@ fn working_status_pos(compact: &str) -> Option<usize> {
 /// Claude draws this footer only once it's done and waiting at the
 /// prompt, so it's the recency anchor that beats a stale status line
 /// still sitting in the append-only buffer.
+///
+/// The `shift+tab to cycle` mode indicator is the footer's bypass /
+/// accept-edits / plan-mode form — pilot launches agents with
+/// `--dangerously-skip-permissions`, so the live footer reads
+/// `bypass permissions on (shift+tab to cycle)` and never `? for
+/// shortcuts`. Without this marker a just-finished agent has no idle
+/// anchor, the stale `esc to interrupt` status line never gets evicted,
+/// and the working glyph sticks ON forever (#179).
 fn idle_box_pos(compact: &str) -> Option<usize> {
-    [compact.rfind("tabtoamend"), compact.rfind("?forshortcuts")]
-        .into_iter()
-        .flatten()
-        .max()
+    [
+        compact.rfind("tabtoamend"),
+        compact.rfind("?forshortcuts"),
+        compact.rfind("shift+tabtocycle"),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
 }
 
 /// Start offset of the last line satisfying `pred`. Walks the buffer
@@ -726,6 +745,31 @@ mod tests {
         // recent, so the agent reads as done rather than forever-busy.
         let idle_recent = compact_lower("✻ (esc to interrupt)\ndone\n? for shortcuts");
         assert!(working_status_pos(&idle_recent) < idle_box_pos(&idle_recent));
+    }
+
+    #[test]
+    fn bypass_mode_idle_footer_evicts_stale_working_status() {
+        // #179: pilot spawns Claude with `--dangerously-skip-permissions`,
+        // so its idle composer footer is the bypass-mode mode line —
+        // `bypass permissions on (shift+tab to cycle) · ← for agents` —
+        // NOT `? for shortcuts`. A just-finished agent's last
+        // `esc to interrupt` status line still sits earlier in the
+        // append-only buffer; the more-recent bypass footer must register
+        // as an idle anchor so the working glyph returns to idle instead
+        // of sticking ON forever. Bytes carry the cursor-positioned
+        // spacing tmux produces (`(shift+tab` ‖ `to` ‖ `cycle)`).
+        let buf = concat!(
+            "\x1b[24;1H\x1b[2K\x1b[35m✻\x1b[0m \x1b[1mCogitating\x1b[0m… ",
+            "\x1b[2m(7s · ↑ 318 tokens · esc to interrupt)\x1b[0m",
+            "\x1b[40;1H\x1b[2K\x1b[7mT\x1b[27m\x1b[2mry \"how do I log an error?\"\x1b[22m",
+            "\x1b[41;3H\x1b[38;5;211mbypass\x1b[10Gpermissions\x1b[22Gon",
+            "\x1b[38;5;246m (shift+tab\x1b[36Gto\x1b[39Gcycle)\x1b[49G · \x1b[53Gfor\x1b[57Gagents\x1b[0m",
+        );
+        assert_eq!(claude_state(buf.as_bytes()), Some(AgentState::Idle));
+
+        // The bypass footer is also a composer-visible signal, so the
+        // spawn-time injector treats the screen as ready for a paste.
+        assert!(claude_ready_for_prompt(buf.as_bytes()));
     }
 
     #[test]

@@ -93,6 +93,20 @@ const FIXTURES: &[ByteFixture] = &[
         expected: AgentState::Working,
         ready: false,
     },
+    // #179: pilot spawns agents with `--dangerously-skip-permissions`,
+    // so the idle composer footer is the bypass-mode mode line —
+    // `bypass permissions on (shift+tab to cycle) · ← for agents`, with
+    // no `? for shortcuts`. Before the fix this footer matched no idle
+    // anchor, so a finished agent's stale `esc to interrupt` was never
+    // evicted and the working glyph stuck ON; readiness also never fired,
+    // so the spawn-time injector rode its hard deadline. Must read Idle
+    // AND ready.
+    ByteFixture {
+        name: "claude_real_bypass_idle",
+        bytes: include_bytes!("fixtures/claude_real_bypass_idle.bin"),
+        expected: AgentState::Idle,
+        ready: true,
+    },
     // #156 false positive: a parked `❯` prompt in the composer above a
     // prose numbered list fired InputNeeded on an idle screen. The
     // composer footer is the most recent bottom-of-screen marker, so no

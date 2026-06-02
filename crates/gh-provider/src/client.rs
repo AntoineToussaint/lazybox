@@ -859,9 +859,24 @@ impl GhClient {
             .lock()
             .expect("notifications state mutex poisoned");
         state.last_full_sweep_at = Some(std::time::Instant::now());
+        state.force_full_sweep = false;
         if state.last_modified.is_none() {
             state.last_modified = Some(notifications::format_http_date(chrono::Utc::now()));
         }
+    }
+
+    /// Arm the next tick to run a full sweep, bypassing the
+    /// `FULL_SWEEP_INTERVAL` gate. Used by the manual `Command::Refresh`
+    /// path so a freshly created issue/PR surfaces immediately rather
+    /// than waiting up to 10 min for the next scheduled sweep — the
+    /// incremental notifications path never sees an issue the user
+    /// created themselves (no self-notification). The flag is one-shot:
+    /// `mark_full_sweep_done` clears it once the sweep completes.
+    pub fn force_full_sweep(&self) {
+        self.notifications_state
+            .lock()
+            .expect("notifications state mutex poisoned")
+            .force_full_sweep = true;
     }
 
     /// Snapshot of the current notifications heartbeat state. Read-only;
@@ -2829,6 +2844,35 @@ mod tests {
             )),
             notifications_state: NotificationsState::shared(),
         }
+    }
+
+    /// Regression test for issue #180: a manual `Command::Refresh`
+    /// arms `force_full_sweep`, which must promote the very next tick to
+    /// a full sweep even though a sweep just completed (the timer alone
+    /// would route to the incremental path and miss a just-created
+    /// issue). Completing the sweep clears the one-shot flag.
+    #[tokio::test(flavor = "current_thread")]
+    async fn force_full_sweep_promotes_next_tick_then_clears() {
+        let client = make_client("http://127.0.0.1:1");
+        // Simulate a sweep that just finished — timer alone says
+        // incremental is fine.
+        client.mark_full_sweep_done();
+        assert!(
+            !client.should_full_sweep(),
+            "a sweep that just ran must not be due again on the timer"
+        );
+        // Manual refresh arms the override.
+        client.force_full_sweep();
+        assert!(
+            client.should_full_sweep(),
+            "force_full_sweep must promote the next tick regardless of the timer"
+        );
+        // Running the sweep consumes the one-shot flag.
+        client.mark_full_sweep_done();
+        assert!(
+            !client.should_full_sweep(),
+            "completing the forced sweep must clear the flag"
+        );
     }
 
     /// Regression test for issue #13: GitHub returns a 502 HTML

@@ -860,6 +860,27 @@ impl Server {
                             // source of truth for ticks, no parallel
                             // inline spawn that could race the loop's
                             // own next-due bookkeeping.
+                            //
+                            // Force a full sweep on that tick: a manual
+                            // refresh must feel authoritative. The
+                            // incremental notifications path can't see
+                            // an issue the user just created (GitHub
+                            // sends no self-notification), so without
+                            // this the new issue wouldn't appear until
+                            // the next scheduled sweep, up to 10 min
+                            // away (issue #180). The flag lives on the
+                            // shared notifications state, so the source
+                            // built from the cached client next tick
+                            // observes it.
+                            if let Some(client) = self
+                                .config
+                                .gh_client_cache
+                                .lock()
+                                .expect("gh_client_cache poisoned")
+                                .as_ref()
+                            {
+                                client.force_full_sweep();
+                            }
                             self.config.poll_wake.notify_one();
                         }
                         pilot_ipc::Command::PostReply { session_key, body } => {

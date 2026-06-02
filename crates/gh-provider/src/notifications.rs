@@ -190,12 +190,21 @@ pub(crate) struct NotificationsState {
     /// full GraphQL sweep on every tick. Cleared by
     /// `note_heartbeat_succeeded` once the endpoint recovers.
     pub(crate) heartbeat_back_off_until: Option<std::time::Instant>,
+    /// One-shot "force the next sweep" flag. Set by a manual
+    /// `Command::Refresh` so the next tick runs a full `involves:USER`
+    /// search regardless of where we are in the `FULL_SWEEP_INTERVAL`
+    /// window — a freshly created issue produces no notification for
+    /// its creator, so the incremental path would never surface it
+    /// (issue #180). Cleared once the sweep completes
+    /// (`mark_full_sweep_done`).
+    pub(crate) force_full_sweep: bool,
 }
 
 impl NotificationsState {
     /// Is the slow-sweep cadence due?
     ///
-    /// True in any of three cases:
+    /// True in any of four cases:
+    ///   - a manual refresh forced the next sweep (`force_full_sweep`),
     ///   - no sweep has run yet (bootstrap, first tick after daemon start),
     ///   - the configured `threshold` has elapsed since the last sweep,
     ///   - the notifications heartbeat is currently in a back-off window
@@ -206,6 +215,9 @@ impl NotificationsState {
     /// timer arithmetic can be unit-tested without spinning up a real
     /// client.
     pub fn is_full_sweep_due(&self, threshold: std::time::Duration) -> bool {
+        if self.force_full_sweep {
+            return true;
+        }
         if self.heartbeat_backed_off() {
             return true;
         }
@@ -416,6 +428,21 @@ mod tests {
         // A zero threshold means "always sweep" — degenerate but the
         // arithmetic should still hold.
         assert!(s.is_full_sweep_due(std::time::Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn forced_sweep_overrides_recent_timer() {
+        // Issue #180: a manual `Command::Refresh` arms `force_full_sweep`
+        // so the next tick runs the heavy `involves:USER` search even
+        // when the timer just ran a sweep — otherwise a freshly created
+        // issue (no self-notification) wouldn't surface until the next
+        // scheduled sweep, up to 10 min away.
+        let s = NotificationsState {
+            last_full_sweep_at: Some(std::time::Instant::now()),
+            force_full_sweep: true,
+            ..Default::default()
+        };
+        assert!(s.is_full_sweep_due(std::time::Duration::from_secs(600)));
     }
 
     #[test]

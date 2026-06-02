@@ -390,9 +390,15 @@ pub struct Model<T: TerminalAdapter> {
     /// copied to the host clipboard via OSC 52.
     terminal_selection: Option<((u16, u16), (u16, u16))>,
     /// `]]` escape from the terminal pane: first press of the escape
-    /// char arms; a second within the window kicks focus back to
-    /// the sidebar instead of forwarding to the PTY.
+    /// char arms; a second within the window arms the `]]` *leader*
+    /// (see `terminal_leader_at`) instead of forwarding to the PTY.
     escape_latch: crate::confirm_latch::DoubleTapLatch,
+    /// `]]` leader armed-at instant. Set when `]]` completes with a
+    /// snippet library present: the *next* key selects a binding
+    /// (snippet) or cancels; if no key arrives within
+    /// `ui_defaults.escape_window` the pane leaves on the idle tick
+    /// (`tick_terminal_leader`). `None` when not armed.
+    terminal_leader_at: Option<std::time::Instant>,
     /// Pending `--workspace` / `--session` preselect from the CLI.
     /// Applied after the daemon's first Snapshot — by then the
     /// sidebar has the full workspace list and `focus_workspace_key`
@@ -681,6 +687,7 @@ impl<T: TerminalAdapter> Model<T> {
             q_latch: crate::confirm_latch::DoubleTapLatch::new(),
             leader: crate::confirm_latch::LeaderLatch::new(),
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
+            terminal_leader_at: None,
             last_click: None,
             terminal_user_typed_since_focus: false,
             pending_refresh_ack: false,
@@ -1562,6 +1569,50 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Open the global snippets file (`<pilot_home>/snippets.yaml`)
+    /// in the configured editor, seeding a commented template the
+    /// first time so a brand-new user lands on a working example
+    /// rather than an empty buffer. Snippets are loaded once at
+    /// startup, so the footer reminds the user to relaunch.
+    fn open_snippets_file(&mut self) {
+        if self.setup.editors.is_empty() {
+            let path = pilot_core::paths::config_yaml();
+            self.flash_info(format!(
+                "no editor detected — add one under `editors:` in {}",
+                path.display(),
+            ));
+            return;
+        }
+        let path = pilot_config::Snippets::default_global_path();
+        if !path.exists() {
+            if let Some(parent) = path.parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                self.flash_error(format!("couldn't create {}: {e}", parent.display()));
+                return;
+            }
+            if let Err(e) = std::fs::write(&path, pilot_config::Snippets::starter_template()) {
+                self.flash_error(format!("couldn't seed {}: {e}", path.display()));
+                return;
+            }
+        }
+        let editor = self.setup.editors[0].clone();
+        match crate::editors::open_file(&editor, &path, None, None) {
+            Ok(()) => {
+                tracing::info!(path = %path.display(), editor = %editor.id, "opened snippets file");
+                self.flash_info(format!(
+                    "editing {} in {} — relaunch pilot to load changes",
+                    path.display(),
+                    editor.display
+                ));
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), "open snippets failed: {e}");
+                self.flash_error(format!("failed to open {}: {e}", path.display()));
+            }
+        }
+    }
+
     fn launch_editor(
         &mut self,
         editor: &crate::editors::EditorTemplate,
@@ -1644,6 +1695,7 @@ impl<T: TerminalAdapter> Model<T> {
         actions.push(SettingsAction::ToggleSkipPermissions {
             enabled: skip_permissions,
         });
+        actions.push(SettingsAction::EditSnippets);
         actions.push(SettingsAction::InspectWorktrees);
         actions.push(SettingsAction::CleanWorktrees);
         actions.push(SettingsAction::FullSetup);
@@ -1670,6 +1722,12 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // Editing snippets opens a file — no wizard runner, no cached
+        // detection inputs needed.
+        if matches!(action, SettingsAction::EditSnippets) {
+            self.open_snippets_file();
+            return;
+        }
         let Some((report, sources)) = self.setup.inputs.clone() else {
             tracing::warn!("dispatch_settings_action: no cached inputs");
             return;
@@ -1694,6 +1752,8 @@ impl<T: TerminalAdapter> Model<T> {
                 return;
             }
             SettingsAction::ToggleSkipPermissions { .. } => return,
+            // Handled by the early return above; listed for exhaustiveness.
+            SettingsAction::EditSnippets => return,
         };
         // Pre-seed the accumulator from persisted state so partial
         // flows don't drop the user's other-provider config.
@@ -1795,6 +1855,16 @@ impl<T: TerminalAdapter> Model<T> {
                 .contextual_bindings(&self.action_key_overrides),
         };
         let notice = self.status.notice.clone();
+        // Snippet rows for the `]]` leader popup — built only while the
+        // leader is armed so the steady-state render pays nothing.
+        let snippet_leader_rows: Vec<(String, String)> = if self.terminal_leader_at.is_some() {
+            self.snippets
+                .all()
+                .map(|(k, s)| (k.to_string(), s.description.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut captured_area = Rect::default();
         let _ = self.terminal.draw(|f| {
             let area = f.area();
@@ -1834,6 +1904,16 @@ impl<T: TerminalAdapter> Model<T> {
             // fires), so z-order is moot.
             if let Some(group) = self.leader.pending().copied() {
                 crate::realm::components::which_key::render(f, area, group);
+            }
+            // Which-key popup for the armed terminal `]]` leader
+            // (#205): lists the snippet keys reachable as `]]<key>`.
+            if self.terminal_leader_at.is_some() {
+                crate::realm::components::which_key::render_terminal_leader(
+                    f,
+                    area,
+                    self.ui_defaults.terminal_escape_char,
+                    &snippet_leader_rows,
+                );
             }
 
             // Modal stack last (highest z-order).

@@ -68,6 +68,28 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // ── Terminal `]]` leader (issue #205) ───────────────────────
+        // Once `]]` arms the leader, THIS key selects a binding under
+        // it and never reaches the PTY:
+        //   - a printable char opens the snippet picker pre-filtered
+        //     by that char (auto-submits on a unique match);
+        //   - the escape char, Esc, or anything else cancels back into
+        //     the terminal so the user can keep typing;
+        //   - no key at all → the idle tick leaves the pane (see
+        //     `tick_terminal_leader`).
+        // The snippet library is the leader's binding set, mirroring
+        // how the sidebar group-leader above resolves an `ActionGroup`.
+        if self.terminal_leader_at.take().is_some() {
+            self.redraw = true;
+            if let Key::Char(c) = key.code
+                && key.modifiers.is_empty()
+                && !c.is_control()
+                && c != self.ui_defaults.terminal_escape_char
+            {
+                self.mount_snippet_picker(c.to_string());
+            }
+            return;
+        }
         // Arm a group leader. Sidebar-only for this first cut: the
         // github group's leader (`g`) is unbound there, and its
         // actions all target the focused workspace, so a workspace
@@ -220,27 +242,34 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
 
-        // Terminal-pane escape sequence (`]]` by default). Two
-        // consecutive presses of the escape char inside a terminal
-        // return focus to the sidebar instead of forwarding to the
-        // PTY. The first `]` is held back via `escape_latch`; if a
-        // non-`]` key arrives before the second `]`, we either:
-        //   - mount the snippet picker (issue #40), when the
-        //     follow-up is a printable char AND a snippet library
-        //     is configured, OR
-        //   - flush the held `]` + the new key to the PTY, so
-        //     typing patterns like `]a` aren't lost when there are
-        //     no snippets.
-        // The `]]` escape always wins because the `Key::Char(']')`
-        // branch is checked first.
+        // Terminal-pane escape sequence + `]]` leader (issues #40,
+        // #205). Two consecutive presses of the escape char inside a
+        // terminal arm the leader; the first `]` is held back via
+        // `escape_latch`.
+        //   - `]]` then a binding key → snippet picker / shortcut.
+        //   - `]]` then nothing → leave the pane on the idle tick.
+        //   - a single `]` then a non-`]` key → flush a literal `]`
+        //     to the PTY so `]` is typeable in code / arrays / md.
+        // The escape-char branch is checked first so `]]` always wins
+        // over the flush path.
         if self.focus == PaneFocus::Terminals
             && key.modifiers.is_empty()
             && matches!(key.code, Key::Char(c) if c == self.ui_defaults.terminal_escape_char)
         {
-            const ESCAPE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
-            if self.escape_latch.tap(ESCAPE_WINDOW) {
-                self.focus = PaneFocus::Sidebar;
-                self.set_focus_attr();
+            if self.escape_latch.tap(self.ui_defaults.escape_window) {
+                // Second `]` within the window completes `]]`. With a
+                // snippet library present, arm the leader so the next
+                // key can invoke a binding (`]]<key>`); the pane only
+                // leaves if no key follows within the window (see
+                // `tick_terminal_leader`). With no snippets there are
+                // no bindings to offer, so `]]` leaves immediately —
+                // no idle delay for users who never configured any.
+                if self.snippets.is_empty() {
+                    self.focus = PaneFocus::Sidebar;
+                    self.set_focus_attr();
+                } else {
+                    self.terminal_leader_at = Some(std::time::Instant::now());
+                }
                 self.redraw = true;
                 return;
             }
@@ -248,26 +277,12 @@ impl<T: TerminalAdapter> Model<T> {
         }
         if self.focus == PaneFocus::Terminals && self.escape_latch.is_armed() {
             self.escape_latch.disarm();
-            // Snippet trigger wins over flush-to-PTY when:
-            //   - a snippet library is configured, AND
-            //   - the follow-up key is a printable char with no
-            //     modifiers (Ctrl-X, F-keys, arrows pass through
-            //     to the PTY).
-            // The mounted picker captures further typing; that's
-            // why we return early. If we didn't, the post-mount
-            // pane-dispatch below would also forward this key to
-            // the PTY — duplicating it once into the picker and
-            // once into the agent's input.
-            if !self.snippets.is_empty()
-                && let Key::Char(c) = key.code
-                && !c.is_control()
-            {
-                self.mount_snippet_picker(c.to_string());
-                self.redraw = true;
-                return;
-            }
-            // Non-`]` key + no snippet match → flush the held `]`
-            // to the PTY before the new key.
+            // A single `]` followed by a non-`]` key is a literal `]`
+            // in the user's input, not a chord — flush the held `]`
+            // to the PTY before the new key falls through to normal
+            // dispatch below. Snippet invocation lives under the `]]`
+            // leader now (issue #205), so a lone `]` is never
+            // intercepted.
             let mut held_cmds: Vec<IpcCommand> = Vec::new();
             let held = crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char(self.ui_defaults.terminal_escape_char),
@@ -414,6 +429,13 @@ impl<T: TerminalAdapter> Model<T> {
     /// tests + (in future) the bottom hint bar.
     pub fn focus(&self) -> PaneFocus {
         self.focus
+    }
+
+    /// Whether the terminal `]]` leader is currently armed. Drives the
+    /// which-key popup in `view`; also a test/inspection hook for the
+    /// #205 leader chord.
+    pub fn terminal_leader_pending(&self) -> bool {
+        self.terminal_leader_at.is_some()
     }
 
     /// Sidebar / right / activity split percentages — exposed so tests

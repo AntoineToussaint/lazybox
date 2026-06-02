@@ -52,6 +52,14 @@ impl Help {
                 label: std::borrow::Cow::Borrowed(def.label),
             });
         }
+        // The snippet leader (`]]<key>`) isn't a catalog `Action` —
+        // it's a terminal-pane chord whose binding set is the user's
+        // snippet library — so it's hand-added to the Terminal section
+        // here, the same way the hint bar curates it (issue #205).
+        by_section.entry(3).or_default().push(Binding {
+            keys: std::borrow::Cow::Borrowed("]]<key>"),
+            label: std::borrow::Cow::Borrowed("snippets"),
+        });
         let sections: Vec<HelpSection> = by_section
             .into_iter()
             .map(|(order, bindings)| {

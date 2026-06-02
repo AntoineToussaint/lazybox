@@ -753,6 +753,115 @@ snippets:
         assert_eq!(m.snippet_choices, vec!["alpha".to_string(), "zeta".into()]);
     }
 
+    // ── `]]` leader chord (issue #205) ──────────────────────────────
+
+    use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+
+    /// Press the default escape char (`]`) into `handle_pane_key`.
+    fn esc_key() -> RealmKey {
+        RealmKey::new(Key::Char(']'), RealmMods::NONE)
+    }
+
+    /// A model focused on the terminal pane with a one-snippet library
+    /// loaded — the precondition for arming the leader. `label` keys
+    /// the fixture's tmp file so parallel tests don't share one.
+    fn model_in_terminal_with_snippets(
+        label: &str,
+    ) -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let mut m = build_model();
+        m.apply_snippets(snippets_from_yaml(
+            label,
+            r#"
+snippets:
+  rev:
+    description: Review
+    body: review body
+"#,
+        ));
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        m
+    }
+
+    /// `]` then `]` with a snippet library present arms the leader and
+    /// keeps focus on the terminal — it does NOT leave immediately.
+    #[test]
+    fn double_bracket_arms_leader_when_snippets_present() {
+        let mut m = model_in_terminal_with_snippets("leader-arm");
+        m.dispatch_key(esc_key());
+        assert!(!m.terminal_leader_pending(), "one `]` only holds");
+        m.dispatch_key(esc_key());
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "leader doesn't leave yet");
+    }
+
+    /// With no snippets configured there are no bindings to offer, so
+    /// `]]` leaves to the sidebar immediately (no leader, no idle wait).
+    #[test]
+    fn double_bracket_leaves_immediately_without_snippets() {
+        let mut m = build_model();
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        assert!(!m.terminal_leader_pending());
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
+    }
+
+    /// `]]<printable>` opens the snippet picker pre-filtered by the
+    /// follow-up char, and disarms the leader.
+    #[test]
+    fn leader_then_char_opens_snippet_picker() {
+        let mut m = model_in_terminal_with_snippets("leader-char");
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        m.dispatch_key(RealmKey::new(Key::Char('r'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        assert!(matches!(m.top_modal(), Some(Id::SnippetPicker)));
+    }
+
+    /// `]]` then `Esc` cancels the leader back into the terminal —
+    /// focus stays, no picker mounts.
+    #[test]
+    fn leader_then_esc_cancels_back_to_terminal() {
+        let mut m = model_in_terminal_with_snippets("leader-esc");
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "Esc cancels, stays put");
+        assert!(m.top_modal().is_none(), "no picker mounted");
+    }
+
+    /// A lone `]` followed by a non-`]` key is a literal `]` in the
+    /// user's input: it must NOT arm the leader or open a picker, even
+    /// with snippets configured (the bug this issue fixes).
+    #[test]
+    fn single_bracket_then_other_key_passes_through() {
+        let mut m = model_in_terminal_with_snippets("leader-literal");
+        m.dispatch_key(esc_key());
+        m.dispatch_key(RealmKey::new(Key::Char('a'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending());
+        assert!(m.top_modal().is_none(), "lone `]a` opens no picker");
+        assert_eq!(m.focus(), PaneFocus::Terminals);
+    }
+
+    /// An armed leader with no follow-up key leaves the pane once the
+    /// escape window elapses (the idle tick). Uses a 1ms window so the
+    /// test doesn't sleep the default 600ms.
+    #[test]
+    fn idle_leader_leaves_on_tick_after_window() {
+        let mut m = model_in_terminal_with_snippets("leader-idle");
+        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        assert!(m.terminal_leader_pending());
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        m.tick_terminal_leader();
+        assert!(!m.terminal_leader_pending(), "window elapsed → disarmed");
+        assert_eq!(m.focus(), PaneFocus::Sidebar, "idle leader leaves the pane");
+    }
+
     /// A single-line snippet body is sent raw plus a trailing `\r`.
     /// No bracketed-paste wrapper — the agent submits it directly.
     #[test]

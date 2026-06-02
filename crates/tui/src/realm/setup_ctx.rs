@@ -35,6 +35,11 @@ pub enum SettingsAction {
     /// sessions launch with `--dangerously-skip-permissions`. Carries
     /// the current value so the dispatcher knows which way to flip.
     ToggleSkipPermissions { enabled: bool },
+    /// Open `<pilot_home>/snippets.yaml` in the configured editor,
+    /// seeding a commented template first when the file is absent.
+    /// Snippets are file-owned (no in-app editor by design), so this
+    /// just gets the user to the file.
+    EditSnippets,
     /// Bail out and run the full splash → providers → agents → … wizard.
     FullSetup,
     /// Admin: wipe every worktree whose session has no live
@@ -59,6 +64,7 @@ impl SettingsAction {
                 "Skip permission prompts for your sessions · {}",
                 if *enabled { "on" } else { "off" }
             ),
+            Self::EditSnippets => "Edit snippets (]]<key> shortcuts)".into(),
             Self::FullSetup => "Run the full setup wizard".into(),
             Self::CleanWorktrees => "Clean worktrees (free disk, keep inbox)".into(),
             Self::InspectWorktrees => "Inspect worktrees…".into(),

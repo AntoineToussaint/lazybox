@@ -624,7 +624,7 @@ impl ActionDef {
                 kind: ActionKind::LeaveTerminal,
                 default_keys: "]]",
                 label: "exit to sidebar",
-                describe: "Escape the terminal back to the sidebar (double-tap the configured escape char).",
+                describe: "Double-tap the escape char to leave the terminal. The same `]]` is a leader: `]]<key>` opens snippets; a lone `]` is sent to the agent.",
                 section: Section::Terminal,
             },
         }

@@ -492,7 +492,7 @@ async fn run_embedded_realm(
         });
         let agent_shortcuts: std::collections::HashMap<char, String> =
             user_config.agent_shortcuts.clone().into_iter().collect();
-        let ui_defaults = user_config.ui.resolved();
+        let ui_defaults = user_config.resolved_ui();
         model.apply_sidebar_config(
             user_config.attention.clone(),
             user_config.ui.collapsed_repos.clone(),

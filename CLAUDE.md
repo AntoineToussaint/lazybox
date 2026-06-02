@@ -141,10 +141,12 @@ direct aliases.
 **RightPane (Activity)**: `j/k` scroll, `g/G` top/bottom.
 
 **TerminalStack**: all keys forward to the PTY. `]]` (configurable
-escape sequence) returns to the sidebar; `Ctrl-c` is forwarded as an
-interrupt. `]<key>` opens the snippet picker (see
+escape sequence) is a leader: bare `]]` returns to the sidebar, while
+`]]<key>` opens the snippet picker (see
 [`docs/snippets.md`](docs/snippets.md)) — fuzzy-filters by snippet
-key, auto-submits when the filter uniquely matches.
+key, auto-submits when the filter uniquely matches. A lone `]`
+followed by any non-`]` key is sent to the agent verbatim. `Ctrl-c`
+is forwarded as an interrupt.
 
 ## Conventions
 

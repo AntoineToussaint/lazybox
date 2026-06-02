@@ -490,6 +490,24 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Leave the terminal pane once the armed `]]` leader has sat
+    /// idle for `ui_defaults.escape_window` with no follow-up key.
+    /// This is what makes bare `]]` (leader armed, no binding key)
+    /// resolve to "exit to sidebar": the user pressed `]]` and didn't
+    /// pick a snippet, so we honor the leave. Called once per run-loop
+    /// iteration (the loop ticks ~every 16ms even while idle), so the
+    /// leave fires within a frame of the window elapsing.
+    pub fn tick_terminal_leader(&mut self) {
+        if let Some(armed_at) = self.terminal_leader_at
+            && armed_at.elapsed() >= self.ui_defaults.escape_window
+        {
+            self.terminal_leader_at = None;
+            self.focus = PaneFocus::Sidebar;
+            self.set_focus_attr();
+            self.redraw = true;
+        }
+    }
+
     /// Advance the sidebar's "working" spinner. Called once per run-
     /// loop iteration; the sidebar itself rate-limits the frame
     /// advance (so this is a cheap no-op most ticks) and only reports

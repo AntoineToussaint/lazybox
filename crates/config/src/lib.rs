@@ -207,6 +207,11 @@ pub struct UiDefaults {
     pub auto_mark_delay: Duration,
     pub quit_double_tap_window: Duration,
     pub terminal_escape_char: char,
+    /// Window for the terminal escape / `]]` leader: a second
+    /// escape-char press within it arms the leader, and a leader key
+    /// must arrive within it before the pane leaves on idle. Sourced
+    /// from `terminal.escape_window_ms`.
+    pub escape_window: Duration,
     pub split_step_percent: i16,
     pub task_body_max_rows: u16,
     pub short_snooze: Duration,
@@ -220,6 +225,7 @@ impl Default for UiDefaults {
             auto_mark_delay: Duration::from_millis(1000),
             quit_double_tap_window: Duration::from_millis(800),
             terminal_escape_char: ']',
+            escape_window: Duration::from_millis(600),
             split_step_percent: 3,
             task_body_max_rows: 8,
             short_snooze: Duration::from_secs(4 * 60 * 60),
@@ -242,6 +248,10 @@ impl UiSection {
                 .quit_double_tap_window
                 .unwrap_or(d.quit_double_tap_window),
             terminal_escape_char: self.terminal_escape_char.unwrap_or(d.terminal_escape_char),
+            // Sourced from the `terminal` section (see
+            // `Config::resolved_ui`); the default stands until that
+            // override is applied.
+            escape_window: d.escape_window,
             split_step_percent: self.split_step_percent.unwrap_or(d.split_step_percent),
             task_body_max_rows: self.task_body_max_rows.unwrap_or(d.task_body_max_rows),
             short_snooze: self.short_snooze.unwrap_or(d.short_snooze),
@@ -505,6 +515,15 @@ impl Default for TerminalSection {
 }
 
 impl Config {
+    /// Resolve the UI defaults, folding in cross-section knobs the
+    /// `ui` block alone can't see — currently the terminal escape /
+    /// `]]` leader window, which lives under `terminal`.
+    pub fn resolved_ui(&self) -> UiDefaults {
+        let mut ui = self.ui.resolved();
+        ui.escape_window = Duration::from_millis(self.terminal.escape_window_ms);
+        ui
+    }
+
     /// Load from `~/.pilot/config.yaml`, falling back to defaults.
     pub fn load() -> Result<Self, ConfigError> {
         let path = Self::default_path();

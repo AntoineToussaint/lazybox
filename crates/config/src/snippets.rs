@@ -59,6 +59,8 @@ pub struct Snippet {
 pub enum SnippetOrigin {
     #[default]
     Unknown,
+    /// Shipped with pilot, merged beneath the user's files.
+    BuiltIn,
     /// `<pilot_home>/snippets.yaml`.
     Global,
     /// `<repo>/.pilot/snippets.yaml`.
@@ -66,9 +68,11 @@ pub enum SnippetOrigin {
 }
 
 impl SnippetOrigin {
-    /// Short label for the picker — `"global"` / `"repo"` / `""`.
+    /// Short label for the picker — `"built-in"` / `"global"` /
+    /// `"repo"` / `""`.
     pub fn label(self) -> &'static str {
         match self {
+            SnippetOrigin::BuiltIn => "built-in",
             SnippetOrigin::Global => "global",
             SnippetOrigin::Repo => "repo",
             SnippetOrigin::Unknown => "",
@@ -130,6 +134,64 @@ impl Snippets {
         Ok(Self { by_key })
     }
 
+    /// Snippets shipped with pilot. Merged *beneath* the user's
+    /// global + repo files (see [`Snippets::load_merged`]), so any
+    /// user entry with the same key transparently overrides one of
+    /// these — they're a starting library, not a locked-in set.
+    pub fn builtin() -> Self {
+        let entry = |description: &str, body: &str| Snippet {
+            description: description.to_string(),
+            body: body.to_string(),
+            origin: SnippetOrigin::BuiltIn,
+        };
+        let by_key = BTreeMap::from([
+            (
+                "rev".to_string(),
+                entry(
+                    "Review the current diff",
+                    "Please review the current diff for correctness bugs and obvious \
+                     cleanups. Focus on the changes only, not the surrounding code.",
+                ),
+            ),
+            (
+                "pr".to_string(),
+                entry(
+                    "Open a PR (summary + test plan)",
+                    "Please open a PR for the current branch. Use a concise title. The \
+                     body should include a Summary section (1-3 bullets) and a Test plan \
+                     section as a checklist.",
+                ),
+            ),
+            (
+                "ready".to_string(),
+                entry(
+                    "Mark the PR ready for review",
+                    "Mark the current pull request as ready for review by running \
+                     `gh pr ready`.",
+                ),
+            ),
+        ]);
+        Self { by_key }
+    }
+
+    /// Commented starter file written by the "Edit snippets" settings
+    /// action when no global file exists yet. Mirrors the built-in
+    /// `rev` entry so a user has a working example to copy.
+    pub fn starter_template() -> &'static str {
+        "# Snippets — keystroke shortcuts that expand into a prompt and\n\
+         # auto-submit to the focused agent. Trigger with `]]<key>` in a\n\
+         # session terminal. See docs/snippets.md for the full reference.\n\
+         #\n\
+         # pilot ships built-in `rev`, `pr`, and `ready` snippets; anything\n\
+         # you define here with the same key overrides the built-in one.\n\
+         snippets:\n\
+         \x20 rev:\n\
+         \x20   description: Review current diff\n\
+         \x20   body: |\n\
+         \x20     Please review the current diff for correctness bugs and\n\
+         \x20     obvious cleanups. Focus on the changes only.\n"
+    }
+
     /// Default global path: `<pilot_home>/snippets.yaml`.
     pub fn default_global_path() -> PathBuf {
         pilot_core::paths::home().join("snippets.yaml")
@@ -177,12 +239,14 @@ impl Snippets {
         Self { by_key }
     }
 
-    /// Load both global + repo files and merge them (repo wins).
-    /// This is the one-shot entry point most callers want.
+    /// Load both global + repo files and merge them over the
+    /// built-in set. Precedence, lowest to highest: built-in →
+    /// global → repo. This is the one-shot entry point most callers
+    /// want.
     pub fn load_merged(repo_root: Option<&Path>) -> Self {
         let global = Self::load_global();
         let repo = repo_root.map(Self::load_repo).unwrap_or_default();
-        Self::merged(global, repo)
+        Self::merged(Self::merged(Self::builtin(), global), repo)
     }
 
     /// Exact lookup by shortcut key.
@@ -368,6 +432,52 @@ snippets: {}
         );
         let s = Snippets::load_from(&path, SnippetOrigin::Global).unwrap();
         assert!(s.is_empty());
+    }
+
+    /// The shipped built-in set is non-empty and carries the
+    /// `ready` shortcut (the headline default).
+    #[test]
+    fn builtin_includes_ready_snippet() {
+        let b = Snippets::builtin();
+        assert!(!b.is_empty());
+        let ready = b.get("ready").expect("ready snippet ships built-in");
+        assert_eq!(ready.origin, SnippetOrigin::BuiltIn);
+        assert!(ready.body.contains("gh pr ready"));
+        assert!(b.get("rev").is_some());
+        assert!(b.get("pr").is_some());
+    }
+
+    /// A global entry with a built-in key wins; built-ins fill the
+    /// gaps. Mirrors how `load_merged` layers built-in < global.
+    #[test]
+    fn user_entry_overrides_builtin_on_key_conflict() {
+        let user = Snippets::load_from(
+            &write_tmp(
+                "override-builtin",
+                r#"
+snippets:
+  rev:
+    description: My review
+    body: my custom review body
+"#,
+            ),
+            SnippetOrigin::Global,
+        )
+        .unwrap();
+        let merged = Snippets::merged(Snippets::builtin(), user);
+        let rev = merged.get("rev").unwrap();
+        assert_eq!(rev.body, "my custom review body");
+        assert_eq!(rev.origin, SnippetOrigin::Global);
+        // Untouched built-ins remain.
+        assert_eq!(merged.get("ready").unwrap().origin, SnippetOrigin::BuiltIn);
+    }
+
+    /// The starter template parses as a valid snippets file.
+    #[test]
+    fn starter_template_is_valid_yaml() {
+        let file: SnippetsFile =
+            serde_yaml::from_str(Snippets::starter_template()).expect("template parses");
+        assert!(file.snippets.contains_key("rev"));
     }
 
     /// Malformed YAML surfaces as `SnippetsError::Parse`, not a

@@ -1534,14 +1534,14 @@ impl TerminalStack {
                 keys: std::borrow::Cow::Borrowed("Ctrl-c"),
                 label: std::borrow::Cow::Borrowed("interrupt"),
             },
-            // Snippet picker entry point (issue #40). `]<key>` opens
-            // the picker pre-filled with the typed char; typing a
-            // full snippet key auto-submits its body to the agent.
-            // The leading `]` is shared with the LeaveTerminal escape
-            // (`]]`) — the second `]` wins, anything else opens the
-            // picker.
+            // Snippet picker entry point (issues #40, #205). The `]]`
+            // leader is shared with LeaveTerminal: `]]` alone leaves,
+            // `]]<key>` opens the picker pre-filled with the typed
+            // char (a full key auto-submits its body to the agent).
+            // Routing the picker under the leader frees a lone `]` to
+            // reach the agent verbatim.
             Binding {
-                keys: std::borrow::Cow::Borrowed("]<key>"),
+                keys: std::borrow::Cow::Borrowed("]]<key>"),
                 label: std::borrow::Cow::Borrowed("snippets"),
             },
         ]

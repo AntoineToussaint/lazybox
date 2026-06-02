@@ -166,10 +166,10 @@ impl ChatProvider for SlackProvider {
                     // the channel between our list + create. Refetch
                     // and use the existing id.
                     tracing::debug!(name = %name, "slack: channel exists, looking up id");
-                    match self.api.conversations_list(1000).await {
-                        Ok(listing) => {
+                    match self.api.conversations_list_all().await {
+                        Ok(channels) => {
                             let mut s = self.name_to_id.lock().unwrap();
-                            for c in &listing.channels {
+                            for c in &channels {
                                 s.insert(c.name.clone(), c.id.clone());
                             }
                             s.get(name).cloned().ok_or_else(|| {
@@ -222,11 +222,12 @@ async fn run(
     let auth = api.auth_test().await?;
     tracing::info!(team = %auth.team, user = %auth.user, "slack: connected");
 
-    // Page through ~1000 channels. The provider seed below uses this
-    // cache so subsequent ensure_workspace_channel calls don't HTTP.
-    let listing = api.conversations_list(1000).await?;
+    // Walk every page of the channel listing. The provider seed below
+    // uses this cache so subsequent ensure_workspace_channel calls
+    // don't HTTP; a workspace with >1000 channels must not miss any.
+    let channels = api.conversations_list_all().await?;
     let mut seed = HashMap::new();
-    for c in &listing.channels {
+    for c in &channels {
         seed.insert(c.name.clone(), c.id.clone());
     }
     tracing::info!(channels = seed.len(), "slack: prefetched channel listing");
@@ -241,7 +242,7 @@ async fn run(
                 format!(
                     "*pilot online* · connected as <@{}>. Mirroring {} project(s).",
                     auth.user_id,
-                    listing.channels.len()
+                    channels.len()
                 ),
             ))
             .await;

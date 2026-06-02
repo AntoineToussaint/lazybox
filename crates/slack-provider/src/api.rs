@@ -22,6 +22,7 @@ const SLACK_API: &str = "https://slack.com/api";
 pub struct Client {
     http: reqwest::Client,
     bot_token: String,
+    base: String,
 }
 
 impl Client {
@@ -32,6 +33,7 @@ impl Client {
         Self {
             http: reqwest::Client::new(),
             bot_token: bot_token.into(),
+            base: SLACK_API.to_string(),
         }
     }
 
@@ -101,6 +103,24 @@ impl Client {
             },
         )
         .await
+    }
+
+    /// Walk every page of `conversations.list` and collect all
+    /// non-archived channels the bot can see. The boot cache seed and
+    /// the `name_taken` recovery path both need the full workspace,
+    /// not just the first 1000-channel page.
+    pub async fn conversations_list_all(&self) -> Result<Vec<Channel>, SlackError> {
+        let mut out = Vec::new();
+        let mut cursor = String::new();
+        loop {
+            let resp = self.conversations_list_page(1000, &cursor, false).await?;
+            out.extend(resp.channels);
+            if resp.response_metadata.next_cursor.is_empty() {
+                break;
+            }
+            cursor = resp.response_metadata.next_cursor;
+        }
+        Ok(out)
     }
 
     /// `conversations.archive` — archive a channel by id. Slack
@@ -184,6 +204,14 @@ impl Client {
         .await
     }
 
+    /// Point the client at a different API base. Test-only: lets a
+    /// canned local server stand in for `slack.com`.
+    #[cfg(test)]
+    fn with_base(mut self, base: impl Into<String>) -> Self {
+        self.base = base.into();
+        self
+    }
+
     /// Internal: shared request shape. Slack returns 200 OK with
     /// `{ok: false, error: "..."}` for application errors — surface
     /// those as `SlackError::Api(error_code)` so callers can pattern-
@@ -193,7 +221,7 @@ impl Client {
         endpoint: &str,
         body: &Req,
     ) -> Result<Resp, SlackError> {
-        let url = format!("{SLACK_API}/{endpoint}");
+        let url = format!("{}/{endpoint}", self.base);
         let raw = self
             .http
             .post(&url)
@@ -383,6 +411,58 @@ pub fn sluggify(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Spin up a tiny TCP server that emulates a two-page
+    /// `conversations.list`: the first request (no `cursor` in the
+    /// body) gets a `next_cursor`, the follow-up request (which carries
+    /// the cursor) gets an empty one. Hand-rolled rather than pulling in
+    /// `wiremock` for a single stateless rule. Returns the `http://addr`
+    /// base to feed into [`Client::with_base`].
+    async fn spawn_paginating_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => continue,
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    // The cursor is only serialized once it's non-empty,
+                    // so its presence in the body marks the second page.
+                    let body = if req.contains("\"cursor\"") {
+                        r#"{"ok":true,"channels":[{"id":"C2","name":"second"}],"response_metadata":{"next_cursor":""}}"#
+                    } else {
+                        r#"{"ok":true,"channels":[{"id":"C1","name":"first"}],"response_metadata":{"next_cursor":"PAGE2"}}"#
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: application/json\r\n\
+                         Content-Length: {}\r\n\
+                         Connection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn conversations_list_all_walks_every_page() {
+        let base = spawn_paginating_server().await;
+        let client = Client::new("xoxb-test").with_base(base);
+        let channels = client.conversations_list_all().await.unwrap();
+        let names: Vec<&str> = channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["first", "second"]);
+    }
 
     #[test]
     fn channel_name_passes_through_well_formed_workspace_key() {

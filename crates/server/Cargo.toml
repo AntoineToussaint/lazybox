@@ -1,5 +1,5 @@
 [package]
-name = "pilot-server"
+name = "lazybox-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,19 +7,19 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-pilot-core       = { workspace = true }
-pilot-auth       = { workspace = true }
-pilot-events     = { workspace = true }
-pilot-store      = { workspace = true }
-pilot-config     = { workspace = true }
-pilot-gh         = { workspace = true }
-pilot-git-ops    = { workspace = true }
-pilot-tui-term   = { workspace = true }
-pilot-ipc       = { workspace = true }
-pilot-agents    = { workspace = true }
-pilot-llm-proxy = { workspace = true }
-pilot-linear       = { path = "../linear-provider" }
-pilot-slack        = { workspace = true }
+lazybox-core       = { workspace = true }
+lazybox-auth       = { workspace = true }
+lazybox-events     = { workspace = true }
+lazybox-store      = { workspace = true }
+lazybox-config     = { workspace = true }
+lazybox-gh         = { workspace = true }
+lazybox-git-ops    = { workspace = true }
+lazybox-tui-term   = { workspace = true }
+lazybox-ipc       = { workspace = true }
+lazybox-agents    = { workspace = true }
+lazybox-llm-proxy = { workspace = true }
+lazybox-linear       = { path = "../linear-provider" }
+lazybox-slack        = { workspace = true }
 
 tokio            = { workspace = true }
 futures          = { workspace = true }

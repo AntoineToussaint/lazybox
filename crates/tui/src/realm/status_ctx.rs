@@ -133,7 +133,7 @@ const BG_POLL_IDLE_GUARD: Duration = Duration::from_secs(90);
 /// Past this elapsed time without a PollCompleted, the footer
 /// label switches from `syncing github · Ns` to
 /// `syncing github · Ns · still working`. Visual signal that
-/// pilot hasn't given up — useful on slow networks where a
+/// lazybox hasn't given up — useful on slow networks where a
 /// 60+ second poll is normal.
 const STILL_WORKING_HINT_AFTER: Duration = Duration::from_secs(30);
 
@@ -231,7 +231,7 @@ pub(crate) struct StatusCtx {
     /// checks at ~50ms granularity from the run loop.
     pub polling_last_tick: Instant,
     /// Background-poll spinner shown in the footer for every poll
-    /// cycle after the initial one. Provides the "is pilot polling
+    /// cycle after the initial one. Provides the "is lazybox polling
     /// right now?" feedback users were missing — pre-fix, the footer
     /// went silent after the first cycle and an assignment made on
     /// GitHub gave no signal until the row appeared (or didn't).

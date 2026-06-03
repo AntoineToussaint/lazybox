@@ -2,7 +2,7 @@
 //! the store's kv table so they survive daemon restarts.
 //!
 //! The *pure* "should we touch this PR" decision lives in
-//! `pilot_core::autofix`. This module adds the part that needs state:
+//! `lazybox_core::autofix`. This module adds the part that needs state:
 //! once the pure layer says "yes, fix the CI on this PR", we still
 //! have to decide whether we've already tried too many times, or tried
 //! too recently. Without this guard a chronically-red PR would re-spawn
@@ -24,8 +24,8 @@
 //! isn't permanently locked out.
 
 use chrono::{DateTime, Utc};
-use pilot_core::{AutoFixKind, AutoFixSettings};
-use pilot_store::Store;
+use lazybox_core::{AutoFixKind, AutoFixSettings};
+use lazybox_store::Store;
 use serde::{Deserialize, Serialize};
 
 /// Persisted per-(workspace, kind) attempt bookkeeping.
@@ -164,7 +164,7 @@ pub fn check_and_record(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pilot_store::MemoryStore;
+    use lazybox_store::MemoryStore;
     use std::time::Duration;
 
     fn settings() -> AutoFixSettings {

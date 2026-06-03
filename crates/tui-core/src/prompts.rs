@@ -2,12 +2,12 @@
 //! single `Task`) and produce a `(SessionKey, String)` pair the
 //! orchestrator can hand to an agent.
 //!
-//! These used to live in `pilot_tui::components::sidebar`, but
+//! These used to live in `lazybox_tui::components::sidebar`, but
 //! `intent::resolve_work` also calls them — and `intent` lives in
-//! `pilot-tui-core`, which can't depend on `pilot-tui`. So they're
+//! `lazybox-tui-core`, which can't depend on `lazybox-tui`. So they're
 //! here. Sidebar re-exports them at the old paths for back-compat.
 
-use pilot_core::{SessionKey, Workspace};
+use lazybox_core::{SessionKey, Workspace};
 
 /// Polymorphic "work on this" prompt builder. Same priority chain
 /// the sidebar's `w` key uses: fix conflicts beats fix CI (CI can't
@@ -32,7 +32,7 @@ pub fn build_work_prompt(workspace: &Workspace) -> Option<(SessionKey, String)> 
     let session_key = SessionKey::from(&workspace.key);
     Some((
         session_key,
-        pilot_core::prompts::build_implement_issue_prompt(issue),
+        lazybox_core::prompts::build_implement_issue_prompt(issue),
     ))
 }
 
@@ -71,7 +71,7 @@ pub fn build_fix_conflict_prompt(workspace: &Workspace) -> Option<(SessionKey, S
 /// both the sidebar's `w` keymap predicate and `build_work_prompt`.
 pub fn build_fix_ci_prompt(workspace: &Workspace) -> Option<(SessionKey, String)> {
     let pr = workspace.pr.as_ref()?;
-    if pr.ci != pilot_core::CiStatus::Failure {
+    if pr.ci != lazybox_core::CiStatus::Failure {
         return None;
     }
     let session_key = SessionKey::from(&workspace.key);
@@ -87,7 +87,7 @@ pub fn build_fix_ci_prompt(workspace: &Workspace) -> Option<(SessionKey, String)
     let failing_checks: Vec<&str> = pr
         .checks
         .iter()
-        .filter(|c| c.status == pilot_core::CiStatus::Failure)
+        .filter(|c| c.status == lazybox_core::CiStatus::Failure)
         .map(|c| c.name.as_str())
         .collect();
     let checks_block = if failing_checks.is_empty() {

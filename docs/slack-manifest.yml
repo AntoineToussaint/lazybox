@@ -1,23 +1,23 @@
-# Slack app manifest for pilot.
+# Slack app manifest for lazybox.
 #
 # Paste this verbatim into <https://api.slack.com/apps> → Create New
 # App → From manifest. After Slack creates the app, run
-# `pilot slack init` to capture the two tokens and wire them into
-# `~/.pilot/config.yaml`. See `docs/slack-setup.md`.
+# `lazybox slack init` to capture the two tokens and wire them into
+# `~/.lazybox/config.yaml`. See `docs/slack-setup.md`.
 display_information:
-  name: pilot
+  name: lazybox
   description: Reactive workspace-inbox bot — mirrors workspaces into channels, accepts commands to drive claude sessions.
   background_color: "#0b0b0b"
 
 features:
   bot_user:
-    display_name: pilot
+    display_name: lazybox
     always_online: true
 
 oauth_config:
   scopes:
     bot:
-      # Read + post in channels pilot creates / is invited to.
+      # Read + post in channels lazybox creates / is invited to.
       - chat:write
       - channels:read
       - channels:history
@@ -27,8 +27,8 @@ oauth_config:
       - mpim:history      # multi-party DMs
       # Receive @mentions + slash commands.
       - app_mentions:read
-      # Auto-create one channel per workspace + self-join `#pilot`
-      # during `pilot slack init`.
+      # Auto-create one channel per workspace + self-join `#lazybox`
+      # during `lazybox slack init`.
       - channels:manage
       - channels:join
       # File uploads (paste diff hunks back to channel).
@@ -36,7 +36,7 @@ oauth_config:
 
 settings:
   event_subscriptions:
-    # Socket Mode — pilot opens a WebSocket out from your home
+    # Socket Mode — lazybox opens a WebSocket out from your home
     # machine, so no public HTTPS endpoint required.
     bot_events:
       - app_mention

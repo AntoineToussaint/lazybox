@@ -3,8 +3,8 @@
 //! Generic CLI gets its own block — it's the extensibility surface
 //! users will drive from YAML.
 
-use pilot_agents::agent::builtins::{Claude, Codex, Cursor, GenericCli};
-use pilot_agents::{Agent, AgentState, Registry, SessionWrapper, SpawnCtx};
+use lazybox_agents::agent::builtins::{Claude, Codex, Cursor, GenericCli};
+use lazybox_agents::{Agent, AgentState, Registry, SessionWrapper, SpawnCtx};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -436,7 +436,7 @@ fn generic_cli_empty_patterns_returns_none() {
 
 #[test]
 fn tmux_wrap_shape() {
-    use pilot_agents::TmuxWrapper;
+    use lazybox_agents::TmuxWrapper;
     let w = TmuxWrapper::new();
     let argv = w.wrap(
         "github:o/r#1",
@@ -459,7 +459,7 @@ fn tmux_wrap_shape() {
 
 #[test]
 fn tmux_sanitize_id_replaces_reserved_chars() {
-    use pilot_agents::TmuxWrapper;
+    use lazybox_agents::TmuxWrapper;
     let w = TmuxWrapper::new();
     assert_eq!(w.sanitize_id("a:b/c"), "a_b_c");
     assert_eq!(w.sanitize_id("simple"), "simple");
@@ -468,7 +468,7 @@ fn tmux_sanitize_id_replaces_reserved_chars() {
 
 #[test]
 fn raw_wrapper_returns_inner_unchanged() {
-    use pilot_agents::session_wrapper::RawWrapper;
+    use lazybox_agents::session_wrapper::RawWrapper;
     let w = RawWrapper;
     let inner = vec!["bash".to_string(), "-c".to_string(), "echo x".to_string()];
     assert_eq!(
@@ -489,7 +489,7 @@ fn raw_wrapper_returns_inner_unchanged() {
 
 #[test]
 fn contains_any_matches_first_pattern() {
-    use pilot_agents::agent::detect;
+    use lazybox_agents::agent::detect;
     assert!(detect::contains_any("approve? y/n", &["approve?", "(y/n)"]));
     assert!(detect::contains_any(
         "running tests... [y/n]",
@@ -499,7 +499,7 @@ fn contains_any_matches_first_pattern() {
 
 #[test]
 fn contains_any_returns_false_when_no_match() {
-    use pilot_agents::agent::detect;
+    use lazybox_agents::agent::detect;
     assert!(!detect::contains_any(
         "regular output, no prompts here",
         detect::YN_PROMPT_PATTERNS,
@@ -508,7 +508,7 @@ fn contains_any_returns_false_when_no_match() {
 
 #[test]
 fn contains_any_empty_pattern_set_is_false() {
-    use pilot_agents::agent::detect;
+    use lazybox_agents::agent::detect;
     // Edge case: an empty pattern set never matches, even on
     // matching-looking text. The GenericCli `detect_state` guards
     // its empty path explicitly, but the primitive should also be
@@ -518,7 +518,7 @@ fn contains_any_empty_pattern_set_is_false() {
 
 #[test]
 fn contains_paired_requires_both_a_choice_and_a_question() {
-    use pilot_agents::agent::detect;
+    use lazybox_agents::agent::detect;
     // Claude's pairing contract: a numbered choice ALONE doesn't
     // trigger (could be chat output listing options), nor does a
     // question phrase alone. Both must appear together.
@@ -532,7 +532,7 @@ fn contains_paired_requires_both_a_choice_and_a_question() {
 
 #[test]
 fn contains_paired_with_only_choice_is_false() {
-    use pilot_agents::agent::detect;
+    use lazybox_agents::agent::detect;
     let buf = "Listing options: 1. Yes 2. No";
     assert!(!detect::contains_paired(
         buf,
@@ -543,7 +543,7 @@ fn contains_paired_with_only_choice_is_false() {
 
 #[test]
 fn contains_paired_with_only_question_is_false() {
-    use pilot_agents::agent::detect;
+    use lazybox_agents::agent::detect;
     // Prevents a false-positive on chat output that mentions the
     // question phrase without an actual prompt UI.
     let buf = "The assistant said: 'Do you want to know more?'";
@@ -556,7 +556,7 @@ fn contains_paired_with_only_question_is_false() {
 
 #[test]
 fn yn_pattern_constant_matches_every_published_variant() {
-    use pilot_agents::agent::detect;
+    use lazybox_agents::agent::detect;
     // The four canonical forms agents emit today. Catches an
     // accidental drop from the constant.
     for marker in ["[y/n]", "(y/n)", "[Y/n]", "[y/N]"] {
@@ -669,7 +669,7 @@ fn claude_question_heuristic_stays_idle_on_plain_streaming() {
     // Belt-and-braces.
     let agent = Claude;
     assert_eq!(
-        agent.detect_state(b"Running tests...\nCompiling pilot-tui v0.1.0\nFinished in 4.2s"),
+        agent.detect_state(b"Running tests...\nCompiling lazybox-tui v0.1.0\nFinished in 4.2s"),
         Some(AgentState::Idle),
     );
 }
@@ -726,15 +726,15 @@ fn claude_freeform_conversational_asks_are_idle() {
 
 // ── Prompt-shape fixture suite ─────────────────────────────────────────
 //
-// A canonical version of every Claude Code prompt shape pilot's
+// A canonical version of every Claude Code prompt shape lazybox's
 // detector is expected to recognise. Each fixture pairs a stable
 // name with a representative buffer and the expected `AgentState`.
 // The single test below iterates so adding a new prompt shape is a
 // one-fixture entry — no per-shape `#[test]` boilerplate.
 //
 // Maintainer flow:
-//   1. Capture the new shape (see `/tmp/pilot.log` when claude
-//      renders the prompt in pilot, or transcribe the visible
+//   1. Capture the new shape (see `/tmp/lazybox.log` when claude
+//      renders the prompt in lazybox, or transcribe the visible
 //      terminal).
 //   2. Add a `PromptFixture` row.
 //   3. If the detector misses it, extend `Claude::detect_state`
@@ -967,7 +967,7 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
         // and-braces baseline.
         name: "idle_streaming_build_output",
         buffer: concat!(
-            "Compiling pilot-tui v0.1.0\n",
+            "Compiling lazybox-tui v0.1.0\n",
             "Finished release [optimized] target(s) in 4.32s",
         ),
         expected: AgentState::Idle,

@@ -4,10 +4,10 @@
 //! curl. Tests drive synthetic output via `MockBackend::emit` and end
 //! sessions via `finish`.
 
-use pilot_ipc::{Command, Event, TerminalKind, channel};
-use pilot_server::backend::{MockBackend, SessionBackend};
-use pilot_server::{Server, ServerConfig};
-use pilot_store::MemoryStore;
+use lazybox_ipc::{Command, Event, TerminalKind, channel};
+use lazybox_server::backend::{MockBackend, SessionBackend};
+use lazybox_server::{Server, ServerConfig};
+use lazybox_store::MemoryStore;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -16,10 +16,10 @@ use tokio::time::timeout;
 /// so a deadlock is reported as a failure, not a hung suite.
 const TEST_DEADLINE: Duration = Duration::from_secs(5);
 
-/// Point `PILOT_HOME` at an empty temp dir for the lifetime of the
+/// Point `LAZYBOX_HOME` at an empty temp dir for the lifetime of the
 /// guard, restoring the previous value on drop. `handle_spawn` calls
-/// `pilot_config::Config::load()`, which resolves `~/.pilot/config.yaml`
-/// via `PILOT_HOME`; without this a test that asserts on a config-driven
+/// `lazybox_config::Config::load()`, which resolves `~/.lazybox/config.yaml`
+/// via `LAZYBOX_HOME`; without this a test that asserts on a config-driven
 /// field (e.g. `skip_permissions`) reads the dev machine's real config
 /// and flakes. An empty dir → `Config::default()`, which is exactly what
 /// CI (no config file) exercises.
@@ -31,13 +31,13 @@ struct IsolatedConfigHome {
 impl IsolatedConfigHome {
     fn new() -> Self {
         let tmp = tempfile::TempDir::new().unwrap();
-        let prev = std::env::var_os("PILOT_HOME");
-        // SAFETY: PILOT_HOME is process-global, but within this test
+        let prev = std::env::var_os("LAZYBOX_HOME");
+        // SAFETY: LAZYBOX_HOME is process-global, but within this test
         // binary only this guard sets it, and an empty dir resolves every
         // reader to defaults (CI's behaviour) — so even if it leaks to a
         // concurrent test, that test sees what it'd see in CI. Restored
         // on drop.
-        unsafe { std::env::set_var("PILOT_HOME", tmp.path()) };
+        unsafe { std::env::set_var("LAZYBOX_HOME", tmp.path()) };
         Self { _tmp: tmp, prev }
     }
 }
@@ -45,15 +45,15 @@ impl IsolatedConfigHome {
 impl Drop for IsolatedConfigHome {
     fn drop(&mut self) {
         match &self.prev {
-            Some(v) => unsafe { std::env::set_var("PILOT_HOME", v) },
-            None => unsafe { std::env::remove_var("PILOT_HOME") },
+            Some(v) => unsafe { std::env::set_var("LAZYBOX_HOME", v) },
+            None => unsafe { std::env::remove_var("LAZYBOX_HOME") },
         }
     }
 }
 
 /// Drain events until we see one matching `pred` or hit the deadline.
 async fn wait_for<F: FnMut(&Event) -> bool>(
-    client: &mut pilot_ipc::Client,
+    client: &mut lazybox_ipc::Client,
     mut pred: F,
     budget: Duration,
 ) -> Option<Event> {
@@ -72,7 +72,7 @@ async fn wait_for<F: FnMut(&Event) -> bool>(
     None
 }
 
-async fn run_daemon(config: ServerConfig) -> pilot_ipc::Client {
+async fn run_daemon(config: ServerConfig) -> lazybox_ipc::Client {
     let (client, server) = channel::pair();
     tokio::spawn(async move {
         let _ = Server::new(config).serve(server).await;
@@ -80,7 +80,7 @@ async fn run_daemon(config: ServerConfig) -> pilot_ipc::Client {
     client
 }
 
-async fn subscribed(config: ServerConfig) -> pilot_ipc::Client {
+async fn subscribed(config: ServerConfig) -> lazybox_ipc::Client {
     let mut client = run_daemon(config).await;
     client.send(Command::Subscribe).unwrap();
     let _snapshot = client.recv().await.expect("snapshot");
@@ -88,9 +88,9 @@ async fn subscribed(config: ServerConfig) -> pilot_ipc::Client {
 }
 
 async fn spawn_and_wait(
-    client: &mut pilot_ipc::Client,
+    client: &mut lazybox_ipc::Client,
     kind: TerminalKind,
-) -> pilot_ipc::TerminalId {
+) -> lazybox_ipc::TerminalId {
     client
         .send(Command::Spawn {
             session_key: "test:ws-1".into(),
@@ -114,10 +114,10 @@ async fn spawn_and_wait(
 }
 
 /// Build a normalized hook event for a Claude lifecycle event name,
-/// mirroring what `pilot hook-ingest` forwards after parsing Claude's
+/// mirroring what `lazybox hook-ingest` forwards after parsing Claude's
 /// stdin payload.
-fn hook(kind: pilot_ipc::HookEventKind) -> pilot_ipc::HookEvent {
-    pilot_ipc::HookEvent {
+fn hook(kind: lazybox_ipc::HookEventKind) -> lazybox_ipc::HookEvent {
+    lazybox_ipc::HookEvent {
         kind,
         session_id: Some("claude-session".into()),
         cwd: None,
@@ -140,7 +140,7 @@ async fn ingest_hook_drives_agent_state_transitions() {
         client
             .send(Command::IngestHook {
                 terminal_id,
-                hook: hook(pilot_ipc::HookEventKind::PreToolUse),
+                hook: hook(lazybox_ipc::HookEventKind::PreToolUse),
             })
             .unwrap();
         let ev = wait_for(
@@ -153,13 +153,13 @@ async fn ingest_hook_drives_agent_state_transitions() {
         assert!(matches!(
             ev,
             Event::AgentState {
-                state: pilot_ipc::AgentState::Working,
+                state: lazybox_ipc::AgentState::Working,
                 ..
             }
         ));
 
         // A permission Notification → InputNeeded.
-        let mut needs_input = hook(pilot_ipc::HookEventKind::Notification);
+        let mut needs_input = hook(lazybox_ipc::HookEventKind::Notification);
         needs_input.notification = Some("permission_prompt".into());
         client
             .send(Command::IngestHook {
@@ -177,7 +177,7 @@ async fn ingest_hook_drives_agent_state_transitions() {
         assert!(matches!(
             ev,
             Event::AgentState {
-                state: pilot_ipc::AgentState::InputNeeded,
+                state: lazybox_ipc::AgentState::InputNeeded,
                 ..
             }
         ));
@@ -186,7 +186,7 @@ async fn ingest_hook_drives_agent_state_transitions() {
         client
             .send(Command::IngestHook {
                 terminal_id,
-                hook: hook(pilot_ipc::HookEventKind::Stop),
+                hook: hook(lazybox_ipc::HookEventKind::Stop),
             })
             .unwrap();
         let ev = wait_for(
@@ -199,7 +199,7 @@ async fn ingest_hook_drives_agent_state_transitions() {
         assert!(matches!(
             ev,
             Event::AgentState {
-                state: pilot_ipc::AgentState::Idle,
+                state: lazybox_ipc::AgentState::Idle,
                 ..
             }
         ));
@@ -224,7 +224,7 @@ async fn hook_driven_terminal_suppresses_pty_input_needed() {
         client
             .send(Command::IngestHook {
                 terminal_id,
-                hook: hook(pilot_ipc::HookEventKind::PreToolUse),
+                hook: hook(lazybox_ipc::HookEventKind::PreToolUse),
             })
             .unwrap();
         let working = wait_for(
@@ -233,7 +233,7 @@ async fn hook_driven_terminal_suppresses_pty_input_needed() {
                 matches!(
                     e,
                     Event::AgentState {
-                        state: pilot_ipc::AgentState::Working,
+                        state: lazybox_ipc::AgentState::Working,
                         ..
                     }
                 )
@@ -262,7 +262,7 @@ async fn hook_driven_terminal_suppresses_pty_input_needed() {
                 matches!(
                     e,
                     Event::AgentState {
-                        state: pilot_ipc::AgentState::InputNeeded,
+                        state: lazybox_ipc::AgentState::InputNeeded,
                         ..
                     }
                 )
@@ -297,7 +297,7 @@ async fn spawn_shell_emits_terminal_spawned_event() {
 async fn interactive_claude_spawn_keeps_permission_prompts() {
     timeout(TEST_DEADLINE, async {
         // Resolve config to defaults regardless of the dev machine's real
-        // `~/.pilot/config.yaml`, whose `skip_permissions` toggle would
+        // `~/.lazybox/config.yaml`, whose `skip_permissions` toggle would
         // otherwise flip `no_permission` and flake this assertion.
         let _home = IsolatedConfigHome::new();
         let (config, mock) = ServerConfig::in_memory_with_mock();
@@ -331,7 +331,7 @@ async fn interactive_claude_spawn_keeps_permission_prompts() {
             !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
             "interactive claude must not get the bypass flag: {argv:?}",
         );
-        // Claude is launched with a pilot-generated hooks settings file so
+        // Claude is launched with a lazybox-generated hooks settings file so
         // it reports state through structured lifecycle hooks.
         assert!(
             argv.iter().any(|a| a == "--settings"),
@@ -354,7 +354,7 @@ async fn autonomous_spawn_wires_no_permission_consistently() {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let mut bus_rx = config.bus.subscribe();
         let cwd = std::env::temp_dir().to_string_lossy().to_string();
-        pilot_server::spawn_handler::handle_spawn(
+        lazybox_server::spawn_handler::handle_spawn(
             &config,
             "test:ws-auto".into(),
             None,
@@ -382,7 +382,7 @@ async fn autonomous_spawn_wires_no_permission_consistently() {
             .iter()
             .any(|a| a == "--dangerously-skip-permissions");
 
-        let snapshot_flag = pilot_server::spawn_handler::snapshot_terminals(&config)
+        let snapshot_flag = lazybox_server::spawn_handler::snapshot_terminals(&config)
             .await
             .into_iter()
             .next()
@@ -450,7 +450,7 @@ async fn spawned_subprocess_output_reaches_client_via_bus() {
 
         // Inject synthetic output. The pump task should forward it as
         // Event::TerminalOutput, exactly like a real PTY would.
-        mock.emit(&key, b"pilot-marker").await;
+        mock.emit(&key, b"lazybox-marker").await;
 
         let evt = wait_for(
             &mut client,
@@ -459,7 +459,7 @@ async fn spawned_subprocess_output_reaches_client_via_bus() {
                     terminal_id: tid,
                     bytes,
                     ..
-                } => *tid == terminal_id && bytes == b"pilot-marker",
+                } => *tid == terminal_id && bytes == b"lazybox-marker",
                 _ => false,
             },
             Duration::from_secs(2),
@@ -467,7 +467,7 @@ async fn spawned_subprocess_output_reaches_client_via_bus() {
         .await;
         assert!(
             evt.is_some(),
-            "expected to see 'pilot-marker' in TerminalOutput"
+            "expected to see 'lazybox-marker' in TerminalOutput"
         );
     })
     .await
@@ -536,11 +536,11 @@ async fn snapshot_replay_includes_buffered_pty_output_for_late_subscribers() {
         // Drive synthetic output and wait for the pump task to fan it
         // out, so the next Snapshot will include it in `replay`.
         let key = mock.list().await.unwrap().into_iter().next().unwrap();
-        mock.emit(&key, b"pilot-replay-marker").await;
+        mock.emit(&key, b"lazybox-replay-marker").await;
         let _ = wait_for(
             &mut producer,
             |e| match e {
-                Event::TerminalOutput { bytes, .. } => bytes == b"pilot-replay-marker",
+                Event::TerminalOutput { bytes, .. } => bytes == b"lazybox-replay-marker",
                 _ => false,
             },
             Duration::from_secs(2),
@@ -559,7 +559,7 @@ async fn snapshot_replay_includes_buffered_pty_output_for_late_subscribers() {
                     .find(|t| t.terminal_id == terminal_id)
                     .expect("our terminal in snapshot");
                 assert_eq!(
-                    term.replay, b"pilot-replay-marker",
+                    term.replay, b"lazybox-replay-marker",
                     "snapshot replay should contain pre-subscription output",
                 );
                 assert!(term.last_seq > 0, "last_seq advanced past 0");
@@ -571,15 +571,15 @@ async fn snapshot_replay_includes_buffered_pty_output_for_late_subscribers() {
     .expect("deadline");
 }
 /// Recovery scenario: a backend has a session running (simulating
-/// "pilot crashed"), then a fresh `ServerConfig` is built around the
-/// same backend (simulating "pilot restarted"). `recover_sessions`
+/// "lazybox crashed"), then a fresh `ServerConfig` is built around the
+/// same backend (simulating "lazybox restarted"). `recover_sessions`
 /// should register the survivor on the new config so the TUI sees it.
 #[tokio::test]
 async fn recover_sessions_reattaches_survivors() {
     timeout(TEST_DEADLINE, async {
         let backend = MockBackend::new();
         // Pre-existing session — simulates one that survived the
-        // previous pilot run. Spawned directly through the backend,
+        // previous lazybox run. Spawned directly through the backend,
         // not through spawn_handler, so it's known to the backend
         // but not to any ServerConfig.
         let preexisting = backend
@@ -588,7 +588,7 @@ async fn recover_sessions_reattaches_survivors() {
             .unwrap();
 
         // Fresh config pointing at the SAME backend instance.
-        let store: Arc<dyn pilot_store::Store> = Arc::new(MemoryStore::new());
+        let store: Arc<dyn lazybox_store::Store> = Arc::new(MemoryStore::new());
         let backend_arc: Arc<dyn SessionBackend> = Arc::new(backend.clone());
         let config = ServerConfig::with_store_and_backend(store, backend_arc);
         assert!(config.terminals.lock().await.is_empty());
@@ -596,7 +596,7 @@ async fn recover_sessions_reattaches_survivors() {
         // Listen on the bus before recovery so TerminalSpawned isn't lost.
         let mut bus = config.bus.subscribe();
 
-        pilot_server::spawn_handler::recover_sessions(&config).await;
+        lazybox_server::spawn_handler::recover_sessions(&config).await;
 
         // Map now has the survivor under a fresh wire id.
         let map = config.terminals.lock().await;
@@ -618,7 +618,7 @@ async fn recover_sessions_reattaches_survivors() {
 
 /// Regression / smoke check for the **ingest-into-agent** path
 /// (issue #50). When work is handed to an agent — either by the user
-/// pressing `w` or by the `@pilot`-mention auto-spawn — the agent is
+/// pressing `w` or by the `@lazybox`-mention auto-spawn — the agent is
 /// `Spawn`ed with an `initial_prompt`. The daemon must actually
 /// deliver that prompt to the agent's terminal once it's ready to
 /// receive input; if it doesn't, the agent starts but never learns
@@ -711,12 +711,12 @@ async fn inject_prompt_falls_back_to_spawn_when_terminal_dead() {
 
         // Use a `TerminalId` that has never been issued. Without the
         // fallback path this command silently no-ops on the daemon.
-        let dead_id = pilot_ipc::TerminalId(99_999);
+        let dead_id = lazybox_ipc::TerminalId(99_999);
         client
             .send(Command::InjectPrompt {
                 terminal_id: dead_id,
                 prompt: "rescued prompt".into(),
-                fallback_spawn: Some(pilot_ipc::SpawnFallback {
+                fallback_spawn: Some(lazybox_ipc::SpawnFallback {
                     session_key: "test:ws-fallback".into(),
                     session_id: None,
                     kind: TerminalKind::Shell,
@@ -750,7 +750,7 @@ async fn inject_prompt_without_fallback_is_silent_noop() {
     timeout(TEST_DEADLINE, async {
         let config = ServerConfig::in_memory();
         let mut client = subscribed(config).await;
-        let dead_id = pilot_ipc::TerminalId(99_999);
+        let dead_id = lazybox_ipc::TerminalId(99_999);
         client
             .send(Command::InjectPrompt {
                 terminal_id: dead_id,
@@ -902,7 +902,7 @@ async fn answering_a_prompt_clears_input_needed_and_does_not_bounce_back() {
                 matches!(
                     e,
                     Event::AgentState {
-                        state: pilot_ipc::AgentState::InputNeeded,
+                        state: lazybox_ipc::AgentState::InputNeeded,
                         ..
                     }
                 )
@@ -929,7 +929,7 @@ async fn answering_a_prompt_clears_input_needed_and_does_not_bounce_back() {
                 matches!(
                     e,
                     Event::AgentState {
-                        state: pilot_ipc::AgentState::Working,
+                        state: lazybox_ipc::AgentState::Working,
                         ..
                     }
                 )
@@ -959,7 +959,7 @@ async fn answering_a_prompt_clears_input_needed_and_does_not_bounce_back() {
         match next {
             Event::AgentState { state, .. } => assert_eq!(
                 state,
-                pilot_ipc::AgentState::Idle,
+                lazybox_ipc::AgentState::Idle,
                 "after answering, the prompt-free follow-up must settle to Idle, \
                  not bounce back to InputNeeded (the #101 stale-buffer regression)"
             ),

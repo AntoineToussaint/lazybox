@@ -1,8 +1,8 @@
 //! Pin down scroll_viewport behavior against libghostty so we can tell
-//! whether pilot's "scrolling doesn't move offset" bug is in libghostty,
-//! in pilot's call sites, or in the rendering path.
+//! whether lazybox's "scrolling doesn't move offset" bug is in libghostty,
+//! in lazybox's call sites, or in the rendering path.
 //!
-//! Asserts the contract the pilot UI assumes: feed >> rows worth of
+//! Asserts the contract the lazybox UI assumes: feed >> rows worth of
 //! content, scroll back via Delta(-N), and verify scrollbar().offset
 //! moves toward zero. Also exercises Top / Bottom anchors.
 
@@ -57,7 +57,7 @@ fn top_then_bottom_round_trips() {
 
 #[test]
 fn delta_with_no_scrollback_is_noop() {
-    // Pilot's terminal panes start nearly empty: a fresh claude UI or
+    // Lazybox's terminal panes start nearly empty: a fresh claude UI or
     // shell prompt fits inside the active area, so total == len and
     // there's nothing to scroll into. Confirm libghostty correctly
     // reports a stable offset in that case so we can teach the UI to

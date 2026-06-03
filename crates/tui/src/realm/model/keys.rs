@@ -9,17 +9,17 @@
 //!
 //! Free helpers used only by this surface (`rect_contains`,
 //! `key_event_to_chord`, `find_action_for_chord`,
-//! `spawn_detached_pilot`, `emit_clipboard_copy`) live in `mod.rs`
+//! `spawn_detached_lazybox`, `emit_clipboard_copy`) live in `mod.rs`
 //! today and are reachable from this submodule because child
 //! modules can see their parent's private items.
 
 use super::{
     Id, Model, PaneFocus, emit_clipboard_copy, find_action_for_chord, key_event_to_chord,
-    rect_contains, spawn_detached_pilot,
+    rect_contains, spawn_detached_lazybox,
 };
 use crate::realm::keymap::realm_key_to_crossterm;
 use crate::realm::layout::pane_areas;
-use pilot_ipc::Command as IpcCommand;
+use lazybox_ipc::Command as IpcCommand;
 use std::time::Duration;
 use tuirealm::application::PollStrategy;
 use tuirealm::event::{Event as RealmEvent, Key, KeyEvent as RealmKey, KeyModifiers};
@@ -99,7 +99,7 @@ impl<T: TerminalAdapter> Model<T> {
         if self.focus == PaneFocus::Sidebar
             && key.modifiers.is_empty()
             && let Key::Char(c) = key.code
-            && let Some(group) = pilot_tui_core::action::ActionGroup::from_leader(c)
+            && let Some(group) = lazybox_tui_core::action::ActionGroup::from_leader(c)
             && self.sidebar.selected_workspace_key().is_some()
         {
             self.q_latch.disarm();
@@ -137,7 +137,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // overridable via `ui.action_keys.quit`). `Double(inner)`
                 // is the two-press latch; `Single` fires on first press.
                 let chord = self.resolve_quit_chord();
-                use pilot_tui_core::action::KeyChord;
+                use lazybox_tui_core::action::KeyChord;
                 if matches!(chord, Some(KeyChord::Single { .. })) {
                     self.quit = true;
                     return;
@@ -184,7 +184,7 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 return;
             }
-            // Ctrl-Shift-D: detach the focused pane into a new pilot
+            // Ctrl-Shift-D: detach the focused pane into a new lazybox
             // process. Many terminals report Ctrl-Shift-letter as the
             // capital letter with CONTROL set; some include SHIFT too.
             // Match either form.
@@ -194,11 +194,11 @@ impl<T: TerminalAdapter> Model<T> {
             {
                 self.q_latch.disarm();
                 if let Some(spec) = self.focused_detach_spec() {
-                    spawn_detached_pilot(&spec);
+                    spawn_detached_lazybox(&spec);
                 }
                 return;
             }
-            // Toggle pilot's mouse capture so the host terminal
+            // Toggle lazybox's mouse capture so the host terminal
             // (Ghostty / iTerm2) regains native text selection. When
             // OFF the user can trackpad-select inside claude / shell
             // scrollback and Cmd-C normally; toggle back on for
@@ -309,7 +309,7 @@ impl<T: TerminalAdapter> Model<T> {
             && let Some(chord) = key_event_to_chord(ct)
             && let Some(def) = find_action_for_chord(&chord, self.focus, &self.action_key_overrides)
         {
-            use pilot_tui_core::action::Action;
+            use lazybox_tui_core::action::Action;
             // Reconstruct a runtime Action from the static ActionDef.
             // `SpawnAgent` is the only variant with runtime data
             // (the agent id) — we don't yet have per-agent catalog
@@ -318,31 +318,35 @@ impl<T: TerminalAdapter> Model<T> {
             // the catalog grows per-agent entries (driven by the
             // user's enabled agents list), this map widens.
             let action: Option<Action> = match def.kind {
-                pilot_tui_core::action::ActionKind::SpawnShell => Some(Action::SpawnShell),
-                pilot_tui_core::action::ActionKind::MarkAllRead => Some(Action::MarkAllRead),
-                pilot_tui_core::action::ActionKind::Work => Some(Action::Work),
-                pilot_tui_core::action::ActionKind::OpenEditor => Some(Action::OpenEditor),
-                pilot_tui_core::action::ActionKind::NewWorkspace => Some(Action::NewWorkspace),
-                pilot_tui_core::action::ActionKind::NewProject => Some(Action::NewProject),
-                pilot_tui_core::action::ActionKind::MergePr => Some(Action::MergePr),
-                pilot_tui_core::action::ActionKind::Archive => Some(Action::Archive),
-                pilot_tui_core::action::ActionKind::ToggleSnooze => Some(Action::ToggleSnooze),
-                pilot_tui_core::action::ActionKind::Refresh => Some(Action::Refresh),
-                pilot_tui_core::action::ActionKind::AdoptSessions => Some(Action::AdoptSessions),
-                pilot_tui_core::action::ActionKind::CollapseIntoPr => Some(Action::CollapseIntoPr),
-                pilot_tui_core::action::ActionKind::Reply => Some(Action::Reply),
-                pilot_tui_core::action::ActionKind::RequestReviewers => {
+                lazybox_tui_core::action::ActionKind::SpawnShell => Some(Action::SpawnShell),
+                lazybox_tui_core::action::ActionKind::MarkAllRead => Some(Action::MarkAllRead),
+                lazybox_tui_core::action::ActionKind::Work => Some(Action::Work),
+                lazybox_tui_core::action::ActionKind::OpenEditor => Some(Action::OpenEditor),
+                lazybox_tui_core::action::ActionKind::NewWorkspace => Some(Action::NewWorkspace),
+                lazybox_tui_core::action::ActionKind::NewProject => Some(Action::NewProject),
+                lazybox_tui_core::action::ActionKind::MergePr => Some(Action::MergePr),
+                lazybox_tui_core::action::ActionKind::Archive => Some(Action::Archive),
+                lazybox_tui_core::action::ActionKind::ToggleSnooze => Some(Action::ToggleSnooze),
+                lazybox_tui_core::action::ActionKind::Refresh => Some(Action::Refresh),
+                lazybox_tui_core::action::ActionKind::AdoptSessions => Some(Action::AdoptSessions),
+                lazybox_tui_core::action::ActionKind::CollapseIntoPr => {
+                    Some(Action::CollapseIntoPr)
+                }
+                lazybox_tui_core::action::ActionKind::Reply => Some(Action::Reply),
+                lazybox_tui_core::action::ActionKind::RequestReviewers => {
                     Some(Action::RequestReviewers)
                 }
-                pilot_tui_core::action::ActionKind::AddAssignees => Some(Action::AddAssignees),
-                pilot_tui_core::action::ActionKind::ManageLabels => Some(Action::ManageLabels),
-                pilot_tui_core::action::ActionKind::OpenInBrowser => Some(Action::OpenInBrowser),
-                pilot_tui_core::action::ActionKind::OpenHelp => Some(Action::OpenHelp),
-                pilot_tui_core::action::ActionKind::OpenTour => Some(Action::OpenTour),
-                pilot_tui_core::action::ActionKind::OpenSyncStatus => Some(Action::OpenSyncStatus),
-                pilot_tui_core::action::ActionKind::OpenSettings => Some(Action::OpenSettings),
-                pilot_tui_core::action::ActionKind::JumpToAsking => Some(Action::JumpToAsking),
-                pilot_tui_core::action::ActionKind::JumpToFailingCi => {
+                lazybox_tui_core::action::ActionKind::AddAssignees => Some(Action::AddAssignees),
+                lazybox_tui_core::action::ActionKind::ManageLabels => Some(Action::ManageLabels),
+                lazybox_tui_core::action::ActionKind::OpenInBrowser => Some(Action::OpenInBrowser),
+                lazybox_tui_core::action::ActionKind::OpenHelp => Some(Action::OpenHelp),
+                lazybox_tui_core::action::ActionKind::OpenTour => Some(Action::OpenTour),
+                lazybox_tui_core::action::ActionKind::OpenSyncStatus => {
+                    Some(Action::OpenSyncStatus)
+                }
+                lazybox_tui_core::action::ActionKind::OpenSettings => Some(Action::OpenSettings),
+                lazybox_tui_core::action::ActionKind::JumpToAsking => Some(Action::JumpToAsking),
+                lazybox_tui_core::action::ActionKind::JumpToFailingCi => {
                     Some(Action::JumpToFailingCi)
                 }
                 _ => None,
@@ -390,8 +394,8 @@ impl<T: TerminalAdapter> Model<T> {
         for cmd in &cmds {
             if let IpcCommand::Spawn { kind, .. } = cmd {
                 let label = match kind {
-                    pilot_ipc::TerminalKind::Shell => "shell".to_string(),
-                    pilot_ipc::TerminalKind::Agent(a) => a.to_string(),
+                    lazybox_ipc::TerminalKind::Shell => "shell".to_string(),
+                    lazybox_ipc::TerminalKind::Agent(a) => a.to_string(),
                     other => format!("{other:?}").to_lowercase(),
                 };
                 // Animated footer spinner (not a static notice): worktree
@@ -421,7 +425,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// The armed leader-chord group, if any. Drives the which-key
     /// popup in `view`; also a test/inspection hook for the #126
     /// grouped chords.
-    pub fn leader_pending(&self) -> Option<pilot_tui_core::action::ActionGroup> {
+    pub fn leader_pending(&self) -> Option<lazybox_tui_core::action::ActionGroup> {
         self.leader.pending().copied()
     }
 
@@ -494,7 +498,7 @@ impl<T: TerminalAdapter> Model<T> {
             IpcCommand::Spawn {
                 session_key,
                 session_id,
-                kind: pilot_ipc::TerminalKind::Agent(agent_id),
+                kind: lazybox_ipc::TerminalKind::Agent(agent_id),
                 cwd,
                 initial_prompt: Some(prompt),
             } => {
@@ -509,10 +513,10 @@ impl<T: TerminalAdapter> Model<T> {
                     // `running_terminals` is updated from a broadcast
                     // channel, so there's always a small window where
                     // `find_agent_terminal` returns a dead id.
-                    let fallback_spawn = Some(pilot_ipc::SpawnFallback {
+                    let fallback_spawn = Some(lazybox_ipc::SpawnFallback {
                         session_key: session_key.clone(),
                         session_id,
-                        kind: pilot_ipc::TerminalKind::Agent(agent_id.clone()),
+                        kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
                         cwd: cwd.clone(),
                     });
                     IpcCommand::InjectPrompt {
@@ -524,7 +528,7 @@ impl<T: TerminalAdapter> Model<T> {
                     IpcCommand::Spawn {
                         session_key,
                         session_id,
-                        kind: pilot_ipc::TerminalKind::Agent(agent_id),
+                        kind: lazybox_ipc::TerminalKind::Agent(agent_id),
                         cwd,
                         initial_prompt: Some(prompt),
                     }
@@ -561,8 +565,8 @@ impl<T: TerminalAdapter> Model<T> {
     /// Look up the Quit chord — catalog default OR
     /// `ui.action_keys.quit` override. Returns the parsed `KeyChord`
     /// (`Double` for `q q`, `Single` for a single-letter remap).
-    fn resolve_quit_chord(&self) -> Option<pilot_tui_core::action::KeyChord> {
-        use pilot_tui_core::action::{ActionDef, ActionKind, KeyChord};
+    fn resolve_quit_chord(&self) -> Option<lazybox_tui_core::action::KeyChord> {
+        use lazybox_tui_core::action::{ActionDef, ActionKind, KeyChord};
         let def = ActionDef::for_kind(ActionKind::Quit);
         def.effective_chord(&self.action_key_overrides)
             .or_else(|| KeyChord::parse(def.default_keys))
@@ -573,7 +577,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// chord's first press; for `Single` chords this is the chord
     /// itself.
     fn matches_quit_chord(&self, key: &RealmKey) -> bool {
-        use pilot_tui_core::action::KeyChord;
+        use lazybox_tui_core::action::KeyChord;
         let Some(chord) = self.resolve_quit_chord() else {
             return false;
         };
@@ -653,7 +657,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // Tab-strip click on the terminal pane top row →
                 // switch active tab. Checked BEFORE the
                 // "forward to inner program" path because the tab
-                // strip belongs to pilot, not to Claude/shell.
+                // strip belongs to lazybox, not to Claude/shell.
                 if matches!(button, crossterm::event::MouseButton::Left)
                     && let Some(idx) = self.terminals.tab_at(m.column, m.row)
                 {
@@ -676,7 +680,7 @@ impl<T: TerminalAdapter> Model<T> {
                         self.sync_panes();
                     }
                     if let Some(ws) = self.sidebar.selected_workspace() {
-                        let session_key: pilot_core::SessionKey = (&ws.key).into();
+                        let session_key: lazybox_core::SessionKey = (&ws.key).into();
                         self.mount_sidebar_context_menu(session_key);
                     }
                     return;
@@ -738,7 +742,7 @@ impl<T: TerminalAdapter> Model<T> {
                 }
 
                 // A left-click in the terminal pane ALWAYS starts a
-                // potential pilot selection — we commit to that
+                // potential lazybox selection — we commit to that
                 // even when the inner program is mouse-tracking.
                 let claim_for_selection = rect_contains(right_bottom_rect, m.column, m.row)
                     && self.focus == PaneFocus::Terminals
@@ -808,7 +812,7 @@ impl<T: TerminalAdapter> Model<T> {
                             self.redraw = true;
                         }
                     }
-                    // Pilot-side selection start: any left-click that
+                    // Lazybox-side selection start: any left-click that
                     // landed in the terminal pane. Recording start ==
                     // end means a click-without-drag is treated as a
                     // click in the Up handler.
@@ -966,10 +970,10 @@ impl<T: TerminalAdapter> Model<T> {
 /// payload, so this is a direct `ActionKind` → `Action` translation;
 /// returns `None` when the key isn't bound in the group.
 fn leader_action(
-    group: pilot_tui_core::action::ActionGroup,
+    group: lazybox_tui_core::action::ActionGroup,
     c: char,
-) -> Option<pilot_tui_core::action::Action> {
-    use pilot_tui_core::action::{Action, ActionKind};
+) -> Option<lazybox_tui_core::action::Action> {
+    use lazybox_tui_core::action::{Action, ActionKind};
     match group.action_for_key(c)? {
         ActionKind::MergePr => Some(Action::MergePr),
         ActionKind::RequestReviewers => Some(Action::RequestReviewers),

@@ -3,7 +3,7 @@ use crate::{Credential, CredentialError, CredentialProvider};
 /// Resolves a credential by running a shell command and reading stdout.
 ///
 /// ```rust,no_run
-/// use pilot_auth::CommandProvider;
+/// use lazybox_auth::CommandProvider;
 /// // Use `gh auth token` to get a GitHub token
 /// let provider = CommandProvider::new("gh", &["auth", "token"]);
 /// // Use `vault read` to get a secret
@@ -44,7 +44,7 @@ impl CredentialProvider for CommandProvider {
         // 5s timeout. `gh auth token` is usually <100ms but can hang
         // if the network's down or `gh` is misconfigured. Without
         // this, the daemon's polling task blocks indefinitely on
-        // first launch — pilot looks frozen.
+        // first launch — lazybox looks frozen.
         const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         // kill_on_drop so a timeout actually kills the child. Without
         // this, every hung `gh auth token` leaks a process that lives

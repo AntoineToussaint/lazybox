@@ -4,7 +4,7 @@
 //!
 //! 1. **Local guard rail.** A self-imposed cap on requests per minute,
 //!    independent of what GitHub allows. The point isn't to mirror
-//!    GitHub's policy — it's a circuit breaker. If pilot has a bug
+//!    GitHub's policy — it's a circuit breaker. If lazybox has a bug
 //!    and starts looping, we want it to stop on its own before
 //!    burning the user's daily quota.
 //!
@@ -76,7 +76,7 @@ impl std::fmt::Display for AcquireError {
         match self {
             Self::LocalBudgetExhausted { wait_secs } => write!(
                 f,
-                "pilot's local rate budget is empty (wait {wait_secs}s) — \
+                "lazybox's local rate budget is empty (wait {wait_secs}s) — \
                  we throttle ourselves to avoid runaway loops"
             ),
             Self::RemoteLow {
@@ -124,7 +124,7 @@ impl RateBudget {
         }
     }
 
-    pub fn default_for_pilot() -> Self {
+    pub fn default_for_lazybox() -> Self {
         Self::new(DEFAULT_CAPACITY, DEFAULT_REFILL_PER_MIN)
     }
 

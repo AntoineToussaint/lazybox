@@ -4,10 +4,10 @@
 //! Two files contribute, merged with the repo-local one winning on
 //! key conflict:
 //!
-//! - **Global** — `<pilot_home>/snippets.yaml` (defaults to
-//!   `~/.pilot/snippets.yaml`). Lives at the profile root so a
+//! - **Global** — `<lazybox_home>/snippets.yaml` (defaults to
+//!   `~/.lazybox/snippets.yaml`). Lives at the profile root so a
 //!   schema bump in `v2/` doesn't orphan the user's library.
-//! - **Repo-local** — `.pilot/snippets.yaml` at the repository root.
+//! - **Repo-local** — `.lazybox/snippets.yaml` at the repository root.
 //!   Checked into source control so a project can ship its own
 //!   review prompts, deploy checks, etc.
 //!
@@ -59,11 +59,11 @@ pub struct Snippet {
 pub enum SnippetOrigin {
     #[default]
     Unknown,
-    /// Shipped with pilot, merged beneath the user's files.
+    /// Shipped with lazybox, merged beneath the user's files.
     BuiltIn,
-    /// `<pilot_home>/snippets.yaml`.
+    /// `<lazybox_home>/snippets.yaml`.
     Global,
-    /// `<repo>/.pilot/snippets.yaml`.
+    /// `<repo>/.lazybox/snippets.yaml`.
     Repo,
 }
 
@@ -134,7 +134,7 @@ impl Snippets {
         Ok(Self { by_key })
     }
 
-    /// Snippets shipped with pilot. Merged *beneath* the user's
+    /// Snippets shipped with lazybox. Merged *beneath* the user's
     /// global + repo files (see [`Snippets::load_merged`]), so any
     /// user entry with the same key transparently overrides one of
     /// these — they're a starting library, not a locked-in set.
@@ -182,7 +182,7 @@ impl Snippets {
          # auto-submit to the focused agent. Trigger with `]]<key>` in a\n\
          # session terminal. See docs/snippets.md for the full reference.\n\
          #\n\
-         # pilot ships built-in `rev`, `pr`, and `ready` snippets; anything\n\
+         # lazybox ships built-in `rev`, `pr`, and `ready` snippets; anything\n\
          # you define here with the same key overrides the built-in one.\n\
          snippets:\n\
          \x20 rev:\n\
@@ -192,14 +192,14 @@ impl Snippets {
          \x20     obvious cleanups. Focus on the changes only.\n"
     }
 
-    /// Default global path: `<pilot_home>/snippets.yaml`.
+    /// Default global path: `<lazybox_home>/snippets.yaml`.
     pub fn default_global_path() -> PathBuf {
-        pilot_core::paths::home().join("snippets.yaml")
+        lazybox_core::paths::home().join("snippets.yaml")
     }
 
-    /// Default repo-local path: `<repo_root>/.pilot/snippets.yaml`.
+    /// Default repo-local path: `<repo_root>/.lazybox/snippets.yaml`.
     pub fn default_repo_path(repo_root: &Path) -> PathBuf {
-        repo_root.join(".pilot").join("snippets.yaml")
+        repo_root.join(".lazybox").join("snippets.yaml")
     }
 
     /// Convenience: load global file from the standard path. Missing
@@ -214,7 +214,7 @@ impl Snippets {
         }
     }
 
-    /// Convenience: load repo-local file from `<repo_root>/.pilot/
+    /// Convenience: load repo-local file from `<repo_root>/.lazybox/
     /// snippets.yaml`. Missing → empty.
     pub fn load_repo(repo_root: &Path) -> Self {
         match Self::load_from(&Self::default_repo_path(repo_root), SnippetOrigin::Repo) {
@@ -279,7 +279,7 @@ mod tests {
     /// for tests — `std::env::temp_dir` + a unique name is enough.
     fn write_tmp(name: &str, contents: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "pilot-snippets-test-{}-{}",
+            "lazybox-snippets-test-{}-{}",
             std::process::id(),
             name,
         ));

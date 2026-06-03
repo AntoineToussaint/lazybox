@@ -1,11 +1,11 @@
 # Mental model
 
-This page explains how to think about pilot. Once these few ideas click, the
+This page explains how to think about lazybox. Once these few ideas click, the
 keybindings and configuration follow naturally.
 
 ## A workspace is a worktree plus an agent session
 
-The central unit in pilot is the **workspace**. A workspace is two things bound
+The central unit in lazybox is the **workspace**. A workspace is two things bound
 together:
 
 1. **A git worktree** — an isolated checkout of the repository, separate from
@@ -19,7 +19,7 @@ issue, a piece of pre-PR work — maps to exactly one workspace.
 ## The reactive inbox model
 
 Most tools make you *pull*: you refresh GitHub, scan for what changed, and
-decide what to act on. pilot inverts this. Providers (GitHub today, Linear, an
+decide what to act on. lazybox inverts this. Providers (GitHub today, Linear, an
 optional Slack mirror) poll upstream and **push** events onto an internal bus.
 Subscribers — the TUI, the JSON API gateway — react. New comments, CI failures,
 and review requests arrive on their own and surface in the sidebar.
@@ -29,8 +29,8 @@ you. The sidebar is your inbox; rows are workspaces; activity flows in.
 
 ## Read and unread
 
-Because it behaves like an inbox, pilot tracks **read/unread** state per
-workspace, persisted in `~/.pilot/v2/state.db` across launches. New activity
+Because it behaves like an inbox, lazybox tracks **read/unread** state per
+workspace, persisted in `~/.lazybox/v2/state.db` across launches. New activity
 marks a row unread; opening it (or pressing `m`) marks it read. Auto-mark-read
 can be undone with `z` in the activity pane. This is what lets you skim the
 sidebar and immediately see *what needs attention* rather than re-reading
@@ -50,7 +50,7 @@ Isolating each task in its own git worktree buys two things:
 
 Binding a single agent session to a single worktree keeps the agent's context
 and blast radius scoped to one task. The agent works directly with `git` and
-`gh` in that worktree — pilot does not wrap those actions behind an approval
+`gh` in that worktree — lazybox does not wrap those actions behind an approval
 layer, so the agent has exactly the tools it would have in any checkout. When
 you let an agent run autonomously (see
 [Run an agent per workspace](../how-to/run-an-agent-per-workspace.md)), the

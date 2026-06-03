@@ -18,7 +18,7 @@
 //! mechanical.
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use pilot_tui_core::confirm_latch::ConfirmLatch;
+use lazybox_tui_core::confirm_latch::ConfirmLatch;
 
 /// A keystroke that arms / fires a latch. `Shift-X` is
 /// `KeyTrigger { code: Char('X'), modifiers: SHIFT }`. Match

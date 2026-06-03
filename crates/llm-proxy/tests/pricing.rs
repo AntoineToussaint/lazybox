@@ -2,7 +2,7 @@
 //! None (never lie about cost), known model families resolve to
 //! reasonable rates, and changes to the rate table get reviewed.
 
-use pilot_llm_proxy::{ApiProvider, pricing};
+use lazybox_llm_proxy::{ApiProvider, pricing};
 
 #[test]
 fn anthropic_known_families_have_rates() {

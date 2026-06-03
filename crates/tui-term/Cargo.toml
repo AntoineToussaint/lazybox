@@ -1,5 +1,5 @@
 [package]
-name = "pilot-tui-term"
+name = "lazybox-tui-term"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

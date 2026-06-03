@@ -1,7 +1,7 @@
 # Slack integration — testing guide
 
 End-to-end smoke test for the Slack bridge. Assumes `docs/slack-setup.md`
-is done (app created, both tokens generated, bot invited to `#pilot`).
+is done (app created, both tokens generated, bot invited to `#lazybox`).
 
 ## 0. Prereqs
 
@@ -10,13 +10,13 @@ is done (app created, both tokens generated, bot invited to `#pilot`).
 export SLACK_BOT_TOKEN=xoxb-...
 export SLACK_APP_TOKEN=xapp-...
 
-# … or put them in ~/.pilot/config.yaml (env wins).
+# … or put them in ~/.lazybox/config.yaml (env wins).
 ```
 
 Tail the daemon log in another pane while running these steps:
 
 ```sh
-tail -F /tmp/pilot.log | grep -i slack
+tail -F /tmp/lazybox.log | grep -i slack
 ```
 
 ## 1. Bot connects on launch
@@ -27,13 +27,13 @@ make run
 
 **Expect** (within ~2 s of launch):
 
-- Log line: `slack: connected team=<your-workspace> user=pilot`.
+- Log line: `slack: connected team=<your-workspace> user=lazybox`.
 - Log line: `slack: prefetched channel listing channels=<N>`.
-- `#pilot` (the anchor channel) receives a `*pilot online* · connected as
-  @pilot. Mirroring N project(s).` message.
+- `#lazybox` (the anchor channel) receives a `*lazybox online* · connected as
+  @lazybox. Mirroring N project(s).` message.
 
-**If the anchor message doesn't appear**: confirm `/invite @pilot` ran in
-`#pilot`. Pilot logs `slack: anchor channel not visible` if the bot isn't
+**If the anchor message doesn't appear**: confirm `/invite @lazybox` ran in
+`#lazybox`. Lazybox logs `slack: anchor channel not visible` if the bot isn't
 in the channel.
 
 ## 2. Per-workspace channels auto-create
@@ -43,7 +43,7 @@ poll tick).
 
 **Expect**:
 
-- For each workspace pilot discovers, a new Slack channel
+- For each workspace lazybox discovers, a new Slack channel
   `#<owner>-<repo>-<n>` (e.g. `#acme-widget-186`).
 - Log line per channel: `slack: created channel channel=<name>`.
 - The first message posted to that channel is the workspace's primary
@@ -54,7 +54,7 @@ poll tick).
   <https://github.com/acme/widget/pull/186>
   ```
 
-**Idempotency check**: re-run `make run`. Pilot should *not* re-post the
+**Idempotency check**: re-run `make run`. Lazybox should *not* re-post the
 title (the `WorkspaceUpserted → already-tracked` guard suppresses
 duplicates).
 
@@ -94,7 +94,7 @@ ago). The label changes based on `last_output_at[terminal_id]`.
 ### What's the heuristic doing under the hood?
 
 `DONE_QUIET_THRESHOLD = 3s`. Every `TerminalOutput` event updates
-`last_output_at[terminal_id]`. When `AgentState::Asking` fires, pilot reads
+`last_output_at[terminal_id]`. When `AgentState::Asking` fires, lazybox reads
 `now - last_output_at`:
 
 - `< 3s` → `paused`. Claude is mid-stream, the prompt is part of an
@@ -107,7 +107,7 @@ ago). The label changes based on `last_output_at[terminal_id]`.
 From Slack (web or mobile), in *any* of the per-workspace channels:
 
 ```
-@pilot yes
+@lazybox yes
 ```
 
 **Expect** (in the TUI):
@@ -119,7 +119,7 @@ From Slack (web or mobile), in *any* of the per-workspace channels:
 **Multi-line check** (bracket-paste path):
 
 ```
-@pilot here is a longer reply:
+@lazybox here is a longer reply:
 - first point
 - second point
 ```
@@ -130,29 +130,29 @@ From Slack (web or mobile), in *any* of the per-workspace channels:
   submit). On the TUI you'll see the lines appear together rather than
   claude dispatching three separate prompts.
 - Confirmed by reading the test `encode_for_pty_multi_line_wraps_in_bracket_paste`
-  in `crates/server/src/slack.rs` — pilot wraps multi-line bodies with
+  in `crates/server/src/slack.rs` — lazybox wraps multi-line bodies with
   `ESC[200~ … ESC[201~`.
 
 ## 5. Inbound noise is ignored
 
-Drop a message in `#pilot` (the anchor channel) *without* a mention:
+Drop a message in `#lazybox` (the anchor channel) *without* a mention:
 
 ```
 just chatting
 ```
 
-**Expect**: nothing happens. Pilot only routes messages whose channel is
+**Expect**: nothing happens. Lazybox only routes messages whose channel is
 tracked in the `channel_to_workspace` map. The anchor channel is
 intentionally not in that map.
 
 ## 6. Bot user can't trigger itself
 
 Worth a manual check on fresh setups — if you accidentally configured the
-bot scopes to react to its own posts, you'll see infinite loops. Pilot
+bot scopes to react to its own posts, you'll see infinite loops. Lazybox
 filters by `bot_user_id` in `SocketModeClient`, so messages it posts
 should never re-enter the inbound stream. Confirm by watching the log
 during step 2 — no `slack: routed inbound message` lines should appear
-from pilot's own bootstrap posts.
+from lazybox's own bootstrap posts.
 
 ## 7. Reconnect resilience
 
@@ -170,33 +170,33 @@ sudo pfctl -d
 
 - `slack: socket disconnected` log line, then within ~5s
   `slack: socket reconnected` (or equivalent).
-- No need to restart pilot.
+- No need to restart lazybox.
 
 ## 8. Tear-down
 
-Channels pilot auto-creates persist in Slack. To clean up after testing:
+Channels lazybox auto-creates persist in Slack. To clean up after testing:
 
 ```
 /archive
 ```
 
-in each test channel, then in `#pilot`:
+in each test channel, then in `#lazybox`:
 
 ```
-@pilot stop
+@lazybox stop
 ```
 
 (if you want to interrupt active sessions) and `Ctrl-C` the daemon.
 
 ## Known limitations
 
-- **One pilot per Slack workspace.** Two pilot instances will both create
-  channels + both respond to mentions. Use one pilot per Slack workspace.
+- **One lazybox per Slack workspace.** Two lazybox instances will both create
+  channels + both respond to mentions. Use one lazybox per Slack workspace.
 - **No threading yet.** Each event posts as a top-level message. The
   `channel_strategy: thread_per_workspace` flag in `docs/slack-setup.md` is
   reserved for a later commit.
 - **No rate-limit backoff.** Slack tier-3 endpoints (post + create) cap at
-  ~50 req/min. Pilot fires one per Asking transition or first-seen
+  ~50 req/min. Lazybox fires one per Asking transition or first-seen
   workspace, so you'd need a lot of new workspaces in a minute to hit it.
   If you do, you'll see `SlackError::Api("rate_limited")` lines — back
   off manually for now.

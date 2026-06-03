@@ -2,7 +2,7 @@
 
 Each workspace can host one or more embedded terminals running a shell or a
 coding agent (Claude Code, Codex, Cursor, or a generic CLI) inside its git
-worktree. This is pilot's highest-churn area — agent state detection and the
+worktree. This is lazybox's highest-churn area — agent state detection and the
 structured runtime are where focused testing pays off most.
 
 See [`DESIGN.md` § Agent abstraction / LLM proxy](../../DESIGN.md),
@@ -129,17 +129,17 @@ root-cause-over-masking principles).
 **Status:** beta
 **Crate(s):** `server` (`spawn_handler.rs`), `agents`, `config`
 **Config / flags:** `agent.autonomous_skip_permissions` (default `true`), `agent.skip_permissions` (default `false`), `auto_fix.*`, `mention.*`
-**Key bindings:** — (triggered by `@pilot` mentions / auto-fix)
+**Key bindings:** — (triggered by `@lazybox` mentions / auto-fix)
 
 ### What it does
-When pilot picks up `@pilot`-triggered work, it spawns the agent **unattended**.
+When lazybox picks up `@lazybox`-triggered work, it spawns the agent **unattended**.
 Since no human is there to approve tool-use prompts, those sessions launch Claude
 with `--dangerously-skip-permissions` and the tab strip flags them with a
 `⚠ no-perms` badge. Sessions you open yourself keep approval prompts on by
 default.
 
 ### How to use it
-Mention `@pilot` (e.g. via the Slack mirror or a configured trigger) to kick off
+Mention `@lazybox` (e.g. via the Slack mirror or a configured trigger) to kick off
 autonomous work. To force prompts even on autonomous runs, or to opt your own
 interactive sessions into bypass:
 
@@ -272,7 +272,7 @@ recording structured telemetry — model, token counts, tool calls, latency, cos
 
 ### How to use it
 Transparent to the agent: the daemon injects the base-URL env vars when spawning
-and tags requests with an `X-Pilot-Session` header. No user action.
+and tags requests with an `X-Lazybox-Session` header. No user action.
 
 ### How it works (brief)
 `ProxyServer` (`crates/llm-proxy/src/server.rs`) binds an ephemeral 127.0.0.1
@@ -299,7 +299,7 @@ key.
 
 **Status:** stable
 **Crate(s):** `config` (`src/snippets.rs`), `tui` (picker)
-**Config / flags:** `~/.pilot/snippets.yaml` (global) + `<repo>/.pilot/snippets.yaml` (repo-local)
+**Config / flags:** `~/.lazybox/snippets.yaml` (global) + `<repo>/.lazybox/snippets.yaml` (repo-local)
 **Key bindings:** `]<key>` in a terminal (configurable escape char)
 
 ### What it does
@@ -346,7 +346,7 @@ followed by a printable char mounts the snippet picker
 
 ### What it does
 Defines how keys and the mouse behave while a terminal is focused: nearly
-everything forwards to the PTY, with a small set of pilot-level escapes for
+everything forwards to the PTY, with a small set of lazybox-level escapes for
 leaving, splitting, scrolling, and copying.
 
 ### How to use it

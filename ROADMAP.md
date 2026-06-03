@@ -1,4 +1,4 @@
-# Pilot Roadmap
+# Lazybox Roadmap
 
 This roadmap tracks execution status against the architecture in
 `DESIGN.md`. The server/client split underpins:
@@ -41,11 +41,11 @@ claude -p --input-format stream-json --output-format stream-json
 Important semantics:
 
 - A Claude `result` line finishes one turn, not necessarily the process.
-  Pilot emits `AgentTurnFinished` for that.
+  Lazybox emits `AgentTurnFinished` for that.
 - `AgentRunFinished` means the child process exited or the run was
   interrupted.
 - Raw JSON is always forwarded so clients can adopt new Claude event
-  fields before Pilot has normalized them.
+  fields before Lazybox has normalized them.
 
 Next:
 
@@ -78,9 +78,9 @@ Streaming endpoints use newline-delimited JSON:
 Defaults:
 
 - Bind address: `127.0.0.1:8787`
-- Override with: `PILOT_API_ADDR`
-- Optional bearer token: `PILOT_API_TOKEN`
-- Launch with: `pilot server api [addr:port]`
+- Override with: `LAZYBOX_API_ADDR`
+- Optional bearer token: `LAZYBOX_API_TOKEN`
+- Launch with: `lazybox server api [addr:port]`
 
 Next:
 
@@ -154,12 +154,12 @@ client represents and must use that principal's provider credentials.
 
 Required split:
 
-- **Pilot client auth**: proves which Pilot user is connected to the
+- **Lazybox client auth**: proves which Lazybox user is connected to the
   daemon.
 - **Provider auth**: GitHub, Linear, Jira, etc. credentials owned by
-  that Pilot user.
+  that Lazybox user.
 - **Workspace ownership**: every workspace/session/run belongs to a
-  Pilot user or shared project and all reads/writes are scoped through
+  Lazybox user or shared project and all reads/writes are scoped through
   that ownership.
 
 Target model:

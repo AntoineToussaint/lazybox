@@ -2,8 +2,8 @@
 #
 # rust-cleanup.sh — reclaim disk space in a Rust workspace worktree.
 #
-# Wire this into pilot as a per-repo script so it lands in every worktree at
-# <worktree>/_pilot/scripts/cleanup. In ~/.pilot/config.yaml:
+# Wire this into lazybox as a per-repo script so it lands in every worktree at
+# <worktree>/_lazybox/scripts/cleanup. In ~/.lazybox/config.yaml:
 #
 #   repos:
 #     owner/name:
@@ -11,7 +11,7 @@
 #         - name: cleanup
 #           source: /absolute/path/to/examples/rust-cleanup.sh
 #
-# Run it from inside a worktree:  ./_pilot/scripts/cleanup
+# Run it from inside a worktree:  ./_lazybox/scripts/cleanup
 #
 set -euo pipefail
 

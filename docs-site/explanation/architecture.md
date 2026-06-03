@@ -1,14 +1,14 @@
 # Architecture
 
-This page explains how pilot is put together and why. For the canonical,
+This page explains how lazybox is put together and why. For the canonical,
 always-current detail, read
-[CLAUDE.md](https://github.com/AntoineToussaint/pilot/blob/main/CLAUDE.md) and
-[DESIGN.md](https://github.com/AntoineToussaint/pilot/blob/main/DESIGN.md) in
+[CLAUDE.md](https://github.com/AntoineToussaint/lazybox/blob/main/CLAUDE.md) and
+[DESIGN.md](https://github.com/AntoineToussaint/lazybox/blob/main/DESIGN.md) in
 the repository.
 
 ## Client / daemon split
 
-pilot is organized as a **client/daemon split**. The daemon (server) owns all
+lazybox is organized as a **client/daemon split**. The daemon (server) owns all
 state and IO — the PTYs behind embedded terminals, provider polling, and the
 store. The TUI is a thin renderer on top.
 
@@ -21,7 +21,7 @@ socket, SSH local forwarding (`ssh -L`) carries it across machines — that's ho
 
 ## The crates
 
-pilot is built from 16 pilot crates (plus two vendored libghostty crates),
+lazybox is built from 16 lazybox crates (plus two vendored libghostty crates),
 split across shared libraries, providers, the daemon, and the client binary. The
 four **core** libraries — core, auth, events, and store — are deliberately
 isolated: they never depend on each other. That keeps the foundation acyclic and
@@ -63,6 +63,6 @@ recent screen contents replay instantly instead of starting blank.
 ## Where to go next
 
 - The [mental model](mental-model.md) for the concepts these mechanisms serve.
-- [CLAUDE.md](https://github.com/AntoineToussaint/pilot/blob/main/CLAUDE.md) and
-  [DESIGN.md](https://github.com/AntoineToussaint/pilot/blob/main/DESIGN.md) for
+- [CLAUDE.md](https://github.com/AntoineToussaint/lazybox/blob/main/CLAUDE.md) and
+  [DESIGN.md](https://github.com/AntoineToussaint/lazybox/blob/main/DESIGN.md) for
   the deep, current architecture notes.

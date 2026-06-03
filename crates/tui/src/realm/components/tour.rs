@@ -1,11 +1,11 @@
 //! `Tour` — the in-app feature walkthrough (issue #146).
 //!
-//! A skippable, stepped overlay card that introduces pilot's
+//! A skippable, stepped overlay card that introduces lazybox's
 //! highlights: the inbox + attention signals, spawning work, the
 //! snippet system (`]<key>`), navigation, and where config lives.
 //!
-//! Launched automatically the first time pilot boots into the panes
-//! (tracked by `~/.pilot/config.yaml::ui.tour_seen`) and re-invocable
+//! Launched automatically the first time lazybox boots into the panes
+//! (tracked by `~/.lazybox/config.yaml::ui.tour_seen`) and re-invocable
 //! on demand via the tour shortcut. It is a plain modal: it owns
 //! input while mounted but every key either advances, retreats, or
 //! exits, so it never traps focus (mind #90). Any exit — finishing
@@ -34,7 +34,7 @@ struct TourStep {
 
 const STEPS: &[TourStep] = &[
     TourStep {
-        title: "Welcome to pilot",
+        title: "Welcome to lazybox",
         body: &[
             "A reactive PR inbox in your terminal. Instead of polling",
             "GitHub, events flow to you — new comments, CI failures and",
@@ -62,7 +62,7 @@ const STEPS: &[TourStep] = &[
     TourStep {
         title: "2 · Spawn work on an item",
         body: &[
-            "Press w on a row to start working on it. pilot spins up a",
+            "Press w on a row to start working on it. lazybox spins up a",
             "git worktree and launches the default agent (Claude Code)",
             "with a contextual prompt — fix the failing CI, address the",
             "review, implement the issue.",
@@ -82,8 +82,8 @@ const STEPS: &[TourStep] = &[
             "Starter snippets ship out of the box — rev (review the",
             "diff) and pr (open a PR with summary + test plan).",
             "",
-            "Add your own in ~/.pilot/snippets.yaml (global) or a repo's",
-            ".pilot/snippets.yaml (checked in, shared with the team).",
+            "Add your own in ~/.lazybox/snippets.yaml (global) or a repo's",
+            ".lazybox/snippets.yaml (checked in, shared with the team).",
         ],
     },
     TourStep {
@@ -102,9 +102,9 @@ const STEPS: &[TourStep] = &[
         body: &[
             "Everything is plain YAML you can hand-edit:",
             "",
-            "  ~/.pilot/config.yaml    scopes, agents, UI, keybindings",
-            "  ~/.pilot/snippets.yaml  your global snippet library",
-            "  <repo>/.pilot/snippets.yaml   repo-local snippets",
+            "  ~/.lazybox/config.yaml    scopes, agents, UI, keybindings",
+            "  ~/.lazybox/snippets.yaml  your global snippet library",
+            "  <repo>/.lazybox/snippets.yaml   repo-local snippets",
             "",
             "Press , for the in-app Settings palette.",
             "",

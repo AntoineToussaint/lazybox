@@ -1,12 +1,12 @@
 //! Auto-inject fix work on CI failure or merge conflict.
 //!
-//! When a PR pilot tracks fails CI or develops a merge conflict, the
+//! When a PR lazybox tracks fails CI or develops a merge conflict, the
 //! next step — spawn an agent, point it at the failure, push a fix —
 //! is mechanical. This module holds the *pure* decision layer: given a
-//! [`Task`] and the user's [`AutoFixSettings`], should pilot kick off
+//! [`Task`] and the user's [`AutoFixSettings`], should lazybox kick off
 //! an auto-fix, and of which kind? The stateful pieces (attempt
 //! counting, cooldown, posting the PR comment, spawning the agent)
-//! live in `pilot-server`'s polling layer, which calls
+//! live in `lazybox-server`'s polling layer, which calls
 //! [`evaluate_auto_fix`] and then layers the guards that need the
 //! store on top.
 //!
@@ -14,7 +14,7 @@
 //!
 //! The "should we touch this PR at all" predicate is the part most
 //! worth unit-testing exhaustively — it's the difference between
-//! pilot quietly fixing your own broken build and pilot rewriting a
+//! lazybox quietly fixing your own broken build and lazybox rewriting a
 //! teammate's PR uninvited. Keeping it pure (no store, no network)
 //! means every guard gets a fast deterministic test, and the server
 //! layer only has to test the stateful parts (cooldown / max-attempts)
@@ -57,9 +57,9 @@ impl AutoFixKind {
 }
 
 /// Runtime settings for the auto-fix feature, resolved from
-/// `~/.pilot/config.yaml` (`auto_fix:` block). Lives in `pilot-core`
-/// (not `pilot-config`) so the pure guard and the server layer share
-/// one type without `pilot-config` leaking into either; `pilot-config`
+/// `~/.lazybox/config.yaml` (`auto_fix:` block). Lives in `lazybox-core`
+/// (not `lazybox-config`) so the pure guard and the server layer share
+/// one type without `lazybox-config` leaking into either; `lazybox-config`
 /// depends on core and converts its YAML form into this.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutoFixSettings {
@@ -87,7 +87,7 @@ impl Default for AutoFixSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            opt_out_labels: vec!["no-auto-fix".into(), "do-not-pilot".into()],
+            opt_out_labels: vec!["no-auto-fix".into(), "do-not-lazybox".into()],
             max_attempts: 3,
             cooldown: Duration::from_secs(60 * 60),
             window: Duration::from_secs(24 * 60 * 60),
@@ -116,7 +116,7 @@ impl Default for AutoFixSettings {
 /// 5. **Opt-out label** — none of `opt_out_labels` present.
 /// 6. **Human in the loop** — no requested reviewers and no
 ///    changes-requested review. If a person is actively reviewing,
-///    hold off so pilot isn't force-pushing under them.
+///    hold off so lazybox isn't force-pushing under them.
 /// 7. **Merge queue** — not currently in GitHub's merge queue; let the
 ///    queue resolve.
 ///
@@ -300,7 +300,7 @@ mod tests {
         let mut t = pr();
         t.labels = vec![crate::Label::new("No-Auto-Fix")];
         assert_eq!(evaluate_auto_fix(&t, &enabled()), None);
-        t.labels = vec![crate::Label::new("do-not-pilot")];
+        t.labels = vec![crate::Label::new("do-not-lazybox")];
         assert_eq!(evaluate_auto_fix(&t, &enabled()), None);
     }
 

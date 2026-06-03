@@ -2,7 +2,7 @@
 source: crates/tui/tests/snapshots.rs
 expression: rendered
 ---
- PILOT  1  [7d]
+ LAZYBOX  1  [7d]
  f [all]  o [split]
 
  ────────────────────────────────────

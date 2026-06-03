@@ -1,6 +1,6 @@
 # How-to guides
 
-Task-oriented recipes. Each guide assumes you already have pilot running (see
+Task-oriented recipes. Each guide assumes you already have lazybox running (see
 the [Quickstart](../tutorials/quickstart.md)) and walks one real goal to
 completion. Pick the one that matches what you need to do.
 

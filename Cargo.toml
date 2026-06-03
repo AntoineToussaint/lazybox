@@ -19,17 +19,17 @@ members = [
     "crates/tui-core",
     "crates/tui",
     # Vendored from https://github.com/Uzaaft/libghostty-rs (commit
-    # f27655a). Includes pilot's local Zig-version + xcframework
+    # f27655a). Includes lazybox's local Zig-version + xcframework
     # patches that haven't shipped upstream yet. Vendored so a fresh
-    # clone of pilot builds standalone — no sibling-clone dance.
+    # clone of lazybox builds standalone — no sibling-clone dance.
     "crates/libghostty-vt",
     "crates/libghostty-vt-sys",
 ]
 
-# Pilot's own crates opt into this lint config via `[lints]
+# Lazybox's own crates opt into this lint config via `[lints]
 # workspace = true` in their Cargo.toml. The two vendored libghostty
 # crates do not, so `cargo clippy --workspace` only fails on issues
-# in pilot code — upstream noise stays upstream.
+# in lazybox code — upstream noise stays upstream.
 [workspace.lints.rust]
 warnings = "deny"
 
@@ -59,7 +59,7 @@ ci = ["github"]
 installers = ["shell", "homebrew"]
 # Tap repo to push the Homebrew formula to. Must exist + give the
 # release workflow write access via a deploy key or PAT.
-tap = "AntoineToussaint/homebrew-pilot"
+tap = "AntoineToussaint/homebrew-lazybox"
 # Build matrix. Add `x86_64-pc-windows-msvc` once the Windows port lands.
 targets = [
     "aarch64-apple-darwin",
@@ -79,9 +79,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/AntoineToussaint/pilot"
+repository = "https://github.com/AntoineToussaint/lazybox"
 readme = "README.md"
-# Pilot ships as a single binary built by cargo-dist (see
+# Lazybox ships as a single binary built by cargo-dist (see
 # `[workspace.metadata.dist]`); the individual workspace crates are
 # internal and not published to crates.io. Marking them
 # `publish = false` keeps an accidental `cargo publish` from
@@ -91,21 +91,21 @@ publish = false
 
 [workspace.dependencies]
 # ── Shared library crates ──────────────────────────────────────────────
-pilot-core        = { path = "crates/core" }
-pilot-auth        = { path = "crates/auth" }
-pilot-events      = { path = "crates/events" }
-pilot-store       = { path = "crates/store" }
-pilot-config      = { path = "crates/config" }
-pilot-git-ops     = { path = "crates/git-ops" }
-pilot-gh          = { path = "crates/gh-provider" }
-pilot-slack       = { path = "crates/slack-provider" }
-pilot-tui-term    = { path = "crates/tui-term" }
-pilot-tui-core    = { path = "crates/tui-core" }
+lazybox-core        = { path = "crates/core" }
+lazybox-auth        = { path = "crates/auth" }
+lazybox-events      = { path = "crates/events" }
+lazybox-store       = { path = "crates/store" }
+lazybox-config      = { path = "crates/config" }
+lazybox-git-ops     = { path = "crates/git-ops" }
+lazybox-gh          = { path = "crates/gh-provider" }
+lazybox-slack       = { path = "crates/slack-provider" }
+lazybox-tui-term    = { path = "crates/tui-term" }
+lazybox-tui-core    = { path = "crates/tui-core" }
 
 # ── Daemon-side crates ─────────────────────────────────────────────────
-pilot-ipc       = { path = "crates/ipc" }
-pilot-agents    = { path = "crates/agents" }
-pilot-llm-proxy = { path = "crates/llm-proxy" }
+lazybox-ipc       = { path = "crates/ipc" }
+lazybox-agents    = { path = "crates/agents" }
+lazybox-llm-proxy = { path = "crates/llm-proxy" }
 
 # ── Third-party ────────────────────────────────────────────────────────
 tokio              = { version = "1", features = ["full"] }

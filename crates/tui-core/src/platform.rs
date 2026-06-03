@@ -1,8 +1,8 @@
-//! Cross-platform shims for the few OS-specific bits pilot needs.
+//! Cross-platform shims for the few OS-specific bits lazybox needs.
 //!
-//! Pilot is Unix-first today (macOS + Linux) but the long-term plan
+//! Lazybox is Unix-first today (macOS + Linux) but the long-term plan
 //! is a Windows port. Rather than scatter `cfg(unix)` blocks across
-//! `main.rs`, `realm::model`, and `pilot-server::lifecycle`, the
+//! `main.rs`, `realm::model`, and `lazybox-server::lifecycle`, the
 //! platform-touching primitives live here. Each function has a unix
 //! impl that does the real thing and a windows stub that returns an
 //! error or `pending()`. When the Windows port lands, fill in the
@@ -26,7 +26,7 @@
 /// Zig `log.warn`, libgit2 stderr, agent CLIs that write to fd 2)
 /// paints directly onto the user's terminal otherwise, corrupting
 /// the alternate-screen frame ratatui just drew. Routing fd 2 into
-/// `/tmp/pilot.log` keeps the screen clean.
+/// `/tmp/lazybox.log` keeps the screen clean.
 pub fn redirect_stderr_to_file(file: &std::fs::File) {
     #[cfg(unix)]
     {
@@ -48,7 +48,7 @@ pub fn redirect_stderr_to_file(file: &std::fs::File) {
 
 /// Detach a child `Command` from the parent's session group so the
 /// child survives the parent process exiting. Used by the
-/// `Ctrl-Shift-D` detach flow that re-spawns pilot pinned to a
+/// `Ctrl-Shift-D` detach flow that re-spawns lazybox pinned to a
 /// specific workspace.
 ///
 /// On unix: `setsid()` via `pre_exec`. On Windows: `CREATE_NEW_PROCESS_GROUP`
@@ -79,10 +79,10 @@ pub fn detach_child_process(cmd: &mut std::process::Command) {
 /// generate noise on every notification).
 ///
 /// Used to surface agent state changes that need the user's
-/// attention even when pilot isn't the focused app — e.g. Claude
+/// attention even when lazybox isn't the focused app — e.g. Claude
 /// going to `Asking` while the user is reading email.
 ///
-/// Suppressed while pilot's terminal is reported focused (see
+/// Suppressed while lazybox's terminal is reported focused (see
 /// [`crate::notify::terminal_is_focused`]) — a banner for what the
 /// user is already looking at is pure noise.
 ///
@@ -90,7 +90,7 @@ pub fn detach_child_process(cmd: &mut std::process::Command) {
 /// the banner is emitted as an OSC escape sequence written to the
 /// controlling terminal ([`crate::notify`]). This is preferred over
 /// the subprocess paths below because it reaches the *local* machine
-/// even when pilot runs over SSH, and needs no helper binary.
+/// even when lazybox runs over SSH, and needs no helper binary.
 ///
 /// The subprocess paths below are the fallback for terminals without
 /// OSC notification support (Terminal.app, plain SSH, …):
@@ -104,7 +104,7 @@ pub fn detach_child_process(cmd: &mut std::process::Command) {
 /// Script Editor, so clicking it opens an empty AppleScript window.
 /// A banner that appears (and is read at a glance) beats no banner at
 /// all, so we accept the worse click target rather than stay silent
-/// on a stock Mac. (When pilot ships as a `.app` with its own bundle
+/// on a stock Mac. (When lazybox ships as a `.app` with its own bundle
 /// id this whole fallback goes away.)
 ///
 /// **Linux**: `notify-send` (libnotify), present on every desktop we
@@ -113,14 +113,14 @@ pub fn detach_child_process(cmd: &mut std::process::Command) {
 ///
 /// **Windows**: stub (TODO: PowerShell `New-BurntToastNotification`).
 pub fn notify_user(title: &str, body: &str) {
-    // Don't self-spam: when pilot's own terminal is reported focused
+    // Don't self-spam: when lazybox's own terminal is reported focused
     // the user is already looking at it. Unknown focus (terminal
     // never reported it) falls through and still notifies.
     if crate::notify::terminal_is_focused() {
         return;
     }
     // Prefer the terminal's own OSC notification surface — it reaches
-    // the local machine even when pilot runs over SSH (the subprocess
+    // the local machine even when lazybox runs over SSH (the subprocess
     // fallbacks would fire on the remote host, where no one is
     // looking) and needs no helper binary.
     if let Some(notifier) = crate::notify::detect_osc_notifier() {
@@ -145,7 +145,7 @@ pub fn notify_user(title: &str, body: &str) {
         };
         if let Some(tn_path) = tn {
             // `-sender` is intentionally omitted — without a real
-            // pilot.app bundle id, spoofing one would surface the
+            // lazybox.app bundle id, spoofing one would surface the
             // wrong app's icon.
             let (i, o, e) = stdio();
             let _ = std::process::Command::new(tn_path)
@@ -154,7 +154,7 @@ pub fn notify_user(title: &str, body: &str) {
                 .arg("-message")
                 .arg(body)
                 .arg("-group")
-                .arg("com.pilot.agent")
+                .arg("com.lazybox.agent")
                 .stdin(i)
                 .stdout(o)
                 .stderr(e)
@@ -186,7 +186,7 @@ pub fn notify_user(title: &str, body: &str) {
 
         let Some(ns_path) = ns else {
             // No notify-send on PATH → no notification. A one-time
-            // tracing line so users can grep /tmp/pilot.log and find
+            // tracing line so users can grep /tmp/lazybox.log and find
             // the install hint when they wonder where their
             // notifications went.
             static WARNED: OnceLock<()> = OnceLock::new();
@@ -224,7 +224,7 @@ fn applescript_escape(s: &str) -> String {
 
 /// Async wait for a graceful-shutdown signal — SIGTERM or Ctrl-C on
 /// unix, Ctrl-Break on Windows. Resolves once. Used by
-/// `pilot server start`'s outer task to trigger a clean stop.
+/// `lazybox server start`'s outer task to trigger a clean stop.
 pub async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {

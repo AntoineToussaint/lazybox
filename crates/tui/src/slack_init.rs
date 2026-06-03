@@ -1,23 +1,23 @@
-//! `pilot slack init` + `pilot slack doctor` — interactive setup +
+//! `lazybox slack init` + `lazybox slack doctor` — interactive setup +
 //! read-only verification for the Slack integration.
 //!
 //! Both commands share the same validations (bot token shape +
 //! `auth.test`, app token shape + `apps.connections.open`, anchor
 //! channel reachable). `init` writes results to
-//! `~/.pilot/config.yaml::slack.{bot_token, app_token}` via
-//! `Config::save_with` and best-effort joins `#pilot` so step 3 of
-//! `docs/slack-setup.md` ("/invite @pilot") goes away. `doctor` runs
+//! `~/.lazybox/config.yaml::slack.{bot_token, app_token}` via
+//! `Config::save_with` and best-effort joins `#lazybox` so step 3 of
+//! `docs/slack-setup.md` ("/invite @lazybox") goes away. `doctor` runs
 //! the same validations read-only on the existing config so a user
 //! who edited YAML by hand can confirm it still works.
 //!
 //! ## Why the wizard isn't a tui-realm modal
 //!
-//! `pilot slack init` runs from a plain shell, before pilot is set
+//! `lazybox slack init` runs from a plain shell, before lazybox is set
 //! up at all — the user hasn't seen the inbox yet and the daemon
 //! isn't necessarily running. Driving it through `realm::Model`
 //! would force us to construct the whole component tree just to ask
 //! two questions. Stdin / println is the right surface here, the
-//! same way `pilot daemon status` is plain text and not a panel.
+//! same way `lazybox daemon status` is plain text and not a panel.
 //!
 //! ## I/O abstraction
 //!
@@ -29,12 +29,12 @@
 
 use std::io::{BufRead, Write};
 
-use pilot_config::{Config, ConfigError};
-use pilot_slack::SlackError;
-use pilot_slack::api::{AuthTestResponse, Client as SlackApi};
-use pilot_slack::socket::SocketModeClient;
+use lazybox_config::{Config, ConfigError};
+use lazybox_slack::SlackError;
+use lazybox_slack::api::{AuthTestResponse, Client as SlackApi};
+use lazybox_slack::socket::SocketModeClient;
 
-/// Result of a full wizard run. Used by `pilot slack init` to set
+/// Result of a full wizard run. Used by `lazybox slack init` to set
 /// the binary's exit code (`0` for `Ready`, `1` otherwise).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InitOutcome {
@@ -49,7 +49,7 @@ pub enum InitOutcome {
     Failed,
 }
 
-/// Outcome of `pilot slack doctor`. Distinct from `InitOutcome`
+/// Outcome of `lazybox slack doctor`. Distinct from `InitOutcome`
 /// because doctor never writes config; the "needs invite" case is
 /// still actionable but isn't a hard failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,7 +133,7 @@ pub trait SlackProbe {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SlackError>> + Send + 'a>>;
 }
 
-/// Real-network probe — what `pilot slack init` runs against
+/// Real-network probe — what `lazybox slack init` runs against
 /// production Slack.
 #[derive(Default)]
 pub struct LiveProbe;
@@ -203,7 +203,7 @@ impl SlackProbe for LiveProbe {
     }
 }
 
-/// Real-mode `pilot slack init` entry point. Reads from stdin,
+/// Real-mode `lazybox slack init` entry point. Reads from stdin,
 /// writes config, prints status. Returns the exit-code mapping via
 /// `InitOutcome`.
 pub async fn run_init() -> std::io::Result<InitOutcome> {
@@ -212,7 +212,7 @@ pub async fn run_init() -> std::io::Result<InitOutcome> {
     run_init_with(&probe, &mut io, ConfigWriter::Real).await
 }
 
-/// Real-mode `pilot slack doctor` entry point. Doesn't prompt, just
+/// Real-mode `lazybox slack doctor` entry point. Doesn't prompt, just
 /// reads the existing config + runs validations.
 pub async fn run_doctor() -> std::io::Result<DoctorOutcome> {
     let probe = LiveProbe::new();
@@ -222,7 +222,7 @@ pub async fn run_doctor() -> std::io::Result<DoctorOutcome> {
 
 /// Config-persistence surface. The `Real` variant writes through
 /// `Config::save_with`; tests pass `Captured` to inspect the value
-/// without touching `~/.pilot/config.yaml`.
+/// without touching `~/.lazybox/config.yaml`.
 pub enum ConfigWriter {
     Real,
     #[cfg(test)]
@@ -246,14 +246,14 @@ impl ConfigWriter {
 }
 
 /// Core wizard, parameterized over I/O + Slack probe + config sink.
-/// `pilot slack init` calls this with the live wiring; tests call
+/// `lazybox slack init` calls this with the live wiring; tests call
 /// it with stubs.
 pub async fn run_init_with<P: SlackProbe + ?Sized, I: PromptIo + ?Sized>(
     probe: &P,
     io: &mut I,
     writer: ConfigWriter,
 ) -> std::io::Result<InitOutcome> {
-    io.print("pilot slack init — interactive setup")?;
+    io.print("lazybox slack init — interactive setup")?;
     io.print("")?;
     io.print(
         "You'll need an existing Slack app (see docs/slack-setup.md for the\n\
@@ -298,14 +298,14 @@ pub async fn run_init_with<P: SlackProbe + ?Sized, I: PromptIo + ?Sized>(
 
     // ── Persist tokens ───────────────────────────────────────────
     if let Err(e) = writer.save(&bot_token, &app_token) {
-        io.print(&format!("✗ write ~/.pilot/config.yaml: {e}"))?;
+        io.print(&format!("✗ write ~/.lazybox/config.yaml: {e}"))?;
         return Ok(InitOutcome::Failed);
     }
-    io.print("✓ wrote tokens to ~/.pilot/config.yaml")?;
+    io.print("✓ wrote tokens to ~/.lazybox/config.yaml")?;
 
     // ── Anchor channel ───────────────────────────────────────────
     // Default name matches `SlackConfig::default_anchor_channel`.
-    let anchor = "pilot";
+    let anchor = "lazybox";
     let outcome =
         ensure_anchor_channel(probe, &bot_token, anchor, io, /*write_on_join=*/ false).await?;
 
@@ -318,35 +318,35 @@ pub async fn run_init_with<P: SlackProbe + ?Sized, I: PromptIo + ?Sized>(
     })
 }
 
-/// `pilot slack doctor` — read-only validations against the current
+/// `lazybox slack doctor` — read-only validations against the current
 /// config. Does NOT prompt or write.
 pub async fn run_doctor_with<P: SlackProbe + ?Sized, I: PromptIo + ?Sized>(
     probe: &P,
     io: &mut I,
 ) -> std::io::Result<DoctorOutcome> {
-    io.print("pilot slack doctor — read-only validation")?;
+    io.print("lazybox slack doctor — read-only validation")?;
     io.print("")?;
 
     let cfg = match Config::load() {
         Ok(c) => c,
         Err(e) => {
-            io.print(&format!("✗ load ~/.pilot/config.yaml: {e}"))?;
+            io.print(&format!("✗ load ~/.lazybox/config.yaml: {e}"))?;
             return Ok(DoctorOutcome::Failed);
         }
     };
 
-    // Env var > YAML, mirroring `pilot_server::slack::resolve_token`.
+    // Env var > YAML, mirroring `lazybox_server::slack::resolve_token`.
     let bot_token = resolve_token(cfg.slack.bot_token.as_deref(), "SLACK_BOT_TOKEN");
     let app_token = resolve_token(cfg.slack.app_token.as_deref(), "SLACK_APP_TOKEN");
 
     let Some(bot_token) = bot_token else {
         io.print("✗ bot_token not set (config.slack.bot_token or $SLACK_BOT_TOKEN)")?;
-        io.print("  Run `pilot slack init` to configure interactively.")?;
+        io.print("  Run `lazybox slack init` to configure interactively.")?;
         return Ok(DoctorOutcome::Failed);
     };
     let Some(app_token) = app_token else {
         io.print("✗ app_token not set (config.slack.app_token or $SLACK_APP_TOKEN)")?;
-        io.print("  Run `pilot slack init` to configure interactively.")?;
+        io.print("  Run `lazybox slack init` to configure interactively.")?;
         return Ok(DoctorOutcome::Failed);
     };
 
@@ -410,8 +410,8 @@ enum AnchorResult {
 /// Idempotent anchor-channel resolution: look up by name, self-join
 /// if found. Used by both `init` and `doctor`. `write_on_join` is
 /// reserved for a future "create the channel on init" path; today
-/// pilot relies on the user (or the workspace having a `#general`-
-/// style default) to have `#pilot` available. This keeps the wizard
+/// lazybox relies on the user (or the workspace having a `#general`-
+/// style default) to have `#lazybox` available. This keeps the wizard
 /// from accidentally creating a public channel that nobody else
 /// will see.
 async fn ensure_anchor_channel<P: SlackProbe + ?Sized, I: PromptIo + ?Sized>(
@@ -445,7 +445,7 @@ async fn ensure_anchor_channel<P: SlackProbe + ?Sized, I: PromptIo + ?Sized>(
             io.print(&format!(
                 "! anchor channel #{anchor} not visible to the bot.\n\
                  Create it in Slack (or rename an existing channel), then run:\n\
-                   pilot slack doctor"
+                   lazybox slack doctor"
             ))?;
             Ok(AnchorResult::NotVisible)
         }
@@ -511,7 +511,7 @@ fn resolve_token(yaml: Option<&str>, env_key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pilot_slack::api::AuthTestResponse;
+    use lazybox_slack::api::AuthTestResponse;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
@@ -564,7 +564,7 @@ mod tests {
                 auth: Ok(AuthTestResponse {
                     url: "https://acme.slack.com/".into(),
                     team: "Acme".into(),
-                    user: "pilot".into(),
+                    user: "lazybox".into(),
                     user_id: "U1".into(),
                     bot_id: Some("B1".into()),
                 }),

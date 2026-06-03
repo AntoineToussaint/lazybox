@@ -1,5 +1,5 @@
 //! Slack adapter. Implements [`crate::chat::ChatProvider`] over the
-//! `pilot-slack` crate's HTTP + Socket Mode clients.
+//! `lazybox-slack` crate's HTTP + Socket Mode clients.
 //!
 //! Boot flow:
 //!
@@ -9,7 +9,7 @@
 //!    a `channel_name → channel_id` map so subsequent
 //!    `ensure_workspace_channel` calls avoid a network round-trip
 //!    when the channel already exists.
-//! 3. **Anchor hello** — post a one-shot "pilot online" line in
+//! 3. **Anchor hello** — post a one-shot "lazybox online" line in
 //!    `slack.anchor_channel` so the user sees the bot came up.
 //! 4. **Drive** — spawn one task that selects on the bus (outbound)
 //!    and the Socket Mode inbound stream, delegating both to
@@ -17,9 +17,9 @@
 
 use crate::ServerConfig;
 use crate::chat::{self, ChatError, ChatInbound, ChatProvider, RouterState, TerminalTarget};
-use pilot_config::SlackConfig;
-use pilot_slack::api::{Client as ApiClient, Message, channel_name_for_terminal};
-use pilot_slack::socket::{InboundEvent, SocketModeClient};
+use lazybox_config::SlackConfig;
+use lazybox_slack::api::{Client as ApiClient, Message, channel_name_for_terminal};
+use lazybox_slack::socket::{InboundEvent, SocketModeClient};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -43,7 +43,7 @@ pub struct SlackProvider {
     cfg: ProviderCfg,
     bot_user_id: String,
     /// `channel_name → channel_id` cache. Populated at boot from
-    /// `conversations.list`; updated when pilot creates a new
+    /// `conversations.list`; updated when lazybox creates a new
     /// channel. Plain `std::sync::Mutex` — guards never span an
     /// `.await`, so the async-aware variant would be overkill.
     name_to_id: std::sync::Mutex<HashMap<String, String>>,
@@ -51,7 +51,7 @@ pub struct SlackProvider {
     /// is visible to the bot at boot. Required for thread-fallback
     /// mode (`per_workspace_channels: false`); when missing, the
     /// provider degrades to "no chat surface" and logs a warning at
-    /// startup so the user knows to `/invite @pilot`.
+    /// startup so the user knows to `/invite @lazybox`.
     anchor_channel_id: Option<String>,
 }
 
@@ -134,7 +134,7 @@ impl ChatProvider for SlackProvider {
             ));
         }
         // `per_workspace_channels: false`: anchor a thread in the
-        // shared `#pilot`-style channel. If the bot can't see that
+        // shared `#lazybox`-style channel. If the bot can't see that
         // channel (no `/invite`) there's nowhere to post — drop the
         // surface rather than fail every notification with a 404.
         match self.anchor_channel_id.as_ref() {
@@ -161,7 +161,7 @@ impl ChatProvider for SlackProvider {
                     tracing::info!(channel = %resp.channel.name, "slack: created channel");
                     Ok(id)
                 }
-                Err(pilot_slack::SlackError::Api(ref e)) if e == "name_taken" => {
+                Err(lazybox_slack::SlackError::Api(ref e)) if e == "name_taken" => {
                     // Race: someone (us, in a prior session?) made
                     // the channel between our list + create. Refetch
                     // and use the existing id.
@@ -215,7 +215,7 @@ async fn run(
     slack: SlackConfig,
     bot_token: String,
     app_token: String,
-) -> Result<(), pilot_slack::SlackError> {
+) -> Result<(), lazybox_slack::SlackError> {
     let api = ApiClient::new(bot_token);
 
     // ── Boot ──────────────────────────────────────────────────────
@@ -240,7 +240,7 @@ async fn run(
             .post_message(&Message::new(
                 anchor_id,
                 format!(
-                    "*pilot online* · connected as <@{}>. Mirroring {} project(s).",
+                    "*lazybox online* · connected as <@{}>. Mirroring {} project(s).",
                     auth.user_id,
                     channels.len()
                 ),
@@ -249,7 +249,7 @@ async fn run(
     } else {
         tracing::warn!(
             anchor_channel = %slack.anchor_channel,
-            "slack: anchor channel not visible; /invite @pilot to that channel \
+            "slack: anchor channel not visible; /invite @lazybox to that channel \
              so it can post bootstrap messages",
         );
     }
@@ -284,7 +284,7 @@ async fn drive(
     provider: &dyn ChatProvider,
     config: &ServerConfig,
     state: &Arc<tokio::sync::Mutex<RouterState>>,
-    mut bus_rx: broadcast::Receiver<pilot_ipc::Event>,
+    mut bus_rx: broadcast::Receiver<lazybox_ipc::Event>,
     mut inbound_rx: tokio::sync::mpsc::Receiver<InboundEvent>,
     bot_user_id: &str,
 ) {
@@ -317,7 +317,7 @@ async fn drive(
 /// doesn't care which Slack event delivered the text).
 ///
 /// Messages whose author is the bot itself are dropped — a second line
-/// of defense behind `socket.rs`'s `bot_id` filter against pilot's own
+/// of defense behind `socket.rs`'s `bot_id` filter against lazybox's own
 /// posts routing back into the agent.
 fn map_inbound(ev: InboundEvent, bot_user_id: &str) -> Option<ChatInbound> {
     match ev {
@@ -354,7 +354,7 @@ fn map_inbound(ev: InboundEvent, bot_user_id: &str) -> Option<ChatInbound> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pilot_config::SlackConfig;
+    use lazybox_config::SlackConfig;
 
     fn provider() -> SlackProvider {
         SlackProvider::new(
@@ -379,14 +379,14 @@ mod tests {
 
     #[tokio::test]
     async fn drive_returns_when_bus_closes() {
-        use pilot_store::MemoryStore;
+        use lazybox_store::MemoryStore;
 
         let provider = provider();
         let config = ServerConfig::with_store(Arc::new(MemoryStore::new()));
         let state = Arc::new(tokio::sync::Mutex::new(RouterState::new()));
 
         // A closed bus: drop the only sender so `recv()` yields `Closed`.
-        let (bus_tx, bus_rx) = broadcast::channel::<pilot_ipc::Event>(8);
+        let (bus_tx, bus_rx) = broadcast::channel::<lazybox_ipc::Event>(8);
         drop(bus_tx);
 
         // Keep the inbound sender alive so that arm never fires — the
@@ -514,12 +514,12 @@ mod tests {
     #[test]
     fn terminal_target_anchor_thread_when_per_workspace_channels_false() {
         let mut seed = HashMap::new();
-        seed.insert("pilot".to_string(), "C-ANCHOR".to_string());
+        seed.insert("lazybox".to_string(), "C-ANCHOR".to_string());
         let p = SlackProvider::new(
             ApiClient::new("xoxb-test".to_string()),
             SlackConfig {
                 per_workspace_channels: false,
-                anchor_channel: "pilot".into(),
+                anchor_channel: "lazybox".into(),
                 ..SlackConfig::default()
             },
             "UBOT".to_string(),
@@ -538,7 +538,7 @@ mod tests {
             ApiClient::new("xoxb-test".to_string()),
             SlackConfig {
                 per_workspace_channels: false,
-                anchor_channel: "pilot".into(),
+                anchor_channel: "lazybox".into(),
                 ..SlackConfig::default()
             },
             "UBOT".to_string(),

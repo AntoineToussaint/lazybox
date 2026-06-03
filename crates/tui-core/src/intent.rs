@@ -32,7 +32,7 @@
 
 use std::time::Duration;
 
-use pilot_core::{SessionKey, Workspace, WorkspaceKey};
+use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
 
 /// What the model should do in response to an action. Carries the
 /// data the side-effect needs (workspace key, prompt text, …) but
@@ -53,7 +53,9 @@ pub enum Intent {
     /// Mount the new-workspace name input under the given Project.
     /// The model stashes `project_key`, mounts the prompt, and on
     /// submit ships `Command::CreateWorkspace { name, project_key }`.
-    MountNewWorkspaceInput { project_key: pilot_core::ProjectKey },
+    MountNewWorkspaceInput {
+        project_key: lazybox_core::ProjectKey,
+    },
     /// Mount the adopt-target picker for moving sessions out of
     /// the named source workspace.
     MountAdoptPicker { source_key: WorkspaceKey },
@@ -161,7 +163,7 @@ pub fn classify_work(
         if pr.mergeable.is_conflicting() {
             return Some(WorkPriority::FixConflict);
         }
-        if pr.ci == pilot_core::CiStatus::Failure {
+        if pr.ci == lazybox_core::CiStatus::Failure {
             return Some(WorkPriority::FixCi);
         }
         // Role-based defaults for healthy PRs. Reviewer always gets
@@ -170,10 +172,10 @@ pub fn classify_work(
         // on. Author/Assignee get AddressComments only when there's
         // something new to look at.
         match pr.role {
-            pilot_core::TaskRole::Reviewer => return Some(WorkPriority::ReviewCode),
-            pilot_core::TaskRole::Author
-            | pilot_core::TaskRole::Assignee
-            | pilot_core::TaskRole::Mentioned => {
+            lazybox_core::TaskRole::Reviewer => return Some(WorkPriority::ReviewCode),
+            lazybox_core::TaskRole::Author
+            | lazybox_core::TaskRole::Assignee
+            | lazybox_core::TaskRole::Mentioned => {
                 if ws.unread_count() > 0 {
                     return Some(WorkPriority::AddressComments);
                 }
@@ -236,7 +238,7 @@ pub fn resolve_work(
                 .gh_issues
                 .first()
                 .expect("ImplementIssue classification implies at least one gh_issue");
-            pilot_core::prompts::build_implement_issue_prompt(issue)
+            lazybox_core::prompts::build_implement_issue_prompt(issue)
         }
     };
     Intent::SpawnAgent {
@@ -316,7 +318,7 @@ pub fn resolve_open_editor(workspace: Option<&Workspace>) -> Intent {
 /// cursor isn't on a Project header or on a workspace under one, the
 /// resolver returns a `Notice` and the model surfaces a hint instead
 /// of mounting the prompt.
-pub fn resolve_new_workspace(focused_project_key: Option<pilot_core::ProjectKey>) -> Intent {
+pub fn resolve_new_workspace(focused_project_key: Option<lazybox_core::ProjectKey>) -> Intent {
     match focused_project_key {
         Some(project_key) => Intent::MountNewWorkspaceInput { project_key },
         None => Intent::Notice("Select a project first (Shift-N creates one).".to_string()),
@@ -348,16 +350,16 @@ pub fn resolve_merge(workspace: Option<&Workspace>) -> Intent {
     };
     if !matches!(
         pr.state,
-        pilot_core::TaskState::Open | pilot_core::TaskState::InReview
+        lazybox_core::TaskState::Open | lazybox_core::TaskState::InReview
     ) {
         return Intent::NoOp;
     }
-    if !matches!(pr.review, pilot_core::ReviewStatus::Approved) {
+    if !matches!(pr.review, lazybox_core::ReviewStatus::Approved) {
         return Intent::NoOp;
     }
     if !matches!(
         pr.ci,
-        pilot_core::CiStatus::Success | pilot_core::CiStatus::None
+        lazybox_core::CiStatus::Success | lazybox_core::CiStatus::None
     ) {
         return Intent::NoOp;
     }
@@ -513,7 +515,7 @@ fn build_address_comments_prompt(workspace: &Workspace, indices: &[usize]) -> St
 mod tests {
     use super::*;
     use chrono::Utc;
-    use pilot_core::{
+    use lazybox_core::{
         CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey,
     };
 
@@ -543,7 +545,7 @@ mod tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: pilot_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             node_id: None,
             needs_reply: false,
@@ -597,7 +599,7 @@ mod tests {
         // fire — without this, the user sits on a CONFLICT-pill row
         // and the hint bar shows nothing under `w`.
         let mut ws = pr("o/r#7", CiStatus::None, ReviewStatus::None);
-        ws.pr.as_mut().unwrap().mergeable = pilot_core::Mergeable::Conflicting;
+        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
         let intent = resolve_work(Some(&ws), &[], "claude");
         match intent {
             Intent::SpawnAgent { prompt, .. } => {
@@ -621,7 +623,7 @@ mod tests {
         // conflict first. Pin the priority so a future refactor
         // doesn't accidentally swap the order.
         let mut ws = pr("o/r#7", CiStatus::Failure, ReviewStatus::None);
-        ws.pr.as_mut().unwrap().mergeable = pilot_core::Mergeable::Conflicting;
+        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
         let intent = resolve_work(Some(&ws), &[], "claude");
         match intent {
             Intent::SpawnAgent { prompt, .. } => {
@@ -649,16 +651,16 @@ mod tests {
             let healthy_pr = pr("o/r#1", CiStatus::Success, ReviewStatus::Pending);
             let ci_fail = pr("o/r#1", CiStatus::Failure, ReviewStatus::Pending);
             let mut conflict_pr = pr("o/r#7", CiStatus::None, ReviewStatus::None);
-            conflict_pr.pr.as_mut().unwrap().mergeable = pilot_core::Mergeable::Conflicting;
+            conflict_pr.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
             let mut conflict_plus_ci = pr("o/r#8", CiStatus::Failure, ReviewStatus::None);
-            conflict_plus_ci.pr.as_mut().unwrap().mergeable = pilot_core::Mergeable::Conflicting;
+            conflict_plus_ci.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
             let issue = issue("o/r#42");
             let mut commented = pr("o/r#9", CiStatus::Success, ReviewStatus::Pending);
-            commented.activity.push(pilot_core::Activity {
+            commented.activity.push(lazybox_core::Activity {
                 author: "alice".into(),
                 body: "comment".into(),
                 created_at: Utc::now(),
-                kind: pilot_core::ActivityKind::Comment,
+                kind: lazybox_core::ActivityKind::Comment,
                 node_id: None,
                 path: None,
                 line: None,
@@ -733,12 +735,12 @@ mod tests {
         // The comments path is most-explicit user intent: they
         // selected what to address. Conflict / CI fall behind.
         let mut ws = pr("o/r#7", CiStatus::None, ReviewStatus::None);
-        ws.pr.as_mut().unwrap().mergeable = pilot_core::Mergeable::Conflicting;
-        ws.activity.push(pilot_core::Activity {
+        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
+        ws.activity.push(lazybox_core::Activity {
             author: "alice".into(),
             body: "fix the lint please".into(),
             created_at: Utc::now(),
-            kind: pilot_core::ActivityKind::Comment,
+            kind: lazybox_core::ActivityKind::Comment,
             node_id: None,
             path: None,
             line: None,
@@ -795,11 +797,11 @@ mod tests {
         // Comments-selected path wins even when CI is red — the user
         // explicitly chose what to address.
         let mut ws = pr("o/r#1", CiStatus::Failure, ReviewStatus::Pending);
-        ws.activity.push(pilot_core::Activity {
+        ws.activity.push(lazybox_core::Activity {
             author: "alice".into(),
             body: "needs more tests".into(),
             created_at: Utc::now(),
-            kind: pilot_core::ActivityKind::Comment,
+            kind: lazybox_core::ActivityKind::Comment,
             node_id: None,
             path: None,
             line: None,
@@ -852,7 +854,7 @@ mod tests {
 
     #[test]
     fn new_workspace_with_project_mounts_input() {
-        let pk = pilot_core::ProjectKey::local("my-project");
+        let pk = lazybox_core::ProjectKey::local("my-project");
         assert_eq!(
             resolve_new_workspace(Some(pk.clone())),
             Intent::MountNewWorkspaceInput { project_key: pk }
@@ -886,9 +888,9 @@ mod tests {
     #[test]
     fn adopt_with_sessions_mounts_picker() {
         let mut ws = pr("o/r#1", CiStatus::None, ReviewStatus::None);
-        ws.add_session(pilot_core::WorkspaceSession::new(
+        ws.add_session(lazybox_core::WorkspaceSession::new(
             ws.key.clone(),
-            pilot_core::SessionKind::Shell,
+            lazybox_core::SessionKind::Shell,
             std::path::PathBuf::from("/tmp"),
             Utc::now(),
         ));

@@ -1,6 +1,6 @@
-//! # pilot-store
+//! # lazybox-store
 //!
-//! Persistent storage for pilot. Abstracts behind a trait so the backend
+//! Persistent storage for lazybox. Abstracts behind a trait so the backend
 //! can be swapped (SQLite, file-based, cloud, etc.).
 
 pub mod mock;

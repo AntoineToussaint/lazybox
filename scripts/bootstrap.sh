@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Bootstrap pilot's build environment.
+# Bootstrap lazybox's build environment.
 #
 # Idempotent. Installs:
-#   - zig 0.15.2 to a HOST-LEVEL cache (default ~/.cache/pilot/zig/,
-#     override with PILOT_ZIG_CACHE). Used by libghostty's build.zig
+#   - zig 0.15.2 to a HOST-LEVEL cache (default ~/.cache/lazybox/zig/,
+#     override with LAZYBOX_ZIG_CACHE). Used by libghostty's build.zig
 #     (which rejects zig >= 0.16). The Makefile prepends this to PATH
 #     so any system zig is ignored. Caching outside the checkout means
 #     every clone and git worktree shares one download instead of each
 #     re-fetching ~45MB into its own vendor/zig/.
 #
-#     Set PILOT_ZIG_LOCAL=1 to install into this worktree's vendor/zig/
+#     Set LAZYBOX_ZIG_LOCAL=1 to install into this worktree's vendor/zig/
 #     instead — run.sh and the Makefile prefer a local install over the
 #     shared cache when one is present.
 #
@@ -26,10 +26,10 @@ ZIG_VERSION="0.15.2"
 # Shared cache root, overridable. Keep this default in lockstep with
 # the Makefile's `ZIG_CACHE` so `make build`/`run` (which compute the
 # pinned PATH themselves) find what `make setup` downloaded here.
-ZIG_CACHE="${PILOT_ZIG_CACHE:-${HOME}/.cache/pilot/zig}"
-# PILOT_ZIG_LOCAL=1 installs into this worktree's vendor/zig/ instead
+ZIG_CACHE="${LAZYBOX_ZIG_CACHE:-${HOME}/.cache/lazybox/zig}"
+# LAZYBOX_ZIG_LOCAL=1 installs into this worktree's vendor/zig/ instead
 # of the shared cache. run.sh and the Makefile prefer a local install.
-if [ "${PILOT_ZIG_LOCAL:-}" = "1" ]; then
+if [ "${LAZYBOX_ZIG_LOCAL:-}" = "1" ]; then
   ZIG_CACHE="${ROOT}/vendor/zig"
 fi
 
@@ -101,11 +101,11 @@ fi
 
 # ── tmux (warn only) ────────────────────────────────────────────────────
 if ! command -v tmux >/dev/null 2>&1; then
-  echo "warning: tmux not found — sessions won't persist across pilot restarts"
+  echo "warning: tmux not found — sessions won't persist across lazybox restarts"
 fi
 
 # ── Linux libc++ check (warn only) ──────────────────────────────────────
-# Zig builds ghostty against LLVM's libc++ (NOT GNU libstdc++) — pilot
+# Zig builds ghostty against LLVM's libc++ (NOT GNU libstdc++) — lazybox
 # fails to link with `undefined reference to std::__1::*` on Linux
 # unless libc++ + libc++abi are installed. CI installs them
 # (.github/release-setup.yml); local users typically forget.

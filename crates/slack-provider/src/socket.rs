@@ -1,4 +1,4 @@
-//! Socket Mode — pilot opens a WebSocket out to Slack so inbound
+//! Socket Mode — lazybox opens a WebSocket out to Slack so inbound
 //! events arrive without needing a public HTTPS endpoint.
 //!
 //! Lifecycle per connection:
@@ -7,26 +7,26 @@
 //!   2. Open the WebSocket. Slack sends `hello` first, then `events_api`
 //!      frames carrying inbound events (`app_mention`,
 //!      `message.channels`, slash commands, interactivity, etc.).
-//!   3. For every `events_api` frame pilot replies with
+//!   3. For every `events_api` frame lazybox replies with
 //!      `{"envelope_id": "...", "payload": {}}` to ACK. Without
 //!      the ACK Slack retries up to 3 times then disconnects.
 //!   4. Slack periodically asks the client to reconnect — `disconnect`
 //!      frame with `reason: "warning"` (gentle, switch over) or
-//!      `"refresh_requested"` (urgent). Pilot just rebuilds the
+//!      `"refresh_requested"` (urgent). Lazybox just rebuilds the
 //!      WSS URL and reconnects.
 //!
-//! ## Events pilot consumes
+//! ## Events lazybox consumes
 //!
-//! - `app_mention` — user `@pilot`'d the bot anywhere it's a member.
+//! - `app_mention` — user `@lazybox`'d the bot anywhere it's a member.
 //! - `message.channels` / `message.groups` / `message.im` — incoming
 //!   plain message in a watched channel.
 //! - Slash commands / interactivity arrive through the same socket
-//!   but pilot doesn't use them today; the parser keeps them as
+//!   but lazybox doesn't use them today; the parser keeps them as
 //!   `Other` so a future addition is a one-arm change.
 //!
-//! Pilot's daemon spawns one `SocketModeClient::run_forever` task on
+//! Lazybox's daemon spawns one `SocketModeClient::run_forever` task on
 //! startup and consumes the resulting `InboundEvent` stream. The
-//! mapping from `channel_id → workspace_key` (built when pilot
+//! mapping from `channel_id → workspace_key` (built when lazybox
 //! creates the per-workspace channel) turns the event into an
 //! `IpcCommand::Spawn` or `InjectPrompt`.
 
@@ -39,7 +39,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 const APP_OPEN: &str = "https://slack.com/api/apps.connections.open";
 
-/// Output stream item — pilot consumes these in the daemon's slack
+/// Output stream item — lazybox consumes these in the daemon's slack
 /// task and routes to the right session.
 #[derive(Debug, Clone)]
 pub enum InboundEvent {
@@ -58,9 +58,9 @@ pub enum InboundEvent {
         ts: String,
         thread_ts: Option<String>,
     },
-    /// Plain message in a channel the bot is a member of. Pilot
+    /// Plain message in a channel the bot is a member of. Lazybox
     /// treats these the same as mentions in per-workspace channels
-    /// (since the user shouldn't have to `@pilot` in a dedicated
+    /// (since the user shouldn't have to `@lazybox` in a dedicated
     /// channel for the bot). `thread_ts` is set for replies inside a
     /// thread; see `Mention` for the routing semantics.
     Message {
@@ -111,7 +111,7 @@ impl SocketModeClient {
     /// usable for Socket Mode without actually consuming the
     /// (short-lived) WebSocket URL.
     ///
-    /// Used by `pilot slack init` and `pilot slack doctor` to fail
+    /// Used by `lazybox slack init` and `lazybox slack doctor` to fail
     /// fast on a misconfigured app token instead of waiting for the
     /// daemon to surface a vague "websocket: …" error later.
     pub async fn validate(&self) -> Result<(), SlackError> {
@@ -251,7 +251,7 @@ impl CleanCloseBackoff {
     }
 }
 
-/// Outer Socket Mode envelope. Five kinds today; pilot consumes
+/// Outer Socket Mode envelope. Five kinds today; lazybox consumes
 /// `hello`, `events_api`, and `disconnect`. The rest get a debug
 /// log + ACK so the connection stays healthy.
 #[derive(Deserialize, Debug)]
@@ -329,7 +329,7 @@ fn parse_events_api(payload: &serde_json::Value) -> Option<InboundEvent> {
             // user id. Filter those out so we don't infinite-loop.
             // Posts made via `chat.postMessage` typically arrive with a
             // `bot_id` set and *no* `bot_message` subtype, so the
-            // subtype check alone lets pilot's own notifications route
+            // subtype check alone lets lazybox's own notifications route
             // back into the agent.
             if event.get("bot_id").is_some() {
                 return None;
@@ -506,7 +506,7 @@ mod tests {
     fn events_api_bot_id_message_without_subtype_is_filtered() {
         // Posts via `chat.postMessage` with a bot token arrive with
         // `bot_id` set and *no* `bot_message` subtype — the shape that
-        // slipped past the old subtype-only filter and fed pilot's own
+        // slipped past the old subtype-only filter and fed lazybox's own
         // notifications back into the agent.
         let env: SocketEnvelope = serde_json::from_value(json!({
             "type": "events_api",

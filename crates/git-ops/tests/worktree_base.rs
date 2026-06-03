@@ -6,14 +6,14 @@
 //! (offline / auth) the call must still succeed against the local
 //! ref rather than blocking.
 
-use pilot_git_ops::WorktreeManager;
+use lazybox_git_ops::WorktreeManager;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
 /// Build a Command for git in `cwd`, with GIT_DIR / GIT_WORK_TREE
 /// scrubbed. `cargo test` inherits env vars from the surrounding
-/// pilot worktree (its `.git` is a gitfile pointing into the main
+/// lazybox worktree (its `.git` is a gitfile pointing into the main
 /// repo's gitdir), and any leaked `GIT_*` var would override
 /// `current_dir(cwd)` and run git against the wrong repo.
 fn git_cmd(cwd: &Path, args: &[&str]) -> Command {

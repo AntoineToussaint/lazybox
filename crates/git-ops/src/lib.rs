@@ -1,4 +1,4 @@
-//! # pilot-git-ops
+//! # lazybox-git-ops
 //!
 //! Git worktree management. Maintains a base directory with bare clones,
 //! creates worktrees per-branch for parallel work.
@@ -47,9 +47,9 @@ pub struct Mount {
 }
 
 /// An executable script to materialize inside the worktree at
-/// `_pilot/scripts/<name>`. The user can then run it as
-/// `./_pilot/scripts/<name>` from a shell pilot spawns in the
-/// worktree, or wire `_pilot/scripts` onto `PATH` to call by name.
+/// `_lazybox/scripts/<name>`. The user can then run it as
+/// `./_lazybox/scripts/<name>` from a shell lazybox spawns in the
+/// worktree, or wire `_lazybox/scripts` onto `PATH` to call by name.
 ///
 /// Two source kinds — pick one per script:
 /// - `Inline(body)` — the body is written verbatim. A `#!/usr/bin/env bash`
@@ -60,7 +60,7 @@ pub struct Mount {
 ///   `apply_scripts`. The source path must exist at apply time.
 #[derive(Debug, Clone)]
 pub struct Script {
-    /// Filename inside `_pilot/scripts/`. See `validate_script_name`
+    /// Filename inside `_lazybox/scripts/`. See `validate_script_name`
     /// for the accept rules.
     pub name: String,
     pub body: ScriptBody,
@@ -102,14 +102,14 @@ impl WorktreeManager {
         &self.base_dir
     }
 
-    /// Default base dir: `<PILOT_HOME>/v2/` (default `~/.pilot/v2/`).
+    /// Default base dir: `<LAZYBOX_HOME>/v2/` (default `~/.lazybox/v2/`).
     ///
-    /// v2-rooted so all of pilot's on-disk state — `state.db`, the
+    /// v2-rooted so all of lazybox's on-disk state — `state.db`, the
     /// bare-clone cache, every worktree — sits under one directory.
-    /// One `rm -rf <PILOT_HOME>/v2/` wipes pilot completely.
-    /// Profile-aware via `pilot_core::paths::state_root`.
+    /// One `rm -rf <LAZYBOX_HOME>/v2/` wipes lazybox completely.
+    /// Profile-aware via `lazybox_core::paths::state_root`.
     pub fn default_base() -> Self {
-        Self::new(pilot_core::paths::state_root())
+        Self::new(lazybox_core::paths::state_root())
     }
 
     fn bare_clone_path(&self, owner: &str, repo: &str) -> PathBuf {
@@ -140,7 +140,7 @@ impl WorktreeManager {
     }
 
     /// Same as [`Self::checkout`] but with an explicit target path. Used by
-    /// pilot's session model where the worktree path is derived from a
+    /// lazybox's session model where the worktree path is derived from a
     /// stable session UUID — `<state_root>/worktrees/<uuid>` — and
     /// must never depend on owner/repo/branch (so renames + branch
     /// changes don't relocate the on-disk folder).
@@ -153,7 +153,7 @@ impl WorktreeManager {
     ) -> Result<Worktree, GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
 
-        // Return early if worktree already exists. Idempotent — pilot
+        // Return early if worktree already exists. Idempotent — lazybox
         // calls this on every session bring-up.
         if wt_path.exists() {
             let name = wt_path
@@ -241,7 +241,7 @@ impl WorktreeManager {
     }
 
     /// Same as [`Self::checkout_new_branch`] but with an explicit target path.
-    /// Used by pilot's session model where the worktree path is derived
+    /// Used by lazybox's session model where the worktree path is derived
     /// from a stable session UUID and must not depend on branch names
     /// (so a branch rename inside the worktree doesn't relocate the
     /// on-disk folder).
@@ -495,7 +495,7 @@ impl WorktreeManager {
         Ok(())
     }
 
-    /// Materialize a list of [`Script`]s under `<worktree>/_pilot/scripts/`.
+    /// Materialize a list of [`Script`]s under `<worktree>/_lazybox/scripts/`.
     /// Each entry becomes either a symlink (`ScriptBody::Linked`) or
     /// a freshly-written file (`ScriptBody::Inline`); both end up
     /// chmod 0o755 so the user can invoke them directly.
@@ -515,7 +515,7 @@ impl WorktreeManager {
         if scripts.is_empty() {
             return Ok(());
         }
-        let scripts_dir = worktree.path.join("_pilot").join("scripts");
+        let scripts_dir = worktree.path.join("_lazybox").join("scripts");
         tokio::fs::create_dir_all(&scripts_dir).await?;
 
         for script in scripts {
@@ -562,7 +562,7 @@ impl WorktreeManager {
     /// Move a worktree from `old` to `new`. Wraps `git worktree move`,
     /// which atomically renames the worktree directory and updates
     /// git's internal pointer in `<bare>/worktrees/<name>/gitdir`.
-    /// Used by pilot's PR-attach migration: when a workspace gains a
+    /// Used by lazybox's PR-attach migration: when a workspace gains a
     /// PR mid-flight, the slug changes from "fix-login" to
     /// "PR-1234-fix-login" and we need to relocate without reclone.
     ///
@@ -589,7 +589,7 @@ impl WorktreeManager {
     }
 
     /// The bare-clone path for `owner/repo` under this manager's base.
-    /// Public so callers (pilot-server) can pass it to `move_worktree`.
+    /// Public so callers (lazybox-server) can pass it to `move_worktree`.
     pub fn bare_path(&self, owner: &str, repo: &str) -> PathBuf {
         self.bare_clone_path(owner, repo)
     }
@@ -637,7 +637,7 @@ impl WorktreeManager {
                 // bare repo's `worktrees/` index drops the stale
                 // entry. Errors here are swallowed — if `rm -rf`
                 // fails (permissions, FS in use), there's nothing
-                // the caller can do that pilot can't.
+                // the caller can do that lazybox can't.
                 let _ = tokio::fs::remove_dir_all(worktree_path).await;
                 let _ = run_git_in(bare_path, &["worktree", "prune"]).await;
             }
@@ -694,11 +694,11 @@ async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Apply pilot's standard env overrides to a `git` Command.
+/// Apply lazybox's standard env overrides to a `git` Command.
 ///
 /// Sets:
 /// - `GIT_TERMINAL_PROMPT=0` — without this, a locked SSH key or
-///   HTTPS-without-auth prompts the user, but pilot's in alternate-
+///   HTTPS-without-auth prompts the user, but lazybox's in alternate-
 ///   screen mode so the prompt is invisible and the subprocess
 ///   hangs forever, freezing whatever async task awaited it
 ///   (worktree migration, session restore, etc.). Disabling makes
@@ -708,7 +708,7 @@ async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
 ///
 /// Removes any inherited `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE`
 /// / `GIT_COMMON_DIR`. Those override `current_dir(cwd)` silently — if
-/// pilot is ever launched from inside another git worktree (or
+/// lazybox is ever launched from inside another git worktree (or
 /// `cargo test` from one), the subprocess would operate on the
 /// inherited repo instead of the bare clone we're targeting.
 ///
@@ -744,7 +744,7 @@ async fn run_git(args: &[&str]) -> Result<String, GitError> {
     }
 }
 
-/// Reject script names that would escape `_pilot/scripts/`, name a
+/// Reject script names that would escape `_lazybox/scripts/`, name a
 /// hidden file, or run on Windows where the path separator differs.
 /// Called by `apply_scripts` before any I/O so a bad name doesn't
 /// leave a partial install behind.

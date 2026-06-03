@@ -11,7 +11,7 @@
 use crate::editors::EditorTemplate;
 use crate::setup;
 use crate::setup_flow::{SetupOutcome, SetupRunner};
-use pilot_core::{PersistedSetup, ScopeSource, SessionKey};
+use lazybox_core::{PersistedSetup, ScopeSource, SessionKey};
 use std::sync::Arc;
 
 /// Cached setup detection results — the `SetupReport` + the source
@@ -35,7 +35,7 @@ pub enum SettingsAction {
     /// sessions launch with `--dangerously-skip-permissions`. Carries
     /// the current value so the dispatcher knows which way to flip.
     ToggleSkipPermissions { enabled: bool },
-    /// Open `<pilot_home>/snippets.yaml` in the configured editor,
+    /// Open `<lazybox_home>/snippets.yaml` in the configured editor,
     /// seeding a commented template first when the file is absent.
     /// Snippets are file-owned (no in-app editor by design), so this
     /// just gets the user to the file.
@@ -47,7 +47,7 @@ pub enum SettingsAction {
     /// after a confirm prompt.
     CleanWorktrees,
     /// Admin: open the worktree inspector — lists every worktree
-    /// pilot finds on disk, flags orphans by reason, surfaces
+    /// lazybox finds on disk, flags orphans by reason, surfaces
     /// uncommitted / unpushed work, lets the user delete per-row or
     /// bulk-delete the clearly-safe set.
     InspectWorktrees,
@@ -92,7 +92,7 @@ pub(crate) struct SetupCtx {
     /// indices; we map them back to actions here.
     pub settings_actions: Vec<SettingsAction>,
     /// Editors detected on PATH at startup + any custom entries from
-    /// `~/.pilot/config.yaml`. Drives the `e` open-in-editor shortcut.
+    /// `~/.lazybox/config.yaml`. Drives the `e` open-in-editor shortcut.
     /// Empty when no editor is installed.
     pub editors: Vec<EditorTemplate>,
     /// Items behind the active editor picker (when `e` finds 2+

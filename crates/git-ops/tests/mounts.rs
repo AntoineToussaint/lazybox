@@ -1,7 +1,7 @@
 //! Tests for `WorktreeManager::apply_mounts`. Uses `tempfile` so the
 //! filesystem state is isolated and nothing leaks onto the host.
 
-use pilot_git_ops::{Mount, Placement, Worktree, WorktreeManager};
+use lazybox_git_ops::{Mount, Placement, Worktree, WorktreeManager};
 use std::path::PathBuf;
 use tempfile::TempDir;
 

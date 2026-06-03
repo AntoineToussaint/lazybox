@@ -36,7 +36,7 @@ name = "gen-bindings"
 path = "tools/gen_bindings.rs"
 required-features = ["bindgen-tool"]
 
-# Vendored upstream crate — don't enforce pilot's lint policy here.
+# Vendored upstream crate — don't enforce lazybox's lint policy here.
 [lints.rust]
 warnings = "allow"
 

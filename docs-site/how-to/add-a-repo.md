@@ -5,7 +5,7 @@ narrow the list to the rows that matter to you.
 
 ## Prerequisites
 
-- pilot is running (see the [Quickstart](../tutorials/quickstart.md)).
+- lazybox is running (see the [Quickstart](../tutorials/quickstart.md)).
 - `gh auth login` has been run, so `gh auth token` resolves a token with access
   to the repository.
 
@@ -16,12 +16,12 @@ You can add a repo in two ways, depending on where you are.
 === "First run"
 
     On the very first launch the setup wizard walks you through adding your
-    first repository. Follow the prompts; pilot starts polling it immediately.
+    first repository. Follow the prompts; lazybox starts polling it immediately.
 
 === "Any time after"
 
     Press `,` to open the **settings palette**, then choose the option to add a
-    repository and enter its `owner/name`. pilot begins polling it (default
+    repository and enter its `owner/name`. lazybox begins polling it (default
     every 60 seconds) and your PRs and issues appear in the sidebar, grouped
     under that repo.
 

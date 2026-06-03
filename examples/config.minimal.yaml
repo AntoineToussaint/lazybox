@@ -1,13 +1,13 @@
-# ~/.pilot/config.yaml — minimal, hand-editable starting point.
+# ~/.lazybox/config.yaml — minimal, hand-editable starting point.
 #
-# You normally do NOT write this by hand. Run pilot once: the first-run setup
+# You normally do NOT write this by hand. Run lazybox once: the first-run setup
 # wizard detects your GitHub login, your installed agents, and your editors,
 # and persists your subscriptions for you. Press `,` any time to add repos,
 # change agents, or edit which roles (author / reviewer / assignee / mentioned)
 # land in your inbox.
 #
 # This file shows the handful of keys it's reasonable to set by hand. Which
-# orgs/repos pilot watches is managed by the wizard, not here.
+# orgs/repos lazybox watches is managed by the wizard, not here.
 
 setup:
   # The `f`/`w` "work" shortcut launches this agent. Unset falls back to claude.
@@ -21,9 +21,9 @@ providers:
 
 ui:
   # Where verbose logs are written. Tail this when something misbehaves:
-  #   tail -f /tmp/pilot.log
-  log_path: /tmp/pilot.log
+  #   tail -f /tmp/lazybox.log
+  log_path: /tmp/lazybox.log
 
-# Credentials are NOT stored here. pilot resolves a GitHub token at runtime via
+# Credentials are NOT stored here. lazybox resolves a GitHub token at runtime via
 # the credential chain: GH_TOKEN → GITHUB_TOKEN → `gh auth token`. Run
 # `gh auth login` once and you are set. For Linear, export LINEAR_API_KEY.

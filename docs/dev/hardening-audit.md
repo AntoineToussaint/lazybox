@@ -100,7 +100,7 @@ the tick driver.
 
 `tests/polling.rs` (3268 LOC) drives the tick/upsert/rescope loop thoroughly
 via `FakeSource`, but the real `GhSource`/`LinearSource` fetch logic —
-tiered full-sweep vs. incremental notifications, `@pilot` mention scanning,
+tiered full-sweep vs. incremental notifications, `@lazybox` mention scanning,
 auto-fix queueing — has no fixture coverage; it is "run against live GitHub and
 squint." **Fix:** record VCR-style HTTP fixtures and assert the adapters
 produce the expected `Vec<Task>` + queued actions offline.
@@ -109,7 +109,7 @@ produce the expected `Vec<Task>` + queued actions offline.
 
 CLAUDE.md (twice) says the four core libs *"must NEVER depend on each other."*
 The actual graph: `core` and `auth` depend on nothing; **`events` depends on
-`pilot-core`** and **`store` depends on `pilot-core`** (both
+`lazybox-core`** and **`store` depends on `lazybox-core`** (both
 `crates/{events,store}/Cargo.toml`). So the literal rule is already violated by
 design. The real, enforceable invariant is: *`core` is the leaf; `auth`,
 `events`, `store` may depend on `core` but not on each other.* **Fix:** correct
@@ -141,10 +141,10 @@ none should stay dead with a blanket allow.
 
 Macro counts (non-test): `trace!` 5, `debug!` 48, **`info!` 125**, **`warn!`
 186**, `error!` 41. `warn!` outnumbering `info!` and 125 info-level lines is the
-"log spam in `/tmp/pilot.log`" the README already apologizes for
+"log spam in `/tmp/lazybox.log`" the README already apologizes for
 (`README.md:17`, `:130`). **Fix:** demote routine lifecycle `info!`s to
 `debug!` and reserve `warn!` for genuinely actionable conditions, so
-`RUST_LOG=pilot=info` is usable by default.
+`RUST_LOG=lazybox=info` is usable by default.
 
 ### <a id="info"></a>Verified-good (recorded, no action)
 

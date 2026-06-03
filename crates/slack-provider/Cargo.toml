@@ -1,13 +1,13 @@
 [package]
-name = "pilot-slack"
+name = "lazybox-slack"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-pilot-auth = { workspace = true }
-pilot-core = { workspace = true }
+lazybox-auth = { workspace = true }
+lazybox-core = { workspace = true }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tokio = { workspace = true }
 tokio-tungstenite = { version = "0.27", features = ["rustls-tls-native-roots"] }

@@ -1,6 +1,6 @@
-# pilot — design
+# lazybox — design
 
-This is the architectural reference for pilot. For execution status and
+This is the architectural reference for lazybox. For execution status and
 phased deliverables see `ROADMAP.md`. For day-to-day conventions see
 `CLAUDE.md`.
 
@@ -10,12 +10,12 @@ Every design decision is filtered through: *would a new contributor
 understand this in 30 minutes? Would a user try this after 5 minutes
 of reading the README?* Concretely:
 
-- **Zero-config first run.** `pilot` with an empty `~/.pilot/config.yaml`
+- **Zero-config first run.** `lazybox` with an empty `~/.lazybox/config.yaml`
   works — agents auto-detect (claude binary in PATH → Claude; codex in
   PATH → Codex). GitHub credentials come from `gh auth token`.
 - **Single binary, no subprocess juggling.** In-process daemon is the
   default. Remote daemon is opt-in, not required.
-- **One-paragraph pitch** at the top of the README: what pilot is,
+- **One-paragraph pitch** at the top of the README: what lazybox is,
   what problem it solves, one GIF.
 - **Every crate has a top-of-file doc comment** explaining its role in
   one paragraph. Newcomers can navigate by folder.
@@ -23,8 +23,8 @@ of reading the README?* Concretely:
   `TaskProvider`, `Store` — each is a 5-method contract at most. No
   god-interfaces.
 - **Config is discoverable.** Every option has a default, a type, and
-  a one-line description. A `pilot config dump` command prints the
-  effective config (defaults + user overrides + `$PILOT_*` env).
+  a one-line description. A `lazybox config dump` command prints the
+  effective config (defaults + user overrides + `$LAZYBOX_*` env).
 - **Errors tell you what to do next.** No "Error: GraphQL: A query
   attribute must be specified" with zero context. Messages link to
   docs or suggest a remediation.
@@ -59,18 +59,18 @@ but not in v2.0.
 
 ```
 ┌───────────────────────────┐
-│ pilot (TUI client)        │   Component tree + message bus.
+│ lazybox (TUI client)        │   Component tree + message bus.
 │ crates/tui/               │   Holds its own libghostty-vt for render.
 └──────────────┬────────────┘
                │  Transport:
                │  - In-process (default): tokio mpsc channel pair
-               │  - Local out-of-process: Unix socket at ~/.pilot/v2/daemon.sock
+               │  - Local out-of-process: Unix socket at ~/.lazybox/v2/daemon.sock
                │  - Remote: SSH tunnel to a remote Unix socket
                │                (no TCP/TLS in v2.0 — SSH handles both)
                │  Framing: length-prefixed bincode
                │  Wire types: crates/ipc/
 ┌──────────────▼────────────┐
-│ pilot-server              │   Owns: SessionManager, TaskProviders,
+│ lazybox-server              │   Owns: SessionManager, TaskProviders,
 │ crates/server/            │     WorktreeManager, PTY TerminalManager,
 │                           │     AgentRuntime registry, Store, JSON API.
 └───────────────────────────┘
@@ -83,9 +83,9 @@ but not in v2.0.
 | Configurability | **Everything that could reasonably be configured, is.** Dashboard tile set + order, agent registry (name, spawn cmd, resume args, state patterns), keybindings per component, filter defaults, snooze presets. YAML, with sensible built-in defaults so empty config is fine. |
 | Client / daemon communication | **Abstracted behind a `Client` trait so local == in-process.** When client and daemon are in the same process (the common case) the "transport" is a pair of tokio mpsc channels — zero serialization, zero sockets. Only when actually remote does it serialize over a socket. TUI code doesn't branch on local vs remote. |
 | Session wrapper (tmux etc.) | **Abstracted via `SessionWrapper` trait.** `TmuxWrapper` is the default impl. Swappable so we can add `ScreenWrapper`, `ZellijWrapper`, or a no-wrapper "raw PTY" mode later without touching the daemon core. |
-| Remote access | **SSH-tunneled Unix socket.** Server binds `~/.pilot/v2/daemon.sock`; remote clients connect through `ssh -L`. No TCP, no TLS cert management — SSH is the trust boundary. |
-| Server lifetime | **Long-running service when out-of-process.** First client auto-starts the daemon subprocess; survives client disconnect; `pilot daemon stop` terminates. Same model as tmux server. For the common in-process case, daemon lives and dies with the TUI. |
-| Binary | **One binary.** `pilot` with subcommands: `pilot` (default: TUI + in-process daemon), `pilot daemon start/stop/status` (manage a standalone daemon), `pilot server api [addr]` (foreground JSON HTTP API gateway), `pilot --connect <socket>` (remote TUI, don't start a local daemon). |
+| Remote access | **SSH-tunneled Unix socket.** Server binds `~/.lazybox/v2/daemon.sock`; remote clients connect through `ssh -L`. No TCP, no TLS cert management — SSH is the trust boundary. |
+| Server lifetime | **Long-running service when out-of-process.** First client auto-starts the daemon subprocess; survives client disconnect; `lazybox daemon stop` terminates. Same model as tmux server. For the common in-process case, daemon lives and dies with the TUI. |
+| Binary | **One binary.** `lazybox` with subcommands: `lazybox` (default: TUI + in-process daemon), `lazybox daemon start/stop/status` (manage a standalone daemon), `lazybox server api [addr]` (foreground JSON HTTP API gateway), `lazybox --connect <socket>` (remote TUI, don't start a local daemon). |
 
 ## Crate layout
 
@@ -104,7 +104,7 @@ crates/
 ├── agents/           Agent trait + Claude/Codex/Cursor/GenericCli + SessionWrapper
 ├── llm-proxy/        127.0.0.1 pass-through recording structured agent telemetry
 ├── server/           PTY lifecycle, polling, agent runs, JSON API gateway
-└── tui/              the `pilot` binary — component tree + key/event dispatch
+└── tui/              the `lazybox` binary — component tree + key/event dispatch
 ```
 
 The four core libraries (`core`, `auth`, `events`, `store`) must not depend
@@ -199,8 +199,8 @@ App
 
 ## Sources (`TaskProvider`)
 
-`TaskProvider` lives in `pilot-core`. Each source returns a stream of
-`Task`s; pilot doesn't care whether a task is a GitHub PR, a GitHub issue,
+`TaskProvider` lives in `lazybox-core`. Each source returns a stream of
+`Task`s; lazybox doesn't care whether a task is a GitHub PR, a GitHub issue,
 or a Linear ticket. All share the same row model, sidebar, status tags,
 search.
 
@@ -227,7 +227,7 @@ search.
   linked rows (config: `display.merge_linked_items`).
 - **Auth.** Each provider builds its own `CredentialProvider` chain.
   GitHub uses `gh auth token`; Linear uses `LINEAR_API_KEY` env or
-  `pilot auth linear` flow (TBD).
+  `lazybox auth linear` flow (TBD).
 
 ### Filter UX
 
@@ -248,7 +248,7 @@ All existing tokens (`needs:reply`, `ci:failed`, `role:author`,
 
 Parsing PTY output to understand what an agent is doing is brittle
 (it worked well enough for "working vs asking", but we hit the ceiling
-fast on tool calls, token counts, cost). Instead, pilot interposes as an
+fast on tool calls, token counts, cost). Instead, lazybox interposes as an
 **LLM API proxy**: the daemon runs a tiny HTTP server, injects
 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` into the agent's env, and
 captures structured metadata on every request/response.
@@ -438,7 +438,7 @@ Built-ins (shipped in `crates/agents/`):
 
 ## Open questions
 
-- **Config format.** YAML today; no plans to move. `pilot config dump`
+- **Config format.** YAML today; no plans to move. `lazybox config dump`
   prints the effective merged config.
 - **Dashboard tile layout.** Fixed grid (2×2) or stacked (1×N with user
   reorder)? Leaning stacked, user can drag/reorder later.

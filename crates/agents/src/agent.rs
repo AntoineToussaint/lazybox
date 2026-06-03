@@ -1,6 +1,6 @@
 //! The `Agent` trait and built-in implementations.
 
-use pilot_ipc::AgentState;
+use lazybox_ipc::AgentState;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,13 +14,13 @@ pub struct SpawnCtx {
     pub pr_number: Option<String>,
     pub env: HashMap<String, String>,
     /// Launch the agent with tool-use permission prompts disabled
-    /// ("no-permission" / bypass mode). Set for pilot-spawned autonomous
+    /// ("no-permission" / bypass mode). Set for lazybox-spawned autonomous
     /// sessions, and for interactive sessions when the user opts in via
     /// the `agent.skip_permissions` toggle. Honored by agents that
     /// support a bypass flag (Claude → `--dangerously-skip-permissions`).
     /// Agents without one ignore it.
     pub skip_permissions: bool,
-    /// Path to a pilot-generated settings file the agent should launch
+    /// Path to a lazybox-generated settings file the agent should launch
     /// with, when the daemon has wired up structured lifecycle hooks
     /// for this spawn. Claude appends `--settings <path>`; agents
     /// without a settings flag ignore it. `None` when hooks aren't
@@ -52,7 +52,7 @@ pub trait Agent: Send + Sync {
     /// (done / nothing happening) — or `None` when there's no
     /// confident determination.
     ///
-    /// This is the per-agent strategy the issue calls for: pilot's
+    /// This is the per-agent strategy the issue calls for: lazybox's
     /// side panel never pattern-matches PTY output itself, it asks the
     /// active session's agent. Each agent kind recognises "working"
     /// differently (Claude's streaming pulser, Codex's spinner, …), so
@@ -107,7 +107,7 @@ pub trait Agent: Send + Sync {
     /// Build the settings JSON to launch this agent with so it reports
     /// state through structured lifecycle hooks instead of (or
     /// alongside) PTY screen-scraping. `hook_command` is the shell
-    /// command the agent should run on each lifecycle event — pilot's
+    /// command the agent should run on each lifecycle event — lazybox's
     /// `hook-ingest` helper, carrying the terminal id. `user_settings`
     /// is the user's own parsed settings, merged in so we don't clobber
     /// their hooks.
@@ -230,7 +230,7 @@ pub mod builtins {
             argv
         }
 
-        /// Wire pilot's hook command into a settings file Claude
+        /// Wire lazybox's hook command into a settings file Claude
         /// launches with, merging the user's existing hooks. Delegates
         /// to [`crate::hook_settings::build_settings`].
         fn build_hook_settings(
@@ -474,11 +474,11 @@ mod tests {
     fn claude_build_hook_settings_wires_command() {
         let claude = Claude;
         let settings = claude
-            .build_hook_settings("pilot hook-ingest --terminal 7", None)
+            .build_hook_settings("lazybox hook-ingest --terminal 7", None)
             .expect("claude supports hooks");
         assert_eq!(
             settings["hooks"]["Stop"][0]["hooks"][0]["command"],
-            "pilot hook-ingest --terminal 7"
+            "lazybox hook-ingest --terminal 7"
         );
     }
 

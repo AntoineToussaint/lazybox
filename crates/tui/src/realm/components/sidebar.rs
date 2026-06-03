@@ -1,7 +1,7 @@
-//! `Sidebar` — tuirealm wrapper around pilot's existing
+//! `Sidebar` — tuirealm wrapper around lazybox's existing
 //! `crate::components::sidebar::Sidebar`.
 //!
-//! Pilot's sidebar is ~1.4k LOC of bespoke render logic (workspace
+//! Lazybox's sidebar is ~1.4k LOC of bespoke render logic (workspace
 //! rows with role badges, status pills, runner badges, mailbox
 //! cycling, time column, …). Rather than copying it, this wrapper
 //! holds an instance and delegates `view` + `on` through to the
@@ -9,18 +9,18 @@
 //!
 //! ## Why this is the right shape during the migration
 //!
-//! The end-state lifts pilot's `impl tui_kit::Pane for Sidebar` body
+//! The end-state lifts lazybox's `impl tui_kit::Pane for Sidebar` body
 //! into inherent methods (or a free `Sidebar::handle_key` /
 //! `::render` / `::on_event`). That conversion is a one-shot
 //! mechanical edit we can do once the kit is deleted. Until then,
 //! UFCS keeps both code paths alive.
 
 use crate::PaneId;
-use crate::components::sidebar::Sidebar as PilotSidebar;
+use crate::components::sidebar::Sidebar as LazyboxSidebar;
 use crate::realm::keymap::realm_key_to_crossterm;
 use crate::realm::{Msg, UserEvent};
-use pilot_ipc::Command as IpcCommand;
-use pilot_ipc::Event as IpcEvent;
+use lazybox_ipc::Command as IpcCommand;
+use lazybox_ipc::Event as IpcEvent;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::Event;
@@ -29,10 +29,10 @@ use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::state::State;
 
-/// Wrap pilot's existing Sidebar so it can be mounted into a
+/// Wrap lazybox's existing Sidebar so it can be mounted into a
 /// tuirealm `Application`.
 pub struct Sidebar {
-    inner: PilotSidebar,
+    inner: LazyboxSidebar,
     /// Whether this pane is the focused one. tuirealm sets it via
     /// the `Attribute::Focus` flag.
     focused: bool,
@@ -43,11 +43,11 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
-    /// Construct using the same `PaneId` the existing pilot sidebar
+    /// Construct using the same `PaneId` the existing lazybox sidebar
     /// uses, so detach specs + helper lookups continue to match.
     pub fn new(id: PaneId) -> Self {
         Self {
-            inner: PilotSidebar::new(id),
+            inner: LazyboxSidebar::new(id),
             focused: true, // sidebar is the default-focused pane
             pending_cmds: Vec::new(),
         }
@@ -83,7 +83,7 @@ impl Sidebar {
     /// response to AgentState transitions. Returns one short string
     /// per Active→Asking edge, suitable for `Notice` rendering. The
     /// OS notification path (above) fires in parallel; this one
-    /// surfaces the same signal inside pilot's footer for users who
+    /// surfaces the same signal inside lazybox's footer for users who
     /// have notifications muted.
     pub fn drain_pending_asking_notices(&mut self) -> Vec<String> {
         self.inner.drain_pending_asking_notices()
@@ -91,7 +91,7 @@ impl Sidebar {
 
     /// Advance the "working" spinner on a low-rate tick. Returns
     /// `true` when the glyph changed so the run loop can mark the
-    /// frame dirty. Delegates to the inner pilot sidebar.
+    /// frame dirty. Delegates to the inner lazybox sidebar.
     pub fn tick_working(&mut self) -> bool {
         self.inner.tick_working()
     }
@@ -102,7 +102,7 @@ impl Sidebar {
     /// Optimistic local update: mark the workspace's PR as `Merged`
     /// so the status pill flips immediately on `Event::PrMerged`,
     /// without waiting for the next poll cycle.
-    pub fn mark_workspace_merged(&mut self, key: &pilot_core::WorkspaceKey) {
+    pub fn mark_workspace_merged(&mut self, key: &lazybox_core::WorkspaceKey) {
         self.inner.mark_workspace_merged(key);
     }
 
@@ -111,9 +111,9 @@ impl Sidebar {
     /// this to decide between InjectPrompt (existing) and Spawn (new).
     pub fn find_agent_terminal(
         &self,
-        workspace_key: &pilot_core::SessionKey,
+        workspace_key: &lazybox_core::SessionKey,
         agent_id: &str,
-    ) -> Option<pilot_ipc::TerminalId> {
+    ) -> Option<lazybox_ipc::TerminalId> {
         self.inner.find_agent_terminal(workspace_key, agent_id)
     }
 
@@ -152,7 +152,7 @@ impl Sidebar {
     }
 
     /// Read currently selected workspace key (for selection projection).
-    pub fn selected_workspace_key(&self) -> Option<&pilot_core::SessionKey> {
+    pub fn selected_workspace_key(&self) -> Option<&lazybox_core::SessionKey> {
         self.inner.selected_session_key()
     }
 
@@ -169,18 +169,21 @@ impl Sidebar {
     /// workspace row OR when the workspace has no sessions yet.
     /// Used by `dispatch_action` to honor "spawn into this specific
     /// session" semantics when the user has a session focused.
-    pub fn selected_session_id(&self) -> Option<pilot_core::SessionId> {
+    pub fn selected_session_id(&self) -> Option<lazybox_core::SessionId> {
         self.inner.selected_session_id()
     }
 
     /// Read the full Workspace under the cursor (for projection into
     /// `Right::set_workspace`).
-    pub fn selected_workspace(&self) -> Option<&pilot_core::Workspace> {
+    pub fn selected_workspace(&self) -> Option<&lazybox_core::Workspace> {
         self.inner.selected_workspace()
     }
 
     /// Look up a workspace by key (independent of cursor).
-    pub fn workspace_by_key(&self, key: &pilot_core::SessionKey) -> Option<&pilot_core::Workspace> {
+    pub fn workspace_by_key(
+        &self,
+        key: &lazybox_core::SessionKey,
+    ) -> Option<&lazybox_core::Workspace> {
         self.inner.workspace_by_key(key)
     }
 
@@ -188,20 +191,20 @@ impl Sidebar {
     /// this to build its candidate list.
     pub fn workspace_iter(
         &self,
-    ) -> impl Iterator<Item = (&pilot_core::SessionKey, &pilot_core::Workspace)> {
+    ) -> impl Iterator<Item = (&lazybox_core::SessionKey, &lazybox_core::Workspace)> {
         self.inner.workspace_iter()
     }
 
-    /// Apply `~/.pilot/config.yaml` overrides to the inner pane in
+    /// Apply `~/.lazybox/config.yaml` overrides to the inner pane in
     /// place. Used by `Model::apply_sidebar_config` once at startup.
     pub fn apply_inner_config(
         &mut self,
-        attention: pilot_config::AttentionConfig,
+        attention: lazybox_config::AttentionConfig,
         collapsed_repos: std::collections::BTreeSet<String>,
         agent_shortcuts: std::collections::HashMap<char, String>,
         default_agent: Option<String>,
-        display: &pilot_config::DisplayConfig,
-        ui: &pilot_config::UiDefaults,
+        display: &lazybox_config::DisplayConfig,
+        ui: &lazybox_config::UiDefaults,
     ) {
         self.inner.apply_config(
             attention,
@@ -218,46 +221,46 @@ impl Sidebar {
     /// See `Sidebar::apply_projects`.
     pub fn apply_projects(
         &mut self,
-        projects: std::collections::BTreeMap<pilot_core::ProjectKey, pilot_core::Project>,
+        projects: std::collections::BTreeMap<lazybox_core::ProjectKey, lazybox_core::Project>,
     ) {
         self.inner.apply_projects(projects);
     }
 
     /// See `Sidebar::focused_project_key`.
-    pub fn focused_project_key(&self) -> Option<pilot_core::ProjectKey> {
+    pub fn focused_project_key(&self) -> Option<lazybox_core::ProjectKey> {
         self.inner.focused_project_key()
     }
 
     /// See `Sidebar::project_label_for`.
-    pub fn project_label_for(&self, key: &pilot_core::ProjectKey) -> Option<String> {
+    pub fn project_label_for(&self, key: &lazybox_core::ProjectKey) -> Option<String> {
         self.inner.project_label_for(key)
     }
 
     /// See `Sidebar::workspaces_iter`.
-    pub fn workspaces_iter(&self) -> impl Iterator<Item = &pilot_core::Workspace> {
+    pub fn workspaces_iter(&self) -> impl Iterator<Item = &lazybox_core::Workspace> {
         self.inner.workspaces_iter()
     }
 
     /// See `Sidebar::workspaces_in_project`.
-    pub fn workspaces_in_project(&self, key: &pilot_core::ProjectKey) -> usize {
+    pub fn workspaces_in_project(&self, key: &lazybox_core::ProjectKey) -> usize {
         self.inner.workspaces_in_project(key)
     }
 
     /// Move the cursor onto the workspace whose key matches.
     /// Returns true if found.
-    pub fn focus_workspace_key(&mut self, key: &pilot_core::SessionKey) -> bool {
+    pub fn focus_workspace_key(&mut self, key: &lazybox_core::SessionKey) -> bool {
         self.inner.focus_workspace_key(key)
     }
 
     /// Move the cursor onto the RepoHeader row for the given project.
     /// See `Sidebar::focus_project_header`.
-    pub fn focus_project_header(&mut self, key: &pilot_core::ProjectKey) -> bool {
+    pub fn focus_project_header(&mut self, key: &lazybox_core::ProjectKey) -> bool {
         self.inner.focus_project_header(key)
     }
 
     /// Move the cursor onto the named session sub-row. Caller is
     /// expected to have first selected the parent workspace.
-    pub fn focus_session_id(&mut self, id: pilot_core::SessionId) -> bool {
+    pub fn focus_session_id(&mut self, id: lazybox_core::SessionId) -> bool {
         self.inner.focus_session_id(id)
     }
 
@@ -347,7 +350,7 @@ impl Component for Sidebar {
 impl AppComponent<Msg, UserEvent> for Sidebar {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
         match ev {
-            // Daemon events route through the inner pilot sidebar's
+            // Daemon events route through the inner lazybox sidebar's
             // `on_event` so its `workspaces` map + `running_terminals`
             // stay current.
             Event::User(UserEvent::Daemon(evt)) => {

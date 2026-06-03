@@ -1,5 +1,5 @@
 //! Tiny utility: translate `tuirealm::event::KeyEvent` into
-//! `crossterm::event::KeyEvent` so existing pilot panes (which take
+//! `crossterm::event::KeyEvent` so existing lazybox panes (which take
 //! crossterm events) can be wrapped without rewriting their key
 //! handlers. Goes away once the panes are fully ported and stop
 //! delegating through UFCS.
@@ -29,7 +29,7 @@ pub fn realm_key_to_crossterm(key: &KeyEvent) -> crossterm::event::KeyEvent {
         Key::Function(n) => CKC::F(n),
         Key::Null => CKC::Null,
         // Realm has a few extras (CapsLock, ScrollLock, Menu, …);
-        // pilot's keymaps ignore them, so treat as Null.
+        // lazybox's keymaps ignore them, so treat as Null.
         _ => CKC::Null,
     };
     let realm_mods = key.modifiers;

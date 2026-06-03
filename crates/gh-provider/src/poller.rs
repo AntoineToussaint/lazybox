@@ -1,6 +1,6 @@
 use crate::GhClient;
-use pilot_core::Task;
-use pilot_events::{Event, EventKind, EventProducer};
+use lazybox_core::Task;
+use lazybox_events::{Event, EventKind, EventProducer};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -133,14 +133,14 @@ impl GhPoller {
                         "github",
                         EventKind::NewActivity {
                             task_id: task.id.clone(),
-                            activity: pilot_core::Activity {
+                            activity: lazybox_core::Activity {
                                 author: "github".into(),
                                 body: format!(
                                     "Title: \"{}\" → \"{}\"",
                                     prev_task.title, task.title
                                 ),
                                 created_at: chrono::Utc::now(),
-                                kind: pilot_core::ActivityKind::StatusChange,
+                                kind: lazybox_core::ActivityKind::StatusChange,
                                 node_id: None,
                                 path: None,
                                 line: None,

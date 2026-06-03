@@ -3,7 +3,7 @@
 //! root directory on disk, and a stable key. Workspaces (PRs, issues,
 //! ad-hoc work) live under a Project.
 //!
-//! Today's pilot inferred "projects" from `task.repo` strings at
+//! Today's lazybox inferred "projects" from `task.repo` strings at
 //! render time, which made it impossible to:
 //!   1. Show an empty repo header (no workspaces yet).
 //!   2. Have a local non-provider project (the old "sandbox" was the
@@ -56,7 +56,7 @@ impl ProjectKey {
     }
 
     /// Build a Project key for a local-only project. `slug` should be
-    /// pre-sluggified (e.g. via `pilot_core::slug::slugify`).
+    /// pre-sluggified (e.g. via `lazybox_core::slug::slugify`).
     pub fn local(slug: &str) -> Self {
         Self(format!("local-{slug}"))
     }
@@ -83,7 +83,7 @@ pub struct Project {
     /// local projects).
     pub name: String,
     /// Where worktrees for workspaces under this project root. `None`
-    /// means "use the default `~/.pilot/v2/<workspace_key>/`". Local
+    /// means "use the default `~/.lazybox/v2/<workspace_key>/`". Local
     /// projects can override this to point at an existing repo on
     /// disk; provider projects leave it `None` and let
     /// `WorktreeManager` allocate.

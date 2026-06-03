@@ -42,9 +42,9 @@ const TRIGGER_LONG_SNOOZE: crate::latch_set::KeyTrigger =
 /// animation only nudges the render loop a few times a second while
 /// an agent is busy (and never when nothing is working).
 const WORKING_SPIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
+use lazybox_core::{SessionId, SessionKey, Workspace};
+use lazybox_ipc::{Command, Event, TerminalId, TerminalKind};
 use pills::visual_width;
-use pilot_core::{SessionId, SessionKey, Workspace};
-use pilot_ipc::{Command, Event, TerminalId, TerminalKind};
 use ratatui::Frame;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -148,7 +148,7 @@ impl WorkspaceKind {
     /// Classify a workspace. A filled PR slot wins; otherwise any
     /// attached issue (GitHub or Linear) makes it an issue bucket; a
     /// workspace with no task at all is `Other`.
-    pub fn classify(w: &pilot_core::Workspace) -> Self {
+    pub fn classify(w: &lazybox_core::Workspace) -> Self {
         if w.pr.is_some() {
             WorkspaceKind::Pr
         } else if !w.gh_issues.is_empty() || !w.linear_issues.is_empty() {
@@ -184,12 +184,12 @@ impl WorkspaceKind {
 /// Sort key for the `ByRole*` modes. Author first (your own PRs are
 /// usually the most actionable), then Reviewer (someone's waiting on
 /// you), then Assignee, then Mentioned. Lower number sorts first.
-pub fn role_rank(role: Option<pilot_core::TaskRole>) -> u8 {
+pub fn role_rank(role: Option<lazybox_core::TaskRole>) -> u8 {
     match role {
-        Some(pilot_core::TaskRole::Author) => 0,
-        Some(pilot_core::TaskRole::Reviewer) => 1,
-        Some(pilot_core::TaskRole::Assignee) => 2,
-        Some(pilot_core::TaskRole::Mentioned) => 3,
+        Some(lazybox_core::TaskRole::Author) => 0,
+        Some(lazybox_core::TaskRole::Reviewer) => 1,
+        Some(lazybox_core::TaskRole::Assignee) => 2,
+        Some(lazybox_core::TaskRole::Mentioned) => 3,
         None => 4,
     }
 }
@@ -219,16 +219,16 @@ impl RoleFilter {
 
     /// Decide whether a workspace passes this filter. `None` means
     /// "no primary task" — only `All` accepts it.
-    pub fn accepts(self, role: Option<pilot_core::TaskRole>) -> bool {
+    pub fn accepts(self, role: Option<lazybox_core::TaskRole>) -> bool {
         let Some(role) = role else {
             return matches!(self, RoleFilter::All);
         };
         match self {
             RoleFilter::All => true,
-            RoleFilter::Author => role == pilot_core::TaskRole::Author,
-            RoleFilter::Reviewer => role == pilot_core::TaskRole::Reviewer,
-            RoleFilter::Assignee => role == pilot_core::TaskRole::Assignee,
-            RoleFilter::Mentioned => role == pilot_core::TaskRole::Mentioned,
+            RoleFilter::Author => role == lazybox_core::TaskRole::Author,
+            RoleFilter::Reviewer => role == lazybox_core::TaskRole::Reviewer,
+            RoleFilter::Assignee => role == lazybox_core::TaskRole::Assignee,
+            RoleFilter::Mentioned => role == lazybox_core::TaskRole::Mentioned,
         }
     }
 }
@@ -306,7 +306,7 @@ pub struct RepoSummary {
     /// Workspaces with at least one indicator demanding the user's
     /// attention: unread activity, CI failing, review pending /
     /// changes-requested, agent in `Asking` state. Configurable in
-    /// the future; defaults are the indicators pilot already
+    /// the future; defaults are the indicators lazybox already
     /// surfaces as badges on workspace rows.
     pub attention: usize,
 }
@@ -349,7 +349,7 @@ pub struct Sidebar {
     /// See [`crate::latch_set::LatchSet`].
     latches: crate::latch_set::LatchSet<SessionKey>,
     /// `z` snooze duration. Configurable via
-    /// `~/.pilot/config.yaml::ui.short_snooze` (default 4h).
+    /// `~/.lazybox/config.yaml::ui.short_snooze` (default 4h).
     short_snooze: std::time::Duration,
     /// `Shift-Z` long-snooze duration. Configurable via
     /// `ui.long_snooze` (default 1 year).
@@ -364,27 +364,27 @@ pub struct Sidebar {
     /// and kept in sync via `TerminalSpawned` / `TerminalExited`.
     running_terminals: HashMap<TerminalId, (SessionKey, TerminalKind)>,
     /// Threshold config for the per-repo "needs attention" counter.
-    /// Loaded from `~/.pilot/config.yaml::attention` at startup;
+    /// Loaded from `~/.lazybox/config.yaml::attention` at startup;
     /// toggle individual signals there to customize.
-    attention: pilot_config::AttentionConfig,
+    attention: lazybox_config::AttentionConfig,
     /// Projects mirrored from the daemon's project table. Each entry
     /// emits a sidebar header so a project with zero workspaces
     /// still appears. Populated by `apply_projects` (called from the
     /// model when `Snapshot` / `ProjectUpserted` / `ProjectRemoved`
     /// fires, and when the wizard's selected scopes are synthesized
     /// into Project entries — the model layer owns that merge).
-    projects: BTreeMap<pilot_core::ProjectKey, pilot_core::Project>,
+    projects: BTreeMap<lazybox_core::ProjectKey, lazybox_core::Project>,
     /// Agent the `f` (fix) shortcut spawns. Defaults to `claude`; the
     /// AppRoot can override from YAML (`setup.default_agent`).
     default_agent: String,
     /// Surface merged + closed tasks in the Inbox view. Off by default
     /// — the Inbox stays focused on actionable work and the Inactive
     /// mailbox owns the history. Wired from
-    /// `~/.pilot/config.yaml::display.show_inactive_in_inbox`.
+    /// `~/.lazybox/config.yaml::display.show_inactive_in_inbox`.
     show_inactive_in_inbox: bool,
     /// Render row type indicators as plain ASCII (`p`/`i`/`l`) rather
     /// than the default unicode glyphs (`⇄`/`○`/`◆`). Wired from
-    /// `~/.pilot/config.yaml::display.ascii_glyphs` — the escape
+    /// `~/.lazybox/config.yaml::display.ascii_glyphs` — the escape
     /// hatch for fonts that don't render the glyphs as a single cell.
     ascii_glyphs: bool,
     /// Notifications queued in response to "any agent → Asking"
@@ -395,7 +395,7 @@ pub struct Sidebar {
     /// after each event delivery and routes to `platform::notify_user`.
     pending_notifications: Vec<PendingNotification>,
     /// One short string per Active→Asking transition since the last
-    /// drain. Surfaces in pilot's footer alongside the OS notification
+    /// drain. Surfaces in lazybox's footer alongside the OS notification
     /// so users with notifications muted still see the prompt.
     pending_asking_notices: Vec<String>,
     /// Workspace keys whose agent is currently in `AgentState::InputNeeded`.
@@ -477,11 +477,11 @@ impl Sidebar {
                 s.register(TRIGGER_LONG_SNOOZE);
                 s
             },
-            short_snooze: pilot_config::UiDefaults::default().short_snooze,
-            long_snooze: pilot_config::UiDefaults::default().long_snooze,
+            short_snooze: lazybox_config::UiDefaults::default().short_snooze,
+            long_snooze: lazybox_config::UiDefaults::default().long_snooze,
             agent_shortcuts,
             running_terminals: HashMap::new(),
-            attention: pilot_config::AttentionConfig::default(),
+            attention: lazybox_config::AttentionConfig::default(),
             projects: BTreeMap::new(),
             default_agent: "claude".to_string(),
             show_inactive_in_inbox: false,
@@ -599,13 +599,13 @@ impl Sidebar {
     /// arrives from the daemon — GitHub accepted the merge, so the
     /// pill should reflect that NOW, not 30s from now when the next
     /// poll rebroadcasts the workspace.
-    pub fn mark_workspace_merged(&mut self, key: &pilot_core::WorkspaceKey) {
+    pub fn mark_workspace_merged(&mut self, key: &lazybox_core::WorkspaceKey) {
         // Read the clock before the mutable borrow of `workspaces`.
         let now = self.now();
         let sk: SessionKey = key.into();
         if let Some(workspace) = self.workspaces.get_mut(&sk) {
             if let Some(pr) = workspace.pr.as_mut() {
-                pr.state = pilot_core::TaskState::Merged;
+                pr.state = lazybox_core::TaskState::Merged;
                 // Stamp the close moment so the grace window keys off
                 // it (not the stale `updated_at`) until the next poll
                 // backfills GitHub's real `closedAt`.
@@ -649,7 +649,7 @@ impl Sidebar {
     /// map clones the daemon's view, no diffing required.
     pub fn apply_projects(
         &mut self,
-        projects: BTreeMap<pilot_core::ProjectKey, pilot_core::Project>,
+        projects: BTreeMap<lazybox_core::ProjectKey, lazybox_core::Project>,
     ) {
         if projects != self.projects {
             self.projects = projects;
@@ -658,17 +658,17 @@ impl Sidebar {
     }
 
     /// Override the attention thresholds + initial collapse set
-    /// from `~/.pilot/config.yaml`. Call once after construction
+    /// from `~/.lazybox/config.yaml`. Call once after construction
     /// (typically in main, between `Sidebar::new` and the first
     /// daemon Subscribe).
     pub fn apply_config(
         &mut self,
-        attention: pilot_config::AttentionConfig,
+        attention: lazybox_config::AttentionConfig,
         collapsed_repos: BTreeSet<String>,
         agent_shortcuts: HashMap<char, String>,
         default_agent: Option<String>,
-        display: &pilot_config::DisplayConfig,
-        ui: &pilot_config::UiDefaults,
+        display: &lazybox_config::DisplayConfig,
+        ui: &lazybox_config::UiDefaults,
     ) {
         self.attention = attention;
         self.collapsed_repos = collapsed_repos;
@@ -744,28 +744,28 @@ impl Sidebar {
     /// GitHub would let us merge — Approved + CI green / none — so
     /// the contextual footer can advertise the key only when it'll
     /// actually work.
-    pub fn merge_target_for_cursor(&self) -> Option<pilot_core::WorkspaceKey> {
+    pub fn merge_target_for_cursor(&self) -> Option<lazybox_core::WorkspaceKey> {
         let workspace = self.selected_workspace()?;
         let pr = workspace.pr.as_ref()?;
         if !matches!(
             pr.state,
-            pilot_core::TaskState::Open | pilot_core::TaskState::InReview
+            lazybox_core::TaskState::Open | lazybox_core::TaskState::InReview
         ) {
             return None;
         }
-        if !matches!(pr.review, pilot_core::ReviewStatus::Approved) {
+        if !matches!(pr.review, lazybox_core::ReviewStatus::Approved) {
             return None;
         }
         if !matches!(
             pr.ci,
-            pilot_core::CiStatus::Success | pilot_core::CiStatus::None
+            lazybox_core::CiStatus::Success | lazybox_core::CiStatus::None
         ) {
             return None;
         }
         if pr.mergeable.is_conflicting() {
             return None;
         }
-        Some(pilot_core::WorkspaceKey::new(workspace.key.as_str()))
+        Some(lazybox_core::WorkspaceKey::new(workspace.key.as_str()))
     }
 
     /// If the row under the cursor is a PR with `ci == Fail`, return
@@ -871,7 +871,7 @@ impl Sidebar {
     /// was before and the new RepoHeader is unreachable via j/k
     /// (header rows are skipped by `move_cursor_by`), which made the
     /// new-project flow feel broken.
-    pub fn focus_project_header(&mut self, key: &pilot_core::ProjectKey) -> bool {
+    pub fn focus_project_header(&mut self, key: &lazybox_core::ProjectKey) -> bool {
         let label = match self.projects.get(key) {
             Some(p) => p.name.clone(),
             None => return false,
@@ -1045,15 +1045,15 @@ impl Sidebar {
     ///   display name matches the header string.
     /// - Anything else → `None`. The model surfaces a footer notice
     ///   ("select a project first") instead of mounting the prompt.
-    pub fn focused_project_key(&self) -> Option<pilot_core::ProjectKey> {
+    pub fn focused_project_key(&self) -> Option<lazybox_core::ProjectKey> {
         match self.visible.get(self.cursor)? {
             VisibleRow::Workspace(k) => {
                 let w = self.workspaces.get(k)?;
-                pilot_core::workspace_project_key(w)
+                lazybox_core::workspace_project_key(w)
             }
             VisibleRow::Session { workspace, .. } => {
                 let w = self.workspaces.get(workspace)?;
-                pilot_core::workspace_project_key(w)
+                lazybox_core::workspace_project_key(w)
             }
             VisibleRow::RepoHeader(name) => self
                 .projects
@@ -1086,7 +1086,7 @@ impl Sidebar {
     /// focused issue — the cross-workspace relationship lookup
     /// doesn't fit the per-workspace `intent::resolve_*` shape, so
     /// the dispatcher walks the map directly.
-    pub fn workspaces_iter(&self) -> impl Iterator<Item = &pilot_core::Workspace> {
+    pub fn workspaces_iter(&self) -> impl Iterator<Item = &lazybox_core::Workspace> {
         self.workspaces.values()
     }
 
@@ -1191,7 +1191,7 @@ impl Sidebar {
     /// `None` when the key isn't in the local project cache (which
     /// shouldn't happen for any user-driven action, since the user
     /// can only target a project that's on screen).
-    pub fn project_label_for(&self, key: &pilot_core::ProjectKey) -> Option<String> {
+    pub fn project_label_for(&self, key: &lazybox_core::ProjectKey) -> Option<String> {
         self.projects.get(key).map(|p| p.name.clone())
     }
 
@@ -1199,7 +1199,7 @@ impl Sidebar {
     /// given project. Used by the project-delete confirm so the
     /// prompt can tell the user how much carnage they're authorizing
     /// ("Delete project X? Its 3 workspaces…").
-    pub fn workspaces_in_project(&self, key: &pilot_core::ProjectKey) -> usize {
+    pub fn workspaces_in_project(&self, key: &lazybox_core::ProjectKey) -> usize {
         self.workspaces
             .values()
             .filter(|w| w.project_key.as_ref() == Some(key))
@@ -1359,11 +1359,11 @@ impl Sidebar {
             self.collapsed_repos.insert(repo.clone());
         }
         self.recompute_visible();
-        // Persist the new set to ~/.pilot/config.yaml::ui.collapsed_repos
+        // Persist the new set to ~/.lazybox/config.yaml::ui.collapsed_repos
         // so the layout survives restart. Best-effort; an I/O
         // error here just means next launch starts expanded.
         let snapshot = self.collapsed_repos.clone();
-        if let Err(e) = pilot_config::Config::save_with(|c| c.ui.collapsed_repos = snapshot) {
+        if let Err(e) = lazybox_config::Config::save_with(|c| c.ui.collapsed_repos = snapshot) {
             tracing::warn!("save collapsed_repos failed: {e}");
         }
         // Always park the cursor on the toggled header so
@@ -1518,7 +1518,7 @@ impl Sidebar {
     ///
     /// Catalog-driven: this method only decides *which* actions to
     /// surface right now. The catalog's `ActionDef::effective_keys_display`
-    /// resolves the actual chord (honoring `~/.pilot/config.yaml::ui.
+    /// resolves the actual chord (honoring `~/.lazybox/config.yaml::ui.
     /// action_keys` overrides), and `contextual_label` resolves the
     /// state-aware verb. Adding a new sidebar action means landing it
     /// in the catalog and pushing it here — the footer, `?` help, and
@@ -1532,7 +1532,7 @@ impl Sidebar {
         overrides: &std::collections::BTreeMap<String, String>,
     ) -> Vec<crate::Binding> {
         use crate::Binding;
-        use pilot_tui_core::action::{Action, ActionDef, contextual_label};
+        use lazybox_tui_core::action::{Action, ActionDef, contextual_label};
 
         let workspace = self.selected_workspace();
         let is_ready = self.merge_target_for_cursor().is_some();
@@ -1603,7 +1603,7 @@ impl Sidebar {
     pub fn detachable(&self) -> Option<crate::DetachSpec> {
         // Cursor on a session sub-row → detach that specific session.
         // Cursor on a workspace row → detach the whole workspace
-        // (both spawn the same kind of child pilot — different
+        // (both spawn the same kind of child lazybox — different
         // arg shape).
         match self.visible.get(self.cursor)? {
             VisibleRow::Session {
@@ -1644,10 +1644,10 @@ pub(crate) use pills::{
 #[cfg(test)]
 pub(crate) use pills::{pill_for_tag, status_pill};
 
-// Prompt builders moved to `pilot_tui_core::prompts` (so `intent`,
+// Prompt builders moved to `lazybox_tui_core::prompts` (so `intent`,
 // which also lives there, can call them without creating a dep
 // cycle). Re-exported here at the legacy `sidebar::*` paths for
 // back-compat.
-pub use pilot_tui_core::prompts::{
+pub use lazybox_tui_core::prompts::{
     build_fix_ci_prompt, build_fix_conflict_prompt, build_work_prompt,
 };

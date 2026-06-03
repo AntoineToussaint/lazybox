@@ -1,6 +1,6 @@
-//! # pilot-gh
+//! # lazybox-gh
 //!
-//! GitHub event provider for pilot. Uses a single GraphQL query per poll
+//! GitHub event provider for lazybox. Uses a single GraphQL query per poll
 //! cycle to fetch all PRs with comments, threads, and review status.
 
 mod client;
@@ -12,7 +12,7 @@ pub mod rate_budget;
 
 pub use client::GhClient;
 pub use graphql::PrDetails;
-pub use mentions::{MentionSource, PilotMention, scan_issue};
+pub use mentions::{LazyboxMention, MentionSource, scan_issue};
 pub use notifications::{
     NotificationEntry, NotificationTarget, NotificationTargetKind, NotificationsPoll,
     NotificationsSnapshot,
@@ -20,8 +20,8 @@ pub use notifications::{
 pub use poller::GhPoller;
 pub use rate_budget::{AcquireError, RateBudget, RemoteRateLimit, Snapshot as RateSnapshot};
 
-use pilot_auth::{CommandProvider, CredentialChain, EnvProvider};
-use pilot_core::{ProviderError, Scope, ScopeSource};
+use lazybox_auth::{CommandProvider, CredentialChain, EnvProvider};
+use lazybox_core::{ProviderError, Scope, ScopeSource};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -51,7 +51,7 @@ pub fn credential_chain() -> CredentialChain {
 /// without leaking GitHub-specific types.
 ///
 /// Constructed by the daemon at setup time from an authenticated
-/// `GhClient`; tests use `pilot_core::MockScopeSource` instead so
+/// `GhClient`; tests use `lazybox_core::MockScopeSource` instead so
 /// no real token is needed.
 pub struct GhScopes {
     client: Arc<GhClient>,

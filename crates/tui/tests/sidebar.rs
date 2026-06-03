@@ -18,12 +18,12 @@
 
 use chrono::{DateTime, Duration, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pilot_core::{
+use lazybox_core::{
     CiStatus, ReviewStatus, SessionKey, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey,
 };
-use pilot_ipc::{Command, Event, TerminalKind};
-use pilot_tui::PaneId;
-use pilot_tui::components::{Mailbox, Sidebar, sidebar::VisibleRow};
+use lazybox_ipc::{Command, Event, TerminalKind};
+use lazybox_tui::PaneId;
+use lazybox_tui::components::{Mailbox, Sidebar, sidebar::VisibleRow};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::prelude::Rect;
@@ -59,7 +59,7 @@ fn make_task(repo: &str, key: &str, updated: DateTime<Utc>) -> Task {
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: pilot_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::Mergeable,
         is_behind_base: false,
         node_id: None,
         needs_reply: false,
@@ -76,11 +76,11 @@ fn make_workspace(repo: &str, key: &str, updated: DateTime<Utc>) -> Workspace {
 }
 
 /// Resolve the wire-side selection key for `task_key`. This is the
-/// sanitized form `pilot_core::workspace_key_for` produces — tests
+/// sanitized form `lazybox_core::workspace_key_for` produces — tests
 /// assert against this so they stay accurate when the sanitizer
 /// changes.
 fn expected_session_key(task_key: &str) -> String {
-    pilot_core::workspace_key_for(&make_task("", task_key, Utc::now()))
+    lazybox_core::workspace_key_for(&make_task("", task_key, Utc::now()))
 }
 
 fn key_code(code: KeyCode) -> KeyEvent {
@@ -217,7 +217,7 @@ fn rows_are_grouped_by_repo_with_headers() {
     // default ByRoleSplit injects KindHeader rows between PR and
     // issue groups, which shifts the expected index assertions in
     // this test.
-    while s.sort_mode() != pilot_tui::components::sidebar::SortMode::Recent {
+    while s.sort_mode() != lazybox_tui::components::sidebar::SortMode::Recent {
         s.cycle_sort_mode();
     }
     let now = Utc::now();
@@ -257,7 +257,7 @@ fn cursor_walks_through_repo_headers() {
     // Flip to Recent sort so the layout is just headers + workspaces
     // (no KindHeader interleaving from the default ByRoleSplit mode).
     let mut s = Sidebar::new(PaneId::new(1));
-    while s.sort_mode() != pilot_tui::components::sidebar::SortMode::Recent {
+    while s.sort_mode() != lazybox_tui::components::sidebar::SortMode::Recent {
         s.cycle_sort_mode();
     }
     let now = Utc::now();
@@ -446,7 +446,7 @@ fn custom_agent_shortcuts_override_defaults() {
     let outcome = s.handle_key(key_code(KeyCode::Char('x')), &mut cmds);
     assert_eq!(
         outcome,
-        pilot_tui::PaneOutcome::Pass,
+        lazybox_tui::PaneOutcome::Pass,
         "unmapped key bubbles, doesn't spawn a random default"
     );
     assert!(cmds.is_empty());
@@ -561,7 +561,7 @@ fn unknown_key_bubbles_up() {
     let mut s = populated_sidebar();
     let mut cmds = Vec::new();
     let outcome = s.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut cmds);
-    assert_eq!(outcome, pilot_tui::PaneOutcome::Pass);
+    assert_eq!(outcome, lazybox_tui::PaneOutcome::Pass);
     assert!(cmds.is_empty());
 }
 
@@ -593,8 +593,8 @@ fn render_smoke_has_mailbox_label_and_grouped_rows() {
     // without truncating the title — this test is about presence,
     // not density.
     let rendered = render_to_string(&mut s, 80, 12, true);
-    // V1-style brand label: `PILOT` for the Inbox mailbox.
-    assert!(rendered.contains("PILOT"));
+    // V1-style brand label: `LAZYBOX` for the Inbox mailbox.
+    assert!(rendered.contains("LAZYBOX"));
     assert!(rendered.contains('2'), "row count in title");
     assert!(rendered.contains("owner/repo"), "repo header rendered");
     assert!(rendered.contains("task: o/r#1"), "first workspace visible");
@@ -675,7 +675,7 @@ fn render_hides_scrollbar_when_list_fits() {
 #[test]
 fn render_mailbox_toggles_title() {
     let mut s = populated_sidebar();
-    // PILOT → INACTIVE → SNOOZED; uppercase brand label per V1.
+    // LAZYBOX → INACTIVE → SNOOZED; uppercase brand label per V1.
     s.handle_key(shift_char('S'), &mut Vec::new());
     let rendered = render_to_string(&mut s, 40, 12, true);
     assert!(rendered.contains("INACTIVE"));
@@ -698,10 +698,10 @@ fn workspace_key_round_trips_through_session_key() {
 
 // ── Workspace ↔ Session expansion (the user-facing rule) ─────────────
 
-use pilot_core::{SessionKind, WorkspaceSession};
+use lazybox_core::{SessionKind, WorkspaceSession};
 use std::path::PathBuf;
 
-fn add_session(workspace: &mut Workspace, name: &str) -> pilot_core::SessionId {
+fn add_session(workspace: &mut Workspace, name: &str) -> lazybox_core::SessionId {
     let mut s = WorkspaceSession::new(
         workspace.key.clone(),
         SessionKind::Shell,
@@ -872,10 +872,10 @@ fn empty_project_still_renders_a_header() {
         projects: vec![],
     });
     let mut projects = std::collections::BTreeMap::new();
-    let pk = pilot_core::ProjectKey::github("fresh-org", "new-repo");
+    let pk = lazybox_core::ProjectKey::github("fresh-org", "new-repo");
     projects.insert(
         pk.clone(),
-        pilot_core::Project::new(pk, "fresh-org/new-repo", Utc::now()),
+        lazybox_core::Project::new(pk, "fresh-org/new-repo", Utc::now()),
     );
     s.apply_projects(projects);
 
@@ -885,7 +885,7 @@ fn empty_project_still_renders_a_header() {
         .visible_rows()
         .iter()
         .filter_map(|r| match r {
-            pilot_tui::components::sidebar::VisibleRow::RepoHeader(name) => Some(name.as_str()),
+            lazybox_tui::components::sidebar::VisibleRow::RepoHeader(name) => Some(name.as_str()),
             _ => None,
         })
         .collect();
@@ -1004,7 +1004,7 @@ fn action_keys_on_repo_header_are_silent_noops() {
     // row 0 (rather than going through a KindHeader in the default
     // ByRoleSplit mode).
     let mut s = Sidebar::new(PaneId::new(1));
-    while s.sort_mode() != pilot_tui::components::sidebar::SortMode::Recent {
+    while s.sort_mode() != lazybox_tui::components::sidebar::SortMode::Recent {
         s.cycle_sort_mode();
     }
     let now = Utc::now();
@@ -1327,9 +1327,9 @@ fn merged_closed_hidden_from_inbox_by_default() {
     let now = Utc::now();
     let stale = now - Duration::hours(2);
     let mut merged = make_task("o/r", "o/r#1", stale);
-    merged.state = pilot_core::TaskState::Merged;
+    merged.state = lazybox_core::TaskState::Merged;
     let mut closed = make_task("o/r", "o/r#2", stale);
-    closed.state = pilot_core::TaskState::Closed;
+    closed.state = lazybox_core::TaskState::Closed;
     let open = make_task("o/r", "o/r#3", now);
 
     s.on_event(&Event::Snapshot {
@@ -1364,24 +1364,24 @@ fn show_inactive_in_inbox_surfaces_merged_and_closed() {
     use std::collections::{BTreeSet, HashMap};
 
     let mut s = Sidebar::new(PaneId::new(1));
-    let display = pilot_config::DisplayConfig {
+    let display = lazybox_config::DisplayConfig {
         show_inactive_in_inbox: true,
-        ..pilot_config::DisplayConfig::default()
+        ..lazybox_config::DisplayConfig::default()
     };
     s.apply_config(
-        pilot_config::AttentionConfig::default(),
+        lazybox_config::AttentionConfig::default(),
         BTreeSet::new(),
         HashMap::new(),
         None,
         &display,
-        &pilot_config::UiDefaults::default(),
+        &lazybox_config::UiDefaults::default(),
     );
 
     let now = Utc::now();
     let mut merged = make_task("o/r", "o/r#1", now);
-    merged.state = pilot_core::TaskState::Merged;
+    merged.state = lazybox_core::TaskState::Merged;
     let mut closed = make_task("o/r", "o/r#2", now);
-    closed.state = pilot_core::TaskState::Closed;
+    closed.state = lazybox_core::TaskState::Closed;
     let open = make_task("o/r", "o/r#3", now);
 
     s.on_event(&Event::Snapshot {
@@ -1441,7 +1441,7 @@ fn work_key_emits_spawn_command_on_issue() {
 // ── Event::AgentState wiring ──────────────────────────────────────────
 //
 // The daemon broadcasts `Event::AgentState { Asking }` when Claude /
-// Codex hits a yes-no prompt. Pilot tracks this in a sidebar-local
+// Codex hits a yes-no prompt. Lazybox tracks this in a sidebar-local
 // asking-set (NOT on `workspace.sessions[i].state`, which gets
 // blown away every poll cycle when `WorkspaceUpserted` reloads
 // the workspace from the persisted store). These tests pin:
@@ -1455,18 +1455,18 @@ fn work_key_emits_spawn_command_on_issue() {
 //      repeat broadcasts.
 
 fn agent_workspace(repo: &str, key: &str, now: DateTime<Utc>) -> Workspace {
-    use pilot_core::{SessionKind, WorkspaceSession};
+    use lazybox_core::{SessionKind, WorkspaceSession};
     use std::path::PathBuf;
 
     let mut w = make_workspace(repo, key, now);
     w.sessions.push(WorkspaceSession {
-        id: pilot_core::SessionId::new(),
+        id: lazybox_core::SessionId::new(),
         workspace_key: w.key.clone(),
         name: "claude".into(),
         kind: SessionKind::Agent {
             agent_id: "claude".into(),
         },
-        state: pilot_core::SessionRunState::Active,
+        state: lazybox_core::SessionRunState::Active,
         worktree_path: PathBuf::from("/tmp/x"),
         created_at: now,
         last_output_at: None,
@@ -1498,9 +1498,9 @@ fn agent_state_asking_makes_workspace_findable_by_bang() {
     );
 
     s.on_event(&Event::AgentState {
-        terminal_id: pilot_ipc::TerminalId(0),
+        terminal_id: lazybox_ipc::TerminalId(0),
         session_key: key.clone(),
-        state: pilot_ipc::AgentState::InputNeeded,
+        state: lazybox_ipc::AgentState::InputNeeded,
     });
 
     // After: `!` can find it.
@@ -1528,9 +1528,9 @@ fn agent_state_working_shows_spinner_and_is_not_asking() {
     let _ = s.drain_pending_notifications();
 
     s.on_event(&Event::AgentState {
-        terminal_id: pilot_ipc::TerminalId(0),
+        terminal_id: lazybox_ipc::TerminalId(0),
         session_key: key.clone(),
-        state: pilot_ipc::AgentState::Working,
+        state: lazybox_ipc::AgentState::Working,
     });
 
     // Working is not an attention signal.
@@ -1576,16 +1576,16 @@ fn working_then_input_needed_swaps_the_shared_slot() {
     });
 
     s.on_event(&Event::AgentState {
-        terminal_id: pilot_ipc::TerminalId(0),
+        terminal_id: lazybox_ipc::TerminalId(0),
         session_key: key.clone(),
-        state: pilot_ipc::AgentState::Working,
+        state: lazybox_ipc::AgentState::Working,
     });
     assert!(!s.focus_next_asking_workspace(), "working is not asking");
 
     s.on_event(&Event::AgentState {
-        terminal_id: pilot_ipc::TerminalId(0),
+        terminal_id: lazybox_ipc::TerminalId(0),
         session_key: key.clone(),
-        state: pilot_ipc::AgentState::InputNeeded,
+        state: lazybox_ipc::AgentState::InputNeeded,
     });
 
     // Now asking; the spinner is gone and the `?` pill is up.
@@ -1628,9 +1628,9 @@ fn workspace_upserted_does_not_clobber_asking_state() {
 
     // 1. Agent goes Asking.
     s.on_event(&Event::AgentState {
-        terminal_id: pilot_ipc::TerminalId(0),
+        terminal_id: lazybox_ipc::TerminalId(0),
         session_key: key.clone(),
-        state: pilot_ipc::AgentState::InputNeeded,
+        state: lazybox_ipc::AgentState::InputNeeded,
     });
     assert!(s.focus_next_asking_workspace(), "asking after the event");
 
@@ -1671,9 +1671,9 @@ fn agent_state_asking_queues_a_desktop_notification() {
     let _ = s.drain_pending_notifications();
 
     s.on_event(&Event::AgentState {
-        terminal_id: pilot_ipc::TerminalId(0),
+        terminal_id: lazybox_ipc::TerminalId(0),
         session_key: key.clone(),
-        state: pilot_ipc::AgentState::InputNeeded,
+        state: lazybox_ipc::AgentState::InputNeeded,
     });
     let queued = s.drain_pending_notifications();
     assert_eq!(queued.len(), 1, "first transition must enqueue once");
@@ -1685,9 +1685,9 @@ fn agent_state_asking_queues_a_desktop_notification() {
 
     // Repeat broadcast — no new notification.
     s.on_event(&Event::AgentState {
-        terminal_id: pilot_ipc::TerminalId(0),
+        terminal_id: lazybox_ipc::TerminalId(0),
         session_key: key,
-        state: pilot_ipc::AgentState::InputNeeded,
+        state: lazybox_ipc::AgentState::InputNeeded,
     });
     let queued = s.drain_pending_notifications();
     assert!(
@@ -1705,17 +1705,17 @@ fn desktop_notify_off_suppresses_os_banner_but_keeps_footer_notice() {
     use std::collections::{BTreeSet, HashMap};
 
     let mut s = Sidebar::new(PaneId::new(1));
-    let attention = pilot_config::AttentionConfig {
+    let attention = lazybox_config::AttentionConfig {
         desktop_notify: false,
-        ..pilot_config::AttentionConfig::default()
+        ..lazybox_config::AttentionConfig::default()
     };
     s.apply_config(
         attention,
         BTreeSet::new(),
         HashMap::new(),
         None,
-        &pilot_config::DisplayConfig::default(),
-        &pilot_config::UiDefaults::default(),
+        &lazybox_config::DisplayConfig::default(),
+        &lazybox_config::UiDefaults::default(),
     );
 
     let now = Utc::now();
@@ -1730,9 +1730,9 @@ fn desktop_notify_off_suppresses_os_banner_but_keeps_footer_notice() {
     let _ = s.drain_pending_asking_notices();
 
     s.on_event(&Event::AgentState {
-        terminal_id: pilot_ipc::TerminalId(0),
+        terminal_id: lazybox_ipc::TerminalId(0),
         session_key: key,
-        state: pilot_ipc::AgentState::InputNeeded,
+        state: lazybox_ipc::AgentState::InputNeeded,
     });
 
     assert!(
@@ -1805,15 +1805,15 @@ fn ci_failure_transition_respects_desktop_notify_off() {
     use std::collections::{BTreeSet, HashMap};
     let mut s = Sidebar::new(PaneId::new(1));
     s.apply_config(
-        pilot_config::AttentionConfig {
+        lazybox_config::AttentionConfig {
             desktop_notify: false,
-            ..pilot_config::AttentionConfig::default()
+            ..lazybox_config::AttentionConfig::default()
         },
         BTreeSet::new(),
         HashMap::new(),
         None,
-        &pilot_config::DisplayConfig::default(),
-        &pilot_config::UiDefaults::default(),
+        &lazybox_config::DisplayConfig::default(),
+        &lazybox_config::UiDefaults::default(),
     );
     s.on_event(&Event::WorkspaceUpserted(Box::new(workspace_with(
         "o/r#1",
@@ -1848,9 +1848,9 @@ fn bang_jumps_to_next_asking_workspace() {
     });
 
     s.on_event(&Event::AgentState {
-        terminal_id: pilot_ipc::TerminalId(0),
+        terminal_id: lazybox_ipc::TerminalId(0),
         session_key: k2.clone(),
-        state: pilot_ipc::AgentState::InputNeeded,
+        state: lazybox_ipc::AgentState::InputNeeded,
     });
 
     let moved = s.focus_next_asking_workspace();

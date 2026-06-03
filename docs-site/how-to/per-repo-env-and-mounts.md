@@ -1,6 +1,6 @@
 # Per-repo env and mounts
 
-Goal: make every worktree pilot creates for a repository feel like a real
+Goal: make every worktree lazybox creates for a repository feel like a real
 checkout — with the environment variables, shared directories, and helper
 scripts your project needs.
 
@@ -8,7 +8,7 @@ Because each workspace lives in its own fresh git worktree, things that sit
 *outside* version control (a `.env`, a `node_modules`, a local credentials dir)
 are not there by default. Per-repo configuration fills that gap.
 
-All of this lives under `repos.<owner/name>` in `~/.pilot/config.yaml`.
+All of this lives under `repos.<owner/name>` in `~/.lazybox/config.yaml`.
 
 ## Inject environment variables
 
@@ -46,7 +46,7 @@ repos:
 
 ## Materialize helper scripts
 
-`scripts` writes executables into `<worktree>/_pilot/scripts/<name>` so agents
+`scripts` writes executables into `<worktree>/_lazybox/scripts/<name>` so agents
 and shells can call them. Provide the body inline with `content`, or point at a
 file with `source`:
 
@@ -63,7 +63,7 @@ repos:
         source: /Users/me/widgets-shared/lint.sh
 ```
 
-Each script lands at `<worktree>/_pilot/scripts/seed-db` (and `lint`),
+Each script lands at `<worktree>/_lazybox/scripts/seed-db` (and `lint`),
 executable, in every worktree for that repo.
 
 ## Verify
@@ -73,7 +73,7 @@ variables and files are present:
 
 ```sh
 echo "$DATABASE_URL"
-ls -l node_modules .secrets _pilot/scripts
+ls -l node_modules .secrets _lazybox/scripts
 ```
 
 ## Related

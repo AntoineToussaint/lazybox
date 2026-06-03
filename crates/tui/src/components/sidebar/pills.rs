@@ -13,7 +13,7 @@
 //! gymnastics for no real readability win.
 
 use super::Mailbox;
-use pilot_core::{SessionKey, Workspace};
+use lazybox_core::{SessionKey, Workspace};
 use ratatui::style::{Color, Modifier, Style};
 
 /// Right-side status pill showing the most actionable problem on the
@@ -31,7 +31,7 @@ pub(crate) struct StatusPill {
 /// Does this workspace want the user's attention right now? Drives
 /// the "needs attention" counter on the collapsed repo header.
 /// Each signal (unread / CI / review / agent-asking / mentioned)
-/// is independently toggleable via `~/.pilot/config.yaml::attention`.
+/// is independently toggleable via `~/.lazybox/config.yaml::attention`.
 /// Single-cell type marker rendered immediately before the number
 /// on each workspace row. The glyph sits flush against the number
 /// (`⇄312`, not `[PR]   #312`) so the title column gets the cells
@@ -47,7 +47,7 @@ pub(crate) struct StatusPill {
 ///
 /// `ascii` toggles the fallback letters (`p` / `i` / `l`) for fonts
 /// that don't render the unicode glyphs reliably as a single cell.
-/// Wired from `display.ascii_glyphs` in `~/.pilot/config.yaml`.
+/// Wired from `display.ascii_glyphs` in `~/.lazybox/config.yaml`.
 pub(crate) fn workspace_type_label(workspace: &Workspace, ascii: bool) -> Option<&'static str> {
     if workspace.pr.is_some() {
         return Some(if ascii { "p" } else { "⇄" });
@@ -88,7 +88,7 @@ pub(crate) fn workspace_type_label(workspace: &Workspace, ascii: bool) -> Option
 /// window the row would IMMEDIATELY disappear from the Inbox view
 /// the user was looking at — they'd never see the MERGED pill.
 ///
-/// 30 minutes is enough to give pilot a poll cycle (or two) to
+/// 30 minutes is enough to give lazybox a poll cycle (or two) to
 /// surface the state transition while the user is still around,
 /// without permanently cluttering Inbox with completed work.
 pub const INACTIVE_GRACE: chrono::Duration = chrono::Duration::minutes(30);
@@ -117,7 +117,7 @@ pub fn mailbox_membership(
         .map(|t| {
             matches!(
                 t.state,
-                pilot_core::TaskState::Merged | pilot_core::TaskState::Closed
+                lazybox_core::TaskState::Merged | lazybox_core::TaskState::Closed
             ) && (now - t.closed_at.unwrap_or(t.updated_at)) < INACTIVE_GRACE
         })
         .unwrap_or(false);
@@ -134,7 +134,7 @@ pub fn mailbox_membership(
                 Some(t) => {
                     let is_terminal = matches!(
                         t.state,
-                        pilot_core::TaskState::Merged | pilot_core::TaskState::Closed
+                        lazybox_core::TaskState::Merged | lazybox_core::TaskState::Closed
                     );
                     !is_terminal || recently_inactivated
                 }
@@ -147,7 +147,7 @@ pub fn mailbox_membership(
             }
             matches!(
                 workspace.primary_task().map(|t| t.state),
-                Some(pilot_core::TaskState::Merged) | Some(pilot_core::TaskState::Closed)
+                Some(lazybox_core::TaskState::Merged) | Some(lazybox_core::TaskState::Closed)
             )
         }
     }
@@ -201,7 +201,7 @@ pub fn workspace_attention_signals(
     if let Some(t) = w.primary_task() {
         if matches!(
             t.ci,
-            pilot_core::CiStatus::Failure | pilot_core::CiStatus::Mixed
+            lazybox_core::CiStatus::Failure | lazybox_core::CiStatus::Mixed
         ) {
             out.push(AttentionSignal::CiFailing);
         }
@@ -212,12 +212,12 @@ pub fn workspace_attention_signals(
         // attention dot — confusing.
         if matches!(
             t.review,
-            pilot_core::ReviewStatus::Pending | pilot_core::ReviewStatus::ChangesRequested,
+            lazybox_core::ReviewStatus::Pending | lazybox_core::ReviewStatus::ChangesRequested,
         ) || !t.reviewers.is_empty()
         {
             out.push(AttentionSignal::ReviewPending);
         }
-        if matches!(t.role, pilot_core::TaskRole::Mentioned) {
+        if matches!(t.role, lazybox_core::TaskRole::Mentioned) {
             out.push(AttentionSignal::Mentioned);
         }
     }
@@ -227,7 +227,10 @@ pub fn workspace_attention_signals(
 /// Is `signal` enabled in the user's attention config? Exhaustive
 /// match so a new `AttentionSignal` variant fails to compile until
 /// it's wired up here AND in `AttentionConfig`.
-pub(crate) fn attention_gate(signal: AttentionSignal, cfg: &pilot_config::AttentionConfig) -> bool {
+pub(crate) fn attention_gate(
+    signal: AttentionSignal,
+    cfg: &lazybox_config::AttentionConfig,
+) -> bool {
     match signal {
         AttentionSignal::Unread => cfg.unread,
         AttentionSignal::AgentAsking => cfg.agent_asking,
@@ -239,7 +242,7 @@ pub(crate) fn attention_gate(signal: AttentionSignal, cfg: &pilot_config::Attent
 
 pub(crate) fn workspace_needs_attention(
     w: &Workspace,
-    cfg: &pilot_config::AttentionConfig,
+    cfg: &lazybox_config::AttentionConfig,
     agents_asking: &std::collections::HashSet<SessionKey>,
 ) -> bool {
     workspace_attention_signals(w, agents_asking)
@@ -249,7 +252,7 @@ pub(crate) fn workspace_needs_attention(
 
 /// Render the right-trailer pill for a task. **Pure mapping** from
 /// `StatusTag::for_task(task)` — no priority logic lives here, all
-/// of that is in `pilot_core::task::StatusTag::for_task`. Adding a
+/// of that is in `lazybox_core::task::StatusTag::for_task`. Adding a
 /// new visual state means adding a `StatusTag` variant first; the
 /// match below is exhaustive, so the compiler then catches the
 /// missing pill arm.
@@ -257,8 +260,8 @@ pub(crate) fn workspace_needs_attention(
 /// Returning `Option<StatusPill>` so the `StatusTag::None` case
 /// renders as a hole (no pill) without making every caller filter.
 #[cfg(test)]
-pub(crate) fn status_pill(task: &pilot_core::Task) -> Option<StatusPill> {
-    pill_for_tag(pilot_core::StatusTag::for_task(task))
+pub(crate) fn status_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
+    pill_for_tag(lazybox_core::StatusTag::for_task(task))
 }
 
 /// Two-column status: a (review-or-lifecycle, ci) pair. Review and
@@ -274,8 +277,8 @@ pub(crate) fn status_pill(task: &pilot_core::Task) -> Option<StatusPill> {
 /// **Open PRs in flight** return `(review_pill, ci_pill)` so the
 /// row shows both. Either slot may be `None` (e.g. CI not yet
 /// configured → ci=None; new PR with no review activity → review=None).
-pub(crate) fn status_pills(task: &pilot_core::Task) -> (Option<StatusPill>, Option<StatusPill>) {
-    use pilot_core::{CiStatus, ReviewStatus, TaskState};
+pub(crate) fn status_pills(task: &lazybox_core::Task) -> (Option<StatusPill>, Option<StatusPill>) {
+    use lazybox_core::{CiStatus, ReviewStatus, TaskState};
     if let Some(lifecycle) = lifecycle_pill(task) {
         return (Some(lifecycle), None);
     }
@@ -348,8 +351,8 @@ pub(crate) fn status_pills(task: &pilot_core::Task) -> (Option<StatusPill>, Opti
 /// Single-pill lifecycle override: returns `Some` for states that
 /// take over the whole status area (no review+ci pair beside them).
 /// `None` for normal open PRs in flight.
-fn lifecycle_pill(task: &pilot_core::Task) -> Option<StatusPill> {
-    use pilot_core::{CiStatus, ReviewStatus, StatusTag, TaskState};
+fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
+    use lazybox_core::{CiStatus, ReviewStatus, StatusTag, TaskState};
     let pill_red = Style::default()
         .bg(Color::Indexed(196))
         .fg(Color::Black)
@@ -437,8 +440,8 @@ fn lifecycle_pill(task: &pilot_core::Task) -> Option<StatusPill> {
 /// `(StatusTag, StatusPill)` pair without going through a
 /// constructed `Task`.
 #[cfg(test)]
-pub(crate) fn pill_for_tag(tag: pilot_core::StatusTag) -> Option<StatusPill> {
-    use pilot_core::StatusTag::*;
+pub(crate) fn pill_for_tag(tag: lazybox_core::StatusTag) -> Option<StatusPill> {
+    use lazybox_core::StatusTag::*;
     let theme = crate::theme::current();
     // Indexed palette colors render as the terminal's "bright"
     // red/yellow on most setups — punchy without the muddy mid-red
@@ -558,12 +561,15 @@ pub(crate) fn relative_time(
 /// All colors come from the active theme — no hardcoded RGB — so
 /// the badges sit on the same palette as the rest of the UI and
 /// don't fight for attention.
-pub(crate) fn role_badge(theme: &crate::theme::Theme, role: pilot_core::TaskRole) -> (char, Color) {
+pub(crate) fn role_badge(
+    theme: &crate::theme::Theme,
+    role: lazybox_core::TaskRole,
+) -> (char, Color) {
     match role {
-        pilot_core::TaskRole::Author => ('A', theme.success),
-        pilot_core::TaskRole::Reviewer => ('R', theme.accent),
-        pilot_core::TaskRole::Assignee => ('@', theme.warn),
-        pilot_core::TaskRole::Mentioned => ('·', theme.text_dim),
+        lazybox_core::TaskRole::Author => ('A', theme.success),
+        lazybox_core::TaskRole::Reviewer => ('R', theme.accent),
+        lazybox_core::TaskRole::Assignee => ('@', theme.warn),
+        lazybox_core::TaskRole::Mentioned => ('·', theme.text_dim),
     }
 }
 

@@ -3,7 +3,7 @@ use crate::{Credential, CredentialError, CredentialProvider};
 /// Resolves a credential from an environment variable.
 ///
 /// ```rust,no_run
-/// use pilot_auth::EnvProvider;
+/// use lazybox_auth::EnvProvider;
 /// let provider = EnvProvider::new("GH_TOKEN");
 /// ```
 pub struct EnvProvider {

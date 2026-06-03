@@ -2,7 +2,7 @@
 //!
 //! When the daemon detects a Claude/Codex/Cursor session has flipped
 //! into `Asking` (yes/no prompt, tool approval), the user needs to
-//! know — even when pilot isn't the focused window.
+//! know — even when lazybox isn't the focused window.
 //!
 //! ## Why this state lives in the sidebar, not on `Workspace`
 //!
@@ -34,8 +34,8 @@
 //! working-set are kept mutually exclusive: every event applies to
 //! both, landing the key in at most one.
 
-use pilot_core::{SessionKey, Workspace};
-use pilot_ipc::AgentState;
+use lazybox_core::{SessionKey, Workspace};
+use lazybox_ipc::AgentState;
 use std::collections::HashSet;
 
 /// How the workspace's overall "needs my input" status changed as a
@@ -183,7 +183,7 @@ pub fn next_flagged_workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pilot_core::WorkspaceKey;
+    use lazybox_core::WorkspaceKey;
 
     fn ws_key(n: u32) -> SessionKey {
         SessionKey::from(&WorkspaceKey::new(format!("owner/repo#{n}")))

@@ -1,7 +1,7 @@
 use crate::ServerConfig;
 use chrono::{DateTime, Utc};
-use pilot_auth::Credential;
-use pilot_ipc::{Event, PrincipalId, ProviderCredentialInput, ProviderCredentialMetadata};
+use lazybox_auth::Credential;
+use lazybox_ipc::{Event, PrincipalId, ProviderCredentialInput, ProviderCredentialMetadata};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -296,7 +296,7 @@ fn send_auth_error(
     let _ = tx.send(Event::provider_error(
         &format!("auth:{provider_id}"),
         error.to_string(),
-        pilot_ipc::ProviderErrorKind::Auth,
+        lazybox_ipc::ProviderErrorKind::Auth,
     ));
 }
 

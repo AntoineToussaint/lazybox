@@ -9,8 +9,8 @@ use crate::ServerConfig;
 use crate::agent_stream::{
     ClaudeStreamConfig, ParsedAgentEvent, encode_user_text_jsonl, spawn_claude_stream,
 };
-use pilot_agents::SpawnCtx;
-use pilot_ipc::{
+use lazybox_agents::SpawnCtx;
+use lazybox_ipc::{
     AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRuntimeMode,
     AgentUsage, Event,
 };
@@ -29,8 +29,8 @@ pub struct AgentRunHandle {
 
 pub async fn handle_start_agent_run(
     config: &ServerConfig,
-    session_key: pilot_core::SessionKey,
-    session_id: Option<pilot_core::SessionId>,
+    session_key: lazybox_core::SessionKey,
+    session_id: Option<lazybox_core::SessionId>,
     agent: String,
     mode: AgentRuntimeMode,
     cwd: Option<String>,
@@ -216,21 +216,21 @@ pub async fn handle_answer_agent_question(
 
 async fn resolve_cwd(
     config: &ServerConfig,
-    session_key: &pilot_core::SessionKey,
-    session_id: Option<pilot_core::SessionId>,
+    session_key: &lazybox_core::SessionKey,
+    session_id: Option<lazybox_core::SessionId>,
     cwd: Option<String>,
 ) -> Option<PathBuf> {
     if let Some(cwd) = cwd {
         return Some(PathBuf::from(cwd));
     }
-    let key = pilot_core::WorkspaceKey::new(session_key.as_str());
+    let key = lazybox_core::WorkspaceKey::new(session_key.as_str());
     let workspace = config
         .store
         .get_workspace(&key)
         .ok()
         .flatten()
         .and_then(|record| record.workspace_json)
-        .and_then(|json| serde_json::from_str::<pilot_core::Workspace>(&json).ok());
+        .and_then(|json| serde_json::from_str::<lazybox_core::Workspace>(&json).ok());
     let Some(workspace) = workspace else {
         return std::env::current_dir().ok();
     };

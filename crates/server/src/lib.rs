@@ -1,8 +1,8 @@
-//! pilot-server — owns state and IO on behalf of TUI clients.
+//! lazybox-server — owns state and IO on behalf of TUI clients.
 //!
 //! Lives as a library so the in-process transport can call `Server::serve`
 //! without a subprocess. When out-of-process (remote access, long-running
-//! service), the `pilot` binary's `daemon` subcommand invokes the same
+//! service), the `lazybox` binary's `daemon` subcommand invokes the same
 //! `Server::serve` entrypoint over a Unix socket.
 //!
 //! Today the daemon exposes the PTY lifecycle (spawn/write/resize/close,
@@ -42,21 +42,21 @@ pub mod socket_service;
 pub mod spawn_handler;
 
 use crate::backend::{RawPtyBackend, SessionBackend, TmuxBackend};
-use pilot_agents::Registry;
-use pilot_ipc::{AgentRunId, Connection, Event, TerminalId};
-use pilot_store::{MemoryStore, SqliteStore, Store};
+use lazybox_agents::Registry;
+use lazybox_ipc::{AgentRunId, Connection, Event, TerminalId};
+use lazybox_store::{MemoryStore, SqliteStore, Store};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::{Mutex, broadcast};
 
-/// Where pilot keeps its persistent state. Thin alias over
-/// [`pilot_core::paths::state_db`] so callers don't have to import
+/// Where lazybox keeps its persistent state. Thin alias over
+/// [`lazybox_core::paths::state_db`] so callers don't have to import
 /// the paths module just for this one helper. Override via the
-/// `PILOT_HOME` env var (see `pilot_core::paths` for details).
+/// `LAZYBOX_HOME` env var (see `lazybox_core::paths` for details).
 pub fn state_db_path() -> PathBuf {
-    pilot_core::paths::state_db()
+    lazybox_core::paths::state_db()
 }
 
 /// Open the persistent store at the canonical path. Returns `None` on
@@ -76,11 +76,11 @@ pub fn open_store() -> Option<Arc<dyn Store>> {
     }
 }
 
-// REMOVED: wipe_legacy_worktrees. We never delete from `~/.pilot/`.
-// pilot is constrained to `~/.pilot/v2/` for everything it writes
+// REMOVED: wipe_legacy_worktrees. We never delete from `~/.lazybox/`.
+// lazybox is constrained to `~/.lazybox/v2/` for everything it writes
 // — `state.db`, the bare-clone cache, every worktree. If a user
-// has real work in `~/.pilot/worktrees/` from a prior tool, that's
-// their data and pilot leaves it alone.
+// has real work in `~/.lazybox/worktrees/` from a prior tool, that's
+// their data and lazybox leaves it alone.
 
 /// Server-side error type. Used by `Server::serve` and the internal
 /// helpers it composes. Public API exposes `Display` only — the
@@ -101,7 +101,7 @@ pub enum ServerError {
     SerdeJson(#[from] serde_json::Error),
     /// Persistent-store read/write failure. The inner error is the
     /// store-specific message; we lose the typed variant on the way
-    /// in since `pilot_store` errors are `Box<dyn Error>`-shaped, but
+    /// in since `lazybox_store` errors are `Box<dyn Error>`-shaped, but
     /// the human message survives.
     #[error("store: {0}")]
     Store(String),
@@ -111,7 +111,7 @@ pub enum ServerError {
     /// concrete worktree target.
     #[error("workspace: {0}")]
     Workspace(String),
-    /// Worktree / git operation failed. Wraps `pilot_git_ops` errors
+    /// Worktree / git operation failed. Wraps `lazybox_git_ops` errors
     /// + checkout / mount failures.
     #[error("worktree: {0}")]
     Worktree(String),
@@ -191,13 +191,13 @@ pub const TERMINAL_MAP_LOCK_ORDER: &str =
 /// `Sender` (clone is a refcount), `agents` is a small struct.
 ///
 /// Per-process invariant: there is exactly **one** `ServerConfig` for
-/// the whole process. Both `run_embedded` and `pilot daemon start`
+/// the whole process. Both `run_embedded` and `lazybox daemon start`
 /// build it once at startup so the polling loop's `SessionUpserted`
 /// events reach every connected TUI.
 #[derive(Clone)]
 pub struct ServerConfig {
     pub agents: Registry,
-    /// Persistent state at `~/.pilot/v2/state.db`.
+    /// Persistent state at `~/.lazybox/v2/state.db`.
     pub store: Arc<dyn Store>,
     /// Process-wide event bus. Producers (poller, PTY, proxy) call
     /// `bus.send(event)`; each `Server::serve` connection subscribes
@@ -219,12 +219,12 @@ pub struct ServerConfig {
     /// session in the process. Populated by `handle_spawn` when a
     /// terminal is created against a known session; entries are
     /// removed on `TerminalExited`.
-    pub terminal_sessions: Arc<Mutex<HashMap<TerminalId, pilot_core::SessionId>>>,
+    pub terminal_sessions: Arc<Mutex<HashMap<TerminalId, lazybox_core::SessionId>>>,
     /// Cached `AgentState` per agent terminal. Populated by the
     /// output pump's state detector; transitions are broadcast as
     /// `Event::AgentState`. Caching avoids broadcasting on every
     /// PTY chunk when nothing changed.
-    pub agent_states: Arc<Mutex<HashMap<TerminalId, pilot_ipc::AgentState>>>,
+    pub agent_states: Arc<Mutex<HashMap<TerminalId, lazybox_ipc::AgentState>>>,
     /// Wire-side metadata per terminal: `(session_key, kind)`. The
     /// `terminals` map only carries the backend key; clients
     /// reconnecting via Subscribe need the full pairing so the
@@ -232,7 +232,7 @@ pub struct ServerConfig {
     /// strip. Populated by `handle_spawn`, cleaned on
     /// `TerminalExited`.
     pub terminal_meta:
-        Arc<Mutex<HashMap<TerminalId, (pilot_core::SessionKey, pilot_ipc::TerminalKind)>>>,
+        Arc<Mutex<HashMap<TerminalId, (lazybox_core::SessionKey, lazybox_ipc::TerminalKind)>>>,
     /// Terminals launched in no-permission / bypass mode (autonomous
     /// sessions). Populated by `handle_spawn` when a spawn skips
     /// permission prompts; read by `snapshot_terminals` so a
@@ -273,7 +273,7 @@ pub struct ServerConfig {
     pub credential_store: Arc<dyn auth::CredentialStore>,
     /// Local/dev fallback principal. API auth can replace this with a
     /// per-connection principal later.
-    pub default_principal_id: pilot_ipc::PrincipalId,
+    pub default_principal_id: lazybox_ipc::PrincipalId,
     /// Cross-tick polling state — provider-error debounce + the
     /// "already prompted" set for out-of-scope workspaces. Shared
     /// between the long-lived poll loop and `Command::Refresh`'s
@@ -303,7 +303,7 @@ pub struct ServerConfig {
     /// means reaching it is a brief `std::sync::Mutex` clone-out that
     /// never blocks on `poll_state` and never spans the `from_credential`
     /// await.
-    pub gh_client_cache: Arc<std::sync::Mutex<Option<pilot_gh::GhClient>>>,
+    pub gh_client_cache: Arc<std::sync::Mutex<Option<lazybox_gh::GhClient>>>,
     /// Issue→PR merge-prompt dedupe memory. Deliberately separate from
     /// `poll_state`: the collapse path that touches it runs inside an
     /// `upsert`, and sharing `poll_state`'s non-reentrant
@@ -333,7 +333,7 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    /// Open the store at `~/.pilot/v2/state.db`.
+    /// Open the store at `~/.lazybox/v2/state.db`.
     ///
     /// Open failures (permissions, disk corruption) fall back to an
     /// in-memory store so the daemon still starts — better empty than
@@ -355,8 +355,8 @@ impl ServerConfig {
         };
 
         // Pick the strongest available backend. tmux means sessions
-        // survive pilot-server restart and can be attached externally
-        // via `tmux -L pilot attach -t <key>`; raw-pty is the
+        // survive lazybox-server restart and can be attached externally
+        // via `tmux -L lazybox attach -t <key>`; raw-pty is the
         // ephemeral fallback when tmux isn't installed.
         let backend: Arc<dyn SessionBackend> = match TmuxBackend::detect() {
             Some(t) => {
@@ -373,7 +373,7 @@ impl ServerConfig {
 
     /// Build a config with an explicit store and the deterministic
     /// raw-pty backend. Used by tests and the `--test` mode that
-    /// don't want tmux side-effects (a real pilot tmux server, leftover
+    /// don't want tmux side-effects (a real lazybox tmux server, leftover
     /// sessions on disk). Production paths go through
     /// `from_user_config` which auto-detects tmux.
     pub fn with_store(store: Arc<dyn Store>) -> Self {
@@ -400,7 +400,7 @@ impl ServerConfig {
             agent_runs: Arc::new(Mutex::new(HashMap::new())),
             next_agent_run_id: Arc::new(AtomicU64::new(1)),
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),
-            default_principal_id: pilot_ipc::PrincipalId::local(),
+            default_principal_id: lazybox_ipc::PrincipalId::local(),
             poll_state: Arc::new(Mutex::new(polling::TickState::default())),
             gh_client_cache: Arc::new(std::sync::Mutex::new(None)),
             merge_prompts: Arc::new(Mutex::new(polling::MergePromptMemory::default())),
@@ -459,13 +459,13 @@ impl ServerConfig {
     pub async fn terminal_meta_for(
         &self,
         id: TerminalId,
-    ) -> Option<(pilot_core::SessionKey, pilot_ipc::TerminalKind)> {
+    ) -> Option<(lazybox_core::SessionKey, lazybox_ipc::TerminalKind)> {
         self.terminal_meta.lock().await.get(&id).cloned()
     }
 
     /// Snapshot the cached `AgentState` for a terminal. `None` when
     /// the pump hasn't observed a state transition yet.
-    pub async fn agent_state_for(&self, id: TerminalId) -> Option<pilot_ipc::AgentState> {
+    pub async fn agent_state_for(&self, id: TerminalId) -> Option<lazybox_ipc::AgentState> {
         self.agent_states.lock().await.get(&id).copied()
     }
 }
@@ -515,50 +515,50 @@ impl Server {
                     // but still emit one line per command so the cadence
                     // is observable.
                     let label = match &cmd {
-                        pilot_ipc::Command::Spawn { .. } => "Spawn",
-                        pilot_ipc::Command::Close { .. } => "Close",
-                        pilot_ipc::Command::IngestHook { .. } => "IngestHook",
-                        pilot_ipc::Command::CreateSession { .. } => "CreateSession",
-                        pilot_ipc::Command::Subscribe => "Subscribe",
-                        pilot_ipc::Command::Refresh => "Refresh",
-                        pilot_ipc::Command::Write { .. } => "Write",
-                        pilot_ipc::Command::Resize { .. } => "Resize",
-                        pilot_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
-                        pilot_ipc::Command::MarkRead { .. } => "MarkRead",
-                        pilot_ipc::Command::FocusWorkspace { .. } => "FocusWorkspace",
-                        pilot_ipc::Command::MarkActivityRead { .. } => "MarkActivityRead",
-                        pilot_ipc::Command::UnmarkActivityRead { .. } => "UnmarkActivityRead",
-                        pilot_ipc::Command::FetchPrDetails { .. } => "FetchPrDetails",
-                        pilot_ipc::Command::PostReply { .. } => "PostReply",
-                        pilot_ipc::Command::MergePr { .. } => "MergePr",
-                        pilot_ipc::Command::ConfirmMerge { .. } => "ConfirmMerge",
-                        pilot_ipc::Command::Snooze { .. } => "Snooze",
-                        pilot_ipc::Command::Unsnooze { .. } => "Unsnooze",
-                        pilot_ipc::Command::Kill { .. } => "Kill",
-                        pilot_ipc::Command::RemoveMergedWorkspace { .. } => "RemoveMergedWorkspace",
-                        pilot_ipc::Command::DeleteProject { .. } => "DeleteProject",
-                        pilot_ipc::Command::CollapseIntoPr { .. } => "CollapseIntoPr",
-                        pilot_ipc::Command::CreateWorkspace { .. } => "CreateWorkspace",
-                        pilot_ipc::Command::CreateProject { .. } => "CreateProject",
-                        pilot_ipc::Command::AdoptSessions { .. } => "AdoptSessions",
-                        pilot_ipc::Command::RequestReviewers { .. } => "RequestReviewers",
-                        pilot_ipc::Command::AddAssignees { .. } => "AddAssignees",
-                        pilot_ipc::Command::SetAssignees { .. } => "SetAssignees",
-                        pilot_ipc::Command::SetLabels { .. } => "SetLabels",
-                        pilot_ipc::Command::FetchRepoLabels { .. } => "FetchRepoLabels",
-                        pilot_ipc::Command::SetSessionLayout { .. } => "SetSessionLayout",
-                        pilot_ipc::Command::StartAgentRun { .. } => "StartAgentRun",
-                        pilot_ipc::Command::SendAgentInput { .. } => "SendAgentInput",
-                        pilot_ipc::Command::InterruptAgentRun { .. } => "InterruptAgentRun",
-                        pilot_ipc::Command::DecideAgentApproval { .. } => "DecideAgentApproval",
-                        pilot_ipc::Command::AnswerAgentQuestion { .. } => "AnswerAgentQuestion",
-                        pilot_ipc::Command::UpsertProviderCredential { .. } => "UpsertProviderCredential",
-                        pilot_ipc::Command::RemoveProviderCredential { .. } => "RemoveProviderCredential",
-                        pilot_ipc::Command::ListProviderCredentials { .. } => "ListProviderCredentials",
-                        pilot_ipc::Command::CleanWorktrees => "CleanWorktrees",
-                        pilot_ipc::Command::InspectWorktrees => "InspectWorktrees",
-                        pilot_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
-                        pilot_ipc::Command::Shutdown => "Shutdown",
+                        lazybox_ipc::Command::Spawn { .. } => "Spawn",
+                        lazybox_ipc::Command::Close { .. } => "Close",
+                        lazybox_ipc::Command::IngestHook { .. } => "IngestHook",
+                        lazybox_ipc::Command::CreateSession { .. } => "CreateSession",
+                        lazybox_ipc::Command::Subscribe => "Subscribe",
+                        lazybox_ipc::Command::Refresh => "Refresh",
+                        lazybox_ipc::Command::Write { .. } => "Write",
+                        lazybox_ipc::Command::Resize { .. } => "Resize",
+                        lazybox_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
+                        lazybox_ipc::Command::MarkRead { .. } => "MarkRead",
+                        lazybox_ipc::Command::FocusWorkspace { .. } => "FocusWorkspace",
+                        lazybox_ipc::Command::MarkActivityRead { .. } => "MarkActivityRead",
+                        lazybox_ipc::Command::UnmarkActivityRead { .. } => "UnmarkActivityRead",
+                        lazybox_ipc::Command::FetchPrDetails { .. } => "FetchPrDetails",
+                        lazybox_ipc::Command::PostReply { .. } => "PostReply",
+                        lazybox_ipc::Command::MergePr { .. } => "MergePr",
+                        lazybox_ipc::Command::ConfirmMerge { .. } => "ConfirmMerge",
+                        lazybox_ipc::Command::Snooze { .. } => "Snooze",
+                        lazybox_ipc::Command::Unsnooze { .. } => "Unsnooze",
+                        lazybox_ipc::Command::Kill { .. } => "Kill",
+                        lazybox_ipc::Command::RemoveMergedWorkspace { .. } => "RemoveMergedWorkspace",
+                        lazybox_ipc::Command::DeleteProject { .. } => "DeleteProject",
+                        lazybox_ipc::Command::CollapseIntoPr { .. } => "CollapseIntoPr",
+                        lazybox_ipc::Command::CreateWorkspace { .. } => "CreateWorkspace",
+                        lazybox_ipc::Command::CreateProject { .. } => "CreateProject",
+                        lazybox_ipc::Command::AdoptSessions { .. } => "AdoptSessions",
+                        lazybox_ipc::Command::RequestReviewers { .. } => "RequestReviewers",
+                        lazybox_ipc::Command::AddAssignees { .. } => "AddAssignees",
+                        lazybox_ipc::Command::SetAssignees { .. } => "SetAssignees",
+                        lazybox_ipc::Command::SetLabels { .. } => "SetLabels",
+                        lazybox_ipc::Command::FetchRepoLabels { .. } => "FetchRepoLabels",
+                        lazybox_ipc::Command::SetSessionLayout { .. } => "SetSessionLayout",
+                        lazybox_ipc::Command::StartAgentRun { .. } => "StartAgentRun",
+                        lazybox_ipc::Command::SendAgentInput { .. } => "SendAgentInput",
+                        lazybox_ipc::Command::InterruptAgentRun { .. } => "InterruptAgentRun",
+                        lazybox_ipc::Command::DecideAgentApproval { .. } => "DecideAgentApproval",
+                        lazybox_ipc::Command::AnswerAgentQuestion { .. } => "AnswerAgentQuestion",
+                        lazybox_ipc::Command::UpsertProviderCredential { .. } => "UpsertProviderCredential",
+                        lazybox_ipc::Command::RemoveProviderCredential { .. } => "RemoveProviderCredential",
+                        lazybox_ipc::Command::ListProviderCredentials { .. } => "ListProviderCredentials",
+                        lazybox_ipc::Command::CleanWorktrees => "CleanWorktrees",
+                        lazybox_ipc::Command::InspectWorktrees => "InspectWorktrees",
+                        lazybox_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
+                        lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     tracing::info!("daemon ← {label}");
                     // Time how long the serve loop spends INLINE on this
@@ -576,7 +576,7 @@ impl Server {
                     // "the app froze".
                     let cmd_started = std::time::Instant::now();
                     match cmd {
-                        pilot_ipc::Command::Subscribe => {
+                        lazybox_ipc::Command::Subscribe => {
                             // Offload the SQLite scans (issue #34: pre-fix
                             // `list_workspaces` + `list_projects` ran on
                             // the daemon's IPC event-loop task, holding
@@ -639,7 +639,7 @@ impl Server {
                                     conn.tx.send(Event::ViewerIdentities { logins });
                             }
                         }
-                        pilot_ipc::Command::Spawn {
+                        lazybox_ipc::Command::Spawn {
                             session_key,
                             session_id,
                             kind,
@@ -661,7 +661,7 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_ipc::Command::CreateSession { session_key, kind, label } => {
+                        lazybox_ipc::Command::CreateSession { session_key, kind, label } => {
                             spawn_handler::handle_create_session(
                                 &self.config,
                                 session_key,
@@ -670,10 +670,10 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_ipc::Command::Write { terminal_id, bytes } => {
+                        lazybox_ipc::Command::Write { terminal_id, bytes } => {
                             spawn_handler::handle_write(&self.config, terminal_id, &bytes).await;
                         }
-                        pilot_ipc::Command::InjectPrompt {
+                        lazybox_ipc::Command::InjectPrompt {
                             terminal_id,
                             prompt,
                             fallback_spawn,
@@ -686,17 +686,17 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_ipc::Command::Resize { terminal_id, cols, rows } => {
+                        lazybox_ipc::Command::Resize { terminal_id, cols, rows } => {
                             spawn_handler::handle_resize(&self.config, terminal_id, cols, rows).await;
                         }
-                        pilot_ipc::Command::Close { terminal_id } => {
+                        lazybox_ipc::Command::Close { terminal_id } => {
                             spawn_handler::handle_close(&self.config, terminal_id).await;
                         }
-                        pilot_ipc::Command::IngestHook { terminal_id, hook } => {
+                        lazybox_ipc::Command::IngestHook { terminal_id, hook } => {
                             spawn_handler::handle_ingest_hook(&self.config, terminal_id, hook)
                                 .await;
                         }
-                        pilot_ipc::Command::StartAgentRun {
+                        lazybox_ipc::Command::StartAgentRun {
                             session_key,
                             session_id,
                             agent,
@@ -715,14 +715,14 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_ipc::Command::SendAgentInput { run_id, message } => {
+                        lazybox_ipc::Command::SendAgentInput { run_id, message } => {
                             agent_runs::handle_send_agent_input(&self.config, run_id, message)
                                 .await;
                         }
-                        pilot_ipc::Command::InterruptAgentRun { run_id } => {
+                        lazybox_ipc::Command::InterruptAgentRun { run_id } => {
                             agent_runs::handle_interrupt_agent_run(&self.config, run_id).await;
                         }
-                        pilot_ipc::Command::DecideAgentApproval {
+                        lazybox_ipc::Command::DecideAgentApproval {
                             run_id,
                             request_id,
                             decision,
@@ -735,7 +735,7 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_ipc::Command::AnswerAgentQuestion {
+                        lazybox_ipc::Command::AnswerAgentQuestion {
                             run_id,
                             question_id,
                             answer,
@@ -748,7 +748,7 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_ipc::Command::UpsertProviderCredential {
+                        lazybox_ipc::Command::UpsertProviderCredential {
                             principal_id,
                             credential,
                         } => {
@@ -760,7 +760,7 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_ipc::Command::RemoveProviderCredential {
+                        lazybox_ipc::Command::RemoveProviderCredential {
                             principal_id,
                             provider_id,
                         } => {
@@ -772,7 +772,7 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_ipc::Command::ListProviderCredentials { principal_id } => {
+                        lazybox_ipc::Command::ListProviderCredentials { principal_id } => {
                             auth::handle_list_provider_credentials(
                                 &self.config,
                                 &conn.tx,
@@ -780,8 +780,8 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_ipc::Command::MarkRead { session_key } => {
-                            let key = pilot_core::WorkspaceKey::new(
+                        lazybox_ipc::Command::MarkRead { session_key } => {
+                            let key = lazybox_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
                             // MarkRead is the user's "I just looked
@@ -794,66 +794,66 @@ impl Server {
                             polling::set_focused_workspace(&self.config, &key).await;
                             polling::mark_workspace_read(&self.config, &key);
                         }
-                        pilot_ipc::Command::FocusWorkspace { session_key } => {
-                            let key = pilot_core::WorkspaceKey::new(
+                        lazybox_ipc::Command::FocusWorkspace { session_key } => {
+                            let key = lazybox_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
                             polling::set_focused_workspace(&self.config, &key).await;
                         }
-                        pilot_ipc::Command::MarkActivityRead { session_key, index } => {
-                            let key = pilot_core::WorkspaceKey::new(
+                        lazybox_ipc::Command::MarkActivityRead { session_key, index } => {
+                            let key = lazybox_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
                             polling::mark_activity_read(&self.config, &key, index);
                         }
-                        pilot_ipc::Command::UnmarkActivityRead { session_key, index } => {
-                            let key = pilot_core::WorkspaceKey::new(
+                        lazybox_ipc::Command::UnmarkActivityRead { session_key, index } => {
+                            let key = lazybox_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
                             polling::unmark_activity_read(&self.config, &key, index);
                         }
-                        pilot_ipc::Command::CreateWorkspace { name, project_key } => {
+                        lazybox_ipc::Command::CreateWorkspace { name, project_key } => {
                             polling::create_empty_workspace(&self.config, &name, project_key);
                         }
-                        pilot_ipc::Command::CreateProject { name } => {
+                        lazybox_ipc::Command::CreateProject { name } => {
                             polling::create_local_project(&self.config, &name);
                         }
-                        pilot_ipc::Command::Snooze { session_key, until } => {
-                            let key = pilot_core::WorkspaceKey::new(
+                        lazybox_ipc::Command::Snooze { session_key, until } => {
+                            let key = lazybox_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
                             polling::set_snooze(&self.config, &key, Some(until));
                         }
-                        pilot_ipc::Command::Unsnooze { session_key } => {
-                            let key = pilot_core::WorkspaceKey::new(
+                        lazybox_ipc::Command::Unsnooze { session_key } => {
+                            let key = lazybox_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
                             polling::set_snooze(&self.config, &key, None);
                         }
-                        pilot_ipc::Command::Kill { session_key } => {
-                            let key = pilot_core::WorkspaceKey::new(
+                        lazybox_ipc::Command::Kill { session_key } => {
+                            let key = lazybox_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
                             polling::delete_workspace(&self.config, &key).await;
                         }
-                        pilot_ipc::Command::RemoveMergedWorkspace { session_key } => {
-                            let key = pilot_core::WorkspaceKey::new(
+                        lazybox_ipc::Command::RemoveMergedWorkspace { session_key } => {
+                            let key = lazybox_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
                             polling::remove_merged_workspace(&self.config, &key).await;
                         }
-                        pilot_ipc::Command::DeleteProject { project_key } => {
+                        lazybox_ipc::Command::DeleteProject { project_key } => {
                             polling::delete_project(&self.config, &project_key).await;
                         }
-                        pilot_ipc::Command::CollapseIntoPr {
+                        lazybox_ipc::Command::CollapseIntoPr {
                             issue_workspace_key,
                         } => {
-                            let key = pilot_core::WorkspaceKey::new(
+                            let key = lazybox_core::WorkspaceKey::new(
                                 issue_workspace_key.as_str().to_string(),
                             );
                             polling::handle_collapse_into_pr(&self.config, key).await;
                         }
-                        pilot_ipc::Command::Refresh => {
+                        lazybox_ipc::Command::Refresh => {
                             // Manual poll trigger. Wakes the long-lived
                             // poll loop so it runs `run_one_tick`
                             // immediately on its own task — single
@@ -883,7 +883,7 @@ impl Server {
                             }
                             self.config.poll_wake.notify_one();
                         }
-                        pilot_ipc::Command::PostReply { session_key, body } => {
+                        lazybox_ipc::Command::PostReply { session_key, body } => {
                             // GraphQL post — detach to keep the serve
                             // loop responsive while the network call
                             // is in flight.
@@ -892,18 +892,18 @@ impl Server {
                                 polling::post_reply(&cfg, session_key, body).await;
                             });
                         }
-                        pilot_ipc::Command::SetSessionLayout {
+                        lazybox_ipc::Command::SetSessionLayout {
                             session_key,
                             session_id_raw,
                             layout_json,
                         } => {
-                            let key = pilot_core::WorkspaceKey::new(
+                            let key = lazybox_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
                             let session_id = uuid::Uuid::parse_str(&session_id_raw)
                                 .ok()
-                                .map(pilot_core::SessionId);
-                            let layout: Option<pilot_core::SessionLayout> =
+                                .map(lazybox_core::SessionId);
+                            let layout: Option<lazybox_core::SessionLayout> =
                                 serde_json::from_str(&layout_json).ok();
                             if let (Some(sid), Some(lay)) = (session_id, layout) {
                                 polling::set_session_layout(&self.config, &key, sid, lay);
@@ -914,8 +914,8 @@ impl Server {
                                 );
                             }
                         }
-                        pilot_ipc::Command::Shutdown => break,
-                        pilot_ipc::Command::ConfirmMerge {
+                        lazybox_ipc::Command::Shutdown => break,
+                        lazybox_ipc::Command::ConfirmMerge {
                             issue_workspace_key,
                             pr_workspace_key,
                             accept,
@@ -937,7 +937,7 @@ impl Server {
                                 .await;
                             });
                         }
-                        pilot_ipc::Command::AdoptSessions {
+                        lazybox_ipc::Command::AdoptSessions {
                             source_workspace_key,
                             target_workspace_key,
                         } => {
@@ -948,7 +948,7 @@ impl Server {
                             )
                             .await;
                         }
-                        pilot_ipc::Command::MergePr { workspace_key } => {
+                        lazybox_ipc::Command::MergePr { workspace_key } => {
                             // Detach for the same reason as
                             // `FetchPrDetails` — `gh pr merge` shells
                             // out and can stall for seconds.
@@ -957,7 +957,7 @@ impl Server {
                                 polling::handle_merge_pr(&cfg, workspace_key).await;
                             });
                         }
-                        pilot_ipc::Command::FetchPrDetails { workspace_key } => {
+                        lazybox_ipc::Command::FetchPrDetails { workspace_key } => {
                             // **Bug fix**: `handle_fetch_pr_details`
                             // runs a GraphQL HTTP call. If the network
                             // stalls (octocrab, dropped connection,
@@ -979,38 +979,38 @@ impl Server {
                                 polling::handle_fetch_pr_details(&cfg, workspace_key).await;
                             });
                         }
-                        pilot_ipc::Command::RequestReviewers { workspace_key, logins } => {
+                        lazybox_ipc::Command::RequestReviewers { workspace_key, logins } => {
                             let cfg = self.config.clone();
                             tokio::spawn(async move {
                                 polling::handle_request_reviewers(&cfg, workspace_key, logins)
                                     .await;
                             });
                         }
-                        pilot_ipc::Command::AddAssignees { workspace_key, logins } => {
+                        lazybox_ipc::Command::AddAssignees { workspace_key, logins } => {
                             let cfg = self.config.clone();
                             tokio::spawn(async move {
                                 polling::handle_add_assignees(&cfg, workspace_key, logins).await;
                             });
                         }
-                        pilot_ipc::Command::SetAssignees { workspace_key, logins } => {
+                        lazybox_ipc::Command::SetAssignees { workspace_key, logins } => {
                             let cfg = self.config.clone();
                             tokio::spawn(async move {
                                 polling::handle_set_assignees(&cfg, workspace_key, logins).await;
                             });
                         }
-                        pilot_ipc::Command::SetLabels { workspace_key, names } => {
+                        lazybox_ipc::Command::SetLabels { workspace_key, names } => {
                             let cfg = self.config.clone();
                             tokio::spawn(async move {
                                 polling::handle_set_labels(&cfg, workspace_key, names).await;
                             });
                         }
-                        pilot_ipc::Command::FetchRepoLabels { workspace_key } => {
+                        lazybox_ipc::Command::FetchRepoLabels { workspace_key } => {
                             let cfg = self.config.clone();
                             tokio::spawn(async move {
                                 polling::handle_fetch_repo_labels(&cfg, workspace_key).await;
                             });
                         }
-                        pilot_ipc::Command::CleanWorktrees => {
+                        lazybox_ipc::Command::CleanWorktrees => {
                             // Detach — the walk does N filesystem
                             // ops (one `git worktree remove` per
                             // session) and the user shouldn't wait
@@ -1020,13 +1020,13 @@ impl Server {
                                 polling::handle_clean_worktrees(&cfg).await;
                             });
                         }
-                        pilot_ipc::Command::InspectWorktrees => {
+                        lazybox_ipc::Command::InspectWorktrees => {
                             let cfg = self.config.clone();
                             tokio::spawn(async move {
                                 polling::handle_inspect_worktrees(&cfg).await;
                             });
                         }
-                        pilot_ipc::Command::DeleteOrphanedWorktree { path, force } => {
+                        lazybox_ipc::Command::DeleteOrphanedWorktree { path, force } => {
                             let cfg = self.config.clone();
                             tokio::spawn(async move {
                                 polling::handle_delete_orphaned_worktree(&cfg, path, force).await;
@@ -1075,8 +1075,8 @@ impl Server {
 /// daemon can run a one-off poll (Command::Refresh) using the
 /// latest user-edited subscriptions, without waiting for the long-
 /// lived poll loop's next tick.
-pub fn persisted_from_config(c: &pilot_config::Config) -> pilot_core::PersistedSetup {
-    pilot_core::PersistedSetup {
+pub fn persisted_from_config(c: &lazybox_config::Config) -> lazybox_core::PersistedSetup {
+    lazybox_core::PersistedSetup {
         enabled_providers: c.setup.providers.clone(),
         enabled_agents: c.setup.agents.clone(),
         provider_filters: c
@@ -1086,7 +1086,7 @@ pub fn persisted_from_config(c: &pilot_config::Config) -> pilot_core::PersistedS
             .map(|(k, v)| {
                 (
                     k.clone(),
-                    pilot_core::ProviderConfig {
+                    lazybox_core::ProviderConfig {
                         enabled_keys: v.clone(),
                     },
                 )
@@ -1098,7 +1098,7 @@ pub fn persisted_from_config(c: &pilot_config::Config) -> pilot_core::PersistedS
 
 /// Deserialize every persisted `Workspace`. Bad JSON is logged and
 /// skipped so a single corrupted row doesn't break startup.
-fn load_workspaces(store: &dyn Store) -> Vec<pilot_core::Workspace> {
+fn load_workspaces(store: &dyn Store) -> Vec<lazybox_core::Workspace> {
     let records = match store.list_workspaces() {
         Ok(r) => r,
         Err(e) => {
@@ -1110,7 +1110,7 @@ fn load_workspaces(store: &dyn Store) -> Vec<pilot_core::Workspace> {
         .into_iter()
         .filter_map(|r| {
             let json = r.workspace_json?;
-            match serde_json::from_str::<pilot_core::Workspace>(&json) {
+            match serde_json::from_str::<lazybox_core::Workspace>(&json) {
                 Ok(w) => Some(w),
                 Err(e) => {
                     tracing::warn!("skipping unreadable workspace {}: {e}", r.key);
@@ -1123,7 +1123,7 @@ fn load_workspaces(store: &dyn Store) -> Vec<pilot_core::Workspace> {
 
 /// Same shape as `load_workspaces` for the project table. Used by
 /// `Snapshot` to seed the sidebar's project headers on reconnect.
-fn load_projects(store: &dyn Store) -> Vec<pilot_core::Project> {
+fn load_projects(store: &dyn Store) -> Vec<lazybox_core::Project> {
     let records = match store.list_projects() {
         Ok(r) => r,
         Err(e) => {
@@ -1135,7 +1135,7 @@ fn load_projects(store: &dyn Store) -> Vec<pilot_core::Project> {
         .into_iter()
         .filter_map(|r| {
             let json = r.project_json?;
-            match serde_json::from_str::<pilot_core::Project>(&json) {
+            match serde_json::from_str::<lazybox_core::Project>(&json) {
                 Ok(p) => Some(p),
                 Err(e) => {
                     tracing::warn!("skipping unreadable project {}: {e}", r.key);

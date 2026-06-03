@@ -5,7 +5,7 @@
 //! - `pr_number_color(n)` — deterministic color from the PR number.
 //!   Same number → same color across renders.
 
-use pilot_core::Task;
+use lazybox_core::Task;
 use ratatui::style::Color;
 
 /// Convert `Task.id.key` (e.g. `"owner/repo#1234"`) to the trailing
@@ -41,7 +41,7 @@ pub fn pr_number_color(n: u64) -> Color {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
+    use lazybox_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
 
     fn task_with_key(key: &str) -> Task {
         Task {
@@ -68,7 +68,7 @@ mod tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: pilot_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             node_id: None,
             needs_reply: false,

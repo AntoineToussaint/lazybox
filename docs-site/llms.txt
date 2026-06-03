@@ -1,26 +1,26 @@
-# pilot
+# lazybox
 
 > A reactive PR inbox in your terminal: GitHub (and Linear) events flow to you as workspaces — a git worktree plus an embedded Claude Code / Codex / Cursor / shell session per task.
 
 ## Docs
 
-- [Home](https://antoinetoussaint.github.io/pilot/): What pilot is, who it's for, and a map of the documentation.
-- [Tutorials](https://antoinetoussaint.github.io/pilot/tutorials/): Learning-oriented lessons for newcomers.
-- [Quickstart](https://antoinetoussaint.github.io/pilot/tutorials/quickstart/): Build from source and open your first workspace with a live terminal in ~5 minutes.
-- [How-to guides](https://antoinetoussaint.github.io/pilot/how-to/): Task-oriented recipes.
-- [Add a repo](https://antoinetoussaint.github.io/pilot/how-to/add-a-repo/): Bring a repository's PRs and issues into the inbox and filter by role.
-- [Run an agent per workspace](https://antoinetoussaint.github.io/pilot/how-to/run-an-agent-per-workspace/): Spawn Claude Code, Codex, or Cursor scoped to one worktree.
-- [Per-repo env and mounts](https://antoinetoussaint.github.io/pilot/how-to/per-repo-env-and-mounts/): Inject env vars, symlink shared dirs, materialize scripts.
-- [Remote over SSH](https://antoinetoussaint.github.io/pilot/how-to/remote-over-ssh/): Run the daemon remotely and the TUI locally over a forwarded socket.
-- [Mirror to Slack](https://antoinetoussaint.github.io/pilot/how-to/mirror-to-slack/): Reflect the inbox into Slack channels.
+- [Home](https://docs.lazybox.ai/): What lazybox is, who it's for, and a map of the documentation.
+- [Tutorials](https://docs.lazybox.ai/tutorials/): Learning-oriented lessons for newcomers.
+- [Quickstart](https://docs.lazybox.ai/tutorials/quickstart/): Build from source and open your first workspace with a live terminal in ~5 minutes.
+- [How-to guides](https://docs.lazybox.ai/how-to/): Task-oriented recipes.
+- [Add a repo](https://docs.lazybox.ai/how-to/add-a-repo/): Bring a repository's PRs and issues into the inbox and filter by role.
+- [Run an agent per workspace](https://docs.lazybox.ai/how-to/run-an-agent-per-workspace/): Spawn Claude Code, Codex, or Cursor scoped to one worktree.
+- [Per-repo env and mounts](https://docs.lazybox.ai/how-to/per-repo-env-and-mounts/): Inject env vars, symlink shared dirs, materialize scripts.
+- [Remote over SSH](https://docs.lazybox.ai/how-to/remote-over-ssh/): Run the daemon remotely and the TUI locally over a forwarded socket.
+- [Mirror to Slack](https://docs.lazybox.ai/how-to/mirror-to-slack/): Reflect the inbox into Slack channels.
 
 ## Reference
 
-- [CLI](https://antoinetoussaint.github.io/pilot/reference/cli/): Every pilot subcommand, flag, and run mode.
-- [Keybindings](https://antoinetoussaint.github.io/pilot/reference/keybindings/): The full keymap for every pane and picker.
-- [Configuration](https://antoinetoussaint.github.io/pilot/reference/configuration/): The complete ~/.pilot/config.yaml schema with an annotated example.
+- [CLI](https://docs.lazybox.ai/reference/cli/): Every lazybox subcommand, flag, and run mode.
+- [Keybindings](https://docs.lazybox.ai/reference/keybindings/): The full keymap for every pane and picker.
+- [Configuration](https://docs.lazybox.ai/reference/configuration/): The complete ~/.lazybox/config.yaml schema with an annotated example.
 
 ## Explanation
 
-- [Mental model](https://antoinetoussaint.github.io/pilot/explanation/mental-model/): Workspace = worktree + agent, the reactive inbox, read/unread, and the isolation rationale.
-- [Architecture](https://antoinetoussaint.github.io/pilot/explanation/architecture/): Client/daemon split, the crates, the event bus, the credential chain, and the embedded terminal.
+- [Mental model](https://docs.lazybox.ai/explanation/mental-model/): Workspace = worktree + agent, the reactive inbox, read/unread, and the isolation rationale.
+- [Architecture](https://docs.lazybox.ai/explanation/architecture/): Client/daemon split, the crates, the event bus, the credential chain, and the embedded terminal.

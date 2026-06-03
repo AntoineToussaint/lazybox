@@ -1,6 +1,6 @@
 # Slack integration — app setup
 
-Pilot can run on your home machine and surface workspace activity through a
+Lazybox can run on your home machine and surface workspace activity through a
 Slack workspace so you can monitor + control sessions from your phone.
 Inbound messages route to claude sessions; outbound events (workspace
 updates, CI failures, agent-asking signals) post to per-workspace
@@ -10,15 +10,15 @@ Setup is two steps:
 
 1. **Create the Slack app from the shipped manifest.** This step
    requires a browser session — Slack requires it.
-2. **Run `pilot slack init`.** Pastes the two tokens through a
+2. **Run `lazybox slack init`.** Pastes the two tokens through a
    wizard that validates each and writes them to
-   `~/.pilot/config.yaml`.
+   `~/.lazybox/config.yaml`.
 
 ## 1. Create the Slack app (manifest)
 
 1. Go to <https://api.slack.com/apps> → **Create New App** →
    **From manifest**.
-2. Pick the Slack workspace where you want pilot to live (typically
+2. Pick the Slack workspace where you want lazybox to live (typically
    your personal workspace, since the bot can see every channel
    it's invited to).
 3. Paste the contents of [`slack-manifest.yml`](./slack-manifest.yml)
@@ -32,7 +32,7 @@ behind a separate dialog:
   → **Generate Token and Scopes**.
 - Name it `socket-mode`.
 - Add scope: `connections:write`.
-- Click **Generate**. Leave this tab open — `pilot slack init`
+- Click **Generate**. Leave this tab open — `lazybox slack init`
   will ask you to paste this token in a moment.
 
 The Bot User OAuth Token lives under **OAuth & Permissions** (it
@@ -42,7 +42,7 @@ above). Also leave that tab open.
 ## 2. Run the wizard
 
 ```sh
-pilot slack init
+lazybox slack init
 ```
 
 The wizard:
@@ -52,33 +52,33 @@ The wizard:
    the wrong type or lacks scopes.
 2. Prompts for the App-Level Token (`xapp-...`) and validates it by
    opening (and immediately closing) one Socket Mode connection.
-3. Writes both tokens into `~/.pilot/config.yaml` under `slack:`,
+3. Writes both tokens into `~/.lazybox/config.yaml` under `slack:`,
    preserving every other key in the file.
-4. Looks up the anchor channel (`#pilot` by default) and self-joins
-   it, so there's no manual `/invite @pilot` step.
-5. Prints `✓ Slack ready` or, if `#pilot` doesn't exist yet, the
+4. Looks up the anchor channel (`#lazybox` by default) and self-joins
+   it, so there's no manual `/invite @lazybox` step.
+5. Prints `✓ Slack ready` or, if `#lazybox` doesn't exist yet, the
    exact next manual step (create the channel, then run
-   `pilot slack doctor`).
+   `lazybox slack doctor`).
 
 If you ever want to confirm the setup still works (e.g. after a
-hand-edit to `~/.pilot/config.yaml`):
+hand-edit to `~/.lazybox/config.yaml`):
 
 ```sh
-pilot slack doctor
+lazybox slack doctor
 ```
 
 This runs the same validations read-only — no prompts, no writes.
 
 ## Configuration knobs
 
-`pilot slack init` only writes the two tokens. Everything else lives
-under `slack:` in `~/.pilot/config.yaml` and has sensible defaults:
+`lazybox slack init` only writes the two tokens. Everything else lives
+under `slack:` in `~/.lazybox/config.yaml` and has sensible defaults:
 
 ```yaml
 slack:
-  bot_token: xoxb-...               # written by `pilot slack init`
-  app_token: xapp-...               # written by `pilot slack init`
-  anchor_channel: pilot             # bootstrap + error channel
+  bot_token: xoxb-...               # written by `lazybox slack init`
+  app_token: xapp-...               # written by `lazybox slack init`
+  anchor_channel: lazybox             # bootstrap + error channel
   channel_prefix: ""                # auto-created channel name template;
                                     # empty = "<owner>-<repo>-<n>". A
                                     # value like "pr-" produces
@@ -88,34 +88,34 @@ slack:
                                     # anchor channel
 ```
 
-Restart pilot after editing:
+Restart lazybox after editing:
 
 ```sh
 make run
 ```
 
-You should see `pilot: slack connected as @pilot` in `/tmp/pilot.log`
-and a "pilot online" message in `#pilot`.
+You should see `lazybox: slack connected as @lazybox` in `/tmp/lazybox.log`
+and a "lazybox online" message in `#lazybox`.
 
 ## Verify
 
 1. Trigger a poll: press `Shift-R` in the TUI, or wait ~60s.
-2. For each workspace pilot finds, it auto-creates a channel
+2. For each workspace lazybox finds, it auto-creates a channel
    `#<owner>-<repo>-<n>` (e.g. `#acme-widget-186`) and posts the
    primary task's description (or workspace name) as the first message.
 3. From Slack (web / mobile), type a message in a per-workspace
    channel:
    ```
-   @pilot work
+   @lazybox work
    ```
-   Pilot spawns claude in that workspace's worktree with the
+   Lazybox spawns claude in that workspace's worktree with the
    role-aware prompt (review for reviewer-role, address-comments
    for author-with-unread, etc.).
 4. Other commands:
    ```
-   @pilot status              # show session state + agent activity
-   @pilot ping                # liveness check
-   @pilot stop                # interrupt the current agent
+   @lazybox status              # show session state + agent activity
+   @lazybox ping                # liveness check
+   @lazybox stop                # interrupt the current agent
    ```
 
 ## Notes / Gotchas
@@ -124,14 +124,14 @@ and a "pilot online" message in `#pilot`.
   you watch hundreds of repos, set `per_workspace_channels: false`
   and route everything through the anchor channel with thread-per-workspace
   (use `channel_strategy: thread_per_workspace`).
-- **Channel name length**: Slack truncates at 80 chars. Pilot
+- **Channel name length**: Slack truncates at 80 chars. Lazybox
   sluggifies and clips automatically.
-- **Re-using existing channels**: pilot looks up by name before
+- **Re-using existing channels**: lazybox looks up by name before
   creating. So if `#acme-widget-186` already exists, it just joins
   + posts (won't recreate).
-- **Archived channels**: pilot won't auto-unarchive. If a workspace you
-  archived in Slack comes back to life, pilot posts to the anchor
+- **Archived channels**: lazybox won't auto-unarchive. If a workspace you
+  archived in Slack comes back to life, lazybox posts to the anchor
   channel with a hint to unarchive manually.
-- **Two pilot instances on one Slack workspace**: don't. Both will
+- **Two lazybox instances on one Slack workspace**: don't. Both will
   try to create the same channels + both will respond to the same
-  `@pilot` mentions. Use one workspace per pilot instance.
+  `@lazybox` mentions. Use one workspace per lazybox instance.

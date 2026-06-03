@@ -19,8 +19,8 @@
 
 pub mod graphql;
 
-use pilot_auth::{CredentialChain, EnvProvider};
-use pilot_core::{ProviderError, Task, TaskProvider};
+use lazybox_auth::{CredentialChain, EnvProvider};
+use lazybox_core::{ProviderError, Task, TaskProvider};
 use serde::Serialize;
 
 const LINEAR_GRAPHQL: &str = "https://api.linear.app/graphql";
@@ -100,10 +100,10 @@ impl LinearClient {
         Ok(Self::with_key(key))
     }
 
-    /// Build a client from a resolved `pilot_auth::Credential`. Matches
+    /// Build a client from a resolved `lazybox_auth::Credential`. Matches
     /// the gh-provider shape so server-side polling can drive both
     /// providers through the same credential chain.
-    pub fn from_credential(cred: pilot_auth::Credential) -> Self {
+    pub fn from_credential(cred: lazybox_auth::Credential) -> Self {
         Self::with_key(cred.into_token())
     }
 
@@ -267,7 +267,7 @@ impl TaskProvider for LinearClient {
     /// has no primary task or no node_id (pre-poll state).
     async fn post_reply(
         &self,
-        workspace: &pilot_core::Workspace,
+        workspace: &lazybox_core::Workspace,
         body: &str,
     ) -> Result<(), ProviderError> {
         let task = workspace.primary_task().ok_or_else(|| {

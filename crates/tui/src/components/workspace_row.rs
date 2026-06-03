@@ -17,7 +17,7 @@ use crate::components::sidebar::{
 };
 use crate::components::table::{Cell, Column, Row};
 use crate::theme::Theme;
-use pilot_core::{Task, Workspace};
+use lazybox_core::{Task, Workspace};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 
@@ -59,7 +59,7 @@ pub struct WorkspaceRowCtx<'a> {
     pub badges: Vec<(char, usize)>,
     /// Render the type indicator as plain ASCII (`p`/`i`/`l`) instead
     /// of the default unicode glyphs (`⇄`/`○`/`◆`). Wired from
-    /// `display.ascii_glyphs` in `~/.pilot/config.yaml`.
+    /// `display.ascii_glyphs` in `~/.lazybox/config.yaml`.
     pub ascii_glyphs: bool,
 }
 
@@ -512,7 +512,7 @@ fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
+    use lazybox_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
 
     fn fixed_time() -> chrono::DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 4, 1, 12, 0, 0).unwrap()
@@ -543,7 +543,7 @@ mod tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: pilot_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             node_id: None,
             needs_reply: false,
@@ -753,7 +753,7 @@ mod tests {
     #[test]
     fn cell_type_empty_for_scratch_workspace() {
         let ws = Workspace::empty(
-            pilot_core::WorkspaceKey("scratch".into()),
+            lazybox_core::WorkspaceKey("scratch".into()),
             "main",
             fixed_time(),
         );
@@ -877,7 +877,7 @@ mod tests {
     #[test]
     fn cell_title_falls_back_to_workspace_name_when_no_task() {
         let ws = Workspace::empty(
-            pilot_core::WorkspaceKey("lonely".into()),
+            lazybox_core::WorkspaceKey("lonely".into()),
             "main",
             fixed_time(),
         );
@@ -1144,7 +1144,10 @@ mod tests {
     #[test]
     fn cell_labels_renders_bracketed_chips() {
         let mut task = make_task("owner/repo#1", "x");
-        task.labels = vec![pilot_core::Label::new("bug"), pilot_core::Label::new("ci")];
+        task.labels = vec![
+            lazybox_core::Label::new("bug"),
+            lazybox_core::Label::new("ci"),
+        ];
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
@@ -1159,11 +1162,11 @@ mod tests {
     fn cell_labels_truncates_with_overflow_indicator() {
         let mut task = make_task("owner/repo#1", "x");
         task.labels = vec![
-            pilot_core::Label::new("bug"),
-            pilot_core::Label::new("ci"),
-            pilot_core::Label::new("backend"),
-            pilot_core::Label::new("priority"),
-            pilot_core::Label::new("docs"),
+            lazybox_core::Label::new("bug"),
+            lazybox_core::Label::new("ci"),
+            lazybox_core::Label::new("backend"),
+            lazybox_core::Label::new("priority"),
+            lazybox_core::Label::new("docs"),
         ];
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
@@ -1251,7 +1254,7 @@ mod tests {
         let ctx_task = ctx_for(&ws_task, &task, &theme);
 
         let ws_scratch = Workspace::empty(
-            pilot_core::WorkspaceKey("scratch-branch".into()),
+            lazybox_core::WorkspaceKey("scratch-branch".into()),
             "main",
             fixed_time(),
         );

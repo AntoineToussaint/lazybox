@@ -24,7 +24,7 @@ version = 2
 yanked = "deny"
 ignore = [
     # bincode 1.x is unmaintained as of 2025. We use it via
-    # pilot-ipc for length-prefixed framing on the Unix-socket
+    # lazybox-ipc for length-prefixed framing on the Unix-socket
     # transport. Moving to bincode 2.x or postcard is a non-trivial
     # wire-format change tracked separately — ignore until that
     # lands.
@@ -59,7 +59,7 @@ allow = [
 exceptions = []
 
 # Ignores license/no-license findings on workspace crates that set
-# `publish = false`. Pilot's internal crates inherit `license =
+# `publish = false`. Lazybox's internal crates inherit `license =
 # "MIT"` from `[workspace.package]`, so this is belt-and-suspenders.
 [licenses.private]
 ignore = true
@@ -71,7 +71,7 @@ ignore = true
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# Workspace path dependencies (`pilot-core = { path = "..." }`) get a
+# Workspace path dependencies (`lazybox-core = { path = "..." }`) get a
 # synthesized `version = "*"` in the resolved manifest. That's
 # expected and not a real wildcard pin.
 allow-wildcard-paths = true

@@ -1,4 +1,4 @@
-//! `Model` — the realm-side replacement for pilot's `App` struct.
+//! `Model` — the realm-side replacement for lazybox's `App` struct.
 //!
 //! ## Architecture
 //!
@@ -8,7 +8,7 @@
 //! `Application` only owns **modals** — that's where its mount/unmount
 //! + Z-stack semantics actually pay off.
 //!
-//! Why: pilot's panes are persistently visible, mutate often, and the
+//! Why: lazybox's panes are persistently visible, mutate often, and the
 //! orchestrator needs typed handles to drain queued commands. Mounting
 //! them via `app.mount(id, Box::new(pane))` hides the concrete type
 //! behind `dyn AppComponent` and forces awkward attribute-based
@@ -38,7 +38,7 @@ pub use helpers::{run_loop_with_model, run_with_client};
 // the helpers moved out of mod.rs.
 pub(crate) use helpers::{
     emit_clipboard_copy, find_action_for_chord, key_event_to_chord, paint_selection, rect_contains,
-    spawn_detached_pilot, split_for_footer,
+    spawn_detached_lazybox, split_for_footer,
 };
 
 use crate::PaneId;
@@ -47,7 +47,7 @@ use crate::realm::components::right::Right;
 use crate::realm::components::sidebar::Sidebar;
 use crate::realm::components::splash::Splash;
 use crate::realm::components::terminals::Terminals;
-use pilot_ipc::{Client, Command as IpcCommand};
+use lazybox_ipc::{Client, Command as IpcCommand};
 use std::sync::mpsc;
 use std::time::Duration;
 use tuirealm::application::Application;
@@ -192,7 +192,7 @@ pub(crate) enum RemovalReason {
 /// Confirm modal by `maybe_mount_next_removal_prompt`.
 #[derive(Debug, Clone)]
 pub(crate) struct RemovalPrompt {
-    pub(crate) workspace_key: pilot_core::WorkspaceKey,
+    pub(crate) workspace_key: lazybox_core::WorkspaceKey,
     /// Compact `owner/repo#N` identifier for the modal copy.
     pub(crate) label: String,
     /// Primary task title (out-of-scope only) rendered inline so the
@@ -301,7 +301,7 @@ pub struct Model<T: TerminalAdapter> {
     /// `Event::ProjectUpserted` (new project or first-sight repo);
     /// `Event::ProjectRemoved` drops entries. Stage 2 stores them
     /// here; stages 3+ render headers from this map.
-    pub projects: std::collections::BTreeMap<pilot_core::ProjectKey, pilot_core::Project>,
+    pub projects: std::collections::BTreeMap<lazybox_core::ProjectKey, lazybox_core::Project>,
     /// Project keys *this client* synthesized from `selected_scopes`
     /// in `refresh_subscribed_projects` — placeholder headers for
     /// repos the user subscribed to that the daemon hasn't surfaced a
@@ -311,7 +311,7 @@ pub struct Model<T: TerminalAdapter> {
     /// `ProjectRemoved` will ever arrive). A daemon `ProjectUpserted` /
     /// `Snapshot` for the same key promotes it to authoritative and
     /// removes it from this set — see `events.rs`.
-    synthesized_projects: std::collections::BTreeSet<pilot_core::ProjectKey>,
+    synthesized_projects: std::collections::BTreeSet<lazybox_core::ProjectKey>,
     /// IPC client for forwarding pane-emitted commands to the daemon.
     pub client: Client,
     /// Watches the inbound daemon-event channel depth after each
@@ -338,7 +338,7 @@ pub struct Model<T: TerminalAdapter> {
     /// picks an action within the group and fires it through the
     /// unified `dispatch_action`. Drives the which-key popup in
     /// `view`. Operator-pending, not timed — see `LeaderLatch`.
-    leader: crate::confirm_latch::LeaderLatch<pilot_tui_core::action::ActionGroup>,
+    leader: crate::confirm_latch::LeaderLatch<lazybox_tui_core::action::ActionGroup>,
     /// Last left-click position + timestamp. A second left-click on
     /// the same row within `DOUBLE_CLICK_WINDOW` is treated as a
     /// double-click; the right pane's double-click handler then
@@ -366,23 +366,23 @@ pub struct Model<T: TerminalAdapter> {
     /// once its sync recovers — otherwise a transient failure left the
     /// red notice up forever even though syncing was healthy again.
     ///
-    /// Tracking the source (not just a bool) matters because pilot
+    /// Tracking the source (not just a bool) matters because lazybox
     /// polls several providers concurrently (GitHub, Linear, Slack): a
     /// successful Linear poll must not erase a still-valid GitHub
     /// failure banner. Any other `flash`/`flash_*` call resets it to
     /// `None`, so we only clear the notice when it's still the
     /// sync-error we set.
     sync_error_source: Option<String>,
-    /// Whether pilot is capturing mouse events. Toggled by F8 /
-    /// Alt-s. When `false`, pilot has issued `DisableMouseCapture`
+    /// Whether lazybox is capturing mouse events. Toggled by F8 /
+    /// Alt-s. When `false`, lazybox has issued `DisableMouseCapture`
     /// so the host terminal regains native text selection (which
-    /// spans pilot's whole window including UI chrome — uglier
-    /// than pilot's pane-scoped selection but useful as a fallback).
-    /// When `true`, pilot owns mouse: clicks drive its UI, drags
-    /// inside the terminal pane do pilot-side text selection.
+    /// spans lazybox's whole window including UI chrome — uglier
+    /// than lazybox's pane-scoped selection but useful as a fallback).
+    /// When `true`, lazybox owns mouse: clicks drive its UI, drags
+    /// inside the terminal pane do lazybox-side text selection.
     #[allow(dead_code)] // accessed indirectly via the toggle handler
     mouse_capture_on: bool,
-    /// Active pilot-side text selection in the terminal pane.
+    /// Active lazybox-side text selection in the terminal pane.
     /// `(start_cell, end_cell)` in absolute viewport coords, set on
     /// mouse Down inside the terminal rect (when the inner program
     /// isn't tracking mouse itself) and extended on Drag. On Up the
@@ -412,25 +412,25 @@ pub struct Model<T: TerminalAdapter> {
     /// Workspace key the reply textarea (if mounted) is targeting.
     /// Set by `mount_reply`; consumed by `Msg::TextareaSubmitted` to
     /// build the `Command::PostReply` payload.
-    pending_reply: Option<pilot_core::SessionKey>,
+    pending_reply: Option<lazybox_core::SessionKey>,
     /// Set by `mount_request_reviewers`; consumed by
     /// `handle_input_submitted` when `Id::RequestReviewers` is the
     /// top modal. Holds the workspace whose PR we'll request
     /// reviewers on.
-    pending_review_request: Option<pilot_core::WorkspaceKey>,
+    pending_review_request: Option<lazybox_core::WorkspaceKey>,
     /// Candidate logins shown in the `RequestReviewers` picker.
     /// Indices from `Msg::ChoicePicked` index back into this Vec.
     /// Cleared after the picker dispatches.
     review_choices: Vec<String>,
     /// Same shape but for the add-assignees flow.
-    pending_assignees_request: Option<pilot_core::WorkspaceKey>,
+    pending_assignees_request: Option<lazybox_core::WorkspaceKey>,
     /// Candidate logins shown in the `AddAssignees` picker.
     assignees_choices: Vec<String>,
     /// Workspace key the `ManageLabels` picker is targeting. Stashed
     /// at mount time so when `Event::RepoLabels` lands the picker
     /// can re-mount with the repo's labels. Cleared on submit /
     /// dismiss.
-    pending_labels_request: Option<pilot_core::WorkspaceKey>,
+    pending_labels_request: Option<lazybox_core::WorkspaceKey>,
     /// Repo-label names rendered in the `ManageLabels` picker. Order
     /// matches the picker's row indices so `Msg::ChoicePicked(indices)`
     /// indexes back into this list. Cleared on submit / dismiss.
@@ -438,7 +438,7 @@ pub struct Model<T: TerminalAdapter> {
     /// Workspace currently waiting on the `SnoozeDuration` picker's
     /// result. `Msg::ChoicePicked` reads this + `snooze_choices` to
     /// turn the picked index into a `Command::Snooze`.
-    pending_snooze_workspace: Option<pilot_core::SessionKey>,
+    pending_snooze_workspace: Option<lazybox_core::SessionKey>,
     /// The duration each picker option maps to. Order MUST match
     /// the labels rendered in `mount_snooze_picker`.
     snooze_choices: Vec<std::time::Duration>,
@@ -451,47 +451,47 @@ pub struct Model<T: TerminalAdapter> {
     /// Workspace + reason currently being prompted about. Set when the
     /// RemoveOutOfScope modal mounts; consumed by `Msg::Confirmed`,
     /// which uses the reason to pick the command to dispatch.
-    active_removal_prompt: Option<(pilot_core::WorkspaceKey, RemovalReason)>,
+    active_removal_prompt: Option<(lazybox_core::WorkspaceKey, RemovalReason)>,
     /// Pending issue→PR merge prompts. Daemon stalls a merge when
     /// the issue has live sessions and emits
     /// `WorkspaceMergePending`; we queue here and surface one at a
     /// time as a Confirm modal. Tuple: issue key, PR key, issue
     /// label, PR label, live terminal count.
     pending_merge_prompts: std::collections::VecDeque<(
-        pilot_core::WorkspaceKey,
-        pilot_core::WorkspaceKey,
+        lazybox_core::WorkspaceKey,
+        lazybox_core::WorkspaceKey,
         String,
         String,
         usize,
     )>,
     /// (issue, PR) pair currently being prompted about. Consumed by
     /// `Msg::Confirmed` when the top modal is `Id::MergeConfirm`.
-    active_merge_prompt: Option<(pilot_core::WorkspaceKey, pilot_core::WorkspaceKey)>,
+    active_merge_prompt: Option<(lazybox_core::WorkspaceKey, lazybox_core::WorkspaceKey)>,
     /// Workspace key whose PR is being confirmed for merge by the
     /// `Shift-M` Confirm modal. Set when the modal mounts, taken on
     /// `Msg::Confirmed` / `Msg::ModalDismissed`.
     /// Source workspace key the `Shift-A` adopt picker is gathering
     /// a target for. Set when the picker mounts; consumed when the
     /// user picks (or dismisses).
-    pending_adopt_source: Option<pilot_core::WorkspaceKey>,
+    pending_adopt_source: Option<lazybox_core::WorkspaceKey>,
     /// Candidate target workspaces for the active adopt picker,
     /// in the same order as the picker's row indices. `Msg::ChoicePicked`
     /// indexes into this to recover the chosen `WorkspaceKey`.
-    adopt_choices: Vec<pilot_core::WorkspaceKey>,
+    adopt_choices: Vec<lazybox_core::WorkspaceKey>,
     /// Transient UI status (polling spinner + footer notice). See
     /// `StatusCtx`.
     status: StatusCtx,
     /// Resolved values for the magic-number knobs that used to be
-    /// module-level `const`s — read from `~/.pilot/config.yaml::ui`,
+    /// module-level `const`s — read from `~/.lazybox/config.yaml::ui`,
     /// or `UiDefaults::default()` when unset / not loaded.
-    ui_defaults: pilot_config::UiDefaults,
+    ui_defaults: lazybox_config::UiDefaults,
     /// Workspace keys for which we've already fired
     /// `Command::FetchPrDetails` this session — the lazy-fetch path
     /// that back-fills review-thread activity. Used to dedupe the
     /// trigger so a flicker of focus doesn't spam the daemon.
     /// Cleared when a workspace is removed (`Event::WorkspaceRemoved`)
     /// so a re-added workspace gets a fresh fetch.
-    pr_details_fetched: std::collections::HashSet<pilot_core::WorkspaceKey>,
+    pr_details_fetched: std::collections::HashSet<lazybox_core::WorkspaceKey>,
     /// Last `SessionKey` we sent a `Command::FocusWorkspace` for.
     /// Single source of truth for "did the cursor leave the previous
     /// workspace?". `sync_panes` reads it after every key/mouse
@@ -500,14 +500,17 @@ pub struct Model<T: TerminalAdapter> {
     /// cursor-mutating path (j/k, mouse click, programmatic
     /// preselect) feeds the daemon's round-robin scheduler without
     /// each call site needing its own emit hook.
-    last_focused_session_key: Option<pilot_core::SessionKey>,
+    last_focused_session_key: Option<lazybox_core::SessionKey>,
     /// Active sidebar right-click context menu state: the workspace
     /// row the menu was raised over plus the ordered list of catalog
     /// `Action`s the picker is offering. `Msg::ChoicePicked` indexes
     /// back into the Vec and dispatches the same IpcCommand the
     /// matching keyboard shortcut would have. None when no menu is
     /// open.
-    pending_sidebar_context: Option<(pilot_core::SessionKey, Vec<pilot_tui_core::action::Action>)>,
+    pending_sidebar_context: Option<(
+        lazybox_core::SessionKey,
+        Vec<lazybox_tui_core::action::Action>,
+    )>,
     /// User-supplied key overrides for catalog actions. Keys are
     /// snake_case `ActionKind` names (see `ActionKind::name`); values
     /// are key-spec strings. Empty when the user hasn't configured
@@ -517,19 +520,19 @@ pub struct Model<T: TerminalAdapter> {
     /// `mount_action_confirm`, taken (and dispatched if Yes) by
     /// the `Msg::Confirmed` handler. None when no destructive
     /// confirm is currently up.
-    pending_action_confirm: Option<pilot_tui_core::action::Action>,
+    pending_action_confirm: Option<lazybox_tui_core::action::Action>,
     /// Latest inspector report driving the `InspectList` modal. The
     /// first slot in the Choice modal is the "delete all safe"
     /// shortcut, hence the wrapper enum on indices.
-    pending_inspect_rows: Vec<pilot_ipc::WorktreeInspectionDto>,
+    pending_inspect_rows: Vec<lazybox_ipc::WorktreeInspectionDto>,
     /// Row picked from `InspectList`, waiting on the `InspectConfirm`
     /// confirm modal. Consumed by `Msg::Confirmed(true)`.
-    pending_inspect_target: Option<pilot_ipc::WorktreeInspectionDto>,
+    pending_inspect_target: Option<lazybox_ipc::WorktreeInspectionDto>,
     /// Project the next `Id::NewWorkspace` submit should land the
     /// new workspace under. Set by `mount_new_workspace_input(pk)`
     /// from the focused-project resolver, consumed by
     /// `handle_input_submitted`'s `Id::NewWorkspace` arm.
-    pending_new_workspace_project: Option<pilot_core::ProjectKey>,
+    pending_new_workspace_project: Option<lazybox_core::ProjectKey>,
     /// Name of a project the user just submitted via Shift-N. When
     /// the daemon broadcasts `ProjectUpserted` for a matching name,
     /// we focus its header row + auto-mount the new-workspace input
@@ -537,12 +540,12 @@ pub struct Model<T: TerminalAdapter> {
     /// j/k (RepoHeader rows are skipped by `move_cursor_by`) and the
     /// user has no clear next step.
     pending_focus_project_name: Option<String>,
-    /// Loaded + merged snippet collection (`<pilot_home>/snippets.yaml`
-    /// + `<cwd>/.pilot/snippets.yaml`). Populated at startup by
+    /// Loaded + merged snippet collection (`<lazybox_home>/snippets.yaml`
+    /// + `<cwd>/.lazybox/snippets.yaml`). Populated at startup by
     /// `apply_snippets`; the terminal-pane `]` latch reads this to
     /// decide whether to mount the picker. Empty when neither file
     /// exists (the typical first-run state).
-    pub(crate) snippets: pilot_config::Snippets,
+    pub(crate) snippets: lazybox_config::Snippets,
     /// Snapshot of the snippet keys the active SnippetPicker is
     /// showing — indexed by `Msg::ChoicePicked` to recover the
     /// underlying entry via `self.snippets.get(...)`. Cleared on
@@ -588,7 +591,7 @@ pub(crate) struct ScrollInertia {
     pub last_at: std::time::Instant,
 }
 
-/// Custom Port that drains events from an `mpsc::Receiver`. Pilot
+/// Custom Port that drains events from an `mpsc::Receiver`. Lazybox
 /// reads crossterm directly in the run loop (so panes get keys
 /// without the listener thread / main thread racing for them) and
 /// pushes modal-bound events onto the sender. The listener thread
@@ -613,11 +616,11 @@ impl Poll<UserEvent> for ChannelPort {
 /// CLI-driven post-snapshot focus target. Applied once after the
 /// first Snapshot so the user lands on a specific workspace +
 /// (optionally) session. Used by `--workspace KEY [--session ID]`
-/// and the detach flow that re-spawns pilot with these flags.
+/// and the detach flow that re-spawns lazybox with these flags.
 #[derive(Debug, Clone)]
 pub struct Preselect {
     /// Workspace key (e.g. `"github:owner/repo#42"`) to land on.
-    pub workspace_key: pilot_core::SessionKey,
+    pub workspace_key: lazybox_core::SessionKey,
     /// Optional session id to focus inside the workspace. Anything
     /// that doesn't parse as a uuid is silently ignored.
     pub session_id_raw: Option<String>,
@@ -636,14 +639,14 @@ const MODAL_REDRAW_WINDOW: Duration = Duration::from_millis(120);
 
 /// How long the first `q` stays armed waiting for the second tap.
 // `Q_DOUBLE_TAP_WINDOW` retired — value lives on `ui_defaults`
-// now, sourced from `~/.pilot/config.yaml::ui.quit_double_tap_window`
-// with `pilot_config::UiDefaults::default()` as the fallback.
+// now, sourced from `~/.lazybox/config.yaml::ui.quit_double_tap_window`
+// with `lazybox_config::UiDefaults::default()` as the fallback.
 
 /// Escape-char for the terminal-pane breakout sequence. Two
 /// consecutive presses (with no intervening non-`]` key) returns
 /// focus to the sidebar instead of forwarding to the PTY.
 // `TERMINAL_ESCAPE_CHAR` retired — value lives on `ui_defaults`,
-// sourced from `~/.pilot/config.yaml::ui.terminal_escape_char`
+// sourced from `~/.lazybox/config.yaml::ui.terminal_escape_char`
 // (default `]`).
 
 impl<T: TerminalAdapter> Model<T> {
@@ -712,7 +715,7 @@ impl<T: TerminalAdapter> Model<T> {
             pending_adopt_source: None,
             adopt_choices: Vec::new(),
             status: StatusCtx::new(),
-            ui_defaults: pilot_config::UiDefaults::default(),
+            ui_defaults: lazybox_config::UiDefaults::default(),
             pr_details_fetched: std::collections::HashSet::new(),
             last_focused_session_key: None,
             pending_sidebar_context: None,
@@ -722,7 +725,7 @@ impl<T: TerminalAdapter> Model<T> {
             pending_inspect_target: None,
             pending_new_workspace_project: None,
             pending_focus_project_name: None,
-            snippets: pilot_config::Snippets::default(),
+            snippets: lazybox_config::Snippets::default(),
             snippet_choices: Vec::new(),
             auto_tour_pending: false,
             scroll_inertia: None,
@@ -783,11 +786,11 @@ impl Model<CrosstermTerminalAdapter> {
         terminal.enable_raw_mode()?;
         terminal.enter_alternate_screen()?;
         // Mouse capture: clicks/drags drive splitter resize +
-        // click-to-focus + pilot-side text selection inside the
+        // click-to-focus + lazybox-side text selection inside the
         // terminal pane (extracted from libghostty's grid, copied
         // via OSC 52). F8 / Alt-s toggles capture off if the user
         // wants the host's native selection (which spans across
-        // pilot's UI chrome and is uglier).
+        // lazybox's UI chrome and is uglier).
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture,);
         // Bracketed paste: the host terminal wraps Cmd-V'd text in
         // `ESC [ 200 ~ … ESC [ 201 ~` so we can tell "user pasted a
@@ -800,15 +803,15 @@ impl Model<CrosstermTerminalAdapter> {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste,);
         // Focus reporting (DEC mode 1004): the host terminal emits
         // `FocusGained` / `FocusLost` as the user switches windows.
-        // Pilot tracks it so desktop notifications only fire while
-        // pilot is unfocused — a banner for what you're already
+        // Lazybox tracks it so desktop notifications only fire while
+        // lazybox is unfocused — a banner for what you're already
         // looking at is just noise. Terminals that don't support it
         // never send the events, so notifications keep firing there.
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableFocusChange,);
         // Ask the host terminal to disambiguate modified Enter /
         // Tab / Backspace etc. via the kitty keyboard protocol.
         // Without this, most terminals collapse Shift-Enter into
-        // the same byte sequence as Enter and pilot can't tell
+        // the same byte sequence as Enter and lazybox can't tell
         // "submit" from "newline in input" — Claude Code's prompt
         // then ignores Shift-Enter the user pressed expecting a
         // newline. Terminals that don't support the protocol
@@ -876,7 +879,7 @@ impl<T: TerminalAdapter> Model<T> {
     pub fn start_setup_wizard(
         &mut self,
         report: crate::setup::SetupReport,
-        sources: std::sync::Arc<Vec<Box<dyn pilot_core::ScopeSource>>>,
+        sources: std::sync::Arc<Vec<Box<dyn lazybox_core::ScopeSource>>>,
     ) {
         self.setup.inputs = Some((report.clone(), sources.clone()));
         self.setup.runner = Some(crate::setup_flow::SetupRunner::new(report, sources));
@@ -890,7 +893,7 @@ impl<T: TerminalAdapter> Model<T> {
     pub fn cache_setup_inputs(
         &mut self,
         report: crate::setup::SetupReport,
-        sources: std::sync::Arc<Vec<Box<dyn pilot_core::ScopeSource>>>,
+        sources: std::sync::Arc<Vec<Box<dyn lazybox_core::ScopeSource>>>,
     ) {
         self.setup.inputs = Some((report, sources));
     }
@@ -898,7 +901,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Cache the user's existing PersistedSetup so partial flows
     /// from the Settings palette can pre-seed the wizard with
     /// current state instead of starting from defaults.
-    pub fn cache_persisted_setup(&mut self, persisted: pilot_core::PersistedSetup) {
+    pub fn cache_persisted_setup(&mut self, persisted: lazybox_core::PersistedSetup) {
         self.setup.persisted = Some(persisted);
         // Mirror narrowed-repo scopes into the sidebar so headers
         // appear at startup, before the first poll completes.
@@ -911,19 +914,19 @@ impl<T: TerminalAdapter> Model<T> {
         self.setup.editors = editors;
     }
 
-    /// Apply `~/.pilot/config.yaml::attention` +
+    /// Apply `~/.lazybox/config.yaml::attention` +
     /// `ui.collapsed_repos` + `agent_shortcuts` to the sidebar at
     /// startup. Must be called before the first daemon Subscribe
     /// so the saved collapse state is in place when the Snapshot
     /// arrives.
     pub fn apply_sidebar_config(
         &mut self,
-        attention: pilot_config::AttentionConfig,
+        attention: lazybox_config::AttentionConfig,
         collapsed_repos: std::collections::BTreeSet<String>,
         agent_shortcuts: std::collections::HashMap<char, String>,
         default_agent: Option<String>,
-        display: &pilot_config::DisplayConfig,
-        ui: &pilot_config::UiDefaults,
+        display: &lazybox_config::DisplayConfig,
+        ui: &lazybox_config::UiDefaults,
     ) {
         // Both panes consume the configured agent: sidebar `f` for
         // CI-fail, right pane `f` for selected comments.
@@ -949,7 +952,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// startup path in `main.rs` after `Snippets::load_merged`. The
     /// terminal-pane `]<key>` latch reads from `self.snippets`
     /// directly, so this is the only handoff needed.
-    pub fn apply_snippets(&mut self, snippets: pilot_config::Snippets) {
+    pub fn apply_snippets(&mut self, snippets: lazybox_config::Snippets) {
         self.snippets = snippets;
     }
 
@@ -987,7 +990,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Best-effort: a write failure just means it may re-prompt next
     /// boot, which is harmless.
     fn mark_tour_seen(&mut self) {
-        if let Err(e) = pilot_config::Config::save_with(|c| c.ui.tour_seen = true) {
+        if let Err(e) = lazybox_config::Config::save_with(|c| c.ui.tour_seen = true) {
             tracing::warn!("save tour_seen failed: {e}");
         }
     }
@@ -1007,7 +1010,7 @@ impl<T: TerminalAdapter> Model<T> {
             // The user typed `]<key>` expecting a snippet and there
             // are none. Flash a hint pointing at the snippets file
             // so they know how to configure one.
-            self.flash_info("no snippets configured — add some to ~/.pilot/snippets.yaml");
+            self.flash_info("no snippets configured — add some to ~/.lazybox/snippets.yaml");
             return;
         }
         let mut rows = Vec::with_capacity(self.snippets.len());
@@ -1025,7 +1028,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Map of snake_case `ActionKind` names → key-spec strings;
     /// catalog lookups in `find_action_for_chord` consult this map
     /// first and fall back to the catalog default. See
-    /// `pilot_tui_core::action::ActionKind::name` for the key
+    /// `lazybox_tui_core::action::ActionKind::name` for the key
     /// vocabulary.
     pub fn apply_action_key_overrides(
         &mut self,
@@ -1051,7 +1054,7 @@ impl<T: TerminalAdapter> Model<T> {
         };
         // The repo-level project keys the user is currently
         // subscribed to, mapped to their display name (`owner/repo`).
-        let mut desired: std::collections::BTreeMap<pilot_core::ProjectKey, String> =
+        let mut desired: std::collections::BTreeMap<lazybox_core::ProjectKey, String> =
             std::collections::BTreeMap::new();
         for set in p.selected_scopes.values() {
             for scope in set {
@@ -1068,9 +1071,9 @@ impl<T: TerminalAdapter> Model<T> {
                 let pk = match source {
                     "github" => {
                         let (owner, name) = rest.split_once('/').expect("contains '/' verified");
-                        pilot_core::ProjectKey::github(owner, name)
+                        lazybox_core::ProjectKey::github(owner, name)
                     }
-                    "linear" => pilot_core::ProjectKey::linear(rest),
+                    "linear" => lazybox_core::ProjectKey::linear(rest),
                     _ => continue,
                 };
                 desired.insert(pk, rest.to_string());
@@ -1083,7 +1086,7 @@ impl<T: TerminalAdapter> Model<T> {
             if !self.projects.contains_key(pk) {
                 self.projects.insert(
                     pk.clone(),
-                    pilot_core::Project::new(pk.clone(), name.clone(), chrono::Utc::now()),
+                    lazybox_core::Project::new(pk.clone(), name.clone(), chrono::Utc::now()),
                 );
                 self.synthesized_projects.insert(pk.clone());
                 changed = true;
@@ -1094,7 +1097,7 @@ impl<T: TerminalAdapter> Model<T> {
         // are owned by `ProjectUpserted` / `ProjectRemoved` and must
         // survive a scope edit (a whole-org subscription surfaces repos
         // we never placed here, and "no scopes" means "all").
-        let stale: Vec<pilot_core::ProjectKey> = self
+        let stale: Vec<lazybox_core::ProjectKey> = self
             .synthesized_projects
             .iter()
             .filter(|k| !desired.contains_key(*k))
@@ -1112,7 +1115,7 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Send a command to the daemon, logging failures. Wraps the raw
     /// `client.send` so a dead channel (daemon restarted, socket
-    /// closed) leaves a breadcrumb in `/tmp/pilot.log` instead of
+    /// closed) leaves a breadcrumb in `/tmp/lazybox.log` instead of
     /// silently vanishing. Most call sites genuinely don't care if
     /// the send fails (Subscribe is idempotent, terminal-Write loses
     /// keystrokes on a dead channel anyway) — but a silent log helps
@@ -1358,7 +1361,7 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Override the initial sidebar / right-top split percentages
-    /// from `~/.pilot/config.yaml::ui`. Each value is clamped to
+    /// from `~/.lazybox/config.yaml::ui`. Each value is clamped to
     /// `[SPLIT_MIN, SPLIT_MAX]`. `None` keeps the default.
     pub fn with_splits(mut self, sidebar_pct: Option<u16>, right_top_pct: Option<u16>) -> Self {
         self.layout.apply_persisted(sidebar_pct, right_top_pct);
@@ -1377,7 +1380,7 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         if self.setup.editors.is_empty() {
-            let path = pilot_core::paths::config_yaml();
+            let path = lazybox_core::paths::config_yaml();
             self.flash_info(format!(
                 "no editor detected — add one under `editors:` in {}",
                 path.display(),
@@ -1401,7 +1404,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.send_cmd(IpcCommand::Spawn {
                     session_key: workspace_key.clone(),
                     session_id: None,
-                    kind: pilot_ipc::TerminalKind::Shell,
+                    kind: lazybox_ipc::TerminalKind::Shell,
                     cwd: None,
                     initial_prompt: None,
                 });
@@ -1543,7 +1546,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// A `line[:col]` suffix is forwarded so the editor jumps there.
     fn open_path_in_editor(&mut self, raw: &str, line: Option<u32>, col: Option<u32>) {
         if self.setup.editors.is_empty() {
-            let path = pilot_core::paths::config_yaml();
+            let path = lazybox_core::paths::config_yaml();
             self.flash_info(format!(
                 "no editor detected — add one under `editors:` in {}",
                 path.display(),
@@ -1569,21 +1572,21 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
-    /// Open the global snippets file (`<pilot_home>/snippets.yaml`)
+    /// Open the global snippets file (`<lazybox_home>/snippets.yaml`)
     /// in the configured editor, seeding a commented template the
     /// first time so a brand-new user lands on a working example
     /// rather than an empty buffer. Snippets are loaded once at
     /// startup, so the footer reminds the user to relaunch.
     fn open_snippets_file(&mut self) {
         if self.setup.editors.is_empty() {
-            let path = pilot_core::paths::config_yaml();
+            let path = lazybox_core::paths::config_yaml();
             self.flash_info(format!(
                 "no editor detected — add one under `editors:` in {}",
                 path.display(),
             ));
             return;
         }
-        let path = pilot_config::Snippets::default_global_path();
+        let path = lazybox_config::Snippets::default_global_path();
         if !path.exists() {
             if let Some(parent) = path.parent()
                 && let Err(e) = std::fs::create_dir_all(parent)
@@ -1591,7 +1594,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.flash_error(format!("couldn't create {}: {e}", parent.display()));
                 return;
             }
-            if let Err(e) = std::fs::write(&path, pilot_config::Snippets::starter_template()) {
+            if let Err(e) = std::fs::write(&path, lazybox_config::Snippets::starter_template()) {
                 self.flash_error(format!("couldn't seed {}: {e}", path.display()));
                 return;
             }
@@ -1601,7 +1604,7 @@ impl<T: TerminalAdapter> Model<T> {
             Ok(()) => {
                 tracing::info!(path = %path.display(), editor = %editor.id, "opened snippets file");
                 self.flash_info(format!(
-                    "editing {} in {} — relaunch pilot to load changes",
+                    "editing {} in {} — relaunch lazybox to load changes",
                     path.display(),
                     editor.display
                 ));
@@ -1689,7 +1692,7 @@ impl<T: TerminalAdapter> Model<T> {
         }
         actions.push(SettingsAction::EditProviders);
         actions.push(SettingsAction::EditAgents);
-        let skip_permissions = pilot_config::Config::load()
+        let skip_permissions = lazybox_config::Config::load()
             .map(|c| c.agent.skip_permissions)
             .unwrap_or(false);
         actions.push(SettingsAction::ToggleSkipPermissions {
@@ -1712,7 +1715,7 @@ impl<T: TerminalAdapter> Model<T> {
         // cached detection inputs the wizard flows below depend on.
         if let SettingsAction::ToggleSkipPermissions { enabled } = action {
             let now = !enabled;
-            match pilot_config::Config::save_with(|c| c.agent.skip_permissions = now) {
+            match lazybox_config::Config::save_with(|c| c.agent.skip_permissions = now) {
                 Ok(()) => self.flash_info(if now {
                     "skip permission prompts: on — new sessions launch with --dangerously-skip-permissions"
                 } else {
@@ -1794,7 +1797,7 @@ impl<T: TerminalAdapter> Model<T> {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture,);
         // Drop the bracketed-paste enable we set in `new`. Without
         // this the host terminal keeps wrapping pastes in
-        // `ESC[200~…ESC[201~` even after pilot exits — every
+        // `ESC[200~…ESC[201~` even after lazybox exits — every
         // subsequent shell paste shows the literal markers.
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste,);
         // Drop the focus-reporting request from `new` so the host
@@ -1802,7 +1805,7 @@ impl<T: TerminalAdapter> Model<T> {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableFocusChange,);
         // Drop the kitty keyboard protocol bits we pushed in `new`.
         // Skipping this would leak the request into the user's host
-        // shell after pilot exits — subsequent commands would still
+        // shell after lazybox exits — subsequent commands would still
         // receive disambiguated key events they didn't ask for.
         let _ = crossterm::execute!(
             std::io::stdout(),
@@ -1824,7 +1827,7 @@ impl<T: TerminalAdapter> Model<T> {
         //   first-poll spinner.
         // - Otherwise, surface the lightweight background indicator
         //   that fires on every subsequent cycle (so the user always
-        //   knows whether pilot is currently talking to GitHub).
+        //   knows whether lazybox is currently talking to GitHub).
         // Footer spinner priority: the blocking first-poll modal owns
         // it at startup; otherwise an in-flight spawn (the user's
         // just-pressed `w`/`c`/`s`) beats the ambient background-poll
@@ -1880,7 +1883,7 @@ impl<T: TerminalAdapter> Model<T> {
             // widget so the reverse-video pass lands on the just-
             // rendered cells. Bounded to `right_bottom` so a drag
             // that strayed into the sidebar / activity panes doesn't
-            // leak the highlight across pilot's pane chrome —
+            // leak the highlight across lazybox's pane chrome —
             // matches what the user expects from a per-pane
             // selection (compare to the host terminal's native
             // selection, which crosses panes).

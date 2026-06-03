@@ -18,7 +18,7 @@
 //! component generic — it asks any provider for its scopes and
 //! renders the same picker. Tests inject [`MockScopeSource`] so the
 //! picker works without real network access; production code wires
-//! `pilot_gh::GhScopes` (or whatever provider) for the real call.
+//! `lazybox_gh::GhScopes` (or whatever provider) for the real call.
 
 use crate::ProviderError;
 use serde::{Deserialize, Serialize};
@@ -97,7 +97,7 @@ pub trait ScopeSource: Send + Sync {
 /// to-end without a real GH token or network access.
 ///
 /// ```
-/// use pilot_core::{MockScopeSource, ScopeSource};
+/// use lazybox_core::{MockScopeSource, ScopeSource};
 /// let mock = MockScopeSource::new("github")
 ///     .with_org("acme")
 ///     .with_repo("acme", "web")

@@ -1,6 +1,6 @@
 //! Pluggable session backend.
 //!
-//! The pilot SERVER is a stateless dispatcher — it owns workspace
+//! The lazybox SERVER is a stateless dispatcher — it owns workspace
 //! metadata in SQLite, runs polling, and routes command/event
 //! traffic to and from connected clients. It does **not** own the
 //! agent processes themselves. That job belongs to a session
@@ -11,14 +11,14 @@
 //! - [`RawPtyBackend`] — opens a PTY directly. Sessions die when the
 //!   server quits. Default in `--test` and as the universal
 //!   fallback when nothing fancier is available.
-//! - `TmuxBackend` (next commit) — `tmux -L pilot` server runs the
-//!   agent. Survives pilot-server restarts; user can attach from
-//!   any other terminal via `tmux attach -L pilot -t <key>`.
+//! - `TmuxBackend` (next commit) — `tmux -L lazybox` server runs the
+//!   agent. Survives lazybox-server restarts; user can attach from
+//!   any other terminal via `tmux attach -L lazybox -t <key>`.
 //!
 //! ## Backend session keys
 //!
 //! Each backend assigns a stable string key per session (e.g. tmux
-//! uses the session name `pilot-claude-…`). The dispatcher allocates
+//! uses the session name `lazybox-claude-…`). The dispatcher allocates
 //! a numeric `TerminalId` for the wire, and keeps a
 //! `(TerminalId ↔ backend_key)` map in `ServerConfig.terminals`. On
 //! restart the server reads `backend.list()` to re-bind to existing

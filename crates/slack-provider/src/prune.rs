@@ -1,8 +1,8 @@
-//! Pure-logic classifier for `pilot slack prune`. Takes a Slack
+//! Pure-logic classifier for `lazybox slack prune`. Takes a Slack
 //! channel listing + the set of channel names belonging to live
-//! pilot terminals + a filter, returns a disposition per channel.
+//! lazybox terminals + a filter, returns a disposition per channel.
 //!
-//! Lives in `pilot-slack` (not `pilot-tui`) so the classification is
+//! Lives in `lazybox-slack` (not `lazybox-tui`) so the classification is
 //! decoupled from the store, the TUI, and the network. The CLI
 //! wrapper feeds it `Vec<ChannelInfo>` from `conversations.list` and
 //! `HashSet<String>` from the daemon's session table, and decides
@@ -10,7 +10,7 @@
 //!
 //! ## Naming pattern
 //!
-//! Pilot-managed per-(session, agent) channels are formatted by
+//! Lazybox-managed per-(session, agent) channels are formatted by
 //! [`channel_name_for_terminal`](crate::api::channel_name_for_terminal)
 //! as `<prefix><workspace>-<session8-hex>-<agent>`, all slugged so
 //! every character is ASCII-safe for Slack. The classifier matches
@@ -33,14 +33,14 @@ pub struct ChannelInfo {
     pub created_unix: i64,
 }
 
-/// What `pilot slack prune` should do with a given channel.
+/// What `lazybox slack prune` should do with a given channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Disposition {
-    /// Channel doesn't match pilot's `<prefix><ws>-<8hex>-<agent>`
+    /// Channel doesn't match lazybox's `<prefix><ws>-<8hex>-<agent>`
     /// pattern. Skip silently — user-created channels must never be
     /// touched by prune.
     NotManaged,
-    /// Channel matches the naming pattern AND a pilot terminal for
+    /// Channel matches the naming pattern AND a lazybox terminal for
     /// it still exists in the store. Skip even if `--older-than`
     /// would otherwise nominate it: live sessions can't be safely
     /// archived without breaking their slack mirror.
@@ -49,7 +49,7 @@ pub enum Disposition {
     /// filter (`--older-than` / `--workspace`) excluded it. Skip
     /// with a less-verbose reason than `NotManaged`.
     FilteredOut,
-    /// Stale pilot-managed channel: archive it.
+    /// Stale lazybox-managed channel: archive it.
     Prune,
 }
 
@@ -71,14 +71,14 @@ pub struct Filter {
 }
 
 /// Classification result with parsed parts attached when the
-/// channel is pilot-managed. Callers print the parts in the
+/// channel is lazybox-managed. Callers print the parts in the
 /// dry-run / confirmation table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Classified {
     pub channel: ChannelInfo,
     pub disposition: Disposition,
     /// Parsed `(workspace_slug, session8, agent)` when the name
-    /// matches pilot's pattern. `None` for `NotManaged`.
+    /// matches lazybox's pattern. `None` for `NotManaged`.
     pub parts: Option<ChannelParts>,
 }
 
@@ -89,13 +89,13 @@ pub struct ChannelParts {
     pub agent: String,
 }
 
-/// Structurally parse a channel name into its pilot parts. Returns
+/// Structurally parse a channel name into its lazybox parts. Returns
 /// `None` if the name doesn't fit `<prefix><ws>-<8hex>-<agent>`.
 ///
 /// The agent segment is required to be non-empty AND contain at
 /// least one non-hex char — otherwise an unrelated channel like
 /// `deadbeef-cafef00d-12345678` (three hex segments) would parse as
-/// `ws=deadbeef, session8=cafef00d, agent=12345678`. Real pilot
+/// `ws=deadbeef, session8=cafef00d, agent=12345678`. Real lazybox
 /// agent ids are `claude` / `codex` / `cursor` / `shell` etc, all
 /// containing at least one alpha char outside `[a-f]`.
 pub fn parse_channel_name(name: &str, prefix: &str) -> Option<ChannelParts> {
@@ -220,7 +220,7 @@ pub fn plan(
 /// Parse `7d` / `12h` / `45m` / `3600s` into seconds. Bare numbers
 /// fall back to seconds for symmetry with crontab.
 ///
-/// `pilot slack prune --older-than` takes this shape directly. The
+/// `lazybox slack prune --older-than` takes this shape directly. The
 /// units are deliberately limited — anything finer than seconds is
 /// nonsense for channel age, anything coarser than days encourages
 /// users to commit "delete everything older than a month" patterns

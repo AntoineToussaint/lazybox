@@ -18,8 +18,8 @@ mod effects_tests {
     //! private fields. Effect contracts that drift would be a
     //! silent regression otherwise — these tests freeze them.
     use super::super::*;
-    use pilot_core::{SessionKey, WorkspaceKey};
-    use pilot_ipc::channel;
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::channel;
     use tuirealm::ratatui::layout::Size;
 
     fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
@@ -53,7 +53,7 @@ mod effects_tests {
     /// Returns the model ready for the recovery half of each test.
     fn model_with_sync_error(source: &str) -> Model<tuirealm::terminal::TestTerminalAdapter> {
         use crate::realm::components::footer::NoticeSeverity;
-        use pilot_ipc::Event as IpcEvent;
+        use lazybox_ipc::Event as IpcEvent;
 
         let mut m = build_model();
         // PollCompleted/ProviderError are only processed when the
@@ -85,7 +85,7 @@ mod effects_tests {
     /// red notice up forever.
     #[test]
     fn provider_error_banner_clears_on_next_successful_poll() {
-        use pilot_ipc::Event as IpcEvent;
+        use lazybox_ipc::Event as IpcEvent;
 
         let mut m = model_with_sync_error("github");
 
@@ -102,11 +102,11 @@ mod effects_tests {
     }
 
     /// The banner is owned by the provider that failed. A successful
-    /// poll from a *different* provider (pilot polls GitHub, Linear and
+    /// poll from a *different* provider (lazybox polls GitHub, Linear and
     /// Slack concurrently) must NOT erase a still-valid failure banner.
     #[test]
     fn provider_error_banner_survives_other_providers_poll() {
-        use pilot_ipc::Event as IpcEvent;
+        use lazybox_ipc::Event as IpcEvent;
 
         let mut m = model_with_sync_error("github");
 
@@ -138,7 +138,7 @@ mod effects_tests {
     /// would wrongly clear whatever notice is now on screen.
     #[test]
     fn unrelated_notice_disarms_sync_error_tag() {
-        use pilot_ipc::Event as IpcEvent;
+        use lazybox_ipc::Event as IpcEvent;
 
         let mut m = model_with_sync_error("github");
 
@@ -190,7 +190,7 @@ mod effects_tests {
     #[test]
     fn input_submitted_for_new_workspace_returns_create_workspace() {
         let mut m = build_model();
-        let pk = pilot_core::ProjectKey::local("my-project");
+        let pk = lazybox_core::ProjectKey::local("my-project");
         m.modal_stack.push(Id::NewWorkspace);
         m.pending_new_workspace_project = Some(pk.clone());
         let cmds = m.handle_input_submitted("  my-feature  ".into());
@@ -256,7 +256,7 @@ mod effects_tests {
     /// dedupe keep it to a single ask.
     #[test]
     fn merged_pr_removable_mounts_confirm_and_dedupes() {
-        use pilot_ipc::Event as IpcEvent;
+        use lazybox_ipc::Event as IpcEvent;
         let mut m = build_model();
         let ev = || IpcEvent::MergedPrRemovable {
             workspace_key: WorkspaceKey::new("github:o/r#1"),
@@ -647,15 +647,15 @@ mod effects_tests {
     /// Helper: load a snippets collection from an inline YAML
     /// string via the tmpfile path. Lets per-test fixtures stay
     /// self-contained without each one re-deriving a tmp path.
-    fn snippets_from_yaml(label: &str, yaml: &str) -> pilot_config::Snippets {
+    fn snippets_from_yaml(label: &str, yaml: &str) -> lazybox_config::Snippets {
         let tmp_dir = std::env::temp_dir().join(format!(
-            "pilot-snippets-test-{}-{label}",
+            "lazybox-snippets-test-{}-{label}",
             std::process::id(),
         ));
         std::fs::create_dir_all(&tmp_dir).unwrap();
         let tmp = tmp_dir.join("snippets.yaml");
         std::fs::write(&tmp, yaml).unwrap();
-        pilot_config::Snippets::load_from(&tmp, pilot_config::SnippetOrigin::Global).unwrap()
+        lazybox_config::Snippets::load_from(&tmp, lazybox_config::SnippetOrigin::Global).unwrap()
     }
 
     /// Snippet picker: picking a row with NO active terminal drops
@@ -901,20 +901,20 @@ mod input_starvation_tests {
     //! that bound.
     use super::super::Model;
     use super::super::helpers::{MAX_EVENTS_PER_TICK, drain_daemon_events};
-    use pilot_ipc::{Client, EVENT_CHANNEL_CAPACITY, Event, TerminalId};
+    use lazybox_ipc::{Client, EVENT_CHANNEL_CAPACITY, Event, TerminalId};
     use tokio::sync::mpsc;
     use tuirealm::ratatui::layout::Size;
 
     /// Build a `Model` wired to a bounded inbound event channel we can
     /// fill directly — the same bounded channel the real transport
-    /// hands the TUI ([`pilot_ipc::EVENT_CHANNEL_CAPACITY`]), minus the
+    /// hands the TUI ([`lazybox_ipc::EVENT_CHANNEL_CAPACITY`]), minus the
     /// daemon-side forwarder. Returns the sender so the test floods it
     /// itself. The command channel's receiver is held alive so the
     /// model's `send` calls don't observe a closed channel.
     fn model_with_event_sender() -> (
         Model<tuirealm::terminal::TestTerminalAdapter>,
         mpsc::Sender<Event>,
-        mpsc::UnboundedReceiver<pilot_ipc::Command>,
+        mpsc::UnboundedReceiver<lazybox_ipc::Command>,
     ) {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
@@ -1017,7 +1017,7 @@ mod coalesce_tests {
     //! a chatty agent. The merge must be byte-for-byte faithful and
     //! must NOT reorder across terminals or non-output events.
     use super::super::helpers::coalesce_adjacent_output;
-    use pilot_ipc::{Event, TerminalId};
+    use lazybox_ipc::{Event, TerminalId};
 
     fn out(id: u64, bytes: &[u8], seq: u64) -> Event {
         Event::TerminalOutput {
@@ -1140,11 +1140,11 @@ mod backlog_monitor_tests {
 #[cfg(test)]
 mod subscribed_projects_tests {
     //! `refresh_subscribed_projects` add/remove contract — the
-    //! placeholder headers pilot synthesizes for narrowed repo
+    //! placeholder headers lazybox synthesizes for narrowed repo
     //! subscriptions before the daemon surfaces a workspace.
     use super::super::*;
-    use pilot_core::{PersistedSetup, Project, ProjectKey};
-    use pilot_ipc::{Event as IpcEvent, channel};
+    use lazybox_core::{PersistedSetup, Project, ProjectKey};
+    use lazybox_ipc::{Event as IpcEvent, channel};
     use tuirealm::ratatui::layout::Size;
 
     fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
@@ -1264,8 +1264,8 @@ mod modal_input_responsiveness_tests {
     //! typing) still repaint.
     use super::super::Id;
     use super::super::Model;
-    use pilot_core::WorkspaceKey;
-    use pilot_ipc::{Event as IpcEvent, channel};
+    use lazybox_core::WorkspaceKey;
+    use lazybox_ipc::{Event as IpcEvent, channel};
     use tuirealm::event::{Event as RealmEvent, Key, KeyEvent, KeyModifiers};
     use tuirealm::ratatui::layout::Size;
 

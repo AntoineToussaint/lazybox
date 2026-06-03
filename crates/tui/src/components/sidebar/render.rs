@@ -11,7 +11,7 @@ use crate::components::workspace_row::{WorkspaceRowCtx, build_row as build_works
 impl Sidebar {
     pub fn render(&mut self, area: Rect, frame: &mut Frame, focused: bool) {
         // V1-style header strip:
-        //   row 0: PILOT  N  ● N new  ? N input  [7d]
+        //   row 0: LAZYBOX  N  ● N new  ? N input  [7d]
         //   row 1: s  filter (needs:reply ci:failed ...)
         //   row 2: N CI  N review               (omitted when both 0)
         //   row 3: ── divider ────────────────
@@ -20,7 +20,7 @@ impl Sidebar {
         let theme = crate::theme::current();
         let now = self.now();
         let mailbox_label = match self.mailbox {
-            Mailbox::Inbox => "PILOT",
+            Mailbox::Inbox => "LAZYBOX",
             Mailbox::Inactive => "INACTIVE",
             Mailbox::Snoozed => "SNOOZED",
         };

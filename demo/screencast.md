@@ -1,7 +1,7 @@
 # Screencast
 
-The [VHS tape](pilot.tape) renders the README GIF deterministically, but
-by design it runs `pilot --test` — a credential-free sandbox. It can show
+The [VHS tape](lazybox.tape) renders the README GIF deterministically, but
+by design it runs `lazybox --test` — a credential-free sandbox. It can show
 the *shape* of the app (inbox → workspace → shell → git) but not the parts
 that need a live account: GitHub events landing in real time, a real agent
 working via `w`, and the Slack "control it from your phone" loop.
@@ -18,25 +18,25 @@ Target: **90–120s**, terminal-only, stitched from short takes.
   profile so events and agents are genuine:
 
   ```bash
-  make dev          # runs against $PILOT_HOME (defaults to ~/.pilot-dev)
+  make dev          # runs against $LAZYBOX_HOME (defaults to ~/.lazybox-dev)
   ```
 
   Seed it ahead of time with a couple of workspaces, including one PR whose
   CI is failing (that PR is the star of shots 2–3). Keep the list short so
   the inbox reads at a glance on camera.
 - **Legible type.** ~18pt terminal font, high-contrast theme.
-- **No log spam.** pilot logs to `/tmp/pilot.log`; keep that out of frame
+- **No log spam.** lazybox logs to `/tmp/lazybox.log`; keep that out of frame
   (don't `tail` it in a visible pane).
 - **A second window** you can switch to for pushing a live comment in
   shot 1 (`gh pr comment …` or the GitHub UI).
 - **Phone on screen mirror** for shot 4, framed beside the terminal.
 - Do a dry run of the Slack reply path on a throwaway channel *before*
-  recording — see [#186](https://github.com/AntoineToussaint/pilot/issues/186).
+  recording — see [#186](https://github.com/AntoineToussaint/lazybox/issues/186).
 
 ## Shot list
 
 1. **Hook — the reactive inbox (0–15s).**
-   Open `pilot` on the curated inbox. From the second window, push a
+   Open `lazybox` on the curated inbox. From the second window, push a
    comment to one of the PRs; on camera, its row lights up and reorders
    live. No refresh, no polling by hand — the event arrives on its own.
 
@@ -52,9 +52,9 @@ Target: **90–120s**, terminal-only, stitched from short takes.
    blank box. Let a few lines of the agent's first turn play.
 
 4. **Slack loop — control from your phone (60–90s).**
-   Split frame: pilot on the left, Slack on the phone (mirrored) on the
+   Split frame: lazybox on the left, Slack on the phone (mirrored) on the
    right. The agent hits a decision point and posts a "needs input"
-   message to Slack. On the phone, reply `@pilot yes`. Back in pilot, the
+   message to Slack. On the phone, reply `@lazybox yes`. Back in lazybox, the
    agent picks the reply up and continues. This is the bidirectional path
    — drive a running agent without touching the keyboard.
 

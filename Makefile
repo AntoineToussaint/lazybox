@@ -1,7 +1,7 @@
-# pilot — reactive PR inbox TUI
+# lazybox — reactive PR inbox TUI
 #
 # Self-contained build: `make setup` downloads a pinned zig 0.15.2 to
-# a host-level cache (`~/.cache/pilot/zig/` by default) — the only
+# a host-level cache (`~/.cache/lazybox/zig/` by default) — the only
 # out-of-band dependency. Caching it OUTSIDE the checkout means every
 # clone and every git worktree shares one download instead of each
 # re-fetching ~45MB into its own `vendor/zig/`. libghostty-rs is
@@ -32,8 +32,8 @@ ZIG_VERSION := 0.15.2
 ZIG_SLUG := $(HOST_ARCH)-$(HOST_OS)-$(ZIG_VERSION)
 # Pinned zig lives in a HOST-LEVEL cache, not inside the checkout, so
 # every clone and worktree shares one download. Override the cache
-# root with `PILOT_ZIG_CACHE` (forwarded to bootstrap.sh by `setup`).
-ZIG_CACHE ?= $(HOME)/.cache/pilot/zig
+# root with `LAZYBOX_ZIG_CACHE` (forwarded to bootstrap.sh by `setup`).
+ZIG_CACHE ?= $(HOME)/.cache/lazybox/zig
 CACHE_ZIG_DIR := $(ZIG_CACHE)/$(ZIG_SLUG)
 # Resolve zig from either a per-worktree local install or the shared
 # cache. A local vendor/zig wins when present (lets a worktree pin its
@@ -44,12 +44,12 @@ PINNED_PATH := $(abspath $(ZIG_DIR)):$(PATH)
 
 .PHONY: all setup build release run run-fresh run-test run-connect dev dev-fresh test lint clean distclean install help
 
-# Side-by-side dev profile root. Picked up by `pilot_core::paths`
+# Side-by-side dev profile root. Picked up by `lazybox_core::paths`
 # everywhere — independent state.db, worktrees, daemon socket, tmux
 # socket, config. Override at the command line if needed:
 #
-#   make dev PILOT_DEV_HOME=$HOME/.pilot-experimental
-PILOT_DEV_HOME ?= $(HOME)/.pilot-dev
+#   make dev LAZYBOX_DEV_HOME=$HOME/.lazybox-experimental
+LAZYBOX_DEV_HOME ?= $(HOME)/.lazybox-dev
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -57,39 +57,39 @@ help: ## Show this help
 
 all: setup build ## Setup dependencies and build
 
-setup: ## Bootstrap: download pinned zig 0.15.2 to the shared cache (~/.cache/pilot/zig).
-	@PILOT_ZIG_CACHE="$(ZIG_CACHE)" ./scripts/bootstrap.sh
+setup: ## Bootstrap: download pinned zig 0.15.2 to the shared cache (~/.cache/lazybox/zig).
+	@LAZYBOX_ZIG_CACHE="$(ZIG_CACHE)" ./scripts/bootstrap.sh
 	@command -v cargo >/dev/null || { echo "Error: cargo not found. Install Rust: https://rustup.rs"; exit 1; }
 	@command -v gh    >/dev/null || { echo "Error: gh not found. Install: brew install gh (macOS) or https://cli.github.com"; exit 1; }
 
-build: ## Build pilot (debug). Uses pinned zig.
-	@PATH="$(PINNED_PATH)" cargo build -p pilot-tui
+build: ## Build lazybox (debug). Uses pinned zig.
+	@PATH="$(PINNED_PATH)" cargo build -p lazybox-tui
 
-release: ## Build pilot (optimized). Uses pinned zig.
-	@PATH="$(PINNED_PATH)" cargo build -p pilot-tui --release
+release: ## Build lazybox (optimized). Uses pinned zig.
+	@PATH="$(PINNED_PATH)" cargo build -p lazybox-tui --release
 
 # `make run` accepts args via ARGS=... (`make run ARGS="--fresh"`).
 # Convenience targets below shorten the common cases.
 ARGS ?=
 
-run: ## Build and run pilot. Pass extra args via ARGS=, e.g. ARGS="--fresh".
-	@PATH="$(PINNED_PATH)" cargo run -p pilot-tui -- $(ARGS)
+run: ## Build and run lazybox. Pass extra args via ARGS=, e.g. ARGS="--fresh".
+	@PATH="$(PINNED_PATH)" cargo run -p lazybox-tui -- $(ARGS)
 
 run-release: ## Same as `run` but optimized build. Use when debug feels sluggish (terminal scroll, large workspace lists). Build is ~10x slower but the binary is fast.
-	@PATH="$(PINNED_PATH)" cargo run -p pilot-tui --release -- $(ARGS)
+	@PATH="$(PINNED_PATH)" cargo run -p lazybox-tui --release -- $(ARGS)
 
-run-fresh: ## Run pilot with --fresh (wipe state.db + force the setup wizard).
+run-fresh: ## Run lazybox with --fresh (wipe state.db + force the setup wizard).
 	@$(MAKE) run ARGS="--fresh"
 
-run-test: ## Run pilot with --test (tempdir + seeded session, no GitHub).
+run-test: ## Run lazybox with --test (tempdir + seeded session, no GitHub).
 	@$(MAKE) run ARGS="--test"
 
 run-connect: ## Connect to a running daemon socket. Usage: make run-connect SOCKET=/path
 	@$(MAKE) run ARGS="--connect $(SOCKET)"
 
-dev: ## Run the dev build against $(PILOT_DEV_HOME) — independent state from `make run`.
-	@echo "▶ dev profile: PILOT_HOME=$(PILOT_DEV_HOME)"
-	@PATH="$(PINNED_PATH)" PILOT_HOME="$(PILOT_DEV_HOME)" cargo run -p pilot-tui -- $(ARGS)
+dev: ## Run the dev build against $(LAZYBOX_DEV_HOME) — independent state from `make run`.
+	@echo "▶ dev profile: LAZYBOX_HOME=$(LAZYBOX_DEV_HOME)"
+	@PATH="$(PINNED_PATH)" LAZYBOX_HOME="$(LAZYBOX_DEV_HOME)" cargo run -p lazybox-tui -- $(ARGS)
 
 dev-fresh: ## Same as `dev` but wipes the dev state.db first.
 	@$(MAKE) dev ARGS="--fresh"
@@ -124,5 +124,6 @@ distclean: clean ## Clean cargo + the local and shared pinned-zig installs for t
 	@rm -rf "$(CACHE_ZIG_DIR)"
 
 install: release ## Install to ~/.cargo/bin.
-	@cp target/release/pilot ~/.cargo/bin/pilot
-	@echo "Installed to ~/.cargo/bin/pilot"
+	@cp target/release/lazybox ~/.cargo/bin/lazybox
+	@cp target/release/lb ~/.cargo/bin/lb
+	@echo "Installed to ~/.cargo/bin/{lazybox,lb}"

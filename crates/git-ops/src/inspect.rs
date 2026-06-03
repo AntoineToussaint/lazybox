@@ -4,8 +4,8 @@
 //! delete helper.
 //!
 //! Decoupling: the inspector takes session metadata as plain
-//! [`TrackedSession`] input rather than reaching into `pilot-store` /
-//! `pilot-core`. That keeps `pilot-git-ops` source-agnostic — the CLI
+//! [`TrackedSession`] input rather than reaching into `lazybox-store` /
+//! `lazybox-core`. That keeps `lazybox-git-ops` source-agnostic — the CLI
 //! / TUI translates store records into `TrackedSession` and calls in.
 
 use std::collections::HashMap;
@@ -42,7 +42,7 @@ pub struct TrackedSession {
 pub enum OrphanReason {
     /// On-disk worktree directory has no matching session record.
     Untracked,
-    /// Pilot tracks a session pointing at this directory, but the
+    /// Lazybox tracks a session pointing at this directory, but the
     /// session's process exited / was closed.
     SessionStopped,
     /// Worktree's checked-out branch is missing from the bare repo's
@@ -88,7 +88,7 @@ pub struct WorktreeInspection {
     pub bare_path: Option<PathBuf>,
     /// Branch reported by `git worktree list --porcelain`. `None`
     /// when the HEAD is detached or git couldn't tell us (rare for
-    /// pilot-created worktrees, common for hand-managed ones).
+    /// lazybox-created worktrees, common for hand-managed ones).
     pub branch: Option<String>,
     /// Session id from the tracked list, if any. None means the dir
     /// is untracked.
@@ -134,7 +134,7 @@ impl WorktreeManager {
     /// Scan the worktrees directory + every bare clone under
     /// `base/repos/**/*.git` and report each worktree's health.
     ///
-    /// `tracked` is the set of sessions pilot currently knows about
+    /// `tracked` is the set of sessions lazybox currently knows about
     /// — typically derived from `Store::list_workspaces`. Worktrees
     /// whose on-disk path doesn't appear in this list are tagged
     /// [`OrphanReason::Untracked`]; tracked sessions whose process
@@ -545,7 +545,7 @@ async fn unpushed(worktree: &Path) -> bool {
     // `@{u}` resolves the configured upstream. If there's no upstream
     // set the command fails — we treat "no upstream" as "no unpushed
     // commits to worry about" because the cleanup path assumes a
-    // pilot-created worktree where the branch either tracks origin or
+    // lazybox-created worktree where the branch either tracks origin or
     // was never published.
     let Ok(output) = apply_git_env(Command::new("git").current_dir(worktree).args([
         "rev-list",

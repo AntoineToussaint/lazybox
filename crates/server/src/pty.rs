@@ -4,7 +4,7 @@
 //! its own libghostty-vt. The daemon only needs to (1) spawn a PTY,
 //! (2) stream raw bytes out to subscribers, (3) accept bytes in,
 //! (4) resize, (5) know when the child exits. So this is deliberately
-//! smaller than `pilot-tui-term::TermSession` and critically it's
+//! smaller than `lazybox-tui-term::TermSession` and critically it's
 //! **Send-safe** — no libghostty pointers.
 //!
 //! Subscription model: one terminal can have N subscribers (e.g. a
@@ -214,14 +214,14 @@ impl DaemonPty {
         let reader_notify = finished_notify.clone();
         let reader_seq = last_seq.clone();
         // Raw-byte capture for building the detector fixture corpus. When
-        // `PILOT_CAPTURE_PTY=<dir>` is set we dump every chunk — exactly
+        // `LAZYBOX_CAPTURE_PTY=<dir>` is set we dump every chunk — exactly
         // the bytes the state detector scrapes — to disk before any ring
         // or broadcast processing. Keyed by child pid so concurrent
         // sessions land in separate files. Off by default; never on a
         // production path.
         let mut capture = open_capture(child_pid);
         std::thread::Builder::new()
-            .name("pilot-server-pty".into())
+            .name("lazybox-server-pty".into())
             .spawn(move || {
                 let mut reader = reader;
                 let mut buf = [0u8; 8192];
@@ -260,7 +260,7 @@ impl DaemonPty {
         // the exit code through a oneshot so the daemon loop can await.
         let (exit_tx, exit_rx) = oneshot::channel::<Option<i32>>();
         std::thread::Builder::new()
-            .name("pilot-server-exit".into())
+            .name("lazybox-server-exit".into())
             .spawn(move || {
                 let code = match child.wait() {
                     Ok(status) => status.exit_code().try_into().ok(),
@@ -380,7 +380,7 @@ impl DaemonPty {
     }
 }
 
-/// Open a per-PTY capture file when `PILOT_CAPTURE_PTY=<dir>` is set,
+/// Open a per-PTY capture file when `LAZYBOX_CAPTURE_PTY=<dir>` is set,
 /// else `None`. The dir is created if missing; an unset var or any IO
 /// error disables capture silently (a warn for the error) — capture is
 /// a developer aid, never load-bearing. Keyed by child pid so two
@@ -388,10 +388,10 @@ impl DaemonPty {
 /// unknown we fall back to a fixed name and append, so a single session
 /// still captures.
 fn open_capture(child_pid: Option<u32>) -> Option<std::fs::File> {
-    let dir = std::env::var_os("PILOT_CAPTURE_PTY")?;
+    let dir = std::env::var_os("LAZYBOX_CAPTURE_PTY")?;
     let dir = PathBuf::from(dir);
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!("PILOT_CAPTURE_PTY: create {} failed: {e}", dir.display());
+        tracing::warn!("LAZYBOX_CAPTURE_PTY: create {} failed: {e}", dir.display());
         return None;
     }
     let name = match child_pid {
@@ -406,13 +406,13 @@ fn open_capture(child_pid: Option<u32>) -> Option<std::fs::File> {
     {
         Ok(f) => {
             tracing::info!(
-                "PILOT_CAPTURE_PTY: capturing raw PTY bytes to {}",
+                "LAZYBOX_CAPTURE_PTY: capturing raw PTY bytes to {}",
                 path.display()
             );
             Some(f)
         }
         Err(e) => {
-            tracing::warn!("PILOT_CAPTURE_PTY: open {} failed: {e}", path.display());
+            tracing::warn!("LAZYBOX_CAPTURE_PTY: open {} failed: {e}", path.display());
             None
         }
     }
@@ -431,21 +431,21 @@ mod capture_tests {
     /// cross-test read. A single test serialises the mutations.
     ///
     /// SAFETY: no other test in this crate reads or writes
-    /// `PILOT_CAPTURE_PTY`, and within this test the calls are strictly
+    /// `LAZYBOX_CAPTURE_PTY`, and within this test the calls are strictly
     /// ordered with no concurrent environment access; the prior value
     /// is restored on exit.
     #[test]
-    fn open_capture_respects_pilot_capture_pty_var() {
-        let prior = std::env::var_os("PILOT_CAPTURE_PTY");
+    fn open_capture_respects_lazybox_capture_pty_var() {
+        let prior = std::env::var_os("LAZYBOX_CAPTURE_PTY");
 
         unsafe {
-            std::env::remove_var("PILOT_CAPTURE_PTY");
+            std::env::remove_var("LAZYBOX_CAPTURE_PTY");
         }
         assert!(open_capture(Some(123)).is_none(), "unset var → no capture");
 
         let dir = tempfile::TempDir::new().unwrap();
         unsafe {
-            std::env::set_var("PILOT_CAPTURE_PTY", dir.path());
+            std::env::set_var("LAZYBOX_CAPTURE_PTY", dir.path());
         }
         let mut f = open_capture(Some(4242)).expect("capture file opens when var is set");
         f.write_all(b"\x1b[2Khello").unwrap();
@@ -456,8 +456,8 @@ mod capture_tests {
 
         unsafe {
             match prior {
-                Some(p) => std::env::set_var("PILOT_CAPTURE_PTY", p),
-                None => std::env::remove_var("PILOT_CAPTURE_PTY"),
+                Some(p) => std::env::set_var("LAZYBOX_CAPTURE_PTY", p),
+                None => std::env::remove_var("LAZYBOX_CAPTURE_PTY"),
             }
         }
     }

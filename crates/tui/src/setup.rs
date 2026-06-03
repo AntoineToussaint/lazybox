@@ -1,6 +1,6 @@
 //! Startup detection: which agents and providers are usable on this
 //! machine. Drives the first-run setup screen and is also useful as a
-//! standalone diagnostic (`pilot doctor` later).
+//! standalone diagnostic (`lazybox doctor` later).
 //!
 //! ## What gets detected
 //!
@@ -92,7 +92,7 @@ pub struct SetupReport {
 }
 
 impl SetupReport {
-    /// Pilot needs at least one task source AND at least one agent to
+    /// Lazybox needs at least one task source AND at least one agent to
     /// be useful. Anything weaker than that and the user gets an empty
     /// sidebar or a broken `c` keystroke — better to surface the
     /// problem upfront than fail silently.
@@ -224,7 +224,7 @@ async fn detect_github() -> ToolStatus {
 
     let cred = match tokio::time::timeout(
         Duration::from_secs(3),
-        pilot_gh::credential_chain().resolve(pilot_gh::SOURCE),
+        lazybox_gh::credential_chain().resolve(lazybox_gh::SOURCE),
     )
     .await
     {
@@ -252,7 +252,7 @@ async fn detect_github() -> ToolStatus {
     // actionable) than just "I have a string."
     match tokio::time::timeout(
         Duration::from_secs(5),
-        pilot_gh::GhClient::from_credential(cred),
+        lazybox_gh::GhClient::from_credential(cred),
     )
     .await
     {
@@ -286,7 +286,7 @@ async fn detect_linear() -> ToolStatus {
         });
     }
 
-    match pilot_linear::LinearClient::from_env() {
+    match lazybox_linear::LinearClient::from_env() {
         Ok(_) => mk(ToolState::Found {
             detail: "LINEAR_API_KEY set".into(),
         }),

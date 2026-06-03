@@ -1,6 +1,6 @@
 # TUI & UX
 
-How pilot is laid out and driven from the keyboard and mouse. This page covers
+How lazybox is laid out and driven from the keyboard and mouse. This page covers
 the pane structure, the action/keybinding system, the overlays (help, settings,
 tour), the activity feed, reply, detach, mouse handling, modals, and desktop
 notifications.
@@ -119,7 +119,7 @@ Press `?`; dismiss with any key.
 
 **Status:** stable
 **Crate(s):** `tui` (`setup_flow.rs`, `realm/setup_ctx.rs`), `config`
-**Config / flags:** writes `~/.pilot/config.yaml`
+**Config / flags:** writes `~/.lazybox/config.yaml`
 **Key bindings:** `,`
 
 ### What it does
@@ -160,7 +160,7 @@ palette entries. Output persists to `config.yaml` (`PersistedSetup`).
 **Key bindings:** `Shift-T`
 
 ### What it does
-A guided walkthrough of pilot's main features (inbox, work, snippets,
+A guided walkthrough of lazybox's main features (inbox, work, snippets,
 navigation, config), shown once on first run and re-openable on demand.
 
 ### How to use it
@@ -257,7 +257,7 @@ message).
 **Key bindings:** `Ctrl-Shift-D`
 
 ### What it does
-Spawns a new pilot window pinned to the focused pane — e.g. pop a terminal out
+Spawns a new lazybox window pinned to the focused pane — e.g. pop a terminal out
 into its own window.
 
 ### How to use it
@@ -265,11 +265,11 @@ Focus a pane and press `Ctrl-Shift-D`.
 
 ### How it works (brief)
 `focused_detach_spec()` builds a `DetachSpec { layout, args }`
-(`crates/tui/src/pane.rs`); `spawn_detached_pilot` launches a new pilot process
+(`crates/tui/src/pane.rs`); `spawn_detached_lazybox` launches a new lazybox process
 with those args (`crates/tui/src/realm/model/keys.rs`).
 
 ### Test checklist
-- [ ] `Ctrl-Shift-D` on a terminal opens a new pilot window showing that pane.
+- [ ] `Ctrl-Shift-D` on a terminal opens a new lazybox window showing that pane.
 - [ ] The detached window connects to the same daemon/state.
 - [ ] Distinct from `Shift-D` (sync status).
 
@@ -286,7 +286,7 @@ with those args (`crates/tui/src/realm/model/keys.rs`).
 **Key bindings:** `F8` / `Alt-s` / `Ctrl-Alt-s` toggle mouse capture; `Shift-arrows` resize
 
 ### What it does
-pilot captures the mouse for pane-scoped selection, clickable UI, splitter
+lazybox captures the mouse for pane-scoped selection, clickable UI, splitter
 drags, and wheel scrollback. Toggle capture off to hand the mouse to the host
 terminal for native whole-screen selection.
 
@@ -295,7 +295,7 @@ terminal for native whole-screen selection.
   right-click a sidebar row for a context menu; right-click terminal content to
   open a detected URL/file/issue reference.
 - Drag a splitter to resize; mouse wheel scrolls the focused list/terminal.
-- `F8` (or `Alt-s` / `Ctrl-Alt-s`) toggles pilot's mouse capture; off = host-native selection, on = pilot pane-scoped selection + splitter drag.
+- `F8` (or `Alt-s` / `Ctrl-Alt-s`) toggles lazybox's mouse capture; off = host-native selection, on = lazybox pane-scoped selection + splitter drag.
 
 ### How it works (brief)
 Mouse events route through `crates/tui/src/realm/model/keys.rs`: hit-testing for
@@ -307,7 +307,7 @@ wheel scroll with inertia damping, and the capture toggle. The context menu is a
 - [ ] Clicking selects/focuses the expected pane or row.
 - [ ] Dragging a splitter resizes; the layout persists for the session.
 - [ ] Mouse wheel scrolls the focused list/terminal.
-- [ ] `F8` flips capture; host-native selection works when off, pilot selection when on.
+- [ ] `F8` flips capture; host-native selection works when off, lazybox selection when on.
 - [ ] Right-click on a sidebar row opens the context menu.
 - [ ] Drag-select in a terminal copies via OSC 52 (footer confirms).
 
@@ -359,14 +359,14 @@ an async future/channel via `tick()`.
 **Key bindings:** —
 
 ### What it does
-Fires an OS notification when something needs attention while pilot is
+Fires an OS notification when something needs attention while lazybox is
 unfocused: an agent transitions to needing input, CI starts failing, a review
 gets requested, or a new comment lands. You don't have to babysit a session or
 keep checking GitHub.
 
 ### How to use it
-On by default. Agent prompts read `pilot — <workspace> needs input`; provider
-events read `pilot — CI failing on <workspace>` / `… review requested on …` /
+On by default. Agent prompts read `lazybox — <workspace> needs input`; provider
+events read `lazybox — CI failing on <workspace>` / `… review requested on …` /
 `… new activity on …`. A footer notice also appears in-app for agent prompts.
 Disable all OS banners with `attention.desktop_notify: false` (the footer notice
 stays). Which provider events notify follows the per-signal `attention` flags
@@ -382,14 +382,14 @@ signals on `Event::WorkspaceUpserted`
 Delivery prefers the **terminal's own OSC notification sequence**
 (`crates/tui-core/src/notify.rs`): Ghostty / Kitty / WezTerm get OSC 777
 (`ESC]777;notify;TITLE;BODY`), iTerm2 gets OSC 9 (body only), detected via
-`$TERM_PROGRAM`. This reaches the *local* machine even when pilot runs over SSH
+`$TERM_PROGRAM`. This reaches the *local* machine even when lazybox runs over SSH
 and needs no helper binary. Inside tmux the sequence is wrapped in a
 passthrough envelope (requires `allow-passthrough`, default-on in tmux 3.3a).
 Terminals without OSC support (Terminal.app, plain SSH) fall back to the
 subprocess path: macOS prefers `terminal-notifier` (grouped) then `osascript`;
 Linux uses `notify-send`; Windows is a stub.
 
-Banners are suppressed while pilot's terminal is reported focused (DEC mode
+Banners are suppressed while lazybox's terminal is reported focused (DEC mode
 1004 focus reporting) so it doesn't self-spam — a terminal that never reports
 focus is treated as unfocused so it still notifies.
 

@@ -1,5 +1,5 @@
 [package]
-name = "pilot-agents"
+name = "lazybox-agents"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,8 +7,8 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-pilot-core    = { workspace = true }
-pilot-ipc  = { workspace = true }
+lazybox-core    = { workspace = true }
+lazybox-ipc  = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
 

@@ -1,4 +1,4 @@
-//! Pilot IPC — protocol between the TUI and the daemon.
+//! Lazybox IPC — protocol between the TUI and the daemon.
 //!
 //! The daemon is the single source of truth for all state (sessions,
 //! worktrees, PTYs, provider polling, persistence). The TUI issues
@@ -17,7 +17,7 @@
 //! Each message on the wire is `[u32 BE length][bincode payload]`.
 //! Max frame size is `MAX_FRAME_BYTES` (64 MiB).
 
-use pilot_core::SessionKey;
+use lazybox_core::SessionKey;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -105,7 +105,7 @@ impl TerminalKind {
 ///
 /// The three states are mutually exclusive and share a single UI
 /// slot per session. They're produced per-agent-kind by
-/// [`Agent::detect_state`](../pilot_agents/trait.Agent.html) — each
+/// [`Agent::detect_state`](../lazybox_agents/trait.Agent.html) — each
 /// agent decides how to recognise "working" / "input needed" from
 /// its own PTY output. An agent with no opinion returns `None`,
 /// which consumers treat as `Idle` (so an unknown agent never
@@ -126,17 +126,17 @@ pub enum AgentState {
 
 /// A normalized lifecycle hook fired by an agent, decoupled from the
 /// agent's wire JSON. Claude Code emits these via configured hooks
-/// (`Stop`, `Notification`, `PreToolUse`, …); pilot injects a hook
+/// (`Stop`, `Notification`, `PreToolUse`, …); lazybox injects a hook
 /// command at spawn so the daemon receives deterministic state signals
 /// instead of screen-scraping the PTY. The wire JSON → `HookEvent`
-/// translation lives in `pilot_agents::hook`; mapping `HookEvent` →
+/// translation lives in `lazybox_agents::hook`; mapping `HookEvent` →
 /// [`AgentState`] lives there too. This type is the IPC-stable shape
 /// carried by [`Command::IngestHook`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookEvent {
     pub kind: HookEventKind,
     /// The agent's own session id (Claude's `session_id`). Informational
-    /// — pilot correlates by the `terminal_id` it baked into the hook
+    /// — lazybox correlates by the `terminal_id` it baked into the hook
     /// command, not this — but captured for the structured-stream path.
     pub session_id: Option<String>,
     pub cwd: Option<String>,
@@ -148,7 +148,7 @@ pub struct HookEvent {
 }
 
 /// The lifecycle point a [`HookEvent`] fired at. `Other` is the
-/// catch-all for hook names pilot doesn't map to a state transition.
+/// catch-all for hook names lazybox doesn't map to a state transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HookEventKind {
     SessionStart,
@@ -200,7 +200,7 @@ pub struct AgentUsage {
 }
 
 /// Stable identity for the human or service account connected to a
-/// Pilot daemon. The current local daemon uses `local`; remote/multi-user
+/// Lazybox daemon. The current local daemon uses `local`; remote/multi-user
 /// clients should authenticate into distinct principal ids.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PrincipalId(String);
@@ -294,16 +294,16 @@ impl fmt::Debug for ProviderCredentialInput {
 pub struct SpawnFallback {
     pub session_key: SessionKey,
     #[serde(default)]
-    pub session_id: Option<pilot_core::SessionId>,
+    pub session_id: Option<lazybox_core::SessionId>,
     pub kind: TerminalKind,
     pub cwd: Option<String>,
 }
 
 /// One row of `Event::WorktreesInspected`. Mirrors
-/// `pilot_git_ops::WorktreeInspection` as a wire-friendly value type
+/// `lazybox_git_ops::WorktreeInspection` as a wire-friendly value type
 /// (no `SystemTime`, no library-specific enum). `reasons` carries the
 /// short tags from `OrphanReason::tag()` so clients can render
-/// without needing to depend on `pilot-git-ops`.
+/// without needing to depend on `lazybox-git-ops`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeInspectionDto {
     pub path: std::path::PathBuf,
@@ -347,7 +347,7 @@ pub enum Command {
     Spawn {
         session_key: SessionKey,
         #[serde(default)]
-        session_id: Option<pilot_core::SessionId>,
+        session_id: Option<lazybox_core::SessionId>,
         kind: TerminalKind,
         cwd: Option<String>,
         /// Optional initial prompt the daemon should inject after the
@@ -392,10 +392,10 @@ pub enum Command {
         terminal_id: TerminalId,
     },
     /// A lifecycle hook fired by an agent (Claude Code), forwarded by
-    /// the `pilot hook-ingest` helper the daemon injects at spawn. The
+    /// the `lazybox hook-ingest` helper the daemon injects at spawn. The
     /// daemon maps it to an [`AgentState`] transition for `terminal_id`
     /// — deterministic state, no PTY screen-scraping. `terminal_id` is
-    /// the value pilot baked into the hook command, so correlation is
+    /// the value lazybox baked into the hook command, so correlation is
     /// exact.
     IngestHook {
         terminal_id: TerminalId,
@@ -421,7 +421,7 @@ pub enum Command {
     /// rows in one batch. Destructive — gated by the unified
     /// ActionConfirm modal on the TUI side.
     DeleteProject {
-        project_key: pilot_core::ProjectKey,
+        project_key: lazybox_core::ProjectKey,
     },
     /// Manually collapse an issue workspace into the PR workspace
     /// that closes it. Same end-state as the auto-detect path
@@ -479,7 +479,7 @@ pub enum Command {
         /// trusts the value (no project-exists check today — the
         /// `n` flow can't fire without a focused project, and a
         /// stale key just produces an orphan workspace).
-        project_key: pilot_core::ProjectKey,
+        project_key: lazybox_core::ProjectKey,
     },
     /// Create a brand-new local Project — a top-level container the
     /// sidebar groups workspaces under, like a github repo but with
@@ -492,7 +492,7 @@ pub enum Command {
     },
     /// Update the per-session tile/tab layout (`SessionLayout`).
     /// Persisted so the user's split arrangement survives restart.
-    /// `layout_json` carries the serialized `pilot_core::SessionLayout`
+    /// `layout_json` carries the serialized `lazybox_core::SessionLayout`
     /// — a string here keeps the wire type free of a core dep without
     /// forcing the IPC crate into the workspace types.
     SetSessionLayout {
@@ -524,11 +524,11 @@ pub enum Command {
     /// replies here: `accept=true` runs the merge (sessions move to
     /// the PR workspace, issue row disappears); `accept=false`
     /// leaves both rows visible and the stall is dropped — the
-    /// merge won't be re-prompted for this issue until pilot
+    /// merge won't be re-prompted for this issue until lazybox
     /// restarts.
     ConfirmMerge {
-        issue_workspace_key: pilot_core::WorkspaceKey,
-        pr_workspace_key: pilot_core::WorkspaceKey,
+        issue_workspace_key: lazybox_core::WorkspaceKey,
+        pr_workspace_key: lazybox_core::WorkspaceKey,
         accept: bool,
     },
     /// Manual "adopt": move all sessions from `source_workspace_key`
@@ -539,8 +539,8 @@ pub enum Command {
     /// just becomes a session-less tracking row the user can ignore
     /// or remove via `Shift-X`.
     AdoptSessions {
-        source_workspace_key: pilot_core::WorkspaceKey,
-        target_workspace_key: pilot_core::WorkspaceKey,
+        source_workspace_key: lazybox_core::WorkspaceKey,
+        target_workspace_key: lazybox_core::WorkspaceKey,
     },
     /// Merge the workspace's PR via the provider. Fires from the
     /// sidebar's `Shift-M` shortcut on a READY (approved + green
@@ -548,7 +548,7 @@ pub enum Command {
     /// the GraphQL `mergePullRequest` mutation. Method defaults
     /// to the repo's setting; future per-repo config can override.
     MergePr {
-        workspace_key: pilot_core::WorkspaceKey,
+        workspace_key: lazybox_core::WorkspaceKey,
     },
     /// Request reviews on the workspace's PR from the given GitHub
     /// logins. Adds to the existing reviewer set (no replacement).
@@ -558,7 +558,7 @@ pub enum Command {
     /// flow through unchanged; the daemon resolves each to a node
     /// ID before issuing the mutation.
     RequestReviewers {
-        workspace_key: pilot_core::WorkspaceKey,
+        workspace_key: lazybox_core::WorkspaceKey,
         logins: Vec<String>,
     },
     /// Add assignees to the workspace's PR or issue. Works on any
@@ -566,7 +566,7 @@ pub enum Command {
     /// `RequestReviewers` — daemon resolves logins → node IDs and
     /// calls the `addAssigneesToAssignable` mutation.
     AddAssignees {
-        workspace_key: pilot_core::WorkspaceKey,
+        workspace_key: lazybox_core::WorkspaceKey,
         logins: Vec<String>,
     },
     /// Replace the assignee set on the workspace's PR / issue.
@@ -576,7 +576,7 @@ pub enum Command {
     /// this list" operation from the TUI's POV. Empty list clears
     /// every assignee.
     SetAssignees {
-        workspace_key: pilot_core::WorkspaceKey,
+        workspace_key: lazybox_core::WorkspaceKey,
         logins: Vec<String>,
     },
     /// Replace the label set on the workspace's PR / issue. Daemon
@@ -586,7 +586,7 @@ pub enum Command {
     /// against the repo's full label set; names that don't exist on
     /// the repo are silently dropped.
     SetLabels {
-        workspace_key: pilot_core::WorkspaceKey,
+        workspace_key: lazybox_core::WorkspaceKey,
         names: Vec<String>,
     },
     /// Ask the daemon to fetch the repository's full label set for
@@ -595,7 +595,7 @@ pub enum Command {
     /// the user can pick from every label the repo defines (not
     /// just the ones currently applied).
     FetchRepoLabels {
-        workspace_key: pilot_core::WorkspaceKey,
+        workspace_key: lazybox_core::WorkspaceKey,
     },
     /// Admin command: walk every persisted workspace, drop sessions
     /// whose terminals aren't currently live, and remove the
@@ -636,7 +636,7 @@ pub enum Command {
     /// and broadcasts an updated `WorkspaceUpserted`. No-op when
     /// the workspace has no PR (issues don't have review threads).
     FetchPrDetails {
-        workspace_key: pilot_core::WorkspaceKey,
+        workspace_key: lazybox_core::WorkspaceKey,
     },
     /// Start an agent runtime using a structured protocol surface. This
     /// does not replace `Spawn`; terminal clients can keep using PTY
@@ -644,7 +644,7 @@ pub enum Command {
     StartAgentRun {
         session_key: SessionKey,
         #[serde(default)]
-        session_id: Option<pilot_core::SessionId>,
+        session_id: Option<lazybox_core::SessionId>,
         agent: String,
         mode: AgentRuntimeMode,
         cwd: Option<String>,
@@ -667,7 +667,7 @@ pub enum Command {
         question_id: String,
         answer: AgentQuestionAnswer,
     },
-    /// Store/update a provider credential for one Pilot principal.
+    /// Store/update a provider credential for one Lazybox principal.
     /// This is the bootstrap path for local desktop clients; future
     /// API connection auth can make `principal_id` implicit.
     UpsertProviderCredential {
@@ -704,7 +704,7 @@ pub enum Event {
     /// issues; every component reads from the workspace directly and
     /// projects to a primary task via `workspace.primary_task()`.
     Snapshot {
-        workspaces: Vec<pilot_core::Workspace>,
+        workspaces: Vec<lazybox_core::Workspace>,
         terminals: Vec<TerminalSnapshot>,
         /// Top-level Projects the daemon knows about. Sidebar
         /// headers render from here so empty projects (no workspaces
@@ -712,7 +712,7 @@ pub enum Event {
         /// without the Project entity still wire-compat with newer
         /// clients.
         #[serde(default)]
-        projects: Vec<pilot_core::Project>,
+        projects: Vec<lazybox_core::Project>,
     },
     /// Authenticated user's login per provider source ("github" →
     /// "AntoineToussaint", etc.). Emitted once after the daemon's
@@ -727,16 +727,16 @@ pub enum Event {
     /// Boxed because Workspace is several KB once activity is
     /// populated; keeping the `Event` enum slim avoids worst-case
     /// async-channel overhead.
-    WorkspaceUpserted(Box<pilot_core::Workspace>),
-    WorkspaceRemoved(pilot_core::WorkspaceKey),
+    WorkspaceUpserted(Box<lazybox_core::Workspace>),
+    WorkspaceRemoved(lazybox_core::WorkspaceKey),
     /// A project (top-level container — github repo, linear team,
     /// or local) was registered or updated. Sidebar headers render
     /// from these. Emitted both on initial snapshot replay AND when
     /// polling discovers a new repo/team.
-    ProjectUpserted(Box<pilot_core::Project>),
+    ProjectUpserted(Box<lazybox_core::Project>),
     /// A project was removed (user deleted a local project, or all
     /// scope/filter rules that pointed at it were dropped).
-    ProjectRemoved(pilot_core::ProjectKey),
+    ProjectRemoved(lazybox_core::ProjectKey),
     /// Daemon detected that this workspace fell out of scope (the
     /// user removed its repo, narrowed the filter so its task no
     /// longer matches, etc.) AND it has running terminals. The
@@ -746,7 +746,7 @@ pub enum Event {
     /// `Command::Kill { session_key }` (drop everything) or by doing
     /// nothing (workspace stays out-of-scope but visible).
     WorkspaceOutOfScope {
-        workspace_key: pilot_core::WorkspaceKey,
+        workspace_key: lazybox_core::WorkspaceKey,
         /// Compact identifier for the confirm modal — `owner/repo#N`
         /// for PRs/issues, the workspace key otherwise.
         label: String,
@@ -765,8 +765,8 @@ pub enum Event {
     /// `Command::ConfirmMerge`. Without live sessions the daemon
     /// merges silently and emits `WorkspaceMerged` instead.
     WorkspaceMergePending {
-        issue_workspace_key: pilot_core::WorkspaceKey,
-        pr_workspace_key: pilot_core::WorkspaceKey,
+        issue_workspace_key: lazybox_core::WorkspaceKey,
+        pr_workspace_key: lazybox_core::WorkspaceKey,
         /// Compact `owner/repo#N` form for both sides — the TUI renders
         /// them in the confirm modal so the user can recognize what's
         /// about to fold without memorizing keys.
@@ -782,8 +782,8 @@ pub enum Event {
     /// post-confirm paths. The TUI flashes a footer notice so the
     /// inbox-row disappearance isn't surprising.
     WorkspaceMerged {
-        issue_workspace_key: pilot_core::WorkspaceKey,
-        pr_workspace_key: pilot_core::WorkspaceKey,
+        issue_workspace_key: lazybox_core::WorkspaceKey,
+        pr_workspace_key: lazybox_core::WorkspaceKey,
         issue_label: String,
         pr_label: String,
     },
@@ -792,7 +792,7 @@ pub enum Event {
     /// up, so the TUI flashes a footer notice so the keypress doesn't
     /// look like a no-op.
     PrMerged {
-        workspace_key: pilot_core::WorkspaceKey,
+        workspace_key: lazybox_core::WorkspaceKey,
         pr_label: String,
     },
     /// A PR just transitioned open→merged and its workspace is a
@@ -807,7 +807,7 @@ pub enum Event {
     /// Suppressed when `worktree.auto_cleanup_merged` is enabled — that
     /// opt-in path reaps safe worktrees silently instead.
     MergedPrRemovable {
-        workspace_key: pilot_core::WorkspaceKey,
+        workspace_key: lazybox_core::WorkspaceKey,
         /// Compact `owner/repo#N` form for the confirm modal copy.
         label: String,
         /// Live terminals that removal would kill. Quoted back so the
@@ -823,22 +823,22 @@ pub enum Event {
     /// request/response correlation id — the picker is keyed by
     /// `workspace_key` so the receiver knows which mount to fill.
     RepoLabels {
-        workspace_key: pilot_core::WorkspaceKey,
-        labels: Vec<pilot_core::Label>,
+        workspace_key: lazybox_core::WorkspaceKey,
+        labels: Vec<lazybox_core::Label>,
     },
     /// A new session (= folder worktree) was provisioned inside its
     /// workspace. Sent in response to `Command::CreateSession` and
     /// also when the daemon auto-creates a session for a workspace-
     /// scoped Spawn. Sidebar uses this to expand the workspace row
     /// into session sub-rows once the count crosses 1.
-    SessionCreated(Box<pilot_core::WorkspaceSession>),
+    SessionCreated(Box<lazybox_core::WorkspaceSession>),
     /// A session ended (process exited and the worktree was reaped,
     /// OR the user explicitly killed it). Includes the workspace
     /// key so consumers can look up which row to update without
     /// parsing the session id.
     SessionEnded {
-        workspace_key: pilot_core::WorkspaceKey,
-        session_id: pilot_core::SessionId,
+        workspace_key: lazybox_core::WorkspaceKey,
+        session_id: lazybox_core::SessionId,
     },
     TerminalSpawned {
         terminal_id: TerminalId,
@@ -928,7 +928,7 @@ pub enum Event {
         count: usize,
     },
     /// Granular progress signal during a poll cycle. Drives the
-    /// polling modal's "what is pilot doing right now" indicator
+    /// polling modal's "what is lazybox doing right now" indicator
     /// (e.g. "Querying PRs in acme/widget…", "Got 5 PRs,
     /// fetching reviews…"). Also great for debugging — every
     /// progress step shows up in the log.
@@ -976,7 +976,7 @@ pub enum Event {
         run_id: AgentRunId,
         session_key: SessionKey,
         #[serde(default)]
-        session_id: Option<pilot_core::SessionId>,
+        session_id: Option<lazybox_core::SessionId>,
         agent: String,
         mode: AgentRuntimeMode,
     },

@@ -1328,6 +1328,274 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "lazybox-agents"
+version = "0.1.0"
+dependencies = [
+ "lazybox-core",
+ "lazybox-ipc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lazybox-auth"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lazybox-config"
+version = "0.1.0"
+dependencies = [
+ "humantime-serde",
+ "lazybox-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "lazybox-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "lazybox-events"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "lazybox-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lazybox-gh"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "futures",
+ "http",
+ "lazybox-auth",
+ "lazybox-core",
+ "lazybox-events",
+ "octocrab",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lazybox-git-ops"
+version = "0.1.0"
+dependencies = [
+ "lazybox-core",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lazybox-ipc"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "chrono",
+ "humantime-serde",
+ "lazybox-core",
+ "proptest",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lazybox-linear"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "lazybox-auth",
+ "lazybox-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lazybox-llm-proxy"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "bytes",
+ "chrono",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "lazybox-core",
+ "lazybox-ipc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lazybox-server"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "lazybox-agents",
+ "lazybox-auth",
+ "lazybox-config",
+ "lazybox-core",
+ "lazybox-events",
+ "lazybox-gh",
+ "lazybox-git-ops",
+ "lazybox-ipc",
+ "lazybox-linear",
+ "lazybox-llm-proxy",
+ "lazybox-slack",
+ "lazybox-store",
+ "lazybox-tui-term",
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "lazybox-slack"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "lazybox-auth",
+ "lazybox-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
+
+[[package]]
+name = "lazybox-store"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "lazybox-core",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "lazybox-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "crossterm",
+ "futures-util",
+ "insta",
+ "lazybox-agents",
+ "lazybox-auth",
+ "lazybox-config",
+ "lazybox-core",
+ "lazybox-gh",
+ "lazybox-ipc",
+ "lazybox-linear",
+ "lazybox-server",
+ "lazybox-slack",
+ "lazybox-store",
+ "lazybox-tui-core",
+ "lazybox-tui-term",
+ "libc",
+ "libghostty-vt",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tuirealm",
+ "uuid",
+ "which",
+]
+
+[[package]]
+name = "lazybox-tui-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "lazybox-auth",
+ "lazybox-core",
+ "lazybox-ipc",
+ "lazybox-store",
+ "libc",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "which",
+]
+
+[[package]]
+name = "lazybox-tui-term"
+version = "0.1.0"
+dependencies = [
+ "libghostty-vt",
+ "portable-pty",
+ "ratatui",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1813,274 +2081,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
 dependencies = [
  "siphasher",
-]
-
-[[package]]
-name = "pilot-agents"
-version = "0.1.0"
-dependencies = [
- "pilot-core",
- "pilot-ipc",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "pilot-auth"
-version = "0.1.0"
-dependencies = [
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "pilot-config"
-version = "0.1.0"
-dependencies = [
- "humantime-serde",
- "pilot-core",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "pilot-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "pilot-events"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "pilot-core",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "pilot-gh"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "futures",
- "http",
- "octocrab",
- "pilot-auth",
- "pilot-core",
- "pilot-events",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "pilot-git-ops"
-version = "0.1.0"
-dependencies = [
- "pilot-core",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "pilot-ipc"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "chrono",
- "humantime-serde",
- "pilot-core",
- "proptest",
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "pilot-linear"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "chrono",
- "http-body-util",
- "hyper",
- "hyper-util",
- "pilot-auth",
- "pilot-core",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "pilot-llm-proxy"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "bytes",
- "chrono",
- "http-body-util",
- "hyper",
- "hyper-util",
- "pilot-core",
- "pilot-ipc",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "pilot-server"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "chrono",
- "futures",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "pilot-agents",
- "pilot-auth",
- "pilot-config",
- "pilot-core",
- "pilot-events",
- "pilot-gh",
- "pilot-git-ops",
- "pilot-ipc",
- "pilot-linear",
- "pilot-llm-proxy",
- "pilot-slack",
- "pilot-store",
- "pilot-tui-term",
- "portable-pty",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "pilot-slack"
-version = "0.1.0"
-dependencies = [
- "futures",
- "pilot-auth",
- "pilot-core",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite",
- "tracing",
-]
-
-[[package]]
-name = "pilot-store"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "parking_lot",
- "pilot-core",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "pilot-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "crossterm",
- "futures-util",
- "insta",
- "libc",
- "libghostty-vt",
- "pilot-agents",
- "pilot-auth",
- "pilot-config",
- "pilot-core",
- "pilot-gh",
- "pilot-ipc",
- "pilot-linear",
- "pilot-server",
- "pilot-slack",
- "pilot-store",
- "pilot-tui-core",
- "pilot-tui-term",
- "ratatui",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "tuirealm",
- "uuid",
- "which",
-]
-
-[[package]]
-name = "pilot-tui-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "libc",
- "pilot-auth",
- "pilot-core",
- "pilot-ipc",
- "pilot-store",
- "serde",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "which",
-]
-
-[[package]]
-name = "pilot-tui-term"
-version = "0.1.0"
-dependencies = [
- "libghostty-vt",
- "portable-pty",
- "ratatui",
- "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]

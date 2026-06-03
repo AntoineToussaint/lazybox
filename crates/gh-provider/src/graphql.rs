@@ -1,7 +1,7 @@
 //! GraphQL-based GitHub data fetching. One query gets everything.
 
 use chrono::{DateTime, Utc};
-use pilot_core::*;
+use lazybox_core::*;
 use serde::Deserialize;
 
 /// The inbox-scan GraphQL query. Pulls **only** what the sidebar
@@ -430,7 +430,7 @@ pub struct GqlComment {
     /// Eyes-reaction state for the authenticated viewer. Populated
     /// by the issues-search query (which selects `reactions(content:
     /// EYES) { viewerHasReacted }`); other queries leave it `None`.
-    /// Drives `@pilot` mention idempotency: pilot reacts 👀 on first
+    /// Drives `@lazybox` mention idempotency: lazybox reacts 👀 on first
     /// sight, then skips comments where this is `Some(true)`.
     #[serde(default)]
     pub reactions: Option<GqlReactionView>,
@@ -438,8 +438,8 @@ pub struct GqlComment {
 
 /// Tiny projection of a `ReactionConnection` filtered to one content
 /// kind (currently `EYES`). True when the authenticated viewer has
-/// reacted with that content. Used by the `@pilot`-mention path to
-/// decide whether pilot has already acknowledged a comment.
+/// reacted with that content. Used by the `@lazybox`-mention path to
+/// decide whether lazybox has already acknowledged a comment.
 #[derive(Deserialize, Debug, Clone, Copy, Default)]
 pub struct GqlReactionView {
     #[serde(default, rename = "viewerHasReacted")]
@@ -691,8 +691,8 @@ pub fn merge_pr_body(pull_request_node_id: &str) -> serde_json::Value {
 }
 
 /// GraphQL mutation: add a 👀 reaction to any `Reactable` (Issue body
-/// or IssueComment, in pilot's case). Posting this reaction is the
-/// authoritative idempotency marker for the `@pilot`-mention
+/// or IssueComment, in lazybox's case). Posting this reaction is the
+/// authoritative idempotency marker for the `@lazybox`-mention
 /// auto-spawn path — subsequent polls see `viewerHasReacted: true`
 /// and skip the trigger. Re-adding an existing reaction is a no-op
 /// on GitHub's side, so retrying is safe.
@@ -1591,7 +1591,7 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
             .labels
             .nodes
             .iter()
-            .map(|l| pilot_core::Label {
+            .map(|l| lazybox_core::Label {
                 name: l.name.clone(),
                 color: l.color.clone().unwrap_or_default(),
             })
@@ -1610,11 +1610,11 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         auto_merge_enabled: pr.auto_merge_request.is_some(),
         is_in_merge_queue: pr.is_in_merge_queue,
         mergeable: match pr.mergeable.as_deref() {
-            Some("CONFLICTING") => pilot_core::Mergeable::Conflicting,
-            Some("MERGEABLE") => pilot_core::Mergeable::Mergeable,
+            Some("CONFLICTING") => lazybox_core::Mergeable::Conflicting,
+            Some("MERGEABLE") => lazybox_core::Mergeable::Mergeable,
             // GitHub returns "UNKNOWN" while it lazily computes
             // mergeability — surface as Unknown rather than guess.
-            _ => pilot_core::Mergeable::Unknown,
+            _ => lazybox_core::Mergeable::Unknown,
         },
         is_behind_base: pr.merge_state_status.as_deref() == Some("BEHIND"),
         node_id: pr.id.clone(),
@@ -2255,7 +2255,7 @@ pub struct GqlIssue {
     /// Eyes-reaction state for the authenticated viewer on the issue
     /// BODY (separate from per-comment reactions on
     /// `comments.nodes[].reactions`). See [`GqlReactionView`] for the
-    /// semantics + why pilot uses 👀 as an idempotency marker.
+    /// semantics + why lazybox uses 👀 as an idempotency marker.
     #[serde(default)]
     pub reactions: Option<GqlReactionView>,
 }
@@ -2403,7 +2403,7 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
             .labels
             .nodes
             .iter()
-            .map(|l| pilot_core::Label {
+            .map(|l| lazybox_core::Label {
                 name: l.name.clone(),
                 color: l.color.clone().unwrap_or_default(),
             })
@@ -2417,7 +2417,7 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
             .collect(),
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: pilot_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::Mergeable,
         is_behind_base: false,
         node_id: issue.id.clone(),
         needs_reply,
@@ -3550,7 +3550,7 @@ mod tests {
     /// Lazy node with no closing refs returns an empty
     /// `closes_issues` — the workspace merge keeps the existing
     /// list (so re-fetch on the same workspace doesn't clobber
-    /// it). Tested at the workspace level in pilot-core.
+    /// it). Tested at the workspace level in lazybox-core.
     #[test]
     fn pr_details_to_details_empty_closes_when_no_refs() {
         let node = GqlPrDetailsNode::default();

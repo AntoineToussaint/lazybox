@@ -1,15 +1,15 @@
 //! `Right` — tuirealm wrapper around `crate::components::right_pane::RightPane`.
 //!
 //! Same pattern as the sidebar wrapper: hold an instance of the
-//! existing pilot pane and delegate `view`/`on_event`/`handle_key`
+//! existing lazybox pane and delegate `view`/`on_event`/`handle_key`
 //! through UFCS.
 
 use crate::PaneId;
-use crate::components::right_pane::RightPane as PilotRight;
+use crate::components::right_pane::RightPane as LazyboxRight;
 use crate::realm::keymap::realm_key_to_crossterm;
 use crate::realm::{Msg, UserEvent};
-use pilot_ipc::Command as IpcCommand;
-use pilot_ipc::Event as IpcEvent;
+use lazybox_ipc::Command as IpcCommand;
+use lazybox_ipc::Event as IpcEvent;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::Event;
@@ -20,7 +20,7 @@ use tuirealm::state::State;
 
 /// tuirealm-shaped right pane.
 pub struct Right {
-    inner: PilotRight,
+    inner: LazyboxRight,
     focused: bool,
     pending_cmds: Vec<IpcCommand>,
 }
@@ -29,7 +29,7 @@ impl Right {
     /// Construct.
     pub fn new(id: PaneId) -> Self {
         Self {
-            inner: PilotRight::new(id),
+            inner: LazyboxRight::new(id),
             focused: false,
             pending_cmds: Vec::new(),
         }
@@ -38,7 +38,7 @@ impl Right {
     /// Set the workspace whose details + activity feed the pane
     /// renders. Called from `Model::update` after sidebar selection
     /// changes.
-    pub fn set_workspace(&mut self, workspace: Option<pilot_core::Workspace>) {
+    pub fn set_workspace(&mut self, workspace: Option<lazybox_core::Workspace>) {
         self.inner.set_workspace(workspace);
     }
 
@@ -63,7 +63,7 @@ impl Right {
     /// Drive the auto-mark-on-hover timer; the orchestrator calls
     /// this each tick. Returns the `(SessionKey, index)` to mark read
     /// when the timer fires, otherwise None.
-    pub fn tick(&mut self) -> Option<(pilot_core::SessionKey, usize)> {
+    pub fn tick(&mut self) -> Option<(lazybox_core::SessionKey, usize)> {
         self.inner.tick(self.focused)
     }
 
@@ -104,7 +104,7 @@ impl Right {
     /// Apply resolved `UiDefaults` (auto-mark delay, task body cap,
     /// etc.) to the inner pane. Called once at startup from the
     /// model's `apply_sidebar_config`.
-    pub fn apply_ui_defaults(&mut self, ui: &pilot_config::UiDefaults) {
+    pub fn apply_ui_defaults(&mut self, ui: &lazybox_config::UiDefaults) {
         self.inner.apply_ui_defaults(ui);
     }
 

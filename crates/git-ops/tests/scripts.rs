@@ -3,7 +3,7 @@
 //! await that could hang, so no body-wrap timeout. The IO is bounded
 //! by `tempfile::TempDir` cleanup at end of scope.
 
-use pilot_git_ops::{Script, ScriptBody, Worktree, WorktreeManager};
+use lazybox_git_ops::{Script, ScriptBody, Worktree, WorktreeManager};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -30,14 +30,14 @@ fn is_executable(p: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Empty scripts list — no `_pilot/scripts/` directory created,
+/// Empty scripts list — no `_lazybox/scripts/` directory created,
 /// no error. Mirrors the `apply_mounts` empty-list contract.
 #[tokio::test]
 async fn empty_scripts_is_noop() {
     let base = TempDir::new().unwrap();
     let wt = make_worktree(&base).await;
     wm(&base).apply_scripts(&wt, &[]).await.expect("noop");
-    let scripts_dir = wt.path.join("_pilot").join("scripts");
+    let scripts_dir = wt.path.join("_lazybox").join("scripts");
     assert!(!scripts_dir.exists(), "no scripts dir on empty list");
 }
 
@@ -57,7 +57,7 @@ async fn inline_script_writes_body_and_chmods_executable() {
         )
         .await
         .expect("apply");
-    let path = wt.path.join("_pilot/scripts/cleanup");
+    let path = wt.path.join("_lazybox/scripts/cleanup");
     assert!(path.exists(), "file written");
     let body = tokio::fs::read_to_string(&path).await.unwrap();
     assert_eq!(body, "#!/usr/bin/env bash\necho hello", "shebang injected");
@@ -80,7 +80,7 @@ async fn inline_script_preserves_existing_shebang() {
         )
         .await
         .unwrap();
-    let body = tokio::fs::read_to_string(wt.path.join("_pilot/scripts/py"))
+    let body = tokio::fs::read_to_string(wt.path.join("_lazybox/scripts/py"))
         .await
         .unwrap();
     assert_eq!(body, "#!/usr/bin/env python3\nprint('hi')");
@@ -107,7 +107,7 @@ async fn linked_script_creates_symlink_to_source() {
         )
         .await
         .expect("apply");
-    let target = wt.path.join("_pilot/scripts/cleanup");
+    let target = wt.path.join("_lazybox/scripts/cleanup");
     let resolved = tokio::fs::read_link(&target).await.unwrap();
     assert_eq!(resolved, source);
     // Edits to source flow through.
@@ -135,7 +135,7 @@ async fn linked_script_errors_when_source_missing() {
         .await
         .expect_err("must error on missing source");
     assert!(err.to_string().contains("does not exist"), "got: {err}");
-    assert!(!wt.path.join("_pilot/scripts/cleanup").exists());
+    assert!(!wt.path.join("_lazybox/scripts/cleanup").exists());
 }
 
 /// Re-applying the same inline script is idempotent — no error,
@@ -151,7 +151,7 @@ async fn inline_script_re_apply_is_idempotent() {
     let mgr = wm(&base);
     mgr.apply_scripts(&wt, &scripts).await.expect("first");
     mgr.apply_scripts(&wt, &scripts).await.expect("second");
-    let path = wt.path.join("_pilot/scripts/cleanup");
+    let path = wt.path.join("_lazybox/scripts/cleanup");
     let body = tokio::fs::read_to_string(&path).await.unwrap();
     assert_eq!(body, "#!/usr/bin/env bash\necho hello");
     #[cfg(unix)]
@@ -159,7 +159,7 @@ async fn inline_script_re_apply_is_idempotent() {
 }
 
 /// Re-applying inline with different content rewrites the file —
-/// pilot must let users iterate on the script without manual
+/// lazybox must let users iterate on the script without manual
 /// deletion.
 #[tokio::test]
 async fn inline_script_re_apply_with_new_content_rewrites() {
@@ -184,7 +184,7 @@ async fn inline_script_re_apply_with_new_content_rewrites() {
     )
     .await
     .unwrap();
-    let body = tokio::fs::read_to_string(wt.path.join("_pilot/scripts/cleanup"))
+    let body = tokio::fs::read_to_string(wt.path.join("_lazybox/scripts/cleanup"))
         .await
         .unwrap();
     assert_eq!(body, "#!/usr/bin/env bash\necho v2");
@@ -192,7 +192,7 @@ async fn inline_script_re_apply_with_new_content_rewrites() {
 
 /// Re-applying linked with a different source errors — same
 /// conflict semantics as `apply_mounts`. The user has to remove
-/// the old symlink before pilot will install a new one (avoids
+/// the old symlink before lazybox will install a new one (avoids
 /// silently rewiring scripts).
 #[tokio::test]
 async fn linked_script_re_apply_with_different_source_errors() {
@@ -228,7 +228,7 @@ async fn linked_script_re_apply_with_different_source_errors() {
         "got: {err}"
     );
     // Original symlink untouched.
-    let resolved = tokio::fs::read_link(wt.path.join("_pilot/scripts/cleanup"))
+    let resolved = tokio::fs::read_link(wt.path.join("_lazybox/scripts/cleanup"))
         .await
         .unwrap();
     assert_eq!(resolved, source_a);
@@ -271,7 +271,7 @@ async fn empty_script_name_is_rejected() {
     assert!(err.to_string().contains("must not be empty"), "got: {err}");
 }
 
-/// Hidden-file name (starts with `.`) is rejected — pilot's
+/// Hidden-file name (starts with `.`) is rejected — lazybox's
 /// scripts dir should hold visible, callable tools, not dotfiles.
 #[tokio::test]
 async fn hidden_script_name_is_rejected() {
@@ -314,8 +314,8 @@ async fn apply_multiple_scripts_in_one_call() {
         )
         .await
         .expect("apply");
-    let cleanup = wt.path.join("_pilot/scripts/cleanup");
-    let setup = wt.path.join("_pilot/scripts/setup");
+    let cleanup = wt.path.join("_lazybox/scripts/cleanup");
+    let setup = wt.path.join("_lazybox/scripts/setup");
     assert!(cleanup.exists() && setup.exists());
     #[cfg(unix)]
     assert!(is_executable(&cleanup));

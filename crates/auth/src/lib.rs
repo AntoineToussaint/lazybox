@@ -1,6 +1,6 @@
-//! # pilot-auth
+//! # lazybox-auth
 //!
-//! Modular credential resolution for pilot.
+//! Modular credential resolution for lazybox.
 //!
 //! Provides the [`CredentialProvider`] trait and a [`CredentialChain`] that
 //! tries multiple providers in order (like AWS credential chain).

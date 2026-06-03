@@ -1,6 +1,6 @@
 //! Provider-agnostic chat integration.
 //!
-//! Pilot uses external chat systems (Slack today; Discord / Matrix /
+//! Lazybox uses external chat systems (Slack today; Discord / Matrix /
 //! IRC planned) as a "second display" for the inbox — a place where
 //! agent events surface, and from which the user can drive the
 //! agent without being at the keyboard.
@@ -8,7 +8,7 @@
 //! ## Channel granularity — one channel per (session, agent), or one
 //! thread per (session, agent) inside the anchor channel
 //!
-//! A pilot workspace can host multiple sessions (= worktrees on
+//! A lazybox workspace can host multiple sessions (= worktrees on
 //! disk), each running one or more agents. Two layouts are
 //! supported, selected by the provider via [`TerminalTarget`]:
 //!
@@ -25,12 +25,12 @@
 //!   per-(session, agent) channels (Slack with
 //!   `per_workspace_channels: false`), every agent terminal gets one
 //!   anchor message in the configured anchor channel
-//!   (`#pilot` by default); subsequent notifications are posted as
+//!   (`#lazybox` by default); subsequent notifications are posted as
 //!   thread replies and inbound thread replies route back to the
 //!   anchoring terminal. This keeps a quiet Slack while preserving
 //!   Asking → reply round-trips.
 //!
-//! Either way, inbound `@pilot yes` (or a thread reply) is
+//! Either way, inbound `@lazybox yes` (or a thread reply) is
 //! unambiguous: the channel id alone identifies the terminal in
 //! dedicated mode; in thread mode the `thread_ts` identifies it.
 //! The older workspace-keyed model couldn't distinguish two agents
@@ -63,8 +63,8 @@
 //! [`handle_bus_event`].
 
 use crate::ServerConfig;
-use pilot_ipc::{AgentState, Event, TerminalId, TerminalKind};
-use pilot_store::Store;
+use lazybox_ipc::{AgentState, Event, TerminalId, TerminalKind};
+use lazybox_store::Store;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -101,7 +101,7 @@ pub enum ChatInbound {
     /// Provider has come online. The dispatcher ignores it today —
     /// adapters can log "connected" themselves.
     Connected,
-    /// User said something in a channel pilot can see. `thread_ts` is
+    /// User said something in a channel lazybox can see. `thread_ts` is
     /// set when the message came from inside a thread — the
     /// dispatcher uses it to route to the (session, agent) anchored
     /// by that thread (thread-fallback mode).
@@ -141,7 +141,7 @@ pub enum TerminalTarget {
     NoSurface,
 }
 
-/// What pilot needs from a chat backend.
+/// What lazybox needs from a chat backend.
 ///
 /// Return-style follows the [`crate::backend::SessionBackend`]
 /// pattern: `Pin<Box<dyn Future>>` rather than `async-trait`, so the
@@ -291,13 +291,13 @@ async fn post_into(
     }
 }
 
-/// Inbound chat commands pilot responds to instead of forwarding to
-/// the PTY. The set is small on purpose — pilot is an inbox, not a
+/// Inbound chat commands lazybox responds to instead of forwarding to
+/// the PTY. The set is small on purpose — lazybox is an inbox, not a
 /// chatbot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatCommand {
     /// Report state of sessions. In a per-terminal channel: that
-    /// agent's state + recent activity. In a channel pilot doesn't
+    /// agent's state + recent activity. In a channel lazybox doesn't
     /// route to a terminal: a summary across every tracked agent.
     Status,
 }
@@ -618,7 +618,7 @@ fn store_workspace_title(store: &dyn Store, workspace_key: &str) -> Option<Strin
     let records = store.list_workspaces().ok()?;
     let r = records.into_iter().find(|r| r.key == workspace_key)?;
     let json = r.workspace_json?;
-    let ws: pilot_core::Workspace = serde_json::from_str(&json).ok()?;
+    let ws: lazybox_core::Workspace = serde_json::from_str(&json).ok()?;
     let title = ws
         .primary_task()
         .map(|t| t.title.clone())
@@ -733,7 +733,7 @@ fn encode_for_pty(text: &str) -> Vec<u8> {
 // ── Status reply ──────────────────────────────────────────────────
 
 /// Build the status reply for a chat command. `terminal_id` is
-/// `Some` when the command came from a channel pilot routes to a
+/// `Some` when the command came from a channel lazybox routes to a
 /// specific agent — that channel reports just that agent. `None`
 /// means the channel isn't routed (anchor / DM / random) — return
 /// the global summary across every tracked terminal.
@@ -752,11 +752,11 @@ async fn build_status_reply(
         let s = state.lock().await;
         s.terminal_to_channel.clone()
     };
-    let terminal_meta: HashMap<TerminalId, (pilot_core::SessionKey, TerminalKind)> = {
+    let terminal_meta: HashMap<TerminalId, (lazybox_core::SessionKey, TerminalKind)> = {
         let m = server.terminal_meta.lock().await;
         m.clone()
     };
-    let terminal_sessions: HashMap<TerminalId, pilot_core::SessionId> = {
+    let terminal_sessions: HashMap<TerminalId, lazybox_core::SessionId> = {
         let m = server.terminal_sessions.lock().await;
         m.clone()
     };
@@ -784,7 +784,7 @@ async fn build_status_reply(
 /// Pull the deserialized workspaces from the store. Mirrors
 /// `lib::load_workspaces` but inlined here because that helper is
 /// private; duplicating five lines is cheaper than re-exporting.
-fn load_workspaces_for_status(store: &dyn Store) -> Vec<pilot_core::Workspace> {
+fn load_workspaces_for_status(store: &dyn Store) -> Vec<lazybox_core::Workspace> {
     let records = match store.list_workspaces() {
         Ok(r) => r,
         Err(e) => {
@@ -805,8 +805,8 @@ pub fn format_status_reply(
     terminal_id: Option<TerminalId>,
     agent_states: &HashMap<TerminalId, AgentState>,
     terminal_to_channel: &HashMap<TerminalId, String>,
-    terminal_meta: &HashMap<TerminalId, (pilot_core::SessionKey, TerminalKind)>,
-    terminal_sessions: &HashMap<TerminalId, pilot_core::SessionId>,
+    terminal_meta: &HashMap<TerminalId, (lazybox_core::SessionKey, TerminalKind)>,
+    terminal_sessions: &HashMap<TerminalId, lazybox_core::SessionId>,
     workspace_titles: &HashMap<String, String>,
 ) -> String {
     if let Some(tid) = terminal_id {
@@ -869,8 +869,8 @@ fn format_one_liner(
 fn format_terminal_status(
     tid: TerminalId,
     agent_states: &HashMap<TerminalId, AgentState>,
-    terminal_meta: &HashMap<TerminalId, (pilot_core::SessionKey, TerminalKind)>,
-    terminal_sessions: &HashMap<TerminalId, pilot_core::SessionId>,
+    terminal_meta: &HashMap<TerminalId, (lazybox_core::SessionKey, TerminalKind)>,
+    terminal_sessions: &HashMap<TerminalId, lazybox_core::SessionId>,
     workspace_titles: &HashMap<String, String>,
 ) -> String {
     let Some((workspace_key, kind)) = terminal_meta.get(&tid) else {
@@ -914,7 +914,7 @@ fn agent_icon(tid: TerminalId, agent_states: &HashMap<TerminalId, AgentState>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pilot_core::{SessionId, SessionKey};
+    use lazybox_core::{SessionId, SessionKey};
 
     fn ws_titles(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs

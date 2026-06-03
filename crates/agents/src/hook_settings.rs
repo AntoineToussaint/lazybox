@@ -1,20 +1,20 @@
 //! Generate the per-session Claude Code settings file that wires
-//! pilot's hook command into every lifecycle event we track.
+//! lazybox's hook command into every lifecycle event we track.
 //!
 //! Claude's `--settings <file|json>` flag takes precedence over the
 //! user's `~/.claude/settings.json` rather than merging with it — so if
 //! we passed a bare `{ "hooks": … }` we'd silently disable any hooks the
 //! user configured. [`build_settings`] therefore starts from the user's
-//! settings (when provided) and *appends* pilot's hook entry to each
+//! settings (when provided) and *appends* lazybox's hook entry to each
 //! event's list, preserving the user's own hooks.
 //!
 //! The settings JSON is built here as a pure function so it's testable
-//! without touching the filesystem; the daemon (`pilot_server`) reads
+//! without touching the filesystem; the daemon (`lazybox_server`) reads
 //! the user's settings, calls this, and writes the result.
 
 use serde_json::{Map, Value, json};
 
-/// Lifecycle events pilot injects its hook command on. `PreToolUse` /
+/// Lifecycle events lazybox injects its hook command on. `PreToolUse` /
 /// `PostToolUse` give the "working, running `<tool>`" signal;
 /// `Notification` / `PermissionRequest` give "needs input"; `Stop` /
 /// `SessionEnd` give "done / idle"; the rest fill in subagent and
@@ -37,7 +37,7 @@ pub const HOOKED_EVENTS: &[&str] = &[
 /// Build the merged Claude settings JSON. `user_settings` is the
 /// parsed `~/.claude/settings.json` (or `None` if absent / unreadable);
 /// `hook_command` is the shell command Claude runs on each event
-/// (`pilot hook-ingest --terminal <id>`).
+/// (`lazybox hook-ingest --terminal <id>`).
 pub fn build_settings(user_settings: Option<&Value>, hook_command: &str) -> Value {
     // Clone the user's settings so their non-hook keys (model, theme,
     // env, permissions, …) survive into the file we hand Claude.
@@ -75,7 +75,7 @@ pub fn build_settings(user_settings: Option<&Value>, hook_command: &str) -> Valu
 mod tests {
     use super::*;
 
-    const CMD: &str = "pilot hook-ingest --terminal 7";
+    const CMD: &str = "lazybox hook-ingest --terminal 7";
 
     fn hook_commands_for(settings: &Value, event: &str) -> Vec<String> {
         settings["hooks"][event]
@@ -94,7 +94,7 @@ mod tests {
             assert_eq!(
                 hook_commands_for(&settings, event),
                 vec![CMD.to_string()],
-                "missing pilot hook on {event}",
+                "missing lazybox hook on {event}",
             );
         }
     }
@@ -120,7 +120,7 @@ mod tests {
             cmds.contains(&"user-stop.sh".to_string()),
             "user hook dropped"
         );
-        assert!(cmds.contains(&CMD.to_string()), "pilot hook missing");
+        assert!(cmds.contains(&CMD.to_string()), "lazybox hook missing");
     }
 
     #[test]
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn tolerates_malformed_user_hooks_key() {
         // A user whose `hooks.Stop` is not an array shouldn't crash us;
-        // we replace it with a valid array carrying pilot's hook.
+        // we replace it with a valid array carrying lazybox's hook.
         let user = json!({ "hooks": { "Stop": "oops-a-string" } });
         let settings = build_settings(Some(&user), CMD);
         assert_eq!(hook_commands_for(&settings, "Stop"), vec![CMD.to_string()]);

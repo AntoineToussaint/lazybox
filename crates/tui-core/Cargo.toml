@@ -1,6 +1,6 @@
 [package]
-name = "pilot-tui-core"
-description = "Pure logic shared by pilot-tui — no ratatui."
+name = "lazybox-tui-core"
+description = "Pure logic shared by lazybox-tui — no ratatui."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,7 +10,7 @@ repository.workspace = true
 readme = "../../README.md"
 
 [lib]
-name = "pilot_tui_core"
+name = "lazybox_tui_core"
 path = "src/lib.rs"
 
 # This crate is intentionally ratatui-free. It holds the pure-logic
@@ -19,14 +19,14 @@ path = "src/lib.rs"
 # editor discovery, platform shims, setup helpers, test-mode harness.
 #
 # Keeping these in their own crate means edits to (say) `intent.rs`
-# only rebuild `pilot-tui-core` + the things that depend on it,
-# instead of forcing a full pilot-tui recompile (~21k LoC).
+# only rebuild `lazybox-tui-core` + the things that depend on it,
+# instead of forcing a full lazybox-tui recompile (~21k LoC).
 
 [dependencies]
-pilot-core  = { workspace = true }
-pilot-auth  = { workspace = true }
-pilot-store = { workspace = true }
-pilot-ipc   = { workspace = true }
+lazybox-core  = { workspace = true }
+lazybox-auth  = { workspace = true }
+lazybox-store = { workspace = true }
+lazybox-ipc   = { workspace = true }
 
 tokio     = { workspace = true }
 chrono    = { workspace = true }

@@ -1,4 +1,4 @@
-//! Pilot domain components — pane structs (Sidebar, RightPane,
+//! Lazybox domain components — pane structs (Sidebar, RightPane,
 //! TerminalStack), the activity-feed renderer, status icons, task
 //! labels. Realm modal/component ports live under `crate::realm`.
 

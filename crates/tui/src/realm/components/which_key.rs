@@ -11,7 +11,7 @@
 //! Styled to match the yazi-style `help` panel: a `surface`-filled
 //! box anchored bottom-left, just above the footer.
 
-use pilot_tui_core::action::{ActionDef, ActionGroup};
+use lazybox_tui_core::action::{ActionDef, ActionGroup};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::prelude::*;

@@ -1,8 +1,8 @@
 # Providers
 
-pilot is source-agnostic: the inbox doesn't care whether a row is a GitHub PR,
+lazybox is source-agnostic: the inbox doesn't care whether a row is a GitHub PR,
 a GitHub issue, a Linear ticket, or a Slack thread. Sources plug in behind two
-traits in `pilot-core`. This page covers those traits and the three shipping
+traits in `lazybox-core`. This page covers those traits and the three shipping
 providers.
 
 See [`DESIGN.md` § Sources](../../DESIGN.md) for the rationale and the planned
@@ -137,15 +137,15 @@ Errors map to `ProviderError` (auth → `Auth`, timeout/5xx/rate-limit →
 
 ### What it does
 Optionally mirrors workspace activity into per-workspace Slack channels and
-routes `@pilot`-mentioned replies in those channels back into the running
+routes `@lazybox`-mentioned replies in those channels back into the running
 agent's stdin — so you can watch and nudge long-running Claude/Codex sessions
 from your phone.
 
 ### How to use it
 Create a Slack app from the manifest in [`docs/slack-setup.md`](../slack-setup.md),
 set `slack.bot_token` and `slack.app_token` in config (or the env vars), and
-enable per-workspace channels. pilot creates a channel per workspace; mention
-`@pilot` in one to send text to that workspace's agent. Smoke tests:
+enable per-workspace channels. lazybox creates a channel per workspace; mention
+`@lazybox` in one to send text to that workspace's agent. Smoke tests:
 [`docs/dev/slack-testing.md`](../dev/slack-testing.md) and
 [`docs/dev/bidirectional-slack-testing.md`](../dev/bidirectional-slack-testing.md).
 
@@ -153,7 +153,7 @@ enable per-workspace channels. pilot creates a channel per workspace; mention
 Outbound: workspace/agent events → `chat.postMessage` via the HTTP client
 (`crates/slack-provider/src/api.rs`). Inbound: a Socket Mode WebSocket
 (`crates/slack-provider/src/socket.rs`) opened via `apps.connections.open`
-streams `app_mention` / `message.*` events; an `@pilot` mention is routed over
+streams `app_mention` / `message.*` events; an `@lazybox` mention is routed over
 IPC to spawn or write into the target workspace's session. Channels are named
 from the slugified workspace key with an optional prefix.
 
@@ -161,7 +161,7 @@ from the slugified workspace key with an optional prefix.
 - [ ] With both tokens set, `auth.test` succeeds and the bot name shows in logs.
 - [ ] Enabling `per_workspace_channels` creates a channel per workspace.
 - [ ] Workspace activity is mirrored into its channel.
-- [ ] An `@pilot` mention in a workspace channel reaches that workspace's agent stdin.
+- [ ] An `@lazybox` mention in a workspace channel reaches that workspace's agent stdin.
 - [ ] Socket Mode reconnects after a `disconnect` frame.
 
 ### Known sharp edges

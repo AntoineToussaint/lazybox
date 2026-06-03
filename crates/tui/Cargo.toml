@@ -1,5 +1,5 @@
 [package]
-name = "pilot-tui"
+name = "lazybox-tui"
 description = "A reactive PR inbox in your terminal."
 version.workspace = true
 edition.workspace = true
@@ -10,12 +10,16 @@ repository.workspace = true
 readme = "../../README.md"
 
 [lib]
-name = "pilot_tui"
+name = "lazybox_tui"
 path = "src/lib.rs"
 
 [[bin]]
-name = "pilot"
+name = "lazybox"
 path = "src/main.rs"
+
+# The short `lb` alias is the auto-discovered bin at `src/bin/lb.rs`, a thin
+# shim that re-runs `main.rs`. (Note: `lb` collides with Debian live-build on
+# Linux hosts that have it; harmless on macOS / most dev setups.)
 
 [dev-dependencies]
 # Golden-snapshot testing. Use `cargo insta review` to accept
@@ -24,20 +28,20 @@ insta = { version = "1", features = ["yaml"] }
 tempfile = "3"
 
 [dependencies]
-pilot-core       = { workspace = true }
-pilot-auth       = { workspace = true }
-pilot-config     = { workspace = true }
-pilot-store      = { workspace = true }
-pilot-gh         = { workspace = true }
-pilot-slack      = { workspace = true }
-pilot-linear     = { path = "../linear-provider" }
-pilot-tui-term   = { workspace = true }
-pilot-tui-core   = { workspace = true }
+lazybox-core       = { workspace = true }
+lazybox-auth       = { workspace = true }
+lazybox-config     = { workspace = true }
+lazybox-store      = { workspace = true }
+lazybox-gh         = { workspace = true }
+lazybox-slack      = { workspace = true }
+lazybox-linear     = { path = "../linear-provider" }
+lazybox-tui-term   = { workspace = true }
+lazybox-tui-core   = { workspace = true }
 tuirealm         = { workspace = true }
 libghostty-vt    = { workspace = true }
-pilot-ipc     = { workspace = true }
-pilot-agents  = { workspace = true }
-pilot-server  = { path = "../server" }
+lazybox-ipc     = { workspace = true }
+lazybox-agents  = { workspace = true }
+lazybox-server  = { path = "../server" }
 
 tokio            = { workspace = true }
 anyhow           = { workspace = true }

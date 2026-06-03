@@ -42,11 +42,11 @@ pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 use crate::ServerConfig;
 use chrono::Utc;
 use futures::FutureExt;
-use pilot_core::{AutoFixKind, ProviderConfig, Task, Workspace, WorkspaceKey};
-use pilot_gh::GhClient;
-use pilot_ipc::Event;
-use pilot_linear::LinearClient;
-use pilot_store::WorkspaceRecord;
+use lazybox_core::{AutoFixKind, ProviderConfig, Task, Workspace, WorkspaceKey};
+use lazybox_gh::GhClient;
+use lazybox_ipc::Event;
+use lazybox_linear::LinearClient;
+use lazybox_store::WorkspaceRecord;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -70,9 +70,9 @@ impl FetchMode {
     /// Greppable label for sync-latency tracing — which delivery path
     /// produced this tick's tasks. `Full` is the exhaustive
     /// `involves:USER` sweep; `Incremental` is the notifications-driven
-    /// fast path (the closest thing pilot has to an event push). When an
+    /// fast path (the closest thing lazybox has to an event push). When an
     /// update "took a long time to appear," this is the first thing to
-    /// check in `/tmp/pilot.log`: did it arrive via a slow full sweep or
+    /// check in `/tmp/lazybox.log`: did it arrive via a slow full sweep or
     /// a fast notifications poll?
     pub fn label(self) -> &'static str {
         match self {
@@ -86,9 +86,9 @@ impl FetchMode {
 /// should be cheap to construct and cheap to call repeatedly: they're
 /// invoked on every poll tick.
 ///
-/// Errors are typed (`pilot_core::ProviderError`) so polling can
+/// Errors are typed (`lazybox_core::ProviderError`) so polling can
 /// distinguish retryable hiccups from auth failures from permanent
-/// bugs and react accordingly. See `pilot_core::provider`.
+/// bugs and react accordingly. See `lazybox_core::provider`.
 pub trait TaskSource: Send + Sync + 'static {
     /// Short stable name for telemetry / `Event::ProviderError`
     /// (e.g. "github", "linear").
@@ -99,7 +99,7 @@ pub trait TaskSource: Send + Sync + 'static {
     /// to retry.
     fn fetch<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>> + Send + 'a>>;
 
     /// What this source authoritatively covered in the most recent
     /// `fetch`. Drives the `rescope` deletion guard: only workspaces
@@ -124,7 +124,7 @@ pub trait TaskSource: Send + Sync + 'static {
     /// `fetch`. The polling tick calls this after each fetch and
     /// dispatches the resulting [`ProviderAction`]s with full
     /// `&ServerConfig` access — used today by `GhSource` to surface
-    /// auto-spawn requests triggered by `@pilot` mentions. Default
+    /// auto-spawn requests triggered by `@lazybox` mentions. Default
     /// impl returns nothing so sources without side effects don't
     /// have to think about it.
     fn drain_actions(&self) -> Vec<ProviderAction> {
@@ -211,7 +211,7 @@ pub struct GhSource {
     /// to `TaskSource::fetch` (would couple them), so each source
     /// keeps a clone of just the broadcast sender.
     bus: tokio::sync::broadcast::Sender<Event>,
-    /// GitHub logins that may trigger auto-spawn via a `@pilot`
+    /// GitHub logins that may trigger auto-spawn via a `@lazybox`
     /// mention. Resolved by `sources_for` from
     /// `config.yaml::mention.allowed_logins`, with the authenticated
     /// viewer's login added as a default when the YAML list is
@@ -220,11 +220,11 @@ pub struct GhSource {
     /// Auto-fix-on-failure settings, resolved by `sources_for` from
     /// `config.yaml::auto_fix`. When `enabled` is false (the default)
     /// the auto-fix scan is skipped entirely. See
-    /// `pilot_core::autofix`.
-    auto_fix: pilot_core::AutoFixSettings,
+    /// `lazybox_core::autofix`.
+    auto_fix: lazybox_core::AutoFixSettings,
     /// Side channel for actions the source wants the polling tick to
     /// take after `fetch()` returns — today, auto-spawn requests
-    /// triggered by `@pilot` mentions. Populated inside `fetch` and
+    /// triggered by `@lazybox` mentions. Populated inside `fetch` and
     /// drained by `tick_with_state` after the upsert pass so the
     /// freshly-created issue workspace exists before we spawn into it.
     pending_actions: std::sync::Arc<std::sync::Mutex<Vec<ProviderAction>>>,
@@ -273,15 +273,15 @@ pub enum ProviderAction {
     /// Spawn `agent_id` in the workspace identified by `session_key`,
     /// optionally with `prompt` injected after the agent reaches its
     /// ready state. Today this fires when an allowed user has
-    /// written `@pilot` in an issue body or comment and pilot
+    /// written `@lazybox` in an issue body or comment and lazybox
     /// already posted the 👀 reaction (the idempotency marker).
     AutoSpawnAgent {
-        session_key: pilot_core::SessionKey,
+        session_key: lazybox_core::SessionKey,
         agent_id: String,
         prompt: Option<String>,
-        /// Free-text reason for the trace log: "@pilot mention by
-        /// alice on owner/repo#42 body". Surfaces in /tmp/pilot.log
-        /// so a user wondering "why did pilot start typing?" can
+        /// Free-text reason for the trace log: "@lazybox mention by
+        /// alice on owner/repo#42 body". Surfaces in /tmp/lazybox.log
+        /// so a user wondering "why did lazybox start typing?" can
         /// trace it back to a specific comment.
         reason: String,
     },
@@ -293,7 +293,7 @@ pub enum ProviderAction {
     /// the source; everything carried here is what the dispatcher
     /// needs without re-deriving it from a `Task`.
     AutoFixPr {
-        session_key: pilot_core::SessionKey,
+        session_key: lazybox_core::SessionKey,
         agent_id: String,
         prompt: Option<String>,
         /// `owner/name` — for the PR comment.
@@ -306,7 +306,7 @@ pub enum ProviderAction {
         /// Cooldown / max-attempts thresholds, carried from the
         /// source so the dispatcher (which only has `&ServerConfig`)
         /// doesn't have to reload config.
-        settings: pilot_core::AutoFixSettings,
+        settings: lazybox_core::AutoFixSettings,
         /// Free-text reason for the trace log.
         reason: String,
     },
@@ -319,7 +319,7 @@ impl GhSource {
         scopes: std::collections::BTreeSet<String>,
         bus: tokio::sync::broadcast::Sender<Event>,
         mention_allowed_logins: std::collections::BTreeSet<String>,
-        auto_fix: pilot_core::AutoFixSettings,
+        auto_fix: lazybox_core::AutoFixSettings,
         scheduling: RoundRobinPick,
     ) -> Self {
         Self {
@@ -363,7 +363,7 @@ impl GhSource {
 
     /// Scan freshly-fetched tasks for auto-fix triggers and queue an
     /// [`ProviderAction::AutoFixPr`] for each eligible PR. Called from
-    /// BOTH `fetch_full` and `fetch_incremental` (unlike `@pilot`
+    /// BOTH `fetch_full` and `fetch_incremental` (unlike `@lazybox`
     /// mention scanning, which needs the full GraphQL comment tree) —
     /// the CI / mergeable signals it reads live on every `Task`, so a
     /// notifications-driven incremental fetch fires auto-fix just as
@@ -383,7 +383,7 @@ impl GhSource {
             .lock()
             .expect("GhSource.pending_actions poisoned");
         for task in tasks {
-            let Some(kind) = pilot_core::evaluate_auto_fix(task, &self.auto_fix) else {
+            let Some(kind) = lazybox_core::evaluate_auto_fix(task, &self.auto_fix) else {
                 continue;
             };
             // Need a repo + numeric PR id to comment + key the counter.
@@ -393,10 +393,12 @@ impl GhSource {
             let Some(pr_number) = task_number_from_key(&task.id.key) else {
                 continue;
             };
-            let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(task));
+            let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(task));
             let prompt = match kind {
-                AutoFixKind::CiFailure => pilot_core::prompts::build_fix_ci_prompt(task),
-                AutoFixKind::MergeConflict => pilot_core::prompts::build_fix_conflict_prompt(task),
+                AutoFixKind::CiFailure => lazybox_core::prompts::build_fix_ci_prompt(task),
+                AutoFixKind::MergeConflict => {
+                    lazybox_core::prompts::build_fix_conflict_prompt(task)
+                }
             };
             let reason = format!("auto-fix ({}) on {repo}#{pr_number}", kind.describe());
             tracing::info!(%reason, %session_key, "queued auto-fix");
@@ -423,15 +425,15 @@ impl GhSource {
     /// haven't given us a fast path, or as fallback on heartbeat
     /// failure).
     ///
-    /// `@pilot` mention scanning lives here (NOT in `fetch_incremental`)
+    /// `@lazybox` mention scanning lives here (NOT in `fetch_incremental`)
     /// because the scan walks the full `involves:USER` response — the
     /// targeted single-PR/issue queries on the incremental path don't
-    /// surface fresh issue bodies/comments anyway. A `@pilot` mention
+    /// surface fresh issue bodies/comments anyway. A `@lazybox` mention
     /// will surface within the slow-sweep cadence (≤10 min default).
-    async fn fetch_full(&self) -> Result<Vec<Task>, pilot_core::ProviderError> {
+    async fn fetch_full(&self) -> Result<Vec<Task>, lazybox_core::ProviderError> {
         let want_prs = self.filter.pr_enabled();
         let want_issues = self.filter.issue_enabled();
-        // The issue query also runs to scan for `@pilot` mentions even
+        // The issue query also runs to scan for `@lazybox` mentions even
         // when issue *display* is off (the GitHub default is PR-only) —
         // see `GhClient::should_query_issues` (issue #50). Mirror that
         // here so the full sweep doesn't early-return before the scan.
@@ -484,7 +486,7 @@ impl GhSource {
                 &self.mention_allowed_logins,
             )
             .await
-            .map_err(pilot_core::ProviderError::from)?;
+            .map_err(lazybox_core::ProviderError::from)?;
         // Record whether this sweep was partial so `polled_scope`
         // downgrades from `Exhaustive` to "no authoritative coverage"
         // — otherwise rescope would delete the half of the inbox the
@@ -500,12 +502,12 @@ impl GhSource {
             let _ = self.bus.send(Event::ProviderError {
                 source: "github".into(),
                 message: format!("partial sync — {msg}"),
-                detail: "see /tmp/pilot.log for the full error".into(),
+                detail: "see /tmp/lazybox.log for the full error".into(),
                 kind: "retryable".into(),
             });
         }
 
-        // Process `@pilot` mention triggers BEFORE returning the task
+        // Process `@lazybox` mention triggers BEFORE returning the task
         // list. Two passes:
         //
         // 1. **Sync pass — queue spawns.** Walk every mention, look up
@@ -535,7 +537,7 @@ impl GhSource {
         // no-op too.
         if !mentions.is_empty() {
             self.emit_progress(format!(
-                "Found {} @pilot mention(s); queueing auto-spawn + reacting",
+                "Found {} @lazybox mention(s); queueing auto-spawn + reacting",
                 mentions.len()
             ));
         }
@@ -545,12 +547,12 @@ impl GhSource {
         // separately so the async pass owns it (the loop below moves
         // mentions into the queue).
         let mut react_targets: Vec<String> = Vec::with_capacity(mentions.len());
-        // Issues an allowed user `@pilot`-tagged this sweep. Re-admitted
+        // Issues an allowed user `@lazybox`-tagged this sweep. Re-admitted
         // into `kept` below so the auto-spawn always lands in a real
         // issue workspace/worktree, even when the display filter (role /
         // scope / issue-display-off) would drop the row — otherwise
         // `handle_spawn` finds no workspace and spawns the agent in
-        // pilot's own cwd with no branch (issue #50). See
+        // lazybox's own cwd with no branch (issue #50). See
         // `readmit_mentioned_tasks`.
         let mut mentioned_tasks: Vec<Task> = Vec::new();
         {
@@ -577,17 +579,18 @@ impl GhSource {
                     );
                     continue;
                 };
-                let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(task));
-                let prompt = Some(pilot_core::prompts::build_implement_issue_prompt(task));
+                let session_key =
+                    lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(task));
+                let prompt = Some(lazybox_core::prompts::build_implement_issue_prompt(task));
                 mentioned_tasks.push(task.clone());
                 let reason = format!(
-                    "@pilot mention by {} on {}#{} ({})",
+                    "@lazybox mention by {} on {}#{} ({})",
                     mention.triggered_by_login,
                     mention.repo,
                     mention.issue_number,
                     match &mention.source {
-                        pilot_gh::MentionSource::Body => "issue body",
-                        pilot_gh::MentionSource::Comment { .. } => "comment",
+                        lazybox_gh::MentionSource::Body => "issue body",
+                        lazybox_gh::MentionSource::Comment { .. } => "comment",
                     },
                 );
                 tracing::info!(%reason, target = %mention.target_node_id, "queued auto-spawn");
@@ -646,7 +649,7 @@ impl GhSource {
     /// heartbeat failure that we want to swallow) — caller treats that
     /// as a no-op tick. Returns `Ok(Some(tasks))` with the targeted
     /// deep-fetched PRs/issues otherwise.
-    async fn fetch_incremental(&self) -> Result<Option<Vec<Task>>, pilot_core::ProviderError> {
+    async fn fetch_incremental(&self) -> Result<Option<Vec<Task>>, lazybox_core::ProviderError> {
         self.emit_progress("Checking GitHub notifications…");
         let poll = match self.client.fetch_notifications().await {
             Ok(p) => p,
@@ -661,11 +664,11 @@ impl GhSource {
             }
         };
         let entries = match poll {
-            pilot_gh::NotificationsPoll::NotModified => {
+            lazybox_gh::NotificationsPoll::NotModified => {
                 self.emit_progress("No new GitHub notifications (304)");
                 return Ok(Some(Vec::new()));
             }
-            pilot_gh::NotificationsPoll::Modified { entries } => entries,
+            lazybox_gh::NotificationsPoll::Modified { entries } => entries,
         };
         self.emit_progress(format!(
             "{} GitHub notification(s) — fetching changed PRs/issues",
@@ -677,9 +680,9 @@ impl GhSource {
         // and we want exactly one targeted fetch per distinct PR/issue.
         // `BTreeSet<NotificationTarget>` collapses duplicates and gives
         // deterministic iteration order — useful for stable logs.
-        let targets: std::collections::BTreeSet<pilot_gh::NotificationTarget> = entries
+        let targets: std::collections::BTreeSet<lazybox_gh::NotificationTarget> = entries
             .iter()
-            .filter_map(pilot_gh::NotificationEntry::target)
+            .filter_map(lazybox_gh::NotificationEntry::target)
             .collect();
 
         // Bounded-concurrent fan-out, mirroring the watched-repo
@@ -694,12 +697,12 @@ impl GhSource {
         let tasks: Vec<Task> = stream::iter(targets)
             .map(|target| async move {
                 let result = match target.kind {
-                    pilot_gh::NotificationTargetKind::PullRequest => {
+                    lazybox_gh::NotificationTargetKind::PullRequest => {
                         self.client
                             .fetch_single_pr(&target.owner, &target.repo, target.number)
                             .await
                     }
-                    pilot_gh::NotificationTargetKind::Issue => {
+                    lazybox_gh::NotificationTargetKind::Issue => {
                         self.client
                             .fetch_single_issue(&target.owner, &target.repo, target.number)
                             .await
@@ -768,8 +771,8 @@ fn log_rate_budget(client: &GhClient) {
 }
 
 /// Default agent id the auto-spawn flow uses when no override is
-/// configured. Mirrors the historical `pilot-tui` fallback so the
-/// user gets the same agent whether they press `w` or `@pilot`-tag
+/// configured. Mirrors the historical `lazybox-tui` fallback so the
+/// user gets the same agent whether they press `w` or `@lazybox`-tag
 /// the issue. Lives here (not behind a config lookup) because the
 /// polling layer doesn't get a `&PersistedSetup` at fetch time —
 /// the source is constructed once per tick and `fetch` is async.
@@ -790,13 +793,13 @@ fn task_number_from_key(key: &str) -> Option<u64> {
 ///
 /// Auto-spawn singleton enforcement happens inside `handle_spawn`
 /// (it checks `find_existing_singleton` per `(session_key, kind)`),
-/// so a `@pilot` mention on an issue that already has a running
+/// so a `@lazybox` mention on an issue that already has a running
 /// claude session focuses the existing terminal instead of starting
 /// a second one. We rely on that rather than re-implementing the
 /// check here, so the auto-spawn path and the user-pressed `w` path
 /// have IDENTICAL semantics.
 /// `gh` is the cached client for this tick (cloned from `TickState`),
-/// used by the auto-fix arm to post the "pilot is fixing…" PR comment.
+/// used by the auto-fix arm to post the "lazybox is fixing…" PR comment.
 /// `None` when no GitHub source ran this tick — the comment is then
 /// skipped (best-effort), but the spawn still fires.
 async fn dispatch_action(
@@ -824,10 +827,10 @@ async fn dispatch_action(
                 config,
                 session_key,
                 None,
-                pilot_ipc::TerminalKind::Agent(agent_id),
+                lazybox_ipc::TerminalKind::Agent(agent_id),
                 None,
                 prompt,
-                // Autonomous `@pilot` spawn — launch unattended with
+                // Autonomous `@lazybox` spawn — launch unattended with
                 // permission prompts disabled (subject to the
                 // `agent.autonomous_skip_permissions` toggle).
                 true,
@@ -844,7 +847,7 @@ async fn dispatch_action(
             settings,
             reason,
         } => {
-            let term_kind = pilot_ipc::TerminalKind::Agent(agent_id.clone());
+            let term_kind = lazybox_ipc::TerminalKind::Agent(agent_id.clone());
             // If a fix agent is ALREADY running on this PR, let it
             // finish — don't burn an attempt, post a duplicate "I'm
             // fixing this" comment, or no-op-spawn on top of it. The
@@ -902,7 +905,7 @@ async fn dispatch_action(
                             .unwrap_or("no-auto-fix");
                         let hours = settings.window.as_secs() / 3600;
                         let body = format!(
-                            "🛟 pilot hit its auto-fix limit on this PR \
+                            "🛟 lazybox hit its auto-fix limit on this PR \
                              ({max} attempts at {what} in the last {hours}h) and is \
                              backing off — this one needs a human. Push a fix yourself, \
                              or add the `{opt_out}` label to silence auto-fix here.",
@@ -927,12 +930,12 @@ async fn dispatch_action(
                         "auto-fixing PR (spawning agent)"
                     );
                     // Post the "why work just started" comment BEFORE
-                    // spawning so the user sees pilot's note even if the
+                    // spawning so the user sees lazybox's note even if the
                     // agent races to push first. Best-effort: a failed
                     // comment never blocks the fix.
                     if let Some(gh) = gh {
                         let body = format!(
-                            "🤖 pilot is {what} on this PR (auto-fix attempt {attempt}/{max}). \
+                            "🤖 lazybox is {what} on this PR (auto-fix attempt {attempt}/{max}). \
                              I'll push to this branch when it's sorted.",
                             what = kind.describe(),
                         );
@@ -992,7 +995,7 @@ impl TaskSource for GhSource {
     /// 1. **Slow full sweep** — heavy `involves:USER` GraphQL search,
     ///    fires every [`GhClient::FULL_SWEEP_INTERVAL`] (default 10 min)
     ///    and on the first tick after daemon start. Rescope runs.
-    ///    `@pilot` mention scanning ONLY happens on this path (the
+    ///    `@lazybox` mention scanning ONLY happens on this path (the
     ///    full search response is what mention scanning walks).
     /// 2. **Fast notifications heartbeat** — `GET /notifications` with
     ///    `If-Modified-Since`; 304 → return empty `Vec`, no rescope.
@@ -1004,7 +1007,7 @@ impl TaskSource for GhSource {
     /// gate rescope on whether ALL sources reported `Full` this tick.
     fn fetch<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>> + Send + 'a>>
     {
         Box::pin(async move {
             // `last_kind` is only consulted by the tick driver in the
@@ -1073,7 +1076,7 @@ impl TaskSource for LinearSource {
     }
     fn fetch<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>> + Send + 'a>>
     {
         Box::pin(async move {
             self.emit_progress("Querying Linear for issues…");
@@ -1081,7 +1084,7 @@ impl TaskSource for LinearSource {
                 .client
                 .fetch_all()
                 .await
-                .map_err(pilot_core::ProviderError::from)?;
+                .map_err(lazybox_core::ProviderError::from)?;
             self.emit_progress(format!("Got {} issues, applying filters…", raw.len()));
             let kept = filter_linear_tasks(raw, &self.filter);
             self.emit_progress(format!("{} issues kept after filter", kept.len()));
@@ -1199,7 +1202,7 @@ fn role_qualifier(filter: &ProviderConfig, username: &str, keys: &[(&str, &str)]
 /// `(repo:A OR repo:B)` — well-intentioned, broken in practice.
 ///
 /// Cost: with 2+ scopes the search is now wider (`involves:USER`
-/// alone) and we filter post-fetch. Acceptable — pilot's typical
+/// alone) and we filter post-fetch. Acceptable — lazybox's typical
 /// user is involved in <100 PRs total, well under the pagination
 /// safety cap.
 fn scope_qualifier(scopes: &std::collections::BTreeSet<String>) -> Option<String> {
@@ -1281,14 +1284,14 @@ pub fn filter_github_tasks(
         .collect()
 }
 
-/// Re-admit `@pilot`-mentioned issue tasks that `filter_github_tasks`
+/// Re-admit `@lazybox`-mentioned issue tasks that `filter_github_tasks`
 /// dropped, so an auto-spawn lands in a real workspace/worktree.
 ///
-/// The `@pilot` mention is an explicit, high-intent trigger: the user
-/// asked pilot to work on this exact issue. The passive display filter
+/// The `@lazybox` mention is an explicit, high-intent trigger: the user
+/// asked lazybox to work on this exact issue. The passive display filter
 /// (role / scope / issue-display-off) must not prevent the issue's
 /// workspace from being created — otherwise `dispatch_action` →
-/// `handle_spawn` finds no workspace and spawns the agent in pilot's
+/// `handle_spawn` finds no workspace and spawns the agent in lazybox's
 /// own cwd with no branch (the issue #50 symptom). Tasks already in
 /// `kept` are left as-is (dedup on `TaskId`); the rest are appended.
 pub fn readmit_mentioned_tasks(mut kept: Vec<Task>, mentioned: Vec<Task>) -> Vec<Task> {
@@ -1318,7 +1321,7 @@ pub fn filter_linear_tasks(tasks: Vec<Task>, filter: &ProviderConfig) -> Vec<Tas
 /// they can emit `PollProgress` events during their fetch (drives
 /// the polling-modal status line).
 pub async fn sources_for(
-    setup: &pilot_core::PersistedSetup,
+    setup: &lazybox_core::PersistedSetup,
     bus: tokio::sync::broadcast::Sender<Event>,
     state: &mut TickState,
     viewer_identities: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
@@ -1326,8 +1329,11 @@ pub async fn sources_for(
 ) -> Vec<Box<dyn TaskSource>> {
     let mut sources: Vec<Box<dyn TaskSource>> = Vec::new();
 
-    if setup.enabled_providers.contains(pilot_gh::SOURCE) {
-        match pilot_gh::credential_chain().resolve(pilot_gh::SOURCE).await {
+    if setup.enabled_providers.contains(lazybox_gh::SOURCE) {
+        match lazybox_gh::credential_chain()
+            .resolve(lazybox_gh::SOURCE)
+            .await
+        {
             Ok(cred) => {
                 // Reuse the cached client when the credential source
                 // is unchanged. `with_filters` consumes Self and
@@ -1398,15 +1404,15 @@ pub async fn sources_for(
                         }
                         *gh_client_cache.lock().expect("gh_client_cache poisoned") =
                             Some(client.clone());
-                        // Resolve the `@pilot` allowlist. Empty YAML
+                        // Resolve the `@lazybox` allowlist. Empty YAML
                         // list → fall back to "just the authenticated
                         // viewer", which mirrors the design doc's MVP
-                        // scope (only the local pilot user's own
+                        // scope (only the local lazybox user's own
                         // issues + comments count).
                         // Load config ONCE for both the mention
                         // allowlist and the auto-fix settings so we
                         // don't read the YAML twice per tick.
-                        let cfg = pilot_config::Config::load().ok();
+                        let cfg = lazybox_config::Config::load().ok();
                         let mut mention_allowed: std::collections::BTreeSet<String> = cfg
                             .as_ref()
                             .map(|c| c.mention.allowed_logins.iter().cloned().collect())
@@ -1444,7 +1450,7 @@ pub async fn sources_for(
                         );
                         if scheduling.run_global || !scheduling.repos.is_empty() {
                             tracing::info!(
-                                source = pilot_gh::SOURCE,
+                                source = lazybox_gh::SOURCE,
                                 tick = state.round_robin.tick,
                                 run_global = scheduling.run_global,
                                 round_robin = ?scheduling.repos,
@@ -1495,13 +1501,13 @@ pub async fn sources_for(
 
 /// Convenience: build the default source set assuming both providers
 /// are enabled with their default filters. Used by binaries that
-/// bypass the setup screen (e.g. headless `pilot daemon start` in
+/// bypass the setup screen (e.g. headless `lazybox daemon start` in
 /// CI). When a saved `PersistedSetup` exists in the store, prefer
 /// that instead.
 pub async fn default_sources(
     bus: tokio::sync::broadcast::Sender<Event>,
 ) -> Vec<Box<dyn TaskSource>> {
-    let setup = pilot_core::PersistedSetup {
+    let setup = lazybox_core::PersistedSetup {
         enabled_providers: ["github".to_string(), "linear".to_string()]
             .into_iter()
             .collect(),
@@ -1670,7 +1676,7 @@ pub async fn tick_with_state(
                         source = source.name(),
                         "poll returned 0 tasks — if unexpected, check `,` Settings: filter roles \
                          + selected scopes both have to match SOMETHING in the user's repos. \
-                         /tmp/pilot.log has the exact GraphQL query string above."
+                         /tmp/lazybox.log has the exact GraphQL query string above."
                     );
                 }
                 // Per-task wall-clock cap. The git-op `run_git_in`
@@ -1700,7 +1706,7 @@ pub async fn tick_with_state(
                 // round-robin through" — the rotation expands
                 // automatically as the user's involvement set grows.
                 let now = std::time::Instant::now();
-                if source.name() == pilot_gh::SOURCE {
+                if source.name() == lazybox_gh::SOURCE {
                     let mut seen_repos: std::collections::HashSet<&str> =
                         std::collections::HashSet::new();
                     for task in &tasks {
@@ -1715,10 +1721,10 @@ pub async fn tick_with_state(
                     }
                 }
                 for (i, task) in tasks.into_iter().enumerate() {
-                    if task.mergeable == pilot_core::Mergeable::Unknown {
+                    if task.mergeable == lazybox_core::Mergeable::Unknown {
                         saw_unknown_mergeable = true;
                     }
-                    let key = WorkspaceKey::new(pilot_core::workspace_key_for(&task));
+                    let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
                     let task_id = task.id.to_string();
                     polled.push(key);
                     let one_started = std::time::Instant::now();
@@ -1745,7 +1751,7 @@ pub async fn tick_with_state(
                                 message: format!(
                                     "upsert timed out on {task_id} — task skipped this tick"
                                 ),
-                                detail: "see /tmp/pilot.log for the slow step".into(),
+                                detail: "see /tmp/lazybox.log for the slow step".into(),
                                 kind: "retryable".into(),
                             });
                         }
@@ -1768,7 +1774,7 @@ pub async fn tick_with_state(
                 });
                 // Drain + dispatch any side-effect actions the source
                 // queued during `fetch` (today: auto-spawn requests
-                // from `@pilot` mentions).
+                // from `@lazybox` mentions).
                 //
                 // ORDERING INVARIANT: this MUST run after the upsert
                 // loop AND before rescope. `dispatch_action` calls
@@ -1960,7 +1966,7 @@ pub async fn rescope_with_state(
     // returned" include:
     //   - GitHub API hiccup mid-search (returns 200 OK with empty
     //     `search.nodes`)
-    //   - the user just edited their `~/.pilot/config.yaml` scopes
+    //   - the user just edited their `~/.lazybox/config.yaml` scopes
     //     and removed every repo (deliberate)
     //   - a transient auth issue that returns no results without
     //     erroring
@@ -2142,7 +2148,7 @@ pub async fn rescope_with_state(
                 let task_ref = r
                     .workspace_json
                     .as_deref()
-                    .and_then(|json| serde_json::from_str::<pilot_core::Workspace>(json).ok())
+                    .and_then(|json| serde_json::from_str::<lazybox_core::Workspace>(json).ok())
                     .and_then(|w| w.primary_task().cloned());
                 let (label, title) = match task_ref {
                     Some(t) => {
@@ -2179,10 +2185,10 @@ pub async fn rescope_with_state(
 }
 
 /// Spawn the long-lived polling loop. Returns the join handle so the
-/// caller can `abort()` on shutdown if it wants — `pilot daemon stop`
+/// caller can `abort()` on shutdown if it wants — `lazybox daemon stop`
 /// drops the whole process so we don't bother in main.
 ///
-/// Each tick reads `~/.pilot/config.yaml` fresh and rebuilds the
+/// Each tick reads `~/.lazybox/config.yaml` fresh and rebuilds the
 /// source list. This means a filter / scope change made via the
 /// Settings palette takes effect on the NEXT tick at the latest —
 /// no separate "respawn polling" plumbing needed, and the previous
@@ -2221,8 +2227,8 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
         // for "why no PRs?" debugging. Lists every enabled provider,
         // its filter-role keys, and its scope set. Without this, a
         // collaborator's "doesn't sync for me" report required us to
-        // ask 4 questions over chat; now: `grep "polling: config" /tmp/pilot.log`.
-        if let Ok(cfg) = pilot_config::Config::load() {
+        // ask 4 questions over chat; now: `grep "polling: config" /tmp/lazybox.log`.
+        if let Ok(cfg) = lazybox_config::Config::load() {
             let providers: Vec<&String> = cfg.setup.providers.iter().collect();
             let filters: std::collections::BTreeMap<&String, Vec<&String>> = cfg
                 .setup
@@ -2244,7 +2250,7 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
             );
         } else {
             tracing::warn!(
-                "polling: config — could not load ~/.pilot/config.yaml; falling back to defaults"
+                "polling: config — could not load ~/.lazybox/config.yaml; falling back to defaults"
             );
         }
 
@@ -2484,7 +2490,7 @@ pub async fn restore_poll_state(config: &ServerConfig, mut state: TickState) {
 }
 
 pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
-    let setup = match pilot_config::Config::load() {
+    let setup = match lazybox_config::Config::load() {
         Ok(c) => crate::persisted_from_config(&c),
         Err(e) => {
             tracing::warn!("polling: config.yaml load failed: {e}");
@@ -2510,7 +2516,7 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
 /// cleanly (see `checkout_poll_state`).
 async fn run_tick_inner(
     config: &ServerConfig,
-    setup: &pilot_core::PersistedSetup,
+    setup: &lazybox_core::PersistedSetup,
     state: &mut TickState,
 ) -> TickSummary {
     let sources = sources_for(
@@ -2566,7 +2572,7 @@ async fn run_tick_inner(
             let _ = config.bus.send(Event::ProviderError {
                 source: "github".into(),
                 message: format!(
-                    "sync exceeded {}s — see /tmp/pilot.log for the slow step",
+                    "sync exceeded {}s — see /tmp/lazybox.log for the slow step",
                     TICK_OVERALL_TIMEOUT.as_secs()
                 ),
                 detail: "the per-upsert / per-graphql / per-git timeouts should catch this; \
@@ -2598,7 +2604,7 @@ async fn run_tick_inner(
     // upsert loop (#133) that is no longer a deadlock risk, but
     // layering "background fetch fan-out" on top of "single sync is
     // fragile" was the wrong order. Re-enable once the next-tick
-    // cadence is visibly healthy in `/tmp/pilot.log`.)
+    // cadence is visibly healthy in `/tmp/lazybox.log`.)
     summary
 }
 
@@ -2627,7 +2633,7 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
     // (`Shift-X`). Without this, every 60s tick re-creates the row
     // from the upstream task and the dismiss feels broken. Cached
     // archive set lives in the store under KV_KEY_ARCHIVED.
-    let candidate_key = pilot_core::workspace_key_for(&task);
+    let candidate_key = lazybox_core::workspace_key_for(&task);
     if load_archived_set(config).contains(&candidate_key) {
         tracing::debug!(
             workspace_key = %candidate_key,
@@ -2677,7 +2683,7 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
     //    snapshot the previous state here, before `prepare_upsert`
     //    overwrites it, so we only act on the open→merged *transition*
     //    and not on every subsequent tick of an already-merged PR.
-    let merged_pr_to_clean = if task.is_pr() && task.state == pilot_core::TaskState::Merged {
+    let merged_pr_to_clean = if task.is_pr() && task.state == lazybox_core::TaskState::Merged {
         let prev = load_workspace(config, key);
         merged_transition_pr_number(prev.as_ref(), &task)
     } else {
@@ -2736,11 +2742,11 @@ fn pr_number_from_task(task: &Task) -> Option<u64> {
 ///   thus no sessions to reap, so firing would only burn an inspect
 ///   sweep for nothing.
 fn merged_transition_pr_number(prev: Option<&Workspace>, task: &Task) -> Option<u64> {
-    if !task.is_pr() || task.state != pilot_core::TaskState::Merged {
+    if !task.is_pr() || task.state != lazybox_core::TaskState::Merged {
         return None;
     }
     let prev_state = prev.and_then(|w| w.task_by_id(&task.id))?.state;
-    if prev_state == pilot_core::TaskState::Merged {
+    if prev_state == lazybox_core::TaskState::Merged {
         return None;
     }
     pr_number_from_task(task)
@@ -2816,7 +2822,7 @@ pub(super) fn commit_upsert(config: &ServerConfig, key: &WorkspaceKey, workspace
     // but won't survive a restart — and the silent `.ok()` previously
     // stored `None`, so the next process would read back an empty
     // record without any indication something went wrong. Log loudly
-    // so a broken Serialize impl shows up in /tmp/pilot.log instead
+    // so a broken Serialize impl shows up in /tmp/lazybox.log instead
     // of mysterious post-restart data loss.
     let json = match serde_json::to_string(&workspace) {
         Ok(s) => Some(s),
@@ -2856,7 +2862,7 @@ pub(super) fn commit_upsert(config: &ServerConfig, key: &WorkspaceKey, workspace
 /// workspace re-saves and re-broadcasts the same Project record (cheap).
 ///
 /// `Workspace::project_key` is populated by `Workspace::from_task` via
-/// `pilot_core::project_key_for_task`. When it's `None` (back-compat
+/// `lazybox_core::project_key_for_task`. When it's `None` (back-compat
 /// reads of pre-Project records, or a workspace with no upstream task),
 /// we skip — Stage 1 doesn't try to back-fill projects for orphan
 /// workspaces.
@@ -2880,7 +2886,7 @@ fn ensure_project_for_workspace(config: &ServerConfig, workspace: &Workspace) {
         .primary_task()
         .and_then(|t| t.repo.clone())
         .unwrap_or_else(|| project_key.as_str().to_string());
-    let project = pilot_core::Project::new(project_key.clone(), name, Utc::now());
+    let project = lazybox_core::Project::new(project_key.clone(), name, Utc::now());
     let json = match serde_json::to_string(&project) {
         Ok(s) => Some(s),
         Err(e) => {
@@ -2891,7 +2897,7 @@ fn ensure_project_for_workspace(config: &ServerConfig, workspace: &Workspace) {
             None
         }
     };
-    let record = pilot_store::ProjectRecord {
+    let record = lazybox_store::ProjectRecord {
         key: project_key.as_str().to_string(),
         created_at: project.created_at,
         project_json: json,
@@ -2920,7 +2926,7 @@ fn is_pr_task(task: &Task) -> bool {
 /// low 100s of workspaces).
 fn pr_workspace_claiming_issue(
     config: &ServerConfig,
-    issue_id: &pilot_core::TaskId,
+    issue_id: &lazybox_core::TaskId,
 ) -> Option<WorkspaceKey> {
     let records = config.store.list_workspaces().ok()?;
     for record in records {
@@ -2940,7 +2946,7 @@ fn pr_workspace_claiming_issue(
     None
 }
 
-/// If `workspace`'s PR closes issues that pilot tracks as their own
+/// If `workspace`'s PR closes issues that lazybox tracks as their own
 /// workspaces, fold each issue's workspace into `workspace` and
 /// remove the standalone row. Sessions move over (terminals keep
 /// running); `terminal_meta` is rewritten so wire-side events for
@@ -2982,7 +2988,7 @@ async fn merge_closing_issue_workspaces(config: &ServerConfig, workspace: &mut W
         "merge: scanning closes_issues for collapse candidates"
     );
 
-    let mut closed_ids: Vec<pilot_core::TaskId> = pr.closes_issues.clone();
+    let mut closed_ids: Vec<lazybox_core::TaskId> = pr.closes_issues.clone();
     closed_ids.dedup();
 
     for issue_id in closed_ids {
@@ -3017,7 +3023,7 @@ async fn merge_closing_issue_workspaces(config: &ServerConfig, workspace: &mut W
         // silently absorbing the user's running work. `merge_prompts`
         // dedupes so a user staring at the modal doesn't see fresh
         // copies every 60s; its `rejected` set is the "no, leave them
-        // separate" pin until pilot restarts.
+        // separate" pin until lazybox restarts.
         if !issue_ws.sessions.is_empty() {
             let issue_key_str = issue_key.as_str().to_string();
             let should_prompt = {
@@ -3256,8 +3262,8 @@ pub async fn handle_adopt_sessions(
         return;
     }
 
-    let source_session_key: pilot_core::SessionKey = (&source_key).into();
-    let target_session_key: pilot_core::SessionKey = (&target_key).into();
+    let source_session_key: lazybox_core::SessionKey = (&source_key).into();
+    let target_session_key: lazybox_core::SessionKey = (&target_key).into();
     let moved = source_ws.sessions.len();
     for mut session in source_ws.sessions.drain(..) {
         session.workspace_key = target_key.clone();
@@ -3296,8 +3302,8 @@ async fn absorb_issue_workspace(
     pr_workspace: &mut Workspace,
     issue_ws: Workspace,
 ) {
-    let issue_session_key: pilot_core::SessionKey = (&issue_ws.key).into();
-    let pr_session_key: pilot_core::SessionKey = (&pr_workspace.key).into();
+    let issue_session_key: lazybox_core::SessionKey = (&issue_ws.key).into();
+    let pr_session_key: lazybox_core::SessionKey = (&pr_workspace.key).into();
 
     for mut session in issue_ws.sessions {
         session.workspace_key = pr_workspace.key.clone();
@@ -3325,10 +3331,10 @@ async fn absorb_issue_workspace(
 /// merge" bug. Updating both keeps the handoff durable across restarts.
 async fn rebadge_terminals(
     config: &ServerConfig,
-    from: &pilot_core::SessionKey,
-    to: &pilot_core::SessionKey,
+    from: &lazybox_core::SessionKey,
+    to: &lazybox_core::SessionKey,
 ) {
-    let rebadged: Vec<(pilot_ipc::TerminalId, pilot_ipc::TerminalKind)> = {
+    let rebadged: Vec<(lazybox_ipc::TerminalId, lazybox_ipc::TerminalKind)> = {
         let mut meta = config.terminal_meta.lock().await;
         meta.iter_mut()
             .filter(|(_, entry)| entry.0 == *from)
@@ -3341,7 +3347,7 @@ async fn rebadge_terminals(
     if rebadged.is_empty() {
         return;
     }
-    let backend_keys: Vec<(String, pilot_ipc::TerminalKind)> = {
+    let backend_keys: Vec<(String, lazybox_ipc::TerminalKind)> = {
         let terminals = config.terminals.lock().await;
         rebadged
             .into_iter()
@@ -3355,15 +3361,15 @@ async fn rebadge_terminals(
 
 /// Synthesize the workspace key an issue TaskId would have produced
 /// when first upserted as a standalone workspace.
-fn issue_id_to_workspace_key(issue_id: &pilot_core::TaskId) -> WorkspaceKey {
+fn issue_id_to_workspace_key(issue_id: &lazybox_core::TaskId) -> WorkspaceKey {
     let stub = Task {
         id: issue_id.clone(),
         title: String::new(),
         body: None,
-        state: pilot_core::TaskState::Open,
-        role: pilot_core::TaskRole::Author,
-        ci: pilot_core::CiStatus::None,
-        review: pilot_core::ReviewStatus::None,
+        state: lazybox_core::TaskState::Open,
+        role: lazybox_core::TaskRole::Author,
+        ci: lazybox_core::CiStatus::None,
+        review: lazybox_core::ReviewStatus::None,
         checks: vec![],
         unread_count: 0,
         url: String::new(),
@@ -3377,7 +3383,7 @@ fn issue_id_to_workspace_key(issue_id: &pilot_core::TaskId) -> WorkspaceKey {
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: pilot_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::Mergeable,
         is_behind_base: false,
         node_id: None,
         needs_reply: false,
@@ -3387,7 +3393,7 @@ fn issue_id_to_workspace_key(issue_id: &pilot_core::TaskId) -> WorkspaceKey {
         deletions: 0,
         closes_issues: vec![],
     };
-    WorkspaceKey::new(pilot_core::workspace_key_for(&stub))
+    WorkspaceKey::new(lazybox_core::workspace_key_for(&stub))
 }
 
 pub(super) fn load_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Option<Workspace> {
@@ -3419,7 +3425,7 @@ pub async fn set_focused_workspace(config: &ServerConfig, key: &WorkspaceKey) {
     let Some(task) = workspace.primary_task() else {
         return;
     };
-    if task.id.source != pilot_gh::SOURCE {
+    if task.id.source != lazybox_gh::SOURCE {
         return;
     }
     let Some(repo) = task
@@ -3487,9 +3493,9 @@ fn workspace_label_for(workspace: &Workspace, key: &WorkspaceKey) -> String {
 pub fn create_empty_workspace(
     config: &ServerConfig,
     name: &str,
-    project_key: pilot_core::ProjectKey,
+    project_key: lazybox_core::ProjectKey,
 ) -> WorkspaceKey {
-    let base = pilot_core::slug::slugify(name);
+    let base = lazybox_core::slug::slugify(name);
     let base = if base.is_empty() {
         "workspace".to_string()
     } else {
@@ -3534,14 +3540,14 @@ pub fn create_empty_workspace(
 ///
 /// Returns the project key so the caller (TUI) can land focus on
 /// the new header.
-pub fn create_local_project(config: &ServerConfig, name: &str) -> pilot_core::ProjectKey {
-    let base = pilot_core::slug::slugify(name);
+pub fn create_local_project(config: &ServerConfig, name: &str) -> lazybox_core::ProjectKey {
+    let base = lazybox_core::slug::slugify(name);
     let slug = if base.is_empty() {
         "project".to_string()
     } else {
         base
     };
-    let key = pilot_core::ProjectKey::local(&slug);
+    let key = lazybox_core::ProjectKey::local(&slug);
     // Idempotent: re-broadcast the existing record on collision.
     let display_name = if name.trim().is_empty() {
         slug.clone()
@@ -3552,9 +3558,9 @@ pub fn create_local_project(config: &ServerConfig, name: &str) -> pilot_core::Pr
         Ok(Some(record)) => record
             .project_json
             .as_deref()
-            .and_then(|j| serde_json::from_str::<pilot_core::Project>(j).ok())
-            .unwrap_or_else(|| pilot_core::Project::new(key.clone(), &display_name, Utc::now())),
-        _ => pilot_core::Project::new(key.clone(), &display_name, Utc::now()),
+            .and_then(|j| serde_json::from_str::<lazybox_core::Project>(j).ok())
+            .unwrap_or_else(|| lazybox_core::Project::new(key.clone(), &display_name, Utc::now())),
+        _ => lazybox_core::Project::new(key.clone(), &display_name, Utc::now()),
     };
     let json = match serde_json::to_string(&project) {
         Ok(s) => Some(s),
@@ -3566,7 +3572,7 @@ pub fn create_local_project(config: &ServerConfig, name: &str) -> pilot_core::Pr
             None
         }
     };
-    let record = pilot_store::ProjectRecord {
+    let record = lazybox_store::ProjectRecord {
         key: key.as_str().to_string(),
         created_at: project.created_at,
         project_json: json,
@@ -3589,7 +3595,7 @@ pub fn create_local_project(config: &ServerConfig, name: &str) -> pilot_core::Pr
 /// set) are left alone; a missing sandbox workspace is a no-op.
 ///
 /// Called once at daemon startup from both `run_embedded_realm` and
-/// `server_start` so each pilot launch self-heals legacy state.
+/// `server_start` so each lazybox launch self-heals legacy state.
 pub fn migrate_legacy_sandbox(config: &ServerConfig) {
     let key = WorkspaceKey::new("sandbox".to_string());
     let Some(record) = config.store.get_workspace(&key).ok().flatten() else {
@@ -3641,8 +3647,8 @@ pub fn set_snooze(config: &ServerConfig, key: &WorkspaceKey, until: Option<chron
 ///
 /// Also kills every backing terminal (PTY / tmux session) that
 /// belonged to the workspace — without this the user's `Shift-X X`
-/// hides the tabs in pilot but leaves ghost tmux sessions visible
-/// in `tmux ls`, which then re-surface on the next pilot launch
+/// hides the tabs in lazybox but leaves ghost tmux sessions visible
+/// in `tmux ls`, which then re-surface on the next lazybox launch
 /// via `recover_sessions`.
 /// Read the persisted set of archived workspace keys. Used by the
 /// upsert path to skip re-creating a workspace the user explicitly
@@ -3652,7 +3658,7 @@ pub fn set_snooze(config: &ServerConfig, key: &WorkspaceKey, until: Option<chron
 pub fn load_archived_set(config: &ServerConfig) -> std::collections::HashSet<String> {
     config
         .store
-        .get_kv(pilot_core::KV_KEY_ARCHIVED)
+        .get_kv(lazybox_core::KV_KEY_ARCHIVED)
         .ok()
         .flatten()
         .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
@@ -3668,7 +3674,7 @@ pub fn archive_workspace_key(config: &ServerConfig, key: &str) {
     }
     let vec: Vec<&String> = set.iter().collect();
     if let Ok(json) = serde_json::to_string(&vec)
-        && let Err(e) = config.store.set_kv(pilot_core::KV_KEY_ARCHIVED, &json)
+        && let Err(e) = config.store.set_kv(lazybox_core::KV_KEY_ARCHIVED, &json)
     {
         tracing::warn!("archive_workspace_key: set_kv failed: {e}");
     }
@@ -3684,7 +3690,7 @@ pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) {
     }
     let vec: Vec<&String> = set.iter().collect();
     if let Ok(json) = serde_json::to_string(&vec)
-        && let Err(e) = config.store.set_kv(pilot_core::KV_KEY_ARCHIVED, &json)
+        && let Err(e) = config.store.set_kv(lazybox_core::KV_KEY_ARCHIVED, &json)
     {
         tracing::warn!("unarchive_workspace_key: set_kv failed: {e}");
     }
@@ -3702,16 +3708,16 @@ pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) {
     // terminal_meta — the authoritative wire-side mapping. Earlier
     // we parsed the backend_key prefix, but the backend's session
     // name format isn't part of any contract (tmux now uses
-    // `pilot-{repo}-{kind}-{pid}-{n}`); the meta map is. Locks are
+    // `lazybox-{repo}-{kind}-{pid}-{n}`); the meta map is. Locks are
     // taken + dropped before async backend.kill() calls.
-    let to_kill_ids: Vec<pilot_ipc::TerminalId> = {
+    let to_kill_ids: Vec<lazybox_ipc::TerminalId> = {
         let meta = config.terminal_meta.lock().await;
         meta.iter()
             .filter(|(_, (sk, _))| sk.as_str() == key_str)
             .map(|(tid, _)| *tid)
             .collect()
     };
-    let to_kill: Vec<(pilot_ipc::TerminalId, String)> = {
+    let to_kill: Vec<(lazybox_ipc::TerminalId, String)> = {
         let terminals = config.terminals.lock().await;
         to_kill_ids
             .into_iter()
@@ -3764,7 +3770,7 @@ pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) {
 /// updated — without that step, the next poll would re-create the
 /// workspaces from upstream tasks and the project would never
 /// stay gone.
-pub async fn delete_project(config: &ServerConfig, project_key: &pilot_core::ProjectKey) {
+pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::ProjectKey) {
     tracing::info!(project_key = %project_key, "delete_project: starting cascade");
 
     // Snapshot the workspace list before mutation — `delete_workspace`
@@ -3816,8 +3822,8 @@ pub async fn delete_project(config: &ServerConfig, project_key: &pilot_core::Pro
 pub fn set_session_layout(
     config: &ServerConfig,
     key: &WorkspaceKey,
-    session_id: pilot_core::SessionId,
-    layout: pilot_core::SessionLayout,
+    session_id: lazybox_core::SessionId,
+    layout: lazybox_core::SessionLayout,
 ) {
     let Some(mut workspace) = load_workspace(config, key) else {
         return;
@@ -3882,7 +3888,7 @@ pub fn mark_workspace_read(config: &ServerConfig, key: &WorkspaceKey) {
 #[cfg(test)]
 mod merge_detection_tests {
     use super::*;
-    use pilot_core::{TaskId, TaskRole, TaskState};
+    use lazybox_core::{TaskId, TaskRole, TaskState};
 
     fn task(source: &str, key: &str, url: &str, state: TaskState) -> Task {
         Task {
@@ -3894,8 +3900,8 @@ mod merge_detection_tests {
             body: None,
             state,
             role: TaskRole::Author,
-            ci: pilot_core::CiStatus::None,
-            review: pilot_core::ReviewStatus::None,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
             checks: vec![],
             unread_count: 0,
             url: url.into(),
@@ -3909,7 +3915,7 @@ mod merge_detection_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: pilot_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             node_id: None,
             needs_reply: false,
@@ -3995,10 +4001,10 @@ mod merge_detection_tests {
 #[cfg(test)]
 mod rescope_collapse_tests {
     use super::*;
-    use pilot_core::{
+    use lazybox_core::{
         SessionKind, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey, WorkspaceSession,
     };
-    use pilot_store::Store;
+    use lazybox_store::Store;
     use std::sync::Arc;
 
     fn gh_task(key: &str, url: &str, state: TaskState, closes: Vec<TaskId>) -> Task {
@@ -4011,8 +4017,8 @@ mod rescope_collapse_tests {
             body: None,
             state,
             role: TaskRole::Author,
-            ci: pilot_core::CiStatus::None,
-            review: pilot_core::ReviewStatus::None,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
             checks: vec![],
             unread_count: 0,
             url: url.into(),
@@ -4026,7 +4032,7 @@ mod rescope_collapse_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: pilot_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             node_id: None,
             needs_reply: false,
@@ -4038,9 +4044,9 @@ mod rescope_collapse_tests {
         }
     }
 
-    fn seed(store: &pilot_store::MemoryStore, ws: &Workspace) {
+    fn seed(store: &lazybox_store::MemoryStore, ws: &Workspace) {
         store
-            .save_workspace(&pilot_store::WorkspaceRecord {
+            .save_workspace(&lazybox_store::WorkspaceRecord {
                 key: ws.key.as_str().to_string(),
                 created_at: ws.created_at,
                 workspace_json: Some(serde_json::to_string(ws).unwrap()),
@@ -4071,7 +4077,7 @@ mod rescope_collapse_tests {
     /// across.
     #[tokio::test]
     async fn out_of_scope_issue_with_sessions_collapses_into_claiming_pr() {
-        let store = Arc::new(pilot_store::MemoryStore::new());
+        let store = Arc::new(lazybox_store::MemoryStore::new());
         let config = ServerConfig::with_store(store.clone());
 
         let issue_task = gh_task(
@@ -4138,7 +4144,7 @@ mod rescope_collapse_tests {
     /// claiming PR and doesn't swallow every out-of-scope issue.
     #[tokio::test]
     async fn out_of_scope_issue_without_claiming_pr_is_not_collapsed() {
-        let store = Arc::new(pilot_store::MemoryStore::new());
+        let store = Arc::new(lazybox_store::MemoryStore::new());
         let config = ServerConfig::with_store(store.clone());
 
         let issue_task = gh_task(

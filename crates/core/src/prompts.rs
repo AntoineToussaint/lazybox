@@ -1,8 +1,8 @@
 //! Agent prompt builders that depend only on `Task` data.
 //!
-//! Lives in `pilot-core` (not `pilot-tui-core`) so the server can
+//! Lives in `lazybox-core` (not `lazybox-tui-core`) so the server can
 //! build the same prompts for non-UI-triggered spawns — today the
-//! auto-spawn flow that fires on a `@pilot` GitHub mention. Keeping
+//! auto-spawn flow that fires on a `@lazybox` GitHub mention. Keeping
 //! one canonical implementation prevents the UI and the auto-spawn
 //! path from drifting.
 
@@ -28,7 +28,7 @@ fn task_number_str(task: &Task) -> &str {
 
 /// Prompt for "implement this GitHub issue". Same string the
 /// sidebar's `w` shortcut builds when the focused workspace is an
-/// issue, so a press-`w` spawn and a `@pilot`-mention auto-spawn
+/// issue, so a press-`w` spawn and a `@lazybox`-mention auto-spawn
 /// land the agent in identical context.
 ///
 /// Structure: role/preamble + principles ([`AGENT_WORK_PREAMBLE`]),
@@ -53,7 +53,7 @@ pub fn build_implement_issue_prompt(issue: &Task) -> String {
          {body_block}\
          \nTitle the PR `… (#{issue_number})` and start its body with \
          `Closes #{issue_number}.` so the issue and PR collapse to a single \
-         row in pilot.",
+         row in lazybox.",
         preamble = AGENT_WORK_PREAMBLE.trim_end(),
         title = issue.title,
     )

@@ -11,11 +11,11 @@ text, and the status ticker can interleave arbitrarily.
 These fixtures reproduce that wire shape: genuine escape sequences,
 multi-byte glyphs (`❯` U+276F, `✻`, `·`, box-drawing), and fragmented
 chooser lines. They exercise `strip_ansi_lossy` + the Claude state
-machine over bytes that resemble what `PILOT_CAPTURE_PTY` dumps from a
+machine over bytes that resemble what `LAZYBOX_CAPTURE_PTY` dumps from a
 real session, not idealised strings.
 
 Regenerate with:  python3 generate.py
-Then run:         cargo test -p pilot-agents --test detect_fixtures
+Then run:         cargo test -p lazybox-agents --test detect_fixtures
 """
 
 import os
@@ -134,7 +134,7 @@ write("finished_with_parked_prompt.bin", [
 ])
 
 # ── REAL idle ready screen (captured from claude 2.1.x) ──────────────────
-# The genuine fresh-spawn idle screen, reproduced from a real PILOT_CAPTURE_PTY
+# The genuine fresh-spawn idle screen, reproduced from a real LAZYBOX_CAPTURE_PTY
 # dump. Two properties broke detection until #153:
 #   1. The boot banner carries the version `Claude Code v2.1.159`; its
 #      `2.1`/`1.1` decimals satisfied the bare `1.`+`2.` chooser test, and

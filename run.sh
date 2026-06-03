@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Dev-mode launcher for pilot. Prepends the pinned zig 0.15.2 to PATH
+# Dev-mode launcher for lazybox. Prepends the pinned zig 0.15.2 to PATH
 # (libghostty-vt's build.zig rejects newer zig) and forwards extra
 # args to the binary (e.g. `./run.sh --fresh`).
 #
-# zig lives in a HOST-LEVEL cache (default ~/.cache/pilot/zig, override
-# with PILOT_ZIG_CACHE) shared by every clone and worktree, so a fresh
+# zig lives in a HOST-LEVEL cache (default ~/.cache/lazybox/zig, override
+# with LAZYBOX_ZIG_CACHE) shared by every clone and worktree, so a fresh
 # worktree runs immediately without re-bootstrapping. Keep the default
 # in lockstep with scripts/bootstrap.sh and the Makefile's ZIG_CACHE.
 #
@@ -31,10 +31,10 @@ slug="${arch}-${os}-0.15.2"
 # Resolve pinned zig from either a per-worktree local install or the
 # shared host-level cache. Local wins when present (lets a worktree pin
 # its own zig); otherwise fall back to the cache `make setup` populates
-# (default ~/.cache/pilot/zig, override with PILOT_ZIG_CACHE) so a fresh
+# (default ~/.cache/lazybox/zig, override with LAZYBOX_ZIG_CACHE) so a fresh
 # worktree runs without re-bootstrapping.
 LOCAL_DIR="${ROOT}/vendor/zig/${slug}"
-CACHE_DIR="${PILOT_ZIG_CACHE:-${HOME}/.cache/pilot/zig}/${slug}"
+CACHE_DIR="${LAZYBOX_ZIG_CACHE:-${HOME}/.cache/lazybox/zig}/${slug}"
 if [ -x "${LOCAL_DIR}/zig" ]; then
   ZIG_DIR="${LOCAL_DIR}"
 elif [ -x "${CACHE_DIR}/zig" ]; then
@@ -45,4 +45,4 @@ else
   exit 1
 fi
 
-PATH="${ZIG_DIR}:${PATH}" cargo run -p pilot-tui -- "$@"
+PATH="${ZIG_DIR}:${PATH}" cargo run -p lazybox-tui -- "$@"

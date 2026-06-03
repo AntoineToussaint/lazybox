@@ -1,6 +1,6 @@
 # Daemon, deployment & build
 
-How pilot is wired as a process, run, authenticated, configured, and built. The
+How lazybox is wired as a process, run, authenticated, configured, and built. The
 client/daemon split underpins remote use and non-terminal clients; the JSON API
 and structured runtime are the foundations for Tauri/iOS clients.
 
@@ -23,7 +23,7 @@ channel with zero serialization. Only when actually remote does traffic
 serialize over a Unix socket.
 
 ### How to use it
-Just run `pilot` — the in-process daemon is the default. The split only becomes
+Just run `lazybox` — the in-process daemon is the default. The split only becomes
 visible when you run a [standalone daemon](#standalone-daemon) or
 [connect remotely](#remote-connect).
 
@@ -35,7 +35,7 @@ length + payload, 64 MiB cap) in `crates/ipc/src/socket.rs`. The TUI code
 doesn't branch on local vs remote — both sit behind the same transport trait.
 
 ### Test checklist
-- [ ] `pilot` with no flags runs the in-process daemon and works end-to-end.
+- [ ] `lazybox` with no flags runs the in-process daemon and works end-to-end.
 - [ ] In-process mode does no socket IO (channel transport).
 - [ ] Commands/events round-trip identically over channel and socket transports.
 
@@ -48,7 +48,7 @@ doesn't branch on local vs remote — both sit behind the same transport trait.
 
 **Status:** stable
 **Crate(s):** `tui` (`main.rs`), `server`
-**Config / flags:** socket at `~/.pilot/v2/run/daemon.sock`, PID at `~/.pilot/v2/run/daemon.pid`
+**Config / flags:** socket at `~/.lazybox/v2/run/daemon.sock`, PID at `~/.lazybox/v2/run/daemon.pid`
 **Key bindings:** —
 
 ### What it does
@@ -57,25 +57,25 @@ disconnects — for SSH / multi-client setups (same model as a tmux server).
 
 ### How to use it
 ```sh
-pilot server start     # start a standalone daemon (also: pilot daemon start)
-pilot daemon status    # PID + socket path if running
-pilot daemon stop      # SIGTERM the daemon
+lazybox server start     # start a standalone daemon (also: lazybox daemon start)
+lazybox daemon status    # PID + socket path if running
+lazybox daemon stop      # SIGTERM the daemon
 ```
 
 ### How it works (brief)
 `server_start` (`crates/tui/src/main.rs`) forks a daemon listening on the Unix
 socket and writes a PID file. `daemon stop` sends SIGTERM via the lifecycle
 helper; `daemon status` reports PID + socket. Socket/PID paths derive from
-`PILOT_HOME`.
+`LAZYBOX_HOME`.
 
 ### Test checklist
-- [ ] `pilot server start` starts a daemon and binds the socket.
-- [ ] `pilot daemon status` reports the running PID + socket path.
-- [ ] `pilot daemon stop` terminates it and clears the PID file.
+- [ ] `lazybox server start` starts a daemon and binds the socket.
+- [ ] `lazybox daemon status` reports the running PID + socket path.
+- [ ] `lazybox daemon stop` terminates it and clears the PID file.
 - [ ] The daemon survives a client disconnect.
 
 ### Known sharp edges
-- Single socket per `PILOT_HOME`; a second `server start` against the same home contends for the socket.
+- Single socket per `LAZYBOX_HOME`; a second `server start` against the same home contends for the socket.
 
 ---
 
@@ -91,10 +91,10 @@ Connects a local TUI to a remote daemon over a Unix socket, typically forwarded
 through SSH (`ssh -L`) — daemon on a beefy box, TUI on your laptop.
 
 ### How to use it
-On the remote host run `pilot server start`. Forward its socket over SSH, then:
+On the remote host run `lazybox server start`. Forward its socket over SSH, then:
 
 ```sh
-pilot --connect /path/to/forwarded.sock
+lazybox --connect /path/to/forwarded.sock
 ```
 
 ### How it works (brief)
@@ -103,7 +103,7 @@ starting a local daemon; framing is the same length-prefixed bincode. SSH is the
 trust boundary — there's no TCP/TLS in v2.0.
 
 ### Test checklist
-- [ ] `pilot --connect <socket>` attaches to a running daemon without starting a local one.
+- [ ] `lazybox --connect <socket>` attaches to a running daemon without starting a local one.
 - [ ] Terminal replay reconstructs the screen on connect (ring-buffer replay).
 - [ ] Disconnecting the client leaves the daemon (and its sessions) running.
 
@@ -117,7 +117,7 @@ trust boundary — there's no TCP/TLS in v2.0.
 
 **Status:** experimental
 **Crate(s):** `server` (`api_gateway.rs`)
-**Config / flags:** `PILOT_API_ADDR` (default `127.0.0.1:8787`), `PILOT_API_TOKEN` (optional bearer)
+**Config / flags:** `LAZYBOX_API_ADDR` (default `127.0.0.1:8787`), `LAZYBOX_API_TOKEN` (optional bearer)
 **Key bindings:** —
 
 ### What it does
@@ -127,9 +127,9 @@ without the terminal protocol.
 
 ### How to use it
 ```sh
-pilot server api               # bind 127.0.0.1:8787
-pilot server api 0.0.0.0:9000  # explicit addr
-PILOT_API_TOKEN=secret pilot server api
+lazybox server api               # bind 127.0.0.1:8787
+lazybox server api 0.0.0.0:9000  # explicit addr
+LAZYBOX_API_TOKEN=secret lazybox server api
 ```
 
 Endpoints: `GET /v1/health`, `GET /v1/workspaces`, `GET /v1/events` (NDJSON
@@ -137,8 +137,8 @@ stream), `POST /v1/commands` (single command), `POST /v1/stream` (duplex
 commands ↔ events).
 
 ### How it works (brief)
-`server_api` (`crates/tui/src/main.rs`) parses the addr (arg → `PILOT_API_ADDR`
-→ default) and optional `PILOT_API_TOKEN`. The gateway (`api_gateway.rs`)
+`server_api` (`crates/tui/src/main.rs`) parses the addr (arg → `LAZYBOX_API_ADDR`
+→ default) and optional `LAZYBOX_API_TOKEN`. The gateway (`api_gateway.rs`)
 serves the endpoints; streaming uses NDJSON frames (`JsonClientFrame::Command`
 / `JsonServerFrame::Event`). When a token is set, requests need
 `Authorization: Bearer <token>`.
@@ -149,7 +149,7 @@ serves the endpoints; streaming uses NDJSON frames (`JsonClientFrame::Command`
 - [ ] `GET /v1/events` streams NDJSON events.
 - [ ] `POST /v1/commands` accepts a single command frame.
 - [ ] `POST /v1/stream` round-trips commands → events.
-- [ ] With `PILOT_API_TOKEN` set, unauthenticated requests are rejected.
+- [ ] With `LAZYBOX_API_TOKEN` set, unauthenticated requests are rejected.
 
 ### Known sharp edges
 - Localhost-only by default and no CORS (ROADMAP §5); bearer auth should be required before any non-loopback bind.
@@ -161,7 +161,7 @@ serves the endpoints; streaming uses NDJSON frames (`JsonClientFrame::Command`
 
 **Status:** stable
 **Crate(s):** `tui` (`main.rs`), `core` (`src/paths.rs`)
-**Config / flags:** `--fresh`, `--test`, `--connect`, `--workspace`, `--session`, `PILOT_HOME`
+**Config / flags:** `--fresh`, `--test`, `--connect`, `--workspace`, `--session`, `LAZYBOX_HOME`
 **Key bindings:** —
 
 ### What it does
@@ -171,24 +171,24 @@ side-by-side dev instance.
 
 ### How to use it
 ```sh
-pilot --fresh                       # wipe state.db, re-run setup
-pilot --test                        # tempdir + seeded session, no GitHub, no disk writes
-PILOT_HOME=~/.pilot-dev pilot       # separate state/worktrees/socket
-pilot --workspace <key>             # preselect a workspace
-pilot --session <id>                # preselect a session
+lazybox --fresh                       # wipe state.db, re-run setup
+lazybox --test                        # tempdir + seeded session, no GitHub, no disk writes
+LAZYBOX_HOME=~/.lazybox-dev lazybox       # separate state/worktrees/socket
+lazybox --workspace <key>             # preselect a workspace
+lazybox --session <id>                # preselect a session
 ```
 
 ### How it works (brief)
 Flags parsed in `crates/tui/src/main.rs`. `--fresh` wipes
-`~/.pilot/v2/state.db`; `--test` builds a throwaway tempdir repo + seeded
-session with no polling/disk writes. `PILOT_HOME` is resolved by
+`~/.lazybox/v2/state.db`; `--test` builds a throwaway tempdir repo + seeded
+session with no polling/disk writes. `LAZYBOX_HOME` is resolved by
 `core::paths::home()` (`crates/core/src/paths.rs`) and every path (state DB,
 worktrees, daemon socket, config) derives from it.
 
 ### Test checklist
 - [ ] `--fresh` clears `state.db` and re-runs the setup wizard.
 - [ ] `--test` opens a seeded session without touching real state or GitHub.
-- [ ] `PILOT_HOME=~/.pilot-dev` uses a fully separate profile (no shared state, separate socket).
+- [ ] `LAZYBOX_HOME=~/.lazybox-dev` uses a fully separate profile (no shared state, separate socket).
 - [ ] `--workspace`/`--session` preselect the UI on startup.
 
 ### Known sharp edges
@@ -210,7 +210,7 @@ tokens.
 
 ### How to use it
 Run `gh auth login` and GitHub just works. Set `LINEAR_API_KEY` for Linear and
-the Slack tokens for the mirror. No pilot-specific credential setup.
+the Slack tokens for the mirror. No lazybox-specific credential setup.
 
 ### How it works (brief)
 `CredentialProvider` (`crates/auth`) has `name()` + `async resolve(scope)`. The
@@ -235,7 +235,7 @@ auth source, implement the trait and add it to the chain in `crates/server/`
 
 **Status:** stable
 **Crate(s):** `config` (`src/lib.rs`, `src/snippets.rs`)
-**Config / flags:** `~/.pilot/config.yaml` (rooted at `PILOT_HOME`)
+**Config / flags:** `~/.lazybox/config.yaml` (rooted at `LAZYBOX_HOME`)
 **Key bindings:** `,` opens the editor palette
 
 ### What it does
@@ -260,9 +260,9 @@ Top-level keys (`crates/config/src/lib.rs`):
 | `display`, `shell`, `hooks`, `terminal`, `mention`, `auto_fix` | Display merging, shell, agent hooks, terminal, mention routing, auto-fix triggers |
 
 ### How it works (brief)
-`Config::load()` reads `~/.pilot/config.yaml` and fills missing fields from
+`Config::load()` reads `~/.lazybox/config.yaml` and fills missing fields from
 `UiDefaults`/section defaults. Snippets are a separate file
-(`~/.pilot/snippets.yaml` + repo-local) loaded by `Snippets::load_merged`.
+(`~/.lazybox/snippets.yaml` + repo-local) loaded by `Snippets::load_merged`.
 
 ### Test checklist
 - [ ] An empty `config.yaml` loads with all defaults (zero-config first run).
@@ -272,7 +272,7 @@ Top-level keys (`crates/config/src/lib.rs`):
 - [ ] Editing config via the `,` palette writes valid YAML that re-loads.
 
 ### Known sharp edges
-- `DESIGN.md` mentions a `pilot config dump` command for the effective merged config — verify whether it's wired before relying on it.
+- `DESIGN.md` mentions a `lazybox config dump` command for the effective merged config — verify whether it's wired before relying on it.
 
 ---
 
@@ -280,17 +280,17 @@ Top-level keys (`crates/config/src/lib.rs`):
 
 **Status:** stable (build) / scaffolded-not-active (release channels)
 **Crate(s):** build scripts, `libghostty-vt*` (vendored), `.github/workflows/release.yml`
-**Config / flags:** `PILOT_ZIG_CACHE`, `GHOSTTY_SOURCE_DIR`
+**Config / flags:** `LAZYBOX_ZIG_CACHE`, `GHOSTTY_SOURCE_DIR`
 **Key bindings:** —
 
 ### What it does
-Builds pilot from source with a pinned Zig toolchain and vendored ghostty VT
+Builds lazybox from source with a pinned Zig toolchain and vendored ghostty VT
 bindings. Release channels (Homebrew tap, curl installer, GitHub Releases via
 cargo-dist) are wired but not yet activated (no `v*.*.*` tag pushed pre-1.0).
 
 ### How to use it
 ```sh
-make setup   # download pinned zig 0.15.2 to ~/.cache/pilot/zig/
+make setup   # download pinned zig 0.15.2 to ~/.cache/lazybox/zig/
 make run     # build + run
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
@@ -302,8 +302,8 @@ also needs libc++ / libc++abi. Direct `cargo build` needs **zig 0.15.2** on
 PATH.
 
 ### How it works (brief)
-`make setup` caches zig host-wide (`~/.cache/pilot/zig/<host>/`, override
-`PILOT_ZIG_CACHE`) so clones/worktrees share one download. The `libghostty-vt*`
+`make setup` caches zig host-wide (`~/.cache/lazybox/zig/<host>/`, override
+`LAZYBOX_ZIG_CACHE`) so clones/worktrees share one download. The `libghostty-vt*`
 Rust bindings are vendored; the underlying ghostty Zig sources are fetched at
 build time (pinned commit, 3× retry; override with `GHOSTTY_SOURCE_DIR`). The
 cargo-dist pipeline (`.github/workflows/release.yml` + `[workspace.metadata.dist]`)

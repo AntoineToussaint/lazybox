@@ -11,10 +11,10 @@
 //! that's the point.
 
 use chrono::{Duration, TimeZone, Utc};
-use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
-use pilot_ipc::Event;
-use pilot_tui::PaneId;
-use pilot_tui::components::Sidebar;
+use lazybox_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
+use lazybox_ipc::Event;
+use lazybox_tui::PaneId;
+use lazybox_tui::components::Sidebar;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::prelude::Rect;
@@ -49,7 +49,7 @@ fn make_task(key: &str, minutes_old: i64) -> Task {
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: pilot_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::Mergeable,
         is_behind_base: false,
         node_id: None,
         needs_reply: false,
@@ -170,7 +170,7 @@ fn sidebar_golden_render_split_pr_vs_issue() {
 /// split mode would still produce visibly different output here.
 #[test]
 fn sidebar_golden_render_recent_pr_and_issue_mixed() {
-    use pilot_tui::components::sidebar::SortMode;
+    use lazybox_tui::components::sidebar::SortMode;
     let mut s = sidebar();
     while s.sort_mode() != SortMode::Recent {
         s.cycle_sort_mode();
@@ -218,8 +218,8 @@ fn sidebar_golden_render_empty() {
 /// per group member, anchored bottom-left above the footer.
 #[test]
 fn which_key_github_group_golden_render() {
-    use pilot_tui::realm::components::which_key;
-    use pilot_tui_core::action::ActionGroup;
+    use lazybox_tui::realm::components::which_key;
+    use lazybox_tui_core::action::ActionGroup;
     let backend = TestBackend::new(40, 12);
     let mut term = Terminal::new(backend).unwrap();
     term.draw(|frame| {

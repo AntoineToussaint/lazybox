@@ -2,7 +2,7 @@
 mod should_arm_mark_timer_tests {
     use super::super::should_arm_mark_timer;
     use chrono::Utc;
-    use pilot_core::{Workspace, WorkspaceKey};
+    use lazybox_core::{Workspace, WorkspaceKey};
 
     fn empty_ws() -> Workspace {
         Workspace::empty(WorkspaceKey::new("k"), "main", Utc::now())
@@ -13,11 +13,11 @@ mod should_arm_mark_timer_tests {
         // Activity rows are indexed newest-first; `seen_count`
         // counts trailing reads. Build `unread` new + `read` old.
         for i in 0..(unread + read) {
-            w.activity.push(pilot_core::Activity {
+            w.activity.push(lazybox_core::Activity {
                 author: format!("u{i}"),
                 body: "x".into(),
                 created_at: Utc::now(),
-                kind: pilot_core::ActivityKind::Comment,
+                kind: lazybox_core::ActivityKind::Comment,
                 node_id: None,
                 path: None,
                 line: None,
@@ -113,7 +113,7 @@ mod teaser_noise_tests {
     #[test]
     fn handles_multibyte_chars_without_panicking() {
         // Regression: pressing Down on a PR with `✓ APPROVED` in
-        // its activity crashed pilot with "byte index 1 is not a
+        // its activity crashed lazybox with "byte index 1 is not a
         // char boundary; it is inside '✓'". The old loop advanced
         // by 1 byte at a time then `&s[i..]`-sliced, landing inside
         // a multi-byte char.
@@ -269,7 +269,7 @@ mod click_dispatch_tests {
 mod undo_auto_mark_tests {
     use super::super::{ActivityFingerprint, AutoMarkRecord, PaneId, RightPane};
     use chrono::{TimeZone, Utc};
-    use pilot_core::{Activity, ActivityKind, Workspace, WorkspaceKey};
+    use lazybox_core::{Activity, ActivityKind, Workspace, WorkspaceKey};
 
     fn activity_with(node_id: &str, body: &str) -> Activity {
         Activity {

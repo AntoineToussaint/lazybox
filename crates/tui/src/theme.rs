@@ -2,7 +2,7 @@
 //!
 //! ## Why a runtime-switchable theme
 //!
-//! Pilot ships several built-in palettes (Pilot Dark, Catppuccin
+//! Lazybox ships several built-in palettes (Lazybox Dark, Catppuccin
 //! Mocha, Tokyo Night, Gruvbox Dark, Rose Pine). The active palette
 //! lives behind `theme::current()`; every component reads from it
 //! instead of hard-coding `Color::*` literals. Switching themes at
@@ -36,7 +36,7 @@ use ratatui::style::{Color, Modifier, Style};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{OnceLock, RwLock};
 
-/// Pilot's color palette. One global instance via `THEME`.
+/// Lazybox's color palette. One global instance via `THEME`.
 #[derive(Clone)]
 pub struct Theme {
     /// Human-readable name, shown in the theme picker / status bar.
@@ -66,11 +66,11 @@ pub struct Theme {
     pub surface: Color,
 }
 
-/// Pilot Dark — the default. Restrained palette in the spirit of
+/// Lazybox Dark — the default. Restrained palette in the spirit of
 /// yazi's defaults: one cyan accent, one magenta hover, otherwise
 /// grays. Calibrated against a near-black terminal background.
-pub const PILOT_DARK: Theme = Theme {
-    name: "Pilot Dark",
+pub const LAZYBOX_DARK: Theme = Theme {
+    name: "Lazybox Dark",
     accent: Color::Rgb(125, 207, 255),      // soft sky blue
     hover: Color::Rgb(247, 118, 142),       // muted coral
     success: Color::Rgb(158, 206, 106),     // sage green
@@ -152,7 +152,7 @@ pub const ROSE_PINE: Theme = Theme {
 /// the default. The runtime registry (see [`register`]) starts with
 /// these and grows as apps register their own.
 pub const BUILT_IN_THEMES: &[&Theme] = &[
-    &PILOT_DARK,
+    &LAZYBOX_DARK,
     &CATPPUCCIN_MOCHA,
     &TOKYO_NIGHT,
     &GRUVBOX_DARK,
@@ -185,7 +185,7 @@ pub fn current() -> &'static Theme {
 /// for the rest of the process. Treat this as one-time setup.
 ///
 /// ```ignore
-/// let mine = crate::theme::PILOT_DARK
+/// let mine = crate::theme::LAZYBOX_DARK
 ///     .derive("My Theme")
 ///     .accent(ratatui::style::Color::Rgb(255, 100, 100))
 ///     .build();
@@ -354,7 +354,7 @@ impl Theme {
     }
 
     /// Modal border — accent-tinted, matches the focus ring on panes
-    /// so pilot has a single identity color across surfaces.
+    /// so lazybox has a single identity color across surfaces.
     pub fn modal_border(&self) -> Style {
         Style::default().fg(self.accent)
     }
@@ -387,22 +387,22 @@ mod tests {
     #[test]
     fn derive_overrides_named_slot_only() {
         let red = Color::Rgb(255, 0, 0);
-        let derived = PILOT_DARK.derive("test").accent(red).build();
+        let derived = LAZYBOX_DARK.derive("test").accent(red).build();
         assert_eq!(derived.name, "test");
         assert_eq!(derived.accent, red);
-        assert_eq!(derived.success, PILOT_DARK.success);
-        assert_eq!(derived.text_strong, PILOT_DARK.text_strong);
+        assert_eq!(derived.success, LAZYBOX_DARK.success);
+        assert_eq!(derived.text_strong, LAZYBOX_DARK.text_strong);
     }
 
     #[test]
     fn registered_theme_appears_in_list_and_is_settable() {
-        let derived = PILOT_DARK.derive("test_registered_unique").build();
+        let derived = LAZYBOX_DARK.derive("test_registered_unique").build();
         register(derived);
         let names: Vec<_> = list().iter().map(|t| t.name).collect();
         assert!(names.contains(&"test_registered_unique"));
         assert!(set_by_name("test_registered_unique"));
         assert_eq!(current().name, "test_registered_unique");
         // Restore default for other tests.
-        set_by_name("Pilot Dark");
+        set_by_name("Lazybox Dark");
     }
 }

@@ -27,7 +27,7 @@ libghostty-vt-sys.workspace = true
 [package.metadata.docs.rs]
 all-features = true
 
-# Vendored upstream crate — don't enforce pilot's lint policy here.
+# Vendored upstream crate — don't enforce lazybox's lint policy here.
 [lints.rust]
 warnings = "allow"
 

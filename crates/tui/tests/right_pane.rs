@@ -11,12 +11,12 @@
 
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pilot_core::{
+use lazybox_core::{
     Activity, ActivityKind, CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace,
 };
-use pilot_ipc::Event;
-use pilot_tui::PaneId;
-use pilot_tui::components::RightPane;
+use lazybox_ipc::Event;
+use lazybox_tui::PaneId;
+use lazybox_tui::components::RightPane;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::prelude::Rect;
@@ -46,7 +46,7 @@ fn make_task(key: &str) -> Task {
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: pilot_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::Mergeable,
         is_behind_base: false,
         node_id: None,
         needs_reply: false,
@@ -124,7 +124,7 @@ fn pr_with_ci_fail() -> Task {
 
 #[test]
 fn w_with_ci_failing_and_no_selection_spawns_fix_ci_not_address_comments() {
-    use pilot_ipc::Command;
+    use lazybox_ipc::Command;
     let mut rp = RightPane::new(PaneId::new(1));
     let mut ws = Workspace::from_task(pr_with_ci_fail(), Utc::now());
     ws.activity
@@ -159,7 +159,7 @@ fn w_with_ci_failing_and_no_selection_spawns_fix_ci_not_address_comments() {
 fn w_with_selected_comments_addresses_them() {
     // Sanity: when comments ARE selected, the address-comments
     // path still fires. This is the original `f` flow we preserved.
-    use pilot_ipc::Command;
+    use lazybox_ipc::Command;
     let mut rp = RightPane::new(PaneId::new(1));
     let mut ws = Workspace::from_task(pr_with_ci_fail(), Utc::now());
     ws.activity
@@ -199,10 +199,10 @@ fn w_on_author_healthy_pr_no_unread_is_noop() {
     // Reviewer + healthy now fires ReviewCode (the user explicitly
     // wants `w` to mean "review this" when you're the reviewer);
     // this test covers the author side.
-    use pilot_ipc::Command;
+    use lazybox_ipc::Command;
     let mut rp = RightPane::new(PaneId::new(1));
     let mut t = make_task("o/r#1");
-    t.role = pilot_core::TaskRole::Author;
+    t.role = lazybox_core::TaskRole::Author;
     t.ci = CiStatus::Success;
     t.url = "https://github.com/o/r/pull/1".into();
     let mut ws = Workspace::from_task(t, Utc::now());
@@ -228,10 +228,10 @@ fn w_on_reviewer_healthy_pr_fires_review_prompt() {
     // landed on a PR you're assigned to review should pre-load
     // claude with a review prompt — no need to manually type
     // "review this PR" each time.
-    use pilot_ipc::Command;
+    use lazybox_ipc::Command;
     let mut rp = RightPane::new(PaneId::new(1));
     let mut t = make_task("o/r#1");
-    t.role = pilot_core::TaskRole::Reviewer;
+    t.role = lazybox_core::TaskRole::Reviewer;
     t.ci = CiStatus::Success;
     t.url = "https://github.com/o/r/pull/1".into();
     let mut ws = Workspace::from_task(t, Utc::now());
@@ -379,7 +379,7 @@ fn j_without_workspace_bubbles_up() {
         KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         &mut Vec::new(),
     );
-    assert_eq!(outcome, pilot_tui::PaneOutcome::Pass);
+    assert_eq!(outcome, lazybox_tui::PaneOutcome::Pass);
 }
 
 #[test]
@@ -390,7 +390,7 @@ fn unknown_key_bubbles_up_even_with_workspace() {
         KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
         &mut Vec::new(),
     );
-    assert_eq!(outcome, pilot_tui::PaneOutcome::Pass);
+    assert_eq!(outcome, lazybox_tui::PaneOutcome::Pass);
 }
 
 #[test]
@@ -404,7 +404,7 @@ fn j_on_empty_activity_list_passes_through_when_collapsed() {
         KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         &mut Vec::new(),
     );
-    assert_eq!(outcome, pilot_tui::PaneOutcome::Pass);
+    assert_eq!(outcome, lazybox_tui::PaneOutcome::Pass);
     assert_eq!(rp.comment_cursor(), 0);
 }
 
@@ -419,7 +419,7 @@ fn j_on_expanded_empty_activity_consumes() {
         KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         &mut Vec::new(),
     );
-    assert_eq!(outcome, pilot_tui::PaneOutcome::Consumed);
+    assert_eq!(outcome, lazybox_tui::PaneOutcome::Consumed);
     assert_eq!(rp.comment_cursor(), 0);
 }
 
@@ -636,7 +636,7 @@ fn enter_toggles_collapse() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut Vec::new(),
     );
-    assert_eq!(outcome, pilot_tui::PaneOutcome::Consumed);
+    assert_eq!(outcome, lazybox_tui::PaneOutcome::Consumed);
     assert!(rp.activity_collapsed(), "Enter collapses");
     rp.handle_key(
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
@@ -842,7 +842,7 @@ fn z_undoes_most_recent_auto_mark() {
     assert!(!rp.can_undo_mark_read());
     assert!(
         cmds.iter()
-            .any(|c| matches!(c, pilot_ipc::Command::UnmarkActivityRead { .. })),
+            .any(|c| matches!(c, lazybox_ipc::Command::UnmarkActivityRead { .. })),
         "z emits UnmarkActivityRead so the daemon writes the partial undo"
     );
 }

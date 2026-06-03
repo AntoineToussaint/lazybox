@@ -1,6 +1,6 @@
 //! `SessionBackend` impl that opens a PTY directly via `portable-pty`.
 //!
-//! This is the historical default — pilot used to embed a PTY inside
+//! This is the historical default — lazybox used to embed a PTY inside
 //! the server with no external session manager. It still works, but
 //! it's now one [`SessionBackend`] among others. Sessions die when
 //! the server process exits; `list()` always returns empty because

@@ -18,14 +18,14 @@
 //! an outer wall-clock cap. See `feedback_test_timeouts.md`.
 
 use chrono::Utc;
-use pilot_core::{
+use lazybox_core::{
     Activity, ActivityKind, CiStatus, ProviderConfig, ReviewStatus, Task, TaskId, TaskRole,
     TaskState,
 };
-use pilot_ipc::{Command, Event, channel};
-use pilot_server::polling::{self, FetchMode, TaskSource};
-use pilot_server::{Server, ServerConfig};
-use pilot_store::WorkspaceRecord;
+use lazybox_ipc::{Command, Event, channel};
+use lazybox_server::polling::{self, FetchMode, TaskSource};
+use lazybox_server::{Server, ServerConfig};
+use lazybox_store::WorkspaceRecord;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -37,7 +37,7 @@ use std::time::Duration;
 /// repo). Tests that drain "one event per workspace upsert" can use
 /// this instead of `client.recv()` to stay robust to the Project
 /// auto-register firing alongside the workspace.
-async fn recv_workspace_upsert(client: &mut pilot_ipc::Client) -> Event {
+async fn recv_workspace_upsert(client: &mut lazybox_ipc::Client) -> Event {
     loop {
         let evt = tokio::time::timeout(Duration::from_secs(2), client.recv())
             .await
@@ -78,7 +78,7 @@ fn make_task(key: &str) -> Task {
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: pilot_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::Mergeable,
         is_behind_base: false,
         node_id: None,
         needs_reply: false,
@@ -117,7 +117,7 @@ impl TaskSource for FakeSource {
     }
     fn fetch<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>> + Send + 'a>>
     {
         let tasks = self.tasks.clone();
         Box::pin(async move { Ok(tasks) })
@@ -132,10 +132,10 @@ impl TaskSource for FailingSource {
     }
     fn fetch<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>> + Send + 'a>>
     {
         Box::pin(async move {
-            Err(pilot_core::ProviderError::retryable(
+            Err(lazybox_core::ProviderError::retryable(
                 self.0.clone(),
                 "rate limited",
             ))
@@ -154,7 +154,7 @@ impl TaskSource for CountingSource {
     }
     fn fetch<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>> + Send + 'a>>
     {
         let counter = self.counter.clone();
         Box::pin(async move {
@@ -166,7 +166,7 @@ impl TaskSource for CountingSource {
 
 /// Source that returns a fixed task set AND queues an
 /// `AutoSpawnAgent` action to be drained after the upsert pass. The
-/// in-process equivalent of `GhSource`'s `@pilot`-mention path
+/// in-process equivalent of `GhSource`'s `@lazybox`-mention path
 /// without the network round-trip — used to verify that
 /// `tick_with_state` runs `drain_actions` and routes the spawn
 /// through `handle_spawn` end-to-end.
@@ -182,7 +182,7 @@ impl TaskSource for ActionEmittingSource {
     }
     fn fetch<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>> + Send + 'a>>
     {
         let tasks = self.tasks.clone();
         Box::pin(async move { Ok(tasks) })
@@ -208,7 +208,7 @@ impl TaskSource for ScopedSource {
     }
     fn fetch<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>> + Send + 'a>>
     {
         let tasks = self.tasks.clone();
         Box::pin(async move { Ok(tasks) })
@@ -233,7 +233,7 @@ impl TaskSource for IncrementalSource {
     }
     fn fetch<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>> + Send + 'a>>
     {
         let tasks = self.tasks.clone();
         Box::pin(async move { Ok(tasks) })
@@ -266,7 +266,7 @@ impl TaskSource for IncrementalSource {
 async fn set_focused_workspace_never_blocks_on_an_in_flight_poll() {
     let config = ServerConfig::in_memory();
     let task = make_task("o/r#42");
-    let workspace = pilot_core::Workspace::from_task(task.clone(), Utc::now());
+    let workspace = lazybox_core::Workspace::from_task(task.clone(), Utc::now());
     polling::upsert(&config, task).await;
 
     // Simulate an in-flight poll tick holding the lock across its
@@ -353,7 +353,7 @@ async fn upsert_preserves_seen_count_across_updates() {
 
     // Seed a workspace with seen_count=5 in the store directly.
     let task = make_task("o/r#7");
-    let mut workspace = pilot_core::Workspace::from_task(task.clone(), Utc::now());
+    let mut workspace = lazybox_core::Workspace::from_task(task.clone(), Utc::now());
     workspace.seen_count = 5;
     let json = serde_json::to_string(&workspace).unwrap();
     config
@@ -369,7 +369,7 @@ async fn upsert_preserves_seen_count_across_updates() {
     polling::upsert(&config, task).await;
 
     let stored = config.store.get_workspace(&workspace.key).unwrap().unwrap();
-    let parsed: pilot_core::Workspace =
+    let parsed: lazybox_core::Workspace =
         serde_json::from_str(&stored.workspace_json.unwrap()).unwrap();
     assert_eq!(parsed.seen_count, 5, "seen_count preserved");
 }
@@ -403,9 +403,9 @@ async fn upsert_de_duplicates_recent_activity() {
     // Compute the workspace key the same way the poller does, then
     // round-trip through the store and verify the activity feed
     // didn't grow on every poll.
-    let key = pilot_core::WorkspaceKey::new(pilot_core::workspace_key_for(&mk()));
+    let key = lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&mk()));
     let stored = config.store.get_workspace(&key).unwrap().unwrap();
-    let workspace: pilot_core::Workspace =
+    let workspace: lazybox_core::Workspace =
         serde_json::from_str(&stored.workspace_json.unwrap()).unwrap();
     assert_eq!(workspace.activity.len(), 1, "activity de-duplicated");
 }
@@ -424,7 +424,7 @@ async fn tick_emits_provider_error_on_failure() {
         } => {
             assert_eq!(source, "github");
             // Message on the bus is the user-facing one (terse) —
-            // full diagnostic lives in /tmp/pilot.log. For a
+            // full diagnostic lives in /tmp/lazybox.log. For a
             // Retryable error the user_message format is
             // "<source> hiccup, retrying next cycle".
             assert!(
@@ -479,8 +479,9 @@ async fn mark_workspace_read_persists_seen_count() {
     ];
     polling::upsert(&config, task).await;
 
-    let key = pilot_core::WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#11")));
-    let before: pilot_core::Workspace = serde_json::from_str(
+    let key =
+        lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#11")));
+    let before: lazybox_core::Workspace = serde_json::from_str(
         &config
             .store
             .get_workspace(&key)
@@ -495,7 +496,7 @@ async fn mark_workspace_read_persists_seen_count() {
 
     polling::mark_workspace_read(&config, &key);
 
-    let after: pilot_core::Workspace = serde_json::from_str(
+    let after: lazybox_core::Workspace = serde_json::from_str(
         &config
             .store
             .get_workspace(&key)
@@ -529,7 +530,8 @@ async fn mark_workspace_read_broadcasts_upsert() {
     // ProjectUpserted event the first-sight registration fires.
     let _seed = recv_workspace_upsert(&mut client).await;
 
-    let key = pilot_core::WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#22")));
+    let key =
+        lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#22")));
     polling::mark_workspace_read(&config, &key);
 
     let evt = recv_workspace_upsert(&mut client).await;
@@ -550,13 +552,14 @@ async fn mark_workspace_read_is_independent_of_provider_state() {
     task.recent_activity = vec![make_activity("alice", "ping")];
     polling::upsert(&config, task.clone()).await;
 
-    let key = pilot_core::WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#33")));
+    let key =
+        lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#33")));
     polling::mark_workspace_read(&config, &key);
 
     // Re-poll the same task — seen state survives.
     polling::upsert(&config, task).await;
 
-    let stored: pilot_core::Workspace = serde_json::from_str(
+    let stored: lazybox_core::Workspace = serde_json::from_str(
         &config
             .store
             .get_workspace(&key)
@@ -573,7 +576,7 @@ async fn mark_workspace_read_no_op_when_workspace_missing() {
     // Pressing `m` on a workspace that the daemon doesn't actually have
     // (race: TUI saw a stale snapshot) must not panic.
     let config = ServerConfig::in_memory();
-    let key = pilot_core::WorkspaceKey::new("github:o/r#nope");
+    let key = lazybox_core::WorkspaceKey::new("github:o/r#nope");
     polling::mark_workspace_read(&config, &key);
     assert!(config.store.get_workspace(&key).unwrap().is_none());
 }
@@ -588,23 +591,23 @@ async fn mark_workspace_read_no_op_when_workspace_missing() {
 
 #[tokio::test]
 async fn migrate_path_only_when_dir_missing() {
-    use pilot_core::WorkspaceSession;
+    use lazybox_core::WorkspaceSession;
     let config = ServerConfig::in_memory();
     let task = make_task("o/r#11");
-    let mut ws = pilot_core::Workspace::from_task(task, Utc::now());
+    let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
     let session = WorkspaceSession::new(
         ws.key.clone(),
-        pilot_core::SessionKind::Shell,
-        std::path::PathBuf::from("/tmp/pilot-nonexistent-old-path"),
+        lazybox_core::SessionKind::Shell,
+        std::path::PathBuf::from("/tmp/lazybox-nonexistent-old-path"),
         Utc::now(),
     );
     ws.add_session(session);
 
     let moved =
-        pilot_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
+        lazybox_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
     assert!(moved, "stale path detected → migrated record");
 
-    let expected = pilot_server::spawn_handler::worktree_root().join(ws.worktree_slug());
+    let expected = lazybox_server::spawn_handler::worktree_root().join(ws.worktree_slug());
     assert_eq!(
         ws.sessions[0].worktree_path, expected,
         "session path now matches the slug-derived path"
@@ -612,21 +615,21 @@ async fn migrate_path_only_when_dir_missing() {
 }
 #[tokio::test]
 async fn migrate_no_op_when_path_already_matches() {
-    use pilot_core::WorkspaceSession;
+    use lazybox_core::WorkspaceSession;
     let config = ServerConfig::in_memory();
     let task = make_task("o/r#22");
-    let mut ws = pilot_core::Workspace::from_task(task, Utc::now());
-    let expected = pilot_server::spawn_handler::worktree_root().join(ws.worktree_slug());
+    let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
+    let expected = lazybox_server::spawn_handler::worktree_root().join(ws.worktree_slug());
     let session = WorkspaceSession::new(
         ws.key.clone(),
-        pilot_core::SessionKind::Shell,
+        lazybox_core::SessionKind::Shell,
         expected.clone(),
         Utc::now(),
     );
     ws.add_session(session);
 
     let moved =
-        pilot_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
+        lazybox_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
     assert!(!moved, "path already matches → migration is a no-op");
     assert_eq!(ws.sessions[0].worktree_path, expected);
 }
@@ -634,9 +637,9 @@ async fn migrate_no_op_when_path_already_matches() {
 async fn migrate_handles_zero_sessions() {
     let config = ServerConfig::in_memory();
     let task = make_task("o/r#33");
-    let mut ws = pilot_core::Workspace::from_task(task, Utc::now());
+    let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
     let moved =
-        pilot_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
+        lazybox_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
     assert!(!moved, "no sessions → nothing to migrate");
 }
 #[tokio::test]
@@ -653,20 +656,20 @@ async fn migrate_picks_up_pr_title_rename() {
     //
     // The real git-worktree-move branch isn't covered here because
     // it requires a real bare clone — different test file's job.
-    use pilot_core::WorkspaceSession;
+    use lazybox_core::WorkspaceSession;
     let config = ServerConfig::in_memory();
 
     // Build the workspace with the ORIGINAL title.
     let mut task = make_task("o/r#7413");
     task.title = "Initial draft".into();
-    let mut ws = pilot_core::Workspace::from_task(task, Utc::now());
+    let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
     let session = WorkspaceSession::new(
         ws.key.clone(),
-        pilot_core::SessionKind::Shell,
+        lazybox_core::SessionKind::Shell,
         // Use a path that DOES match the original slug so we can
         // assert it changes after the rename — same fallback the
         // production spawn handler uses.
-        pilot_server::spawn_handler::worktree_root().join(ws.worktree_slug()),
+        lazybox_server::spawn_handler::worktree_root().join(ws.worktree_slug()),
         Utc::now(),
     );
     let original_slug = ws.worktree_slug();
@@ -689,10 +692,10 @@ async fn migrate_picks_up_pr_title_rename() {
     assert!(renamed_slug.starts_with("PR-7413-"));
 
     let moved =
-        pilot_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
+        lazybox_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
     assert!(moved, "rename must trigger migration");
 
-    let expected = pilot_server::spawn_handler::worktree_root().join(&renamed_slug);
+    let expected = lazybox_server::spawn_handler::worktree_root().join(&renamed_slug);
     assert_eq!(
         ws.sessions[0].worktree_path, expected,
         "session path follows the new slug after migration",
@@ -710,14 +713,14 @@ async fn create_empty_workspace_persists_with_user_name() {
     let key = polling::create_empty_workspace(
         &config,
         "fix login flow",
-        pilot_core::ProjectKey::local("test"),
+        lazybox_core::ProjectKey::local("test"),
     );
     assert_eq!(
         key.as_str(),
         "fix-login-flow",
         "workspace key is the slugified name"
     );
-    let stored: pilot_core::Workspace = serde_json::from_str(
+    let stored: lazybox_core::Workspace = serde_json::from_str(
         &config
             .store
             .get_workspace(&key)
@@ -736,17 +739,17 @@ async fn create_empty_workspace_disambiguates_collisions() {
     let k1 = polling::create_empty_workspace(
         &config,
         "Refactor auth",
-        pilot_core::ProjectKey::local("test"),
+        lazybox_core::ProjectKey::local("test"),
     );
     let k2 = polling::create_empty_workspace(
         &config,
         "Refactor auth",
-        pilot_core::ProjectKey::local("test"),
+        lazybox_core::ProjectKey::local("test"),
     );
     let k3 = polling::create_empty_workspace(
         &config,
         "Refactor auth",
-        pilot_core::ProjectKey::local("test"),
+        lazybox_core::ProjectKey::local("test"),
     );
     assert_eq!(k1.as_str(), "refactor-auth");
     assert_eq!(k2.as_str(), "refactor-auth-2");
@@ -755,7 +758,8 @@ async fn create_empty_workspace_disambiguates_collisions() {
 #[tokio::test]
 async fn create_empty_workspace_falls_back_when_name_is_unsluggable() {
     let config = ServerConfig::in_memory();
-    let k = polling::create_empty_workspace(&config, "🚀✨", pilot_core::ProjectKey::local("test"));
+    let k =
+        polling::create_empty_workspace(&config, "🚀✨", lazybox_core::ProjectKey::local("test"));
     assert_eq!(
         k.as_str(),
         "workspace",
@@ -778,7 +782,7 @@ async fn create_empty_workspace_broadcasts_upserted() {
     polling::create_empty_workspace(
         &config,
         "side experiment",
-        pilot_core::ProjectKey::local("test"),
+        lazybox_core::ProjectKey::local("test"),
     );
     let evt = recv_workspace_upsert(&mut client).await;
     match evt {
@@ -795,10 +799,10 @@ async fn migrate_legacy_sandbox_stamps_project_key() {
     let config = ServerConfig::in_memory();
     // Seed the pre-Stage-1 state: a workspace at key `sandbox`
     // with no `project_key` field.
-    let key = pilot_core::WorkspaceKey::new("sandbox");
-    let workspace = pilot_core::Workspace::empty(key.clone(), "main", Utc::now());
+    let key = lazybox_core::WorkspaceKey::new("sandbox");
+    let workspace = lazybox_core::Workspace::empty(key.clone(), "main", Utc::now());
     assert!(workspace.project_key.is_none());
-    let record = pilot_store::WorkspaceRecord {
+    let record = lazybox_store::WorkspaceRecord {
         key: key.as_str().to_string(),
         created_at: workspace.created_at,
         workspace_json: serde_json::to_string(&workspace).ok(),
@@ -808,7 +812,7 @@ async fn migrate_legacy_sandbox_stamps_project_key() {
     polling::migrate_legacy_sandbox(&config);
 
     // Workspace now carries the local-sandbox project key.
-    let migrated: pilot_core::Workspace = serde_json::from_str(
+    let migrated: lazybox_core::Workspace = serde_json::from_str(
         &config
             .store
             .get_workspace(&key)
@@ -820,10 +824,10 @@ async fn migrate_legacy_sandbox_stamps_project_key() {
     .unwrap();
     assert_eq!(
         migrated.project_key,
-        Some(pilot_core::ProjectKey::local("sandbox"))
+        Some(lazybox_core::ProjectKey::local("sandbox"))
     );
     // And the project record was registered.
-    let project_key = pilot_core::ProjectKey::local("sandbox");
+    let project_key = lazybox_core::ProjectKey::local("sandbox");
     assert!(config.store.get_project(&project_key).unwrap().is_some());
 }
 
@@ -844,10 +848,10 @@ async fn migrate_legacy_sandbox_skips_already_migrated_workspaces() {
     // A sandbox workspace that ALREADY has a project_key — must not
     // be touched by the migration (its project_key stays, no new
     // project is created).
-    let key = pilot_core::WorkspaceKey::new("sandbox");
-    let mut workspace = pilot_core::Workspace::empty(key.clone(), "main", Utc::now());
-    workspace.project_key = Some(pilot_core::ProjectKey::local("custom"));
-    let record = pilot_store::WorkspaceRecord {
+    let key = lazybox_core::WorkspaceKey::new("sandbox");
+    let mut workspace = lazybox_core::Workspace::empty(key.clone(), "main", Utc::now());
+    workspace.project_key = Some(lazybox_core::ProjectKey::local("custom"));
+    let record = lazybox_store::WorkspaceRecord {
         key: key.as_str().to_string(),
         created_at: workspace.created_at,
         workspace_json: serde_json::to_string(&workspace).ok(),
@@ -856,7 +860,7 @@ async fn migrate_legacy_sandbox_skips_already_migrated_workspaces() {
 
     polling::migrate_legacy_sandbox(&config);
 
-    let after: pilot_core::Workspace = serde_json::from_str(
+    let after: lazybox_core::Workspace = serde_json::from_str(
         &config
             .store
             .get_workspace(&key)
@@ -868,7 +872,7 @@ async fn migrate_legacy_sandbox_skips_already_migrated_workspaces() {
     .unwrap();
     assert_eq!(
         after.project_key,
-        Some(pilot_core::ProjectKey::local("custom")),
+        Some(lazybox_core::ProjectKey::local("custom")),
         "migration must not overwrite an existing project_key"
     );
 }
@@ -877,24 +881,24 @@ async fn migrate_legacy_sandbox_skips_already_migrated_workspaces() {
 
 #[tokio::test]
 async fn set_session_layout_persists_and_broadcasts() {
-    use pilot_core::{SessionKind, SessionLayout, TileTree, WorkspaceSession};
+    use lazybox_core::{SessionKind, SessionLayout, TileTree, WorkspaceSession};
     let config = ServerConfig::in_memory();
 
     // Seed a workspace with one session.
     let task = make_task("o/r#1");
-    let ws_key = pilot_core::WorkspaceKey::new(pilot_core::workspace_key_for(&task));
-    let mut ws = pilot_core::Workspace::from_task(task, Utc::now());
+    let ws_key = lazybox_core::WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+    let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
     let session = WorkspaceSession::new(
         ws_key.clone(),
         SessionKind::Shell,
-        std::path::PathBuf::from("/tmp/pilot-test"),
+        std::path::PathBuf::from("/tmp/lazybox-test"),
         Utc::now(),
     );
     let session_id = session.id;
     ws.add_session(session);
     config
         .store
-        .save_workspace(&pilot_store::WorkspaceRecord {
+        .save_workspace(&lazybox_store::WorkspaceRecord {
             key: ws_key.as_str().to_string(),
             created_at: ws.created_at,
             workspace_json: serde_json::to_string(&ws).ok(),
@@ -913,7 +917,7 @@ async fn set_session_layout_persists_and_broadcasts() {
     polling::set_session_layout(&config, &ws_key, session_id, layout.clone());
 
     // Reload + verify.
-    let stored: pilot_core::Workspace = serde_json::from_str(
+    let stored: lazybox_core::Workspace = serde_json::from_str(
         &config
             .store
             .get_workspace(&ws_key)
@@ -931,14 +935,14 @@ async fn set_session_layout_persists_and_broadcasts() {
 }
 #[tokio::test]
 async fn set_session_layout_no_op_for_missing_session() {
-    use pilot_core::SessionLayout;
+    use lazybox_core::SessionLayout;
     let config = ServerConfig::in_memory();
-    let key = pilot_core::WorkspaceKey::new("github:none");
+    let key = lazybox_core::WorkspaceKey::new("github:none");
     // Should not panic when neither workspace nor session exist.
     polling::set_session_layout(
         &config,
         &key,
-        pilot_core::SessionId::new(),
+        lazybox_core::SessionId::new(),
         SessionLayout::default(),
     );
 }
@@ -991,7 +995,7 @@ async fn spawn_with_no_sources_exits_quickly_and_silently() {
 /// a poll loop. The wizard's on-complete hook writes config and fires
 /// `Command::Refresh` (→ `poll_wake.notify_one()`) to kick the first
 /// tick — but that notify hit a loop that was never spawned, so the
-/// inbox stayed empty until the user restarted pilot. The fix spawns
+/// inbox stayed empty until the user restarted lazybox. The fix spawns
 /// the loop UNCONDITIONALLY at boot, before any setup exists.
 ///
 /// That fix is only safe because the PRODUCTION `spawn` loop — unlike
@@ -999,7 +1003,7 @@ async fn spawn_with_no_sources_exits_quickly_and_silently() {
 /// tick produces no sources: it idles, re-reading config every tick,
 /// until the wizard writes providers and a wake fires. This test pins
 /// that property: spawn the real loop against an unconfigured
-/// `PILOT_HOME` (defaults → zero providers → no-op tick, no network)
+/// `LAZYBOX_HOME` (defaults → zero providers → no-op tick, no network)
 /// and assert the loop is still alive after several intervals. If
 /// someone "optimizes" `spawn` to exit-on-empty like
 /// `spawn_with_sources`, the first-run kick would wake a dead loop and
@@ -1008,15 +1012,15 @@ async fn spawn_with_no_sources_exits_quickly_and_silently() {
 async fn production_spawn_loop_survives_unconfigured_boot() {
     // Point config resolution at an EMPTY dir so `Config::load()`
     // returns defaults (no providers enabled). Without this the loop
-    // would read the dev machine's real `~/.pilot/config.yaml`, build
+    // would read the dev machine's real `~/.lazybox/config.yaml`, build
     // a real GhSource, and fire live GitHub requests from a unit test.
     let tmp = tempfile::TempDir::new().unwrap();
-    let prev = std::env::var_os("PILOT_HOME");
-    // SAFETY/ISOLATION: PILOT_HOME is process-global, but within this
+    let prev = std::env::var_os("LAZYBOX_HOME");
+    // SAFETY/ISOLATION: LAZYBOX_HOME is process-global, but within this
     // test binary `spawn`/`run_one_tick` are the only readers of the
     // resolved config path, and only this test drives them — no other
     // polling.rs test races on it. Restored before we return.
-    unsafe { std::env::set_var("PILOT_HOME", tmp.path()) };
+    unsafe { std::env::set_var("LAZYBOX_HOME", tmp.path()) };
 
     let config = ServerConfig::in_memory();
     let handle = polling::spawn(config, Duration::from_millis(10));
@@ -1030,8 +1034,8 @@ async fn production_spawn_loop_survives_unconfigured_boot() {
         .is_err();
 
     match prev {
-        Some(v) => unsafe { std::env::set_var("PILOT_HOME", v) },
-        None => unsafe { std::env::remove_var("PILOT_HOME") },
+        Some(v) => unsafe { std::env::set_var("LAZYBOX_HOME", v) },
+        None => unsafe { std::env::remove_var("LAZYBOX_HOME") },
     }
 
     assert!(
@@ -1335,7 +1339,7 @@ async fn spawn_drives_sources_on_interval() {
 }
 #[tokio::test]
 async fn rescope_removes_workspaces_with_no_active_session() {
-    use pilot_core::WorkspaceKey;
+    use lazybox_core::WorkspaceKey;
     let config = ServerConfig::in_memory();
     // Seed with an existing workspace (was in scope last poll).
     polling::upsert(&config, make_task("o/r#stale")).await;
@@ -1344,7 +1348,7 @@ async fn rescope_removes_workspaces_with_no_active_session() {
     // Simulate a new poll that returns only `#current` — `#stale`
     // fell out of scope (filter change, repo unsubscribed, …).
     let outcome = polling::TickOutcome {
-        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+        polled: vec![WorkspaceKey::new(lazybox_core::workspace_key_for(
             &make_task("o/r#current"),
         ))],
         any_source_succeeded: true,
@@ -1370,8 +1374,8 @@ async fn rescope_removes_workspaces_with_no_active_session() {
 }
 #[tokio::test]
 async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
-    use pilot_core::{SessionKey, WorkspaceKey};
-    use pilot_ipc::{TerminalId, TerminalKind};
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::{TerminalId, TerminalKind};
     let config = ServerConfig::in_memory();
     let mut bus_rx = config.bus.subscribe();
     polling::upsert(&config, make_task("o/r#alive")).await;
@@ -1381,7 +1385,7 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
     // "has active session". `terminal_meta` is the source of truth
     // the production code consults.
     let session_key: SessionKey =
-        SessionKey::from(pilot_core::workspace_key_for(&make_task("o/r#alive")));
+        SessionKey::from(lazybox_core::workspace_key_for(&make_task("o/r#alive")));
     config
         .terminal_meta
         .lock()
@@ -1391,7 +1395,7 @@ async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
     // Poll returns only `#kept-elsewhere` — `#alive` is out of
     // scope but has a live terminal.
     let outcome = polling::TickOutcome {
-        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+        polled: vec![WorkspaceKey::new(lazybox_core::workspace_key_for(
             &make_task("o/r#kept-elsewhere"),
         ))],
         any_source_succeeded: true,
@@ -1515,7 +1519,7 @@ async fn rescope_preserves_workspaces_from_unpolled_repos() {
     // source reports `Repos(...)`, workspaces in repos NOT in that
     // list are preserved — we have no information about them this
     // tick and silently dropping them is data loss.
-    use pilot_core::{Task, TaskId, WorkspaceKey};
+    use lazybox_core::{Task, TaskId, WorkspaceKey};
     let config = ServerConfig::in_memory();
 
     // Seed three workspaces across three different GitHub repos.
@@ -1552,7 +1556,7 @@ async fn rescope_preserves_workspaces_from_unpolled_repos() {
     // authoritative scope. The other two repos are intentionally
     // outside this tick's coverage.
     let outcome = polling::TickOutcome {
-        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+        polled: vec![WorkspaceKey::new(lazybox_core::workspace_key_for(
             &polled_task,
         ))],
         any_source_succeeded: true,
@@ -1599,13 +1603,13 @@ async fn rescope_with_exhaustive_scope_still_deletes_stale() {
     // cleaned up. Without this assertion, a regression that flipped
     // the new guard to "always preserve" would silently leave the
     // sidebar full of stale rows forever.
-    use pilot_core::WorkspaceKey;
+    use lazybox_core::WorkspaceKey;
     let config = ServerConfig::in_memory();
     polling::upsert(&config, make_task("o/r#stale")).await;
     polling::upsert(&config, make_task("o/r#current")).await;
 
     let outcome = polling::TickOutcome {
-        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+        polled: vec![WorkspaceKey::new(lazybox_core::workspace_key_for(
             &make_task("o/r#current"),
         ))],
         any_source_succeeded: true,
@@ -1681,7 +1685,7 @@ async fn rescope_preserves_prs_when_pr_fetch_partially_failed() {
     // guard makes the source report empty coverage
     // (`gh_polled_scope(.., partial=true)` → `Repos([])`), so the PR
     // survives until a clean sweep can speak to its real state.
-    use pilot_core::{TaskId, WorkspaceKey};
+    use lazybox_core::{TaskId, WorkspaceKey};
     let config = ServerConfig::in_memory();
 
     let mut pr_task = make_task("owner/repo#7");
@@ -1707,7 +1711,7 @@ async fn rescope_preserves_prs_when_pr_fetch_partially_failed() {
     // The source reports the downgraded scope it would compute via
     // `gh_polled_scope(run_global=true, repos=[], partial=true)`.
     let outcome = polling::TickOutcome {
-        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+        polled: vec![WorkspaceKey::new(lazybox_core::workspace_key_for(
             &issue_task,
         ))],
         any_source_succeeded: true,
@@ -1745,7 +1749,7 @@ async fn rescope_preserves_workspaces_from_unreported_sources() {
     // Pre-fix, a Linear-only successful tick would have wiped every
     // GitHub workspace (since none were in `polled`) — silently
     // destructive whenever GH had a transient failure.
-    use pilot_core::{Task, TaskId};
+    use lazybox_core::{Task, TaskId};
     let config = ServerConfig::in_memory();
 
     // Seed a GH workspace and a Linear workspace.
@@ -1806,7 +1810,7 @@ async fn rescope_round_robin_tick_after_global_keeps_unpolled() {
     // Expectation: after step 2, `owner/b#2` and `owner/c#3` are
     // still in the store — they belong to repos we didn't query
     // this tick, not repos that fell out of upstream scope.
-    use pilot_core::{Task, TaskId};
+    use lazybox_core::{Task, TaskId};
 
     fn gh_task(repo: &str, num: u32) -> Task {
         let mut t = make_task(&format!("{repo}#{num}"));
@@ -1874,22 +1878,22 @@ async fn rescope_round_robin_tick_after_global_keeps_unpolled() {
 async fn delete_workspace_kills_terminals_via_terminal_meta() {
     // Regression: an earlier implementation parsed the backend_key
     // prefix to find which terminals belong to a workspace. After
-    // tmux session names switched to `pilot-{repo}-{kind}-{pid}-{n}`
+    // tmux session names switched to `lazybox-{repo}-{kind}-{pid}-{n}`
     // (no longer prefixed with the workspace_key), that filter
     // matched zero terminals — Shift-X X silently kept the ghosts.
     // Now we use terminal_meta as the source of truth.
-    use pilot_core::{SessionKey, WorkspaceKey};
-    use pilot_ipc::{TerminalId, TerminalKind};
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::{TerminalId, TerminalKind};
 
     let config = ServerConfig::in_memory();
     polling::upsert(&config, make_task("o/r#1")).await;
 
-    let workspace_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#1")));
+    let workspace_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#1")));
     let session_key = SessionKey::from(workspace_key.as_str());
     // Insert a terminal pointing at this workspace, with a backend
     // key in the NEW format that doesn't start with the workspace
     // key.
-    let backend_key_new_format = format!("pilot-o-r-1-claude-{}-1", std::process::id());
+    let backend_key_new_format = format!("lazybox-o-r-1-claude-{}-1", std::process::id());
     config
         .terminals
         .lock()
@@ -1906,12 +1910,12 @@ async fn delete_workspace_kills_terminals_via_terminal_meta() {
         .terminal_sessions
         .lock()
         .await
-        .insert(TerminalId(42), pilot_core::SessionId::new());
+        .insert(TerminalId(42), lazybox_core::SessionId::new());
     config
         .agent_states
         .lock()
         .await
-        .insert(TerminalId(42), pilot_ipc::AgentState::Working);
+        .insert(TerminalId(42), lazybox_ipc::AgentState::Working);
 
     polling::delete_workspace(&config, &workspace_key).await;
 
@@ -2001,7 +2005,7 @@ async fn pr_polled_after_issue_collapses_them_into_one_row() {
     assert!(keys[0].contains("141"), "remaining row is the PR's");
 
     let pr_ws_record = config.store.list_workspaces().unwrap().pop().unwrap();
-    let pr_ws: pilot_core::Workspace =
+    let pr_ws: lazybox_core::Workspace =
         serde_json::from_str(&pr_ws_record.workspace_json.unwrap()).unwrap();
     assert_eq!(
         pr_ws.gh_issues.len(),
@@ -2036,7 +2040,7 @@ async fn issue_polled_after_pr_routes_into_pr_workspace() {
         1,
         "issue must NOT create its own workspace when a PR already claims it",
     );
-    let ws: pilot_core::Workspace =
+    let ws: lazybox_core::Workspace =
         serde_json::from_str(records[0].workspace_json.clone().unwrap().as_str()).unwrap();
     assert_eq!(ws.pr.as_ref().unwrap().id.key, "o/r#141");
     assert_eq!(ws.gh_issues.len(), 1);
@@ -2048,17 +2052,17 @@ async fn issue_polled_after_pr_routes_into_pr_workspace() {
 async fn seed_issue_with_session(
     config: &ServerConfig,
     issue_short_key: &str,
-) -> (pilot_core::WorkspaceKey, pilot_core::SessionId) {
-    use pilot_core::{SessionKind, WorkspaceKey, WorkspaceSession};
+) -> (lazybox_core::WorkspaceKey, lazybox_core::SessionId) {
+    use lazybox_core::{SessionKind, WorkspaceKey, WorkspaceSession};
     polling::upsert(config, make_issue_task(issue_short_key)).await;
-    let issue_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_issue_task(
+    let issue_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_issue_task(
         issue_short_key,
     )));
-    let mut issue_ws: pilot_core::Workspace = {
+    let mut issue_ws: lazybox_core::Workspace = {
         let record = config.store.get_workspace(&issue_key).unwrap().unwrap();
         serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
     };
-    let session_id = pilot_core::SessionId::new();
+    let session_id = lazybox_core::SessionId::new();
     issue_ws.add_session(WorkspaceSession {
         id: session_id,
         workspace_key: issue_key.clone(),
@@ -2066,11 +2070,11 @@ async fn seed_issue_with_session(
         kind: SessionKind::Agent {
             agent_id: "claude".into(),
         },
-        state: pilot_core::SessionRunState::Active,
-        worktree_path: std::path::PathBuf::from("/tmp/pilot-test"),
+        state: lazybox_core::SessionRunState::Active,
+        worktree_path: std::path::PathBuf::from("/tmp/lazybox-test"),
         created_at: Utc::now(),
         last_output_at: None,
-        layout: pilot_core::SessionLayout::default(),
+        layout: lazybox_core::SessionLayout::default(),
     });
     let json = serde_json::to_string(&issue_ws).unwrap();
     config
@@ -2090,7 +2094,7 @@ async fn live_issue_session_stalls_merge_and_emits_pending_event() {
     // silently absorbed by its closing PR. The daemon emits a
     // `WorkspaceMergePending` event and leaves both rows alone until
     // the user confirms via `Command::ConfirmMerge`.
-    use pilot_core::WorkspaceKey;
+    use lazybox_core::WorkspaceKey;
 
     let config = ServerConfig::in_memory();
     let mut bus = config.bus.subscribe();
@@ -2103,7 +2107,7 @@ async fn live_issue_session_stalls_merge_and_emits_pending_event() {
         config.store.get_workspace(&issue_key).unwrap().is_some(),
         "issue workspace must NOT auto-merge while it has live sessions",
     );
-    let pr_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_pr_closing(
         "o/r#141",
         &["o/r#71"],
     )));
@@ -2195,7 +2199,7 @@ async fn checkout_poll_state_frees_the_guard_for_the_tick() {
 async fn restore_poll_state_keeps_a_concurrent_focus_hint() {
     let config = ServerConfig::in_memory();
     let task = make_task("o/r#42");
-    let workspace = pilot_core::Workspace::from_task(task.clone(), Utc::now());
+    let workspace = lazybox_core::Workspace::from_task(task.clone(), Utc::now());
     polling::upsert(&config, task).await;
 
     // Tick checks the state out (empty round-robin); a sidebar
@@ -2269,12 +2273,12 @@ async fn confirm_merge_accept_runs_the_merge() {
     // After the user says "yes" to the prompt, the merge runs the
     // same as the silent path: sessions move, terminal_meta rebadges,
     // issue row disappears.
-    use pilot_core::WorkspaceKey;
+    use lazybox_core::WorkspaceKey;
 
     let config = ServerConfig::in_memory();
     let (issue_key, session_id) = seed_issue_with_session(&config, "o/r#71").await;
     polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
-    let pr_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_pr_closing(
         "o/r#141",
         &["o/r#71"],
     )));
@@ -2285,7 +2289,7 @@ async fn confirm_merge_accept_runs_the_merge() {
         config.store.get_workspace(&issue_key).unwrap().is_none(),
         "issue workspace should be removed after accepted merge",
     );
-    let pr_ws: pilot_core::Workspace = {
+    let pr_ws: lazybox_core::Workspace = {
         let record = config.store.get_workspace(&pr_key).unwrap().unwrap();
         serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
     };
@@ -2306,8 +2310,8 @@ async fn closing_pr_transfers_live_session_durably_to_pr() {
     // workspace, so a restart orphaned the terminal and the session
     // vanished. Assert the persisted record follows the session to the
     // PR key.
-    use pilot_core::{SessionKey, WorkspaceKey};
-    use pilot_ipc::{TerminalId, TerminalKind};
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::{TerminalId, TerminalKind};
 
     let config = ServerConfig::in_memory();
     let (issue_key, session_id) = seed_issue_with_session(&config, "o/r#71").await;
@@ -2315,7 +2319,7 @@ async fn closing_pr_transfers_live_session_durably_to_pr() {
     // Stand up a live terminal on the issue: in-memory maps + the
     // persisted record, exactly as `handle_spawn` would have left them.
     let issue_session_key: SessionKey = (&issue_key).into();
-    let backend_key = "pilot-test-o-r-71-claude";
+    let backend_key = "lazybox-test-o-r-71-claude";
     config.terminal_meta.lock().await.insert(
         TerminalId(7),
         (issue_session_key.clone(), TerminalKind::Shell),
@@ -2334,14 +2338,14 @@ async fn closing_pr_transfers_live_session_durably_to_pr() {
         .unwrap();
 
     polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
-    let pr_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_pr_closing(
         "o/r#141",
         &["o/r#71"],
     )));
     polling::handle_confirm_merge(&config, issue_key.clone(), pr_key.clone(), true).await;
 
     // The session record moved to the PR…
-    let pr_ws: pilot_core::Workspace = {
+    let pr_ws: lazybox_core::Workspace = {
         let record = config.store.get_workspace(&pr_key).unwrap().unwrap();
         serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
     };
@@ -2378,18 +2382,18 @@ async fn closing_pr_transfers_live_session_durably_to_pr() {
 }
 #[tokio::test]
 async fn adopt_sessions_moves_sessions_between_workspaces() {
-    use pilot_core::WorkspaceKey;
+    use lazybox_core::WorkspaceKey;
 
     let config = ServerConfig::in_memory();
     let (source_key, session_id) = seed_issue_with_session(&config, "o/r#71").await;
     polling::upsert(&config, make_task("o/r#999")).await;
-    let target_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#999")));
+    let target_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#999")));
 
     polling::handle_adopt_sessions(&config, source_key.clone(), target_key.clone()).await;
 
     // Source still exists (we don't delete it on adopt), but has no
     // sessions left.
-    let source_ws: pilot_core::Workspace = serde_json::from_str(
+    let source_ws: lazybox_core::Workspace = serde_json::from_str(
         &config
             .store
             .get_workspace(&source_key)
@@ -2405,7 +2409,7 @@ async fn adopt_sessions_moves_sessions_between_workspaces() {
     );
 
     // Target gained the session, rekeyed.
-    let target_ws: pilot_core::Workspace = serde_json::from_str(
+    let target_ws: lazybox_core::Workspace = serde_json::from_str(
         &config
             .store
             .get_workspace(&target_key)
@@ -2427,7 +2431,7 @@ async fn adopt_sessions_into_self_is_a_noop() {
     let config = ServerConfig::in_memory();
     let (source_key, session_id) = seed_issue_with_session(&config, "o/r#71").await;
     polling::handle_adopt_sessions(&config, source_key.clone(), source_key.clone()).await;
-    let ws: pilot_core::Workspace = serde_json::from_str(
+    let ws: lazybox_core::Workspace = serde_json::from_str(
         &config
             .store
             .get_workspace(&source_key)
@@ -2444,13 +2448,13 @@ async fn adopt_sessions_into_self_is_a_noop() {
 }
 #[tokio::test]
 async fn adopt_sessions_rewrites_terminal_meta() {
-    use pilot_core::{SessionKey, WorkspaceKey};
-    use pilot_ipc::{TerminalId, TerminalKind};
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::{TerminalId, TerminalKind};
 
     let config = ServerConfig::in_memory();
     let (source_key, _session_id) = seed_issue_with_session(&config, "o/r#71").await;
     polling::upsert(&config, make_task("o/r#999")).await;
-    let target_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#999")));
+    let target_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#999")));
 
     let source_session_key: SessionKey = (&source_key).into();
     config
@@ -2474,12 +2478,12 @@ async fn confirm_merge_reject_pins_against_re_prompting() {
     // User says "no": both workspaces survive, and a subsequent
     // poll of the same PR must NOT re-emit WorkspaceMergePending
     // — otherwise the modal would haunt them every 60 seconds.
-    use pilot_core::WorkspaceKey;
+    use lazybox_core::WorkspaceKey;
 
     let config = ServerConfig::in_memory();
     let (issue_key, _) = seed_issue_with_session(&config, "o/r#71").await;
     polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
-    let pr_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_pr_closing(
         "o/r#141",
         &["o/r#71"],
     )));
@@ -2548,7 +2552,7 @@ async fn body_text_referencing_another_pr_does_not_delete_that_pr() {
     // from the inbox shortly after every poll cycle. The merge code
     // now verifies that the target workspace is an actual issue
     // (no `pr` slot) before touching it.
-    use pilot_core::WorkspaceKey;
+    use lazybox_core::WorkspaceKey;
 
     let config = ServerConfig::in_memory();
     polling::upsert(&config, make_task("o/r#141")).await; // a PR
@@ -2559,7 +2563,7 @@ async fn body_text_referencing_another_pr_does_not_delete_that_pr() {
     }];
     polling::upsert(&config, pr_166).await;
 
-    let key_141 = WorkspaceKey::new(pilot_core::workspace_key_for(&make_task("o/r#141")));
+    let key_141 = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#141")));
     assert!(
         config.store.get_workspace(&key_141).unwrap().is_some(),
         "PR #141 must survive — a PR body referencing another PR via \
@@ -2585,13 +2589,13 @@ async fn merge_rewrites_terminal_meta_so_terminals_dont_orphan() {
     // issue, the meta entry must be rebadged to the PR's key —
     // otherwise reconnecting TUI clients see a terminal pointing
     // to a workspace that no longer exists.
-    use pilot_core::{SessionKey, WorkspaceKey};
-    use pilot_ipc::{TerminalId, TerminalKind};
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::{TerminalId, TerminalKind};
 
     let config = ServerConfig::in_memory();
     polling::upsert(&config, make_issue_task("o/r#71")).await;
 
-    let issue_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_issue_task("o/r#71")));
+    let issue_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_issue_task("o/r#71")));
     let issue_session_key: SessionKey = (&issue_key).into();
     config.terminal_meta.lock().await.insert(
         TerminalId(7),
@@ -2600,7 +2604,7 @@ async fn merge_rewrites_terminal_meta_so_terminals_dont_orphan() {
 
     polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
 
-    let pr_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_pr_closing(
         "o/r#141",
         &["o/r#71"],
     )));
@@ -2627,12 +2631,12 @@ impl TaskSource for ThrottledSource {
     }
     fn fetch<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, pilot_core::ProviderError>> + Send + 'a>>
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>> + Send + 'a>>
     {
         let name = self.name.clone();
         let secs = self.retry_after_secs;
         Box::pin(async move {
-            Err(pilot_core::ProviderError::retryable_after(
+            Err(lazybox_core::ProviderError::retryable_after(
                 name,
                 "rate limited (test)",
                 secs,
@@ -2731,7 +2735,7 @@ async fn tick_outcome_flags_unknown_mergeable_when_any_task_is_unknown() {
     // quick re-poll that chases GitHub's lazy compute.
     let config = ServerConfig::in_memory();
     let mut t = make_task("o/r#unknown");
-    t.mergeable = pilot_core::Mergeable::Unknown;
+    t.mergeable = lazybox_core::Mergeable::Unknown;
     let source: Box<dyn TaskSource> = Box::new(FakeSource {
         name: "github".into(),
         tasks: vec![t],
@@ -2815,14 +2819,14 @@ async fn rescope_skipped_for_incremental_tick_so_untouched_workspaces_survive() 
     // shape (some workspaces missing from `polled`) but for the
     // notifications-driven cadence rather than a transient empty
     // response.
-    use pilot_core::WorkspaceKey;
+    use lazybox_core::WorkspaceKey;
     let config = ServerConfig::in_memory();
     polling::upsert(&config, make_task("o/r#untouched-1")).await;
     polling::upsert(&config, make_task("o/r#untouched-2")).await;
     polling::upsert(&config, make_task("o/r#touched")).await;
 
     let outcome = polling::TickOutcome {
-        polled: vec![WorkspaceKey::new(pilot_core::workspace_key_for(
+        polled: vec![WorkspaceKey::new(lazybox_core::workspace_key_for(
             &make_task("o/r#touched"),
         ))],
         any_source_succeeded: true,
@@ -2853,7 +2857,7 @@ async fn rescope_skipped_for_incremental_tick_so_untouched_workspaces_survive() 
 /// children's `WorkspaceRemoved` events arrive.
 #[tokio::test]
 async fn delete_project_cascades_through_workspaces() {
-    use pilot_core::{Project, ProjectKey, WorkspaceKey};
+    use lazybox_core::{Project, ProjectKey, WorkspaceKey};
 
     let config = ServerConfig::in_memory();
     let project_key = ProjectKey::github("acme", "widget");
@@ -2861,11 +2865,11 @@ async fn delete_project_cascades_through_workspaces() {
 
     // Two workspaces under this project + one orphan workspace that
     // points at a DIFFERENT project — must survive the cascade.
-    let mut ws_a = pilot_core::Workspace::from_task(make_task("acme/widget#1"), Utc::now());
+    let mut ws_a = lazybox_core::Workspace::from_task(make_task("acme/widget#1"), Utc::now());
     ws_a.project_key = Some(project_key.clone());
-    let mut ws_b = pilot_core::Workspace::from_task(make_task("acme/widget#2"), Utc::now());
+    let mut ws_b = lazybox_core::Workspace::from_task(make_task("acme/widget#2"), Utc::now());
     ws_b.project_key = Some(project_key.clone());
-    let mut other = pilot_core::Workspace::from_task(make_task("other/repo#9"), Utc::now());
+    let mut other = lazybox_core::Workspace::from_task(make_task("other/repo#9"), Utc::now());
     other.project_key = Some(ProjectKey::github("other", "repo"));
 
     for ws in [&ws_a, &ws_b, &other] {
@@ -2880,7 +2884,7 @@ async fn delete_project_cascades_through_workspaces() {
     }
     config
         .store
-        .save_project(&pilot_store::ProjectRecord {
+        .save_project(&lazybox_store::ProjectRecord {
             key: project.key.as_str().to_string(),
             created_at: project.created_at,
             project_json: Some(serde_json::to_string(&project).unwrap()),
@@ -2950,7 +2954,7 @@ async fn delete_project_cascades_through_workspaces() {
 /// prompt is actionable again.
 #[tokio::test]
 async fn collapse_into_pr_folds_issue_workspace_into_claiming_pr() {
-    use pilot_core::WorkspaceKey;
+    use lazybox_core::WorkspaceKey;
 
     let config = ServerConfig::in_memory();
 
@@ -2966,7 +2970,7 @@ async fn collapse_into_pr_folds_issue_workspace_into_claiming_pr() {
     // Simulate "user dismissed the auto-prompt with No" — pins
     // the issue in `rejected_merge`. The manual trigger must
     // override that pin.
-    let pr_key_for_reject = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+    let pr_key_for_reject = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_pr_closing(
         "o/r#141",
         &["o/r#71"],
     )));
@@ -2977,7 +2981,7 @@ async fn collapse_into_pr_folds_issue_workspace_into_claiming_pr() {
 
     polling::handle_collapse_into_pr(&config, issue_key.clone()).await;
 
-    let pr_key = WorkspaceKey::new(pilot_core::workspace_key_for(&make_pr_closing(
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_pr_closing(
         "o/r#141",
         &["o/r#71"],
     )));
@@ -2990,7 +2994,7 @@ async fn collapse_into_pr_folds_issue_workspace_into_claiming_pr() {
         .get_workspace(&pr_key)
         .unwrap()
         .expect("pr exists");
-    let pr_ws: pilot_core::Workspace =
+    let pr_ws: lazybox_core::Workspace =
         serde_json::from_str(&pr_record.workspace_json.unwrap()).unwrap();
     // The absorb path migrates the issue task onto the PR
     // workspace's gh_issues. Verify it landed by task key —
@@ -3007,7 +3011,7 @@ async fn collapse_into_pr_folds_issue_workspace_into_claiming_pr() {
 /// defense in case a stale Command arrives.
 #[tokio::test]
 async fn collapse_into_pr_is_noop_when_no_claiming_pr_known() {
-    use pilot_core::WorkspaceKey;
+    use lazybox_core::WorkspaceKey;
     let config = ServerConfig::in_memory();
 
     // Issue workspace, NO matching PR seeded.
@@ -3017,7 +3021,7 @@ async fn collapse_into_pr_is_noop_when_no_claiming_pr_known() {
         t.branch = None;
         t
     };
-    let issue_ws = pilot_core::Workspace::from_task(issue_task, Utc::now());
+    let issue_ws = lazybox_core::Workspace::from_task(issue_task, Utc::now());
     let issue_key = WorkspaceKey::new(issue_ws.key.as_str());
     config
         .store
@@ -3040,14 +3044,14 @@ async fn collapse_into_pr_is_noop_when_no_claiming_pr_known() {
 /// Shift-X" path.
 #[tokio::test]
 async fn delete_project_with_no_workspaces_still_removes_project() {
-    use pilot_core::{Project, ProjectKey};
+    use lazybox_core::{Project, ProjectKey};
 
     let config = ServerConfig::in_memory();
     let project_key = ProjectKey::local("scratch");
     let project = Project::new(project_key.clone(), "scratch", Utc::now());
     config
         .store
-        .save_project(&pilot_store::ProjectRecord {
+        .save_project(&lazybox_store::ProjectRecord {
             key: project.key.as_str().to_string(),
             created_at: project.created_at,
             project_json: Some(serde_json::to_string(&project).unwrap()),
@@ -3081,7 +3085,7 @@ async fn delete_project_with_no_workspaces_still_removes_project() {
 //
 // The polling tick must drain side-effect actions surfaced by a
 // source after `fetch()` and route them through `handle_spawn`. The
-// `@pilot`-mention auto-spawn path depends on this glue — without
+// `@lazybox`-mention auto-spawn path depends on this glue — without
 // `drain_actions` running, the eyes-reacted comment never produces
 // a terminal.
 
@@ -3094,12 +3098,12 @@ async fn tick_dispatches_auto_spawn_action_after_upsert() {
     // session key MUST match `workspace_key_for(task)` because
     // `handle_spawn` uses it to find / create the workspace.
     let task = make_task("o/r#101");
-    let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(&task));
+    let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
     let action = polling::ProviderAction::AutoSpawnAgent {
         session_key: session_key.clone(),
         agent_id: "claude".to_string(),
         prompt: Some("Implement issue".to_string()),
-        reason: "@pilot mention by alice on o/r#101 (issue body)".to_string(),
+        reason: "@lazybox mention by alice on o/r#101 (issue body)".to_string(),
     };
 
     let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
@@ -3135,17 +3139,17 @@ async fn tick_dispatches_auto_spawn_action_after_upsert() {
     );
 }
 
-// ── @pilot ingest: mentioned issues survive the display filter ──────
+// ── @lazybox ingest: mentioned issues survive the display filter ──────
 //
-// Regression for issue #50. The `@pilot` auto-spawn targets the
+// Regression for issue #50. The `@lazybox` auto-spawn targets the
 // mentioned issue's workspace key, so that issue's Task must be
 // upserted even when the user's display filter would drop it (PR-only
 // inbox, role/scope mismatch). Otherwise `handle_spawn` finds no
-// workspace and spawns the agent in pilot's own cwd with no branch.
+// workspace and spawns the agent in lazybox's own cwd with no branch.
 
 #[test]
 fn readmit_keeps_mentioned_issue_dropped_by_filter() {
-    // Display filter kept only a PR; the `@pilot`-mentioned issue was
+    // Display filter kept only a PR; the `@lazybox`-mentioned issue was
     // dropped. It must be re-admitted so its workspace gets created.
     let kept = vec![make_task("o/r#1")]; // a PR that passed the filter
     let mentioned = vec![make_issue_task("o/r#42")];
@@ -3153,7 +3157,7 @@ fn readmit_keeps_mentioned_issue_dropped_by_filter() {
     assert_eq!(out.len(), 2, "mentioned issue must be re-admitted");
     assert!(
         out.iter().any(|t| t.id.key == "o/r#42"),
-        "the @pilot-mentioned issue is present so its workspace gets built"
+        "the @lazybox-mentioned issue is present so its workspace gets built"
     );
 }
 
@@ -3181,15 +3185,15 @@ async fn tick_dispatches_auto_fix_action_spawns_agent() {
     let mut bus_rx = config.bus.subscribe();
 
     let task = make_task("o/r#202");
-    let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(&task));
+    let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
     let action = polling::ProviderAction::AutoFixPr {
         session_key: session_key.clone(),
         agent_id: "claude".to_string(),
         prompt: Some("Fix the failing CI".to_string()),
         repo: "o/r".to_string(),
         pr_number: 202,
-        kind: pilot_core::AutoFixKind::CiFailure,
-        settings: pilot_core::AutoFixSettings {
+        kind: lazybox_core::AutoFixKind::CiFailure,
+        settings: lazybox_core::AutoFixSettings {
             enabled: true,
             ..Default::default()
         },
@@ -3242,15 +3246,15 @@ async fn tick_auto_fix_respects_exhausted_budget() {
     let mut bus_rx = config.bus.subscribe();
 
     let task = make_task("o/r#303");
-    let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(&task));
+    let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
     let action = polling::ProviderAction::AutoFixPr {
         session_key,
         agent_id: "claude".to_string(),
         prompt: Some("Fix the failing CI".to_string()),
         repo: "o/r".to_string(),
         pr_number: 303,
-        kind: pilot_core::AutoFixKind::CiFailure,
-        settings: pilot_core::AutoFixSettings {
+        kind: lazybox_core::AutoFixKind::CiFailure,
+        settings: lazybox_core::AutoFixSettings {
             enabled: true,
             max_attempts: 0,
             ..Default::default()
@@ -3290,15 +3294,15 @@ async fn auto_fix_skips_and_burns_no_attempt_while_agent_already_running() {
     // the budget + spams duplicate "I'm fixing this" comments.
     let (config, _mock) = ServerConfig::in_memory_with_mock();
     let task = make_task("o/r#404");
-    let session_key = pilot_core::SessionKey::new(pilot_core::workspace_key_for(&task));
+    let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
     let make_action = || polling::ProviderAction::AutoFixPr {
         session_key: session_key.clone(),
         agent_id: "claude".to_string(),
         prompt: Some("Fix CI".to_string()),
         repo: "o/r".to_string(),
         pr_number: 404,
-        kind: pilot_core::AutoFixKind::CiFailure,
-        settings: pilot_core::AutoFixSettings {
+        kind: lazybox_core::AutoFixKind::CiFailure,
+        settings: lazybox_core::AutoFixSettings {
             enabled: true,
             ..Default::default()
         },

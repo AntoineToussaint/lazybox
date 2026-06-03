@@ -7,17 +7,17 @@
 # nested under crates/), prints before/after disk usage, then
 # `cargo clean`.
 #
-# Mounted into pilot worktrees via:
+# Mounted into lazybox worktrees via:
 #   repos.tensorzero/nanogateway.scripts:
 #     - name: cleanup
 #       source: ~/Development/scripts/rust-cleanup.sh
-# → available as `./_pilot/scripts/cleanup` inside the worktree.
+# → available as `./_lazybox/scripts/cleanup` inside the worktree.
 
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-# Pilot's nanogateway-style repos have Cargo.toml under crates/.
+# Lazybox's nanogateway-style repos have Cargo.toml under crates/.
 # Plain Rust repos have it at the root. Support both.
 if [[ -f Cargo.toml ]]; then
     workspace_dir="."

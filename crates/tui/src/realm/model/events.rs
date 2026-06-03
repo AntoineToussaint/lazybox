@@ -11,20 +11,23 @@
 //! the "things the run loop calls between keystrokes" surface.
 
 use super::{Id, Model, Msg, PaneFocus};
-use pilot_ipc::{Command as IpcCommand, Event as IpcEvent};
+use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent};
 use tuirealm::terminal::TerminalAdapter;
 
 impl<T: TerminalAdapter> Model<T> {
-    /// Flip pilot's mouse capture on/off. Issues
+    /// Flip lazybox's mouse capture on/off. Issues
     /// `EnableMouseCapture` / `DisableMouseCapture` to stdout so the
-    /// host terminal switches between "send mouse to pilot" and
+    /// host terminal switches between "send mouse to lazybox" and
     /// "handle mouse natively (selection works)". Footer notice
     /// confirms which mode is now active.
     pub(super) fn toggle_mouse_capture(&mut self) {
         self.mouse_capture_on = !self.mouse_capture_on;
         let (msg, _) = if self.mouse_capture_on {
             let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture,);
-            ("mouse: pilot (clicks → splitter/focus, wheel → scroll)", ())
+            (
+                "mouse: lazybox (clicks → splitter/focus, wheel → scroll)",
+                (),
+            )
         } else {
             let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture,);
             (
@@ -53,7 +56,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// re-emit (daemon restart, a Shift-M `PrMerged` racing the poll's
     /// `MergedPrRemovable`) could otherwise stack duplicate prompts —
     /// belt and braces.
-    fn removal_already_pending(&self, workspace_key: &pilot_core::WorkspaceKey) -> bool {
+    fn removal_already_pending(&self, workspace_key: &lazybox_core::WorkspaceKey) -> bool {
         let active = self
             .active_removal_prompt
             .as_ref()
@@ -285,7 +288,7 @@ impl<T: TerminalAdapter> Model<T> {
         // Surface Active→Asking transitions in the footer with a
         // brief Hint-severity notice. The sidebar already pushed an
         // OS notification + flipped its `?` glyph; this is the
-        // in-pilot equivalent for users running with notifications
+        // in-lazybox equivalent for users running with notifications
         // muted. Last one wins if multiple workspaces transition
         // in the same tick — they'll see them in sequence anyway as
         // the 3s Hint fade clears each.
@@ -420,7 +423,7 @@ impl<T: TerminalAdapter> Model<T> {
             if self.modal_stack.contains(&Id::InspectList)
                 || self.modal_stack.contains(&Id::InspectConfirm)
             {
-                self.send_cmd(pilot_ipc::Command::InspectWorktrees);
+                self.send_cmd(lazybox_ipc::Command::InspectWorktrees);
             }
         }
         if is_snapshot && self.preselect.is_some() {
@@ -623,7 +626,7 @@ impl<T: TerminalAdapter> Model<T> {
         if let Some(raw) = p.session_id_raw
             && let Ok(uuid) = uuid::Uuid::parse_str(&raw)
         {
-            let _ = self.sidebar.focus_session_id(pilot_core::SessionId(uuid));
+            let _ = self.sidebar.focus_session_id(lazybox_core::SessionId(uuid));
             // Move focus to terminals so the user can type immediately.
             self.focus = PaneFocus::Terminals;
             self.set_focus_attr();

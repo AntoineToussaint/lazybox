@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use pilot_core::{ProjectKey, WorkspaceKey};
+use lazybox_core::{ProjectKey, WorkspaceKey};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -16,12 +16,12 @@ pub enum StoreError {
 pub struct WorkspaceRecord {
     pub key: String,
     pub created_at: DateTime<Utc>,
-    /// JSON of `pilot_core::Workspace`.
+    /// JSON of `lazybox_core::Workspace`.
     pub workspace_json: Option<String>,
 }
 
 /// A persisted project record — the parent container that holds
-/// workspaces. JSON-serialized `pilot_core::Project`, keyed by
+/// workspaces. JSON-serialized `lazybox_core::Project`, keyed by
 /// `ProjectKey`. See the trait methods below for default kv-piggyback
 /// behavior (`project:<key>` prefix) — the same shape `WorkspaceRecord`
 /// uses, so simple kv stores don't need a per-method override.

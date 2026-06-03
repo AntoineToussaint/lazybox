@@ -8,9 +8,9 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use pilot_core::{TaskRole, TaskState};
-use pilot_linear::LinearClient;
-use pilot_linear::graphql::{self, Issue, IssueState, Label, Labels, Person, Team};
+use lazybox_core::{TaskRole, TaskState};
+use lazybox_linear::LinearClient;
+use lazybox_linear::graphql::{self, Issue, IssueState, Label, Labels, Person, Team};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -203,15 +203,15 @@ fn mapper_no_branch_no_ci_no_review() {
     let issue = make_issue("x", "ENG-1", "started", None, None);
     let task = graphql::issue_to_task(&issue, "me");
     assert_eq!(task.branch, None);
-    assert!(matches!(task.ci, pilot_core::CiStatus::None));
-    assert!(matches!(task.review, pilot_core::ReviewStatus::None));
+    assert!(matches!(task.ci, lazybox_core::CiStatus::None));
+    assert!(matches!(task.review, lazybox_core::ReviewStatus::None));
 }
 
 #[test]
 fn mapper_labels_preserved() {
     let issue = make_issue("x", "ENG-1", "started", None, None);
     let task = graphql::issue_to_task(&issue, "me");
-    assert_eq!(task.labels, vec![pilot_core::Label::new("bug")]);
+    assert_eq!(task.labels, vec![lazybox_core::Label::new("bug")]);
 }
 
 // ── End-to-end against mock ────────────────────────────────────────────

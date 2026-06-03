@@ -1,17 +1,17 @@
 //! Wire types for LLM-proxy telemetry. These cross the IPC boundary
 //! as `Event::ProxyRecord`, which is why they live in the protocol
-//! crate rather than in `pilot-llm-proxy`. The proxy crate re-exports
-//! them so existing call sites (`pilot_llm_proxy::ProxyRecord`) keep
+//! crate rather than in `lazybox-llm-proxy`. The proxy crate re-exports
+//! them so existing call sites (`lazybox_llm_proxy::ProxyRecord`) keep
 //! compiling without churn.
 //!
 //! Moved here to break the previous inverted dependency
-//! (`pilot-ipc → pilot-llm-proxy`). Wire types belong at the bottom
+//! (`lazybox-ipc → lazybox-llm-proxy`). Wire types belong at the bottom
 //! of the dependency graph so any consumer (TUI, JSON API gateway,
 //! future remote agents) can read records without dragging in hyper
 //! / reqwest.
 
 use chrono::{DateTime, Utc};
-use pilot_core::SessionKey;
+use lazybox_core::SessionKey;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ use std::time::Duration;
 pub enum ApiProvider {
     Anthropic,
     OpenAI,
-    /// Fallback for hosts pilot doesn't recognize. We still forward the
+    /// Fallback for hosts lazybox doesn't recognize. We still forward the
     /// request and record coarse metadata (url, status, duration) but
     /// can't parse provider-specific token counts.
     Unknown,

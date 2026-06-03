@@ -21,7 +21,7 @@ pub(crate) const SPLIT_MAX: u16 = 80;
 /// Default step size per Shift-arrow tap. Picked so 4-5 taps cover
 /// a useful range and a single tap is visibly more than a shimmer.
 /// Live value reads from `ui.split_step_percent` (via
-/// `pilot_config::UiDefaults`) — kept here so the tests below stay
+/// `lazybox_config::UiDefaults`) — kept here so the tests below stay
 /// readable.
 #[cfg(test)]
 pub(crate) const SPLIT_STEP: i16 = 3;
@@ -65,7 +65,7 @@ impl LayoutCtx {
         }
     }
 
-    /// Apply persisted splits from `~/.pilot/config.yaml::ui`. `None`
+    /// Apply persisted splits from `~/.lazybox/config.yaml::ui`. `None`
     /// leaves the default in place.
     ///
     /// Does NOT flip `sidebar_user_resized` — a persisted percentage
@@ -186,7 +186,7 @@ impl LayoutCtx {
     pub fn persist(&self) {
         let s = self.sidebar_pct;
         let t = self.right_top_pct;
-        if let Err(e) = pilot_config::Config::save_with(|c| {
+        if let Err(e) = lazybox_config::Config::save_with(|c| {
             c.ui.sidebar_pct = Some(s);
             c.ui.right_top_pct = Some(t);
         }) {

@@ -32,7 +32,7 @@ mod truncate_tests {
 #[cfg(test)]
 mod status_pill_tests {
     use super::super::status_pill;
-    use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
+    use lazybox_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
 
     pub(super) fn base_task() -> Task {
         Task {
@@ -59,7 +59,7 @@ mod status_pill_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: pilot_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             node_id: None,
             needs_reply: false,
@@ -162,7 +162,7 @@ mod status_pill_tests {
     #[test]
     fn conflicts_trump_ci_status() {
         let mut t = base_task();
-        t.mergeable = pilot_core::Mergeable::Conflicting;
+        t.mergeable = lazybox_core::Mergeable::Conflicting;
         t.ci = CiStatus::Success;
         assert_eq!(status_pill(&t).unwrap().label, " CONFLICT ");
     }
@@ -277,7 +277,7 @@ mod status_pill_consistency_tests {
 
     use super::super::{pill_for_tag, status_pill};
     use super::status_pill_tests::base_task;
-    use pilot_core::{CiStatus, ReviewStatus, StatusTag, TaskState};
+    use lazybox_core::{CiStatus, ReviewStatus, StatusTag, TaskState};
 
     /// Every variant of `StatusTag` the contract sweeps over. Keep
     /// this list exhaustive — a new variant on `StatusTag` should
@@ -411,10 +411,10 @@ mod status_pill_consistency_tests {
         // the pill rendered must match the pill mapped from the
         // tag computed by `StatusTag::for_task`. Catches drift if
         // someone reintroduces priority logic into `pill_for_tag`.
-        let mut cases: Vec<pilot_core::Task> = Vec::new();
+        let mut cases: Vec<lazybox_core::Task> = Vec::new();
         cases.push({
             let mut t = base_task();
-            t.mergeable = pilot_core::Mergeable::Conflicting;
+            t.mergeable = lazybox_core::Mergeable::Conflicting;
             t
         });
         cases.push({
@@ -449,13 +449,13 @@ mod status_pill_consistency_tests {
 #[cfg(test)]
 mod workspace_type_label_tests {
     use super::super::*;
-    use pilot_core::{Workspace, WorkspaceKey};
+    use lazybox_core::{Workspace, WorkspaceKey};
 
     fn empty_ws() -> Workspace {
         Workspace::empty(WorkspaceKey::new("k"), "main", chrono::Utc::now())
     }
 
-    fn task(url: &str) -> pilot_core::Task {
+    fn task(url: &str) -> lazybox_core::Task {
         let mut t = super::status_pill_tests::base_task();
         t.url = url.into();
         t
@@ -579,7 +579,7 @@ mod mailbox_membership_tests {
 
     use super::super::{Mailbox, mailbox_membership};
     use chrono::{Duration, Utc};
-    use pilot_core::{TaskState, Workspace, WorkspaceKey};
+    use lazybox_core::{TaskState, Workspace, WorkspaceKey};
 
     fn ws(state: Option<TaskState>) -> Workspace {
         ws_with_updated_at(state, Utc::now() - Duration::hours(2))
@@ -821,9 +821,9 @@ mod attention_signal_tests {
 
     use super::super::*;
     use super::status_pill_tests::base_task;
-    use pilot_core::{ReviewStatus, TaskRole, Workspace};
+    use lazybox_core::{ReviewStatus, TaskRole, Workspace};
 
-    fn ws_from_pr(mut task: pilot_core::Task) -> Workspace {
+    fn ws_from_pr(mut task: lazybox_core::Task) -> Workspace {
         // The classifier slots tasks based on URL — `/pull/N` lands in
         // the PR slot, everything else falls through to gh_issues.
         // Force a PR URL so `primary_task` returns this task.
@@ -853,7 +853,7 @@ mod attention_signal_tests {
     #[test]
     fn ci_failure_emits_ci_failing_signal() {
         let mut t = base_task();
-        t.ci = pilot_core::CiStatus::Failure;
+        t.ci = lazybox_core::CiStatus::Failure;
         let w = ws_from_pr(t);
         assert!(
             workspace_attention_signals(&w, &empty_set()).contains(&AttentionSignal::CiFailing),
@@ -865,7 +865,7 @@ mod attention_signal_tests {
         // CI Mixed is a "partial failure" — treated the same as
         // Failure for attention purposes.
         let mut t = base_task();
-        t.ci = pilot_core::CiStatus::Mixed;
+        t.ci = lazybox_core::CiStatus::Mixed;
         let w = ws_from_pr(t);
         assert!(
             workspace_attention_signals(&w, &empty_set()).contains(&AttentionSignal::CiFailing),
@@ -931,10 +931,10 @@ mod attention_signal_tests {
     #[test]
     fn needs_attention_returns_false_when_all_signals_gated_off() {
         let mut t = base_task();
-        t.ci = pilot_core::CiStatus::Failure;
+        t.ci = lazybox_core::CiStatus::Failure;
         t.review = ReviewStatus::ChangesRequested;
         let w = ws_from_pr(t);
-        let cfg = pilot_config::AttentionConfig {
+        let cfg = lazybox_config::AttentionConfig {
             unread: false,
             ci_failing: false,
             review_pending: false,
@@ -948,9 +948,9 @@ mod attention_signal_tests {
     #[test]
     fn needs_attention_returns_true_when_any_gated_on_signal_active() {
         let mut t = base_task();
-        t.ci = pilot_core::CiStatus::Failure;
+        t.ci = lazybox_core::CiStatus::Failure;
         let w = ws_from_pr(t);
-        let mut cfg = pilot_config::AttentionConfig {
+        let mut cfg = lazybox_config::AttentionConfig {
             unread: false,
             ci_failing: false,
             review_pending: false,
@@ -979,7 +979,7 @@ mod attention_signal_tests {
         let w = ws_from_pr(t);
         let signals = workspace_attention_signals(&w, &empty_set());
         assert!(signals.contains(&AttentionSignal::ReviewPending));
-        let cfg = pilot_config::AttentionConfig::default();
+        let cfg = lazybox_config::AttentionConfig::default();
         assert!(workspace_needs_attention(&w, &cfg, &empty_set()));
     }
 }
@@ -988,7 +988,7 @@ mod attention_signal_tests {
 mod role_filter_tests {
     use super::super::*;
     use super::status_pill_tests::base_task;
-    use pilot_core::{TaskRole, Workspace};
+    use lazybox_core::{TaskRole, Workspace};
 
     fn ws_with_role(key: &str, role: TaskRole) -> Workspace {
         let mut t = base_task();
@@ -1244,7 +1244,7 @@ mod role_filter_tests {
         // it belongs in `Other` (issue #195).
         use crate::components::sidebar::WorkspaceKind;
         let now = chrono::Utc::now();
-        let empty = Workspace::empty(pilot_core::WorkspaceKey::new("research"), "main", now);
+        let empty = Workspace::empty(lazybox_core::WorkspaceKey::new("research"), "main", now);
         assert_eq!(WorkspaceKind::classify(&empty), WorkspaceKind::Other);
         assert_eq!(WorkspaceKind::Other.header_label(), "Other");
 
@@ -1278,7 +1278,7 @@ mod role_filter_tests {
         let mut sb = Sidebar::new(PaneId::new(1));
         let now = chrono::Utc::now();
 
-        let empty_ws = Workspace::empty(pilot_core::WorkspaceKey::new("research"), "main", now);
+        let empty_ws = Workspace::empty(lazybox_core::WorkspaceKey::new("research"), "main", now);
         let key = SessionKey::from(&empty_ws.key);
         sb.workspaces.insert(key.clone(), empty_ws);
 
@@ -1428,7 +1428,7 @@ mod search_tests {
     use super::super::*;
     use super::status_pill_tests::base_task;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use pilot_core::Workspace;
+    use lazybox_core::Workspace;
 
     fn issue_ws(key: &str, title: &str) -> Workspace {
         let mut t = base_task();

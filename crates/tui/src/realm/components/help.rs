@@ -6,7 +6,7 @@
 use crate::pane::Binding;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
-use pilot_tui_core::action::{ActionDef, Section};
+use lazybox_tui_core::action::{ActionDef, Section};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::Event;

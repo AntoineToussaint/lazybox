@@ -4,7 +4,7 @@
 //! integrations (providers + agents), configure per-provider filters,
 //! and pick scopes (orgs + repos) for providers that support them.
 //! Each step is a generic `Choice` / `Loading` / `ErrorModal` from
-//! `crate::realm::components::*` — pilot-specific knowledge lives in
+//! `crate::realm::components::*` — lazybox-specific knowledge lives in
 //! `SetupRunner` which decides which step comes next.
 
 use crate::realm::components::{
@@ -15,8 +15,10 @@ use crate::realm::components::{
 };
 use crate::realm::{Msg, UserEvent};
 use crate::setup::{self, Category, SetupReport, ToolStatus};
-use pilot_core::{KV_KEY_SETUP, PersistedSetup, ProviderConfig, ProviderError, Scope, ScopeSource};
-use pilot_store::Store;
+use lazybox_core::{
+    KV_KEY_SETUP, PersistedSetup, ProviderConfig, ProviderError, Scope, ScopeSource,
+};
+use lazybox_store::Store;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use tuirealm::component::AppComponent;
@@ -93,12 +95,12 @@ pub fn persisted_to_outcome(p: PersistedSetup, report: SetupReport) -> SetupOutc
 /// Path to the user's YAML config. The setup wizard, `,` Settings
 /// palette, and any hand edits all converge here. Empty / missing
 /// → no persisted setup, wizard runs on first launch. Profile-aware
-/// via the shared `pilot_core::paths` resolver.
+/// via the shared `lazybox_core::paths` resolver.
 fn config_yaml_path() -> std::path::PathBuf {
-    pilot_core::paths::config_yaml()
+    lazybox_core::paths::config_yaml()
 }
 
-/// Load the persisted setup from `~/.pilot/config.yaml::setup`.
+/// Load the persisted setup from `~/.lazybox/config.yaml::setup`.
 ///
 /// Migration: an older release wrote setup state to the SQLite kv
 /// blob (`KV_KEY_SETUP`). We still check that as a fallback so
@@ -134,7 +136,7 @@ pub fn load_persisted(store: &dyn Store) -> Option<PersistedSetup> {
 
 fn load_from_yaml(path: &std::path::Path) -> Option<PersistedSetup> {
     let raw = std::fs::read_to_string(path).ok()?;
-    let cfg: pilot_config::Config = match serde_yaml::from_str(&raw) {
+    let cfg: lazybox_config::Config = match serde_yaml::from_str(&raw) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("config.yaml parse failed: {e}");
@@ -163,14 +165,14 @@ fn load_from_yaml(path: &std::path::Path) -> Option<PersistedSetup> {
     Some(p)
 }
 
-/// Persist setup state by merging into `~/.pilot/config.yaml`.
+/// Persist setup state by merging into `~/.lazybox/config.yaml`.
 ///
 /// Reads the existing file (if any), updates only the `setup:`
 /// section, writes back. Hand-edited sections (worktree mounts,
 /// hooks, custom editors, etc.) are preserved.
 pub fn save_persisted(store: &dyn Store, p: &PersistedSetup) {
     let path = config_yaml_path();
-    let mut cfg: pilot_config::Config = std::fs::read_to_string(&path)
+    let mut cfg: lazybox_config::Config = std::fs::read_to_string(&path)
         .ok()
         .and_then(|raw| serde_yaml::from_str(&raw).ok())
         .unwrap_or_default();
@@ -875,7 +877,7 @@ impl SetupRunner {
         self.current_choice = Some(CurrentChoice::Providers(items.clone()));
         Box::new(
             Choice::multi(
-                "Where do your tasks come from?  Pilot polls these for new \
+                "Where do your tasks come from?  Lazybox polls these for new \
                  PRs, issues, and tickets so you don't have to refresh.",
                 items,
             )
@@ -901,7 +903,7 @@ impl SetupRunner {
         self.current_choice = Some(CurrentChoice::Agents(items.clone()));
         Box::new(
             Choice::multi(
-                "Which AI coding agents should pilot let you spawn into a \
+                "Which AI coding agents should lazybox let you spawn into a \
                  worktree?  Press `c`/`x`/`u` on a row to drop into them.",
                 items,
             )
@@ -1125,7 +1127,7 @@ fn empty_repos_modal(parent_label: &str) -> Box<dyn AppComponent<Msg, UserEvent>
         "No repositories visible under {parent_label}.\n\n\
          This usually means your token doesn't have repo-read scope, \
          or there are no repos in this org / account.\n\n\
-         Setup will continue with the org-level subscription — pilot \
+         Setup will continue with the org-level subscription — lazybox \
          will poll for any items the token CAN see in {parent_label}.\n\n\
          Press any key to continue."
     );
@@ -1206,7 +1208,7 @@ mod tests {
         };
 
         // Build the equivalent Config + serialize.
-        let mut cfg = pilot_config::Config::default();
+        let mut cfg = lazybox_config::Config::default();
         cfg.setup.providers = original.enabled_providers.clone();
         cfg.setup.agents = original.enabled_agents.clone();
         cfg.setup.filters = original
@@ -1233,7 +1235,7 @@ mod tests {
         // should return None — the first-run wizard then kicks.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
-        let cfg = pilot_config::Config::default();
+        let cfg = lazybox_config::Config::default();
         cfg.save_to(&path).unwrap();
         assert!(load_from_yaml(&path).is_none());
     }
@@ -1394,19 +1396,19 @@ mod tests {
                 id: "github:acme".into(),
                 label: "acme".into(),
                 parent: None,
-                kind: pilot_core::ScopeKind::Org,
+                kind: lazybox_core::ScopeKind::Org,
             },
             Scope {
                 id: "github:acme".into(),
                 label: "acme".into(),
                 parent: None,
-                kind: pilot_core::ScopeKind::Org,
+                kind: lazybox_core::ScopeKind::Org,
             },
             Scope {
                 id: "github:widget".into(),
                 label: "widget".into(),
                 parent: None,
-                kind: pilot_core::ScopeKind::Org,
+                kind: lazybox_core::ScopeKind::Org,
             },
         ];
         runner.current_choice = Some(CurrentChoice::ScopePick(items));
@@ -1460,13 +1462,13 @@ mod tests {
                 id: "github:doomed".into(),
                 label: "doomed".into(),
                 parent: None,
-                kind: pilot_core::ScopeKind::Org,
+                kind: lazybox_core::ScopeKind::Org,
             },
             Scope {
                 id: "github:keepme".into(),
                 label: "keepme".into(),
                 parent: None,
-                kind: pilot_core::ScopeKind::Org,
+                kind: lazybox_core::ScopeKind::Org,
             },
         ];
         runner.current_choice = Some(CurrentChoice::ScopePick(items));
@@ -1511,13 +1513,13 @@ mod tests {
                 id: "github:doomed".into(),
                 label: "doomed".into(),
                 parent: None,
-                kind: pilot_core::ScopeKind::Org,
+                kind: lazybox_core::ScopeKind::Org,
             },
             Scope {
                 id: "github:keepme".into(),
                 label: "keepme".into(),
                 parent: None,
-                kind: pilot_core::ScopeKind::Org,
+                kind: lazybox_core::ScopeKind::Org,
             },
         ];
         runner.current_choice = Some(CurrentChoice::ScopePick(items));
@@ -1558,13 +1560,13 @@ mod tests {
                 id: "github:keepme".into(),
                 label: "keepme".into(),
                 parent: None,
-                kind: pilot_core::ScopeKind::Org,
+                kind: lazybox_core::ScopeKind::Org,
             },
             Scope {
                 id: "github:fresh".into(),
                 label: "fresh".into(),
                 parent: None,
-                kind: pilot_core::ScopeKind::Org,
+                kind: lazybox_core::ScopeKind::Org,
             },
         ];
         runner.current_choice = Some(CurrentChoice::ScopePick(items));
@@ -1617,13 +1619,13 @@ mod tests {
                 id: "github:acme/keep".into(),
                 label: "keep".into(),
                 parent: Some("acme".into()),
-                kind: pilot_core::ScopeKind::Repo,
+                kind: lazybox_core::ScopeKind::Repo,
             },
             Scope {
                 id: "github:acme/drop".into(),
                 label: "drop".into(),
                 parent: Some("acme".into()),
-                kind: pilot_core::ScopeKind::Repo,
+                kind: lazybox_core::ScopeKind::Repo,
             },
         ];
         runner.current_choice = Some(CurrentChoice::RepoPick(items));

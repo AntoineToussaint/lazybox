@@ -17,7 +17,7 @@
 //! the workspace list locally) so even that path uses the same
 //! mutation primitive.
 
-use pilot_core::{Workspace, WorkspaceKey};
+use lazybox_core::{Workspace, WorkspaceKey};
 
 use super::{commit_upsert, load_workspace};
 use crate::ServerConfig;
@@ -107,8 +107,8 @@ mod tests {
     use super::*;
     use crate::ServerConfig;
     use chrono::Utc;
-    use pilot_core::Workspace;
-    use pilot_store::WorkspaceRecord;
+    use lazybox_core::Workspace;
+    use lazybox_store::WorkspaceRecord;
 
     fn seed_workspace(config: &ServerConfig, key: &str) -> WorkspaceKey {
         let wk = WorkspaceKey::new(key);

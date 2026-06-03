@@ -1,4 +1,4 @@
-# Contributing to pilot
+# Contributing to lazybox
 
 Glad you're here. A few ground rules so the codebase stays maintainable.
 
@@ -6,21 +6,21 @@ Glad you're here. A few ground rules so the codebase stays maintainable.
 
 ```sh
 cargo build                       # first build compiles Zig/ghostty + SQLite (~30s)
-cargo run -p pilot-tui            # uses `gh auth token` automatically
+cargo run -p lazybox-tui            # uses `gh auth token` automatically
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```
 
-Logs go to `/tmp/pilot.log`. Persistent state lives in `~/.pilot/v2/state.db`.
+Logs go to `/tmp/lazybox.log`. Persistent state lives in `~/.lazybox/v2/state.db`.
 
 ## Standing rules
 
 These are enforced in code review:
 
 1. **Files over 1500 lines are unacceptable.** Split aggressively into sibling files. `model.rs` was 4626 lines, now lives in 8 focused files under `crates/tui/src/realm/model/`. Same shape applies elsewhere.
-2. **No `unwrap()` in library crates.** `thiserror` for error types in `crates/{core,auth,events,store,config,git-ops,gh-provider,linear-provider,tui-term,tui-core,ipc,agents,llm-proxy}`. `anyhow` is only allowed in the `pilot-tui` binary crate.
-3. **Core 4 isolation.** `pilot-core`, `pilot-auth`, `pilot-events`, `pilot-store` must NOT depend on each other. Provider crates depend on core + events + auth only.
+2. **No `unwrap()` in library crates.** `thiserror` for error types in `crates/{core,auth,events,store,config,git-ops,gh-provider,linear-provider,tui-term,tui-core,ipc,agents,llm-proxy}`. `anyhow` is only allowed in the `lazybox-tui` binary crate.
+3. **Core 4 isolation.** `lazybox-core`, `lazybox-auth`, `lazybox-events`, `lazybox-store` must NOT depend on each other. Provider crates depend on core + events + auth only.
 4. **Tests with every change.** Every public function has a test; every TUI component has a render snapshot (insta + ratatui `TestBackend`); every bug fix lands with a regression test. See `crates/tui/tests/` for the realm-level effect-contract tests.
 5. **No real subprocesses in tests.** No real `claude` / `sh` / `curl` / `tmux` invocations. Mock at the trait boundary (`Agent`, `SessionBackend`, `CredentialProvider`) or `#[ignore]`-gate.
 6. **Every async test needs a timeout.** Wrap the body in `tokio::time::timeout` — no exceptions. `cargo-nextest` enforces a 10s slow-test budget; relying on it is fine for healthy tests but explicit `timeout` is the rule for ones that historically hung.
@@ -29,7 +29,7 @@ These are enforced in code review:
 
 ## Architecture cheatsheet
 
-Pilot is a Rust workspace organised as a client/daemon split with shared library crates:
+Lazybox is a Rust workspace organised as a client/daemon split with shared library crates:
 
 ```
 crates/
@@ -38,7 +38,7 @@ crates/
   auth/           # CredentialProvider trait + chain.
   events/         # In-process event bus.
   store/          # Store trait + SQLite backend.
-  config/         # YAML loader for ~/.pilot/config.yaml.
+  config/         # YAML loader for ~/.lazybox/config.yaml.
   git-ops/        # Worktree manager.
   tui-term/       # Embedded terminal widget.
   tui-core/       # Action catalog + intent resolvers.
@@ -54,14 +54,14 @@ crates/
   server/         # Server library.
 
   # ── client / binary ─────────────────────────────────────────────────
-  tui/            # Component-tree TUI client + `pilot` binary.
+  tui/            # Component-tree TUI client + `lazybox` binary.
 ```
 
 More detail in [`CLAUDE.md`](./CLAUDE.md) (architecture decisions, key patterns).
 
 ## Sample config
 
-`~/.pilot/config.yaml`:
+`~/.lazybox/config.yaml`:
 
 ```yaml
 repos:
@@ -87,17 +87,17 @@ attention:
 
 ## Where to get help
 
-- **Questions, setup help, sharing configs** → [GitHub Discussions](https://github.com/AntoineToussaint/pilot/discussions).
-- **Bugs and feature requests** → [Issues](https://github.com/AntoineToussaint/pilot/issues/new/choose) (use the templates).
-- **Docs & architecture** → the [docs site](https://antoinetoussaint.github.io/pilot/), plus [`CLAUDE.md`](./CLAUDE.md) and `DESIGN.md` for deeper notes.
+- **Questions, setup help, sharing configs** → [GitHub Discussions](https://github.com/AntoineToussaint/lazybox/discussions).
+- **Bugs and feature requests** → [Issues](https://github.com/AntoineToussaint/lazybox/issues/new/choose) (use the templates).
+- **Docs & architecture** → the [docs site](https://docs.lazybox.ai/), plus [`CLAUDE.md`](./CLAUDE.md) and `DESIGN.md` for deeper notes.
 
-pilot is pre-1.0, so support is best-effort. See [`SUPPORT.md`](./SUPPORT.md) for the short version.
+lazybox is pre-1.0, so support is best-effort. See [`SUPPORT.md`](./SUPPORT.md) for the short version.
 
 ## Reporting bugs & requesting features
 
-Use the [issue templates](https://github.com/AntoineToussaint/pilot/issues/new/choose) — there's a form for bugs and one for feature requests. For bugs, include:
+Use the [issue templates](https://github.com/AntoineToussaint/lazybox/issues/new/choose) — there's a form for bugs and one for feature requests. For bugs, include:
 
-- The relevant `/tmp/pilot.log` excerpt (re-run with `RUST_LOG=pilot=debug` for verbose output).
+- The relevant `/tmp/lazybox.log` excerpt (re-run with `RUST_LOG=lazybox=debug` for verbose output).
 - Your OS (macOS or Linux) and the commit you built from (`git rev-parse HEAD`).
 - For terminal-rendering bugs, a screenshot.
 

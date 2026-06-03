@@ -154,7 +154,7 @@ impl ActivityFeed {
     ///   fall past `new_len` are dropped.
     /// - **Shrinkage**: indices past `new_len` are dropped. Survivors
     ///   keep their position (deletions from the middle would corrupt
-    ///   this, but pilot's poll doesn't delete from the middle —
+    ///   this, but lazybox's poll doesn't delete from the middle —
     ///   removals are only from the tail when activity gets truncated).
     ///
     /// Before this method existed the caller cleared both sets on any

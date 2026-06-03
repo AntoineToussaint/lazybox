@@ -9,10 +9,10 @@
 
 use chrono::Utc;
 use crossterm::event::{KeyModifiers as CtKeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use pilot_core::{SessionKey, Workspace, WorkspaceKey};
-use pilot_ipc::{Event as IpcEvent, channel};
-use pilot_tui::realm::Model;
-use pilot_tui::realm::model::{Id, PaneFocus, Preselect};
+use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
+use lazybox_ipc::{Event as IpcEvent, channel};
+use lazybox_tui::realm::Model;
+use lazybox_tui::realm::model::{Id, PaneFocus, Preselect};
 use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 use tuirealm::ratatui::layout::{Rect, Size};
 
@@ -93,8 +93,8 @@ fn remapped_new_workspace_binding_mounts_input() {
     // `n` requires a focused project (Stage 3 of the Project
     // refactor). Seed one + a workspace under it so the sidebar's
     // cursor has a project_key to resolve.
-    let project = pilot_core::Project::new(
-        pilot_core::ProjectKey::github("owner", "repo"),
+    let project = lazybox_core::Project::new(
+        lazybox_core::ProjectKey::github("owner", "repo"),
         "owner/repo",
         Utc::now(),
     );
@@ -124,7 +124,7 @@ fn remapped_new_workspace_binding_mounts_input() {
 /// mounts the new-workspace input so the user can keep typing.
 #[test]
 fn create_project_auto_focuses_new_header_and_opens_workspace_input() {
-    use pilot_core::{Project, ProjectKey};
+    use lazybox_core::{Project, ProjectKey};
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
 
@@ -153,7 +153,7 @@ fn create_project_auto_focuses_new_header_and_opens_workspace_input() {
 /// state emits `CollapseIntoPr` so the daemon can fold the rows.
 #[test]
 fn shift_j_on_issue_with_claiming_pr_emits_collapse_command() {
-    use pilot_ipc::{Command, TerminalKind};
+    use lazybox_ipc::{Command, TerminalKind};
     let _ = TerminalKind::Shell; // appease unused-import warning if Command is re-exported lazily
 
     let (client, mut server) = channel::pair();
@@ -204,7 +204,7 @@ fn shift_j_on_issue_with_claiming_pr_emits_collapse_command() {
 /// footer notice instead of firing a no-op IPC.
 #[test]
 fn shift_j_on_orphan_issue_surfaces_notice_no_ipc() {
-    use pilot_ipc::Command;
+    use lazybox_ipc::Command;
     let (client, mut server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
 
@@ -232,7 +232,7 @@ fn shift_j_on_orphan_issue_surfaces_notice_no_ipc() {
 
 #[test]
 fn create_project_with_no_matching_upsert_does_not_auto_open_input() {
-    use pilot_core::{Project, ProjectKey};
+    use lazybox_core::{Project, ProjectKey};
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
 
@@ -531,7 +531,7 @@ fn out_of_scope_with_active_session_queues_a_prompt() {
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     let target = "github:owner/repo#42";
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
-        workspace_key: pilot_core::WorkspaceKey::new(target),
+        workspace_key: lazybox_core::WorkspaceKey::new(target),
         label: "owner/repo#42".into(),
         title: None,
         active_terminal_count: 1,
@@ -547,23 +547,23 @@ fn out_of_scope_prompts_queue_one_at_a_time() {
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
-        workspace_key: pilot_core::WorkspaceKey::new("github:o/a#1"),
+        workspace_key: lazybox_core::WorkspaceKey::new("github:o/a#1"),
         label: "o/a#1".into(),
         title: None,
         active_terminal_count: 1,
     });
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
-        workspace_key: pilot_core::WorkspaceKey::new("github:o/b#2"),
+        workspace_key: lazybox_core::WorkspaceKey::new("github:o/b#2"),
         label: "o/b#2".into(),
         title: None,
         active_terminal_count: 2,
     });
     assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
     // Press Esc to dismiss the first prompt (= "no, keep it").
-    m.update(pilot_tui::realm::Msg::ModalDismissed);
+    m.update(lazybox_tui::realm::Msg::ModalDismissed);
     // Next prompt should be live now.
     assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
-    m.update(pilot_tui::realm::Msg::ModalDismissed);
+    m.update(lazybox_tui::realm::Msg::ModalDismissed);
     // Queue drained.
     assert_eq!(m.top_modal(), None);
 }
@@ -642,7 +642,7 @@ fn out_of_scope_queued_during_help_modal_drains_on_help_dismiss() {
     assert_eq!(m.top_modal(), Some(&Id::Help));
     // Daemon sends an out-of-scope event while Help is up.
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
-        workspace_key: pilot_core::WorkspaceKey::new("github:o/r#1"),
+        workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
         label: "o/r#1".into(),
         title: None,
         active_terminal_count: 1,
@@ -650,7 +650,7 @@ fn out_of_scope_queued_during_help_modal_drains_on_help_dismiss() {
     // Help still on top — the queued prompt hasn't surfaced yet.
     assert_eq!(m.top_modal(), Some(&Id::Help));
     // Dismiss Help. Now the prompt should mount.
-    m.update(pilot_tui::realm::Msg::ModalDismissed);
+    m.update(lazybox_tui::realm::Msg::ModalDismissed);
     assert_eq!(
         m.top_modal(),
         Some(&Id::RemoveOutOfScope),
@@ -663,8 +663,8 @@ fn merge_pending_event_mounts_confirm_modal() {
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     m.handle_daemon_event(IpcEvent::WorkspaceMergePending {
-        issue_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-71"),
-        pr_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-141"),
+        issue_workspace_key: lazybox_core::WorkspaceKey::new("github-o-r-71"),
+        pr_workspace_key: lazybox_core::WorkspaceKey::new("github-o-r-141"),
         issue_label: "o/r#71".into(),
         pr_label: "o/r#141".into(),
         active_terminal_count: 1,
@@ -674,17 +674,17 @@ fn merge_pending_event_mounts_confirm_modal() {
 
 #[test]
 fn merge_confirm_yes_sends_accept_command() {
-    use pilot_ipc::Command;
+    use lazybox_ipc::Command;
     let (client, mut server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     m.handle_daemon_event(IpcEvent::WorkspaceMergePending {
-        issue_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-71"),
-        pr_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-141"),
+        issue_workspace_key: lazybox_core::WorkspaceKey::new("github-o-r-71"),
+        pr_workspace_key: lazybox_core::WorkspaceKey::new("github-o-r-141"),
         issue_label: "o/r#71".into(),
         pr_label: "o/r#141".into(),
         active_terminal_count: 1,
     });
-    m.update(pilot_tui::realm::Msg::Confirmed(true));
+    m.update(lazybox_tui::realm::Msg::Confirmed(true));
     // Drain the IPC pipe — we expect a ConfirmMerge { accept: true }.
     let cmd = server.rx.try_recv().expect("ConfirmMerge command emitted");
     match cmd {
@@ -704,17 +704,17 @@ fn merge_confirm_yes_sends_accept_command() {
 
 #[test]
 fn merge_confirm_esc_dismisses_silently_so_re_prompt_can_self_heal() {
-    use pilot_ipc::Command;
+    use lazybox_ipc::Command;
     let (client, mut server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     m.handle_daemon_event(IpcEvent::WorkspaceMergePending {
-        issue_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-71"),
-        pr_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-141"),
+        issue_workspace_key: lazybox_core::WorkspaceKey::new("github-o-r-71"),
+        pr_workspace_key: lazybox_core::WorkspaceKey::new("github-o-r-141"),
         issue_label: "o/r#71".into(),
         pr_label: "o/r#141".into(),
         active_terminal_count: 1,
     });
-    m.update(pilot_tui::realm::Msg::ModalDismissed);
+    m.update(lazybox_tui::realm::Msg::ModalDismissed);
     // Pre-fix Esc sent `ConfirmMerge { accept: false }`, which pinned
     // the issue in `rejected_merge` for the whole session — the user
     // never saw the prompt again until daemon restart. Now: silent
@@ -734,8 +734,8 @@ fn merge_confirm_esc_dismisses_silently_so_re_prompt_can_self_heal() {
 }
 
 /// GitHub issue (not PR) — `url` carries `/issues/<n>`, no branch.
-fn task_with_issue(key: &str, title: &str, body: Option<&str>) -> pilot_core::Task {
-    use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
+fn task_with_issue(key: &str, title: &str, body: Option<&str>) -> lazybox_core::Task {
+    use lazybox_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
     let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
     Task {
         id: TaskId {
@@ -761,7 +761,7 @@ fn task_with_issue(key: &str, title: &str, body: Option<&str>) -> pilot_core::Ta
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: pilot_core::Mergeable::Unknown,
+        mergeable: lazybox_core::Mergeable::Unknown,
         is_behind_base: false,
         node_id: None,
         needs_reply: false,
@@ -781,7 +781,7 @@ fn task_with_issue(key: &str, title: &str, body: Option<&str>) -> pilot_core::Ta
 /// `Action::Work` on an issue.
 #[test]
 fn w_on_issue_with_running_claude_injects_implement_prompt() {
-    use pilot_ipc::{Command, TerminalId, TerminalKind};
+    use lazybox_ipc::{Command, TerminalId, TerminalKind};
     let (client, mut server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     let issue = task_with_issue("o/r#42", "Migrate to Postgres 16", None);
@@ -864,7 +864,7 @@ fn w_on_issue_with_running_claude_injects_implement_prompt() {
 /// path too, not only the catalog dispatch path.
 #[test]
 fn w_on_issue_from_right_pane_also_injects() {
-    use pilot_ipc::{Command, TerminalId, TerminalKind};
+    use lazybox_ipc::{Command, TerminalId, TerminalKind};
     let (client, mut server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     let issue = task_with_issue("o/r#42", "Migrate to Postgres 16", None);
@@ -918,8 +918,8 @@ fn w_on_issue_from_right_pane_also_injects() {
 #[test]
 fn sidebar_w_honors_activity_selection() {
     use chrono::Utc;
-    use pilot_core::{Activity, ActivityKind, CiStatus, Workspace};
-    use pilot_ipc::Command;
+    use lazybox_core::{Activity, ActivityKind, CiStatus, Workspace};
+    use lazybox_ipc::Command;
 
     let (client, mut server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
@@ -979,8 +979,8 @@ fn sidebar_w_honors_activity_selection() {
     );
 }
 
-fn task_with_pr(key: &str) -> pilot_core::Task {
-    use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
+fn task_with_pr(key: &str) -> lazybox_core::Task {
+    use lazybox_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
     let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
     Task {
         id: TaskId {
@@ -1006,7 +1006,7 @@ fn task_with_pr(key: &str) -> pilot_core::Task {
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: pilot_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::Mergeable,
         is_behind_base: false,
         node_id: None,
         needs_reply: false,
@@ -1040,7 +1040,7 @@ fn shift_a_with_no_sessions_does_not_mount_picker() {
 #[test]
 fn shift_a_with_sessions_mounts_adopt_picker() {
     use chrono::Duration;
-    use pilot_core::{SessionKind, WorkspaceSession};
+    use lazybox_core::{SessionKind, WorkspaceSession};
 
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
@@ -1092,8 +1092,8 @@ fn merge_pending_dedupes_re_emits_for_same_issue() {
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     for _ in 0..3 {
         m.handle_daemon_event(IpcEvent::WorkspaceMergePending {
-            issue_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-71"),
-            pr_workspace_key: pilot_core::WorkspaceKey::new("github-o-r-141"),
+            issue_workspace_key: lazybox_core::WorkspaceKey::new("github-o-r-71"),
+            pr_workspace_key: lazybox_core::WorkspaceKey::new("github-o-r-141"),
             issue_label: "o/r#71".into(),
             pr_label: "o/r#141".into(),
             active_terminal_count: 1,
@@ -1101,7 +1101,7 @@ fn merge_pending_dedupes_re_emits_for_same_issue() {
     }
     // Dismiss the active prompt — the queue should be empty, not full
     // of duplicates of the same prompt.
-    m.update(pilot_tui::realm::Msg::ModalDismissed);
+    m.update(lazybox_tui::realm::Msg::ModalDismissed);
     assert_eq!(m.top_modal(), None, "queue must not requeue duplicates");
 }
 
@@ -1114,8 +1114,8 @@ fn tick_right_drives_auto_mark_and_emits_command() {
     // that wiring: ticker drives the inner pane AND the daemon
     // gets `Command::MarkActivityRead` so the read state persists.
     use chrono::Utc;
-    use pilot_core::{Activity, ActivityKind, Workspace};
-    use pilot_ipc::Command;
+    use lazybox_core::{Activity, ActivityKind, Workspace};
+    use lazybox_ipc::Command;
     let (client, mut server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     let mut ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
@@ -1164,7 +1164,7 @@ fn tick_right_drives_auto_mark_and_emits_command() {
 /// firing anything or mounting a modal.
 #[test]
 fn leader_g_arms_github_group_when_workspace_selected() {
-    use pilot_tui_core::action::ActionGroup;
+    use lazybox_tui_core::action::ActionGroup;
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     m.handle_daemon_event(IpcEvent::Snapshot {
@@ -1223,7 +1223,7 @@ fn leader_g_then_esc_cancels() {
 /// convention) without firing anything.
 #[test]
 fn leader_g_then_unmapped_key_cancels_without_firing() {
-    use pilot_ipc::Command;
+    use lazybox_ipc::Command;
     let (client, mut server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     m.handle_daemon_event(IpcEvent::Snapshot {

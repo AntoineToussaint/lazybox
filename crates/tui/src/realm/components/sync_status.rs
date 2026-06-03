@@ -14,7 +14,7 @@
 use crate::realm::status_ctx::{SyncEntry, SyncOutcome};
 use crate::realm::{Msg, UserEvent};
 use chrono::{DateTime, Utc};
-use pilot_core::time::time_ago_at;
+use lazybox_core::time::time_ago_at;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::{Event, Key, KeyModifiers};
@@ -60,7 +60,7 @@ impl SyncStatus {
 
         if self.summary.is_empty() {
             lines.push(Line::from(Span::styled(
-                "No sync activity yet — pilot hasn't completed a poll.",
+                "No sync activity yet — lazybox hasn't completed a poll.",
                 Style::default().fg(theme.text_dim),
             )));
             return lines;

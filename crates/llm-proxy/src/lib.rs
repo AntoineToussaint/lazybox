@@ -30,11 +30,11 @@ pub mod server;
 
 pub use server::{ProxyError, ProxyServer, SESSION_TAG_HEADER};
 
-// Wire types live in `pilot_ipc::proxy` so the protocol crate stays
+// Wire types live in `lazybox_ipc::proxy` so the protocol crate stays
 // at the bottom of the dependency graph. Re-export them here so
-// existing call sites (`pilot_llm_proxy::ProxyRecord` etc.) keep
+// existing call sites (`lazybox_llm_proxy::ProxyRecord` etc.) keep
 // working without churn.
-pub use pilot_ipc::{ApiProvider, ProxyRecord, ToolCall};
+pub use lazybox_ipc::{ApiProvider, ProxyRecord, ToolCall};
 
 /// Per-spawn proxy configuration handed to the agent via env vars.
 ///
@@ -42,13 +42,13 @@ pub use pilot_ipc::{ApiProvider, ProxyRecord, ToolCall};
 /// these, binds a fresh port if needed, and sets ANTHROPIC_BASE_URL /
 /// OPENAI_BASE_URL in the child env. Each terminal gets its own
 /// `session_tag`; the proxy uses that to attribute requests to the
-/// right pilot session without exposing pilot internals to the agent.
+/// right lazybox session without exposing lazybox internals to the agent.
 #[derive(Debug, Clone)]
 pub struct ProxyCtx {
     pub anthropic_url: Option<String>,
     pub openai_url: Option<String>,
     /// Header value the proxy recognizes. The daemon injects it as
-    /// `X-Pilot-Session: <tag>` into every agent request (via the
+    /// `X-Lazybox-Session: <tag>` into every agent request (via the
     /// upstream envvar trick when possible, or a header-rewriting
     /// layer if needed).
     pub session_tag: String,

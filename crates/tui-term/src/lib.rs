@@ -1,4 +1,4 @@
-//! # pilot-tui-term
+//! # lazybox-tui-term
 //!
 //! Embedded terminal widget for ratatui, powered by libghostty-vt.
 

@@ -1,4 +1,4 @@
-//! `pilot --test` — boots the TUI against a throwaway git repo with a
+//! `lazybox --test` — boots the TUI against a throwaway git repo with a
 //! single seeded session, no setup screen, no provider polling. The
 //! goal is a one-command path for trying the side panel + terminal
 //! pane end-to-end without needing GitHub credentials, a real
@@ -16,11 +16,11 @@
 //!    saved so the sidebar boots with a workspace selected.
 
 use chrono::Utc;
-use pilot_core::{
+use lazybox_core::{
     CiStatus, KV_KEY_SETUP, PersistedSetup, ProviderConfig, ReviewStatus, SessionKind, Task,
     TaskId, TaskRole, TaskState, Workspace, WorkspaceSession,
 };
-use pilot_store::{MemoryStore, Store, WorkspaceRecord};
+use lazybox_store::{MemoryStore, Store, WorkspaceRecord};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -51,7 +51,7 @@ impl TestFixture {
 
     fn new_with_options(seed_session: bool) -> anyhow::Result<Self> {
         let repo = tempfile::Builder::new()
-            .prefix("pilot-test-")
+            .prefix("lazybox-test-")
             .tempdir()
             .map_err(|e| anyhow::anyhow!("create tempdir: {e}"))?;
         run_git_init(repo.path())?;
@@ -101,7 +101,7 @@ fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
         },
         title: "Test workspace".into(),
         body: Some(
-            "Fake workspace created by `pilot --test`. The bottom \
+            "Fake workspace created by `lazybox --test`. The bottom \
              hint bar shows what's available right now: `s` shell, \
              `c` claude, `x` codex, `u` cursor."
                 .into(),
@@ -118,12 +118,12 @@ fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
         base_branch: Some("main".into()),
         updated_at: Utc::now(),
         closed_at: None,
-        labels: vec![pilot_core::Label::new("test")],
+        labels: vec![lazybox_core::Label::new("test")],
         reviewers: vec![],
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: pilot_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::Mergeable,
         is_behind_base: false,
         node_id: None,
         needs_reply: false,
@@ -168,7 +168,7 @@ fn run_git_init(path: &Path) -> anyhow::Result<()> {
     // A first commit so the worktree isn't in the awkward "no HEAD"
     // state where some shell prompts get noisy.
     let readme = path.join("README.md");
-    std::fs::write(&readme, "# pilot test repo\n")?;
+    std::fs::write(&readme, "# lazybox test repo\n")?;
     let _ = Command::new("git")
         .args(["add", "."])
         .current_dir(path)
@@ -176,9 +176,9 @@ fn run_git_init(path: &Path) -> anyhow::Result<()> {
     let _ = Command::new("git")
         .args([
             "-c",
-            "user.email=test@pilot",
+            "user.email=test@lazybox",
             "-c",
-            "user.name=pilot test",
+            "user.name=lazybox test",
             "commit",
             "-qm",
             "init",

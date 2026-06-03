@@ -11,17 +11,21 @@
 
 use super::{TickState, commit_upsert, fetch_and_apply, load_workspace};
 use crate::ServerConfig;
-use pilot_core::{CiStatus, ReviewStatus, Workspace, WorkspaceKey};
-use pilot_gh::GhClient;
-use pilot_ipc::Event;
-use pilot_linear::LinearClient;
+use lazybox_core::{CiStatus, ReviewStatus, Workspace, WorkspaceKey};
+use lazybox_gh::GhClient;
+use lazybox_ipc::Event;
+use lazybox_linear::LinearClient;
 
 /// Post a top-level reply to the workspace's primary task. Today this
 /// targets only GitHub PRs/issues; Linear and other providers can grow
 /// into the same shape. On success we don't update the local activity
 /// feed inline — the next poll picks up the new comment, which keeps
 /// the "what the upstream provider says" invariant intact.
-pub async fn post_reply(config: &ServerConfig, session_key: pilot_core::SessionKey, body: String) {
+pub async fn post_reply(
+    config: &ServerConfig,
+    session_key: lazybox_core::SessionKey,
+    body: String,
+) {
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return;
@@ -78,7 +82,7 @@ fn emit_reply_error(config: &ServerConfig, msg: &str) {
 /// `TaskProvider`. Using an enum (vs `Arc<dyn TaskProvider>`) is
 /// deliberate: the trait uses `async fn` which isn't dyn-compatible
 /// without the `async_trait` crate. The enum dispatches manually
-/// in O(n_providers) — fine for the 2-3 providers pilot will
+/// in O(n_providers) — fine for the 2-3 providers lazybox will
 /// ever have at once.
 ///
 /// Adding a new provider: add a variant + the four `match` arms
@@ -91,69 +95,72 @@ pub enum ProviderHandle {
 }
 
 impl ProviderHandle {
-    pub async fn merge(&self, ws: &pilot_core::Workspace) -> Result<(), pilot_core::ProviderError> {
+    pub async fn merge(
+        &self,
+        ws: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
         match self {
-            Self::Github(c) => pilot_core::TaskProvider::merge(c, ws).await,
-            Self::Linear(c) => pilot_core::TaskProvider::merge(c, ws).await,
+            Self::Github(c) => lazybox_core::TaskProvider::merge(c, ws).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::merge(c, ws).await,
         }
     }
     pub async fn request_reviewers(
         &self,
-        ws: &pilot_core::Workspace,
+        ws: &lazybox_core::Workspace,
         logins: &[String],
-    ) -> Result<(), pilot_core::ProviderError> {
+    ) -> Result<(), lazybox_core::ProviderError> {
         match self {
-            Self::Github(c) => pilot_core::TaskProvider::request_reviewers(c, ws, logins).await,
-            Self::Linear(c) => pilot_core::TaskProvider::request_reviewers(c, ws, logins).await,
+            Self::Github(c) => lazybox_core::TaskProvider::request_reviewers(c, ws, logins).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::request_reviewers(c, ws, logins).await,
         }
     }
     pub async fn add_assignees(
         &self,
-        ws: &pilot_core::Workspace,
+        ws: &lazybox_core::Workspace,
         logins: &[String],
-    ) -> Result<(), pilot_core::ProviderError> {
+    ) -> Result<(), lazybox_core::ProviderError> {
         match self {
-            Self::Github(c) => pilot_core::TaskProvider::add_assignees(c, ws, logins).await,
-            Self::Linear(c) => pilot_core::TaskProvider::add_assignees(c, ws, logins).await,
+            Self::Github(c) => lazybox_core::TaskProvider::add_assignees(c, ws, logins).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::add_assignees(c, ws, logins).await,
         }
     }
     pub async fn set_assignees(
         &self,
-        ws: &pilot_core::Workspace,
+        ws: &lazybox_core::Workspace,
         logins: &[String],
-    ) -> Result<(), pilot_core::ProviderError> {
+    ) -> Result<(), lazybox_core::ProviderError> {
         match self {
-            Self::Github(c) => pilot_core::TaskProvider::set_assignees(c, ws, logins).await,
-            Self::Linear(c) => pilot_core::TaskProvider::set_assignees(c, ws, logins).await,
+            Self::Github(c) => lazybox_core::TaskProvider::set_assignees(c, ws, logins).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::set_assignees(c, ws, logins).await,
         }
     }
     pub async fn list_repo_labels(
         &self,
-        ws: &pilot_core::Workspace,
-    ) -> Result<Vec<pilot_core::Label>, pilot_core::ProviderError> {
+        ws: &lazybox_core::Workspace,
+    ) -> Result<Vec<lazybox_core::Label>, lazybox_core::ProviderError> {
         match self {
-            Self::Github(c) => pilot_core::TaskProvider::list_repo_labels(c, ws).await,
-            Self::Linear(c) => pilot_core::TaskProvider::list_repo_labels(c, ws).await,
+            Self::Github(c) => lazybox_core::TaskProvider::list_repo_labels(c, ws).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::list_repo_labels(c, ws).await,
         }
     }
     pub async fn set_labels(
         &self,
-        ws: &pilot_core::Workspace,
+        ws: &lazybox_core::Workspace,
         names: &[String],
-    ) -> Result<(), pilot_core::ProviderError> {
+    ) -> Result<(), lazybox_core::ProviderError> {
         match self {
-            Self::Github(c) => pilot_core::TaskProvider::set_labels(c, ws, names).await,
-            Self::Linear(c) => pilot_core::TaskProvider::set_labels(c, ws, names).await,
+            Self::Github(c) => lazybox_core::TaskProvider::set_labels(c, ws, names).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::set_labels(c, ws, names).await,
         }
     }
     pub async fn post_reply(
         &self,
-        ws: &pilot_core::Workspace,
+        ws: &lazybox_core::Workspace,
         body: &str,
-    ) -> Result<(), pilot_core::ProviderError> {
+    ) -> Result<(), lazybox_core::ProviderError> {
         match self {
-            Self::Github(c) => pilot_core::TaskProvider::post_reply(c, ws, body).await,
-            Self::Linear(c) => pilot_core::TaskProvider::post_reply(c, ws, body).await,
+            Self::Github(c) => lazybox_core::TaskProvider::post_reply(c, ws, body).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::post_reply(c, ws, body).await,
         }
     }
 }
@@ -180,9 +187,9 @@ async fn build_provider_for_workspace(
         .map(|(p, _)| p)
         .unwrap_or("");
     match source {
-        s if s == pilot_gh::SOURCE => {
-            let cred = pilot_gh::credential_chain()
-                .resolve(pilot_gh::SOURCE)
+        s if s == lazybox_gh::SOURCE => {
+            let cred = lazybox_gh::credential_chain()
+                .resolve(lazybox_gh::SOURCE)
                 .await
                 .map_err(|e| format!("github credentials: {e}"))?;
             let client = GhClient::from_credential(cred)
@@ -190,9 +197,9 @@ async fn build_provider_for_workspace(
                 .map_err(|e| format!("github client init: {e}"))?;
             Ok(ProviderHandle::Github(client))
         }
-        s if s == pilot_linear::SOURCE => {
-            let cred = pilot_linear::credential_chain()
-                .resolve(pilot_linear::SOURCE)
+        s if s == lazybox_linear::SOURCE => {
+            let cred = lazybox_linear::credential_chain()
+                .resolve(lazybox_linear::SOURCE)
                 .await
                 .map_err(|e| format!("linear credentials: {e}"))?;
             Ok(ProviderHandle::Linear(LinearClient::from_credential(cred)))
@@ -465,7 +472,7 @@ pub async fn handle_fetch_repo_labels(config: &ServerConfig, workspace_key: Work
 /// Errors are silent at the user-facing level (no error toast):
 /// the inbox row already shows what we have; an upgrade-only
 /// failure shouldn't pop a modal. The diagnostic still lands in
-/// `/tmp/pilot.log`.
+/// `/tmp/lazybox.log`.
 pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: WorkspaceKey) {
     // Use the persistent client from TickState so the rate budget
     // and observations carry across calls — same logic as the
@@ -484,7 +491,10 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
     let client = match cached {
         Some(c) => c,
         None => {
-            let cred = match pilot_gh::credential_chain().resolve(pilot_gh::SOURCE).await {
+            let cred = match lazybox_gh::credential_chain()
+                .resolve(lazybox_gh::SOURCE)
+                .await
+            {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!("fetch_pr_details credentials: {e}");
@@ -576,7 +586,7 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
 ///   knows the full activity count. The workspace-level
 ///   `Workspace::unread_count()` still respects `read_indices`, so
 ///   user read state isn't disturbed.
-fn merge_pr_details_into_workspace(ws: &mut Workspace, details: pilot_gh::PrDetails) {
+fn merge_pr_details_into_workspace(ws: &mut Workspace, details: lazybox_gh::PrDetails) {
     let Some(pr) = ws.pr.as_mut() else {
         return;
     };
@@ -617,12 +627,12 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
     // Snapshot live session ids — anything in `terminal_sessions`
     // (the per-terminal owning-session map) is a session we must
     // not touch. Lock dropped before any async fs work.
-    let live_sessions: std::collections::HashSet<pilot_core::SessionId> = {
+    let live_sessions: std::collections::HashSet<lazybox_core::SessionId> = {
         let map = config.terminal_sessions.lock().await;
         map.values().copied().collect()
     };
 
-    let mgr = pilot_git_ops::WorktreeManager::default_base();
+    let mgr = lazybox_git_ops::WorktreeManager::default_base();
     let mut removed: usize = 0;
     let mut skipped: usize = 0;
 
@@ -630,7 +640,7 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
         let Some(json) = record.workspace_json else {
             continue;
         };
-        let Ok(mut workspace) = serde_json::from_str::<pilot_core::Workspace>(&json) else {
+        let Ok(mut workspace) = serde_json::from_str::<lazybox_core::Workspace>(&json) else {
             continue;
         };
         let workspace_key = workspace.key.clone();
@@ -688,7 +698,7 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
 /// inspector can surface the "session ended but worktree still here"
 /// orphan category. Live (`Active`/`Idle`/`Asking`) sessions don't
 /// move the orphan needle on their own.
-fn collect_tracked_sessions(config: &ServerConfig) -> Vec<pilot_git_ops::TrackedSession> {
+fn collect_tracked_sessions(config: &ServerConfig) -> Vec<lazybox_git_ops::TrackedSession> {
     let records = match config.store.list_workspaces() {
         Ok(r) => r,
         Err(e) => {
@@ -696,21 +706,21 @@ fn collect_tracked_sessions(config: &ServerConfig) -> Vec<pilot_git_ops::Tracked
             return Vec::new();
         }
     };
-    let mut out: Vec<pilot_git_ops::TrackedSession> = Vec::with_capacity(records.len() * 2);
+    let mut out: Vec<lazybox_git_ops::TrackedSession> = Vec::with_capacity(records.len() * 2);
     for record in records {
         let Some(json) = record.workspace_json else {
             continue;
         };
-        let Ok(workspace) = serde_json::from_str::<pilot_core::Workspace>(&json) else {
+        let Ok(workspace) = serde_json::from_str::<lazybox_core::Workspace>(&json) else {
             continue;
         };
         for session in workspace.sessions {
-            let is_stopped = matches!(session.state, pilot_core::SessionRunState::Stopped);
+            let is_stopped = matches!(session.state, lazybox_core::SessionRunState::Stopped);
             // First 8 chars of the UUID — enough to identify a row
             // in the modal without leaking the whole id into the UI.
             let raw = session.id.to_string();
             let session_id = raw.get(..8).unwrap_or(&raw).to_string();
-            out.push(pilot_git_ops::TrackedSession {
+            out.push(lazybox_git_ops::TrackedSession {
                 session_id,
                 worktree_path: session.worktree_path,
                 is_stopped,
@@ -720,8 +730,8 @@ fn collect_tracked_sessions(config: &ServerConfig) -> Vec<pilot_git_ops::Tracked
     out
 }
 
-fn to_dto(row: pilot_git_ops::WorktreeInspection) -> pilot_ipc::WorktreeInspectionDto {
-    pilot_ipc::WorktreeInspectionDto {
+fn to_dto(row: lazybox_git_ops::WorktreeInspection) -> lazybox_ipc::WorktreeInspectionDto {
+    lazybox_ipc::WorktreeInspectionDto {
         path: row.path,
         bare_path: row.bare_path,
         branch: row.branch,
@@ -742,15 +752,15 @@ fn to_dto(row: pilot_git_ops::WorktreeInspection) -> pilot_ipc::WorktreeInspecti
 /// Read-only — pair with [`handle_delete_orphaned_worktree`] for
 /// destructive follow-up.
 pub async fn handle_inspect_worktrees(config: &ServerConfig) {
-    inspect_worktrees_with(config, &pilot_git_ops::WorktreeManager::default_base()).await
+    inspect_worktrees_with(config, &lazybox_git_ops::WorktreeManager::default_base()).await
 }
 
 /// Test seam for [`handle_inspect_worktrees`]. Production callers
 /// use the default base; tests pass an explicit manager rooted at a
-/// tempdir so they don't have to mutate `PILOT_HOME`.
+/// tempdir so they don't have to mutate `LAZYBOX_HOME`.
 pub(crate) async fn inspect_worktrees_with(
     config: &ServerConfig,
-    mgr: &pilot_git_ops::WorktreeManager,
+    mgr: &lazybox_git_ops::WorktreeManager,
 ) {
     let tracked = collect_tracked_sessions(config);
     let inspections = match mgr.inspect_worktrees(&tracked).await {
@@ -777,7 +787,7 @@ pub async fn handle_delete_orphaned_worktree(
 ) {
     delete_orphaned_worktree_with(
         config,
-        &pilot_git_ops::WorktreeManager::default_base(),
+        &lazybox_git_ops::WorktreeManager::default_base(),
         path,
         force,
     )
@@ -788,7 +798,7 @@ pub async fn handle_delete_orphaned_worktree(
 /// explicit manager.
 pub(crate) async fn delete_orphaned_worktree_with(
     config: &ServerConfig,
-    mgr: &pilot_git_ops::WorktreeManager,
+    mgr: &lazybox_git_ops::WorktreeManager,
     path: std::path::PathBuf,
     force: bool,
 ) {
@@ -847,8 +857,8 @@ pub(crate) async fn delete_orphaned_worktree_with(
 ///   [`Event::MergedPrRemovable`] so the TUI prompts the user. Their
 ///   "yes" returns as `Command::RemoveMergedWorkspace`.
 pub async fn on_merged_pr(config: &ServerConfig, key: &WorkspaceKey, pr_number: u64) {
-    let mgr = pilot_git_ops::WorktreeManager::default_base();
-    let auto = pilot_config::Config::load()
+    let mgr = lazybox_git_ops::WorktreeManager::default_base();
+    let auto = lazybox_config::Config::load()
         .map(|c| c.worktree.auto_cleanup_merged)
         .unwrap_or(false);
     if auto {
@@ -871,7 +881,7 @@ pub async fn on_merged_pr(config: &ServerConfig, key: &WorkspaceKey, pr_number: 
 /// without being nagged.
 pub(crate) async fn prompt_merged_pr_removal_with(
     config: &ServerConfig,
-    mgr: &pilot_git_ops::WorktreeManager,
+    mgr: &lazybox_git_ops::WorktreeManager,
     key: &WorkspaceKey,
 ) {
     let Some(workspace) = load_workspace(config, key) else {
@@ -921,14 +931,19 @@ pub(crate) async fn prompt_merged_pr_removal_with(
 /// force-delete the now-idle worktree directories — the deletion
 /// `delete_workspace` (used by `Shift-X`) deliberately skips.
 pub async fn remove_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
-    remove_merged_workspace_with(config, &pilot_git_ops::WorktreeManager::default_base(), key).await
+    remove_merged_workspace_with(
+        config,
+        &lazybox_git_ops::WorktreeManager::default_base(),
+        key,
+    )
+    .await
 }
 
 /// Test seam for [`remove_merged_workspace`] — explicit manager so
-/// tests can root it at a tempdir without mutating `PILOT_HOME`.
+/// tests can root it at a tempdir without mutating `LAZYBOX_HOME`.
 pub(crate) async fn remove_merged_workspace_with(
     config: &ServerConfig,
-    mgr: &pilot_git_ops::WorktreeManager,
+    mgr: &lazybox_git_ops::WorktreeManager,
     key: &WorkspaceKey,
 ) {
     // Capture the worktree paths before the row is gone —
@@ -988,7 +1003,7 @@ pub(crate) async fn remove_merged_workspace_with(
 /// Canonicalize a path for cross-referencing inspector rows (reported
 /// straight from `read_dir`) against a session's stored
 /// `worktree_path` — the two can differ purely by symlink resolution
-/// (macOS `/var` → `/private/var`, a symlinked `PILOT_HOME`, …).
+/// (macOS `/var` → `/private/var`, a symlinked `LAZYBOX_HOME`, …).
 fn canon(p: &std::path::Path) -> std::path::PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
@@ -1026,7 +1041,7 @@ async fn count_live_terminals(config: &ServerConfig, key: &WorkspaceKey) -> usiz
 /// the user what was cleaned.
 pub(crate) async fn cleanup_merged_worktrees_with(
     config: &ServerConfig,
-    mgr: &pilot_git_ops::WorktreeManager,
+    mgr: &lazybox_git_ops::WorktreeManager,
     key: &WorkspaceKey,
     pr_number: u64,
 ) {
@@ -1041,7 +1056,7 @@ pub(crate) async fn cleanup_merged_worktrees_with(
     // tree is clean — that's the "don't pull a folder out from under
     // an active agent" guard the inspector's safety check can't make
     // on its own.
-    let live: std::collections::HashSet<pilot_core::SessionId> = {
+    let live: std::collections::HashSet<lazybox_core::SessionId> = {
         let map = config.terminal_sessions.lock().await;
         map.values().copied().collect()
     };
@@ -1059,13 +1074,15 @@ pub(crate) async fn cleanup_merged_worktrees_with(
     // reports `path` straight from `read_dir`, while a session's
     // `worktree_path` is whatever was stored at checkout — the two can
     // differ purely by symlink resolution (e.g. macOS `/var` →
-    // `/private/var`, or a symlinked `PILOT_HOME`). Canonicalizing both
+    // `/private/var`, or a symlinked `LAZYBOX_HOME`). Canonicalizing both
     // sides matches the inspector's own `canonical_or_self` keying so a
     // safe worktree is never silently skipped over a cosmetic path
     // difference.
     let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let by_path: std::collections::HashMap<std::path::PathBuf, &pilot_git_ops::WorktreeInspection> =
-        inspections.iter().map(|r| (canon(&r.path), r)).collect();
+    let by_path: std::collections::HashMap<
+        std::path::PathBuf,
+        &lazybox_git_ops::WorktreeInspection,
+    > = inspections.iter().map(|r| (canon(&r.path), r)).collect();
 
     let mut removed: usize = 0;
     let mut wrote = false;
@@ -1114,7 +1131,7 @@ pub(crate) async fn cleanup_merged_worktrees_with(
             "worktrees"
         };
         let _ = config.bus.send(Event::Notification {
-            title: "pilot".into(),
+            title: "lazybox".into(),
             body: format!("Cleaned up {removed} {noun} for merged PR #{pr_number}"),
         });
     }
@@ -1272,14 +1289,14 @@ mod inspect_tests {
     //! `handle_delete_orphaned_worktree`. The handlers depend on a
     //! `WorktreeManager` plus the workspace store; both are wired up
     //! against a tempdir + an in-memory store here so the tests are
-    //! hermetic (no `PILOT_HOME` env mutation, no shared on-disk
+    //! hermetic (no `LAZYBOX_HOME` env mutation, no shared on-disk
     //! state with other tests).
 
     use super::*;
     use crate::ServerConfig;
-    use pilot_core::{SessionId, SessionKind, SessionRunState, WorkspaceSession};
-    use pilot_ipc::Event;
-    use pilot_store::{MemoryStore, Store, WorkspaceRecord};
+    use lazybox_core::{SessionId, SessionKind, SessionRunState, WorkspaceSession};
+    use lazybox_ipc::Event;
+    use lazybox_store::{MemoryStore, Store, WorkspaceRecord};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1329,7 +1346,7 @@ mod inspect_tests {
             ],
         )
         .await;
-        // Pilot-style remote-tracking refspec so `@{u}` resolves
+        // Lazybox-style remote-tracking refspec so `@{u}` resolves
         // from worktrees (matches `WorktreeManager::checkout_at`).
         run(
             &bare,
@@ -1400,7 +1417,9 @@ mod inspect_tests {
     /// Stash a workspace record so `collect_tracked_sessions` picks
     /// up its sessions when the inspector asks the store.
     fn seed_workspace(store: &MemoryStore, worktree_path: PathBuf, stopped: bool) -> SessionId {
-        use pilot_core::{SessionKey, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey};
+        use lazybox_core::{
+            SessionKey, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey,
+        };
         let session_key: SessionKey = "github:o/r#1".into();
         let workspace_key: WorkspaceKey = WorkspaceKey::new(session_key.as_str().to_string());
         let task = Task {
@@ -1412,8 +1431,8 @@ mod inspect_tests {
             body: None,
             state: TaskState::Open,
             role: TaskRole::Author,
-            ci: pilot_core::CiStatus::None,
-            review: pilot_core::ReviewStatus::None,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
             checks: vec![],
             unread_count: 0,
             url: "https://github.com/o/r/pull/1".into(),
@@ -1427,7 +1446,7 @@ mod inspect_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: pilot_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             node_id: None,
             needs_reply: false,
@@ -1486,7 +1505,7 @@ mod inspect_tests {
         seed_workspace(&store, wt.clone(), /*stopped=*/ false);
 
         let config = fresh_config(store);
-        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
         inspect_worktrees_with(&config, &mgr).await;
@@ -1515,7 +1534,7 @@ mod inspect_tests {
         seed_workspace(&store, wt.clone(), /*stopped=*/ true);
 
         let config = fresh_config(store);
-        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
         inspect_worktrees_with(&config, &mgr).await;
@@ -1542,7 +1561,7 @@ mod inspect_tests {
         let wt = add_wt(&fx, "ghost", "feat").await;
         let store = Arc::new(MemoryStore::new());
         let config = fresh_config(store);
-        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
         inspect_worktrees_with(&config, &mgr).await;
@@ -1566,7 +1585,7 @@ mod inspect_tests {
         let wt = add_wt(&fx, "safe", "feat").await;
         let store = Arc::new(MemoryStore::new());
         let config = fresh_config(store);
-        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
         delete_orphaned_worktree_with(&config, &mgr, wt.clone(), /*force=*/ false).await;
@@ -1593,7 +1612,7 @@ mod inspect_tests {
         std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
         let store = Arc::new(MemoryStore::new());
         let config = fresh_config(store);
-        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
         delete_orphaned_worktree_with(&config, &mgr, wt.clone(), /*force=*/ false).await;
@@ -1620,7 +1639,7 @@ mod inspect_tests {
         std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
         let store = Arc::new(MemoryStore::new());
         let config = fresh_config(store);
-        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
         delete_orphaned_worktree_with(&config, &mgr, wt.clone(), /*force=*/ true).await;
@@ -1643,7 +1662,7 @@ mod inspect_tests {
         let fx = setup_fixture().await;
         let store = Arc::new(MemoryStore::new());
         let config = fresh_config(store);
-        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
         delete_orphaned_worktree_with(
@@ -1676,7 +1695,7 @@ mod inspect_tests {
         wt: PathBuf,
         branch: &str,
     ) -> (WorkspaceKey, SessionId) {
-        use pilot_core::{Task, TaskId, TaskRole, TaskState, Workspace};
+        use lazybox_core::{Task, TaskId, TaskRole, TaskState, Workspace};
         let task = Task {
             id: TaskId {
                 source: "github".into(),
@@ -1686,8 +1705,8 @@ mod inspect_tests {
             body: None,
             state: TaskState::Merged,
             role: TaskRole::Author,
-            ci: pilot_core::CiStatus::None,
-            review: pilot_core::ReviewStatus::None,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
             checks: vec![],
             unread_count: 0,
             url: "https://github.com/o/r/pull/1".into(),
@@ -1701,7 +1720,7 @@ mod inspect_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: pilot_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             node_id: None,
             needs_reply: false,
@@ -1751,7 +1770,7 @@ mod inspect_tests {
         let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
 
         let config = fresh_config(store.clone());
-        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
         cleanup_merged_worktrees_with(&config, &mgr, &key, 1).await;
@@ -1782,7 +1801,7 @@ mod inspect_tests {
         let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
 
         let config = fresh_config(store);
-        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
 
         cleanup_merged_worktrees_with(&config, &mgr, &key, 1).await;
 
@@ -1813,7 +1832,7 @@ mod inspect_tests {
         let (key, _sid) = seed_merged_workspace(&store, symlinked, "feat");
 
         let config = fresh_config(store);
-        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
 
         cleanup_merged_worktrees_with(&config, &mgr, &key, 1).await;
 
@@ -1842,8 +1861,8 @@ mod inspect_tests {
             .terminal_sessions
             .lock()
             .await
-            .insert(pilot_ipc::TerminalId(1), sid);
-        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+            .insert(lazybox_ipc::TerminalId(1), sid);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
 
         cleanup_merged_worktrees_with(&config, &mgr, &key, 1).await;
 
@@ -1864,7 +1883,7 @@ mod inspect_tests {
         let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
 
         let config = fresh_config(store);
-        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
         prompt_merged_pr_removal_with(&config, &mgr, &key).await;
@@ -1898,7 +1917,7 @@ mod inspect_tests {
         let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
 
         let config = fresh_config(store);
-        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
         prompt_merged_pr_removal_with(&config, &mgr, &key).await;
@@ -1922,7 +1941,7 @@ mod inspect_tests {
         let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
 
         let config = fresh_config(store);
-        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
         remove_merged_workspace_with(&config, &mgr, &key).await;
@@ -1949,7 +1968,7 @@ mod inspect_tests {
         let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
 
         let config = fresh_config(store);
-        let mgr = pilot_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
 
         remove_merged_workspace_with(&config, &mgr, &key).await;
 

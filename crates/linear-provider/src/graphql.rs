@@ -1,7 +1,7 @@
 //! Linear GraphQL types + mappers.
 
 use chrono::{DateTime, Utc};
-use pilot_core::{
+use lazybox_core::{
     Activity, ActivityKind, CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState,
 };
 use serde::Deserialize;
@@ -175,13 +175,13 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         _ => TaskState::Open,
     };
 
-    let labels: Vec<pilot_core::Label> = issue
+    let labels: Vec<lazybox_core::Label> = issue
         .labels
         .as_ref()
         .map(|l| {
             l.nodes
                 .iter()
-                .map(|n| pilot_core::Label::new(n.name.clone()))
+                .map(|n| lazybox_core::Label::new(n.name.clone()))
                 .collect()
         })
         .unwrap_or_default();
@@ -221,7 +221,7 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         assignees,
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: pilot_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::Mergeable,
         is_behind_base: false,
         node_id: Some(issue.id.clone()),
         needs_reply: false,

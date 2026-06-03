@@ -1,0 +1,16 @@
+{
+  "name": "lazybox-web",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Marketing homepage for lazybox — a reactive PR inbox in your terminal.",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check"
+  },
+  "dependencies": {
+    "astro": "^6.4.0"
+  }
+}

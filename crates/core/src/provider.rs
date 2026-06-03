@@ -127,7 +127,7 @@ impl ProviderError {
 
     /// Full diagnostic — provider id + variant tag + the underlying
     /// error chain. Goes to the log file; not shown in the TUI by
-    /// default (use `RUST_LOG=debug` or tail `/tmp/pilot.log`).
+    /// default (use `RUST_LOG=debug` or tail `/tmp/lazybox.log`).
     pub fn diagnostic(&self) -> String {
         match self {
             Self::Retryable {
@@ -163,7 +163,7 @@ impl ProviderError {
                 None => format!("{source} hiccup, retrying next cycle"),
             },
             Self::Auth { source, .. } => {
-                format!("{source} auth failed — rotate token then `pilot --fresh`")
+                format!("{source} auth failed — rotate token then `lazybox --fresh`")
             }
             Self::Permanent { source, detail } => {
                 let summary = detail.lines().next().unwrap_or(detail);

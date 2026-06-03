@@ -3,10 +3,10 @@
 //! the Subscribe → Snapshot contract works end-to-end — just like
 //! the in-process `channel::pair` path, but over a real Unix socket.
 
-use pilot_ipc::{Command, Event, socket};
-use pilot_server::ServerConfig;
-use pilot_server::lifecycle;
-use pilot_server::socket_service::SocketService;
+use lazybox_ipc::{Command, Event, socket};
+use lazybox_server::ServerConfig;
+use lazybox_server::lifecycle;
+use lazybox_server::socket_service::SocketService;
 use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -134,14 +134,14 @@ fn runtime_dir_honors_env_var() {
     let _g = GUARD.lock().unwrap();
     // SAFETY: same rationale as in Linear's from_env test.
     unsafe {
-        std::env::set_var("PILOT_RUNTIME_DIR", "/tmp/pilot-test-runtime");
+        std::env::set_var("LAZYBOX_RUNTIME_DIR", "/tmp/lazybox-test-runtime");
     }
     assert_eq!(
         lifecycle::runtime_dir(),
-        PathBuf::from("/tmp/pilot-test-runtime"),
+        PathBuf::from("/tmp/lazybox-test-runtime"),
     );
     unsafe {
-        std::env::remove_var("PILOT_RUNTIME_DIR");
+        std::env::remove_var("LAZYBOX_RUNTIME_DIR");
     }
 }
 

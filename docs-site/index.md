@@ -1,4 +1,4 @@
-# pilot
+# lazybox
 
 **A reactive PR inbox in your terminal.**
 
@@ -8,13 +8,13 @@ the way an email client surfaces mail. Each task becomes a *workspace*: a git
 worktree plus an embedded terminal running Claude Code, Codex, Cursor, or a
 plain shell.
 
-pilot is source-agnostic. GitHub today, Linear, and an optional Slack mirror —
+lazybox is source-agnostic. GitHub today, Linear, and an optional Slack mirror —
 all in the same inbox, with the same keys.
 
 !!! warning "Pre-1.0, early-adopter dev mode"
-    pilot is daily-driven on macOS; Linux runs the same code paths but is less
+    lazybox is daily-driven on macOS; Linux runs the same code paths but is less
     tested. There is no prebuilt release yet, so every install path here builds
-    from source. Expect sharp edges; logs land in `/tmp/pilot.log`.
+    from source. Expect sharp edges; logs land in `/tmp/lazybox.log`.
 
 ## Who it's for
 
@@ -43,8 +43,8 @@ The documentation is split into four sections, following the
 ## Fastest path
 
 ```sh
-git clone https://github.com/AntoineToussaint/pilot.git
-cd pilot && make setup && make run
+git clone https://github.com/AntoineToussaint/lazybox.git
+cd lazybox && make setup && make run
 ```
 
 Then follow the [Quickstart](tutorials/quickstart.md) for what you see on first

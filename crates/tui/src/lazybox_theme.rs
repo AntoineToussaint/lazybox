@@ -1,6 +1,6 @@
-//! Pilot-flavored extras on top of `crate::theme`.
+//! Lazybox-flavored extras on top of `crate::theme`.
 //!
-//! The kit ships a generic palette + the `Theme` slots; pilot adds
+//! The kit ships a generic palette + the `Theme` slots; lazybox adds
 //! its own state-pill mapping (PR open/closed/merged → bg/fg color
 //! pair), conventional-commit kind colors, etc. Lives here rather
 //! than inside the kit so the kit stays domain-free.
@@ -8,7 +8,7 @@
 use crate::theme::Theme;
 use ratatui::style::Color;
 
-/// PR-state buckets the pilot UI's state pill knows about.
+/// PR-state buckets the lazybox UI's state pill knows about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatePill {
     /// Open PR.
@@ -26,7 +26,7 @@ pub enum StatePill {
 }
 
 /// `(bg, fg)` color pair for the pill keyed by PR state, drawn from
-/// the active theme. Pilot's right-pane header renders these as
+/// the active theme. Lazybox's right-pane header renders these as
 /// powerline-style segments.
 pub fn state_pill(theme: &Theme, kind: StatePill) -> (Color, Color) {
     match kind {

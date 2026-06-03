@@ -16,7 +16,7 @@
 
 use super::{Id, Model, Msg};
 use crate::realm::UserEvent;
-use pilot_ipc::Command as IpcCommand;
+use lazybox_ipc::Command as IpcCommand;
 use tuirealm::terminal::TerminalAdapter;
 
 impl<T: TerminalAdapter> Model<T> {
@@ -163,19 +163,20 @@ impl<T: TerminalAdapter> Model<T> {
         // same IpcCommand the matching keyboard shortcut would.
         // Empty pick (Esc) clears the stash silently.
         if matches!(self.modal_stack.last(), Some(Id::SidebarContext)) {
-            use pilot_tui_core::action::Action;
+            use lazybox_tui_core::action::Action;
             let stash = self.pending_sidebar_context.take();
             self.pop_modal();
             if let (Some((session_key, actions)), Some(&idx)) = (stash.as_ref(), picks.first())
                 && let Some(action) = actions.get(idx)
             {
-                let workspace_key = pilot_core::WorkspaceKey::new(session_key.as_str().to_string());
+                let workspace_key =
+                    lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
                 match action {
                     Action::SpawnAgent(agent_id) => {
                         cmds.push(IpcCommand::Spawn {
                             session_key: session_key.clone(),
                             session_id: None,
-                            kind: pilot_ipc::TerminalKind::Agent(agent_id.clone()),
+                            kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
                             cwd: None,
                             initial_prompt: None,
                         });
@@ -184,7 +185,7 @@ impl<T: TerminalAdapter> Model<T> {
                         cmds.push(IpcCommand::Spawn {
                             session_key: session_key.clone(),
                             session_id: None,
-                            kind: pilot_ipc::TerminalKind::Shell,
+                            kind: lazybox_ipc::TerminalKind::Shell,
                             cwd: None,
                             initial_prompt: None,
                         });
@@ -399,7 +400,7 @@ impl<T: TerminalAdapter> Model<T> {
                 cmds.push(IpcCommand::Spawn {
                     session_key: workspace_key.clone(),
                     session_id: None,
-                    kind: pilot_ipc::TerminalKind::Shell,
+                    kind: lazybox_ipc::TerminalKind::Shell,
                     cwd: None,
                     initial_prompt: None,
                 });
@@ -541,7 +542,7 @@ impl<T: TerminalAdapter> Model<T> {
                 if let Some((workspace_key, reason)) = self.active_removal_prompt.take()
                     && yes
                 {
-                    let session_key: pilot_core::SessionKey = (&workspace_key).into();
+                    let session_key: lazybox_core::SessionKey = (&workspace_key).into();
                     // Out-of-scope: drop the row + kill terminals (worktree
                     // left on disk). Merged: also delete the worktree.
                     cmds.push(match reason {

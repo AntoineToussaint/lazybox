@@ -11,12 +11,12 @@ focuses on the new shape:
 - **`ChatProvider` abstraction:** Slack is one adapter; Discord /
   Matrix / IRC plug in without touching dispatch logic.
 - **`status` query:** inbound `status` / `state` / `ls` / `list` in
-  a channel pilot can see produces a reply with the agent's state.
+  a channel lazybox can see produces a reply with the agent's state.
 
 ## 0. Prereqs
 
 App setup done per `docs/slack-setup.md`: bot installed, both tokens
-issued, `/invite @pilot` run in `#pilot`.
+issued, `/invite @lazybox` run in `#lazybox`.
 
 ```sh
 export SLACK_BOT_TOKEN=xoxb-...
@@ -26,7 +26,7 @@ export SLACK_APP_TOKEN=xapp-...
 Tail the log in a side pane:
 
 ```sh
-tail -F /tmp/pilot.log | egrep -i 'slack|chat'
+tail -F /tmp/lazybox.log | egrep -i 'slack|chat'
 ```
 
 Launch:
@@ -37,11 +37,11 @@ make run
 
 Expect within ~2 s of launch:
 
-- Log: `slack: connected team=<ws> user=pilot`
+- Log: `slack: connected team=<ws> user=lazybox`
 - Log: `slack: prefetched channel listing channels=<N>`
-- `#pilot` receives `*pilot online* · connected as @pilot. Mirroring N project(s).`
+- `#lazybox` receives `*lazybox online* · connected as @lazybox. Mirroring N project(s).`
 
-If the anchor message doesn't appear, the bot isn't in `#pilot` — fix
+If the anchor message doesn't appear, the bot isn't in `#lazybox` — fix
 that before continuing.
 
 ---
@@ -103,8 +103,8 @@ Expect:
 Expect:
 
 - The Codex channel **persists in Slack** (channels accumulate;
-  pilot doesn't trigger admin actions per session-end).
-- Pilot's internal `terminal_to_channel` map drops the entry.
+  lazybox doesn't trigger admin actions per session-end).
+- Lazybox's internal `terminal_to_channel` map drops the entry.
 - A subsequent message in that channel hits "untracked channel" and
   is ignored unless it's a `status` query.
 
@@ -137,7 +137,7 @@ expect `⏸ *paused — input expected*` mid-stream and
 
 ### C1. Single-line reply lands in the right agent
 
-1. In `#…-aaa11111-claude`, post `@pilot yes`.
+1. In `#…-aaa11111-claude`, post `@lazybox yes`.
 
 Expect:
 
@@ -147,7 +147,7 @@ Expect:
 
 ### C2. Same workspace, different agent — no cross-talk
 
-1. In `#…-aaa11111-codex`, post `@pilot do the codex thing`.
+1. In `#…-aaa11111-codex`, post `@lazybox do the codex thing`.
 
 Expect:
 
@@ -159,7 +159,7 @@ Expect:
 In any per-(session, agent) channel:
 
 ```
-@pilot here is a longer reply:
+@lazybox here is a longer reply:
 - first point
 - second point
 ```
@@ -171,10 +171,10 @@ Expect:
 
 ### C4. Untracked channel ignores non-command messages
 
-In `#random` (any channel pilot doesn't map to a terminal):
+In `#random` (any channel lazybox doesn't map to a terminal):
 
 ```
-@pilot anything
+@lazybox anything
 ```
 
 Expect:
@@ -197,7 +197,7 @@ The new path: inbound messages whose **leading token** is `status`,
 In `#…-aaa11111-claude`, post:
 
 ```
-@pilot status
+@lazybox status
 ```
 
 Expect a reply like:
@@ -229,13 +229,13 @@ Expect:
 
 ### D3. `status` in the anchor channel — global summary
 
-In `#pilot`, post:
+In `#lazybox`, post:
 
 ```
 status
 ```
 
-(No `@pilot` prefix needed; the bot has `channels:history` on the
+(No `@lazybox` prefix needed; the bot has `channels:history` on the
 anchor channel and the keyword leads.)
 
 Expect a list of every tracked `(session, agent)` row, grouped by
@@ -265,7 +265,7 @@ Each of these should produce the same reply shape:
 In any channel, post:
 
 ```
-@pilot what is the status of this PR
+@lazybox what is the status of this PR
 ```
 
 Expect:
@@ -277,7 +277,7 @@ Expect:
 ### D6. Empty inbox
 
 Launch with `--fresh` (no workspaces, no agents). Post `status` in
-`#pilot`:
+`#lazybox`:
 
 ```
 📭 no agent sessions tracked yet
@@ -298,69 +298,69 @@ The short-circuit returns before reaching the PTY-forward branch.
 
 ### E1. Bot removed from a (session, agent) channel
 
-1. `/remove @pilot` from one per-(session, agent) channel.
+1. `/remove @lazybox` from one per-(session, agent) channel.
 2. Trigger an Asking event for that agent.
 
 Expect:
 
 - Log: `chat: post failed: not_in_channel`.
-- Pilot keeps running, other agents still post.
+- Lazybox keeps running, other agents still post.
 
 ### E2. `per_workspace_channels: false`
 
-Edit `~/.pilot/config.yaml`:
+Edit `~/.lazybox/config.yaml`:
 
 ```yaml
 slack:
   per_workspace_channels: false
 ```
 
-Restart pilot. Expect:
+Restart lazybox. Expect:
 
 - No per-(session, agent) channels created.
 - Outbound asking notifications are silently dropped (today; future
-  work could route to `#pilot` threads).
-- `status` in `#pilot` still returns the global summary.
+  work could route to `#lazybox` threads).
+- `status` in `#lazybox` still returns the global summary.
 
 ### E3. Channel name race
 
 1. Before spawning the agent, manually create
    `#<workspace>-<session>-claude` in Slack with the exact name
-   pilot would have used.
-2. Spawn Claude in that session in pilot.
+   lazybox would have used.
+2. Spawn Claude in that session in lazybox.
 
 Expect:
 
 - Log: `slack: channel exists, looking up id` (the `name_taken`
   recovery branch fires).
-- Pilot uses the existing channel — no duplicate, no error.
+- Lazybox uses the existing channel — no duplicate, no error.
 - Header still posted.
 
 ---
 
 ## Checklist
 
-- [ ] **Prereqs**: tokens exported, `/invite @pilot` done, daemon logs tailing
+- [ ] **Prereqs**: tokens exported, `/invite @lazybox` done, daemon logs tailing
 - [ ] **A1** First agent spawn creates `#<ws>-<session>-<agent>`
 - [ ] **A2** Second agent in same session = second channel, same session prefix
 - [ ] **A3** Second session = different 8-hex prefix
 - [ ] **A4** TerminalExited leaves channel in Slack but drops the mapping
 - [ ] **B1** Asking routes to the right session-agent channel only
 - [ ] **B2** Paused vs done labels still flip on quiet threshold
-- [ ] **C1** `@pilot yes` lands in the right agent
+- [ ] **C1** `@lazybox yes` lands in the right agent
 - [ ] **C2** Sibling agent doesn't receive cross-channel messages
 - [ ] **C3** Multi-line bracket-paste delivers as one dispatch
 - [ ] **C4** Untracked-channel non-keyword chat is ignored
 - [ ] **D1** `status` in agent channel reports that agent's state
 - [ ] **D2** `status` in an exited-agent channel reports "no longer tracked"
-- [ ] **D3** `status` in `#pilot` returns global summary
+- [ ] **D3** `status` in `#lazybox` returns global summary
 - [ ] **D4** Synonyms (`state`, `ls`, `list`, `Status?`, `ls -la`)
 - [ ] **D5** Non-leading keyword does NOT trigger
 - [ ] **D6** Empty-inbox global status reads `📭 no agent sessions tracked yet`
 - [ ] **D7** Status reply does not enter the agent PTY
 - [ ] **E1** Bot removed from a channel — logged, doesn't crash
 - [ ] **E2** `per_workspace_channels: false` suppresses per-channel posts
-- [ ] **E3** Manual pre-existing channel — pilot finds, doesn't dupe
+- [ ] **E3** Manual pre-existing channel — lazybox finds, doesn't dupe
 
 ## Cleanup
 
@@ -370,4 +370,4 @@ Auto-created channels accumulate. To remove them:
 /archive
 ```
 
-per channel, or via the Slack admin UI. Pilot won't auto-unarchive.
+per channel, or via the Slack admin UI. Lazybox won't auto-unarchive.

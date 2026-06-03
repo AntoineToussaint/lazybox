@@ -4,7 +4,7 @@
 //! agent (Claude / Codex / Cursor), a shell, a log tail. This
 //! component owns the per-terminal libghostty-vt parser state, feeds
 //! it the bytes the daemon streams, and renders the resulting cell
-//! grid via `pilot_tui_term::GhosttyTerminal`.
+//! grid via `lazybox_tui_term::GhosttyTerminal`.
 //!
 //! ## Why per-client emulation
 //!
@@ -28,10 +28,10 @@
 
 use crate::{PaneId, PaneOutcome};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lazybox_core::SessionKey;
+use lazybox_ipc::{Command, Event, TerminalId, TerminalKind};
+use lazybox_tui_term::GhosttyTerminal;
 use libghostty_vt as vt;
-use pilot_core::SessionKey;
-use pilot_ipc::{Command, Event, TerminalId, TerminalKind};
-use pilot_tui_term::GhosttyTerminal;
 use ratatui::Frame;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -307,7 +307,7 @@ pub struct TerminalStack {
     /// `Tabs` so the legacy single-runner-full-pane UX keeps working
     /// when no split has ever been requested. Mutating this triggers
     /// a `Command::SetSessionLayout` so the daemon persists.
-    layout: pilot_core::SessionLayout,
+    layout: lazybox_core::SessionLayout,
     /// `Ctrl-w` tile-management prefix latch (tmux-style). When
     /// armed, the next keystroke is interpreted as a tile action
     /// (split, focus move, close); otherwise keys forward to the
@@ -426,14 +426,14 @@ fn forward_osc52(bytes: &[u8]) {
 /// Read-only walk of a `TileTree` along a path. Returns None if the
 /// path tries to descend through a leaf.
 fn subtree_at_path<'a>(
-    root: &'a pilot_core::TileTree,
+    root: &'a lazybox_core::TileTree,
     path: &[u8],
-) -> Option<&'a pilot_core::TileTree> {
+) -> Option<&'a lazybox_core::TileTree> {
     let mut node = root;
     for &step in path {
         node = match node {
-            pilot_core::TileTree::HSplit { left, right, .. }
-            | pilot_core::TileTree::VSplit {
+            lazybox_core::TileTree::HSplit { left, right, .. }
+            | lazybox_core::TileTree::VSplit {
                 top: left,
                 bottom: right,
                 ..
@@ -444,7 +444,7 @@ fn subtree_at_path<'a>(
                     right.as_ref()
                 }
             }
-            pilot_core::TileTree::Leaf { .. } => return None,
+            lazybox_core::TileTree::Leaf { .. } => return None,
         };
     }
     Some(node)
@@ -466,7 +466,7 @@ struct TerminalSlot {
     /// broadcasts. Drives the "needs input" / "working" badge in the
     /// tab strip. Default `Idle` so non-agent terminals (shells) carry
     /// a neutral state and never falsely show working.
-    agent_state: pilot_ipc::AgentState,
+    agent_state: lazybox_ipc::AgentState,
     /// Last (cols, rows) we rendered this terminal at. Used to detect
     /// pane resizes — when the rect changes between frames we push a
     /// `Command::Resize` so the backend PTY sees the new size and the
@@ -719,7 +719,7 @@ impl TerminalStack {
             active_tab_idx: 0,
             collapsed: true,
             collapse_user_set: false,
-            layout: pilot_core::SessionLayout::default(),
+            layout: lazybox_core::SessionLayout::default(),
             ctrl_w_latch: crate::confirm_latch::PrefixLatch::new(),
             pending_split: None,
             pending_resizes: Vec::new(),
@@ -741,13 +741,13 @@ impl TerminalStack {
     /// Apply a session's persisted layout. Called by the App when the
     /// active workspace + session change so the renderer matches the
     /// user's last arrangement.
-    pub fn set_layout(&mut self, layout: pilot_core::SessionLayout) {
+    pub fn set_layout(&mut self, layout: lazybox_core::SessionLayout) {
         self.layout = layout;
         self.ctrl_w_latch.disarm();
         self.pending_split = None;
     }
 
-    pub fn layout(&self) -> &pilot_core::SessionLayout {
+    pub fn layout(&self) -> &lazybox_core::SessionLayout {
         &self.layout
     }
 
@@ -756,12 +756,12 @@ impl TerminalStack {
     /// renderable.
     pub fn focused_terminal_id(&self) -> Option<TerminalId> {
         match &self.layout {
-            pilot_core::SessionLayout::Tabs { .. } => self.active_terminal_id(),
-            pilot_core::SessionLayout::Splits { tree, focused } => {
+            lazybox_core::SessionLayout::Tabs { .. } => self.active_terminal_id(),
+            lazybox_core::SessionLayout::Splits { tree, focused } => {
                 let leaves = tree.leaves();
                 let path = focused.as_slice();
                 let id = subtree_at_path(tree, path).and_then(|n| match n {
-                    pilot_core::TileTree::Leaf { terminal_id } => Some(*terminal_id),
+                    lazybox_core::TileTree::Leaf { terminal_id } => Some(*terminal_id),
                     _ => None,
                 });
                 id.map(TerminalId)
@@ -1075,7 +1075,7 @@ impl TerminalStack {
 
     /// Scroll the focused terminal by `delta` rows. Returns a
     /// `ScrollOutcome` describing what actually happened so the
-    /// caller can surface a clear notice — pilot's scroll bug
+    /// caller can surface a clear notice — lazybox's scroll bug
     /// turned out to be "total == len, no scrollback to scroll
     /// into" silently looking identical to "delta is broken."
     /// Read the text content of the focused terminal's grid between
@@ -1357,7 +1357,7 @@ impl TerminalStack {
         // (Ghostty / iTerm2 / Kitty / Wezterm) honor it and the
         // user's system clipboard gets updated. Without this,
         // libghostty-vt consumes the sequence internally for its
-        // own clipboard (which pilot doesn't surface).
+        // own clipboard (which lazybox doesn't surface).
         forward_osc52(bytes);
         slot.vt.feed(bytes);
         slot.recent.extend_from_slice(bytes);
@@ -1405,7 +1405,7 @@ impl TerminalStack {
             last_seq,
             vt,
             recent: Vec::new(),
-            agent_state: pilot_ipc::AgentState::Idle,
+            agent_state: lazybox_ipc::AgentState::Idle,
             last_rendered_size: None,
             composing: String::new(),
             last_user_message: None,
@@ -1515,7 +1515,7 @@ impl TerminalStack {
         overrides: &std::collections::BTreeMap<String, String>,
     ) -> Vec<crate::Binding> {
         use crate::Binding;
-        use pilot_tui_core::action::{ActionDef, ActionKind};
+        use lazybox_tui_core::action::{ActionDef, ActionKind};
         // `Shift-PgUp/Dn scroll` removed in #11 — the mouse wheel
         // is the primary scroll path and the keyboard fallback
         // wasn't worth its slot in the hint bar. Leave + interrupt
@@ -1690,7 +1690,7 @@ impl TerminalStack {
                 {
                     self.commit_pending_split(*terminal_id, direction);
                 } else if Some(session_key) == self.active_session.as_ref()
-                    && matches!(self.layout, pilot_core::SessionLayout::Tabs { .. })
+                    && matches!(self.layout, lazybox_core::SessionLayout::Tabs { .. })
                     && self
                         .terminals
                         .iter()
@@ -1754,7 +1754,7 @@ impl TerminalStack {
                 // a single-leaf split collapses to a Leaf root; an
                 // n-way split loses just the dead branch. Tabs mode
                 // doesn't carry tile state — no work to do there.
-                if let pilot_core::SessionLayout::Splits { tree, focused } = &mut self.layout {
+                if let lazybox_core::SessionLayout::Splits { tree, focused } = &mut self.layout {
                     if let Some(path) = tree.path_to(terminal_id.0) {
                         match tree.remove_at(&path) {
                             Ok(new_focus) => {
@@ -1766,7 +1766,7 @@ impl TerminalStack {
                                 // tabs default so a future spawn opens
                                 // a fresh layout instead of leaving an
                                 // orphan tree.
-                                self.layout = pilot_core::SessionLayout::Tabs { active: 0 };
+                                self.layout = lazybox_core::SessionLayout::Tabs { active: 0 };
                             }
                         }
                     }
@@ -1775,10 +1775,10 @@ impl TerminalStack {
                     // payload renders fine but means the next spawn
                     // promotes us right back into Splits, which is
                     // confusing UX.
-                    if let pilot_core::SessionLayout::Splits { tree, .. } = &self.layout
-                        && matches!(tree, pilot_core::TileTree::Leaf { .. })
+                    if let lazybox_core::SessionLayout::Splits { tree, .. } = &self.layout
+                        && matches!(tree, lazybox_core::TileTree::Leaf { .. })
                     {
-                        self.layout = pilot_core::SessionLayout::Tabs { active: 0 };
+                        self.layout = lazybox_core::SessionLayout::Tabs { active: 0 };
                     }
                 }
                 self.clamp_active_tab();
@@ -1882,11 +1882,11 @@ impl TerminalStack {
             // while typing in another shell); a dim accent "· working"
             // while it streams. Idle/untracked shows nothing.
             let (hint, hint_style) = match agent_state {
-                Some(pilot_ipc::AgentState::InputNeeded) => (
+                Some(lazybox_ipc::AgentState::InputNeeded) => (
                     " ! needs input",
                     Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
                 ),
-                Some(pilot_ipc::AgentState::Working) => {
+                Some(lazybox_ipc::AgentState::Working) => {
                     (" · working", Style::default().fg(theme.accent))
                 }
                 _ => ("", Style::default()),
@@ -1960,13 +1960,13 @@ impl TerminalStack {
         };
 
         match self.layout.clone() {
-            pilot_core::SessionLayout::Tabs { .. } => {
+            lazybox_core::SessionLayout::Tabs { .. } => {
                 // Render the active tab full-pane (existing behavior).
                 if let Some(id) = self.active_terminal_id() {
                     self.render_one_terminal(id, body, frame, focused);
                 }
             }
-            pilot_core::SessionLayout::Splits {
+            lazybox_core::SessionLayout::Splits {
                 tree,
                 focused: focus_path,
             } => {
@@ -2002,21 +2002,21 @@ impl TerminalStack {
         // Promote Tabs → Splits if needed. The Tabs mode's "focused"
         // leaf is the active terminal id.
         let mut tree = match self.layout.clone() {
-            pilot_core::SessionLayout::Splits { tree, .. } => tree,
-            pilot_core::SessionLayout::Tabs { .. } => {
+            lazybox_core::SessionLayout::Splits { tree, .. } => tree,
+            lazybox_core::SessionLayout::Tabs { .. } => {
                 let Some(current_id) = self.active_terminal_id() else {
                     // No terminal at all yet — the new spawn is just
                     // the first tab. Stay in Tabs mode.
                     return;
                 };
-                pilot_core::TileTree::Leaf {
+                lazybox_core::TileTree::Leaf {
                     terminal_id: current_id.0,
                 }
             }
         };
         let focused_path = match &self.layout {
-            pilot_core::SessionLayout::Splits { focused, .. } => focused.clone(),
-            pilot_core::SessionLayout::Tabs { .. } => Vec::new(),
+            lazybox_core::SessionLayout::Splits { focused, .. } => focused.clone(),
+            lazybox_core::SessionLayout::Tabs { .. } => Vec::new(),
         };
 
         // Read the existing leaf at the focused path, build the new
@@ -2025,16 +2025,16 @@ impl TerminalStack {
         let Some(existing) = subtree_at_path(&tree, &focused_path).cloned() else {
             return;
         };
-        let new_leaf = pilot_core::TileTree::Leaf {
+        let new_leaf = lazybox_core::TileTree::Leaf {
             terminal_id: new_id.0,
         };
         let new_split = match direction {
-            PendingSplit::Vertical => pilot_core::TileTree::HSplit {
+            PendingSplit::Vertical => lazybox_core::TileTree::HSplit {
                 left: Box::new(existing),
                 right: Box::new(new_leaf),
                 ratio: 50,
             },
-            PendingSplit::Horizontal => pilot_core::TileTree::VSplit {
+            PendingSplit::Horizontal => lazybox_core::TileTree::VSplit {
                 top: Box::new(existing),
                 bottom: Box::new(new_leaf),
                 ratio: 50,
@@ -2046,7 +2046,7 @@ impl TerminalStack {
         // split we just inserted at `focused_path`.
         let mut new_focus = focused_path;
         new_focus.push(1);
-        self.layout = pilot_core::SessionLayout::Splits {
+        self.layout = lazybox_core::SessionLayout::Splits {
             tree,
             focused: new_focus,
         };
@@ -2057,7 +2057,7 @@ impl TerminalStack {
     /// a clean no-op (the prefix has already been consumed; the user
     /// just has to retry).
     fn handle_tile_action(&mut self, key: KeyEvent, cmds: &mut Vec<Command>) -> PaneOutcome {
-        use pilot_core::TileDirection;
+        use lazybox_core::TileDirection;
 
         // Need an active session to know where to spawn into. Without
         // one, splits + new shells have nowhere to land.
@@ -2103,9 +2103,9 @@ impl TerminalStack {
 
     /// Move focus across the tile tree (or cycle through tabs in
     /// Tabs mode). Persists the new layout via `SetSessionLayout`.
-    fn move_focus(&mut self, dir: pilot_core::TileDirection, cmds: &mut Vec<Command>) {
+    fn move_focus(&mut self, dir: lazybox_core::TileDirection, cmds: &mut Vec<Command>) {
         match &mut self.layout {
-            pilot_core::SessionLayout::Tabs { active } => {
+            lazybox_core::SessionLayout::Tabs { active } => {
                 // In tabs mode h/l cycle the tab strip; j/k are no-ops
                 // since there's only one row of "tabs" stacked vertically.
                 let n = self.terminals.len();
@@ -2113,17 +2113,17 @@ impl TerminalStack {
                     return;
                 }
                 match dir {
-                    pilot_core::TileDirection::Left => {
+                    lazybox_core::TileDirection::Left => {
                         *active = if *active == 0 { n - 1 } else { *active - 1 };
                     }
-                    pilot_core::TileDirection::Right => {
+                    lazybox_core::TileDirection::Right => {
                         *active = (*active + 1) % n;
                     }
                     _ => {}
                 }
                 self.active_tab_idx = *active;
             }
-            pilot_core::SessionLayout::Splits { tree, focused } => {
+            lazybox_core::SessionLayout::Splits { tree, focused } => {
                 if let Some(new_path) = tree.neighbor(focused, dir) {
                     *focused = new_path;
                 }
@@ -2136,13 +2136,13 @@ impl TerminalStack {
     /// surviving sibling. Single-leaf trees are refused (would leave
     /// the session with nothing visible).
     fn close_focused_tile(&mut self, cmds: &mut Vec<Command>) {
-        let pilot_core::SessionLayout::Splits { tree, focused } = &mut self.layout else {
+        let lazybox_core::SessionLayout::Splits { tree, focused } = &mut self.layout else {
             return;
         };
         // Capture the terminal that's about to disappear before we
         // mutate the tree — we'll close its PTY too.
         let target_id = subtree_at_path(tree, focused).and_then(|n| match n {
-            pilot_core::TileTree::Leaf { terminal_id } => Some(*terminal_id),
+            lazybox_core::TileTree::Leaf { terminal_id } => Some(*terminal_id),
             _ => None,
         });
         if tree.remove_at(focused).is_ok() {
@@ -2160,7 +2160,7 @@ impl TerminalStack {
             // Tabs so the rest of the UI (tab strip, focus models)
             // doesn't see a degenerate splits tree.
             if leaves.len() <= 1 {
-                self.layout = pilot_core::SessionLayout::Tabs { active: 0 };
+                self.layout = lazybox_core::SessionLayout::Tabs { active: 0 };
                 self.active_tab_idx = 0;
             }
             if let Some(id) = target_id {
@@ -2333,7 +2333,7 @@ impl TerminalStack {
     #[allow(clippy::too_many_arguments)]
     fn render_tile_tree(
         &mut self,
-        node: &pilot_core::TileTree,
+        node: &lazybox_core::TileTree,
         rect: Rect,
         frame: &mut Frame,
         pane_focused: bool,
@@ -2343,7 +2343,7 @@ impl TerminalStack {
         accent: Color,
     ) {
         match node {
-            pilot_core::TileTree::Leaf { terminal_id } => {
+            lazybox_core::TileTree::Leaf { terminal_id } => {
                 let is_focused_leaf = pane_focused && current_path == focus_path;
                 self.render_one_terminal(TerminalId(*terminal_id), rect, frame, is_focused_leaf);
                 // Highlight the focused leaf with a one-cell top
@@ -2365,7 +2365,7 @@ impl TerminalStack {
                     );
                 }
             }
-            pilot_core::TileTree::HSplit { left, right, ratio } => {
+            lazybox_core::TileTree::HSplit { left, right, ratio } => {
                 let split_at = (rect.width as u32 * (*ratio).min(100) as u32 / 100) as u16;
                 let left_w = split_at.min(rect.width.saturating_sub(1));
                 let right_x = rect.x + left_w + 1;
@@ -2420,7 +2420,7 @@ impl TerminalStack {
                     frame.render_widget(Paragraph::new(lines), div);
                 }
             }
-            pilot_core::TileTree::VSplit { top, bottom, ratio } => {
+            lazybox_core::TileTree::VSplit { top, bottom, ratio } => {
                 let split_at = (rect.height as u32 * (*ratio).min(100) as u32 / 100) as u16;
                 let top_h = split_at.min(rect.height.saturating_sub(1));
                 let bottom_y = rect.y + top_h + 1;
@@ -2722,7 +2722,7 @@ fn find_issue_ref_at_byte(row_text: &str, byte_pos: usize) -> Option<ClickTarget
     }
 
     // Cross-repo: `owner/repo#42`. Mirrors the validation in
-    // `pilot_core::issue_links`: the repo part must contain a `/` and
+    // `lazybox_core::issue_links`: the repo part must contain a `/` and
     // only owner/repo-legal characters.
     let hash = tok.find('#')?;
     let repo = &tok[..hash];
@@ -2883,11 +2883,11 @@ mod detect_target_tests {
 
     #[test]
     fn detects_home_relative_path() {
-        let row = "edit ~/.config/pilot.yaml please";
+        let row = "edit ~/.config/lazybox.yaml please";
         assert_eq!(
             detect_target(row, 6),
             Some(ClickTarget::Path {
-                path: "~/.config/pilot.yaml".into(),
+                path: "~/.config/lazybox.yaml".into(),
                 line: None,
                 col: None,
             })

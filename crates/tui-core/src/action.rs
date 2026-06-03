@@ -2,7 +2,7 @@
 //!
 //! # Why this exists
 //!
-//! Pilot has three surfaces that ask "which actions are available at
+//! Lazybox has three surfaces that ask "which actions are available at
 //! the current cursor?":
 //!   - **Keyboard**: `handle_key` matches a chord → fires an IPC.
 //!   - **Footer hint bar**: lists the contextual short labels.
@@ -19,8 +19,8 @@
 //!
 //! # Plugin awareness
 //!
-//! Pilot's data model is plugin-shaped: providers (github, linear,
-//! …) emit `Workspace`s; pilot wraps them in a uniform UI. Actions
+//! Lazybox's data model is plugin-shaped: providers (github, linear,
+//! …) emit `Workspace`s; lazybox wraps them in a uniform UI. Actions
 //! follow the same rule — they target a `Workspace` or a `Project`
 //! (the repo/sandbox container) and don't bake in provider-specific
 //! verbs. `MergePr` is the one exception that surfaces a github-
@@ -31,7 +31,7 @@
 //!
 //! - Keyboard → Action lookup. Each pane still owns its key-match
 //!   logic; this module just owns the vocabulary + catalog.
-//! - Configurable rebinding from `~/.pilot/config.yaml`. The
+//! - Configurable rebinding from `~/.lazybox/config.yaml`. The
 //!   catalog returns the *default* binding; user overrides will
 //!   layer on top later.
 //! - `Cursor` abstraction (`Sidebar::Workspace(K)::Session(S)`).
@@ -93,7 +93,7 @@ pub enum Action {
     ManageLabels,
     /// Open the focused workspace's PR / issue page in the host's
     /// default web browser. Useful for jumping to GitHub when the
-    /// in-pilot UI doesn't carry every affordance yet (mobile-rich
+    /// in-lazybox UI doesn't carry every affordance yet (mobile-rich
     /// review thread, full diff view, etc.).
     OpenInBrowser,
 
@@ -133,7 +133,7 @@ pub enum Action {
     /// Begin the two-press quit chord. Single-press from a remap
     /// just fires.
     Quit,
-    /// Detach the focused pane to a new pilot process (Ctrl+Shift+D).
+    /// Detach the focused pane to a new lazybox process (Ctrl+Shift+D).
     DetachPane,
     /// Resize the active splitter (Shift+Arrow).
     ResizeSplitter(ResizeDirection),
@@ -428,14 +428,14 @@ impl ActionDef {
                 kind: ActionKind::Quit,
                 default_keys: "q q",
                 label: "quit",
-                describe: "Quit pilot. Default is the two-key chord; a single-letter remap fires on first press.",
+                describe: "Quit lazybox. Default is the two-key chord; a single-letter remap fires on first press.",
                 section: Section::Global,
             },
             ActionKind::DetachPane => &Self {
                 kind: ActionKind::DetachPane,
                 default_keys: "Ctrl-Shift-D",
                 label: "detach pane",
-                describe: "Spawn a new pilot process pinned to the focused pane.",
+                describe: "Spawn a new lazybox process pinned to the focused pane.",
                 section: Section::Global,
             },
             ActionKind::ResizeSplitter => &Self {
@@ -973,7 +973,7 @@ impl ActionKind {
 /// same label.
 pub fn contextual_label(
     action: &Action,
-    workspace: Option<&pilot_core::Workspace>,
+    workspace: Option<&lazybox_core::Workspace>,
 ) -> &'static str {
     use crate::intent;
     let default = ActionDef::for_action(action).label;
@@ -1004,7 +1004,7 @@ pub fn contextual_label(
 /// Returns `false` when `workspace` is `None` and the action needs
 /// one (most Workspace-section actions). Use the section info to
 /// avoid passing `None` to actions that can't sensibly act on it.
-pub fn availability(kind: ActionKind, workspace: Option<&pilot_core::Workspace>) -> bool {
+pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace>) -> bool {
     use crate::intent;
     let has_ws = workspace.is_some();
     match kind {

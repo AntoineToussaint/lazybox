@@ -3,7 +3,7 @@
 //! `components::table` renderer can call it without taking a dep
 //! on `components::sidebar` (where these helpers originally lived).
 //!
-//! Pilot's text content is overwhelmingly ASCII + a handful of
+//! Lazybox's text content is overwhelmingly ASCII + a handful of
 //! box-drawing / Unicode marker chars (`▸`, `●`, `✓`, `❯`, `│`,
 //! `▾`). Each of those is 1 cell in a monospaced terminal, so
 //! `chars().count()` matches `unicode-width` in 99% of cases — and

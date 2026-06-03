@@ -14,7 +14,7 @@ palette has an **Edit snippets** entry that opens the file for you).
 This page documents that full lifecycle — create, list/use, edit,
 delete — plus the file format and the picker reference.
 
-pilot ships a few **built-in** snippets so a fresh install has
+lazybox ships a few **built-in** snippets so a fresh install has
 something to expand out of the box — `rev` (review the diff), `pr`
 (open a PR), and `ready` (mark the PR ready for review via
 `gh pr ready`). Anything you define with the same key transparently
@@ -22,7 +22,7 @@ overrides the built-in; you never have to start from an empty library.
 
 ## Quick start
 
-1. Create `~/.pilot/snippets.yaml` (or run **Settings → Edit snippets**,
+1. Create `~/.lazybox/snippets.yaml` (or run **Settings → Edit snippets**,
    which seeds a starter file):
 
    ```yaml
@@ -35,7 +35,7 @@ overrides the built-in; you never have to start from an empty library.
          surrounding code.
    ```
 
-2. (Re)start pilot — snippet files are read once at launch.
+2. (Re)start lazybox — snippet files are read once at launch.
 3. Open a session, focus its terminal, and type `]]rev`. The body is
    sent to the agent and submitted immediately.
 
@@ -61,7 +61,7 @@ The `description` is an optional one-line label shown in the picker;
 `body` is the text sent to the agent.
 
 Snippets are loaded once, at startup. After editing a file, **restart
-pilot** (or relaunch it) to pick up the change.
+lazybox** (or relaunch it) to pick up the change.
 
 ### List & use
 
@@ -96,15 +96,15 @@ case-insensitively.
 
 ### Edit
 
-Edit the entry in the YAML file and restart pilot. Because repo-local
+Edit the entry in the YAML file and restart lazybox. Because repo-local
 snippets override global ones on key conflict, you can also "edit" a
 shared global snippet for one project by redefining the same key in
-that repo's `.pilot/snippets.yaml`.
+that repo's `.lazybox/snippets.yaml`.
 
 ### Delete
 
 Remove the entry from the YAML file (or delete the file to clear all
-of its snippets) and restart pilot. Deleting a repo-local entry that
+of its snippets) and restart lazybox. Deleting a repo-local entry that
 shadowed a global one re-exposes the global snippet under that key.
 
 ## File locations & precedence
@@ -114,11 +114,11 @@ are optional; a missing file simply contributes nothing.
 
 | Scope          | Path                          | Use it for                                        |
 | -------------- | ----------------------------- | ------------------------------------------------- |
-| **Built-in**   | _(shipped with pilot)_        | A starter library (`rev`, `pr`, `ready`).         |
-| **Global**     | `~/.pilot/snippets.yaml`      | Your personal library, shared across all repos.   |
-| **Repo-local** | `<repo>/.pilot/snippets.yaml` | Project-specific prompts, checked into the repo.   |
+| **Built-in**   | _(shipped with lazybox)_        | A starter library (`rev`, `pr`, `ready`).         |
+| **Global**     | `~/.lazybox/snippets.yaml`      | Your personal library, shared across all repos.   |
+| **Repo-local** | `<repo>/.lazybox/snippets.yaml` | Project-specific prompts, checked into the repo.   |
 
-The repo-local file is resolved relative to the directory pilot was
+The repo-local file is resolved relative to the directory lazybox was
 launched from. The sets are **merged** with precedence, lowest to
 highest, **built-in → global → repo** — so a key conflict resolves to
 the most specific definition. A project can override a shared shortcut
@@ -145,12 +145,12 @@ snippets:
 
 - **Submission.** The body is sent **verbatim** to the active
   terminal's PTY, followed by a single carriage return (`\r`) that
-  submits it. This works for every agent pilot ships (Claude Code,
+  submits it. This works for every agent lazybox ships (Claude Code,
   Codex, Cursor) and for a plain shell. A multi-line `body` is sent as
   one block; only the trailing `\r` submits, so embedded newlines stay
   part of the prompt.
 - **No active terminal.** If you trigger a snippet with no session
-  terminal focused, nothing is sent and pilot flashes a hint to open a
+  terminal focused, nothing is sent and lazybox flashes a hint to open a
   session first.
 - **Typing a literal `]`.** A single `]` is only the start of the
   leader if a second `]` immediately follows. `]` + any other key is
@@ -160,8 +160,8 @@ snippets:
   has at least `rev` / `pr` / `ready` to offer. (If you somehow have
   no snippets at all, `]]` simply leaves the pane immediately, with no
   idle wait.)
-- **Reload.** Files are read once at startup. Restart pilot after
+- **Reload.** Files are read once at startup. Restart lazybox after
   creating, editing, or deleting a snippet.
 - **Malformed YAML.** A file that fails to parse is skipped with a
-  warning in the log (`/tmp/pilot.log`) rather than crashing pilot —
+  warning in the log (`/tmp/lazybox.log`) rather than crashing lazybox —
   if a snippet "disappears," check the log for a parse error.

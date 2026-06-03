@@ -5,7 +5,7 @@ use tracing::{debug, trace};
 /// Modeled after AWS SDK's credential chain.
 ///
 /// ```rust,no_run
-/// use pilot_auth::*;
+/// use lazybox_auth::*;
 ///
 /// let chain = CredentialChain::new()
 ///     .with(EnvProvider::new("GH_TOKEN"))

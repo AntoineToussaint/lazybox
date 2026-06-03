@@ -1,5 +1,5 @@
 [package]
-name = "pilot-linear"
+name = "lazybox-linear"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,14 +7,14 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-pilot-core = { workspace = true }
+lazybox-core = { workspace = true }
 # Provider rule (CLAUDE.md): provider crates depend on core + auth so
 # credentials flow through the chain instead of every provider rolling
 # its own env-var lookup. linear-provider's `from_env` constructor is
 # kept for back-compat, but new code should use `from_credential` so
 # CommandProvider / future Vault / Keychain providers transparently
 # apply.
-pilot-auth = { workspace = true }
+lazybox-auth = { workspace = true }
 serde      = { workspace = true }
 serde_json = "1"
 tokio      = { workspace = true }

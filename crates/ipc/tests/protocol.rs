@@ -6,25 +6,25 @@
 //! one of these assertions blows up. Far better than finding out when
 //! a v0.2 client can't talk to a v0.3 daemon.
 
-use pilot_ipc::{
+use lazybox_ipc::{
     AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRuntimeMode,
     AgentState, AgentUsage, Command, Event, PrincipalId, ProviderCredentialInput,
     ProviderCredentialMetadata, TerminalId, TerminalKind, TerminalSnapshot,
 };
 use tokio::io::duplex;
 
-fn sample_workspace() -> pilot_core::Workspace {
-    let task = pilot_core::Task {
-        id: pilot_core::TaskId {
+fn sample_workspace() -> lazybox_core::Workspace {
+    let task = lazybox_core::Task {
+        id: lazybox_core::TaskId {
             source: "github".into(),
             key: "o/r#1".into(),
         },
         title: "t".into(),
         body: None,
-        state: pilot_core::TaskState::Open,
-        role: pilot_core::TaskRole::Author,
-        ci: pilot_core::CiStatus::None,
-        review: pilot_core::ReviewStatus::None,
+        state: lazybox_core::TaskState::Open,
+        role: lazybox_core::TaskRole::Author,
+        ci: lazybox_core::CiStatus::None,
+        review: lazybox_core::ReviewStatus::None,
         checks: vec![],
         unread_count: 0,
         url: "https://github.com/o/r/pull/1".into(),
@@ -38,7 +38,7 @@ fn sample_workspace() -> pilot_core::Workspace {
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: pilot_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::Mergeable,
         is_behind_base: false,
         node_id: None,
         needs_reply: false,
@@ -48,11 +48,11 @@ fn sample_workspace() -> pilot_core::Workspace {
         deletions: 0,
         closes_issues: vec![],
     };
-    pilot_core::Workspace::from_task(task, chrono::Utc::now())
+    lazybox_core::Workspace::from_task(task, chrono::Utc::now())
 }
 
 fn all_commands() -> Vec<Command> {
-    let key: pilot_core::SessionKey = "github:o/r#1".into();
+    let key: lazybox_core::SessionKey = "github:o/r#1".into();
     let principal_id = PrincipalId::local();
     vec![
         Command::Subscribe,
@@ -65,7 +65,7 @@ fn all_commands() -> Vec<Command> {
         },
         Command::Spawn {
             session_key: key.clone(),
-            session_id: Some(pilot_core::SessionId::new()),
+            session_id: Some(lazybox_core::SessionId::new()),
             kind: TerminalKind::Shell,
             cwd: None,
             initial_prompt: None,
@@ -98,7 +98,7 @@ fn all_commands() -> Vec<Command> {
         },
         Command::StartAgentRun {
             session_key: key.clone(),
-            session_id: Some(pilot_core::SessionId::new()),
+            session_id: Some(lazybox_core::SessionId::new()),
             agent: "claude".into(),
             mode: AgentRuntimeMode::StreamJson,
             cwd: Some("/tmp/worktree".into()),
@@ -190,7 +190,7 @@ fn all_commands() -> Vec<Command> {
 }
 
 fn all_events() -> Vec<Event> {
-    let key: pilot_core::SessionKey = "github:o/r#1".into();
+    let key: lazybox_core::SessionKey = "github:o/r#1".into();
     let principal_id = PrincipalId::local();
     let credential_metadata = ProviderCredentialMetadata {
         principal_id: principal_id.clone(),
@@ -214,16 +214,16 @@ fn all_events() -> Vec<Event> {
             projects: vec![],
         },
         Event::WorkspaceUpserted(Box::new(sample_workspace())),
-        Event::WorkspaceRemoved(pilot_core::WorkspaceKey::new(key.as_str())),
-        Event::SessionCreated(Box::new(pilot_core::WorkspaceSession::new(
-            pilot_core::WorkspaceKey::new(key.as_str()),
-            pilot_core::SessionKind::Shell,
+        Event::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(key.as_str())),
+        Event::SessionCreated(Box::new(lazybox_core::WorkspaceSession::new(
+            lazybox_core::WorkspaceKey::new(key.as_str()),
+            lazybox_core::SessionKind::Shell,
             std::path::PathBuf::from("/tmp/wt"),
             chrono::Utc::now(),
         ))),
         Event::SessionEnded {
-            workspace_key: pilot_core::WorkspaceKey::new(key.as_str()),
-            session_id: pilot_core::SessionId::new(),
+            workspace_key: lazybox_core::WorkspaceKey::new(key.as_str()),
+            session_id: lazybox_core::SessionId::new(),
         },
         Event::TerminalSpawned {
             terminal_id: TerminalId(2),
@@ -252,7 +252,7 @@ fn all_events() -> Vec<Event> {
         Event::AgentRunStarted {
             run_id: AgentRunId(9),
             session_key: key.clone(),
-            session_id: Some(pilot_core::SessionId::new()),
+            session_id: Some(lazybox_core::SessionId::new()),
             agent: "claude".into(),
             mode: AgentRuntimeMode::StreamJson,
         },
@@ -368,7 +368,7 @@ fn all_events() -> Vec<Event> {
             inspections: vec![],
         },
         Event::WorktreesInspected {
-            inspections: vec![pilot_ipc::WorktreeInspectionDto {
+            inspections: vec![lazybox_ipc::WorktreeInspectionDto {
                 path: std::path::PathBuf::from("/tmp/wt"),
                 bare_path: Some(std::path::PathBuf::from("/tmp/repos/o/r.git")),
                 branch: Some("feat".into()),
@@ -442,7 +442,7 @@ fn event_bincode_round_trip() {
 /// touching the filesystem or kernel sockets.
 #[tokio::test]
 async fn socket_framing_round_trip() {
-    use pilot_ipc::socket::{read_frame, write_frame};
+    use lazybox_ipc::socket::{read_frame, write_frame};
 
     let (mut a, mut b) = duplex(64 * 1024);
 
@@ -467,8 +467,8 @@ async fn socket_framing_round_trip() {
 /// allocating a huge buffer. Simulates a malicious or corrupted peer.
 #[tokio::test]
 async fn socket_rejects_oversized_frames() {
-    use pilot_ipc::MAX_FRAME_BYTES;
-    use pilot_ipc::socket::read_frame;
+    use lazybox_ipc::MAX_FRAME_BYTES;
+    use lazybox_ipc::socket::read_frame;
     use tokio::io::AsyncWriteExt;
 
     let (mut a, mut b) = duplex(64);
@@ -482,7 +482,7 @@ async fn socket_rejects_oversized_frames() {
 
     let result: Result<Option<Command>, _> = read_frame(&mut b).await;
     assert!(
-        matches!(result, Err(pilot_ipc::socket::FrameError::TooLarge(n)) if n == bad_len),
+        matches!(result, Err(lazybox_ipc::socket::FrameError::TooLarge(n)) if n == bad_len),
         "expected TooLarge, got {result:?}"
     );
 }
@@ -492,7 +492,7 @@ async fn socket_rejects_oversized_frames() {
 /// from a transport fault.
 #[tokio::test]
 async fn socket_clean_eof_is_none() {
-    use pilot_ipc::socket::read_frame;
+    use lazybox_ipc::socket::read_frame;
 
     let (a, mut b) = duplex(64);
     drop(a);
@@ -507,7 +507,7 @@ async fn socket_clean_eof_is_none() {
 /// edge cases in the framing arithmetic.
 #[tokio::test]
 async fn socket_zero_byte_payload_works() {
-    use pilot_ipc::socket::{read_frame, write_frame};
+    use lazybox_ipc::socket::{read_frame, write_frame};
     let (mut a, mut b) = duplex(64);
     let msg = Command::Write {
         terminal_id: TerminalId(1),
@@ -524,7 +524,7 @@ async fn socket_zero_byte_payload_works() {
 /// Terminal output carries both.
 #[tokio::test]
 async fn socket_binary_terminal_output_round_trip() {
-    use pilot_ipc::socket::{read_frame, write_frame};
+    use lazybox_ipc::socket::{read_frame, write_frame};
     let (mut a, mut b) = duplex(64 * 1024);
 
     let nasty: Vec<u8> = (0..=255).collect();

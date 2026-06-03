@@ -1,5 +1,5 @@
 [package]
-name = "pilot-ipc"
+name = "lazybox-ipc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-pilot-core          = { workspace = true }
+lazybox-core          = { workspace = true }
 serde               = { workspace = true }
 bincode             = { workspace = true }
 thiserror           = { workspace = true }
@@ -15,7 +15,7 @@ tokio               = { workspace = true }
 chrono              = { workspace = true }
 tracing             = { workspace = true }
 # Wire types for Event::ProxyRecord use Duration with humantime
-# serialization. Lives here (not pulled in via pilot-llm-proxy) so
+# serialization. Lives here (not pulled in via lazybox-llm-proxy) so
 # the protocol crate doesn't depend on the proxy implementation.
 humantime-serde     = "1"
 

@@ -1,6 +1,6 @@
 # Workspaces & git worktrees
 
-A **workspace** is pilot's unit of work: a task (PR / issue / ticket) plus the
+A **workspace** is lazybox's unit of work: a task (PR / issue / ticket) plus the
 git worktree and terminal sessions attached to it. This page covers the
 workspace model, the worktree manager that backs it, the lifecycle actions
 (new / merge / archive / adopt / collapse), editor and per-repo integration,
@@ -63,12 +63,12 @@ if needed. Manage stale worktrees from Settings → Inspect/Clean worktrees.
 
 ### How it works (brief)
 `WorktreeManager` (`crates/git-ops/src/lib.rs`) keeps bare clones at
-`~/.pilot/v2/repos/<owner>/<repo>.git` and worktrees under
-`~/.pilot/v2/worktrees/`. `checkout()` is idempotent (returns the existing
+`~/.lazybox/v2/repos/<owner>/<repo>.git` and worktrees under
+`~/.lazybox/v2/worktrees/`. `checkout()` is idempotent (returns the existing
 worktree if present) and falls back from `refs/remotes/origin/<branch>` to a
 local branch. `checkout_new_branch()` creates a worktree from a fresh branch off
 a base. Mounts symlink shared dirs (`placement: inside|above`); scripts
-materialize to `<worktree>/_pilot/scripts/<name>` (inline body or symlinked
+materialize to `<worktree>/_lazybox/scripts/<name>` (inline body or symlinked
 source). Cleanup (`remove_by_path`) removes the worktree and falls back to
 `rm -rf` + `git worktree prune`; orphan detection lives in `inspect.rs`.
 
@@ -77,11 +77,11 @@ source). Cleanup (`remove_by_path`) removes the worktree and falls back to
 - [ ] A second session on the same task reuses the existing worktree (idempotent).
 - [ ] A pre-PR workspace gets a worktree off a fresh branch from latest `main`.
 - [ ] Configured mounts appear as symlinks in new worktrees.
-- [ ] Configured scripts appear at `_pilot/scripts/<name>` and are executable.
+- [ ] Configured scripts appear at `_lazybox/scripts/<name>` and are executable.
 - [ ] Archiving removes the worktree from disk and prunes git's worktree list.
 
 ### Known sharp edges
-- Removal falls back to `rm -rf` if `git worktree remove` fails — make sure the target really is a pilot worktree before forcing.
+- Removal falls back to `rm -rf` if `git worktree remove` fails — make sure the target really is a lazybox worktree before forcing.
 - Bare clone + worktrees share one fetch; a corrupt bare clone affects all worktrees of that repo.
 
 ---
@@ -98,7 +98,7 @@ Creates a fresh workspace with a new branch off the latest `main`, before any
 PR exists — for starting work from scratch.
 
 ### How to use it
-Press `n`, enter a name; pilot creates the branch + worktree and opens the
+Press `n`, enter a name; lazybox creates the branch + worktree and opens the
 workspace ready for an agent or shell.
 
 ### How it works (brief)
@@ -225,7 +225,7 @@ applies repo mounts/scripts after `git worktree add`. See the README
 - [ ] A `repos.<r>.env` var is present in a shell spawned in that repo's worktree.
 - [ ] Per-repo env wins over a colliding daemon-env var.
 - [ ] A per-repo mount appears as a symlink at `link_at`.
-- [ ] A per-repo script appears at `_pilot/scripts/<name>`.
+- [ ] A per-repo script appears at `_lazybox/scripts/<name>`.
 - [ ] Repo overrides stack on top of global `worktree.mounts`/`scripts`.
 
 ### Known sharp edges
@@ -354,7 +354,7 @@ to the closing PR using the `closes_issues` relationship on the `Task`.
 
 **Status:** stable
 **Crate(s):** `store` (`src/sqlite.rs`)
-**Config / flags:** state DB at `~/.pilot/v2/state.db` (rooted at `PILOT_HOME`)
+**Config / flags:** state DB at `~/.lazybox/v2/state.db` (rooted at `LAZYBOX_HOME`)
 **Key bindings:** —
 
 ### What it does
@@ -363,7 +363,7 @@ terminal scrollback ring across launches, so the inbox picks up where you left
 off.
 
 ### How to use it
-Automatic. `pilot --fresh` wipes it; `PILOT_HOME` points it elsewhere for a
+Automatic. `lazybox --fresh` wipes it; `LAZYBOX_HOME` points it elsewhere for a
 side-by-side profile.
 
 ### How it works (brief)
@@ -374,8 +374,8 @@ The `Store` trait (`src/traits.rs`) is the swap point for other backends.
 
 ### Test checklist
 - [ ] Read/unread, snooze, and sessions survive a restart.
-- [ ] `pilot --fresh` clears the DB and re-runs setup.
-- [ ] `PILOT_HOME=~/.pilot-dev pilot` uses a separate DB (zero shared state).
+- [ ] `lazybox --fresh` clears the DB and re-runs setup.
+- [ ] `LAZYBOX_HOME=~/.lazybox-dev lazybox` uses a separate DB (zero shared state).
 - [ ] Deleting a workspace removes its row from the store.
 
 ### Known sharp edges

@@ -5,7 +5,7 @@
 //! replaced with focused unit tests for the building blocks.
 #![allow(clippy::unnecessary_get_then_check)]
 
-use pilot_server::agent_spawn::{ProxyProvider, ProxyTarget, inject_proxy_env};
+use lazybox_server::agent_spawn::{ProxyProvider, ProxyTarget, inject_proxy_env};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -69,13 +69,13 @@ fn missing_listen_url_skips_injection() {
 #[tokio::test]
 async fn proxy_record_event_round_trips_through_ipc() {
     timeout(TEST_DEADLINE, async {
-        use pilot_ipc::{Event, channel};
+        use lazybox_ipc::{Event, channel};
 
-        let record = pilot_llm_proxy::ProxyRecord {
+        let record = lazybox_llm_proxy::ProxyRecord {
             session_key: "github:o/r#1".into(),
             started_at: chrono::Utc::now(),
             duration: Duration::from_millis(420),
-            provider: pilot_llm_proxy::ApiProvider::Anthropic,
+            provider: lazybox_llm_proxy::ApiProvider::Anthropic,
             endpoint: "/v1/messages".into(),
             request_model: Some("claude-sonnet-4-6".into()),
             tokens_input: Some(1024),
@@ -96,9 +96,9 @@ async fn proxy_record_event_round_trips_through_ipc() {
         // which the server normally spawns in `serve`. Spawn it here so
         // the event actually reaches the client.
         let forward = server.take_forward().expect("in-process forward plumbing");
-        tokio::spawn(pilot_server::event_forward::forward_events(
+        tokio::spawn(lazybox_server::event_forward::forward_events(
             forward,
-            pilot_server::ServerConfig::in_memory(),
+            lazybox_server::ServerConfig::in_memory(),
         ));
         server.tx.send(event.clone()).unwrap();
         let received = timeout(Duration::from_secs(1), client.recv())

@@ -1,7 +1,7 @@
-//! Claude Code lifecycle hooks → pilot state.
+//! Claude Code lifecycle hooks → lazybox state.
 //!
 //! Claude Code fires structured hook events at lifecycle points (`Stop`,
-//! `Notification`, `PreToolUse`, …). pilot injects a hook command at
+//! `Notification`, `PreToolUse`, …). lazybox injects a hook command at
 //! spawn (see [`crate::hook_settings`]) so the daemon receives these as
 //! deterministic JSON payloads instead of reverse-engineering the
 //! rendered TUI from the PTY byte stream (`crate::detect`).
@@ -13,7 +13,7 @@
 //!   - [`hook_to_state`] — [`HookEvent`] → the [`AgentState`] transition
 //!     it implies (or `None` when the event doesn't change state).
 
-use pilot_ipc::{AgentState, HookEvent, HookEventKind};
+use lazybox_ipc::{AgentState, HookEvent, HookEventKind};
 use serde_json::Value;
 
 /// Parse one Claude Code hook payload (the JSON it writes to a hook

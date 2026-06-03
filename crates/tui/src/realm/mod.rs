@@ -1,4 +1,4 @@
-//! Pilot's UI on `tuirealm`. Lives parallel to the `tui-kit`-based
+//! Lazybox's UI on `tuirealm`. Lives parallel to the `tui-kit`-based
 //! tree (`crate::app`, `crate::components`) during the migration;
 //! once every pane + modal is ported here and the new `app::run`
 //! works end-to-end, the old code is deleted and `crate::tui_kit`
@@ -9,7 +9,7 @@
 //! ```text
 //! realm/
 //! ├── mod.rs         this file — re-exports + the Msg/Id types
-//! ├── model.rs       the Application + main loop (pilot's `App`
+//! ├── model.rs       the Application + main loop (lazybox's `App`
 //! │                  equivalent under tuirealm)
 //! └── components/    one file per pane / modal port
 //!     ├── splash.rs
@@ -27,7 +27,7 @@
 //!   old impls where it's clean — duplicate them and edit when it's
 //!   not.
 //!
-//! ## What's pilot-domain (stays) vs framework-shaped (rewires)
+//! ## What's lazybox-domain (stays) vs framework-shaped (rewires)
 //!
 //! - **State + render bodies + helpers** — copy verbatim from
 //!   `crate::components::*`. The ratatui calls work identically

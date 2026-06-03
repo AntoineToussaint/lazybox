@@ -1,6 +1,6 @@
-//! # pilot-core
+//! # lazybox-core
 //!
-//! Generic domain types for pilot. Source-agnostic: nothing here knows about
+//! Generic domain types for lazybox. Source-agnostic: nothing here knows about
 //! GitHub, Linear, or any specific provider.
 
 pub mod agent;

@@ -6,7 +6,7 @@
 //! behavior stays consistent across surfaces.
 
 use super::{Model, PaneFocus};
-use pilot_ipc::Command as IpcCommand;
+use lazybox_ipc::Command as IpcCommand;
 use tuirealm::terminal::TerminalAdapter;
 
 impl<T: TerminalAdapter> Model<T> {
@@ -18,8 +18,11 @@ impl<T: TerminalAdapter> Model<T> {
     /// **Returns** the IPC commands the action produces, if any.
     /// UI-only effects (modal mounts, focus moves) happen via
     /// `&mut self` and aren't reflected in the return.
-    pub fn dispatch_action(&mut self, action: &pilot_tui_core::action::Action) -> Vec<IpcCommand> {
-        use pilot_tui_core::action::ActionDef;
+    pub fn dispatch_action(
+        &mut self,
+        action: &lazybox_tui_core::action::Action,
+    ) -> Vec<IpcCommand> {
+        use lazybox_tui_core::action::ActionDef;
         // Destructive gate, type-system enforced via the catalog.
         // Every destructive action is routed through the unified
         // Confirm modal first; the pending action lives in
@@ -61,8 +64,8 @@ impl<T: TerminalAdapter> Model<T> {
     /// workspaces under it." Adding more overrides here is the right
     /// growth path — keeps catalog defaults declarative and the
     /// context-sensitive copy out of the dispatch.
-    fn action_confirm_override(&self, action: &pilot_tui_core::action::Action) -> Option<String> {
-        use pilot_tui_core::action::Action;
+    fn action_confirm_override(&self, action: &lazybox_tui_core::action::Action) -> Option<String> {
+        use lazybox_tui_core::action::Action;
         if !matches!(action, Action::Archive) {
             return None;
         }
@@ -90,9 +93,9 @@ impl<T: TerminalAdapter> Model<T> {
 
     pub(crate) fn dispatch_action_unchecked(
         &mut self,
-        action: &pilot_tui_core::action::Action,
+        action: &lazybox_tui_core::action::Action,
     ) -> Vec<IpcCommand> {
-        use pilot_tui_core::action::Action;
+        use lazybox_tui_core::action::Action;
         let mut cmds = Vec::new();
         // Workspace-scoped actions need a target — grab the
         // sidebar's selection. Mismatch (no selection) silently
@@ -112,7 +115,7 @@ impl<T: TerminalAdapter> Model<T> {
                     cmds.push(IpcCommand::Spawn {
                         session_key: sk,
                         session_id,
-                        kind: pilot_ipc::TerminalKind::Shell,
+                        kind: lazybox_ipc::TerminalKind::Shell,
                         cwd: None,
                         initial_prompt: None,
                     });
@@ -123,7 +126,7 @@ impl<T: TerminalAdapter> Model<T> {
                     cmds.push(IpcCommand::Spawn {
                         session_key: sk,
                         session_id,
-                        kind: pilot_ipc::TerminalKind::Agent(agent_id.clone()),
+                        kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
                         cwd: None,
                         initial_prompt: None,
                     });
@@ -158,7 +161,7 @@ impl<T: TerminalAdapter> Model<T> {
                     cmds.push(IpcCommand::Spawn {
                         session_key: (&workspace_key).into(),
                         session_id,
-                        kind: pilot_ipc::TerminalKind::Agent(agent_id),
+                        kind: lazybox_ipc::TerminalKind::Agent(agent_id),
                         cwd: None,
                         initial_prompt: prompt,
                     });
@@ -265,11 +268,11 @@ impl<T: TerminalAdapter> Model<T> {
                         w.pr.as_ref()
                             .is_some_and(|pr| pr.closes_issues.contains(&primary.id))
                     })
-                    .map(|w| pilot_core::SessionKey::from(&w.key));
+                    .map(|w| lazybox_core::SessionKey::from(&w.key));
                 match claiming_pr {
                     Some(_pr_key) => {
                         cmds.push(IpcCommand::CollapseIntoPr {
-                            issue_workspace_key: pilot_core::SessionKey::from(&issue_ws.key),
+                            issue_workspace_key: lazybox_core::SessionKey::from(&issue_ws.key),
                         });
                         self.flash_info("joining into PR…");
                     }
@@ -289,10 +292,10 @@ impl<T: TerminalAdapter> Model<T> {
                     return cmds;
                 };
                 if workspace.is_snoozed(now) {
-                    let session_key = pilot_core::SessionKey::from(&workspace.key);
+                    let session_key = lazybox_core::SessionKey::from(&workspace.key);
                     cmds.push(IpcCommand::Unsnooze { session_key });
                 } else {
-                    let session_key = pilot_core::SessionKey::from(&workspace.key);
+                    let session_key = lazybox_core::SessionKey::from(&workspace.key);
                     self.mount_snooze_picker(session_key);
                 }
             }
@@ -364,7 +367,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // covers both focuses).
                 let intent = crate::intent::resolve_reply(self.sidebar.selected_workspace());
                 if let crate::intent::Intent::MountReply { workspace_key } = intent {
-                    let session_key: pilot_core::SessionKey = (&workspace_key).into();
+                    let session_key: lazybox_core::SessionKey = (&workspace_key).into();
                     self.mount_reply(session_key);
                 }
             }
@@ -435,7 +438,7 @@ impl<T: TerminalAdapter> Model<T> {
                     self.flash_info("no task URL on this workspace");
                     return cmds;
                 };
-                match pilot_tui_core::editors::open_url(&url) {
+                match lazybox_tui_core::editors::open_url(&url) {
                     Ok(()) => {
                         tracing::info!(%url, "opened workspace URL in browser");
                         self.flash_info(format!("opened {url}"));

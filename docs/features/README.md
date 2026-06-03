@@ -1,6 +1,6 @@
-# pilot feature catalog
+# lazybox feature catalog
 
-A dev-side inventory of **everything pilot currently does**, organized by
+A dev-side inventory of **everything lazybox currently does**, organized by
 domain. Each entry is a short, consistent page that doubles as a
 **hand-testing checklist** — the source material for focused, feature-by-feature
 review and for dev onboarding.

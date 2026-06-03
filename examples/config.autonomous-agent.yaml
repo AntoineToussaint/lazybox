@@ -1,7 +1,7 @@
-# ~/.pilot/config.yaml — autonomous agent settings
+# ~/.lazybox/config.yaml — autonomous agent settings
 #
-# pilot can run Claude Code autonomously to handle work for you — for example
-# when you mention @pilot on a PR/issue, or press `w` ("work") on a workspace
+# lazybox can run Claude Code autonomously to handle work for you — for example
+# when you mention @lazybox on a PR/issue, or press `w` ("work") on a workspace
 # to spawn an agent with the right prompt for its state (fix CI, resolve a
 # conflict, address review comments, implement an issue).
 #
@@ -13,7 +13,7 @@
 # repos. It can still push branches and open PRs via `gh`, so review its output.
 
 agent:
-  # Used for autonomous runs (e.g. @pilot work, the `w` key). When true, these
+  # Used for autonomous runs (e.g. @lazybox work, the `w` key). When true, these
   # runs launch Claude with --dangerously-skip-permissions. Recommended only if
   # you are comfortable with worktree-scoped autonomy.
   autonomous_skip_permissions: true
@@ -25,7 +25,7 @@ agent:
 
 # Keep your normal config alongside the agent block.
 repos:
-  AntoineToussaint/pilot: {}
+  AntoineToussaint/lazybox: {}
 
 providers:
   github:

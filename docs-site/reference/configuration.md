@@ -1,17 +1,17 @@
 # Configuration reference
 
-pilot reads `~/.pilot/config.yaml`. Every key is optional — pilot runs with an
+lazybox reads `~/.lazybox/config.yaml`. Every key is optional — lazybox runs with an
 empty config by auto-detecting agents and editors and reading GitHub credentials
 from `gh auth token`. The sections below document each top-level key.
 
-`PILOT_HOME` overrides the base directory pilot writes to, which moves the
+`LAZYBOX_HOME` overrides the base directory lazybox writes to, which moves the
 config, state, and worktree paths accordingly.
 
 ## Annotated example
 
 ```yaml
 # ── editors ──────────────────────────────────────────────────────────
-# Overrides/extends the editors pilot auto-detects (Zed, VS Code, Cursor,
+# Overrides/extends the editors lazybox auto-detects (Zed, VS Code, Cursor,
 # Windsurf, Fleet, IDEA, Gram). {path} expands to the worktree directory.
 editors:
   - id: zed
@@ -35,7 +35,7 @@ repos:
       - source: /Users/me/widgets-secrets
         link_at: .secrets
         placement: above
-    # Materialize executables at <worktree>/_pilot/scripts/<name>.
+    # Materialize executables at <worktree>/_lazybox/scripts/<name>.
     scripts:
       - name: seed-db
         content: |
@@ -49,12 +49,12 @@ repos:
 slack:
   bot_token: xoxb-your-bot-token
   app_token: xapp-your-app-token
-  anchor_channel: pilot-inbox
+  anchor_channel: lazybox-inbox
   per_workspace_channels: true
 
 # ── agent ────────────────────────────────────────────────────────────
 agent:
-  # Autonomous @pilot work runs Claude with --dangerously-skip-permissions.
+  # Autonomous @lazybox work runs Claude with --dangerously-skip-permissions.
   autonomous_skip_permissions: true
   # Skip permission prompts for interactively spawned agents too.
   skip_permissions: false
@@ -66,7 +66,7 @@ providers:
 
 # ── ui ───────────────────────────────────────────────────────────────
 ui:
-  log_path: /tmp/pilot.log
+  log_path: /tmp/lazybox.log
 ```
 
 ## `editors`
@@ -103,11 +103,11 @@ A list of symlink definitions:
 
 ### `scripts`
 
-A list of executables materialized at `<worktree>/_pilot/scripts/<name>`:
+A list of executables materialized at `<worktree>/_lazybox/scripts/<name>`:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `name` | string | File name under `_pilot/scripts/` |
+| `name` | string | File name under `_lazybox/scripts/` |
 | `content` | string | Inline script body |
 | `source` | path | Alternative to `content`: read the body from this file |
 
@@ -128,7 +128,7 @@ See [Mirror to Slack](../how-to/mirror-to-slack.md) for setup.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `autonomous_skip_permissions` | bool | Autonomous @pilot work runs Claude with `--dangerously-skip-permissions` (blast radius bounded to the worktree) |
+| `autonomous_skip_permissions` | bool | Autonomous @lazybox work runs Claude with `--dangerously-skip-permissions` (blast radius bounded to the worktree) |
 | `skip_permissions` | bool | Skip permission prompts for interactively spawned agents |
 
 ## `providers`
@@ -141,4 +141,4 @@ See [Mirror to Slack](../how-to/mirror-to-slack.md) for setup.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `log_path` | path | `/tmp/pilot.log` | Where logs are written |
+| `log_path` | path | `/tmp/lazybox.log` | Where logs are written |

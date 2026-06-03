@@ -7,7 +7,7 @@
 //! The daemon emits one `Event::TerminalOutput` per PTY chunk. A chatty
 //! agent (Claude streaming) can produce them faster than a client
 //! consumes. The client-facing channel is bounded
-//! ([`pilot_ipc::EVENT_CHANNEL_CAPACITY`]) so inbound memory has a hard
+//! ([`lazybox_ipc::EVENT_CHANNEL_CAPACITY`]) so inbound memory has a hard
 //! ceiling — but a naive bounded send would either block the daemon
 //! (starving every other client + the command path) or drop raw bytes
 //! mid-stream (which corrupts the libghostty-vt parser on the consumer:
@@ -34,7 +34,7 @@
 //! low-volume lossless queue.
 
 use crate::ServerConfig;
-use pilot_ipc::{Event, EventForward, TerminalId};
+use lazybox_ipc::{Event, EventForward, TerminalId};
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
@@ -246,8 +246,8 @@ async fn resync_replay(config: &ServerConfig, terminal_id: TerminalId) -> (Vec<u
 mod tests {
     use super::*;
     use crate::ServerConfig;
-    use pilot_core::SessionKey;
-    use pilot_ipc::TerminalKind;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::TerminalKind;
     use std::time::Duration;
     use tokio::sync::mpsc;
 

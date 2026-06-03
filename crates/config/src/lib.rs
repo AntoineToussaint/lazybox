@@ -1,6 +1,6 @@
-//! # pilot-config
+//! # lazybox-config
 //!
-//! YAML-based configuration for pilot. Loads from `~/.pilot/config.yaml`
+//! YAML-based configuration for lazybox. Loads from `~/.lazybox/config.yaml`
 //! with sensible defaults if the file is missing.
 
 mod snippets;
@@ -44,7 +44,7 @@ pub struct Config {
     /// custom CLIs (e.g. `a → aider`).
     #[serde(default)]
     pub agent_shortcuts: std::collections::BTreeMap<char, String>,
-    /// View preferences pilot writes back automatically: which
+    /// View preferences lazybox writes back automatically: which
     /// repos are collapsed in the sidebar, last splitter widths.
     /// Edit by hand if you want to lock a layout.
     #[serde(default)]
@@ -63,7 +63,7 @@ pub struct Config {
     pub hooks: HooksConfig,
     pub worktree: WorktreeConfig,
     pub terminal: TerminalSection,
-    /// Auto-spawn-on-`@pilot`-mention settings. See [`MentionConfig`].
+    /// Auto-spawn-on-`@lazybox`-mention settings. See [`MentionConfig`].
     #[serde(default)]
     pub mention: MentionConfig,
     /// Auto-inject fix work on CI failure / merge conflict. See
@@ -73,7 +73,7 @@ pub struct Config {
 }
 
 /// `setup:` block — wizard-driven user config. Mirrors
-/// `pilot_core::PersistedSetup` shape but in YAML form.
+/// `lazybox_core::PersistedSetup` shape but in YAML form.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct SetupSection {
@@ -87,13 +87,13 @@ pub struct SetupSection {
     /// Per-provider scope ids (orgs / repos).
     pub scopes: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     /// Agent id the `f` (fix) shortcut spawns. Empty / unset →
-    /// pilot falls back to `"claude"`.
+    /// lazybox falls back to `"claude"`.
     #[serde(default)]
     pub default_agent: Option<String>,
 }
 
 /// One entry under `editors:`. Args support `{path}` for the
-/// worktree dir. See `pilot_tui::editors::EditorTemplate`.
+/// worktree dir. See `lazybox_tui::editors::EditorTemplate`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorEntry {
     pub id: String,
@@ -136,7 +136,7 @@ impl Default for AttentionConfig {
     }
 }
 
-/// `ui:` block — user-facing view state pilot writes back so UI
+/// `ui:` block — user-facing view state lazybox writes back so UI
 /// preferences survive restart.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -175,14 +175,14 @@ pub struct UiSection {
     /// `Shift-Z` long-snooze duration. None = ~1 year (365 days).
     #[serde(with = "duration_secs_opt", default)]
     pub long_snooze: Option<Duration>,
-    /// Where the pilot client writes its log file. None =
-    /// `/tmp/pilot.log`. Future: respect `$XDG_STATE_HOME` /
-    /// `~/.pilot/logs/pilot.log` as a smarter default.
+    /// Where the lazybox client writes its log file. None =
+    /// `/tmp/lazybox.log`. Future: respect `$XDG_STATE_HOME` /
+    /// `~/.lazybox/logs/lazybox.log` as a smarter default.
     pub log_path: Option<std::path::PathBuf>,
     /// Catalog-driven keybinding overrides. Open schema: keys are
     /// snake_case `ActionKind` names (`"merge_pr"`, `"spawn_shell"`,
     /// `"refresh"`, …); values are key-spec strings (`"Shift-M"`,
-    /// `"Ctrl-Enter"`). Pilot consults this map before falling back
+    /// `"Ctrl-Enter"`). Lazybox consults this map before falling back
     /// to the catalog default (`ActionDef::default_keys`). Unset
     /// keys use the default. This is the only remap surface — the
     /// older typed `Keybindings` struct was retired in favor of the
@@ -230,7 +230,7 @@ impl Default for UiDefaults {
             task_body_max_rows: 8,
             short_snooze: Duration::from_secs(4 * 60 * 60),
             long_snooze: Duration::from_secs(365 * 24 * 60 * 60),
-            log_path: std::path::PathBuf::from("/tmp/pilot.log"),
+            log_path: std::path::PathBuf::from("/tmp/lazybox.log"),
         }
     }
 }
@@ -269,17 +269,17 @@ impl UiSection {
 #[serde(default)]
 pub struct WorktreeConfig {
     /// Paths to symlink into / above each worktree. See
-    /// `pilot_git_ops::Mount` for semantics.
+    /// `lazybox_git_ops::Mount` for semantics.
     pub mounts: Vec<MountSpec>,
     /// Executable scripts to materialize inside each worktree at
-    /// `_pilot/scripts/<name>`. Either inline `content` or a path
-    /// `source` to symlink. See `pilot_git_ops::Script`.
+    /// `_lazybox/scripts/<name>`. Either inline `content` or a path
+    /// `source` to symlink. See `lazybox_git_ops::Script`.
     pub scripts: Vec<ScriptSpec>,
     /// When a tracked PR flips to merged, automatically reap the
     /// worktrees backing its sessions — but only the ones the
     /// inspector deems safe (no locked / uncommitted / unpushed work,
     /// and no live terminal attached). Off by default: opt in once
-    /// you trust pilot not to pull a folder out from under you.
+    /// you trust lazybox not to pull a folder out from under you.
     pub auto_cleanup_merged: bool,
 }
 
@@ -318,11 +318,11 @@ pub struct RepoConfig {
     pub mounts: Vec<MountSpec>,
     /// Executable scripts to materialize inside this repo's
     /// worktrees. Stacked on top of `worktree.scripts`. Each entry
-    /// lands at `_pilot/scripts/<name>` chmod +x.
+    /// lands at `_lazybox/scripts/<name>` chmod +x.
     pub scripts: Vec<ScriptSpec>,
 }
 
-/// Serializable form of `pilot_git_ops::Mount`. Kept separate so
+/// Serializable form of `lazybox_git_ops::Mount`. Kept separate so
 /// config doesn't depend on git-ops; the daemon converts on the way
 /// in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,7 +336,7 @@ pub struct MountSpec {
     pub placement: PlacementSpec,
 }
 
-/// Serializable form of `pilot_git_ops::Script`. Either `content`
+/// Serializable form of `lazybox_git_ops::Script`. Either `content`
 /// (inline body, written to the file) or `source` (path to symlink)
 /// must be set — never both, never neither. The daemon validates
 /// this on the way in.
@@ -352,7 +352,7 @@ pub struct MountSpec {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptSpec {
-    /// Filename inside `_pilot/scripts/`. Must not contain `/`,
+    /// Filename inside `_lazybox/scripts/`. Must not contain `/`,
     /// `\`, `..`, or start with `.` (rejected at apply time).
     pub name: String,
     /// Inline body. Written verbatim into the file. Mutually
@@ -376,10 +376,10 @@ pub enum PlacementSpec {
     Above,
 }
 
-/// Periodic scripts pilot runs to keep the user's environment tidy —
+/// Periodic scripts lazybox runs to keep the user's environment tidy —
 /// cargo sweep, worktree GC, whatever. Users drop shell scripts into
-/// `hooks.dir/<bucket>/` and pilot runs each bucket on its cadence.
-/// Pilot never knows or cares what the scripts do.
+/// `hooks.dir/<bucket>/` and lazybox runs each bucket on its cadence.
+/// Lazybox never knows or cares what the scripts do.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HooksConfig {
@@ -397,10 +397,10 @@ impl Default for HooksConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            // Profile-aware. `~/.pilot-dev` keeps its own hooks
-            // distinct from `~/.pilot`, so a "send Slack on merge"
+            // Profile-aware. `~/.lazybox-dev` keeps its own hooks
+            // distinct from `~/.lazybox`, so a "send Slack on merge"
             // hook configured in stable doesn't spam from dev runs.
-            dir: pilot_core::paths::hooks_dir(),
+            dir: lazybox_core::paths::hooks_dir(),
             schedule: HooksSchedule::default(),
             script_timeout: Duration::from_secs(300),
         }
@@ -435,8 +435,8 @@ impl Default for HooksSchedule {
 #[serde(default)]
 pub struct AgentSection {
     #[serde(flatten)]
-    pub config: pilot_core::AgentConfig,
-    /// Launch pilot-spawned autonomous sessions (e.g. `@pilot`-triggered
+    pub config: lazybox_core::AgentConfig,
+    /// Launch lazybox-spawned autonomous sessions (e.g. `@lazybox`-triggered
     /// work) with permission prompts disabled — `claude
     /// --dangerously-skip-permissions` — so the agent runs unattended
     /// instead of blocking on every tool-use approval. Only affects
@@ -456,7 +456,7 @@ pub struct AgentSection {
 impl Default for AgentSection {
     fn default() -> Self {
         Self {
-            config: pilot_core::AgentConfig::default(),
+            config: lazybox_core::AgentConfig::default(),
             autonomous_skip_permissions: true,
             skip_permissions: false,
         }
@@ -524,7 +524,7 @@ impl Config {
         ui
     }
 
-    /// Load from `~/.pilot/config.yaml`, falling back to defaults.
+    /// Load from `~/.lazybox/config.yaml`, falling back to defaults.
     pub fn load() -> Result<Self, ConfigError> {
         let path = Self::default_path();
         if path.exists() {
@@ -554,8 +554,8 @@ impl Config {
         Ok(())
     }
 
-    /// Atomic write to `~/.pilot/config.yaml`. tmp + rename so a
-    /// crashing pilot doesn't leave a half-written file. Used by
+    /// Atomic write to `~/.lazybox/config.yaml`. tmp + rename so a
+    /// crashing lazybox doesn't leave a half-written file. Used by
     /// the in-process write-back paths (sidebar collapse,
     /// `,` settings palette, splitter resize).
     pub fn save(&self) -> Result<(), ConfigError> {
@@ -596,18 +596,18 @@ impl Config {
     }
 
     pub fn default_path() -> PathBuf {
-        pilot_core::paths::config_yaml()
+        lazybox_core::paths::config_yaml()
     }
 }
 
 // ─── Mention auto-spawn ────────────────────────────────────────────────────
 
-/// Auto-spawn-on-`@pilot`-mention settings. When an allowed user
-/// writes `@pilot` in an issue body or comment, pilot reacts 👀 on
+/// Auto-spawn-on-`@lazybox`-mention settings. When an allowed user
+/// writes `@lazybox` in an issue body or comment, lazybox reacts 👀 on
 /// that surface and spawns the default agent with the implement-issue
 /// prompt — same end-state as the user pressing `w` on the issue row.
 ///
-/// Default: empty `allowed_logins` → pilot falls back to "just the
+/// Default: empty `allowed_logins` → lazybox falls back to "just the
 /// authenticated user's own issues + comments." Add teammates' logins
 /// to extend the allowlist:
 ///
@@ -618,7 +618,7 @@ impl Config {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct MentionConfig {
-    /// GitHub logins whose `@pilot` mentions auto-spawn. Empty (the
+    /// GitHub logins whose `@lazybox` mentions auto-spawn. Empty (the
     /// default) means "just the authenticated viewer" — the polling
     /// layer resolves that fallback at runtime so daemon restarts
     /// pick up token rotations without a config edit.
@@ -628,8 +628,8 @@ pub struct MentionConfig {
 // ─── Auto-fix on CI failure / merge conflict ───────────────────────────────
 
 /// Auto-inject fix work when a PR you authored fails CI or develops a
-/// merge conflict — pilot spawns an agent pointed at the failure and
-/// posts a brief PR comment explaining why, no manual `@pilot` needed.
+/// merge conflict — lazybox spawns an agent pointed at the failure and
+/// posts a brief PR comment explaining why, no manual `@lazybox` needed.
 ///
 /// **Opt-in.** `enabled` defaults to `false`: this pushes commits to
 /// your PRs with no human nudge, so you turn it on deliberately. Only
@@ -641,7 +641,7 @@ pub struct MentionConfig {
 ///   max_attempts: 3       # per PR, per failure-kind, per window
 ///   cooldown: 1h          # min gap between attempts on the same PR
 ///   window: 24h           # rolling budget window
-///   opt_out_labels: [no-auto-fix, do-not-pilot]
+///   opt_out_labels: [no-auto-fix, do-not-lazybox]
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -662,9 +662,9 @@ pub struct AutoFixConfig {
 
 impl Default for AutoFixConfig {
     fn default() -> Self {
-        // Mirror `pilot_core::AutoFixSettings::default()` so the two
+        // Mirror `lazybox_core::AutoFixSettings::default()` so the two
         // can't drift; the conversion below is the single bridge.
-        let d = pilot_core::AutoFixSettings::default();
+        let d = lazybox_core::AutoFixSettings::default();
         Self {
             enabled: d.enabled,
             opt_out_labels: d.opt_out_labels,
@@ -684,11 +684,11 @@ impl Default for AutoFixConfig {
 const MIN_AUTO_FIX_COOLDOWN: Duration = Duration::from_secs(60);
 
 impl AutoFixConfig {
-    /// Convert the YAML form into the runtime [`pilot_core::AutoFixSettings`]
+    /// Convert the YAML form into the runtime [`lazybox_core::AutoFixSettings`]
     /// the polling layer consumes. Clamps `cooldown` up to
     /// `MIN_AUTO_FIX_COOLDOWN` so a too-small value can't spam.
-    pub fn to_settings(&self) -> pilot_core::AutoFixSettings {
-        pilot_core::AutoFixSettings {
+    pub fn to_settings(&self) -> lazybox_core::AutoFixSettings {
+        lazybox_core::AutoFixSettings {
             enabled: self.enabled,
             opt_out_labels: self.opt_out_labels.clone(),
             max_attempts: self.max_attempts,
@@ -823,8 +823,8 @@ pub enum SortMode {
 
 // ─── Slack config ─────────────────────────────────────────────────────────
 
-/// Slack integration. Bidirectional: pilot mirrors PR/agent events to
-/// per-workspace channels (outbound), and `@pilot`-mentions /
+/// Slack integration. Bidirectional: lazybox mirrors PR/agent events to
+/// per-workspace channels (outbound), and `@lazybox`-mentions /
 /// channel messages route back to claude sessions (inbound, via
 /// Socket Mode WebSocket). See `docs/slack-setup.md` for the
 /// Slack-side app setup.
@@ -839,9 +839,9 @@ pub struct SlackConfig {
     /// Required for inbound. Same env-wins-over-YAML rule as
     /// `bot_token`; env var is `SLACK_APP_TOKEN`.
     pub app_token: Option<String>,
-    /// Anchor channel name (no `#` prefix). Pilot posts bootstrap
+    /// Anchor channel name (no `#` prefix). Lazybox posts bootstrap
     /// / error messages here, and routes everything when
-    /// `per_workspace_channels: false`. Default `"pilot"`.
+    /// `per_workspace_channels: false`. Default `"lazybox"`.
     #[serde(default = "default_anchor_channel")]
     pub anchor_channel: String,
     /// Per-workspace channel name prefix. Default `""` → channel
@@ -849,7 +849,7 @@ pub struct SlackConfig {
     /// widget-186`). A value like `"pr-"` produces `pr-github-...`.
     #[serde(default)]
     pub channel_prefix: String,
-    /// If true, pilot auto-creates a channel for every workspace
+    /// If true, lazybox auto-creates a channel for every workspace
     /// the inbox sees. If false, everything routes through the
     /// anchor channel with thread-per-workspace. Default true.
     #[serde(default = "default_per_workspace_channels")]
@@ -857,7 +857,7 @@ pub struct SlackConfig {
 }
 
 fn default_anchor_channel() -> String {
-    "pilot".into()
+    "lazybox".into()
 }
 
 fn default_per_workspace_channels() -> bool {
@@ -1048,7 +1048,7 @@ repos:
         // Default matches the core settings so the two can't drift.
         assert_eq!(
             cfg.auto_fix.to_settings(),
-            pilot_core::AutoFixSettings::default()
+            lazybox_core::AutoFixSettings::default()
         );
     }
 
@@ -1060,7 +1060,7 @@ auto_fix:
   max_attempts: 5
   cooldown: 30m
   window: 12h
-  opt_out_labels: [skip-pilot]
+  opt_out_labels: [skip-lazybox]
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
         let s = cfg.auto_fix.to_settings();
@@ -1068,7 +1068,7 @@ auto_fix:
         assert_eq!(s.max_attempts, 5);
         assert_eq!(s.cooldown, Duration::from_secs(30 * 60));
         assert_eq!(s.window, Duration::from_secs(12 * 3600));
-        assert_eq!(s.opt_out_labels, vec!["skip-pilot".to_string()]);
+        assert_eq!(s.opt_out_labels, vec!["skip-lazybox".to_string()]);
         // Survives a serialize → reparse cycle.
         let written = serde_yaml::to_string(&cfg).expect("serialize");
         let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
@@ -1118,7 +1118,7 @@ auto_fix:
             split_step_percent: Some(7),
             short_snooze: Some(Duration::from_secs(15 * 60)),
             long_snooze: Some(Duration::from_secs(7 * 24 * 3600)),
-            log_path: Some(std::path::PathBuf::from("/var/log/pilot.log")),
+            log_path: Some(std::path::PathBuf::from("/var/log/lazybox.log")),
             ..Default::default()
         };
         let r = ui.resolved();
@@ -1127,6 +1127,6 @@ auto_fix:
         assert_eq!(r.split_step_percent, 7);
         assert_eq!(r.short_snooze, Duration::from_secs(15 * 60));
         assert_eq!(r.long_snooze, Duration::from_secs(7 * 24 * 3600));
-        assert_eq!(r.log_path, std::path::PathBuf::from("/var/log/pilot.log"));
+        assert_eq!(r.log_path, std::path::PathBuf::from("/var/log/lazybox.log"));
     }
 }

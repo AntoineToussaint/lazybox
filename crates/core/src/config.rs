@@ -1,16 +1,16 @@
 //! Setup configuration types.
 //!
-//! These live in pilot_core (rather than pilot_tui) so the daemon
+//! These live in lazybox_core (rather than lazybox_tui) so the daemon
 //! can read them out of the store and the providers can filter by
 //! them, while the TUI's setup screen is the only thing that writes
 //! them. Keys are opaque strings — provider crates know how to
-//! interpret them; pilot_core stays source-agnostic.
+//! interpret them; lazybox_core stays source-agnostic.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Per-provider config: a flat set of opaque keys describing what
-/// pilot should poll for from this provider.
+/// lazybox should poll for from this provider.
 ///
 /// ## GitHub key schema
 ///
@@ -99,7 +99,7 @@ impl ProviderConfig {
     /// Project legacy `role.*` + `type.*` keys onto the new per-type
     /// schema. Idempotent — running it twice is a no-op. Called once
     /// at load time by `setup_flow::load_persisted` so stored configs
-    /// from older versions of pilot keep working.
+    /// from older versions of lazybox keep working.
     pub fn migrate_legacy_keys(&mut self) {
         let prs_enabled = self.enabled_keys.contains("type.prs");
         let issues_enabled = self.enabled_keys.contains("type.issues");
@@ -144,7 +144,7 @@ impl ProviderConfig {
     /// GitHub default is **PR-only** because issues are typically
     /// tracked in a separate issue tracker (Linear, Jira, …) rather
     /// than on GitHub for users sophisticated enough to use a tool
-    /// like pilot. Users who do want issues opt in via the filter
+    /// like lazybox. Users who do want issues opt in via the filter
     /// step.
     pub fn default_for(provider_id: &str) -> Self {
         let mut keys = BTreeSet::new();

@@ -2,11 +2,11 @@
 //! `ipc::channel::pair` — zero serialization, zero sockets — so tests
 //! are fast and deterministic.
 
-use pilot_ipc::{
+use lazybox_ipc::{
     AgentInputMessage, AgentRunId, AgentRuntimeMode, Command, Event, PrincipalId,
     ProviderCredentialInput, channel,
 };
-use pilot_server::{Server, ServerConfig};
+use lazybox_server::{Server, ServerConfig};
 
 #[tokio::test]
 async fn subscribe_yields_snapshot() {

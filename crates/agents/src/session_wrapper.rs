@@ -15,13 +15,13 @@ pub trait SessionWrapper: Send + Sync {
     /// something like `["tmux", "new-session", "-A", "-s", "<key>", "claude --continue"]`.
     fn wrap(&self, session_id: &str, inner: &[String], cwd: &Path) -> Vec<String>;
 
-    /// Sanitize a pilot session key into whatever format the wrapper
+    /// Sanitize a lazybox session key into whatever format the wrapper
     /// accepts. Tmux allows most printables but splits on colons.
-    fn sanitize_id(&self, pilot_key: &str) -> String {
-        pilot_key.replace([':', '/'], "_")
+    fn sanitize_id(&self, lazybox_key: &str) -> String {
+        lazybox_key.replace([':', '/'], "_")
     }
 
-    /// List sessions managed by this wrapper that pilot previously
+    /// List sessions managed by this wrapper that lazybox previously
     /// created. Used on daemon startup to auto-reattach.
     fn list_sessions(&self) -> Vec<String>;
 
@@ -96,7 +96,7 @@ impl SessionWrapper for TmuxWrapper {
 }
 
 /// No-wrapper fallback — runs the inner argv directly. The process
-/// dies when pilot quits. Useful for constrained environments (CI,
+/// dies when lazybox quits. Useful for constrained environments (CI,
 /// containers without tmux) where persistence isn't a goal.
 pub struct RawWrapper;
 

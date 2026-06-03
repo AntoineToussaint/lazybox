@@ -1,35 +1,35 @@
-//! `pilot` — TUI client. Single binary, multiple modes:
+//! `lazybox` — TUI client. Single binary, multiple modes:
 //!
-//!   pilot                         default: in-process daemon + TUI
-//!   pilot --fresh                 wipe ~/.pilot/v2/state.db + force
+//!   lazybox                         default: in-process daemon + TUI
+//!   lazybox --fresh                 wipe ~/.lazybox/v2/state.db + force
 //!                                  the setup screen (testing first-run)
-//!   pilot --test                  throwaway tempdir repo + one fake
+//!   lazybox --test                  throwaway tempdir repo + one fake
 //!                                  workspace, no setup, no polling —
 //!                                  for trying side panel + terminal
 //!                                  pane end-to-end without GitHub
-//!   pilot daemon start            standalone daemon (for remote access)
-//!   pilot daemon stop             stop a running standalone daemon
-//!   pilot daemon status           show daemon status
-//!   pilot server api              foreground JSON HTTP API gateway
-//!   pilot slack init              interactive Slack token setup wizard
-//!   pilot slack doctor            read-only validation of an existing setup
-//!   pilot slack prune             archive stale per-(session, agent) channels
-//!   pilot hook-ingest --terminal N  forward a Claude lifecycle hook
+//!   lazybox daemon start            standalone daemon (for remote access)
+//!   lazybox daemon stop             stop a running standalone daemon
+//!   lazybox daemon status           show daemon status
+//!   lazybox server api              foreground JSON HTTP API gateway
+//!   lazybox slack init              interactive Slack token setup wizard
+//!   lazybox slack doctor            read-only validation of an existing setup
+//!   lazybox slack prune             archive stale per-(session, agent) channels
+//!   lazybox hook-ingest --terminal N  forward a Claude lifecycle hook
 //!                                  payload (stdin JSON) to the daemon;
 //!                                  injected into Claude via --settings
 //!
 //! All arg parsing is intentionally stupid — see `take_flag`.
 
-use pilot_ipc::{channel, socket};
-use pilot_server::lifecycle::{self, ServerStatus};
-use pilot_server::polling;
-use pilot_server::socket_service::SocketService;
-use pilot_server::{Server, ServerConfig};
+use lazybox_ipc::{channel, socket};
+use lazybox_server::lifecycle::{self, ServerStatus};
+use lazybox_server::polling;
+use lazybox_server::socket_service::SocketService;
+use lazybox_server::{Server, ServerConfig};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Fallback poll interval when `~/.pilot/config.yaml::providers.github.poll_interval`
+/// Fallback poll interval when `~/.lazybox/config.yaml::providers.github.poll_interval`
 /// is unreadable. Once we have multiple-provider configs, each
 /// provider will carry its own interval; this constant is only the
 /// safety net for "couldn't load any config at all".
@@ -43,11 +43,11 @@ const POLL_INTERVAL_FALLBACK: Duration = Duration::from_secs(90);
 /// the safety-net constant when the config can't be loaded.
 /// `GithubConfig::poll_interval` already exists in the schema
 /// (default 60s) — using this helper instead of a hardcoded
-/// `POLL_INTERVAL` means edits to `~/.pilot/config.yaml` take
+/// `POLL_INTERVAL` means edits to `~/.lazybox/config.yaml` take
 /// effect on the next daemon start instead of being silently
 /// ignored.
 fn resolve_poll_interval() -> Duration {
-    pilot_config::Config::load()
+    lazybox_config::Config::load()
         .map(|c| c.providers.github.poll_interval)
         .unwrap_or(POLL_INTERVAL_FALLBACK)
 }
@@ -63,7 +63,7 @@ mod tests {
     /// regresses.
     #[test]
     fn default_github_poll_interval_is_what_the_schema_says() {
-        let default = pilot_config::GithubConfig::default().poll_interval;
+        let default = lazybox_config::GithubConfig::default().poll_interval;
         // Default schema value is 60s — picked to fit a 200-PR
         // inbox inside GitHub's 5000-points/hour PAT budget after
         // the GraphQL connection-size trim (see SEARCH_QUERY in
@@ -81,13 +81,13 @@ mod tests {
 
 /// Fallback log path when the config can't be read. Matches the old
 /// hardcoded constant so existing operators / docs that reference
-/// `/tmp/pilot.log` still find what they expect.
-const LOG_PATH_FALLBACK: &str = "/tmp/pilot.log";
+/// `/tmp/lazybox.log` still find what they expect.
+const LOG_PATH_FALLBACK: &str = "/tmp/lazybox.log";
 
-/// Resolve the log path: prefer `~/.pilot/config.yaml::ui.log_path`,
+/// Resolve the log path: prefer `~/.lazybox/config.yaml::ui.log_path`,
 /// fall back to `LOG_PATH_FALLBACK` when the config can't be loaded.
 fn resolve_log_path() -> std::path::PathBuf {
-    pilot_config::Config::load()
+    lazybox_config::Config::load()
         .map(|c| c.ui.resolved().log_path)
         .unwrap_or_else(|_| std::path::PathBuf::from(LOG_PATH_FALLBACK))
 }
@@ -107,10 +107,10 @@ fn init_tracing() -> anyhow::Result<()> {
     // Route the OS stderr into the same log file so native logs from
     // below the Rust layer (libghostty-vt Zig log, libgit2 stderr,
     // agent CLI noise) don't paint over the alternate-screen frame.
-    pilot_tui::platform::redirect_stderr_to_file(&file);
+    lazybox_tui::platform::redirect_stderr_to_file(&file);
 
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "pilot=info,pilot_gh=info,pilot_server=info".into());
+        .unwrap_or_else(|_| "lazybox=info,lazybox_gh=info,lazybox_server=info".into());
 
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
@@ -121,44 +121,44 @@ fn init_tracing() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Top-level orientation, printed on `pilot -h` / `pilot --help`. Ordered
+/// Top-level orientation, printed on `lazybox -h` / `lazybox --help`. Ordered
 /// getting-started-first, with the one destructive flag (`--fresh`) last.
 /// Printed to stdout (not the log file) and exits before the daemon boots,
 /// so `--help` stays fast and clean even when launched in a pipe.
 const HELP: &str = "\
-pilot — a reactive PR inbox in your terminal
+lazybox — a reactive PR inbox in your terminal
 
 Events flow to you: new comments, CI failures, and review requests surface as
 they land. Each task opens a git worktree with an embedded terminal for Claude
 Code, Codex, Cursor, or a shell.
 
-Usage: pilot [OPTIONS] [COMMAND]
+Usage: lazybox [OPTIONS] [COMMAND]
 
 Run with no arguments to launch the inbox (an in-process daemon + TUI). The
 first launch walks you through a short setup wizard; press `,` any time to add
 repos, change agents, or edit roles.
 
 Getting started:
-  pilot                     launch the inbox (default)
-  pilot --test              try the UI on a throwaway seeded workspace, no GitHub
-  pilot --help, -h          show this help
-  pilot --version, -V       print the version
+  lazybox                     launch the inbox (default)
+  lazybox --test              try the UI on a throwaway seeded workspace, no GitHub
+  lazybox --help, -h          show this help
+  lazybox --version, -V       print the version
 
 Remote & services:
-  pilot server start        run a standalone daemon (for SSH / multi-client)
-  pilot server stop         stop a running standalone daemon
-  pilot server status       show daemon status
-  pilot server api [addr]   JSON HTTP API gateway (default 127.0.0.1:8787)
-  pilot --connect <socket>  attach a TUI to a running daemon
-  pilot slack init          set up the optional Slack mirror
-  pilot slack doctor        validate an existing Slack setup
+  lazybox server start        run a standalone daemon (for SSH / multi-client)
+  lazybox server stop         stop a running standalone daemon
+  lazybox server status       show daemon status
+  lazybox server api [addr]   JSON HTTP API gateway (default 127.0.0.1:8787)
+  lazybox --connect <socket>  attach a TUI to a running daemon
+  lazybox slack init          set up the optional Slack mirror
+  lazybox slack doctor        validate an existing Slack setup
 
 Advanced:
-  pilot --fresh             wipe ~/.pilot/v2/state.db and re-run setup (destructive)
+  lazybox --fresh             wipe ~/.lazybox/v2/state.db and re-run setup (destructive)
 
 Credentials come from `gh auth token` by default; set LINEAR_API_KEY for Linear.
-Logs go to /tmp/pilot.log (RUST_LOG=pilot=debug for verbose). State lives in
-~/.pilot/v2/state.db. Docs: https://antoinetoussaint.github.io/pilot/";
+Logs go to /tmp/lazybox.log (RUST_LOG=lazybox=debug for verbose). State lives in
+~/.lazybox/v2/state.db. Docs: https://docs.lazybox.ai/";
 
 /// `-h` / `--help` anywhere in argv. Help is always available regardless of
 /// the rest of the command line, per clig.dev discoverability.
@@ -171,8 +171,10 @@ fn wants_version(args: &[String]) -> bool {
     args.iter().any(|a| a == "-V" || a == "--version")
 }
 
+// `pub` so the `lb` alias bin (src/bin/lb.rs) can call this via a
+// `#[path]` include; harmless for the binary's own entrypoint.
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+pub async fn main() -> anyhow::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
 
     // Resolve --help / --version before init_tracing (which redirects stderr
@@ -183,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if wants_version(&args) {
-        println!("pilot {}", env!("CARGO_PKG_VERSION"));
+        println!("lazybox {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
@@ -193,8 +195,8 @@ async fn main() -> anyhow::Result<()> {
     let test_mode = take_flag(&mut args, "--test");
     let preselect_workspace = take_value(&mut args, "--workspace");
     let preselect_session = take_value(&mut args, "--session");
-    let preselect = preselect_workspace.map(|w| pilot_tui::realm::model::Preselect {
-        workspace_key: pilot_core::SessionKey::from(w),
+    let preselect = preselect_workspace.map(|w| lazybox_tui::realm::model::Preselect {
+        workspace_key: lazybox_core::SessionKey::from(w),
         session_id_raw: preselect_session,
     });
     if fresh {
@@ -218,8 +220,8 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// `pilot hook-ingest --terminal <id>` — the command Claude Code runs
-/// on each lifecycle hook (pilot injects it via `--settings` at spawn).
+/// `lazybox hook-ingest --terminal <id>` — the command Claude Code runs
+/// on each lifecycle hook (lazybox injects it via `--settings` at spawn).
 /// Reads the hook's JSON payload from stdin, normalizes it, and forwards
 /// it to the running daemon over the IPC socket so the daemon can map it
 /// to an `AgentState` transition.
@@ -238,12 +240,12 @@ async fn hook_ingest_subcommand(args: &[String]) -> anyhow::Result<()> {
     };
 
     let payload = read_stdin_to_string();
-    let Some(hook) = pilot_agents::hook::parse_claude_hook(&payload) else {
+    let Some(hook) = lazybox_agents::hook::parse_claude_hook(&payload) else {
         return Ok(());
     };
 
-    let command = pilot_ipc::Command::IngestHook {
-        terminal_id: pilot_ipc::TerminalId(terminal_id),
+    let command = lazybox_ipc::Command::IngestHook {
+        terminal_id: lazybox_ipc::TerminalId(terminal_id),
         hook,
     };
 
@@ -251,7 +253,7 @@ async fn hook_ingest_subcommand(args: &[String]) -> anyhow::Result<()> {
     // reply expected. A connect/write error means no daemon is listening
     // (e.g. hooks fired against a session whose daemon already exited);
     // that's a no-op, not a failure.
-    if let Ok((_rd, mut wr)) = pilot_ipc::transport::connect(&lifecycle::socket_path()).await {
+    if let Ok((_rd, mut wr)) = lazybox_ipc::transport::connect(&lifecycle::socket_path()).await {
         let _ = socket::write_frame(&mut wr, &command).await;
     }
     Ok(())
@@ -284,16 +286,16 @@ fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
     None
 }
 
-/// `pilot --test` boots against a throwaway tempdir repo + one
+/// `lazybox --test` boots against a throwaway tempdir repo + one
 /// pre-seeded workspace. No setup screen, no provider polling, no
 /// disk writes. The fixture (which owns the TempDir) is held in
 /// scope for the whole TUI session — drop = `rm -rf` the tempdir.
-async fn run_test(preselect: Option<pilot_tui::realm::model::Preselect>) -> anyhow::Result<()> {
-    let fixture = pilot_tui::test_mode::TestFixture::new_with_seeded_session()?;
+async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> anyhow::Result<()> {
+    let fixture = lazybox_tui::test_mode::TestFixture::new_with_seeded_session()?;
     eprintln!("--test repo at {}", fixture.repo.path().display());
 
     // Spawn under the test tempdir so any agent we launch defaults
-    // there. Best-effort — pilot still works if chdir fails.
+    // there. Best-effort — lazybox still works if chdir fails.
     let _ = std::env::set_current_dir(fixture.repo.path());
 
     let (client, server) = channel::pair();
@@ -306,11 +308,11 @@ async fn run_test(preselect: Option<pilot_tui::realm::model::Preselect>) -> anyh
     });
 
     tokio::task::spawn_blocking(move || {
-        let mut model = pilot_tui::realm::Model::new(client)?;
+        let mut model = lazybox_tui::realm::Model::new(client)?;
         if let Some(p) = preselect {
             model = model.with_preselect(p);
         }
-        pilot_tui::realm::model::run_loop_with_model(model)
+        lazybox_tui::realm::model::run_loop_with_model(model)
     })
     .await
     .map_err(|e| anyhow::anyhow!("realm task panicked: {e}"))?
@@ -328,10 +330,10 @@ fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
     }
 }
 
-/// `--fresh`: clear `~/.pilot/v2/state.db`. Wipes the entire DB,
+/// `--fresh`: clear `~/.lazybox/v2/state.db`. Wipes the entire DB,
 /// which means the saved setup config in the kv table goes with it.
 fn wipe_state_db() {
-    let path = pilot_server::state_db_path();
+    let path = lazybox_server::state_db_path();
     match std::fs::remove_file(&path) {
         Ok(()) => eprintln!("removed {}", path.display()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -339,18 +341,18 @@ fn wipe_state_db() {
     }
 }
 
-/// `pilot --connect <socket>` — connect to a standalone daemon over
+/// `lazybox --connect <socket>` — connect to a standalone daemon over
 /// a Unix socket and run the realm UI against it. The remote path
 /// trusts the daemon's persisted setup (no first-run wizard, no
 /// detection, no polling kickoff — all of that lives on the daemon
 /// side).
 async fn run_remote(
     socket_path: &std::path::Path,
-    preselect: Option<pilot_tui::realm::model::Preselect>,
+    preselect: Option<lazybox_tui::realm::model::Preselect>,
 ) -> anyhow::Result<()> {
     if !socket_path.exists() {
         anyhow::bail!(
-            "no daemon socket at {}. Start one with `pilot server start`.",
+            "no daemon socket at {}. Start one with `lazybox server start`.",
             socket_path.display()
         );
     }
@@ -359,11 +361,11 @@ async fn run_remote(
         .map_err(|e| anyhow::anyhow!("connect {}: {e}", socket_path.display()))?;
 
     tokio::task::spawn_blocking(move || {
-        let mut model = pilot_tui::realm::Model::new(client)?;
+        let mut model = lazybox_tui::realm::Model::new(client)?;
         if let Some(p) = preselect {
             model = model.with_preselect(p);
         }
-        pilot_tui::realm::model::run_loop_with_model(model)
+        lazybox_tui::realm::model::run_loop_with_model(model)
     })
     .await
     .map_err(|e| anyhow::anyhow!("realm task panicked: {e}"))?
@@ -373,14 +375,14 @@ async fn run_remote(
 /// if no setup exists (kicks the wizard), kicks the polling loop on
 /// completion, runs the realm UI on a blocking task.
 async fn run_embedded_realm(
-    preselect: Option<pilot_tui::realm::model::Preselect>,
+    preselect: Option<lazybox_tui::realm::model::Preselect>,
 ) -> anyhow::Result<()> {
     let (client, server) = channel::pair();
     let config = ServerConfig::from_user_config();
 
-    pilot_server::spawn_handler::recover_sessions(&config).await;
-    pilot_server::spawn_handler::restore_persisted_sessions(&config).await;
-    pilot_server::polling::migrate_legacy_sandbox(&config);
+    lazybox_server::spawn_handler::recover_sessions(&config).await;
+    lazybox_server::spawn_handler::restore_persisted_sessions(&config).await;
+    lazybox_server::polling::migrate_legacy_sandbox(&config);
 
     let serve_config = config.clone();
     tokio::spawn(async move {
@@ -413,17 +415,17 @@ async fn run_embedded_realm(
     // and fires `Command::Refresh` (→ `poll_wake.notify_one()`) to
     // kick an immediate tick — but that notify hit a loop that was
     // never spawned, so polling never started until the user
-    // restarted pilot (empty inbox after first-run setup). Spawning
+    // restarted lazybox (empty inbox after first-run setup). Spawning
     // here regardless is safe: with no config yet, `run_one_tick`
     // sees no providers and ticks as a cheap no-op until the wizard
     // writes `config.yaml` and the Refresh wakes the loop.
     polling::spawn(config.clone(), resolve_poll_interval());
 
-    // Slack mirror — opt-in via `~/.pilot/config.yaml::slack.{bot_token,
+    // Slack mirror — opt-in via `~/.lazybox/config.yaml::slack.{bot_token,
     // app_token}` (or `$SLACK_BOT_TOKEN` / `$SLACK_APP_TOKEN`). No-op
     // when neither token is set.
-    if let Ok(yaml) = pilot_config::Config::load() {
-        let _ = pilot_server::slack::spawn(config.clone(), yaml.slack);
+    if let Ok(yaml) = lazybox_config::Config::load() {
+        let _ = lazybox_server::slack::spawn(config.clone(), yaml.slack);
     }
 
     // Always pre-run detection + scope sources. Two reasons: (1)
@@ -433,7 +435,7 @@ async fn run_embedded_realm(
     // that path doesn't need to re-run async detection from inside
     // a `spawn_blocking` task. Both calls are read-only + cheap-ish
     // (sub-second on a warm cache).
-    let setup_report = pilot_tui::setup::detect_all().await;
+    let setup_report = lazybox_tui::setup::detect_all().await;
     let setup_sources = std::sync::Arc::new(build_scope_sources().await);
     let needs_wizard = persisted_setup(&*config.store).is_none();
     let wizard_seed = if needs_wizard {
@@ -444,7 +446,7 @@ async fn run_embedded_realm(
 
     let store_for_save = config.store.clone();
     tokio::task::spawn_blocking(move || {
-        let mut model = pilot_tui::realm::Model::new(client)?;
+        let mut model = lazybox_tui::realm::Model::new(client)?;
         // Returning user with persisted setup → mount the polling
         // modal up front so the first poll cycle has UI feedback.
         if !returning_sources.is_empty() {
@@ -458,10 +460,10 @@ async fn run_embedded_realm(
         // for an immediate tick + rescope. `Arc<dyn Fn>` because
         // partial flows can fire many times.
         let store_for_save = std::sync::Arc::new(store_for_save);
-        let hook: std::sync::Arc<dyn Fn(pilot_tui::setup_flow::SetupOutcome) + Send + Sync> =
+        let hook: std::sync::Arc<dyn Fn(lazybox_tui::setup_flow::SetupOutcome) + Send + Sync> =
             std::sync::Arc::new(move |outcome| {
-                let persisted = pilot_tui::setup_flow::outcome_to_persisted(&outcome);
-                pilot_tui::setup_flow::save_persisted(&**store_for_save, &persisted);
+                let persisted = lazybox_tui::setup_flow::outcome_to_persisted(&outcome);
+                lazybox_tui::setup_flow::save_persisted(&**store_for_save, &persisted);
             });
         model = model.with_setup_complete_hook(hook);
         if let Some(p) = preselect {
@@ -478,17 +480,17 @@ async fn run_embedded_realm(
             model.cache_persisted_setup(p);
         }
         // Detect installed editors for the `e` shortcut. User
-        // overrides come from `~/.pilot/config.yaml::editors`; the
+        // overrides come from `~/.lazybox/config.yaml::editors`; the
         // builtins ship as defaults.
-        let editors = pilot_tui::editors::discover_at_startup(load_user_editors());
+        let editors = lazybox_tui::editors::discover_at_startup(load_user_editors());
         tracing::info!("detected {} editor(s)", editors.len());
         model.cache_editors(editors);
-        // Apply ~/.pilot/config.yaml::{attention, ui, agent_shortcuts}
+        // Apply ~/.lazybox/config.yaml::{attention, ui, agent_shortcuts}
         // → sidebar + Model. Single load; subsequent reads happen
         // on-demand via Config::save_with for the writable parts.
-        let user_config = pilot_config::Config::load().unwrap_or_else(|e| {
+        let user_config = lazybox_config::Config::load().unwrap_or_else(|e| {
             tracing::warn!("config.yaml load: {e}; using defaults");
-            pilot_config::Config::default()
+            lazybox_config::Config::default()
         });
         let agent_shortcuts: std::collections::HashMap<char, String> =
             user_config.agent_shortcuts.clone().into_iter().collect();
@@ -506,11 +508,12 @@ async fn run_embedded_realm(
         // launches on wizard Finish for first-run users, or at startup
         // (just below) for returning ones.
         model.set_auto_tour(!user_config.ui.tour_seen);
-        // Snippets — global (`<pilot_home>/snippets.yaml`) merged
-        // with the cwd's `.pilot/snippets.yaml` (repo wins on key
-        // conflict). Cwd is "wherever the user launched pilot from",
+        // Snippets — global (`<lazybox_home>/snippets.yaml`) merged
+        // with the cwd's `.lazybox/snippets.yaml` (repo wins on key
+        // conflict). Cwd is "wherever the user launched lazybox from",
         // which is the natural repo root for a single-repo workflow.
-        let snippets = pilot_config::Snippets::load_merged(std::env::current_dir().ok().as_deref());
+        let snippets =
+            lazybox_config::Snippets::load_merged(std::env::current_dir().ok().as_deref());
         model.apply_snippets(snippets);
         model = model.with_splits(user_config.ui.sidebar_pct, user_config.ui.right_top_pct);
         if let Some((report, sources)) = wizard_seed {
@@ -521,7 +524,7 @@ async fn run_embedded_realm(
             // hasn't been seen (e.g. an upgrade into this feature).
             model.maybe_mount_tour();
         }
-        pilot_tui::realm::model::run_loop_with_model(model)
+        lazybox_tui::realm::model::run_loop_with_model(model)
     })
     .await
     .map_err(|e| anyhow::anyhow!("realm task panicked: {e}"))?
@@ -529,26 +532,28 @@ async fn run_embedded_realm(
 
 /// Build the scope sources used by the setup wizard. GitHub today;
 /// Linear ships without a scope-discovery API so the wizard skips it.
-async fn build_scope_sources() -> Vec<Box<dyn pilot_core::ScopeSource>> {
-    let mut sources: Vec<Box<dyn pilot_core::ScopeSource>> = Vec::new();
-    if let Ok(cred) = pilot_gh::credential_chain().resolve(pilot_gh::SOURCE).await
-        && let Ok(client) = pilot_gh::GhClient::from_credential(cred).await
+async fn build_scope_sources() -> Vec<Box<dyn lazybox_core::ScopeSource>> {
+    let mut sources: Vec<Box<dyn lazybox_core::ScopeSource>> = Vec::new();
+    if let Ok(cred) = lazybox_gh::credential_chain()
+        .resolve(lazybox_gh::SOURCE)
+        .await
+        && let Ok(client) = lazybox_gh::GhClient::from_credential(cred).await
     {
-        sources.push(Box::new(pilot_gh::GhScopes::new(std::sync::Arc::new(
+        sources.push(Box::new(lazybox_gh::GhScopes::new(std::sync::Arc::new(
             client,
         ))));
     }
     sources
 }
 
-fn persisted_setup(store: &dyn pilot_store::Store) -> Option<pilot_core::PersistedSetup> {
-    pilot_tui::setup_flow::load_persisted(store)
+fn persisted_setup(store: &dyn lazybox_store::Store) -> Option<lazybox_core::PersistedSetup> {
+    lazybox_tui::setup_flow::load_persisted(store)
 }
 
-/// Read the optional `editors:` list from `~/.pilot/config.yaml`.
+/// Read the optional `editors:` list from `~/.lazybox/config.yaml`.
 /// Errors / missing file → empty vec (the builtins still apply).
-fn load_user_editors() -> Vec<pilot_tui::editors::UserEditorEntry> {
-    let cfg = match pilot_config::Config::load() {
+fn load_user_editors() -> Vec<lazybox_tui::editors::UserEditorEntry> {
+    let cfg = match lazybox_config::Config::load() {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("config.yaml load failed: {e}");
@@ -557,7 +562,7 @@ fn load_user_editors() -> Vec<pilot_tui::editors::UserEditorEntry> {
     };
     cfg.editors
         .into_iter()
-        .map(|e| pilot_tui::editors::UserEditorEntry {
+        .map(|e| lazybox_tui::editors::UserEditorEntry {
             id: e.id,
             display: e.display,
             command: e.command,
@@ -566,16 +571,16 @@ fn load_user_editors() -> Vec<pilot_tui::editors::UserEditorEntry> {
         .collect()
 }
 
-/// `pilot slack <init|doctor>` — Slack-side setup helpers. See
-/// `pilot_tui::slack_init` for the actual flow; this is just the
+/// `lazybox slack <init|doctor>` — Slack-side setup helpers. See
+/// `lazybox_tui::slack_init` for the actual flow; this is just the
 /// argv dispatch.
 ///
 /// User-facing output goes through `println!` (stdout) because
 /// `init_tracing` redirects fd 2 to the log file — anything written
-/// to stderr from here would vanish into `/tmp/pilot.log` instead of
+/// to stderr from here would vanish into `/tmp/lazybox.log` instead of
 /// reaching the user's terminal.
 async fn slack_subcommand(args: &[String]) -> anyhow::Result<()> {
-    use pilot_tui::slack_init;
+    use lazybox_tui::slack_init;
     match args.first().map(String::as_str) {
         Some("init") => {
             let outcome = slack_init::run_init().await?;
@@ -585,7 +590,7 @@ async fn slack_subcommand(args: &[String]) -> anyhow::Result<()> {
                     // Exit 0 — tokens are persisted and validated, the
                     // user just needs to make the channel reachable.
                     // Doctor will re-run the same check.
-                    println!("(re-run `pilot slack doctor` once #{anchor_channel} is created.)");
+                    println!("(re-run `lazybox slack doctor` once #{anchor_channel} is created.)");
                     Ok(())
                 }
                 slack_init::InitOutcome::Failed => std::process::exit(1),
@@ -603,7 +608,7 @@ async fn slack_subcommand(args: &[String]) -> anyhow::Result<()> {
             }
         }
         Some("prune") => {
-            use pilot_tui::slack_prune;
+            use lazybox_tui::slack_prune;
             let outcome = slack_prune::run(&args[1..]).await?;
             match outcome {
                 slack_prune::PruneOutcome::Done { .. } => Ok(()),
@@ -612,7 +617,7 @@ async fn slack_subcommand(args: &[String]) -> anyhow::Result<()> {
             }
         }
         _ => {
-            println!("usage: pilot slack [init|doctor|prune]");
+            println!("usage: lazybox slack [init|doctor|prune]");
             std::process::exit(2);
         }
     }
@@ -625,7 +630,7 @@ async fn server_subcommand(args: &[String]) -> anyhow::Result<()> {
         Some("status") => server_status(),
         Some("api") => server_api(args.get(1)).await,
         _ => {
-            eprintln!("usage: pilot server [start|stop|status|api [addr:port]]");
+            eprintln!("usage: lazybox server [start|stop|status|api [addr:port]]");
             std::process::exit(2);
         }
     }
@@ -640,11 +645,11 @@ async fn server_start() -> anyhow::Result<()> {
     let pid_file = lifecycle::pid_path();
 
     let config = ServerConfig::from_user_config();
-    pilot_server::spawn_handler::recover_sessions(&config).await;
+    lazybox_server::spawn_handler::recover_sessions(&config).await;
     polling::migrate_legacy_sandbox(&config);
     polling::spawn(config.clone(), resolve_poll_interval());
-    if let Ok(yaml) = pilot_config::Config::load() {
-        let _ = pilot_server::slack::spawn(config.clone(), yaml.slack);
+    if let Ok(yaml) = lazybox_config::Config::load() {
+        let _ = lazybox_server::slack::spawn(config.clone(), yaml.slack);
     }
 
     let factory_config = config.clone();
@@ -652,13 +657,13 @@ async fn server_start() -> anyhow::Result<()> {
     let shutdown = service.shutdown_handle();
 
     tokio::spawn(async move {
-        pilot_tui::platform::wait_for_shutdown_signal().await;
+        lazybox_tui::platform::wait_for_shutdown_signal().await;
         shutdown.notify_one();
     });
 
-    println!("pilot-server listening on {}", socket.display());
+    println!("lazybox-server listening on {}", socket.display());
     service.run().await?;
-    println!("pilot-server stopped");
+    println!("lazybox-server stopped");
     Ok(())
 }
 
@@ -689,27 +694,27 @@ async fn server_api(addr_arg: Option<&String>) -> anyhow::Result<()> {
         Some(raw) => raw
             .parse::<SocketAddr>()
             .map_err(|e| anyhow::anyhow!("invalid API bind address {raw:?}: {e}"))?,
-        None => std::env::var("PILOT_API_ADDR")
+        None => std::env::var("LAZYBOX_API_ADDR")
             .ok()
             .and_then(|raw| raw.parse::<SocketAddr>().ok())
             .unwrap_or_else(|| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8787)),
     };
-    let token = std::env::var("PILOT_API_TOKEN")
+    let token = std::env::var("LAZYBOX_API_TOKEN")
         .ok()
         .filter(|s| !s.is_empty());
 
     let config = ServerConfig::from_user_config();
-    pilot_server::spawn_handler::recover_sessions(&config).await;
-    println!("pilot API listening on http://{bind_addr}");
+    lazybox_server::spawn_handler::recover_sessions(&config).await;
+    println!("lazybox API listening on http://{bind_addr}");
     if token.is_some() {
-        println!("pilot API bearer auth enabled via PILOT_API_TOKEN");
+        println!("lazybox API bearer auth enabled via LAZYBOX_API_TOKEN");
     } else {
-        println!("pilot API bearer auth disabled; bound to localhost by default");
+        println!("lazybox API bearer auth disabled; bound to localhost by default");
     }
 
-    pilot_server::api_gateway::serve(
+    lazybox_server::api_gateway::serve(
         config,
-        pilot_server::api_gateway::GatewayOptions {
+        lazybox_server::api_gateway::GatewayOptions {
             bind_addr,
             bearer_token: token,
         },

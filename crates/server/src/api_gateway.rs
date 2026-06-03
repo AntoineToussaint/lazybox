@@ -1,4 +1,4 @@
-//! Minimal JSON gateway for Pilot.
+//! Minimal JSON gateway for Lazybox.
 //!
 //! This module is intentionally isolated from `lib.rs` wiring. It uses
 //! Hyper 1 for HTTP and exposes newline-delimited JSON frames so API
@@ -12,8 +12,8 @@ use hyper::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use pilot_ipc::{Command, Connection, Event};
-use pilot_store::StoreError;
+use lazybox_ipc::{Command, Connection, Event};
+use lazybox_store::StoreError;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::fmt::Display;
@@ -64,7 +64,7 @@ pub struct HealthResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspacesResponse {
-    pub workspaces: Vec<pilot_core::Workspace>,
+    pub workspaces: Vec<lazybox_core::Workspace>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,7 +108,7 @@ pub fn check_bearer_token(
 pub fn health_response() -> HealthResponse {
     HealthResponse {
         ok: true,
-        service: "pilot-api-gateway".into(),
+        service: "lazybox-api-gateway".into(),
     }
 }
 
@@ -118,7 +118,7 @@ pub fn workspaces_response(config: &ServerConfig) -> Result<WorkspacesResponse, 
         .into_iter()
         .filter_map(|record| {
             let json = record.workspace_json?;
-            match serde_json::from_str::<pilot_core::Workspace>(&json) {
+            match serde_json::from_str::<lazybox_core::Workspace>(&json) {
                 Ok(workspace) => Some(workspace),
                 Err(error) => {
                     tracing::warn!("api gateway: skipping workspace {}: {error}", record.key);

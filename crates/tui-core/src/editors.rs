@@ -1,6 +1,6 @@
 //! Editor detection + launch helpers.
 //!
-//! Pilot exposes an `o` (sidebar) shortcut that opens the focused
+//! Lazybox exposes an `o` (sidebar) shortcut that opens the focused
 //! workspace's worktree in the user's editor of choice. We probe
 //! PATH at startup for known editors (Zed, VS Code, Cursor, Vim,
 //! Neovim, Helix, JetBrains IDEs, Fleet, …) so the user doesn't
@@ -8,7 +8,7 @@
 //!
 //! ## Customization
 //!
-//! `~/.pilot/config.yaml` can add custom editors via an `editors:`
+//! `~/.lazybox/config.yaml` can add custom editors via an `editors:`
 //! list. Entries with the same `id` as a builtin override the
 //! builtin's command/args; new ids extend the list. Args support
 //! `{path}` (the worktree directory) which is substituted at launch.
@@ -27,7 +27,7 @@
 //!
 //! ## Spawning
 //!
-//! The editor process is detached from pilot — closing pilot
+//! The editor process is detached from lazybox — closing lazybox
 //! shouldn't take the editor with it. We use the same
 //! `crate::platform::detach_child_process` helper as `Ctrl-Shift-D`
 //! so the cross-platform story is consistent.
@@ -51,8 +51,8 @@ pub struct EditorTemplate {
 }
 
 /// Built-in editor list. **GUI editors only** — vim/neovim/helix
-/// belong in a terminal pane, which pilot already provides. Users
-/// who want them can add via `editors:` in `~/.pilot/config.yaml`.
+/// belong in a terminal pane, which lazybox already provides. Users
+/// who want them can add via `editors:` in `~/.lazybox/config.yaml`.
 fn builtin_editors() -> Vec<EditorTemplate> {
     let template = |id: &str, display: &str, command: &str| EditorTemplate {
         id: id.to_string(),
@@ -71,7 +71,7 @@ fn builtin_editors() -> Vec<EditorTemplate> {
     ]
 }
 
-/// User entry in `~/.pilot/config.yaml::editors`. Mirrors the
+/// User entry in `~/.lazybox/config.yaml::editors`. Mirrors the
 /// builtin shape but is owned (deserialized).
 #[derive(Debug, Clone, Deserialize)]
 pub struct UserEditorEntry {
@@ -142,13 +142,13 @@ pub fn discover_at_startup(user: Vec<UserEditorEntry>) -> Vec<EditorTemplate> {
 }
 
 /// Spawn `template` against `worktree`. Replaces `{path}`
-/// placeholders in args. Detached so the editor outlives pilot.
+/// placeholders in args. Detached so the editor outlives lazybox.
 /// Returns Ok on successful spawn — the editor's own success is
 /// not waited on.
 /// Open `url` in the host's default web browser. Picks the right
 /// per-platform launcher (`open` on macOS, `xdg-open` on Linux,
 /// `cmd /c start` on Windows) and detaches so the browser outlives
-/// pilot. Used by the `O` (Shift-O) shortcut on workspaces to jump
+/// lazybox. Used by the `O` (Shift-O) shortcut on workspaces to jump
 /// to the PR / issue page on GitHub / Linear.
 pub fn open_url(url: &str) -> std::io::Result<()> {
     // Minimal allow-list: must be http(s) so a malformed task URL
@@ -240,7 +240,7 @@ fn open_file_args(
 /// special-case those by `id`. The file target is substituted into
 /// the template's `{path}` placeholder (or appended when the template
 /// has none), reusing the same argv shape as [`launch`]. Detached so
-/// the editor outlives pilot.
+/// the editor outlives lazybox.
 pub fn open_file(
     template: &EditorTemplate,
     file: &Path,

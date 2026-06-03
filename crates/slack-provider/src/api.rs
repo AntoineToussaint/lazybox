@@ -1,5 +1,5 @@
 //! Slack Web API client — `chat.postMessage`, `conversations.*`,
-//! `auth.test`. Just the calls pilot needs; not a full SDK.
+//! `auth.test`. Just the calls lazybox needs; not a full SDK.
 //!
 //! ## Why no `slack-rs` / `slack-api` dep
 //!
@@ -45,7 +45,7 @@ impl Client {
     }
 
     /// `conversations.list` — fetch up to `limit` channels the bot
-    /// can see. Pilot uses this once at startup to build the
+    /// can see. Lazybox uses this once at startup to build the
     /// `channel_name → channel_id` map; new channels created later
     /// are tracked via the `conversations.create` return value.
     pub async fn conversations_list(
@@ -73,7 +73,7 @@ impl Client {
         .await
     }
 
-    /// Paginated `conversations.list`. Used by `pilot slack prune`,
+    /// Paginated `conversations.list`. Used by `lazybox slack prune`,
     /// which needs to walk the whole workspace (including archived
     /// channels — so it can skip ones already archived) and which
     /// can't rely on a single 1000-channel page. `cursor` is the
@@ -125,7 +125,7 @@ impl Client {
 
     /// `conversations.archive` — archive a channel by id. Slack
     /// doesn't expose a delete-channel endpoint; archiving is the
-    /// closest pilot can get. Idempotent-ish: re-archiving a channel
+    /// closest lazybox can get. Idempotent-ish: re-archiving a channel
     /// that's already archived returns `already_archived`, which
     /// callers should treat as success.
     pub async fn conversations_archive(&self, channel_id: &str) -> Result<(), SlackError> {
@@ -147,7 +147,7 @@ impl Client {
     }
 
     /// `conversations.create` — create a public channel by name.
-    /// Returns the channel id; pilot stashes that for the
+    /// Returns the channel id; lazybox stashes that for the
     /// `channel_id → workspace_key` reverse map.
     ///
     /// Idempotent at the API level — Slack returns
@@ -181,8 +181,8 @@ impl Client {
     }
 
     /// `conversations.join` — self-join a public channel by id. Used
-    /// by `pilot slack init` so the bot lands in `#pilot` without
-    /// requiring a manual `/invite @pilot` from the user.
+    /// by `lazybox slack init` so the bot lands in `#lazybox` without
+    /// requiring a manual `/invite @lazybox` from the user.
     ///
     /// Idempotent: Slack returns `ok: true` even when the bot is
     /// already a member (with `already_in_channel: true` in the
@@ -285,7 +285,7 @@ pub struct Channel {
     #[serde(default)]
     pub is_private: bool,
     /// Unix timestamp (seconds) the channel was created. Used by
-    /// `pilot slack prune --older-than` to age-out stale per-(session,
+    /// `lazybox slack prune --older-than` to age-out stale per-(session,
     /// agent) channels. Slack always sends this; the `default` keeps
     /// the deserializer permissive against legacy fixtures / mock
     /// payloads that omit it.
@@ -314,7 +314,7 @@ pub struct Message {
     /// Optional rich-formatting blocks. None → plain text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocks: Option<serde_json::Value>,
-    /// Optional thread anchor. Pilot uses this when
+    /// Optional thread anchor. Lazybox uses this when
     /// `channel_strategy: thread_per_workspace` is configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_ts: Option<String>,
@@ -349,7 +349,7 @@ pub struct PostMessageResponse {
 
 /// Canonical Slack channel name for a workspace key. Slack channel
 /// names must be lowercase, ≤ 80 chars, with only letters, digits,
-/// hyphens, underscores, and periods. Pilot turns
+/// hyphens, underscores, and periods. Lazybox turns
 /// `"github-acme-widget-186"` → `"github-acme-widget-186"` (already
 /// lowercase + safe characters) but defensively sluggifies in case
 /// a future workspace key contains unexpected chars.
@@ -360,7 +360,7 @@ pub fn channel_name_for_workspace(workspace_key: &str, prefix: &str) -> String {
 /// Channel name for a specific (session, agent) pair. Format:
 /// `<prefix><workspace>-<session8>-<agent>`. Each per-(session, agent)
 /// channel is its own conversation so a workspace running Claude in
-/// one worktree and Codex in another doesn't collide on `@pilot`
+/// one worktree and Codex in another doesn't collide on `@lazybox`
 /// inbound or status reports.
 ///
 /// `session_id` is shortened to 8 hex chars — enough uniqueness for a
@@ -387,7 +387,7 @@ pub fn channel_name_for_terminal(
 /// digits, hyphens, underscores, periods. Caps at 80 chars and trims
 /// trailing punctuation Slack rejects.
 ///
-/// `pub` so `pilot slack prune --workspace` can normalize the user's
+/// `pub` so `lazybox slack prune --workspace` can normalize the user's
 /// input (e.g. `acme/widget#186`) the same way before matching it
 /// against parsed channel names.
 pub fn sluggify(input: &str) -> String {

@@ -1,26 +1,26 @@
 # Support
 
-pilot is pre-1.0 and maintained in the open. Here's where to go depending on
+lazybox is pre-1.0 and maintained in the open. Here's where to go depending on
 what you need.
 
 ## Questions & help
 
 For "how do I…", setup help, or sharing your configuration, start a
-[GitHub Discussion](https://github.com/AntoineToussaint/pilot/discussions).
+[GitHub Discussion](https://github.com/AntoineToussaint/lazybox/discussions).
 
 ## Bugs & feature requests
 
-Open an [issue](https://github.com/AntoineToussaint/pilot/issues/new/choose):
+Open an [issue](https://github.com/AntoineToussaint/lazybox/issues/new/choose):
 
-- **Bug report** — something is broken. Include a `/tmp/pilot.log` excerpt
-  (re-run with `RUST_LOG=pilot=debug` for more), your OS, and the commit you
+- **Bug report** — something is broken. Include a `/tmp/lazybox.log` excerpt
+  (re-run with `RUST_LOG=lazybox=debug` for more), your OS, and the commit you
   built from.
 - **Feature request** — describe the problem you're hitting, not just the
   feature you have in mind.
 
 ## Documentation
 
-The docs site lives at <https://antoinetoussaint.github.io/pilot/>, and the
+The docs site lives at <https://docs.lazybox.ai/>, and the
 architecture notes are in [`CLAUDE.md`](./CLAUDE.md) and `DESIGN.md`.
 
 ## A note on response times

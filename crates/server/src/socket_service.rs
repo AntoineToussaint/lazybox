@@ -7,7 +7,7 @@
 
 use crate::lifecycle;
 use crate::{Server, ServerConfig};
-use pilot_ipc::{socket, transport};
+use lazybox_ipc::{socket, transport};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Notify;
@@ -82,14 +82,14 @@ impl SocketService {
         lifecycle::write_pid_file(std::process::id(), &self.pid_file)
             .map_err(SocketServiceError::Pid)?;
 
-        tracing::info!("pilot-server listening on {}", self.socket.display());
+        tracing::info!("lazybox-server listening on {}", self.socket.display());
 
         let shutdown = self.shutdown.clone();
         loop {
             tokio::select! {
                 biased;
                 _ = shutdown.notified() => {
-                    tracing::info!("pilot-server shutdown requested");
+                    tracing::info!("lazybox-server shutdown requested");
                     break;
                 }
                 accept = listener.accept() => {

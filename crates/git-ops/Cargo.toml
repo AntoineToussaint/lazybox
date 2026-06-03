@@ -1,12 +1,12 @@
 [package]
-name = "pilot-git-ops"
+name = "lazybox-git-ops"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-pilot-core = { workspace = true }
+lazybox-core = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

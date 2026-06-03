@@ -13,7 +13,7 @@
 //! `Application`. So this component fixes `T` to a single dynamic
 //! payload type. We use `Box<dyn Any + Send>` and let the
 //! `Model::update` arm downcast to whatever the calling flow expects.
-//! That's the same pattern pilot uses for `LoadingModal<T>` in tui-kit.
+//! That's the same pattern lazybox uses for `LoadingModal<T>` in tui-kit.
 
 use crate::realm::Msg;
 use crate::realm::UserEvent;

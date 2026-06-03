@@ -14,7 +14,7 @@ pub mod hook_settings;
 pub mod session_wrapper;
 
 pub use agent::{Agent, Registry, SpawnCtx};
-pub use pilot_ipc::AgentState;
+pub use lazybox_ipc::AgentState;
 pub use session_wrapper::{SessionWrapper, TmuxWrapper};
 
 /// Look up a built-in agent by id, or fall back to a `GenericCli`

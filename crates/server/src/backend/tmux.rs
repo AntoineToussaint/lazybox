@@ -1,17 +1,17 @@
 //! `SessionBackend` impl backed by `tmux`.
 //!
-//! Why tmux? Sessions outlive the pilot server. If pilot crashes or is
+//! Why tmux? Sessions outlive the lazybox server. If lazybox crashes or is
 //! restarted, the user's Claude conversation, build output, and shell
 //! history all survive — `backend.list()` rediscovers them and the
 //! server reattaches a fresh I/O conduit. The user can also
-//! `tmux -L pilot attach -t <key>` from any other terminal to see and
+//! `tmux -L lazybox attach -t <key>` from any other terminal to see and
 //! drive the same session — useful for debugging or for picking up
 //! work from a different machine over SSH.
 //!
 //! ## Wire model
 //!
 //! Each session is a tmux session in its own right under the
-//! private socket `tmux -L pilot`. The pilot server keeps **one
+//! private socket `tmux -L lazybox`. The lazybox server keeps **one
 //! attached portable-pty client per session** as the I/O conduit:
 //! bytes the client renders → broadcast to subscribers; bytes from
 //! `write()` → fed to the client's stdin, which tmux relays to the
@@ -20,9 +20,9 @@
 //! This is intentionally a "headless tmux client" — a custom config
 //! file disables tmux's prefix key, status bar, and key bindings so
 //! the bytes flowing through are the agent's own output, not framed
-//! by tmux UI. The agent inside doesn't know it's in tmux; pilot's
+//! by tmux UI. The agent inside doesn't know it's in tmux; lazybox's
 //! libghostty-vt parser doesn't know either; the only role tmux plays
-//! is to keep the inner PTY alive when no pilot client is attached.
+//! is to keep the inner PTY alive when no lazybox client is attached.
 //!
 //! ## Restart recovery
 //!
@@ -44,16 +44,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 
-/// Default socket name for the pilot-owned tmux server. Isolating to
+/// Default socket name for the lazybox-owned tmux server. Isolating to
 /// a private socket means we never touch the user's interactive tmux
 /// sessions running on the default socket.
 ///
 /// The runtime socket name comes from
-/// [`pilot_core::paths::tmux_socket_name`] which derives a unique
-/// name per profile (`PILOT_HOME=~/.pilot-dev` → `pilot-dev`). The
+/// [`lazybox_core::paths::tmux_socket_name`] which derives a unique
+/// name per profile (`LAZYBOX_HOME=~/.lazybox-dev` → `lazybox-dev`). The
 /// constant below is kept for backward compatibility with callers
 /// that imported it directly.
-pub const TMUX_SOCKET: &str = "pilot";
+pub const TMUX_SOCKET: &str = "lazybox";
 
 /// tmux client config: prefix off (so Ctrl-B reaches the agent), no
 /// key bindings (so nothing intercepts), no status bar (so output
@@ -95,7 +95,7 @@ const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
 
 /// Per-session state. The DaemonPty is the tmux-attach client that
-/// streams I/O between pilot and the underlying tmux session.
+/// streams I/O between lazybox and the underlying tmux session.
 struct Slot {
     /// The portable-pty wrapping `tmux attach -t <key>`.
     /// Killed when `kill()` is called; if the session itself ends,
@@ -104,7 +104,7 @@ struct Slot {
 }
 
 pub struct TmuxBackend {
-    /// `tmux -L <socket>` socket name. Per-process so multiple pilot
+    /// `tmux -L <socket>` socket name. Per-process so multiple lazybox
     /// processes don't share session state by accident.
     socket: String,
     /// Path to the transparent-tmux config dropped on first call.
@@ -127,17 +127,17 @@ impl TmuxBackend {
         let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
         tracing::info!("tmux backend available: {version}");
         // Profile-aware socket name. Default profile resolves to
-        // "pilot" — backward compatible with running sessions; a
-        // dev profile (`PILOT_HOME=~/.pilot-dev`) gets "pilot-dev"
-        // so two pilot daemons don't share session state.
-        let socket = pilot_core::paths::tmux_socket_name();
+        // "lazybox" — backward compatible with running sessions; a
+        // dev profile (`LAZYBOX_HOME=~/.lazybox-dev`) gets "lazybox-dev"
+        // so two lazybox daemons don't share session state.
+        let socket = lazybox_core::paths::tmux_socket_name();
         Self::with_socket(&socket).ok()
     }
 
     /// Build a backend pinned to a specific tmux socket name. Useful
     /// for tests so concurrent runs don't share state.
     pub fn with_socket(socket: &str) -> std::io::Result<Self> {
-        let dir = std::env::temp_dir().join("pilot-tmux");
+        let dir = std::env::temp_dir().join("lazybox-tmux");
         std::fs::create_dir_all(&dir)?;
         let config_path = dir.join(format!("{socket}.conf"));
         std::fs::write(&config_path, TMUX_TRANSPARENT_CONF)?;
@@ -151,10 +151,10 @@ impl TmuxBackend {
 
     fn alloc_key(&self, hint: &str) -> String {
         let n = self.next_key.fetch_add(1, Ordering::Relaxed);
-        // Format: `pilot-{hint}-{pid}-{n}`. The hint is a readable
+        // Format: `lazybox-{hint}-{pid}-{n}`. The hint is a readable
         // seed (`widget-126-claude`) so `tmux ls` shows what
         // each session is for; PID + counter guarantee uniqueness
-        // across pilot launches (PIDs aren't reused while in-use)
+        // across lazybox launches (PIDs aren't reused while in-use)
         // and within a single process. Recovery is name-agnostic
         // so old sessions still get reattached by their existing
         // names on restart.
@@ -171,7 +171,7 @@ impl TmuxBackend {
                 }
             })
             .collect();
-        format!("pilot-{safe}-{}-{n}", std::process::id())
+        format!("lazybox-{safe}-{}-{n}", std::process::id())
     }
 
     /// Run `tmux -L <socket> -f <config> ...args`. Captures stdout +
@@ -184,9 +184,9 @@ impl TmuxBackend {
     /// which can be 100ms+ during server startup. Every other task
     /// (TUI render, IPC pumps, polling) would freeze in lockstep.
     async fn tmux(&self, args: &[&str]) -> Result<std::process::Output, BackendError> {
-        // Self-heal the conf file: another pilot instance running on
+        // Self-heal the conf file: another lazybox instance running on
         // the same machine could have hit `Drop` and removed it (we
-        // share `std::env::temp_dir()/pilot-tmux/pilot.conf` across
+        // share `std::env::temp_dir()/lazybox-tmux/lazybox.conf` across
         // instances). Re-writing every call is cheap (a few hundred
         // bytes) and beats a confusing "No such file" error on the
         // user's first spawn.
@@ -250,10 +250,10 @@ impl Drop for TmuxBackend {
         // We deliberately do NOT kill the tmux server or remove the
         // conf file here. Two reasons:
         //
-        // 1. Sessions persist across pilot restarts — that's the
+        // 1. Sessions persist across lazybox restarts — that's the
         //    whole point of the tmux backend (claude/codex sessions
         //    survive a `q q`/relaunch). Killing the server defeats it.
-        // 2. Multiple pilot instances on the same host share the
+        // 2. Multiple lazybox instances on the same host share the
         //    socket + conf. A Drop-on-exit by one instance would yank
         //    the conf out from under a still-running sibling, which
         //    is the bug that surfaced as "No such file or directory"
@@ -408,7 +408,7 @@ impl SessionBackend for TmuxBackend {
         Box::pin(async move {
             // Two sources of truth: the in-memory map (sessions we
             // spawned) and `tmux list-sessions` (what tmux currently
-            // sees, including any survivors of a prior pilot run).
+            // sees, including any survivors of a prior lazybox run).
             // We return the union so restart recovery works even
             // before the server has rebound clients to those keys.
             let mut keys: Vec<String> = self.sessions.lock().await.keys().cloned().collect();
@@ -566,7 +566,7 @@ impl SessionBackend for TmuxBackend {
         &'a self,
         _key: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
-        // Re-attach happens implicitly on the next subscribe — pilot
+        // Re-attach happens implicitly on the next subscribe — lazybox
         // already has the per-client `attach-session` flow wired in
         // `subscribe`. So `resume` is a deliberate no-op: the caller
         // either re-subscribes (live client) or leaves the session

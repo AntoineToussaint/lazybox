@@ -1,7 +1,7 @@
 //! `Polling` — first-poll progress modal. tuirealm port of
 //! `crate::components::polling_modal::PollingModal`.
 //!
-//! Shows after setup completes while pilot kicks off the first poll
+//! Shows after setup completes while lazybox kicks off the first poll
 //! cycle. Dismisses on first `WorkspaceUpserted`, or after a timeout
 //! so the user is never stuck staring at it.
 //!
@@ -11,7 +11,7 @@
 //!   `PollProgress` / `PollCompleted` / `ProviderError`.
 
 use crate::realm::{Msg, UserEvent};
-use pilot_ipc::Event as IpcEvent;
+use lazybox_ipc::Event as IpcEvent;
 use std::time::{Duration, Instant};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};

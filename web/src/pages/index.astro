@@ -1,0 +1,127 @@
+---
+import Layout from '../layouts/Layout.astro';
+
+const repo = 'https://github.com/AntoineToussaint/lazybox';
+const docs = 'https://docs.lazybox.ai';
+
+const features = [
+  {
+    icon: '◉',
+    title: 'Events flow to you',
+    body: 'New comments, CI failures, and review requests surface automatically with read/unread tracking. No more tab-checking GitHub.',
+  },
+  {
+    icon: '⌗',
+    title: 'A session per task',
+    body: 'Every PR or issue becomes a session with an embedded terminal — run Claude Code or a shell, right where the work is.',
+  },
+  {
+    icon: '⑂',
+    title: 'Isolated worktrees',
+    body: 'Each session gets its own git worktree from a bare clone. Switch tasks without stashing, rebasing, or losing your place.',
+  },
+  {
+    icon: '⇄',
+    title: 'Source-agnostic',
+    body: 'GitHub is one provider. Linear, Jira, and others plug in the same way — one inbox for everything that needs you.',
+  },
+  {
+    icon: '⌁',
+    title: 'Agents, built in',
+    body: 'Claude, Codex, Cursor, or any CLI. Spawned agents drive the repo directly with gh and git — no tool-approval wrapper.',
+  },
+  {
+    icon: '⇲',
+    title: 'Local or remote',
+    body: 'Runs as an in-process daemon by default, or split client/daemon over a Unix socket and forward it across SSH.',
+  },
+];
+---
+
+<Layout>
+  <div class="container">
+    <nav class="nav">
+      <span class="brand"><span class="prompt">›</span> lazybox</span>
+      <div class="links">
+        <a href="#features">Features</a>
+        <a href={docs} class="hide-sm">Docs</a>
+        <a href={repo}>GitHub</a>
+      </div>
+    </nav>
+  </div>
+
+  <header class="hero">
+    <div class="container">
+      <span class="eyebrow">reactive PR inbox · TUI</span>
+      <h1>Stop checking GitHub.<br /><span class="grad">Let it come to you.</span></h1>
+      <p class="lead">
+        lazybox is a reactive PR inbox in your terminal. Comments, CI failures, and
+        review requests surface the moment they happen — each one a session with
+        an embedded terminal in its own git worktree.
+      </p>
+
+      <div class="cta-row">
+        <a class="btn btn-primary" href={docs}>Get started →</a>
+        <a class="btn btn-ghost" href={repo}>★ Star on GitHub</a>
+      </div>
+      <p class="install">
+        <code><span class="prompt">$ </span>cargo install lazybox-tui</code>
+      </p>
+
+      <div class="term" aria-hidden="true">
+        <div class="bar">
+          <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+          <span class="title">lazybox — inbox</span>
+        </div>
+        <pre><span class="c-dim">┌─ inbox ──────────────────────────────┐</span>
+<span class="unread">● #209  Rework snippet invocation</span>      <span class="c-green">✓ ci</span>
+<span class="unread">● #207  Bucket untyped workspaces</span>     <span class="c-amber">2 comments</span>
+<span class="c-dim">○ #206  Wrap multi-line snippet bodies</span>  <span class="c-green">✓ ci</span>
+<span class="unread">● #197  Drop bot-authored Slack msgs</span>    <span class="c-red">✗ ci failed</span>
+<span class="c-dim">○ #195  Collapse out-of-scope issue</span>      <span class="c-green">merged</span>
+<span class="c-dim">└──────────────────────────────────────┘</span>
+  <span class="c-accent">c</span> claude  <span class="c-accent">b</span> shell  <span class="c-accent">g m</span> merge  <span class="c-accent">/</span> search</pre>
+      </div>
+    </div>
+  </header>
+
+  <section id="features">
+    <div class="container">
+      <div class="section-head">
+        <h2>An inbox, not a dashboard</h2>
+        <p>Everything that needs your attention, in one place — and a terminal for every task.</p>
+      </div>
+      <div class="grid">
+        {features.map((f) => (
+          <div class="card">
+            <div class="icon">{f.icon}</div>
+            <h3>{f.title}</h3>
+            <p>{f.body}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="container">
+      <h2>Your PRs, where you already live.</h2>
+      <p>Free and open source. Built in Rust.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href={docs}>Read the docs →</a>
+        <a class="btn btn-ghost" href={repo}>View source</a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container row">
+      <span class="brand">› lazybox</span>
+      <div class="links">
+        <a href={docs}>Docs</a>
+        <a href={repo}>GitHub</a>
+        <a href={`${repo}/blob/main/LICENSE`}>License</a>
+      </div>
+    </div>
+  </footer>
+</Layout>

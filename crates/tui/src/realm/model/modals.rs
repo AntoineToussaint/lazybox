@@ -25,7 +25,7 @@ pub(super) enum InspectRow {
     BulkSafe {
         count: usize,
     },
-    Inspection(pilot_ipc::WorktreeInspectionDto),
+    Inspection(lazybox_ipc::WorktreeInspectionDto),
 }
 
 /// Tabular label for one inspector row. Single-line — the Choice
@@ -163,7 +163,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Mount the reply textarea targeted at `workspace_key`. Submit
     /// → `Msg::TextareaSubmitted(body)` → orchestrator builds a
     /// `Command::PostReply { session_key, body }`.
-    pub(super) fn mount_reply(&mut self, workspace_key: pilot_core::SessionKey) {
+    pub(super) fn mount_reply(&mut self, workspace_key: lazybox_core::SessionKey) {
         use crate::realm::components::textarea::Textarea;
 
         if matches!(self.modal_stack.last(), Some(Id::Reply)) {
@@ -181,7 +181,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// `Id::NewWorkspace` is on top → `Command::CreateWorkspace
     /// { name, project_key }`. The project_key is stashed on self
     /// here and consumed by `handle_input_submitted`.
-    pub(super) fn mount_new_workspace_input(&mut self, project_key: pilot_core::ProjectKey) {
+    pub(super) fn mount_new_workspace_input(&mut self, project_key: lazybox_core::ProjectKey) {
         use crate::realm::components::input::Input;
 
         if matches!(self.modal_stack.last(), Some(Id::NewWorkspace)) {
@@ -220,7 +220,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// `Msg::ChoicePicked(indices)` → `handle_choice_picked` looks
     /// up the chosen logins in `review_choices` and dispatches
     /// `Command::RequestReviewers`.
-    pub(crate) fn mount_request_reviewers(&mut self, workspace_key: pilot_core::WorkspaceKey) {
+    pub(crate) fn mount_request_reviewers(&mut self, workspace_key: lazybox_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
 
         if matches!(self.modal_stack.last(), Some(Id::RequestReviewers)) {
@@ -246,7 +246,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// remove) rather than an additive picker — submitting fires
     /// `Command::SetAssignees`, which diffs against the persisted
     /// task and runs add + remove mutations as needed.
-    pub(crate) fn mount_add_assignees(&mut self, workspace_key: pilot_core::WorkspaceKey) {
+    pub(crate) fn mount_add_assignees(&mut self, workspace_key: lazybox_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
 
         if matches!(self.modal_stack.last(), Some(Id::AddAssignees)) {
@@ -291,8 +291,8 @@ impl<T: TerminalAdapter> Model<T> {
     /// labels"; submit replaces the upstream set via `SetLabels`.
     pub(crate) fn mount_manage_labels(
         &mut self,
-        workspace_key: pilot_core::WorkspaceKey,
-        repo_labels: Vec<pilot_core::Label>,
+        workspace_key: lazybox_core::WorkspaceKey,
+        repo_labels: Vec<lazybox_core::Label>,
     ) {
         use crate::realm::components::choice::Choice;
 
@@ -355,7 +355,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// the duration instead of always paying the YAML default.
     /// Cycle of options is curated: each one's a "I'll come back
     /// to this when…" moment that maps to a real schedule.
-    pub(crate) fn mount_snooze_picker(&mut self, session_key: pilot_core::SessionKey) {
+    pub(crate) fn mount_snooze_picker(&mut self, session_key: lazybox_core::SessionKey) {
         use crate::realm::components::choice::Choice;
         use chrono::Datelike;
         use std::time::Duration;
@@ -436,7 +436,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// path can untick → remove.
     pub(super) fn gather_candidate_logins_inclusive(
         &self,
-        workspace_key: &pilot_core::WorkspaceKey,
+        workspace_key: &lazybox_core::WorkspaceKey,
     ) -> Vec<String> {
         let Some(ws) = self
             .sidebar
@@ -478,7 +478,7 @@ impl<T: TerminalAdapter> Model<T> {
 
     pub(super) fn gather_candidate_logins(
         &self,
-        workspace_key: &pilot_core::WorkspaceKey,
+        workspace_key: &lazybox_core::WorkspaceKey,
         exclude_existing_reviewers: bool,
     ) -> Vec<String> {
         let Some(ws) = self
@@ -602,11 +602,11 @@ impl<T: TerminalAdapter> Model<T> {
     /// add a prompt".
     pub(super) fn mount_action_confirm(
         &mut self,
-        action: pilot_tui_core::action::Action,
+        action: lazybox_tui_core::action::Action,
         override_prompt: Option<String>,
     ) {
         use crate::realm::components::confirm::Confirm;
-        use pilot_tui_core::action::ActionDef;
+        use lazybox_tui_core::action::ActionDef;
         // Override wins so callers can render context-sensitive copy
         // (e.g. "Delete project X with 3 workspaces" vs. the generic
         // "Archive the focused workspace"). Catalog default is the
@@ -628,7 +628,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// arriving later calls [`Self::mount_inspect_list`] with the
     /// payload.
     pub(super) fn start_inspect_worktrees(&mut self) {
-        self.send_cmd(pilot_ipc::Command::InspectWorktrees);
+        self.send_cmd(lazybox_ipc::Command::InspectWorktrees);
         self.flash_info("inspecting worktrees…");
     }
 
@@ -644,7 +644,7 @@ impl<T: TerminalAdapter> Model<T> {
     ///   the user has full visibility but can't accidentally delete
     pub(super) fn mount_inspect_list(
         &mut self,
-        inspections: Vec<pilot_ipc::WorktreeInspectionDto>,
+        inspections: Vec<lazybox_ipc::WorktreeInspectionDto>,
     ) {
         use crate::realm::components::choice::Choice;
 
@@ -700,7 +700,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// target so `Msg::Confirmed(true)` knows what to dispatch. Copy
     /// changes when the row has local work so the user sees a clear
     /// "FORCE" warning before they say yes.
-    pub(super) fn mount_inspect_confirm(&mut self, target: pilot_ipc::WorktreeInspectionDto) {
+    pub(super) fn mount_inspect_confirm(&mut self, target: lazybox_ipc::WorktreeInspectionDto) {
         use crate::realm::components::confirm::Confirm;
         let dirty = target.has_uncommitted_changes || target.has_unpushed_commits;
         let prompt = if dirty {
@@ -751,9 +751,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// menu only offers actions that *make sense* for this row —
     /// e.g. `MergePr` only when the PR is in a merge-ready state —
     /// so the user never sees a no-op entry.
-    pub(super) fn mount_sidebar_context_menu(&mut self, session_key: pilot_core::SessionKey) {
+    pub(super) fn mount_sidebar_context_menu(&mut self, session_key: lazybox_core::SessionKey) {
         use crate::realm::components::choice::Choice;
-        use pilot_tui_core::action::{Action, ActionDef, ActionKind, availability};
+        use lazybox_tui_core::action::{Action, ActionDef, ActionKind, availability};
 
         // Snapshot the workspace state — the catalog's `availability`
         // resolver takes `Option<&Workspace>` and decides whether each
@@ -783,7 +783,7 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 // Surface-specific extra gate: don't offer "open
                 // editor" when no editor was detected at startup.
-                // The catalog can't know about pilot's setup state,
+                // The catalog can't know about lazybox's setup state,
                 // so the menu enforces this one.
                 if a.kind() == ActionKind::OpenEditor && self.setup.editors.is_empty() {
                     return false;
@@ -815,13 +815,13 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::SidebarContext, modal);
     }
 
-    pub(super) fn mount_adopt_picker(&mut self, source_key: pilot_core::WorkspaceKey) {
+    pub(super) fn mount_adopt_picker(&mut self, source_key: lazybox_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
 
         // Build (target_key, label) pairs from every workspace EXCEPT
         // the source. Labels prefer the primary task's `owner/repo#N`
         // form so the picker reads like the inbox rows.
-        let mut items: Vec<(pilot_core::WorkspaceKey, String)> = Vec::new();
+        let mut items: Vec<(lazybox_core::WorkspaceKey, String)> = Vec::new();
         for (key, ws) in self.sidebar.workspace_iter() {
             if key.as_str() == source_key.as_str() {
                 continue;
@@ -830,7 +830,7 @@ impl<T: TerminalAdapter> Model<T> {
                 .primary_task()
                 .map(|t| t.id.key.clone())
                 .unwrap_or_else(|| ws.name.clone());
-            items.push((pilot_core::WorkspaceKey::new(key.as_str()), label));
+            items.push((lazybox_core::WorkspaceKey::new(key.as_str()), label));
         }
         if items.is_empty() {
             self.flash_info("no other workspace to adopt sessions into");
@@ -907,8 +907,8 @@ mod tests {
         dirty: bool,
         unpushed: bool,
         size: u64,
-    ) -> pilot_ipc::WorktreeInspectionDto {
-        pilot_ipc::WorktreeInspectionDto {
+    ) -> lazybox_ipc::WorktreeInspectionDto {
+        lazybox_ipc::WorktreeInspectionDto {
             path: std::path::PathBuf::from("/tmp/worktrees/o-r-feat"),
             bare_path: None,
             branch: Some("feat".into()),
@@ -926,7 +926,7 @@ mod tests {
 
     fn merged_prompt(terminal_count: usize, has_local_work: bool) -> super::super::RemovalPrompt {
         super::super::RemovalPrompt {
-            workspace_key: pilot_core::WorkspaceKey::new("github:o/r#7"),
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#7"),
             label: "o/r#7".into(),
             title: None,
             terminal_count,

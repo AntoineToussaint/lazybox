@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## What is pilot?
+## What is lazybox?
 
 A reactive PR inbox TUI. Instead of checking GitHub, events flow to you — new comments, CI failures, review requests surface automatically with read/unread tracking. Each task becomes a session with an embedded terminal for running Claude Code or a shell in a git worktree.
 
@@ -12,13 +12,13 @@ Source-agnostic: GitHub is one provider, but Linear/Jira/etc. plug in the same w
 
 ```bash
 cargo build                    # build (first build compiles SQLite, takes ~30s)
-cargo run -p pilot-tui      # run (uses `gh auth token` automatically)
+cargo run -p lazybox-tui      # run (uses `gh auth token` automatically)
 cargo test --workspace         # tests
 cargo clippy --workspace       # lint
-make run                       # same as cargo run -p pilot-tui
+make run                       # same as cargo run -p lazybox-tui
 ```
 
-Logs go to `/tmp/pilot.log`. State persisted in `~/.pilot/v2/state.db`.
+Logs go to `/tmp/lazybox.log`. State persisted in `~/.lazybox/v2/state.db`.
 
 ## Architecture
 
@@ -33,7 +33,7 @@ crates/
   auth/            # CredentialProvider trait + chain. Env, Command, Static providers.
   events/          # In-process event bus (broadcast channel). EventKind enum.
   store/           # Store trait + SQLite backend. Sessions, read/unread, snooze.
-  config/          # YAML loader for ~/.pilot/config.yaml.
+  config/          # YAML loader for ~/.lazybox/config.yaml.
   git-ops/         # Worktree manager (bare clones + per-task worktrees).
   tui-term/        # Embedded terminal: portable-pty + ghostty-vt + widget. Used
                    #   by both daemon (PTY ownership) and TUI (replay).
@@ -53,7 +53,7 @@ crates/
                    #   polling, agent runs, JSON API gateway.
 
   # ── client / binary ─────────────────────────────────────────────────
-  tui/             # Component-tree TUI client. Hosts `pilot` binary with
+  tui/             # Component-tree TUI client. Hosts `lazybox` binary with
                    #   subcommands: default (in-process daemon + TUI),
                    #   `daemon start/stop/status`, `server api`,
                    #   `--connect <socket>`.
@@ -84,7 +84,7 @@ crates/
 - **Event bus**: `tokio::sync::broadcast` inside the daemon. Providers
   produce; subscribers (TUI clients, JSON API gateway) consume.
 - **Credential chain**: `EnvProvider("GH_TOKEN") → EnvProvider("GITHUB_TOKEN") → CommandProvider("gh auth token")`. Trait-based, extensible (Vault, Keychain, OAuth).
-- **Store**: `Store` trait with `SqliteStore` backend at `~/.pilot/v2/state.db`.
+- **Store**: `Store` trait with `SqliteStore` backend at `~/.lazybox/v2/state.db`.
   Read/unread, snooze, and session metadata persist across launches.
 - **Terminal**: PTY reader on std::thread. ghostty-vt parser behind Mutex.
   Daemon keeps a per-terminal ring buffer (64 KB) for replay on reconnect.
@@ -93,13 +93,13 @@ crates/
   stream-json --output-format stream-json` for non-terminal clients (Tauri,
   iOS, JSON API). Raw JSON is preserved alongside normalized events.
 - **Agent autonomy**: spawned Claude Code sessions drive the repo directly
-  with `gh` and `git`. Pilot does not wrap these actions behind an
+  with `gh` and `git`. Lazybox does not wrap these actions behind an
   MCP/tool-approval layer — the agent has the same tools it would in any
   other worktree.
 
 ### Adding a new provider
 
-1. Create `crates/foo-provider/` depending on `pilot-core` + `pilot-events` + `pilot-auth`
+1. Create `crates/foo-provider/` depending on `lazybox-core` + `lazybox-events` + `lazybox-auth`
 2. Build a credential chain for auth
 3. Implement client returning `Vec<Task>` + poller emitting `Event`s
 4. Wire in `crates/server/` alongside the GitHub and Linear pollers

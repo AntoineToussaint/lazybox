@@ -425,7 +425,7 @@ impl Sidebar {
                         // The footer notice below always fires — it's
                         // in-app and free of the banner's noise.
                         if self.attention.desktop_notify {
-                            let title = format!("pilot — {} needs input", workspace.name);
+                            let title = format!("lazybox — {} needs input", workspace.name);
                             let body = workspace
                                 .primary_task()
                                 .map(|t| t.title.clone())
@@ -459,10 +459,10 @@ impl Sidebar {
 /// title (falling back to the workspace name).
 fn attention_notification(signal: AttentionSignal, w: &Workspace) -> Option<PendingNotification> {
     let title = match signal {
-        AttentionSignal::CiFailing => format!("pilot — CI failing on {}", w.name),
-        AttentionSignal::ReviewPending => format!("pilot — review requested on {}", w.name),
-        AttentionSignal::Unread => format!("pilot — new activity on {}", w.name),
-        AttentionSignal::Mentioned => format!("pilot — you were mentioned in {}", w.name),
+        AttentionSignal::CiFailing => format!("lazybox — CI failing on {}", w.name),
+        AttentionSignal::ReviewPending => format!("lazybox — review requested on {}", w.name),
+        AttentionSignal::Unread => format!("lazybox — new activity on {}", w.name),
+        AttentionSignal::Mentioned => format!("lazybox — you were mentioned in {}", w.name),
         // Delivered via `Event::AgentState`, not workspace upserts.
         AttentionSignal::AgentAsking => return None,
     };

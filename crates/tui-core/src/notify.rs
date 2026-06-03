@@ -2,12 +2,12 @@
 //! sequences.
 //!
 //! Ghostty, iTerm2, Kitty and WezTerm raise a real Notification
-//! Center banner when pilot writes an OSC notification sequence to
+//! Center banner when lazybox writes an OSC notification sequence to
 //! its controlling terminal. Unlike the subprocess fallbacks in
 //! [`crate::platform::notify_user`] (`terminal-notifier` /
 //! `osascript` / `notify-send`), the banner is produced by the
 //! terminal emulator itself — so it surfaces on the *local* machine
-//! even when pilot runs over SSH, and needs no helper binary.
+//! even when lazybox runs over SSH, and needs no helper binary.
 //!
 //! Two sequences cover the field:
 //!   - **OSC 777** `ESC ] 777 ; notify ; TITLE ; BODY BEL` — full

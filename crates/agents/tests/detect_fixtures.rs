@@ -6,7 +6,7 @@
 //! them and still misfire live. This suite closes that gap: each
 //! `include_bytes!` is a raw PTY transcript (genuine CSI/SGR escapes,
 //! multi-byte glyphs, fragmented chooser lines) of the shape
-//! `PILOT_CAPTURE_PTY` dumps from a real session. See
+//! `LAZYBOX_CAPTURE_PTY` dumps from a real session. See
 //! `tests/fixtures/generate.py` for how they're built and how to add
 //! captures from new sessions.
 //!
@@ -14,8 +14,8 @@
 //! real-transcript corpus for idle, working, permission prompt, trust
 //! prompt, conversational question, and finished.
 
-use pilot_agents::AgentState;
-use pilot_agents::detect::{claude_ready_for_prompt, claude_state};
+use lazybox_agents::AgentState;
+use lazybox_agents::detect::{claude_ready_for_prompt, claude_state};
 
 struct ByteFixture {
     name: &'static str,
@@ -93,7 +93,7 @@ const FIXTURES: &[ByteFixture] = &[
         expected: AgentState::Working,
         ready: false,
     },
-    // #179: pilot spawns agents with `--dangerously-skip-permissions`,
+    // #179: lazybox spawns agents with `--dangerously-skip-permissions`,
     // so the idle composer footer is the bypass-mode mode line —
     // `bypass permissions on (shift+tab to cycle) · ← for agents`, with
     // no `? for shortcuts`. Before the fix this footer matched no idle

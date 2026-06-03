@@ -7,7 +7,7 @@
 //!
 //! `ServerConfig::terminals` maps wire `TerminalId` → backend session
 //! key. Multiple connections (in-process channel + a remote SSH
-//! `pilot --connect`) share this map so they see the same set.
+//! `lazybox --connect`) share this map so they see the same set.
 //!
 //! ## Flow on Spawn
 //!
@@ -26,12 +26,12 @@
 
 use crate::ServerConfig;
 use chrono::Utc;
-use pilot_agents::SpawnCtx;
-use pilot_core::{
+use lazybox_agents::SpawnCtx;
+use lazybox_core::{
     SessionId, SessionKey, SessionKind, Task, Workspace, WorkspaceKey, WorkspaceSession as Session,
 };
-use pilot_ipc::{Event, TerminalId, TerminalKind, TerminalSnapshot};
-use pilot_store::WorkspaceRecord;
+use lazybox_ipc::{Event, TerminalId, TerminalKind, TerminalSnapshot};
+use lazybox_store::WorkspaceRecord;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -95,25 +95,25 @@ fn argv_for(
     }
 }
 
-/// Absolute path to the per-terminal Claude settings file pilot writes
+/// Absolute path to the per-terminal Claude settings file lazybox writes
 /// at spawn. Deterministic in `terminal_id` so the pump can delete it on
 /// exit without bookkeeping a map.
 fn hook_settings_path(terminal_id: TerminalId) -> PathBuf {
-    pilot_core::paths::runtime_dir()
+    lazybox_core::paths::runtime_dir()
         .join("hooks")
         .join(format!("settings-{}.json", terminal_id.0))
 }
 
 /// The shell command Claude runs on each lifecycle hook. Uses the
-/// running pilot binary's absolute path (so it works regardless of
+/// running lazybox binary's absolute path (so it works regardless of
 /// `$PATH` inside the agent's environment) and bakes in the terminal id
-/// pilot allocated, so the daemon correlates the hook back to this exact
+/// lazybox allocated, so the daemon correlates the hook back to this exact
 /// terminal with no guessing.
 fn hook_command(terminal_id: TerminalId) -> String {
     let exe = std::env::current_exe()
         .ok()
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "pilot".to_string());
+        .unwrap_or_else(|| "lazybox".to_string());
     format!("\"{exe}\" hook-ingest --terminal {}", terminal_id.0)
 }
 
@@ -194,7 +194,7 @@ pub async fn handle_spawn(
     initial_prompt: Option<String>,
     autonomous: bool,
 ) {
-    // Autonomous sessions (e.g. `@pilot`-triggered work) launch with
+    // Autonomous sessions (e.g. `@lazybox`-triggered work) launch with
     // tool-use permission prompts disabled so the agent runs unattended
     // — there's no human nearby to approve. Gated by config so a
     // paranoid user can force prompts on every session. Interactive
@@ -206,9 +206,9 @@ pub async fn handle_spawn(
     // Wall-clock origin for the spawn → inject timing trace. Every
     // milestone below logs `elapsed_ms` against this so the "long delay
     // between `w` and the prompt being injected" is measurable from
-    // `/tmp/pilot.log` instead of guessed at (#142).
+    // `/tmp/lazybox.log` instead of guessed at (#142).
     let t0 = std::time::Instant::now();
-    let cfg = pilot_config::Config::load().unwrap_or_default();
+    let cfg = lazybox_config::Config::load().unwrap_or_default();
     let skip_permissions = skip_permissions_for(autonomous, &cfg);
     tracing::info!(
         %session_key,
@@ -242,7 +242,7 @@ pub async fn handle_spawn(
     // `owning_session` is the session id this spawn lives in — used
     // to populate `terminal_sessions` so the migration freeze can
     // scope correctly. None when cwd was overridden out-of-band.
-    let (cwd_path, owning_session): (Option<PathBuf>, Option<pilot_core::SessionId>) =
+    let (cwd_path, owning_session): (Option<PathBuf>, Option<lazybox_core::SessionId>) =
         if let Some(c) = cwd.as_deref() {
             (Some(PathBuf::from(c)), None)
         } else {
@@ -266,7 +266,7 @@ pub async fn handle_spawn(
         "handle_spawn: session/worktree resolved",
     );
     // Allocate the terminal id up front so the hook settings file can
-    // bake it into the `pilot hook-ingest --terminal <id>` command —
+    // bake it into the `lazybox hook-ingest --terminal <id>` command —
     // that gives the daemon an exact, guess-free correlation from a
     // later hook payload back to this terminal. (The auxiliary/primary
     // map inserts still happen below, after the backend spawn.)
@@ -288,8 +288,8 @@ pub async fn handle_spawn(
     };
 
     // Human-readable hint the backend bakes into its session name so
-    // `tmux ls` shows something like `pilot-github-acme-widget-126-claude-NNNN`
-    // instead of `pilot-4`. Backends append their own uniqueness
+    // `tmux ls` shows something like `lazybox-github-acme-widget-126-claude-NNNN`
+    // instead of `lazybox-4`. Backends append their own uniqueness
     // suffix (PID + counter) so the hint doesn't need to be unique.
     let kind_label = match &kind {
         TerminalKind::Agent(id) => id.clone(),
@@ -375,7 +375,7 @@ pub async fn handle_spawn(
         .await
         .insert(terminal_id, backend_key.clone());
     // Persist the (backend_key → session_key, kind) pairing so the
-    // next pilot start can reattach surviving tmux sessions to their
+    // next lazybox start can reattach surviving tmux sessions to their
     // owning workspace. Without this, `recover_sessions` reattaches
     // raw PTYs but doesn't know which workspace they belong to —
     // sidebar badges go blank, even though the agent is still alive.
@@ -398,7 +398,7 @@ pub async fn handle_spawn(
     let store_for_pump = config.store.clone();
     let id_for_pump = terminal_id;
     let key_for_pump = backend_key.clone();
-    let agent_for_pump: Option<std::sync::Arc<dyn pilot_agents::Agent>> = match &kind {
+    let agent_for_pump: Option<std::sync::Arc<dyn lazybox_agents::Agent>> = match &kind {
         TerminalKind::Agent(id) => config.agents.get(id),
         _ => None,
     };
@@ -481,11 +481,11 @@ pub async fn handle_spawn(
         const INPUT_NEEDED_HYSTERESIS: std::time::Duration = std::time::Duration::from_secs(8);
 
         async fn maybe_emit_state_change(
-            agent: Option<&std::sync::Arc<dyn pilot_agents::Agent>>,
+            agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
             buf: &mut Vec<u8>,
             bytes: &[u8],
             states: &std::sync::Arc<
-                tokio::sync::Mutex<std::collections::HashMap<TerminalId, pilot_ipc::AgentState>>,
+                tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
             >,
             bus: &tokio::sync::broadcast::Sender<Event>,
             id: TerminalId,
@@ -541,7 +541,7 @@ pub async fn handle_spawn(
             // never reported a hook isn't in the set and keeps full PTY
             // detection unchanged.
             if hook_driven.lock().await.contains(&id) {
-                let idle_fallback = new_state == pilot_ipc::AgentState::Idle
+                let idle_fallback = new_state == lazybox_ipc::AgentState::Idle
                     && agent.detect_ready_for_prompt(detect_window);
                 if !idle_fallback {
                     return;
@@ -552,14 +552,14 @@ pub async fn handle_spawn(
             // the log). Only ELEVATE to debug-level on every Asking
             // detection so a missing `?` pill is easy to bisect from
             // the log without re-running with full trace verbosity.
-            // Toggle full trace via `RUST_LOG=pilot_server=trace`.
+            // Toggle full trace via `RUST_LOG=lazybox_server=trace`.
             tracing::trace!(
                 terminal_id = ?id,
                 buf_len = buf.len(),
                 detected = ?new_state,
                 "detect_state ran",
             );
-            if new_state == pilot_ipc::AgentState::InputNeeded {
+            if new_state == lazybox_ipc::AgentState::InputNeeded {
                 tracing::debug!(
                     terminal_id = ?id,
                     buf_len = buf.len(),
@@ -585,8 +585,8 @@ pub async fn handle_spawn(
             // readiness probe affirmatively recognizes — is honored
             // immediately, so a wrong InputNeeded can't stick for the
             // full window once Claude is visibly streaming or idle.
-            let clear_exit_signal = new_state == pilot_ipc::AgentState::Working
-                || (new_state == pilot_ipc::AgentState::Idle
+            let clear_exit_signal = new_state == lazybox_ipc::AgentState::Working
+                || (new_state == lazybox_ipc::AgentState::Idle
                     && agent.detect_ready_for_prompt(detect_window));
             if should_suppress_input_needed_exit(
                 current,
@@ -936,7 +936,7 @@ async fn resolve_or_create_session(
     // No worktree provisioning — the dir is just a plain mkdir from
     // `create_sandbox_workspace`. Sessions all share that directory.
     if workspace_key.as_str().starts_with("sandbox-") {
-        let path = pilot_core::paths::sandbox_dir(workspace_key.as_str());
+        let path = lazybox_core::paths::sandbox_dir(workspace_key.as_str());
         // Best-effort mkdir in case the user removed the dir between
         // sandbox creation and spawn. Failure logs but doesn't abort.
         if let Err(e) = std::fs::create_dir_all(&path) {
@@ -1027,9 +1027,9 @@ async fn resolve_or_create_session(
 /// would leave two orphan branches, neither push-ready.
 ///
 /// Examples:
-/// - `github:owner/repo#42` → `pilot/issue-42`
-/// - `linear:ENG-456`       → `pilot/linear-eng-456`
-/// - anything else          → `pilot/<source>-<sanitized-key>`
+/// - `github:owner/repo#42` → `lazybox/issue-42`
+/// - `linear:ENG-456`       → `lazybox/linear-eng-456`
+/// - anything else          → `lazybox/<source>-<sanitized-key>`
 fn derive_branch_for_branchless(task: &Task) -> String {
     let source = task.id.source.to_ascii_lowercase();
     let raw_key = &task.id.key;
@@ -1038,7 +1038,7 @@ fn derive_branch_for_branchless(task: &Task) -> String {
         if let Some(hash_idx) = raw_key.rfind('#') {
             let number = &raw_key[hash_idx + 1..];
             if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()) {
-                return format!("pilot/issue-{number}");
+                return format!("lazybox/issue-{number}");
             }
         }
     }
@@ -1052,7 +1052,7 @@ fn derive_branch_for_branchless(task: &Task) -> String {
         })
         .collect();
     let trimmed = sanitized.trim_matches('-');
-    format!("pilot/{source}-{trimmed}")
+    format!("lazybox/{source}-{trimmed}")
 }
 
 /// Try to set up a real git worktree at `target` for the workspace's
@@ -1074,7 +1074,7 @@ async fn provision_worktree(
         .split_once('/')
         .ok_or_else(|| ServerError::Workspace(format!("repo '{repo}' is not owner/name")))?;
 
-    let mgr = pilot_git_ops::WorktreeManager::default_base();
+    let mgr = lazybox_git_ops::WorktreeManager::default_base();
     let worktree = match task.branch.as_deref() {
         Some(branch) => mgr
             .checkout_at(target, owner, name, branch)
@@ -1086,7 +1086,7 @@ async fn provision_worktree(
             // so two spawns on the same issue land on the same branch
             // and subsequent presses are idempotent — without that,
             // pressing `c` twice on issue #42 would create
-            // `pilot/issue-42-…` and `pilot/issue-42-…-2`, neither of
+            // `lazybox/issue-42-…` and `lazybox/issue-42-…-2`, neither of
             // which corresponds to a PR the user can push.
             let new_branch = derive_branch_for_branchless(task);
             let base = mgr
@@ -1106,17 +1106,17 @@ async fn provision_worktree(
     // is a no-op.
     // YAML load failures used to be `.unwrap_or_default()` — silently
     // disabling every configured mount on a typo. Surface the parse
-    // error so a broken `~/.pilot/config.yaml` shows up loudly in
-    // `/tmp/pilot.log` instead of users wondering why their mounts
+    // error so a broken `~/.lazybox/config.yaml` shows up loudly in
+    // `/tmp/lazybox.log` instead of users wondering why their mounts
     // stopped working after an edit.
-    let cfg = match pilot_config::Config::load() {
+    let cfg = match lazybox_config::Config::load() {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(
                 repo = %format!("{owner}/{name}"),
                 "Config::load failed (mounts will be skipped): {e}",
             );
-            pilot_config::Config::default()
+            lazybox_config::Config::default()
         }
     };
     let mut mounts = config_mounts_to_git(&cfg.worktree.mounts);
@@ -1134,7 +1134,7 @@ async fn provision_worktree(
     // effort — a single bad ScriptSpec (e.g. missing source, name
     // collision) logs a warning but doesn't fail the whole spawn.
     // The script that DID validate gets materialized; the one that
-    // failed surfaces in /tmp/pilot.log.
+    // failed surfaces in /tmp/lazybox.log.
     let mut scripts = config_scripts_to_git(&cfg.worktree.scripts);
     if let Some(repo_cfg) = cfg.repos.get(&repo_key) {
         scripts.extend(config_scripts_to_git(&repo_cfg.scripts));
@@ -1153,15 +1153,15 @@ async fn provision_worktree(
 /// Convert per-config `MountSpec` → git-ops `Mount`, expanding a
 /// leading `~/` in the source path. Kept here so the config crate
 /// doesn't need to depend on `dirs` or git-ops.
-fn config_mounts_to_git(specs: &[pilot_config::MountSpec]) -> Vec<pilot_git_ops::Mount> {
+fn config_mounts_to_git(specs: &[lazybox_config::MountSpec]) -> Vec<lazybox_git_ops::Mount> {
     specs
         .iter()
-        .map(|m| pilot_git_ops::Mount {
+        .map(|m| lazybox_git_ops::Mount {
             source: expand_tilde(&m.source),
             link_at: m.link_at.clone(),
             placement: match m.placement {
-                pilot_config::PlacementSpec::Inside => pilot_git_ops::Placement::Inside,
-                pilot_config::PlacementSpec::Above => pilot_git_ops::Placement::Above,
+                lazybox_config::PlacementSpec::Inside => lazybox_git_ops::Placement::Inside,
+                lazybox_config::PlacementSpec::Above => lazybox_git_ops::Placement::Above,
             },
         })
         .collect()
@@ -1171,17 +1171,17 @@ fn config_mounts_to_git(specs: &[pilot_config::MountSpec]) -> Vec<pilot_git_ops:
 /// `~/` in source paths. Specs with neither `content` nor `source`
 /// set, or with both set, are skipped with a warning — we don't
 /// want a bad entry in YAML to abort every script's install.
-fn config_scripts_to_git(specs: &[pilot_config::ScriptSpec]) -> Vec<pilot_git_ops::Script> {
+fn config_scripts_to_git(specs: &[lazybox_config::ScriptSpec]) -> Vec<lazybox_git_ops::Script> {
     specs
         .iter()
         .filter_map(|s| match (&s.content, &s.source) {
-            (Some(body), None) => Some(pilot_git_ops::Script {
+            (Some(body), None) => Some(lazybox_git_ops::Script {
                 name: s.name.clone(),
-                body: pilot_git_ops::ScriptBody::Inline(body.clone()),
+                body: lazybox_git_ops::ScriptBody::Inline(body.clone()),
             }),
-            (None, Some(path)) => Some(pilot_git_ops::Script {
+            (None, Some(path)) => Some(lazybox_git_ops::Script {
                 name: s.name.clone(),
-                body: pilot_git_ops::ScriptBody::Linked(expand_tilde(path)),
+                body: lazybox_git_ops::ScriptBody::Linked(expand_tilde(path)),
             }),
             (Some(_), Some(_)) => {
                 tracing::warn!(
@@ -1217,7 +1217,7 @@ fn collect_repo_env(config: &ServerConfig, session_key: &SessionKey) -> Vec<(Str
     let Some(repo) = workspace.primary_task().and_then(|t| t.repo.clone()) else {
         return Vec::new();
     };
-    let cfg = match pilot_config::Config::load() {
+    let cfg = match lazybox_config::Config::load() {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
@@ -1225,11 +1225,11 @@ fn collect_repo_env(config: &ServerConfig, session_key: &SessionKey) -> Vec<(Str
 }
 
 /// Whether a spawn should launch in no-permission / bypass mode.
-/// Autonomous (pilot-spawned) sessions follow `autonomous_skip_permissions`
+/// Autonomous (lazybox-spawned) sessions follow `autonomous_skip_permissions`
 /// (default on); interactive sessions the user opens follow the
 /// separate `skip_permissions` toggle (default off). Pure so tests
 /// don't need a real YAML on disk.
-pub(crate) fn skip_permissions_for(autonomous: bool, cfg: &pilot_config::Config) -> bool {
+pub(crate) fn skip_permissions_for(autonomous: bool, cfg: &lazybox_config::Config) -> bool {
     if autonomous {
         cfg.agent.autonomous_skip_permissions
     } else {
@@ -1249,20 +1249,20 @@ pub(crate) fn skip_permissions_for(autonomous: bool, cfg: &pilot_config::Config)
 /// is the ambiguous fall-through (`clear_exit_signal == false`); a
 /// positive marker is honored immediately. Returns true to suppress.
 fn should_suppress_input_needed_exit(
-    current: Option<pilot_ipc::AgentState>,
-    new_state: pilot_ipc::AgentState,
+    current: Option<lazybox_ipc::AgentState>,
+    new_state: lazybox_ipc::AgentState,
     clear_exit_signal: bool,
     since_last_input_needed: Option<std::time::Duration>,
     hysteresis: std::time::Duration,
 ) -> bool {
-    current == Some(pilot_ipc::AgentState::InputNeeded)
-        && new_state != pilot_ipc::AgentState::InputNeeded
+    current == Some(lazybox_ipc::AgentState::InputNeeded)
+        && new_state != lazybox_ipc::AgentState::InputNeeded
         && !clear_exit_signal
         && since_last_input_needed.is_some_and(|e| e < hysteresis)
 }
 
 /// Pure-data lookup so tests don't need a real YAML on disk.
-pub(crate) fn env_for_repo(cfg: &pilot_config::Config, repo: &str) -> Vec<(String, String)> {
+pub(crate) fn env_for_repo(cfg: &lazybox_config::Config, repo: &str) -> Vec<(String, String)> {
     cfg.repos
         .get(repo)
         .map(|rc| rc.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -1349,7 +1349,7 @@ pub(crate) async fn find_existing_singleton(
 /// unrelated workspace's runners don't pause for our migration.
 async fn freeze_runners_in_session(
     config: &crate::ServerConfig,
-    session_id: pilot_core::SessionId,
+    session_id: lazybox_core::SessionId,
 ) -> Vec<String> {
     // Lock-order: `terminals` before `terminal_sessions` per
     // `crate::TERMINAL_MAP_LOCK_ORDER`. This used to acquire them in
@@ -1443,7 +1443,7 @@ pub async fn migrate_session_paths_if_needed(
         let Some((owner, name)) = repo.split_once('/') else {
             continue;
         };
-        let mgr = pilot_git_ops::WorktreeManager::default_base();
+        let mgr = lazybox_git_ops::WorktreeManager::default_base();
         let bare = mgr.bare_path(owner, name);
         if let Some(parent) = expected.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
@@ -1478,10 +1478,12 @@ pub async fn migrate_session_paths_if_needed(
                     actual.display(),
                     expected.display()
                 );
-                let _ = config.bus.send(pilot_ipc::Event::provider_error_retryable(
-                    "worktree",
-                    format!("PR-attach migration failed: {e}"),
-                ));
+                let _ = config
+                    .bus
+                    .send(lazybox_ipc::Event::provider_error_retryable(
+                        "worktree",
+                        format!("PR-attach migration failed: {e}"),
+                    ));
             }
         }
     }
@@ -1490,11 +1492,11 @@ pub async fn migrate_session_paths_if_needed(
 }
 
 /// Root directory for every workspace's worktrees. Sits under the v2
-/// state root next to `state.db` so a single `rm -rf ~/.pilot/v2/`
-/// wipes everything pilot owns on disk. Override the parent via the
-/// `PILOT_HOME` env var (see `pilot_core::paths`).
+/// state root next to `state.db` so a single `rm -rf ~/.lazybox/v2/`
+/// wipes everything lazybox owns on disk. Override the parent via the
+/// `LAZYBOX_HOME` env var (see `lazybox_core::paths`).
 pub fn worktree_root() -> PathBuf {
-    pilot_core::paths::worktrees_root()
+    lazybox_core::paths::worktrees_root()
 }
 
 /// Compose the on-disk path for the Nth session of a workspace.
@@ -1623,7 +1625,7 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     if !bytes.contains(&b'\r') && !bytes.contains(&b'\n') {
         return;
     }
-    if config.agent_state_for(terminal_id).await != Some(pilot_ipc::AgentState::InputNeeded) {
+    if config.agent_state_for(terminal_id).await != Some(lazybox_ipc::AgentState::InputNeeded) {
         return;
     }
     let session_key = config
@@ -1639,7 +1641,7 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
         .agent_states
         .lock()
         .await
-        .insert(terminal_id, pilot_ipc::AgentState::Working);
+        .insert(terminal_id, lazybox_ipc::AgentState::Working);
     // Tell the output pump to drop its detection buffer on the next
     // chunk. Without this the just-answered prompt's markers linger in
     // the rolling window and re-fire InputNeeded on the very next
@@ -1655,7 +1657,7 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     let _ = config.bus.send(Event::AgentState {
         session_key,
         terminal_id,
-        state: pilot_ipc::AgentState::Working,
+        state: lazybox_ipc::AgentState::Working,
     });
 }
 
@@ -1668,7 +1670,7 @@ pub async fn handle_inject_prompt(
     config: &ServerConfig,
     terminal_id: TerminalId,
     prompt: &str,
-    fallback_spawn: Option<pilot_ipc::SpawnFallback>,
+    fallback_spawn: Option<lazybox_ipc::SpawnFallback>,
 ) {
     // Look up — and drop the guard — before any further await so
     // a nested handle_spawn (in the fallback path) can re-acquire
@@ -1791,7 +1793,7 @@ pub async fn handle_close(config: &ServerConfig, terminal_id: TerminalId) {
 }
 
 /// Handle a `Command::IngestHook`: a structured lifecycle hook fired by
-/// an agent and forwarded by `pilot hook-ingest`. Marks the terminal
+/// an agent and forwarded by `lazybox hook-ingest`. Marks the terminal
 /// hook-driven (so the PTY pump yields `Working`/`InputNeeded` to hooks)
 /// and, when the hook implies a state, broadcasts the transition.
 ///
@@ -1802,10 +1804,10 @@ pub async fn handle_close(config: &ServerConfig, terminal_id: TerminalId) {
 pub async fn handle_ingest_hook(
     config: &ServerConfig,
     terminal_id: TerminalId,
-    hook: pilot_ipc::HookEvent,
+    hook: lazybox_ipc::HookEvent,
 ) {
     // Resolve the workspace first; an unknown terminal (already exited,
-    // or a stale hook from a process pilot no longer tracks) is dropped
+    // or a stale hook from a process lazybox no longer tracks) is dropped
     // without marking anything hook-driven.
     let session_key = {
         let meta = config.terminal_meta.lock().await;
@@ -1827,7 +1829,7 @@ pub async fn handle_ingest_hook(
         .await
         .insert(terminal_id);
 
-    let Some(new_state) = pilot_agents::hook::hook_to_state(&hook) else {
+    let Some(new_state) = lazybox_agents::hook::hook_to_state(&hook) else {
         return;
     };
     let prev = config.agent_states.lock().await.get(&terminal_id).copied();
@@ -1854,7 +1856,7 @@ pub async fn handle_ingest_hook(
 }
 
 /// Bind already-running backend sessions to fresh wire TerminalIds.
-/// Called once at server startup so pilot restarts don't lose the
+/// Called once at server startup so lazybox restarts don't lose the
 /// agents the user was running.
 ///
 /// Per-survivor we look up the persisted `(session_key, kind)` pairing
@@ -1953,7 +1955,7 @@ pub async fn recover_sessions(config: &ServerConfig) {
 
 /// Persist the `(session_key, kind)` pairing for `backend_key` to the
 /// store under `terminal:{backend_key}`. Read back in `recover_sessions`
-/// after a pilot restart.
+/// after a lazybox restart.
 pub(crate) async fn persist_terminal_meta(
     config: &ServerConfig,
     backend_key: &str,
@@ -1991,7 +1993,7 @@ async fn load_terminal_meta(
 }
 
 /// Persist whether `backend_key` was launched in no-permission mode so
-/// a pilot restart can re-render the indicator for surviving sessions
+/// a lazybox restart can re-render the indicator for surviving sessions
 /// (`recover_sessions`). Stored under a key separate from
 /// `terminal_meta` so the existing two-tuple payload format is left
 /// untouched. Only written when `skip_permissions` — absence means
@@ -2113,11 +2115,11 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
 /// Sessions are persistent **intent**: a record means "the user
 /// wants a claude here". Restoring at startup matches the user's
 /// mental model — the sidebar shows `▸ claude` for a workspace
-/// because there should be a claude running. Without this, a pilot
+/// because there should be a claude running. Without this, a lazybox
 /// restart leaves a stale-looking sidebar with the terminal stack
 /// reading "(no terminals)".
 ///
-/// Per-session, per-pilot-lifetime: we only relaunch sessions that
+/// Per-session, per-lazybox-lifetime: we only relaunch sessions that
 /// don't currently have a live PTY. If the user explicitly killed
 /// one earlier in this run, it stays dead until next restart.
 pub async fn restore_persisted_sessions(config: &ServerConfig) {
@@ -2147,10 +2149,10 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
         let session_key = SessionKey::from(workspace.key.as_str());
         for session in &workspace.sessions {
             let kind = match &session.kind {
-                pilot_core::SessionKind::Agent { agent_id } => {
+                lazybox_core::SessionKind::Agent { agent_id } => {
                     TerminalKind::Agent(agent_id.clone())
                 }
-                pilot_core::SessionKind::Shell => TerminalKind::Shell,
+                lazybox_core::SessionKind::Shell => TerminalKind::Shell,
                 // Compare / LogTail aren't auto-restored — those
                 // are user-initiated transient runners.
                 _ => continue,
@@ -2200,13 +2202,13 @@ mod tests {
     /// case-sensitive on the repo key.
     #[test]
     fn env_for_repo_returns_repo_env() {
-        let mut cfg = pilot_config::Config::default();
+        let mut cfg = lazybox_config::Config::default();
         let mut env = std::collections::BTreeMap::new();
         env.insert("DATABASE_URL".to_string(), "postgres://x".to_string());
         env.insert("OPENAI_API_KEY".to_string(), "sk-test".to_string());
         cfg.repos.insert(
             "acme/widget".into(),
-            pilot_config::RepoConfig {
+            lazybox_config::RepoConfig {
                 env,
                 mounts: vec![],
                 scripts: vec![],
@@ -2228,13 +2230,13 @@ mod tests {
 
     #[test]
     fn env_for_repo_returns_empty_when_repo_not_configured() {
-        let cfg = pilot_config::Config::default();
+        let cfg = lazybox_config::Config::default();
         assert!(env_for_repo(&cfg, "no/such-repo").is_empty());
     }
 
     #[test]
     fn hysteresis_damps_only_ambiguous_input_needed_exit() {
-        use pilot_ipc::AgentState::{Idle, InputNeeded, Working};
+        use lazybox_ipc::AgentState::{Idle, InputNeeded, Working};
         let hyst = std::time::Duration::from_secs(8);
         let recent = Some(std::time::Duration::from_secs(1));
         let stale = Some(std::time::Duration::from_secs(9));
@@ -2291,7 +2293,7 @@ mod tests {
 
     #[test]
     fn skip_permissions_follows_per_kind_toggles() {
-        let mut cfg = pilot_config::Config::default();
+        let mut cfg = lazybox_config::Config::default();
         // Defaults: autonomous on, interactive off.
         assert!(cfg.agent.autonomous_skip_permissions);
         assert!(!cfg.agent.skip_permissions);
@@ -2316,7 +2318,8 @@ mod tests {
 
     #[test]
     fn argv_for_claude_carries_skip_flag_per_toggle() {
-        let config = ServerConfig::with_store(std::sync::Arc::new(pilot_store::MemoryStore::new()));
+        let config =
+            ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
         let kind = TerminalKind::Agent("claude".into());
         let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
 
@@ -2354,12 +2357,12 @@ mod tests {
 
     #[test]
     fn env_for_repo_case_sensitive() {
-        let mut cfg = pilot_config::Config::default();
+        let mut cfg = lazybox_config::Config::default();
         let mut env = std::collections::BTreeMap::new();
         env.insert("X".into(), "1".into());
         cfg.repos.insert(
             "Owner/Repo".into(),
-            pilot_config::RepoConfig {
+            lazybox_config::RepoConfig {
                 env,
                 mounts: vec![],
                 scripts: vec![],
@@ -2398,41 +2401,41 @@ mod tests {
     #[test]
     fn config_mounts_to_git_translates_placement() {
         let specs = vec![
-            pilot_config::MountSpec {
+            lazybox_config::MountSpec {
                 source: std::path::PathBuf::from("/a"),
                 link_at: std::path::PathBuf::from("inside"),
-                placement: pilot_config::PlacementSpec::Inside,
+                placement: lazybox_config::PlacementSpec::Inside,
             },
-            pilot_config::MountSpec {
+            lazybox_config::MountSpec {
                 source: std::path::PathBuf::from("/b"),
                 link_at: std::path::PathBuf::from("above"),
-                placement: pilot_config::PlacementSpec::Above,
+                placement: lazybox_config::PlacementSpec::Above,
             },
         ];
         let mounts = config_mounts_to_git(&specs);
         assert_eq!(mounts.len(), 2);
         assert!(matches!(
             mounts[0].placement,
-            pilot_git_ops::Placement::Inside
+            lazybox_git_ops::Placement::Inside
         ));
         assert!(matches!(
             mounts[1].placement,
-            pilot_git_ops::Placement::Above
+            lazybox_git_ops::Placement::Above
         ));
     }
 
     fn task_for(source: &str, key: &str) -> Task {
         Task {
-            id: pilot_core::TaskId {
+            id: lazybox_core::TaskId {
                 source: source.into(),
                 key: key.into(),
             },
             title: "t".into(),
             body: None,
-            state: pilot_core::TaskState::Open,
-            role: pilot_core::TaskRole::Author,
-            ci: pilot_core::CiStatus::default(),
-            review: pilot_core::ReviewStatus::default(),
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::default(),
+            review: lazybox_core::ReviewStatus::default(),
             checks: vec![],
             unread_count: 0,
             url: String::new(),
@@ -2446,7 +2449,7 @@ mod tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: pilot_core::Mergeable::Unknown,
+            mergeable: lazybox_core::Mergeable::Unknown,
             is_behind_base: false,
             node_id: None,
             needs_reply: false,
@@ -2458,13 +2461,13 @@ mod tests {
         }
     }
 
-    /// Issue spawns get a deterministic `pilot/issue-<n>` branch so
+    /// Issue spawns get a deterministic `lazybox/issue-<n>` branch so
     /// pressing the spawn key twice on the same issue lands on the
     /// same branch instead of accumulating orphans.
     #[test]
     fn derive_branch_for_branchless_github_issue() {
         let t = task_for("github", "acme/widget#42");
-        assert_eq!(derive_branch_for_branchless(&t), "pilot/issue-42");
+        assert_eq!(derive_branch_for_branchless(&t), "lazybox/issue-42");
     }
 
     /// Linear / non-GitHub keys go through the sanitizer fallback so
@@ -2473,15 +2476,18 @@ mod tests {
     #[test]
     fn derive_branch_for_branchless_linear() {
         let t = task_for("linear", "ENG-456");
-        assert_eq!(derive_branch_for_branchless(&t), "pilot/linear-eng-456");
+        assert_eq!(derive_branch_for_branchless(&t), "lazybox/linear-eng-456");
     }
 
     /// A non-numeric GitHub key (no `#`) falls through to the
-    /// sanitizer instead of producing `pilot/issue-`.
+    /// sanitizer instead of producing `lazybox/issue-`.
     #[test]
     fn derive_branch_for_branchless_github_without_hash() {
         let t = task_for("github", "acme/widget");
-        assert_eq!(derive_branch_for_branchless(&t), "pilot/github-acme-widget");
+        assert_eq!(
+            derive_branch_for_branchless(&t),
+            "lazybox/github-acme-widget"
+        );
     }
 
     const HARD: std::time::Duration = std::time::Duration::from_secs(10);

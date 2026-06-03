@@ -4,7 +4,7 @@
 //!
 //! - **Left**: contextual hints for the focused pane — only actions
 //!   that are actually wired up *right now*. The list is built by
-//!   each pane from the action catalog (`pilot_tui_core::action`),
+//!   each pane from the action catalog (`lazybox_tui_core::action`),
 //!   so a binding shown here is — by construction — a binding the
 //!   pane will dispatch. Universal shortcuts (`?` help, `q q` quit,
 //!   etc.) live in the onboarding tour and the `?` help modal, not

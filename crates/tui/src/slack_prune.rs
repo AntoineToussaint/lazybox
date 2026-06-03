@@ -1,31 +1,31 @@
-//! `pilot slack prune` — archive stale per-(session, agent) Slack
+//! `lazybox slack prune` — archive stale per-(session, agent) Slack
 //! channels.
 //!
 //! Walks `conversations.list`, classifies each channel via
-//! [`pilot_slack::prune`], and either prints the plan (`--dry-run`)
-//! or prompts the user before archiving. Lives in `pilot-tui` (not
+//! [`lazybox_slack::prune`], and either prints the plan (`--dry-run`)
+//! or prompts the user before archiving. Lives in `lazybox-tui` (not
 //! the slack-provider crate) because it ties together three things:
 //! the Slack HTTP client, the daemon's persistent store (to see
 //! which terminals are still live), and stdin/stdout. The pure
-//! classification logic stays in `pilot-slack` so it can be tested
+//! classification logic stays in `lazybox-slack` so it can be tested
 //! without any of those.
 //!
 //! Acceptance for #6:
 //! - `--dry-run` lists what would be archived
 //! - Without `--dry-run`, prompts before archiving each batch
-//! - Channels not matching pilot's naming pattern are skipped
+//! - Channels not matching lazybox's naming pattern are skipped
 //! - Channels for still-live terminals are skipped regardless of age
 
 use std::collections::HashSet;
 use std::io::{BufRead, Write};
 
-use pilot_config::Config;
-use pilot_core::Workspace;
-use pilot_slack::api::{Client as SlackApi, channel_name_for_terminal, sluggify};
-use pilot_slack::prune::{ChannelInfo, Filter, parse_duration, plan as build_plan};
-use pilot_store::Store;
+use lazybox_config::Config;
+use lazybox_core::Workspace;
+use lazybox_slack::api::{Client as SlackApi, channel_name_for_terminal, sluggify};
+use lazybox_slack::prune::{ChannelInfo, Filter, parse_duration, plan as build_plan};
+use lazybox_store::Store;
 
-/// Outcome variant for the binary's exit code. `pilot slack prune`
+/// Outcome variant for the binary's exit code. `lazybox slack prune`
 /// exits 0 on `Done`, 1 on `Failed`, 2 on `BadArgs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PruneOutcome {
@@ -39,7 +39,7 @@ pub enum PruneOutcome {
     BadArgs,
 }
 
-/// Parsed argv for `pilot slack prune`. Construction lives in the
+/// Parsed argv for `lazybox slack prune`. Construction lives in the
 /// `parse_args` helper below so it's unit-testable.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PruneArgs {
@@ -51,7 +51,7 @@ pub struct PruneArgs {
     pub show_help: bool,
 }
 
-/// Parse `pilot slack prune`'s flags. Returns `Err` with a usage
+/// Parse `lazybox slack prune`'s flags. Returns `Err` with a usage
 /// string for unrecognized input so the caller can print and exit 2.
 pub fn parse_args(args: &[String]) -> Result<PruneArgs, String> {
     let mut out = PruneArgs::default();
@@ -93,7 +93,7 @@ pub fn parse_args(args: &[String]) -> Result<PruneArgs, String> {
 /// printing so the tests can assert on the output without redirecting
 /// stdout.
 pub fn render_plan(
-    archive: &[pilot_slack::prune::Classified],
+    archive: &[lazybox_slack::prune::Classified],
     skipped_not_managed: usize,
     skipped_live: usize,
     skipped_filter: usize,
@@ -115,14 +115,14 @@ pub fn render_plan(
         }
     }
     s.push_str(&format!(
-        "Skipped: {} not pilot-managed, {} live session(s), {} filtered.\n",
+        "Skipped: {} not lazybox-managed, {} live session(s), {} filtered.\n",
         skipped_not_managed, skipped_live, skipped_filter
     ));
     s
 }
 
 /// Build the set of channel names belonging to live terminals so
-/// `pilot_slack::prune::classify` can short-circuit them.
+/// `lazybox_slack::prune::classify` can short-circuit them.
 ///
 /// Walks every workspace in the store and every agent session
 /// inside it, formatting the channel name with the same helper the
@@ -152,7 +152,7 @@ pub fn live_channel_names_from_store(store: &dyn Store, channel_prefix: &str) ->
         };
         for session in &ws.sessions {
             let agent_id = match &session.kind {
-                pilot_core::SessionKind::Agent { agent_id } => agent_id.clone(),
+                lazybox_core::SessionKind::Agent { agent_id } => agent_id.clone(),
                 _ => continue,
             };
             let name = channel_name_for_terminal(
@@ -219,7 +219,7 @@ pub trait PruneSlack {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
 }
 
-/// Live wiring over `pilot_slack::api::Client`.
+/// Live wiring over `lazybox_slack::api::Client`.
 pub struct LiveSlack {
     api: SlackApi,
 }
@@ -273,7 +273,7 @@ impl PruneSlack for LiveSlack {
         Box::pin(async move {
             match self.api.conversations_archive(channel_id).await {
                 Ok(()) => Ok(()),
-                Err(pilot_slack::SlackError::Api(ref e)) if e == "already_archived" => Ok(()),
+                Err(lazybox_slack::SlackError::Api(ref e)) if e == "already_archived" => Ok(()),
                 Err(e) => Err(e.to_string()),
             }
         })
@@ -281,7 +281,7 @@ impl PruneSlack for LiveSlack {
 }
 
 /// Real-mode entry point. Reads tokens via the same env-wins-over-
-/// YAML rule as `pilot slack doctor`, opens the daemon's persistent
+/// YAML rule as `lazybox slack doctor`, opens the daemon's persistent
 /// store read-only, runs the wizard.
 pub async fn run(args: &[String]) -> std::io::Result<PruneOutcome> {
     let parsed = match parse_args(args) {
@@ -302,17 +302,17 @@ pub async fn run(args: &[String]) -> std::io::Result<PruneOutcome> {
     let cfg = match Config::load() {
         Ok(c) => c,
         Err(e) => {
-            println!("✗ load ~/.pilot/config.yaml: {e}");
+            println!("✗ load ~/.lazybox/config.yaml: {e}");
             return Ok(PruneOutcome::Failed);
         }
     };
     let Some(bot_token) = resolve_token(cfg.slack.bot_token.as_deref(), "SLACK_BOT_TOKEN") else {
         println!("✗ bot_token not set (config.slack.bot_token or $SLACK_BOT_TOKEN)");
-        println!("  Run `pilot slack init` to configure interactively.");
+        println!("  Run `lazybox slack init` to configure interactively.");
         return Ok(PruneOutcome::Failed);
     };
-    let Some(store) = pilot_server::open_store() else {
-        println!("✗ open ~/.pilot/v2/state.db — can't tell which sessions are live.");
+    let Some(store) = lazybox_server::open_store() else {
+        println!("✗ open ~/.lazybox/v2/state.db — can't tell which sessions are live.");
         return Ok(PruneOutcome::Failed);
     };
     let slack = LiveSlack::new(bot_token);
@@ -342,7 +342,7 @@ pub async fn run_with_clock<S: PruneSlack + ?Sized, I: PrunePromptIo + ?Sized>(
     channel_prefix: &str,
     now_unix: i64,
 ) -> std::io::Result<PruneOutcome> {
-    io.print("pilot slack prune — archive stale per-(session, agent) channels")?;
+    io.print("lazybox slack prune — archive stale per-(session, agent) channels")?;
     io.print("")?;
 
     // ── Translate args → Filter ─────────────────────────────────────
@@ -374,7 +374,10 @@ pub async fn run_with_clock<S: PruneSlack + ?Sized, I: PrunePromptIo + ?Sized>(
     io.print(&format!("• Found {} channel(s)", channels.len()))?;
 
     let live = live_channel_names_from_store(store, channel_prefix);
-    io.print(&format!("• {} live pilot terminal(s) in store", live.len()))?;
+    io.print(&format!(
+        "• {} live lazybox terminal(s) in store",
+        live.len()
+    ))?;
 
     // ── Plan ────────────────────────────────────────────────────────
     let plan = build_plan(&channels, channel_prefix, &live, &filter, now_unix);
@@ -445,7 +448,7 @@ pub async fn run_with_clock<S: PruneSlack + ?Sized, I: PrunePromptIo + ?Sized>(
 }
 
 fn print_usage() {
-    println!("usage: pilot slack prune [--dry-run] [--yes] [--older-than DUR] [--workspace KEY]");
+    println!("usage: lazybox slack prune [--dry-run] [--yes] [--older-than DUR] [--workspace KEY]");
     println!();
     println!("  --dry-run         List candidates without archiving");
     println!("  --yes, -y         Don't prompt before archiving");
@@ -465,8 +468,8 @@ fn resolve_token(yaml: Option<&str>, env_key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pilot_core::{SessionKind, WorkspaceKey, WorkspaceSession as Session};
-    use pilot_store::mock::MemoryStore;
+    use lazybox_core::{SessionKind, WorkspaceKey, WorkspaceSession as Session};
+    use lazybox_store::mock::MemoryStore;
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -525,7 +528,7 @@ mod tests {
         for s in sessions {
             ws.add_session(s);
         }
-        let rec = pilot_store::WorkspaceRecord {
+        let rec = lazybox_store::WorkspaceRecord {
             key: key.to_string(),
             created_at: chrono::Utc::now(),
             workspace_json: Some(serde_json::to_string(&ws).unwrap()),
@@ -773,7 +776,7 @@ mod tests {
         assert!(matches!(outcome, PruneOutcome::Done { archived: 0, .. }));
         let log = io.joined();
         assert!(log.contains("Nothing to archive"));
-        assert!(log.contains("2 not pilot-managed"));
+        assert!(log.contains("2 not lazybox-managed"));
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@
 //!   and return a streaming `(read, write)` pair.
 //!
 //! Both halves are returned as boxed `AsyncRead`/`AsyncWrite` so
-//! `pilot-ipc::socket::{serve, connect}` can stay generic over the
+//! `lazybox-ipc::socket::{serve, connect}` can stay generic over the
 //! transport. The unix impl uses `tokio::net::UnixStream`; the
 //! windows arm is a `TODO` that compiles to a no-op so the rest of
 //! the workspace builds on Windows even before the port lands.

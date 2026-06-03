@@ -1,9 +1,9 @@
-site_name: pilot
-site_url: https://antoinetoussaint.github.io/pilot/
+site_name: lazybox
+site_url: https://docs.lazybox.ai/
 site_description: A reactive PR inbox in your terminal.
 
-repo_url: https://github.com/AntoineToussaint/pilot
-repo_name: AntoineToussaint/pilot
+repo_url: https://github.com/AntoineToussaint/lazybox
+repo_name: AntoineToussaint/lazybox
 
 docs_dir: docs-site
 use_directory_urls: true

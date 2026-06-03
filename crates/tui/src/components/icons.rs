@@ -71,7 +71,7 @@ pub const POWERLINE_RIGHT: &str = "";
 
 /// Pick the right runner-kind icon for an agent id. Falls back to the
 /// generic `AGENT` glyph for unknown ids — e.g. user-defined agents
-/// from `~/.pilot/config.yaml`.
+/// from `~/.lazybox/config.yaml`.
 pub fn agent_icon(agent_id: &str) -> &'static str {
     match agent_id {
         "cursor" => CURSOR,

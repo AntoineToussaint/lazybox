@@ -1,6 +1,6 @@
 # Inbox & sync
 
-The reactive inbox is pilot's core model: instead of polling GitHub yourself,
+The reactive inbox is lazybox's core model: instead of polling GitHub yourself,
 provider events flow to you and surface as workspace rows with read/unread
 state. This page covers the inbox, the polling loop that feeds it, and the
 controls that shape what you see.
@@ -24,7 +24,7 @@ update the row in place and mark it unread, so the inbox is a live picture of
 what needs your attention rather than a list you refresh by hand.
 
 ### How to use it
-Launch `pilot`. The sidebar lists workspaces grouped under their repo. `j/k`
+Launch `lazybox`. The sidebar lists workspaces grouped under their repo. `j/k`
 (or arrows) move the cursor, `Enter` opens a workspace into the Activity +
 Terminal panes, `Space` folds/unfolds a repo group. Rows carry status chips
 (CI, review, unread count, agent state).
@@ -79,7 +79,7 @@ each tick, so `config.yaml` edits take effect within one interval without a
 restart.
 
 ### Test checklist
-- [ ] With several repos configured, each is polled in rotation (check `/tmp/pilot.log` with `RUST_LOG=pilot=debug`).
+- [ ] With several repos configured, each is polled in rotation (check `/tmp/lazybox.log` with `RUST_LOG=lazybox=debug`).
 - [ ] Editing `poll_interval` in `config.yaml` changes cadence without restarting.
 - [ ] A provider auth failure surfaces as a `ProviderError`, not a crash.
 - [ ] Rate-limit `retry_after` headers back off rather than hammering the API.

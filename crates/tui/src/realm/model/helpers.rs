@@ -6,7 +6,7 @@
 //! - **Key / catalog**: `key_event_to_chord` (crossterm → catalog
 //!   chord), `find_action_for_chord` (catalog lookup honoring user
 //!   overrides).
-//! - **Detach + clipboard**: `spawn_detached_pilot` (Ctrl-Shift-D
+//! - **Detach + clipboard**: `spawn_detached_lazybox` (Ctrl-Shift-D
 //!   spawn), `emit_clipboard_copy` (OSC 52).
 //! - **Run loop entry points**: `run_with_client`, `run_loop_with_model`.
 //! - **Misc encoders**: `base64_encode` (OSC 52 payload).
@@ -16,7 +16,7 @@
 //! keeps mod.rs focused on the `Model` struct + its constructors.
 
 use super::{Model, PaneFocus};
-use pilot_ipc::{Client, Event as IpcEvent};
+use lazybox_ipc::{Client, Event as IpcEvent};
 use std::time::Duration;
 use tuirealm::application::PollStrategy;
 use tuirealm::event::{Event as RealmEvent, Key, KeyEvent as RealmKey, KeyModifiers};
@@ -41,7 +41,7 @@ pub(crate) fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
 ///   final row.
 ///
 /// All writes are clipped to `rect` so a drag that strayed outside
-/// the terminal pane can't recolor pilot's sidebar or activity feed.
+/// the terminal pane can't recolor lazybox's sidebar or activity feed.
 pub(crate) fn paint_selection(
     buf: &mut ratatui::buffer::Buffer,
     rect: Rect,
@@ -104,9 +104,9 @@ pub(crate) fn paint_selection(
 /// release events).
 pub(crate) fn key_event_to_chord(
     key: crossterm::event::KeyEvent,
-) -> Option<pilot_tui_core::action::KeyChord> {
+) -> Option<lazybox_tui_core::action::KeyChord> {
     use crossterm::event::{KeyCode, KeyModifiers};
-    use pilot_tui_core::action::{ChordCode, KeyChord, NamedKey};
+    use lazybox_tui_core::action::{ChordCode, KeyChord, NamedKey};
 
     let mut ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let _ = &mut ctrl;
@@ -151,7 +151,7 @@ pub(crate) fn key_event_to_chord(
 /// the focused pane should resolve. Globals always match; pane-
 /// scoped sections only match when their pane is focused.
 ///
-/// Honors user keybinding overrides from `~/.pilot/config.yaml::ui
+/// Honors user keybinding overrides from `~/.lazybox/config.yaml::ui
 /// .action_keys`: each catalog entry's effective chord falls back
 /// to its default only when the user hasn't set an override for
 /// that `ActionKind::name()`.
@@ -161,11 +161,11 @@ pub(crate) fn key_event_to_chord(
 /// navigation keys, latches, and any action whose `default_keys`
 /// is a presentation form like `g/G`).
 pub(crate) fn find_action_for_chord(
-    chord: &pilot_tui_core::action::KeyChord,
+    chord: &lazybox_tui_core::action::KeyChord,
     focus: PaneFocus,
     overrides: &std::collections::BTreeMap<String, String>,
-) -> Option<&'static pilot_tui_core::action::ActionDef> {
-    use pilot_tui_core::action::{ActionDef, Section};
+) -> Option<&'static lazybox_tui_core::action::ActionDef> {
+    use lazybox_tui_core::action::{ActionDef, Section};
     let allowed = |s: Section| -> bool {
         match (s, focus) {
             (Section::Global, _) => true,
@@ -190,11 +190,11 @@ pub(crate) fn find_action_for_chord(
         .find(|d| allowed(d.section) && d.effective_chord(overrides).as_ref() == Some(chord))
 }
 
-/// Spawn a new `pilot` process pinned to the focused pane's
+/// Spawn a new `lazybox` process pinned to the focused pane's
 /// detachable scope. Detached: the new process gets its own session
 /// so closing the parent doesn't kill it. Errors are logged, not
 /// surfaced — detach is best-effort UX.
-pub(crate) fn spawn_detached_pilot(spec: &crate::pane::DetachSpec) {
+pub(crate) fn spawn_detached_lazybox(spec: &crate::pane::DetachSpec) {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -204,7 +204,7 @@ pub(crate) fn spawn_detached_pilot(spec: &crate::pane::DetachSpec) {
     };
     let mut cmd = std::process::Command::new(exe);
     cmd.args(&spec.args);
-    // Decouple from the parent so closing this pilot doesn't take
+    // Decouple from the parent so closing this lazybox doesn't take
     // the detached one with it. Implementation lives in
     // `crate::platform` — setsid() on unix, DETACHED_PROCESS on
     // Windows (TODO).
@@ -242,12 +242,12 @@ pub(crate) fn split_for_footer(area: Rect) -> (Rect, Rect) {
 #[allow(dead_code)]
 fn placeholder(f: &mut Frame, area: Rect) {
     let block = Block::default()
-        .title(" pilot · realm migration scaffold ")
+        .title(" lazybox · realm migration scaffold ")
         .borders(Borders::ALL);
     f.render_widget(block, area);
 }
 
-/// Run the realm-based pilot loop with a pre-built IPC client.
+/// Run the realm-based lazybox loop with a pre-built IPC client.
 /// `main.rs::run_embedded_realm` constructs the client + daemon pair
 /// before calling this so the daemon is already serving when the UI
 /// boots.
@@ -262,7 +262,7 @@ pub fn run_with_client(client: Client) -> anyhow::Result<()> {
 /// smoke tests without spinning up the full daemon stack.
 #[allow(dead_code)]
 pub fn run() -> anyhow::Result<()> {
-    let (client, _server) = pilot_ipc::channel::pair();
+    let (client, _server) = lazybox_ipc::channel::pair();
     run_with_client(client)
 }
 
@@ -322,7 +322,7 @@ pub(super) fn drain_daemon_events<T: TerminalAdapter>(model: &mut Model<T>) -> b
     // Count resyncs in this batch before dispatching — each one is a
     // daemon-side overflow that dropped `TerminalOutput` and rebuilt the
     // grid from the ring, so surfacing it makes drops observable in
-    // `/tmp/pilot.log` (the #87 BacklogMonitor's remit, now extended to
+    // `/tmp/lazybox.log` (the #87 BacklogMonitor's remit, now extended to
     // the actual drop signal rather than just a growing-backlog guess).
     let resyncs = collected
         .iter()
@@ -386,7 +386,7 @@ const BACKLOG_WARN_THRESHOLD: usize = 1024;
 /// drain — the signature of the TUI consuming slower than the daemon
 /// produces (a runaway producer, or a handler leaking time). Logging
 /// only: it never blocks or drops, it just makes "we're falling
-/// behind" visible in `/tmp/pilot.log` instead of silent.
+/// behind" visible in `/tmp/lazybox.log` instead of silent.
 ///
 /// Healthy bursty load is silent — a warning fires only when the
 /// residual climbs to a NEW high above [`BACKLOG_WARN_THRESHOLD`], so
@@ -412,7 +412,7 @@ pub(super) struct BacklogMonitor {
 
 impl BacklogMonitor {
     /// Record `n` resyncs observed in one drain. Logs at warn when any
-    /// occurred so an overflow episode is greppable in `/tmp/pilot.log`.
+    /// occurred so an overflow episode is greppable in `/tmp/lazybox.log`.
     pub(super) fn observe_resyncs(&mut self, n: usize) {
         if n == 0 {
             return;
@@ -514,8 +514,8 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         // 4. Render if dirty — before the blocking input read so the
         // user sees their last action immediately.
         if model.redraw {
-            // Per-frame timing log behind the `pilot=debug` filter.
-            // Lets us see in `/tmp/pilot.log` whether a slow scroll
+            // Per-frame timing log behind the `lazybox=debug` filter.
+            // Lets us see in `/tmp/lazybox.log` whether a slow scroll
             // is the render itself (would show large `frame_ms`)
             // versus daemon round-trips between renders. Cheap —
             // `Instant::now` is ~10ns and `tracing::debug!` is a
@@ -630,7 +630,7 @@ fn dispatch_event<T: TerminalAdapter>(model: &mut Model<T>, event: crossterm::ev
         }
         // Terminal focus changed (DEC mode 1004). Recorded process-
         // globally so `platform::notify_user` can suppress banners
-        // while pilot is the focused window. No redraw — purely a
+        // while lazybox is the focused window. No redraw — purely a
         // notification-gating signal.
         crossterm::event::Event::FocusGained => {
             crate::notify::set_terminal_focus(true);
@@ -642,7 +642,7 @@ fn dispatch_event<T: TerminalAdapter>(model: &mut Model<T>, event: crossterm::ev
     }
 }
 
-/// Translate crossterm's modifier bitflags into tuirealm's. Pilot only
+/// Translate crossterm's modifier bitflags into tuirealm's. Lazybox only
 /// distinguishes Shift / Control / Alt — the rest (Super, Hyper, …) are
 /// dropped.
 fn convert_modifiers(m: crossterm::event::KeyModifiers) -> KeyModifiers {
@@ -705,7 +705,7 @@ fn crossterm_to_realm(key: crossterm::event::KeyEvent) -> RealmKey {
 /// Write OSC 52 clipboard-set to the host terminal's stdout. The host
 /// (Ghostty / iTerm2 / Kitty / WezTerm) lands the text on the system
 /// clipboard. Format: `ESC ] 52 ; c ; <base64> ESC \`. Wraps the
-/// pilot-side "copy from terminal selection" gesture — without OSC 52
+/// lazybox-side "copy from terminal selection" gesture — without OSC 52
 /// the extracted text would just live in memory.
 pub(crate) fn emit_clipboard_copy(text: &str) {
     let encoded = base64_encode(text.as_bytes());
@@ -715,7 +715,7 @@ pub(crate) fn emit_clipboard_copy(text: &str) {
     let _ = std::io::stdout().flush();
 }
 
-/// Tiny RFC 4648 base64 encoder. Pilot doesn't have a `base64` dep
+/// Tiny RFC 4648 base64 encoder. Lazybox doesn't have a `base64` dep
 /// and pulling one in for one OSC 52 call is overkill. ~25 lines,
 /// allocation-free aside from the output `String`.
 pub(super) fn base64_encode(bytes: &[u8]) -> String {

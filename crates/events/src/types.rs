@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use pilot_core::{Activity, CiStatus, ReviewStatus, Task, TaskId, TaskState};
+use lazybox_core::{Activity, CiStatus, ReviewStatus, Task, TaskId, TaskState};
 
 /// An event produced by any provider (GitHub, Linear, CI, …).
 /// The app reacts to these generically — it never pattern-matches on
@@ -91,11 +91,11 @@ impl Event {
     }
 }
 
-fn activity_label(kind: &pilot_core::ActivityKind) -> &'static str {
+fn activity_label(kind: &lazybox_core::ActivityKind) -> &'static str {
     match kind {
-        pilot_core::ActivityKind::Comment => "comment",
-        pilot_core::ActivityKind::Review => "review",
-        pilot_core::ActivityKind::StatusChange => "status",
-        pilot_core::ActivityKind::CiUpdate => "ci",
+        lazybox_core::ActivityKind::Comment => "comment",
+        lazybox_core::ActivityKind::Review => "review",
+        lazybox_core::ActivityKind::StatusChange => "status",
+        lazybox_core::ActivityKind::CiUpdate => "ci",
     }
 }

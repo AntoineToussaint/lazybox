@@ -1,6 +1,6 @@
+use lazybox_auth::Credential;
+use lazybox_core::*;
 use octocrab::Octocrab;
-use pilot_auth::Credential;
-use pilot_core::*;
 
 use crate::graphql;
 use crate::notifications::{
@@ -222,7 +222,7 @@ fn detail_of(err: &GhError) -> String {
     }
 }
 
-impl From<GhError> for pilot_core::ProviderError {
+impl From<GhError> for lazybox_core::ProviderError {
     /// Classify GitHub failures so polling knows whether to retry.
     /// Heuristics:
     /// - 401/403 only when the GitHub API itself returned that status →
@@ -243,7 +243,7 @@ impl From<GhError> for pilot_core::ProviderError {
             retry_after_secs, ..
         } = &err
         {
-            return pilot_core::ProviderError::retryable_after(SOURCE, detail, *retry_after_secs);
+            return lazybox_core::ProviderError::retryable_after(SOURCE, detail, *retry_after_secs);
         }
 
         // Status-aware classification when we have an octocrab
@@ -255,12 +255,12 @@ impl From<GhError> for pilot_core::ProviderError {
         if let GhError::Api(octocrab::Error::GitHub { source, .. }) = &err {
             let status = source.status_code.as_u16();
             if status == 401 || status == 403 {
-                return pilot_core::ProviderError::auth(SOURCE, detail);
+                return lazybox_core::ProviderError::auth(SOURCE, detail);
             }
             if status == 429 || (500..=599).contains(&status) {
-                return pilot_core::ProviderError::retryable(SOURCE, detail);
+                return lazybox_core::ProviderError::retryable(SOURCE, detail);
             }
-            return pilot_core::ProviderError::permanent(SOURCE, detail);
+            return lazybox_core::ProviderError::permanent(SOURCE, detail);
         }
 
         // Same status-aware classification for `HttpStatus`, the
@@ -275,15 +275,15 @@ impl From<GhError> for pilot_core::ProviderError {
         } = &err
         {
             if *status == 401 || *status == 403 {
-                return pilot_core::ProviderError::auth(SOURCE, detail);
+                return lazybox_core::ProviderError::auth(SOURCE, detail);
             }
             if *status == 429 || (500..=599).contains(status) {
-                return pilot_core::ProviderError::retryable(SOURCE, detail);
+                return lazybox_core::ProviderError::retryable(SOURCE, detail);
             }
             if (200..=299).contains(status) && !content_type_is_json(content_type) {
-                return pilot_core::ProviderError::retryable(SOURCE, detail);
+                return lazybox_core::ProviderError::retryable(SOURCE, detail);
             }
-            return pilot_core::ProviderError::permanent(SOURCE, detail);
+            return lazybox_core::ProviderError::permanent(SOURCE, detail);
         }
 
         // Variant-aware classification: every transport-layer variant
@@ -302,7 +302,7 @@ impl From<GhError> for pilot_core::ProviderError {
                     | octocrab::Error::Uri { .. }
             )
         {
-            return pilot_core::ProviderError::retryable(SOURCE, detail);
+            return lazybox_core::ProviderError::retryable(SOURCE, detail);
         }
 
         // Fallback string matching for everything else (GraphQL
@@ -319,10 +319,10 @@ impl From<GhError> for pilot_core::ProviderError {
             || lower.contains("504")
             || lower.contains("temporarily");
         if is_retryable {
-            return pilot_core::ProviderError::retryable(SOURCE, detail);
+            return lazybox_core::ProviderError::retryable(SOURCE, detail);
         }
 
-        pilot_core::ProviderError::permanent(SOURCE, detail)
+        lazybox_core::ProviderError::permanent(SOURCE, detail)
     }
 }
 
@@ -373,7 +373,7 @@ impl GhClient {
             issue_filters: vec![],
             watch_repos: vec![],
             budget: std::sync::Arc::new(std::sync::Mutex::new(
-                crate::rate_budget::RateBudget::default_for_pilot(),
+                crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
             notifications_state: NotificationsState::shared(),
         })
@@ -464,7 +464,7 @@ impl GhClient {
         const DELAYS_MS: &[u64] = &[200, 800];
         // Per-request wall-clock cap. The default reqwest client has
         // no timeout — a flaky network can leave the HTTP call
-        // hanging forever, which the user perceives as "pilot's
+        // hanging forever, which the user perceives as "lazybox's
         // sync froze." 25s is generous (a real PR search rarely
         // breaks 5s) but well under the 90s spinner guard so a hung
         // call surfaces as an error before the UI gives up.
@@ -1009,7 +1009,7 @@ impl GhClient {
         }
         // `participating=false` — match #19's recommendation. Returns
         // every notification the user can see, not just ones they're
-        // explicitly mentioned in. That's what we want: pilot's job is
+        // explicitly mentioned in. That's what we want: lazybox's job is
         // to surface activity on rows already in the inbox.
         // `all=false` (default) — only unread items. Read notifications
         // wouldn't add information since we already saw them.
@@ -1158,7 +1158,7 @@ impl GhClient {
     pub async fn fetch_all_prs(&self) -> Result<Vec<Task>, GhError> {
         // Per-call wall-clock timer so the log can quantify the
         // parallelization win and so a regression jumps out in
-        // `grep "fetch_all_prs: completed" /tmp/pilot.log`. Cheap;
+        // `grep "fetch_all_prs: completed" /tmp/lazybox.log`. Cheap;
         // Instant::now() is ~10ns on macOS.
         let started = std::time::Instant::now();
         // Parallelize the three independent branches of a PR fetch:
@@ -1619,7 +1619,7 @@ impl GhClient {
     /// paginated. Separate from `fetch_all_prs` so callers opt in
     /// explicitly. Thin wrapper over `fetch_all_issues_with_mentions`
     /// that discards the mention side-channel — use the underlying
-    /// method when you want the `@pilot` triggers too.
+    /// method when you want the `@lazybox` triggers too.
     pub async fn fetch_all_issues(&self) -> Result<Vec<Task>, GhError> {
         let (tasks, _mentions) = self
             .fetch_all_issues_with_mentions(&std::collections::BTreeSet::new())
@@ -1628,8 +1628,8 @@ impl GhClient {
     }
 
     /// Same as `fetch_all_issues` but also scans each raw issue for
-    /// `@pilot` mentions from `allowed_logins` and returns the
-    /// resulting [`crate::PilotMention`] list. Done in one pass so we
+    /// `@lazybox` mentions from `allowed_logins` and returns the
+    /// resulting [`crate::LazyboxMention`] list. Done in one pass so we
     /// don't pay the issue search twice; the GraphQL response already
     /// carries `reactions(content: EYES) { viewerHasReacted }` for
     /// idempotency.
@@ -1640,7 +1640,7 @@ impl GhClient {
     pub async fn fetch_all_issues_with_mentions(
         &self,
         allowed_logins: &std::collections::BTreeSet<String>,
-    ) -> Result<(Vec<Task>, Vec<crate::PilotMention>), GhError> {
+    ) -> Result<(Vec<Task>, Vec<crate::LazyboxMention>), GhError> {
         let started = std::time::Instant::now();
         // Same assembly as `fetch_all_prs` — see notes there.
         let mut quals = graphql::default_issues_qualifiers();
@@ -1653,7 +1653,7 @@ impl GhClient {
         tracing::info!("GraphQL issues search: {search_query}");
 
         let mut tasks: Vec<Task> = Vec::new();
-        let mut mentions: Vec<crate::PilotMention> = Vec::new();
+        let mut mentions: Vec<crate::LazyboxMention> = Vec::new();
         let mut cursor: Option<String> = None;
         let mut page = 0usize;
         loop {
@@ -1898,7 +1898,7 @@ impl GhClient {
     /// happen given the scheduler's cold-start rule, but defensive),
     /// the PR side is skipped entirely.
     ///
-    /// [polling]: ../../../pilot_server/polling/fn.pick_repos_for_tick.html
+    /// [polling]: ../../../lazybox_server/polling/fn.pick_repos_for_tick.html
     pub async fn fetch_round_robin_with_status_and_mentions(
         &self,
         want_prs: bool,
@@ -1906,8 +1906,8 @@ impl GhClient {
         run_global: bool,
         want_issues: bool,
         allowed_logins: &std::collections::BTreeSet<String>,
-    ) -> Result<(Vec<Task>, Option<String>, Vec<crate::PilotMention>), GhError> {
-        // Issues are queried for `@pilot` mentions even when issue
+    ) -> Result<(Vec<Task>, Option<String>, Vec<crate::LazyboxMention>), GhError> {
+        // Issues are queried for `@lazybox` mentions even when issue
         // *display* is off — see `should_query_issues` (issue #50).
         let want_issue_side = should_query_issues(want_issues, allowed_logins);
         if !want_prs && !want_issue_side {
@@ -1965,10 +1965,10 @@ impl GhClient {
     }
 
     /// Like `fetch_selected_with_status` but also runs the
-    /// `@pilot`-mention scan on the issues side. The returned
-    /// [`PilotMention`](crate::PilotMention) list is empty when
+    /// `@lazybox`-mention scan on the issues side. The returned
+    /// [`LazyboxMention`](crate::LazyboxMention) list is empty when
     /// `allowed_logins` is empty (the mention feature is opt-in via
-    /// config) or when no allowed user has written `@pilot` on an
+    /// config) or when no allowed user has written `@lazybox` on an
     /// unreacted body / comment. Errors fall back to the same
     /// partial-failure shape as the underlying call — a failed
     /// PR side keeps issues + mentions, and vice versa.
@@ -1977,9 +1977,9 @@ impl GhClient {
         want_prs: bool,
         want_issues: bool,
         allowed_logins: &std::collections::BTreeSet<String>,
-    ) -> Result<(Vec<Task>, Option<String>, Vec<crate::PilotMention>), GhError> {
+    ) -> Result<(Vec<Task>, Option<String>, Vec<crate::LazyboxMention>), GhError> {
         // Same decoupling as the round-robin variant: scan issues for
-        // `@pilot` mentions whenever the feature is active, even on a
+        // `@lazybox` mentions whenever the feature is active, even on a
         // PR-only inbox (issue #50).
         let want_issue_side = should_query_issues(want_issues, allowed_logins);
         if !want_prs && !want_issue_side {
@@ -2056,11 +2056,11 @@ impl GhClient {
     }
 
     /// Post a 👀 (`:eyes:`) reaction on any Reactable — typically an
-    /// Issue body or an IssueComment for the `@pilot`-mention
+    /// Issue body or an IssueComment for the `@lazybox`-mention
     /// auto-spawn flow. The reaction is the canonical idempotency
     /// marker for that flow: subsequent polls select
     /// `viewerHasReacted` and skip already-acknowledged surfaces, so
-    /// pilot doesn't re-spawn every cycle.
+    /// lazybox doesn't re-spawn every cycle.
     ///
     /// Re-posting an existing reaction is a no-op on GitHub's side,
     /// so retrying on transient failure is safe.
@@ -2394,12 +2394,12 @@ impl GhClient {
     }
 }
 
-impl pilot_core::TaskProvider for GhClient {
+impl lazybox_core::TaskProvider for GhClient {
     fn name(&self) -> &str {
         "github"
     }
 
-    async fn fetch_tasks(&self) -> Result<Vec<pilot_core::Task>, pilot_core::ProviderError> {
+    async fn fetch_tasks(&self) -> Result<Vec<lazybox_core::Task>, lazybox_core::ProviderError> {
         self.fetch_all_prs().await.map_err(Into::into)
     }
 
@@ -2414,23 +2414,23 @@ impl pilot_core::TaskProvider for GhClient {
     /// translate to "repoll first".
     async fn merge(
         &self,
-        workspace: &pilot_core::Workspace,
-    ) -> Result<(), pilot_core::ProviderError> {
+        workspace: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
         let Some(pr) = workspace.pr.as_ref() else {
-            return Err(pilot_core::ProviderError::permanent(
+            return Err(lazybox_core::ProviderError::permanent(
                 "github",
                 format!("workspace {} has no PR", workspace.key),
             ));
         };
         let Some(node_id) = pr.node_id.as_deref() else {
-            return Err(pilot_core::ProviderError::permanent(
+            return Err(lazybox_core::ProviderError::permanent(
                 "github",
                 "PR has no node_id (poll first)",
             ));
         };
         self.merge_pr(node_id)
             .await
-            .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))
+            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
     }
 
     /// Request reviewer(s) on the workspace's PR. Logins are
@@ -2438,33 +2438,33 @@ impl pilot_core::TaskProvider for GhClient {
     /// node ids inside `request_reviewers`.
     async fn request_reviewers(
         &self,
-        workspace: &pilot_core::Workspace,
+        workspace: &lazybox_core::Workspace,
         logins: &[String],
-    ) -> Result<(), pilot_core::ProviderError> {
+    ) -> Result<(), lazybox_core::ProviderError> {
         let Some(pr) = workspace.pr.as_ref() else {
-            return Err(pilot_core::ProviderError::permanent(
+            return Err(lazybox_core::ProviderError::permanent(
                 "github",
                 format!("workspace {} has no PR", workspace.key),
             ));
         };
         let Some(node_id) = pr.node_id.as_deref() else {
-            return Err(pilot_core::ProviderError::permanent(
+            return Err(lazybox_core::ProviderError::permanent(
                 "github",
                 "PR has no node_id (poll first)",
             ));
         };
         self.request_reviewers(node_id, logins)
             .await
-            .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))
+            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
     }
 
     /// Add assignee(s) to the workspace's PR or issue. Both are
     /// GraphQL `Assignable` so a single mutation covers them.
     async fn add_assignees(
         &self,
-        workspace: &pilot_core::Workspace,
+        workspace: &lazybox_core::Workspace,
         logins: &[String],
-    ) -> Result<(), pilot_core::ProviderError> {
+    ) -> Result<(), lazybox_core::ProviderError> {
         // Prefer the PR's node_id; fall back to the first issue's
         // node_id for issue-only workspaces.
         let node_id = workspace
@@ -2478,7 +2478,7 @@ impl pilot_core::TaskProvider for GhClient {
                     .and_then(|i| i.node_id.as_deref())
             });
         let Some(node_id) = node_id else {
-            return Err(pilot_core::ProviderError::permanent(
+            return Err(lazybox_core::ProviderError::permanent(
                 "github",
                 format!(
                     "workspace {} has neither a PR nor an issue with a node_id",
@@ -2488,7 +2488,7 @@ impl pilot_core::TaskProvider for GhClient {
         };
         self.add_assignees(node_id, logins)
             .await
-            .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))
+            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
     }
 
     /// Replace the assignee set on the workspace's PR or issue.
@@ -2499,9 +2499,9 @@ impl pilot_core::TaskProvider for GhClient {
     /// an unchecked picker for that case).
     async fn set_assignees(
         &self,
-        workspace: &pilot_core::Workspace,
+        workspace: &lazybox_core::Workspace,
         logins: &[String],
-    ) -> Result<(), pilot_core::ProviderError> {
+    ) -> Result<(), lazybox_core::ProviderError> {
         // Resolve the same Assignable node we'd add against.
         let (node_id, existing) = {
             let pr_match = workspace
@@ -2513,7 +2513,7 @@ impl pilot_core::TaskProvider for GhClient {
                 .first()
                 .and_then(|i| i.node_id.as_deref().map(|n| (n, &i.assignees)));
             pr_match.or(issue_match).ok_or_else(|| {
-                pilot_core::ProviderError::permanent(
+                lazybox_core::ProviderError::permanent(
                     "github",
                     format!(
                         "workspace {} has neither a PR nor an issue with a node_id",
@@ -2544,12 +2544,12 @@ impl pilot_core::TaskProvider for GhClient {
         if !to_add.is_empty() {
             self.add_assignees(node_id, &to_add)
                 .await
-                .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+                .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))?;
         }
         if !to_remove.is_empty() {
             self.remove_assignees(node_id, &to_remove)
                 .await
-                .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+                .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))?;
         }
         Ok(())
     }
@@ -2560,17 +2560,17 @@ impl pilot_core::TaskProvider for GhClient {
     /// layer) — `pr.number` doubles as the issue number.
     async fn post_reply(
         &self,
-        workspace: &pilot_core::Workspace,
+        workspace: &lazybox_core::Workspace,
         body: &str,
-    ) -> Result<(), pilot_core::ProviderError> {
+    ) -> Result<(), lazybox_core::ProviderError> {
         let primary = workspace.primary_task().ok_or_else(|| {
-            pilot_core::ProviderError::permanent(
+            lazybox_core::ProviderError::permanent(
                 "github",
                 format!("workspace {} has no primary task", workspace.key),
             )
         })?;
         let Some(repo) = primary.repo.as_deref() else {
-            return Err(pilot_core::ProviderError::permanent(
+            return Err(lazybox_core::ProviderError::permanent(
                 "github",
                 "primary task has no repo",
             ));
@@ -2593,14 +2593,14 @@ impl pilot_core::TaskProvider for GhClient {
                     .and_then(|(_, n)| n.parse::<u64>().ok())
             });
         let Some(number) = number else {
-            return Err(pilot_core::ProviderError::permanent(
+            return Err(lazybox_core::ProviderError::permanent(
                 "github",
                 format!("can't parse number from task key `{}`", primary.id.key),
             ));
         };
         self.post_issue_comment(repo, number, body)
             .await
-            .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))
+            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
     }
 
     /// List the labels defined on the workspace's repository. Both
@@ -2608,22 +2608,22 @@ impl pilot_core::TaskProvider for GhClient {
     /// primary task's `repo` field.
     async fn list_repo_labels(
         &self,
-        workspace: &pilot_core::Workspace,
-    ) -> Result<Vec<pilot_core::Label>, pilot_core::ProviderError> {
+        workspace: &lazybox_core::Workspace,
+    ) -> Result<Vec<lazybox_core::Label>, lazybox_core::ProviderError> {
         let primary = workspace.primary_task().ok_or_else(|| {
-            pilot_core::ProviderError::permanent(
+            lazybox_core::ProviderError::permanent(
                 "github",
                 format!("workspace {} has no primary task", workspace.key),
             )
         })?;
         let Some(repo) = primary.repo.as_deref() else {
-            return Err(pilot_core::ProviderError::permanent(
+            return Err(lazybox_core::ProviderError::permanent(
                 "github",
                 "primary task has no repo",
             ));
         };
         let Some((owner, name)) = repo.split_once('/') else {
-            return Err(pilot_core::ProviderError::permanent(
+            return Err(lazybox_core::ProviderError::permanent(
                 "github",
                 format!("can't parse owner/name from `{repo}`"),
             ));
@@ -2631,10 +2631,10 @@ impl pilot_core::TaskProvider for GhClient {
         let nodes = self
             .list_labels_for_repo(owner, name)
             .await
-            .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))?;
         Ok(nodes
             .into_iter()
-            .map(|n| pilot_core::Label {
+            .map(|n| lazybox_core::Label {
                 name: n.name,
                 color: n.color.unwrap_or_default(),
             })
@@ -2648,9 +2648,9 @@ impl pilot_core::TaskProvider for GhClient {
     /// needed. Empty `names` clears every label.
     async fn set_labels(
         &self,
-        workspace: &pilot_core::Workspace,
+        workspace: &lazybox_core::Workspace,
         names: &[String],
-    ) -> Result<(), pilot_core::ProviderError> {
+    ) -> Result<(), lazybox_core::ProviderError> {
         // Find the labelable node — prefer the PR, fall back to the
         // first issue. Same shape as set_assignees: both PRs and
         // issues implement the `Labelable` interface. We borrow the
@@ -2667,7 +2667,7 @@ impl pilot_core::TaskProvider for GhClient {
                     .and_then(|i| i.node_id.as_deref().map(|n| (n, i.labels.as_slice())))
             })
             .ok_or_else(|| {
-                pilot_core::ProviderError::permanent(
+                lazybox_core::ProviderError::permanent(
                     "github",
                     format!(
                         "workspace {} has neither a PR nor an issue with a node_id",
@@ -2683,15 +2683,15 @@ impl pilot_core::TaskProvider for GhClient {
             .primary_task()
             .and_then(|t| t.repo.as_deref())
             .ok_or_else(|| {
-                pilot_core::ProviderError::permanent("github", "primary task has no repo")
+                lazybox_core::ProviderError::permanent("github", "primary task has no repo")
             })?;
         let (owner, name) = repo.split_once('/').ok_or_else(|| {
-            pilot_core::ProviderError::permanent("github", format!("bad repo string `{repo}`"))
+            lazybox_core::ProviderError::permanent("github", format!("bad repo string `{repo}`"))
         })?;
         let repo_labels = self
             .list_labels_for_repo(owner, name)
             .await
-            .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))?;
         // Hash lookup keeps the typical 0-50 repo-labels × 0-10 picks
         // case constant-time without the two extra HashSet allocs the
         // prior diff path used.
@@ -2723,12 +2723,12 @@ impl pilot_core::TaskProvider for GhClient {
         if !to_add.is_empty() {
             self.add_labels(node_id, &to_add)
                 .await
-                .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+                .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))?;
         }
         if !to_remove.is_empty() {
             self.remove_labels(node_id, &to_remove)
                 .await
-                .map_err(|e| pilot_core::ProviderError::permanent("github", e.to_string()))?;
+                .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))?;
         }
         Ok(())
     }
@@ -2738,13 +2738,13 @@ impl pilot_core::TaskProvider for GhClient {
 ///
 /// Runs when EITHER:
 ///   - the user wants issues displayed in the inbox (`want_issues`), OR
-///   - the `@pilot` mention feature is active (a non-empty allowlist).
+///   - the `@lazybox` mention feature is active (a non-empty allowlist).
 ///
-/// The second clause is the fix for issue #50: the `@pilot` auto-spawn
+/// The second clause is the fix for issue #50: the `@lazybox` auto-spawn
 /// trigger lives on the issues side, but the GitHub default filter is
 /// PR-only (`issue.*` keys unset → `want_issues == false`). Tying the
 /// mention scan to `want_issues` meant a default/PR-only inbox silently
-/// never ingested `@pilot` work. The non-mention issues pulled by a
+/// never ingested `@lazybox` work. The non-mention issues pulled by a
 /// mention-only scan are dropped downstream by `filter_github_tasks`,
 /// so they don't leak into the displayed inbox.
 pub(crate) fn should_query_issues(
@@ -2773,10 +2773,10 @@ mod tests {
     #[test]
     fn issue_query_runs_for_mentions_even_when_issue_display_off() {
         // Regression (issue #50): PR-only inbox must still scan issues
-        // for `@pilot` mentions when the allowlist is non-empty.
+        // for `@lazybox` mentions when the allowlist is non-empty.
         assert!(
             should_query_issues(false, &logins(&["alice"])),
-            "@pilot scan must run even when issue display is off"
+            "@lazybox scan must run even when issue display is off"
         );
     }
 
@@ -2840,7 +2840,7 @@ mod tests {
             issue_filters: vec![],
             watch_repos: vec![],
             budget: std::sync::Arc::new(std::sync::Mutex::new(
-                crate::rate_budget::RateBudget::default_for_pilot(),
+                crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
             notifications_state: NotificationsState::shared(),
         }
@@ -2931,9 +2931,9 @@ mod tests {
             matches!(err, GhError::HttpStatus { status: 401, .. }),
             "expected HttpStatus(401), got: {err:?}"
         );
-        let pe: pilot_core::ProviderError = err.into();
+        let pe: lazybox_core::ProviderError = err.into();
         assert!(
-            matches!(pe, pilot_core::ProviderError::Auth { .. }),
+            matches!(pe, lazybox_core::ProviderError::Auth { .. }),
             "401 should map to ProviderError::Auth, got: {pe:?}"
         );
     }

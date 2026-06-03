@@ -17,7 +17,7 @@ use crate::components::sidebar::{
     Mailbox, RepoSummary, RoleFilter, SearchState, SortMode, VisibleRow, WorkspaceKind,
     mailbox_membership, role_rank,
 };
-use pilot_core::{Project, ProjectKey, SessionKey, Workspace};
+use lazybox_core::{Project, ProjectKey, SessionKey, Workspace};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Output of `compute_visible`. Held together because the
@@ -48,7 +48,7 @@ pub struct ComputeInputs<'a> {
     /// workspaces still shows up.
     pub projects: &'a BTreeMap<ProjectKey, Project>,
     pub collapsed_repos: &'a BTreeSet<String>,
-    pub attention: &'a pilot_config::AttentionConfig,
+    pub attention: &'a lazybox_config::AttentionConfig,
     pub agents_asking: &'a HashSet<SessionKey>,
     pub now: chrono::DateTime<chrono::Utc>,
     /// Free-text search scoped to one project, or `None`. When `Some`
@@ -85,7 +85,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         .collect();
 
     // Step 2: bucket by project. A workspace's parent project is
-    // looked up via `pilot_core::workspace_project_key` → resolved
+    // looked up via `lazybox_core::workspace_project_key` → resolved
     // through the daemon's project table to get the display name.
     // Workspaces with no project_key (back-compat reads of pre-
     // Stage-1 records OR orphans whose task.repo failed to derive)
@@ -179,7 +179,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
                     // visual noise (the workspace row itself
                     // represents that session).
                     if w.session_count() >= 2 {
-                        let mut sessions: Vec<&pilot_core::WorkspaceSession> =
+                        let mut sessions: Vec<&lazybox_core::WorkspaceSession> =
                             w.sessions.iter().collect();
                         sessions.sort_by_key(|s| s.created_at);
                         for s in sessions {
@@ -202,7 +202,7 @@ fn group_label(w: &Workspace, projects: &BTreeMap<ProjectKey, Project>) -> Strin
     // Prefer the project_key → project record path: the display
     // name matches the standalone Project header so they collapse
     // into one bucket.
-    if let Some(pk) = pilot_core::workspace_project_key(w)
+    if let Some(pk) = lazybox_core::workspace_project_key(w)
         && let Some(p) = projects.get(&pk)
     {
         return p.name.clone();
@@ -261,7 +261,7 @@ fn is_subsequence(haystack: &str, needle: &str) -> bool {
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone, Utc};
-    use pilot_core::{
+    use lazybox_core::{
         CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey,
     };
 
@@ -294,7 +294,7 @@ mod tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: pilot_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             node_id: None,
             needs_reply: false,
@@ -313,7 +313,7 @@ mod tests {
         workspaces: &'a HashMap<SessionKey, Workspace>,
         _subscribed: &'a BTreeSet<String>,
         collapsed: &'a BTreeSet<String>,
-        attention: &'a pilot_config::AttentionConfig,
+        attention: &'a lazybox_config::AttentionConfig,
         asking: &'a HashSet<SessionKey>,
         projects: &'a BTreeMap<ProjectKey, Project>,
     ) -> ComputeInputs<'a> {
@@ -338,7 +338,7 @@ mod tests {
         let ws = HashMap::new();
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
-        let att = pilot_config::AttentionConfig::default();
+        let att = lazybox_config::AttentionConfig::default();
         let asking = HashSet::new();
         let projects = BTreeMap::new();
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
@@ -354,7 +354,7 @@ mod tests {
         ws.insert(SessionKey::from(&w.key), w);
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
-        let att = pilot_config::AttentionConfig::default();
+        let att = lazybox_config::AttentionConfig::default();
         let asking = HashSet::new();
         let projects = BTreeMap::new();
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
@@ -374,7 +374,7 @@ mod tests {
         ws.insert(SessionKey::from(&b.key), b);
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
-        let att = pilot_config::AttentionConfig::default();
+        let att = lazybox_config::AttentionConfig::default();
         let asking = HashSet::new();
         let projects = BTreeMap::new();
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
@@ -402,7 +402,7 @@ mod tests {
         let sub = BTreeSet::new();
         let mut col = BTreeSet::new();
         col.insert("owner/r".to_string());
-        let att = pilot_config::AttentionConfig::default();
+        let att = lazybox_config::AttentionConfig::default();
         let asking = HashSet::new();
         let projects = BTreeMap::new();
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
@@ -424,7 +424,7 @@ mod tests {
         ws.insert(SessionKey::from(&w.key), w);
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
-        let att = pilot_config::AttentionConfig::default();
+        let att = lazybox_config::AttentionConfig::default();
         let asking = HashSet::new();
         let mut projects = BTreeMap::new();
         projects.insert(
@@ -446,7 +446,7 @@ mod tests {
         let ws = HashMap::new();
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
-        let att = pilot_config::AttentionConfig::default();
+        let att = lazybox_config::AttentionConfig::default();
         let asking = HashSet::new();
         let mut projects = BTreeMap::new();
         let pk = ProjectKey::github("owner", "empty");
@@ -466,7 +466,7 @@ mod tests {
         let ws = HashMap::new();
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
-        let att = pilot_config::AttentionConfig::default();
+        let att = lazybox_config::AttentionConfig::default();
         let asking = HashSet::new();
         let mut projects = BTreeMap::new();
         let pk = ProjectKey::github("owner", "empty");
@@ -491,7 +491,7 @@ mod tests {
         ws.insert(SessionKey::from(&newer.key), newer);
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
-        let att = pilot_config::AttentionConfig::default();
+        let att = lazybox_config::AttentionConfig::default();
         let asking = HashSet::new();
         let projects = BTreeMap::new();
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
@@ -516,7 +516,7 @@ mod tests {
         ws.insert(SessionKey::from(&w.key), w);
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
-        let att = pilot_config::AttentionConfig::default();
+        let att = lazybox_config::AttentionConfig::default();
         let asking = HashSet::new();
         let projects = BTreeMap::new();
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
@@ -536,7 +536,7 @@ mod tests {
         let sub = BTreeSet::new();
         let mut col = BTreeSet::new();
         col.insert("owner/r".to_string());
-        let att = pilot_config::AttentionConfig::default();
+        let att = lazybox_config::AttentionConfig::default();
         let asking = HashSet::new();
         let projects = BTreeMap::new();
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
@@ -579,7 +579,7 @@ mod tests {
         }
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
-        let att = pilot_config::AttentionConfig::default();
+        let att = lazybox_config::AttentionConfig::default();
         let asking = HashSet::new();
         let projects = BTreeMap::new();
         let s = search("owner/r", "search");
@@ -610,7 +610,7 @@ mod tests {
         }
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
-        let att = pilot_config::AttentionConfig::default();
+        let att = lazybox_config::AttentionConfig::default();
         let asking = HashSet::new();
         let projects = BTreeMap::new();
         let s = search("owner/r", "#100");
@@ -642,7 +642,7 @@ mod tests {
         }
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
-        let att = pilot_config::AttentionConfig::default();
+        let att = lazybox_config::AttentionConfig::default();
         let asking = HashSet::new();
         let projects = BTreeMap::new();
         let s = search("owner/a", "search");
@@ -666,7 +666,7 @@ mod tests {
         }
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
-        let att = pilot_config::AttentionConfig::default();
+        let att = lazybox_config::AttentionConfig::default();
         let asking = HashSet::new();
         let projects = BTreeMap::new();
         let s = search("owner/r", "");

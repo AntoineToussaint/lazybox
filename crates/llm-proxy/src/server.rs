@@ -12,7 +12,7 @@
 //!
 //! - IN: byte-level request/response forwarding; method/path/status/
 //!   duration/bytes in the record; session-tag attribution via
-//!   `X-Pilot-Session` header; header redaction for stored records.
+//!   `X-Lazybox-Session` header; header redaction for stored records.
 //! - NOT YET: SSE parsing for token counts and tool calls; cost
 //!   computation from parsed tokens. Those land in a follow-up so
 //!   this file stays focused on the transport layer.
@@ -35,7 +35,7 @@ use tokio::task::JoinHandle;
 
 /// Session-tag header the proxy reads to attribute requests. The
 /// daemon sets this value via env injection in the spawn wrapper.
-pub const SESSION_TAG_HEADER: &str = "x-pilot-session";
+pub const SESSION_TAG_HEADER: &str = "x-lazybox-session";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -200,7 +200,7 @@ async fn handle_request(
             Ok((status, body_bytes, req_bytes)) => (status.as_u16(), body_bytes, req_bytes, None),
             Err(e) => (
                 StatusCode::BAD_GATEWAY.as_u16(),
-                Bytes::from_static(b"pilot-server: upstream error\n"),
+                Bytes::from_static(b"lazybox-server: upstream error\n"),
                 0,
                 Some(e.to_string()),
             ),
@@ -251,7 +251,7 @@ async fn handle_request(
     );
     let resp = builder.body(Full::new(response_bytes)).unwrap_or_else(|_| {
         Response::new(Full::new(Bytes::from_static(
-            b"pilot-server: encode error\n",
+            b"lazybox-server: encode error\n",
         )))
     });
     Ok(resp)

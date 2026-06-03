@@ -48,13 +48,13 @@ impl CardState {
 /// each visual element gets its own helper.
 pub(crate) fn render_card_header(
     state: &CardState,
-    activity: &pilot_core::Activity,
+    activity: &lazybox_core::Activity,
     theme: &crate::theme::Theme,
     now: chrono::DateTime<chrono::Utc>,
     teaser_cells: usize,
     viewer_logins: &std::collections::HashMap<String, String>,
 ) -> Line<'static> {
-    use pilot_core::ActivityKind;
+    use lazybox_core::ActivityKind;
     let (kind_icon, kind_label) = match activity.kind {
         ActivityKind::Comment => (crate::components::icons::COMMENT, "Message"),
         ActivityKind::Review => (crate::components::icons::REVIEW, "Review"),
@@ -155,7 +155,7 @@ pub(crate) fn render_card_header(
 /// rendering lives in `comment_render::render_body`; this helper
 /// just wraps each body line with the indented marker-bar prefix.
 pub(crate) fn render_card_body(
-    activity: &pilot_core::Activity,
+    activity: &lazybox_core::Activity,
     theme: &crate::theme::Theme,
     state: &CardState,
     body_width: u16,

@@ -25,7 +25,7 @@
 
 use crate::realm::Msg;
 use crate::realm::UserEvent;
-use pilot_config::Snippet;
+use lazybox_config::Snippet;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::{Event, Key, KeyEvent, KeyModifiers};
@@ -44,7 +44,7 @@ pub struct PickerRow {
     pub key: String,
     pub description: String,
     pub body_preview: String,
-    pub origin: pilot_config::SnippetOrigin,
+    pub origin: lazybox_config::SnippetOrigin,
 }
 
 impl PickerRow {
@@ -268,7 +268,7 @@ impl Component for SnippetPicker {
         if self.visible_indices.is_empty() {
             body.push(Line::from(Span::styled(
                 if self.rows.is_empty() {
-                    "  (no snippets configured — see ~/.pilot/snippets.yaml)"
+                    "  (no snippets configured — see ~/.lazybox/snippets.yaml)"
                 } else {
                     "  (no matches)"
                 },
@@ -345,7 +345,7 @@ impl AppComponent<Msg, UserEvent> for SnippetPicker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pilot_config::{Snippet, SnippetOrigin};
+    use lazybox_config::{Snippet, SnippetOrigin};
 
     /// Build a sorted row vec. The production caller (`mount_snippet_picker`)
     /// hands the picker rows derived from `Snippets::all()`, which walks

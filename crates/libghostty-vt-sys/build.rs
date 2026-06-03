@@ -50,7 +50,7 @@ fn main() {
     // requires the same minor — newer zig (e.g. brew's default 0.16.x)
     // fails at comptime. Resolve the right zig binary in order:
     //
-    //   1. `PILOT_ZIG_BIN`     — explicit override, takes precedence.
+    //   1. `LAZYBOX_ZIG_BIN`     — explicit override, takes precedence.
     //   2. `zig` on PATH       — usually correct; fails fast if too new.
     //   3. Homebrew's `zig@0.15` keg path — best-effort fallback so a
     //      `brew install zig@0.15` (it's keg-only, doesn't link to
@@ -59,7 +59,7 @@ fn main() {
     // The fallback only kicks in when the path exists, so non-mac CI
     // and users with a system zig 0.15 stay on the PATH binary.
     let zig_bin = resolve_zig_binary();
-    println!("cargo:rerun-if-env-changed=PILOT_ZIG_BIN");
+    println!("cargo:rerun-if-env-changed=LAZYBOX_ZIG_BIN");
     let mut build = Command::new(&zig_bin);
     build
         .arg("build")
@@ -130,11 +130,11 @@ fn main() {
 }
 
 /// Pick the right `zig` binary to invoke. See the call site for the
-/// resolution order. Returns either a PILOT_ZIG_BIN override, the
+/// resolution order. Returns either a LAZYBOX_ZIG_BIN override, the
 /// system `zig` from PATH, or Homebrew's `zig@0.15` keg path on
 /// macOS when system zig is missing or too new.
 fn resolve_zig_binary() -> PathBuf {
-    if let Ok(explicit) = env::var("PILOT_ZIG_BIN") {
+    if let Ok(explicit) = env::var("LAZYBOX_ZIG_BIN") {
         return PathBuf::from(explicit);
     }
 
@@ -287,4 +287,4 @@ fn zig_target(target: &str) -> String {
     value.to_owned()
 }
 
-// Note: appended by pilot for static linking support
+// Note: appended by lazybox for static linking support

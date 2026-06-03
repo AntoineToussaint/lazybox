@@ -1,5 +1,5 @@
 [package]
-name = "pilot-llm-proxy"
+name = "lazybox-llm-proxy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,12 +7,12 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-pilot-core       = { workspace = true }
-# Wire types (ProxyRecord / ToolCall / ApiProvider) live in pilot-ipc
+lazybox-core       = { workspace = true }
+# Wire types (ProxyRecord / ToolCall / ApiProvider) live in lazybox-ipc
 # so the protocol crate stays at the bottom of the dep graph. This
 # crate re-exports them for backward compatibility with existing
-# `pilot_llm_proxy::ProxyRecord` call sites.
-pilot-ipc        = { workspace = true }
+# `lazybox_llm_proxy::ProxyRecord` call sites.
+lazybox-ipc        = { workspace = true }
 serde            = { workspace = true }
 serde_json       = "1"
 tokio            = { workspace = true }

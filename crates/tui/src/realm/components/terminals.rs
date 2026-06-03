@@ -6,13 +6,13 @@
 //! so this wrapper just delegates render + key dispatch.
 
 use crate::PaneId;
-use crate::components::terminal_stack::TerminalStack as PilotTerminals;
+use crate::components::terminal_stack::TerminalStack as LazyboxTerminals;
 use crate::realm::keymap::realm_key_to_crossterm;
 use crate::realm::{Msg, UserEvent};
-use pilot_core::SessionKey;
-use pilot_ipc::Command as IpcCommand;
-use pilot_ipc::Event as IpcEvent;
-use pilot_ipc::TerminalId;
+use lazybox_core::SessionKey;
+use lazybox_ipc::Command as IpcCommand;
+use lazybox_ipc::Event as IpcEvent;
+use lazybox_ipc::TerminalId;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::Event;
@@ -23,7 +23,7 @@ use tuirealm::state::State;
 
 /// tuirealm-shaped terminal stack.
 pub struct Terminals {
-    inner: PilotTerminals,
+    inner: LazyboxTerminals,
     focused: bool,
     pending_cmds: Vec<IpcCommand>,
 }
@@ -32,7 +32,7 @@ impl Terminals {
     /// Construct.
     pub fn new(id: PaneId) -> Self {
         Self {
-            inner: PilotTerminals::new(id),
+            inner: LazyboxTerminals::new(id),
             focused: false,
             pending_cmds: Vec::new(),
         }
@@ -71,7 +71,7 @@ impl Terminals {
     /// to it so the panes render with the right arrangement.
     /// Without this call, switching workspaces shows the previous
     /// workspace's layout against the new workspace's terminals.
-    pub fn set_layout(&mut self, layout: pilot_core::SessionLayout) {
+    pub fn set_layout(&mut self, layout: lazybox_core::SessionLayout) {
         self.inner.set_layout(layout);
     }
 
@@ -201,7 +201,7 @@ impl Terminals {
     /// Wire id of the currently focused terminal, if any. Needed by
     /// the wheel handler so it can address its synthetic arrow-key
     /// `Write` at the right pane.
-    pub fn focused_terminal_id(&self) -> Option<pilot_ipc::TerminalId> {
+    pub fn focused_terminal_id(&self) -> Option<lazybox_ipc::TerminalId> {
         self.inner.focused_terminal_id()
     }
 
@@ -210,7 +210,7 @@ impl Terminals {
     /// that arrives via paste (not just key-by-key typing). No-op
     /// when the focused terminal isn't an Agent. The caller is still
     /// responsible for sending the paste bytes to the PTY — this
-    /// only updates pilot's own composing buffer.
+    /// only updates lazybox's own composing buffer.
     pub fn record_paste(&mut self, text: &str) {
         self.inner.record_paste(text);
     }
@@ -220,8 +220,8 @@ impl Terminals {
     /// user-message tracker, so the pinned recap reflects commands
     /// that never flow through the key-by-key path. No-op for
     /// non-Agent terminals. The caller still sends the bytes to the
-    /// PTY — this only updates pilot's own composing buffer.
-    pub fn record_pty_write(&mut self, id: pilot_ipc::TerminalId, bytes: &[u8]) {
+    /// PTY — this only updates lazybox's own composing buffer.
+    pub fn record_pty_write(&mut self, id: lazybox_ipc::TerminalId, bytes: &[u8]) {
         self.inner.record_pty_write(id, bytes);
     }
 
@@ -235,7 +235,7 @@ impl Terminals {
         button: Option<libghostty_vt::mouse::Button>,
         cell_col: u32,
         cell_row: u32,
-    ) -> Option<(pilot_ipc::TerminalId, Vec<u8>)> {
+    ) -> Option<(lazybox_ipc::TerminalId, Vec<u8>)> {
         self.inner
             .encode_mouse_for_focused(action, button, cell_col, cell_row)
     }

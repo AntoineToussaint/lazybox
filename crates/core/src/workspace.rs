@@ -1,4 +1,4 @@
-//! `Workspace` and `Session` — pilot's hierarchy.
+//! `Workspace` and `Session` — lazybox's hierarchy.
 //!
 //! ## The hierarchy (canonical)
 //!
@@ -26,7 +26,7 @@
 //! Separating "the unit of work" (Workspace) from "the running thing"
 //! (Session) lets a single workspace host parallel agents and shells —
 //! e.g. Claude AND Codex on the same PR, or a long-running shell next
-//! to an agent. Both persist across pilot restarts: the daemon keeps
+//! to an agent. Both persist across lazybox restarts: the daemon keeps
 //! the worktree and the PTYs alive, the store remembers everything else.
 
 use crate::task::{Activity, Task, TaskId};
@@ -176,7 +176,7 @@ impl Workspace {
         self.sessions.len()
     }
 
-    /// The session pilot should target when the user issues a workspace-
+    /// The session lazybox should target when the user issues a workspace-
     /// scoped action without picking a specific session. Today: the
     /// most recently created. None when the workspace has no sessions.
     pub fn default_session(&self) -> Option<&Session> {
@@ -1508,7 +1508,7 @@ mod tests {
     // ── Worktree slug stability ───────────────────────────────────
     //
     // `worktree_slug` decides the on-disk directory name for every
-    // worktree pilot creates. The whole session-recovery model relies
+    // worktree lazybox creates. The whole session-recovery model relies
     // on calling the function with the same workspace state +
     // session-index returning the SAME path, otherwise a restart
     // would orphan every existing worktree.
@@ -1531,7 +1531,7 @@ mod tests {
 
     #[test]
     fn slug_is_deterministic_for_the_same_workspace() {
-        // Bedrock contract: pilot calls `worktree_slug` on every
+        // Bedrock contract: lazybox calls `worktree_slug` on every
         // session bring-up. Two calls in a row, no state change in
         // between, must produce identical strings.
         let w = ws_with_pr(7413, "Propagate status code");

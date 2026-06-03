@@ -1,20 +1,20 @@
-# pilot demo — the reactive PR inbox, end to end in one workflow.
+# lazybox demo — the reactive PR inbox, end to end in one workflow.
 #
 # This tape is the SOURCE OF TRUTH for the README GIF. It is code, not a
 # binary blob: edit it here, regenerate, commit the outputs.
 #
 # Regenerate locally:
-#   cargo build -p pilot-tui            # produces target/debug/pilot
-#   PATH="$PWD/target/debug:$PATH" vhs demo/pilot.tape
+#   cargo build -p lazybox-tui            # produces target/debug/lazybox
+#   PATH="$PWD/target/debug:$PATH" vhs demo/lazybox.tape
 #
-# Requires `vhs` (brew install vhs) and a `pilot` binary on PATH. CI re-renders
-# this on UI changes and snapshot-tests demo/pilot.ascii (see .github/workflows/demo.yml).
+# Requires `vhs` (brew install vhs) and a `lazybox` binary on PATH. CI re-renders
+# this on UI changes and snapshot-tests demo/lazybox.ascii (see .github/workflows/demo.yml).
 #
 # Deterministic render: FontSize / Width / Height / Theme are pinned so the
 # output only changes when the tape or the UI changes — never from host drift.
 
-Output "demo/pilot.gif"
-Output "demo/pilot.mp4"
+Output "demo/lazybox.gif"
+Output "demo/lazybox.mp4"
 
 Set Shell "bash"
 Set FontSize 16
@@ -28,7 +28,7 @@ Set LoopOffset 25%
 # Boot the throwaway, no-GitHub sandbox: a seeded workspace, no credentials,
 # no setup wizard. Hide the launch command so the loop opens on the payoff.
 Hide
-Type "pilot --test"
+Type "lazybox --test"
 Enter
 Sleep 3.5s
 Show
@@ -53,7 +53,7 @@ Enter
 Sleep 3s
 
 # Static frame for the README's prefers-reduced-motion fallback.
-Screenshot "demo/pilot.png"
+Screenshot "demo/lazybox.png"
 
 # Back out to the inbox.
 Type "]]"

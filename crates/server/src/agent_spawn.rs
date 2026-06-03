@@ -12,15 +12,15 @@
 //! ## Env injection
 //!
 //! `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` point the agent at our
-//! proxy. `X-Pilot-Session` is added via `ANTHROPIC_DEFAULT_HEADERS`
+//! proxy. `X-Lazybox-Session` is added via `ANTHROPIC_DEFAULT_HEADERS`
 //! where the agent supports it; otherwise we fall back on the
 //! per-spawn proxy binding as the attribution mechanism (the proxy
 //! stamps records with the `session_tag` we hand it at startup, not
 //! from the request header).
 
 use crate::pty::{DaemonPty, PtyError};
-use pilot_core::SessionKey;
-use pilot_llm_proxy::{ProxyConfig, ProxyError, ProxyRecord, ProxyServer};
+use lazybox_core::SessionKey;
+use lazybox_llm_proxy::{ProxyConfig, ProxyError, ProxyRecord, ProxyServer};
 use portable_pty::PtySize;
 use std::collections::HashMap;
 use std::path::PathBuf;

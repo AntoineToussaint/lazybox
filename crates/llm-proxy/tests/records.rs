@@ -1,7 +1,7 @@
 //! Serde round-trip for the proxy record types. Same rationale as the
 //! ipc tests: wire format changes should be loud, not silent.
 
-use pilot_llm_proxy::{ApiProvider, ProxyConfig, ProxyRecord, ToolCall};
+use lazybox_llm_proxy::{ApiProvider, ProxyConfig, ProxyRecord, ToolCall};
 use std::time::Duration;
 
 fn sample_record() -> ProxyRecord {

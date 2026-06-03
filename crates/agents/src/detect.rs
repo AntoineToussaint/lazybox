@@ -1,8 +1,8 @@
 //! Pure, testable PTY-output detection over `&[u8]`.
 //!
-//! pilot wraps every agent in tmux and infers the agent's state by
+//! lazybox wraps every agent in tmux and infers the agent's state by
 //! screen-scraping the PTY byte stream. tmux paints by absolute cursor
-//! position, so the bytes pilot sees arrive ANSI-laden and temporally
+//! position, so the bytes lazybox sees arrive ANSI-laden and temporally
 //! reordered — a single visual line can land as
 //! `<cursor-move>❯<cursor-move> <cursor-move>1.<…>Yes`. Detection is
 //! therefore inherently heuristic; the only way to keep it honest is to
@@ -15,7 +15,7 @@
 //! `Agent` impls in [`crate::agent`] are thin wrappers that call into
 //! these functions.
 
-use pilot_ipc::AgentState;
+use lazybox_ipc::AgentState;
 
 /// Standard bare yes/no prompt markers. Used by every CLI that doesn't
 /// have a custom approval UI (Codex, Cursor, most GenericCli configs).
@@ -114,7 +114,7 @@ pub fn claude_state(recent_output: &[u8]) -> Option<AgentState> {
 ///   status-bar marker is matched against. tmux/Claude paint the bottom
 ///   status bar by absolute cursor position, so a footer phrase
 ///   (`? for shortcuts`, `Esc to cancel`, the `esc to interrupt` hint)
-///   reaches pilot as `?forshortcuts` / `esctocancel` / `esctointerrupt`
+///   reaches lazybox as `?forshortcuts` / `esctocancel` / `esctointerrupt`
 ///   — the inter-word gaps are cursor moves, not space bytes — while the
 ///   SAME phrase in scrollback keeps its spaces. Comparing the space-free
 ///   form matches either rendering; the spaced literal silently never
@@ -143,7 +143,7 @@ fn claude_state_of(s: &str, compact: &str) -> AgentState {
     let chooser_live = marker_at_least_as_recent(chooser_pos(compact), idle_pos);
 
     // tmux paints the screen by absolute cursor position, so the bytes
-    // pilot sees arrive in TEMPORAL order: a single visual line
+    // lazybox sees arrive in TEMPORAL order: a single visual line
     // `❯ 1. Yes` can land in the buffer as
     // `<cursor-move>❯<cursor-move> <cursor-move>1.<…>Yes` and
     // strip_ansi removes the CSI runs but NOT the absolute positioning
@@ -299,7 +299,7 @@ pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
 /// at the prompt: the long form `Esc to cancel · Tab to amend · …`, the
 /// short newer form `? for shortcuts`, or — in any non-default
 /// permission mode — the mode indicator `… on (shift+tab to cycle)`.
-/// Pilot spawns every agent with `--dangerously-skip-permissions`, so
+/// Lazybox spawns every agent with `--dangerously-skip-permissions`, so
 /// that last form (`bypass permissions on (shift+tab to cycle)`) is the
 /// footer it actually sees; `? for shortcuts` is never drawn in that
 /// mode. Any of the three is proof the composer is drawn. `compact` is
@@ -314,7 +314,7 @@ fn input_box_visible(compact: &str) -> bool {
 
 /// Lowercased copy of `s` with ASCII spaces removed. tmux/Claude render
 /// the bottom status bar by absolute cursor position, so a footer phrase
-/// reaches pilot with its inter-word gaps as cursor moves rather than
+/// reaches lazybox with its inter-word gaps as cursor moves rather than
 /// space bytes (`? for shortcuts` → `?forshortcuts`), while the same
 /// phrase printed into scrollback keeps its spaces. Matching against
 /// this form catches a marker in either rendering. Newlines are
@@ -471,7 +471,7 @@ fn working_status_pos(compact: &str) -> Option<usize> {
 /// still sitting in the append-only buffer.
 ///
 /// The `shift+tab to cycle` mode indicator is the footer's bypass /
-/// accept-edits / plan-mode form — pilot launches agents with
+/// accept-edits / plan-mode form — lazybox launches agents with
 /// `--dangerously-skip-permissions`, so the live footer reads
 /// `bypass permissions on (shift+tab to cycle)` and never `? for
 /// shortcuts`. Without this marker a just-finished agent has no idle
@@ -541,7 +541,7 @@ pub fn strip_ansi_lossy(bytes: &[u8]) -> String {
 /// Advance past one escape sequence whose `ESC` (0x1b) is at `start`.
 /// Returns the index of the first byte *after* the sequence — i.e. the
 /// next byte the caller should treat as content. Recognises the four
-/// families that actually reach pilot through tmux:
+/// families that actually reach lazybox through tmux:
 ///
 ///   - **CSI** `ESC [ … <final 0x40–0x7e>` — SGR colour, cursor moves.
 ///   - **OSC** `ESC ] … <BEL | ST>` — window title, hyperlinks.
@@ -779,7 +779,7 @@ mod tests {
 
     #[test]
     fn bypass_mode_idle_footer_evicts_stale_working_status() {
-        // #179: pilot spawns Claude with `--dangerously-skip-permissions`,
+        // #179: lazybox spawns Claude with `--dangerously-skip-permissions`,
         // so its idle composer footer is the bypass-mode mode line —
         // `bypass permissions on (shift+tab to cycle) · ← for agents` —
         // NOT `? for shortcuts`. A just-finished agent's last

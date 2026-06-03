@@ -1,6 +1,6 @@
 //! Lightweight pane support types — `PaneId`, `PaneOutcome`,
 //! `DetachSpec`, `Binding`. Originally lived in the `tui-kit` crate;
-//! kept here as plain types pilot's panes use directly.
+//! kept here as plain types lazybox's panes use directly.
 
 /// Stable id for a Pane. Allocated by the host app at construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

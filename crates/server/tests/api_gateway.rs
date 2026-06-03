@@ -1,4 +1,4 @@
-pub use pilot_server::{Server, ServerConfig};
+pub use lazybox_server::{Server, ServerConfig};
 
 #[allow(dead_code)]
 #[path = "../src/api_gateway.rs"]
@@ -13,10 +13,10 @@ use chrono::Utc;
 use http_body_util::{BodyExt, Full};
 use hyper::header::{AUTHORIZATION, HeaderValue};
 use hyper::{Method, Request, StatusCode};
-use pilot_agents::{Agent, SpawnCtx};
-use pilot_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
-use pilot_ipc::{AgentInputMessage, AgentRuntimeMode, Command, Event};
-use pilot_store::WorkspaceRecord;
+use lazybox_agents::{Agent, SpawnCtx};
+use lazybox_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
+use lazybox_ipc::{AgentInputMessage, AgentRuntimeMode, Command, Event};
+use lazybox_store::WorkspaceRecord;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -87,7 +87,7 @@ fn make_task(key: &str) -> Task {
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: pilot_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::Mergeable,
         is_behind_base: false,
         node_id: None,
         needs_reply: false,
@@ -151,7 +151,7 @@ async fn health_route_returns_json() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: HealthResponse = read_json(response).await;
-    assert_eq!(payload.service, "pilot-api-gateway");
+    assert_eq!(payload.service, "lazybox-api-gateway");
     assert!(payload.ok);
 }
 #[tokio::test]

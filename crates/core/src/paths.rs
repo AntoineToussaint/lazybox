@@ -1,6 +1,6 @@
 //! Per-profile root directory + helpers.
 //!
-//! Pilot used to hardcode `~/.pilot` everywhere — fine for a single
+//! Lazybox used to hardcode `~/.lazybox` everywhere — fine for a single
 //! installation, but it made running a second instance impossible
 //! (two daemons would corrupt each other's `state.db`, claim the
 //! same daemon socket, fight over the same tmux sessions). This
@@ -8,16 +8,16 @@
 //!
 //! ## Override
 //!
-//! Set `PILOT_HOME` to point at a different directory. Everything
-//! pilot writes — state DB, worktrees, daemon socket, config,
+//! Set `LAZYBOX_HOME` to point at a different directory. Everything
+//! lazybox writes — state DB, worktrees, daemon socket, config,
 //! hooks, tmux sessions — lives under it.
 //!
 //! ```bash
-//! # Default: ~/.pilot
-//! pilot
+//! # Default: ~/.lazybox
+//! lazybox
 //!
 //! # Side-by-side dev instance:
-//! PILOT_HOME=~/.pilot-dev cargo run -p pilot-tui
+//! LAZYBOX_HOME=~/.lazybox-dev cargo run -p lazybox-tui
 //! ```
 //!
 //! ## What's shared between profiles
@@ -25,36 +25,36 @@
 //! - Your GitHub token (resolved via `gh auth token` or env vars).
 //! - Your GitHub per-user rate-limit budget. Two instances polling
 //!   in parallel still hit the same 5000/hr ceiling, so bump dev's
-//!   `~/.pilot-dev/config.yaml::providers.github.poll_interval` to
+//!   `~/.lazybox-dev/config.yaml::providers.github.poll_interval` to
 //!   leave headroom.
 //!
 //! ## Tmux socket disambiguation
 //!
 //! [`tmux_socket_name`] derives a unique socket label from the home
-//! dir's last component: `~/.pilot` → `pilot`, `~/.pilot-dev` →
-//! `pilot-dev`. So `tmux -L pilot attach` shows the stable instance,
-//! `tmux -L pilot-dev attach` shows the dev one — no cross-talk.
+//! dir's last component: `~/.lazybox` → `lazybox`, `~/.lazybox-dev` →
+//! `lazybox-dev`. So `tmux -L lazybox attach` shows the stable instance,
+//! `tmux -L lazybox-dev attach` shows the dev one — no cross-talk.
 
 use std::path::PathBuf;
 
-/// Profile root. Defaults to `$HOME/.pilot`; override with
-/// `PILOT_HOME`.
+/// Profile root. Defaults to `$HOME/.lazybox`; override with
+/// `LAZYBOX_HOME`.
 ///
 /// **Why an env var, not a CLI flag.** The polling task, the daemon
 /// socket-service, the spawn handler, and the config loader all
 /// resolve paths independently — threading a `--profile` arg
 /// through every entry point is a lot of plumbing for the same
-/// outcome. `PILOT_HOME=path pilot` reads identically to a flag
-/// and works for every subcommand (`pilot`, `pilot daemon start`,
-/// `pilot server api`) without per-subcommand wiring.
+/// outcome. `LAZYBOX_HOME=path lazybox` reads identically to a flag
+/// and works for every subcommand (`lazybox`, `lazybox daemon start`,
+/// `lazybox server api`) without per-subcommand wiring.
 pub fn home() -> PathBuf {
-    if let Ok(dir) = std::env::var("PILOT_HOME")
+    if let Ok(dir) = std::env::var("LAZYBOX_HOME")
         && !dir.is_empty()
     {
         return PathBuf::from(dir);
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".pilot")
+    PathBuf::from(home).join(".lazybox")
 }
 
 /// State-versioned subdirectory under `home()`. Today: `<home>/v2`.
@@ -75,7 +75,7 @@ pub fn worktrees_root() -> PathBuf {
 
 /// Sandbox workspaces — repo-less scratch directories the user
 /// creates via `Shift-N`. Lives next to the worktree base under
-/// `<home>/v2/sandboxes/<slug>/`. Survives across pilot restarts
+/// `<home>/v2/sandboxes/<slug>/`. Survives across lazybox restarts
 /// and is preserved on `Shift-X` archive (the workspace record
 /// goes; the directory stays for the user to clean up manually if
 /// it contains real work).
@@ -96,11 +96,11 @@ pub fn config_yaml() -> PathBuf {
 }
 
 /// Daemon runtime artifacts (socket, pid). `<home>/run/`. Honors
-/// the older `PILOT_RUNTIME_DIR` env var for back-compat — set both
+/// the older `LAZYBOX_RUNTIME_DIR` env var for back-compat — set both
 /// to the same value if you want, or just unset it and let
-/// `PILOT_HOME` win.
+/// `LAZYBOX_HOME` win.
 pub fn runtime_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("PILOT_RUNTIME_DIR")
+    if let Ok(dir) = std::env::var("LAZYBOX_RUNTIME_DIR")
         && !dir.is_empty()
     {
         return PathBuf::from(dir);
@@ -117,23 +117,23 @@ pub fn hooks_dir() -> PathBuf {
 /// the home dir's last component so two profiles don't collide
 /// on a shared tmux server.
 ///
-/// - `~/.pilot` → `"pilot"` (unchanged from before this module
+/// - `~/.lazybox` → `"lazybox"` (unchanged from before this module
 ///   existed — preserves backward compatibility with running
 ///   sessions on the default profile).
-/// - `~/.pilot-dev` → `"pilot-dev"`.
-/// - Anything weird (path with no usable last component) → `"pilot"`
+/// - `~/.lazybox-dev` → `"lazybox-dev"`.
+/// - Anything weird (path with no usable last component) → `"lazybox"`
 ///   fallback so callers don't have to handle Option.
 pub fn tmux_socket_name() -> String {
     home()
         .file_name()
         .and_then(|s| s.to_str())
         .map(|s| {
-            // `.pilot` → `pilot`, `.pilot-dev` → `pilot-dev`,
-            // `pilot-something` → `pilot-something`.
+            // `.lazybox` → `lazybox`, `.lazybox-dev` → `lazybox-dev`,
+            // `lazybox-something` → `lazybox-something`.
             s.strip_prefix('.').unwrap_or(s).to_string()
         })
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "pilot".to_string())
+        .unwrap_or_else(|| "lazybox".to_string())
 }
 
 #[cfg(test)]
@@ -142,7 +142,7 @@ mod tests {
 
     /// Global lock serializing tests that mutate env vars. Without
     /// this, cargo-test's default parallel execution lets two tests
-    /// step on each other (PILOT_HOME set by one read by another)
+    /// step on each other (LAZYBOX_HOME set by one read by another)
     /// since env state is process-wide. Every test in this module
     /// must hold the lock for its entire body. Poisoning is fine —
     /// the test already failed, no recovery needed.
@@ -191,38 +191,41 @@ mod tests {
     }
 
     #[test]
-    fn home_honors_pilot_home_env() {
+    fn home_honors_lazybox_home_env() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _g = EnvGuard::set("PILOT_HOME", "/tmp/pilot-test-xyz");
-        assert_eq!(home(), PathBuf::from("/tmp/pilot-test-xyz"));
+        let _g = EnvGuard::set("LAZYBOX_HOME", "/tmp/lazybox-test-xyz");
+        assert_eq!(home(), PathBuf::from("/tmp/lazybox-test-xyz"));
     }
 
     #[test]
-    fn home_empty_pilot_home_falls_back_to_default() {
+    fn home_empty_lazybox_home_falls_back_to_default() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Empty string must NOT be treated as "use /": a fish-shell
-        // user with `set -gx PILOT_HOME` and no value would silently
-        // get pilot writing to the filesystem root. The check above
+        // user with `set -gx LAZYBOX_HOME` and no value would silently
+        // get lazybox writing to the filesystem root. The check above
         // filters empties to the default branch.
-        let _g1 = EnvGuard::set("PILOT_HOME", "");
+        let _g1 = EnvGuard::set("LAZYBOX_HOME", "");
         let _g2 = EnvGuard::set("HOME", "/tmp/test-home");
-        assert_eq!(home(), PathBuf::from("/tmp/test-home/.pilot"));
+        assert_eq!(home(), PathBuf::from("/tmp/test-home/.lazybox"));
     }
 
     #[test]
-    fn home_uses_home_env_when_pilot_home_unset() {
+    fn home_uses_home_env_when_lazybox_home_unset() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::unset("PILOT_HOME");
+        let _g1 = EnvGuard::unset("LAZYBOX_HOME");
         let _g2 = EnvGuard::set("HOME", "/tmp/test-home");
-        assert_eq!(home(), PathBuf::from("/tmp/test-home/.pilot"));
+        assert_eq!(home(), PathBuf::from("/tmp/test-home/.lazybox"));
     }
 
     #[test]
     fn state_db_lives_under_state_root() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _g = EnvGuard::set("PILOT_HOME", "/tmp/pilot-x");
-        assert_eq!(state_db(), PathBuf::from("/tmp/pilot-x/v2/state.db"));
-        assert_eq!(worktrees_root(), PathBuf::from("/tmp/pilot-x/v2/worktrees"));
+        let _g = EnvGuard::set("LAZYBOX_HOME", "/tmp/lazybox-x");
+        assert_eq!(state_db(), PathBuf::from("/tmp/lazybox-x/v2/state.db"));
+        assert_eq!(
+            worktrees_root(),
+            PathBuf::from("/tmp/lazybox-x/v2/worktrees")
+        );
     }
 
     #[test]
@@ -232,61 +235,61 @@ mod tests {
         // config. Living at `<home>/config.yaml` instead of
         // `<home>/v2/config.yaml` means a v2→v3 schema bump leaves
         // their customizations alone.
-        let _g = EnvGuard::set("PILOT_HOME", "/tmp/pilot-x");
-        assert_eq!(config_yaml(), PathBuf::from("/tmp/pilot-x/config.yaml"));
+        let _g = EnvGuard::set("LAZYBOX_HOME", "/tmp/lazybox-x");
+        assert_eq!(config_yaml(), PathBuf::from("/tmp/lazybox-x/config.yaml"));
     }
 
     #[test]
     fn runtime_dir_honors_legacy_env_var() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // PILOT_RUNTIME_DIR existed before PILOT_HOME — keep it
+        // LAZYBOX_RUNTIME_DIR existed before LAZYBOX_HOME — keep it
         // working so users who already set it don't have to migrate.
-        let _g1 = EnvGuard::set("PILOT_HOME", "/tmp/pilot-x");
-        let _g2 = EnvGuard::set("PILOT_RUNTIME_DIR", "/var/run/pilot");
-        assert_eq!(runtime_dir(), PathBuf::from("/var/run/pilot"));
+        let _g1 = EnvGuard::set("LAZYBOX_HOME", "/tmp/lazybox-x");
+        let _g2 = EnvGuard::set("LAZYBOX_RUNTIME_DIR", "/var/run/lazybox");
+        assert_eq!(runtime_dir(), PathBuf::from("/var/run/lazybox"));
     }
 
     #[test]
-    fn runtime_dir_falls_back_to_pilot_home_when_legacy_unset() {
+    fn runtime_dir_falls_back_to_lazybox_home_when_legacy_unset() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::set("PILOT_HOME", "/tmp/pilot-x");
-        let _g2 = EnvGuard::unset("PILOT_RUNTIME_DIR");
-        assert_eq!(runtime_dir(), PathBuf::from("/tmp/pilot-x/run"));
+        let _g1 = EnvGuard::set("LAZYBOX_HOME", "/tmp/lazybox-x");
+        let _g2 = EnvGuard::unset("LAZYBOX_RUNTIME_DIR");
+        assert_eq!(runtime_dir(), PathBuf::from("/tmp/lazybox-x/run"));
     }
 
     #[test]
     fn tmux_socket_strips_leading_dot_on_default_profile() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Backward compat: pre-PILOT_HOME, sessions were stored
-        // under `tmux -L pilot`. Default profile must still resolve
-        // to "pilot" so an in-flight session survives the upgrade.
-        let _g1 = EnvGuard::set("PILOT_HOME", "/Users/test/.pilot");
-        assert_eq!(tmux_socket_name(), "pilot");
+        // Backward compat: pre-LAZYBOX_HOME, sessions were stored
+        // under `tmux -L lazybox`. Default profile must still resolve
+        // to "lazybox" so an in-flight session survives the upgrade.
+        let _g1 = EnvGuard::set("LAZYBOX_HOME", "/Users/test/.lazybox");
+        assert_eq!(tmux_socket_name(), "lazybox");
     }
 
     #[test]
     fn tmux_socket_disambiguates_dev_profile() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::set("PILOT_HOME", "/Users/test/.pilot-dev");
-        assert_eq!(tmux_socket_name(), "pilot-dev");
+        let _g1 = EnvGuard::set("LAZYBOX_HOME", "/Users/test/.lazybox-dev");
+        assert_eq!(tmux_socket_name(), "lazybox-dev");
     }
 
     #[test]
     fn tmux_socket_handles_non_dotted_profile() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Users sometimes point PILOT_HOME at a non-dotfile path
+        // Users sometimes point LAZYBOX_HOME at a non-dotfile path
         // (e.g. for testing). No leading dot to strip; pass the name
         // through.
-        let _g1 = EnvGuard::set("PILOT_HOME", "/tmp/sandbox/profile-a");
+        let _g1 = EnvGuard::set("LAZYBOX_HOME", "/tmp/sandbox/profile-a");
         assert_eq!(tmux_socket_name(), "profile-a");
     }
 
     #[test]
     fn tmux_socket_falls_back_when_path_has_no_name() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // PILOT_HOME=/ is degenerate but mustn't crash. Fallback
-        // to "pilot" so callers don't have to handle None.
-        let _g1 = EnvGuard::set("PILOT_HOME", "/");
-        assert_eq!(tmux_socket_name(), "pilot");
+        // LAZYBOX_HOME=/ is degenerate but mustn't crash. Fallback
+        // to "lazybox" so callers don't have to handle None.
+        let _g1 = EnvGuard::set("LAZYBOX_HOME", "/");
+        assert_eq!(tmux_socket_name(), "lazybox");
     }
 }

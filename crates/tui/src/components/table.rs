@@ -1,6 +1,6 @@
 //! Minimal table layout for sidebar / right-pane row rendering.
 //!
-//! Pilot's "tabular" views (sidebar workspaces, activity cards) had
+//! Lazybox's "tabular" views (sidebar workspaces, activity cards) had
 //! been hand-laying-out columns inline in their render functions:
 //! ad-hoc padding, hardcoded widths, jitter when content widths
 //! varied across rows (`#7204 R` vs `#31 R` putting the `R` at

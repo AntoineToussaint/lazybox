@@ -41,7 +41,7 @@ pub enum TaskState {
     Draft,
 }
 
-/// A label/tag on a task. Mostly transparent to pilot — providers
+/// A label/tag on a task. Mostly transparent to lazybox — providers
 /// give us the name + color (hex like `"d73a4a"` for GitHub) and
 /// the sidebar renders the name with the color as foreground. Color
 /// is best-effort: empty string means "no color known."
@@ -128,7 +128,7 @@ pub enum ReviewStatus {
 /// because GitHub computes the field lazily — `Unknown` means
 /// "GitHub hasn't computed yet" and is observably different from
 /// `Mergeable` (no conflict). The sidebar surfaces `Unknown` as a
-/// `?` pill so the user can tell pilot doesn't actually know.
+/// `?` pill so the user can tell lazybox doesn't actually know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum Mergeable {
     /// GitHub hasn't computed mergeability yet. Re-query nudges
@@ -718,7 +718,7 @@ mod status_tag_tests {
     fn label_deserializes_old_string_shape() {
         // Pre-color persisted state stored labels as bare strings.
         // The custom Deserialize must keep accepting that shape so a
-        // running pilot upgrade doesn't lose label data.
+        // running lazybox upgrade doesn't lose label data.
         let json = r#"["bug", "ci"]"#;
         let labels: Vec<Label> = serde_json::from_str(json).unwrap();
         assert_eq!(

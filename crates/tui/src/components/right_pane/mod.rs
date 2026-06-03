@@ -33,8 +33,8 @@ pub(crate) use markdown::teaser_text;
 
 use crate::{PaneId, PaneOutcome};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pilot_core::Workspace;
-use pilot_ipc::{Command, Event};
+use lazybox_core::Workspace;
+use lazybox_ipc::{Command, Event};
 use ratatui::Frame;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -106,7 +106,7 @@ pub struct RightPane {
     /// feed shrinks accordingly).
     task_body_view: TaskBodyView,
     /// Resolved cap on the task-body expanded height, sourced from
-    /// `~/.pilot/config.yaml::ui.task_body_max_rows` (default 8).
+    /// `~/.lazybox/config.yaml::ui.task_body_max_rows` (default 8).
     task_body_max_rows: u16,
     /// Resolved auto-mark-read timer, sourced from
     /// `ui.auto_mark_delay` (default 1 s).
@@ -142,7 +142,7 @@ struct ClickHits {
 }
 
 // `MARK_READ_DELAY` retired — value lives on `self.auto_mark_delay`
-// now, sourced from `~/.pilot/config.yaml::ui.auto_mark_delay`.
+// now, sourced from `~/.lazybox/config.yaml::ui.auto_mark_delay`.
 
 /// Pure predicate: should the auto-mark timer be armed for the
 /// current state? The old `rearm_mark_timer` mixed this decision
@@ -200,7 +200,7 @@ enum ActivityFingerprint {
 }
 
 impl ActivityFingerprint {
-    fn of(activity: &pilot_core::Activity) -> Self {
+    fn of(activity: &lazybox_core::Activity) -> Self {
         if let Some(id) = &activity.node_id
             && !id.is_empty()
         {
@@ -218,7 +218,7 @@ impl ActivityFingerprint {
         }
     }
 
-    fn matches(&self, activity: &pilot_core::Activity) -> bool {
+    fn matches(&self, activity: &lazybox_core::Activity) -> bool {
         *self == Self::of(activity)
     }
 }
@@ -236,7 +236,7 @@ impl AutoMarkRecord {
     /// Find the activity matching this record in `activity` and
     /// return its current index. None when the row is gone (e.g.
     /// removed upstream between the mark and the undo).
-    fn resolve(&self, activity: &[pilot_core::Activity]) -> Option<usize> {
+    fn resolve(&self, activity: &[lazybox_core::Activity]) -> Option<usize> {
         if let Some(act) = activity.get(self.last_index)
             && self.fingerprint.matches(act)
         {
@@ -248,7 +248,7 @@ impl AutoMarkRecord {
 
 pub fn should_arm_mark_timer(
     focused: bool,
-    workspace: Option<&pilot_core::Workspace>,
+    workspace: Option<&lazybox_core::Workspace>,
     cursor: usize,
 ) -> bool {
     // `focused` is now ignored — see `tick` for rationale. Kept in
@@ -281,8 +281,8 @@ impl RightPane {
             last_marked_read: None,
             default_agent: "claude".to_string(),
             task_body_view: TaskBodyView::Collapsed,
-            task_body_max_rows: pilot_config::UiDefaults::default().task_body_max_rows,
-            auto_mark_delay: pilot_config::UiDefaults::default().auto_mark_delay,
+            task_body_max_rows: lazybox_config::UiDefaults::default().task_body_max_rows,
+            auto_mark_delay: lazybox_config::UiDefaults::default().auto_mark_delay,
             click_hits: ClickHits::default(),
             pending_selection_notice: None,
         }
@@ -290,7 +290,7 @@ impl RightPane {
 
     /// Apply resolved `UiDefaults` once at startup. Subsequent
     /// hot-reload of the YAML would call this again; idempotent.
-    pub fn apply_ui_defaults(&mut self, ui: &pilot_config::UiDefaults) {
+    pub fn apply_ui_defaults(&mut self, ui: &lazybox_config::UiDefaults) {
         self.task_body_max_rows = ui.task_body_max_rows;
         self.auto_mark_delay = ui.auto_mark_delay;
     }
@@ -380,7 +380,7 @@ impl RightPane {
     /// Flip the cursor's activity to read and remember the index for
     /// undo. Returns `(session_key, index)` so the caller can persist
     /// via `Command::MarkActivityRead`.
-    fn fire_auto_mark(&mut self) -> Option<(pilot_core::SessionKey, usize)> {
+    fn fire_auto_mark(&mut self) -> Option<(lazybox_core::SessionKey, usize)> {
         let workspace = self.workspace.as_mut()?;
         let i = self.feed.cursor;
         let total = workspace.activity.len();
@@ -407,7 +407,7 @@ impl RightPane {
             fingerprint,
         });
         self.mark_timer.disarm();
-        Some((pilot_core::SessionKey::from(&workspace.key), i))
+        Some((lazybox_core::SessionKey::from(&workspace.key), i))
     }
 
     /// Undo the most recent auto-mark, if any. Returns
@@ -418,7 +418,7 @@ impl RightPane {
     /// position — a poll that introduced a new top-of-feed comment
     /// shifts every older row down by one, and a raw cached index
     /// would un-read the wrong comment.
-    fn undo_auto_mark(&mut self) -> Option<(pilot_core::SessionKey, usize)> {
+    fn undo_auto_mark(&mut self) -> Option<(lazybox_core::SessionKey, usize)> {
         let record = self.last_marked_read.take()?;
         let workspace = self.workspace.as_mut()?;
         let index = match record.resolve(&workspace.activity) {
@@ -438,13 +438,13 @@ impl RightPane {
         // timer would re-fire on the next tick and undo the undo.
         // Simpler: just clear; user can re-arm by moving.
         self.mark_timer.disarm();
-        Some((pilot_core::SessionKey::from(&workspace.key), index))
+        Some((lazybox_core::SessionKey::from(&workspace.key), index))
     }
 
     /// Drive the auto-mark timer. Called from the App's per-tick
     /// path. Returns `(session_key, index)` when the timer fired and
     /// an activity was just marked, so the App can persist via IPC.
-    pub fn tick(&mut self, focused: bool) -> Option<(pilot_core::SessionKey, usize)> {
+    pub fn tick(&mut self, focused: bool) -> Option<(lazybox_core::SessionKey, usize)> {
         // `focused` parameter kept for API compatibility but no
         // longer gates the fire. The reasoning was originally "user
         // navigated away, stop the countdown" but in practice the
@@ -754,7 +754,7 @@ impl RightPane {
         let mut lines: Vec<Line> = Vec::new();
 
         use crate::components::icons;
-        use crate::pilot_theme::{self, StatePill};
+        use crate::lazybox_theme::{self, StatePill};
 
         // Breadcrumb above the title: `repo · #1234`. Dim, separated
         // by a `›`. Orients the user to "where am I?" before they
@@ -781,14 +781,14 @@ impl RightPane {
         // state color, prefixed by a Nerd-Font glyph, closed by a
         // triangle that "flows" into the page background.
         let (icon, label, bucket) = match task.state {
-            pilot_core::TaskState::Open => (icons::PR_OPEN, "OPEN", StatePill::Open),
-            pilot_core::TaskState::Draft => (icons::PR_DRAFT, "DRAFT", StatePill::Draft),
-            pilot_core::TaskState::Merged => (icons::PR_MERGED, "MERGED", StatePill::Merged),
-            pilot_core::TaskState::Closed => (icons::PR_CLOSED, "CLOSED", StatePill::Closed),
-            pilot_core::TaskState::InProgress => (icons::PR_WIP, "WIP", StatePill::InProgress),
-            pilot_core::TaskState::InReview => (icons::PR_REVIEW, "REVIEW", StatePill::InReview),
+            lazybox_core::TaskState::Open => (icons::PR_OPEN, "OPEN", StatePill::Open),
+            lazybox_core::TaskState::Draft => (icons::PR_DRAFT, "DRAFT", StatePill::Draft),
+            lazybox_core::TaskState::Merged => (icons::PR_MERGED, "MERGED", StatePill::Merged),
+            lazybox_core::TaskState::Closed => (icons::PR_CLOSED, "CLOSED", StatePill::Closed),
+            lazybox_core::TaskState::InProgress => (icons::PR_WIP, "WIP", StatePill::InProgress),
+            lazybox_core::TaskState::InReview => (icons::PR_REVIEW, "REVIEW", StatePill::InReview),
         };
-        let (bg, fg) = pilot_theme::state_pill(theme, bucket);
+        let (bg, fg) = lazybox_theme::state_pill(theme, bucket);
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {icon} {label} "),
@@ -804,7 +804,7 @@ impl RightPane {
             ),
         ]));
 
-        // Branch line — confirms which worktree pilot will spawn an
+        // Branch line — confirms which worktree lazybox will spawn an
         // agent into. Cyan accent on a "Branch:" dim label.
         let branch = task.branch.as_deref().unwrap_or("-");
         lines.push(Line::from(vec![
@@ -1172,7 +1172,7 @@ impl RightPane {
         overrides: &std::collections::BTreeMap<String, String>,
     ) -> Vec<crate::Binding> {
         use crate::Binding;
-        use pilot_tui_core::action::{Action, ActionDef, contextual_label};
+        use lazybox_tui_core::action::{Action, ActionDef, contextual_label};
 
         let workspace = self.workspace.as_ref();
         let has_activity = workspace.map(|w| !w.activity.is_empty()).unwrap_or(false);
@@ -1359,7 +1359,7 @@ impl RightPane {
                     cmds.push(Command::Spawn {
                         session_key: workspace_key,
                         session_id: None,
-                        kind: pilot_ipc::TerminalKind::Agent(agent_id),
+                        kind: lazybox_ipc::TerminalKind::Agent(agent_id),
                         cwd: None,
                         initial_prompt: prompt,
                     });

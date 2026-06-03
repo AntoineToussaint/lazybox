@@ -39,7 +39,7 @@ impl Default for Splash {
 impl Component for Splash {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
         // The render body — copied from the original SplashModal so
-        // pilot's brand mark + bullets stay identical. The "Tour of
+        // lazybox's brand mark + bullets stay identical. The "Tour of
         // commands" block (issue #25) lists the always-available
         // global shortcuts here so the per-view footer doesn't need
         // to repeat them on every screen. The list is built from the
@@ -64,7 +64,7 @@ impl Component for Splash {
         let mut lines = vec![
             Line::raw(""),
             Line::from(Span::styled(
-                "  pilot  ",
+                "  lazybox  ",
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
@@ -143,7 +143,7 @@ impl Component for Splash {
 /// available but not listed in the tour to keep the card scannable;
 /// the `?` help modal lists every global.
 pub fn universal_shortcuts() -> Vec<(&'static str, &'static str)> {
-    use pilot_tui_core::action::{ActionDef, ActionKind};
+    use lazybox_tui_core::action::{ActionDef, ActionKind};
     [
         ActionKind::OpenHelp,
         ActionKind::Quit,

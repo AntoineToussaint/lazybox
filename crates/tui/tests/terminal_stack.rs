@@ -2,11 +2,11 @@
 //! key → Write routing, ANSI strip, render.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pilot_core::SessionKey;
-use pilot_ipc::{Command, Event, TerminalId, TerminalKind, TerminalSnapshot};
-use pilot_tui::components::TerminalStack;
-use pilot_tui::components::terminal_stack::{COMPOSING_CAP, RECENT_OUTPUT_CAP, strip_ansi};
-use pilot_tui::{PaneId, PaneOutcome};
+use lazybox_core::SessionKey;
+use lazybox_ipc::{Command, Event, TerminalId, TerminalKind, TerminalSnapshot};
+use lazybox_tui::components::TerminalStack;
+use lazybox_tui::components::terminal_stack::{COMPOSING_CAP, RECENT_OUTPUT_CAP, strip_ansi};
+use lazybox_tui::{PaneId, PaneOutcome};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::prelude::Rect;
@@ -155,7 +155,7 @@ fn workspace_removed_prunes_all_its_terminals() {
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
     t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
     t.on_event(&spawned(3, "o/r#2", TerminalKind::Shell));
-    t.on_event(&Event::WorkspaceRemoved(pilot_core::WorkspaceKey::new(
+    t.on_event(&Event::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(
         "o/r#1",
     )));
     assert_eq!(t.terminal_count(), 1, "only o/r#2's terminal remains");
@@ -318,7 +318,7 @@ fn removed_workspace_forgets_its_remembered_focus() {
 
     // Leave (records o/r#1 -> id 2), then the workspace is removed.
     t.set_active_session(Some(sk("o/r#2")));
-    t.on_event(&Event::WorkspaceRemoved(pilot_core::WorkspaceKey::new(
+    t.on_event(&Event::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(
         "o/r#1",
     )));
 
@@ -422,7 +422,7 @@ fn ctrl_bracket_flows_to_agent_too() {
 #[test]
 fn ctrl_o_flows_to_agent() {
     // The terminal stack has no escape shortcut at all — every
-    // keystroke flows to the agent. Pilot's escape latch (default
+    // keystroke flows to the agent. Lazybox's escape latch (default
     // `]]`) lives at the app dispatcher level.
     let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
@@ -742,7 +742,7 @@ fn focus_terminal_returns_false_for_invisible_target() {
 // focus moves, close. Render-shape tests live alongside (visual checks
 // require a TestBackend which we already use elsewhere).
 
-use pilot_core::{SessionLayout, TileTree};
+use lazybox_core::{SessionLayout, TileTree};
 
 fn ws_key(s: &str) -> SessionKey {
     s.into()
@@ -1386,7 +1386,7 @@ fn footer_drops_all_keys_to_pty_noise() {
 
 #[test]
 fn footer_keys_follow_user_action_key_overrides() {
-    // Catalog-driven footer: a user rebind in `~/.pilot/config.yaml`
+    // Catalog-driven footer: a user rebind in `~/.lazybox/config.yaml`
     // → `ui.action_keys.leave_terminal: "Esc"` should appear in the
     // footer's `keys` column without any extra plumbing. The original
     // bug (footer drift from actual shortcuts) was that hint text was

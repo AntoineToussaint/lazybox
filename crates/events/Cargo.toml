@@ -1,12 +1,12 @@
 [package]
-name = "pilot-events"
+name = "lazybox-events"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-pilot-core = { workspace = true }
+lazybox-core = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }

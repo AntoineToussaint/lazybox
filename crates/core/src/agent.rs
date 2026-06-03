@@ -1,5 +1,5 @@
 //! Agent abstraction. Any coding agent (Claude Code, Aider, Cursor, etc.)
-//! implements this trait to integrate with pilot.
+//! implements this trait to integrate with lazybox.
 
 use serde::{Deserialize, Serialize};
 

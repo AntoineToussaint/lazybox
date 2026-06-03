@@ -220,9 +220,9 @@ mod tests {
         symbols
     }
 
-    // Pilot vendors libghostty-rs with a slightly older bindings.rs
+    // Lazybox vendors libghostty-rs with a slightly older bindings.rs
     // than the upstream commit `build.rs` fetches. This drift-check
-    // belongs to libghostty-rs maintainers; pilot only cares that
+    // belongs to libghostty-rs maintainers; lazybox only cares that
     // the API surface it actually calls compiles + works.
     #[test]
     #[ignore = "vendored bindings drift from upstream ghostty source — see crates/libghostty-vt-sys/README.md"]

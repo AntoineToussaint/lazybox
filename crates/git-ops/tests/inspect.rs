@@ -1,6 +1,6 @@
 //! Tests for `WorktreeManager::inspect_worktrees` + `delete_inspected`.
 //!
-//! These tests build a small but real pilot-style layout under a
+//! These tests build a small but real lazybox-style layout under a
 //! tempdir:
 //!
 //! ```text
@@ -17,12 +17,12 @@
 //! inside `WorktreeManager` paths that are already bounded by the
 //! 30s per-call timeout in `lib.rs`. No additional wrapper required.
 
-use pilot_git_ops::{OrphanReason, TrackedSession, WorktreeManager};
+use lazybox_git_ops::{OrphanReason, TrackedSession, WorktreeManager};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-/// Build a pilot-shaped tempdir: an "upstream" bare repo plus a fresh
-/// pilot-style bare clone of it under `<base>/repos/o/r.git`. Returns
+/// Build a lazybox-shaped tempdir: an "upstream" bare repo plus a fresh
+/// lazybox-style bare clone of it under `<base>/repos/o/r.git`. Returns
 /// the base dir handle (drops at scope end → tempdir cleanup) along
 /// with the path to the bare clone the manager will operate on.
 struct Fixture {
@@ -61,7 +61,7 @@ async fn setup_fixture() -> Fixture {
     // Standard remote-tracking refspec — a bare clone defaults to
     // `+refs/heads/*:refs/heads/*` (storing upstream branches as if
     // they were local), which breaks `@{u}` lookups from worktrees.
-    // Pilot's bare clones use the standard refspec because the
+    // Lazybox's bare clones use the standard refspec because the
     // production checkout path explicitly fetches into
     // `refs/remotes/origin/*`; the inspector tests do the same so
     // they match the real shape.
@@ -113,7 +113,7 @@ fn mgr(fx: &Fixture) -> WorktreeManager {
     WorktreeManager::new(fx.base.path().to_path_buf())
 }
 
-/// Add a worktree the way pilot does at runtime: ensure the bare has
+/// Add a worktree the way lazybox does at runtime: ensure the bare has
 /// a `refs/remotes/origin/<branch>` remote-tracking ref, then
 /// `git worktree add -B <branch> <path> refs/remotes/origin/<branch>`.
 /// This is what `WorktreeManager::checkout_at` actually executes —
@@ -271,7 +271,7 @@ async fn unpushed_commits_block_safe_delete() {
     let wt = add_wt(&fx, "ahead", "ahead-base", "ahead-base").await;
     // Set upstream directly via config — `branch --set-upstream-to`
     // refuses with "starting point is not a branch" when the ref is
-    // remote-tracking-only, which is exactly the shape pilot worktrees
+    // remote-tracking-only, which is exactly the shape lazybox worktrees
     // have (no local branch, just refs/remotes/origin/<name>).
     // `branch.*` config lives on the *bare* clone (shared across all
     // worktrees), so write there directly.
@@ -308,7 +308,7 @@ async fn unpushed_commits_block_safe_delete() {
 async fn branch_deleted_upstream_is_flagged() {
     let fx = setup_fixture().await;
     // Branch upstream + worktree the standard way (mirrors what
-    // pilot does when a PR is open).
+    // lazybox does when a PR is open).
     run(&fx.upstream_path, &["branch", "feature"]).await;
     let _wt = add_wt(&fx, "feature", "feature", "feature").await;
 

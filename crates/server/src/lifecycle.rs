@@ -4,8 +4,8 @@
 //!
 //! ## Layout on disk
 //!
-//! Everything under `$PILOT_RUNTIME_DIR` (defaults to
-//! `~/.pilot/run/`):
+//! Everything under `$LAZYBOX_RUNTIME_DIR` (defaults to
+//! `~/.lazybox/run/`):
 //!
 //! ```text
 //! run/
@@ -13,19 +13,19 @@
 //!   daemon.pid    PID of the running daemon (written on start)
 //! ```
 //!
-//! Clients resolve the socket via the same paths, so `pilot` and
-//! `pilot daemon *` agree without having to pass paths around.
+//! Clients resolve the socket via the same paths, so `lazybox` and
+//! `lazybox daemon *` agree without having to pass paths around.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Canonical daemon run-dir. Override via `PILOT_RUNTIME_DIR` (legacy
-/// — wins over `PILOT_HOME` for back-compat) or via `PILOT_HOME` (the
+/// Canonical daemon run-dir. Override via `LAZYBOX_RUNTIME_DIR` (legacy
+/// — wins over `LAZYBOX_HOME` for back-compat) or via `LAZYBOX_HOME` (the
 /// preferred multi-profile knob). Implementation lives in
-/// [`pilot_core::paths::runtime_dir`]; this thin re-export keeps the
+/// [`lazybox_core::paths::runtime_dir`]; this thin re-export keeps the
 /// existing `lifecycle::runtime_dir` import path working.
 pub fn runtime_dir() -> PathBuf {
-    pilot_core::paths::runtime_dir()
+    lazybox_core::paths::runtime_dir()
 }
 
 pub fn socket_path() -> PathBuf {

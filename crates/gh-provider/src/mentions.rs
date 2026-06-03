@@ -1,37 +1,37 @@
-//! Detect `@pilot` mentions in GitHub issue bodies and comments and
+//! Detect `@lazybox` mentions in GitHub issue bodies and comments and
 //! turn them into auto-spawn triggers.
 //!
 //! ## What "trigger" means
 //!
-//! When an allowed user writes `@pilot` in an issue body or comment,
-//! pilot reacts 👀 on that body/comment and spawns the default agent
+//! When an allowed user writes `@lazybox` in an issue body or comment,
+//! lazybox reacts 👀 on that body/comment and spawns the default agent
 //! with the implement-issue prompt — same end-state as the user
 //! manually pressing `w` on the issue row, just triggered by the
 //! mention.
 //!
 //! ## Idempotency via 👀 reaction
 //!
-//! The `@pilot` text stays in the comment forever; we'd re-spawn
+//! The `@lazybox` text stays in the comment forever; we'd re-spawn
 //! every 60s poll cycle without a marker. We use GitHub's reaction
-//! API: pilot adds 👀 the first time it sees a mention, and on
+//! API: lazybox adds 👀 the first time it sees a mention, and on
 //! subsequent polls we skip targets where `viewerHasReacted == true`.
 //! The reaction is authoritative — no separate kv-store needed, and
-//! humans reading the issue see the eyes emoji so they know pilot
+//! humans reading the issue see the eyes emoji so they know lazybox
 //! picked it up.
 //!
 //! ## Allowlist
 //!
-//! Anyone with comment permission can write `@pilot`, but spending
+//! Anyone with comment permission can write `@lazybox`, but spending
 //! tokens + creating branches needs gating. The allowlist defaults
-//! to "just the authenticated pilot user"; users can extend it via
-//! `mention.allowed_logins` in `~/.pilot/config.yaml`.
+//! to "just the authenticated lazybox user"; users can extend it via
+//! `mention.allowed_logins` in `~/.lazybox/config.yaml`.
 
 use crate::graphql::{GqlIssue, GqlReactionView};
 use std::collections::BTreeSet;
 
-/// One detected `@pilot` mention that warrants an auto-spawn.
+/// One detected `@lazybox` mention that warrants an auto-spawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PilotMention {
+pub struct LazyboxMention {
     /// Repo as `owner/name`. Extracted from the issue's `repository`
     /// field or parsed from the URL.
     pub repo: String,
@@ -47,7 +47,7 @@ pub struct PilotMention {
     pub target_node_id: String,
     /// Where the mention came from.
     pub source: MentionSource,
-    /// Login that wrote the `@pilot` text. The caller already
+    /// Login that wrote the `@lazybox` text. The caller already
     /// allow-listed this — included for logging / audit only.
     pub triggered_by_login: String,
 }
@@ -57,24 +57,24 @@ pub struct PilotMention {
 /// the design doc — PRs have `w`-on-comments already).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MentionSource {
-    /// `@pilot` lives in the issue body itself.
+    /// `@lazybox` lives in the issue body itself.
     Body,
-    /// `@pilot` lives in an issue comment with this node id.
+    /// `@lazybox` lives in an issue comment with this node id.
     Comment { comment_id: String },
 }
 
-/// True when `text` contains a `@pilot` mention at a word boundary.
-/// Case-insensitive on the `pilot` portion (matches GitHub's
-/// own mention rendering). Avoids false positives like `@pilots`,
-/// `@pilot-bot`, `email@pilot.io`.
+/// True when `text` contains a `@lazybox` mention at a word boundary.
+/// Case-insensitive on the `lazybox` portion (matches GitHub's
+/// own mention rendering). Avoids false positives like `@lazyboxs`,
+/// `@lazybox-bot`, `email@lazybox.io`.
 ///
 /// We accept mentions inside `>` quote blocks — the design doc calls
 /// this out as an acceptable false-positive ("user can kill via
 /// Shift-X"). Detecting quotes line-by-line was deemed not worth the
 /// complexity for an MVP.
-pub fn contains_pilot_mention(text: &str) -> bool {
+pub fn contains_lazybox_mention(text: &str) -> bool {
     let bytes = text.as_bytes();
-    let needle_lower = b"@pilot";
+    let needle_lower = b"@lazybox";
     let n = needle_lower.len();
     if bytes.len() < n {
         return false;
@@ -89,17 +89,17 @@ pub fn contains_pilot_mention(text: &str) -> bool {
             continue;
         }
         // Pre-boundary: `@` must NOT be preceded by an identifier
-        // char — otherwise `email@pilot.io` would match.
+        // char — otherwise `email@lazybox.io` would match.
         if i > 0 {
             let prev = bytes[i - 1];
             if is_login_char(prev) || prev == b'@' {
                 continue;
             }
         }
-        // Post-boundary: the char after `@pilot` must NOT be a
-        // login-continuation char — otherwise `@pilots`, `@pilot1`,
-        // `@pilot-bot` would match. `.` is also rejected to skip
-        // `@pilot.io` style email-likes.
+        // Post-boundary: the char after `@lazybox` must NOT be a
+        // login-continuation char — otherwise `@lazyboxs`, `@lazybox1`,
+        // `@lazybox-bot` would match. `.` is also rejected to skip
+        // `@lazybox.io` style email-likes.
         if let Some(&next) = bytes.get(i + n)
             && (is_login_char(next) || next == b'.' || next == b'@')
         {
@@ -121,21 +121,21 @@ fn is_login_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
 }
 
-/// Scan an issue (body + every comment) for `@pilot` mentions worth
+/// Scan an issue (body + every comment) for `@lazybox` mentions worth
 /// triggering an auto-spawn for. A mention triggers when ALL of:
 ///
-/// 1. The text contains `@pilot` at a word boundary.
+/// 1. The text contains `@lazybox` at a word boundary.
 /// 2. The author's login is in `allowed_logins`.
 /// 3. The corresponding reaction record has `viewerHasReacted ==
-///    false` — i.e. pilot hasn't already acknowledged this surface.
+///    false` — i.e. lazybox hasn't already acknowledged this surface.
 ///
-/// Returns one [`PilotMention`] per qualifying surface. Multiple
-/// `@pilot` strings inside a single comment coalesce into one
+/// Returns one [`LazyboxMention`] per qualifying surface. Multiple
+/// `@lazybox` strings inside a single comment coalesce into one
 /// trigger (the design doc's "coalesce to one spawn" requirement).
 /// The body and individual comments produce SEPARATE triggers — the
 /// caller can dedupe at workspace level if it wants only one spawn
 /// per issue.
-pub fn scan_issue(issue: &GqlIssue, allowed_logins: &BTreeSet<String>) -> Vec<PilotMention> {
+pub fn scan_issue(issue: &GqlIssue, allowed_logins: &BTreeSet<String>) -> Vec<LazyboxMention> {
     let mut out = Vec::new();
     let repo = match issue.repository.as_ref() {
         Some(r) => r.name_with_owner.clone(),
@@ -146,11 +146,11 @@ pub fn scan_issue(issue: &GqlIssue, allowed_logins: &BTreeSet<String>) -> Vec<Pi
     // Body. Author present + allowed + mention + no prior 👀.
     if let Some(author) = issue.author.as_ref()
         && allowed_logins.contains(&author.login)
-        && contains_pilot_mention(issue.body.as_deref().unwrap_or(""))
+        && contains_lazybox_mention(issue.body.as_deref().unwrap_or(""))
         && !viewer_has_eyes_reacted(issue.reactions.as_ref())
         && let Some(node_id) = issue.id.as_ref()
     {
-        out.push(PilotMention {
+        out.push(LazyboxMention {
             repo: repo.clone(),
             issue_number: issue.number,
             issue_node_id: issue_node_id.clone(),
@@ -167,7 +167,7 @@ pub fn scan_issue(issue: &GqlIssue, allowed_logins: &BTreeSet<String>) -> Vec<Pi
         if !allowed_logins.contains(&author.login) {
             continue;
         }
-        if !contains_pilot_mention(&comment.body) {
+        if !contains_lazybox_mention(&comment.body) {
             continue;
         }
         if viewer_has_eyes_reacted(comment.reactions.as_ref()) {
@@ -181,11 +181,11 @@ pub fn scan_issue(issue: &GqlIssue, allowed_logins: &BTreeSet<String>) -> Vec<Pi
                 repo = %repo,
                 issue = issue.number,
                 author = %author.login,
-                "comment with @pilot mention has no node id; skipping (would re-spawn every poll)"
+                "comment with @lazybox mention has no node id; skipping (would re-spawn every poll)"
             );
             continue;
         };
-        out.push(PilotMention {
+        out.push(LazyboxMention {
             repo: repo.clone(),
             issue_number: issue.number,
             issue_node_id: issue_node_id.clone(),
@@ -284,41 +284,47 @@ mod tests {
         }
     }
 
-    // ── contains_pilot_mention ──────────────────────────────────────
+    // ── contains_lazybox_mention ──────────────────────────────────────
 
     #[test]
-    fn detects_plain_at_pilot() {
-        assert!(contains_pilot_mention("@pilot please look"));
-        assert!(contains_pilot_mention("hey @pilot"));
-        assert!(contains_pilot_mention("@pilot\nmultiline"));
-        assert!(contains_pilot_mention("@PILOT case insensitive"));
-        assert!(contains_pilot_mention("@Pilot mixed"));
+    fn detects_plain_at_lazybox() {
+        assert!(contains_lazybox_mention("@lazybox please look"));
+        assert!(contains_lazybox_mention("hey @lazybox"));
+        assert!(contains_lazybox_mention("@lazybox\nmultiline"));
+        assert!(contains_lazybox_mention("@LAZYBOX case insensitive"));
+        assert!(contains_lazybox_mention("@Lazybox mixed"));
     }
 
     #[test]
     fn ignores_word_boundary_misses() {
-        assert!(!contains_pilot_mention("@pilots love this"));
-        assert!(!contains_pilot_mention("@pilot-bot"));
-        assert!(!contains_pilot_mention("@pilot1"));
-        assert!(!contains_pilot_mention("@pilot.io"));
-        assert!(!contains_pilot_mention("autopilot@pilot"));
-        assert!(!contains_pilot_mention("plain pilot no at-sign"));
-        assert!(!contains_pilot_mention(""));
+        assert!(!contains_lazybox_mention("@lazyboxs love this"));
+        assert!(!contains_lazybox_mention("@lazybox-bot"));
+        assert!(!contains_lazybox_mention("@lazybox1"));
+        assert!(!contains_lazybox_mention("@lazybox.io"));
+        assert!(!contains_lazybox_mention("email@lazybox"));
+        assert!(!contains_lazybox_mention("plain lazybox no at-sign"));
+        assert!(!contains_lazybox_mention(""));
     }
 
     #[test]
     fn boundary_chars_count_as_boundaries() {
-        assert!(contains_pilot_mention("(@pilot)"));
-        assert!(contains_pilot_mention("`@pilot`"));
-        assert!(contains_pilot_mention("> @pilot quoted"));
-        assert!(contains_pilot_mention("@pilot!"));
+        assert!(contains_lazybox_mention("(@lazybox)"));
+        assert!(contains_lazybox_mention("`@lazybox`"));
+        assert!(contains_lazybox_mention("> @lazybox quoted"));
+        assert!(contains_lazybox_mention("@lazybox!"));
     }
 
     // ── scan_issue ──────────────────────────────────────────────────
 
     #[test]
     fn scan_body_mention_by_allowed_user() {
-        let i = issue(42, Some("alice"), Some("hey @pilot please"), false, vec![]);
+        let i = issue(
+            42,
+            Some("alice"),
+            Some("hey @lazybox please"),
+            false,
+            vec![],
+        );
         let m = scan_issue(&i, &allow_only("alice"));
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].source, MentionSource::Body);
@@ -330,14 +336,14 @@ mod tests {
 
     #[test]
     fn scan_skips_body_when_author_not_allowed() {
-        let i = issue(1, Some("eve"), Some("@pilot do something"), false, vec![]);
+        let i = issue(1, Some("eve"), Some("@lazybox do something"), false, vec![]);
         let m = scan_issue(&i, &allow_only("alice"));
         assert!(m.is_empty());
     }
 
     #[test]
     fn scan_skips_body_when_already_reacted() {
-        let i = issue(1, Some("alice"), Some("@pilot do it"), true, vec![]);
+        let i = issue(1, Some("alice"), Some("@lazybox do it"), true, vec![]);
         let m = scan_issue(&i, &allow_only("alice"));
         assert!(m.is_empty(), "viewerHasReacted=true should skip");
     }
@@ -351,7 +357,7 @@ mod tests {
 
     #[test]
     fn scan_finds_comment_mention() {
-        let c = comment("C_1", Some("alice"), "@pilot fix it", false);
+        let c = comment("C_1", Some("alice"), "@lazybox fix it", false);
         let i = issue(7, Some("bob"), None, false, vec![c]);
         let m = scan_issue(&i, &allow_only("alice"));
         assert_eq!(m.len(), 1);
@@ -365,7 +371,7 @@ mod tests {
 
     #[test]
     fn scan_skips_already_reacted_comment() {
-        let c = comment("C_1", Some("alice"), "@pilot", true);
+        let c = comment("C_1", Some("alice"), "@lazybox", true);
         let i = issue(7, Some("bob"), None, false, vec![c]);
         let m = scan_issue(&i, &allow_only("alice"));
         assert!(m.is_empty());
@@ -373,8 +379,8 @@ mod tests {
 
     #[test]
     fn scan_skips_comments_from_disallowed_users() {
-        let c1 = comment("C_1", Some("eve"), "@pilot", false);
-        let c2 = comment("C_2", Some("alice"), "@pilot", false);
+        let c1 = comment("C_1", Some("eve"), "@lazybox", false);
+        let c2 = comment("C_2", Some("alice"), "@lazybox", false);
         let i = issue(7, Some("bob"), None, false, vec![c1, c2]);
         let m = scan_issue(&i, &allow_only("alice"));
         assert_eq!(m.len(), 1, "only alice's comment qualifies");
@@ -383,7 +389,12 @@ mod tests {
 
     #[test]
     fn scan_coalesces_repeated_mentions_in_one_comment() {
-        let c = comment("C_1", Some("alice"), "@pilot @pilot please @pilot", false);
+        let c = comment(
+            "C_1",
+            Some("alice"),
+            "@lazybox @lazybox please @lazybox",
+            false,
+        );
         let i = issue(7, Some("bob"), None, false, vec![c]);
         let m = scan_issue(&i, &allow_only("alice"));
         assert_eq!(m.len(), 1, "one comment → one mention regardless of count");
@@ -391,12 +402,12 @@ mod tests {
 
     #[test]
     fn scan_body_plus_comment_both_trigger() {
-        // Author wrote @pilot in the body AND a separate comment.
+        // Author wrote @lazybox in the body AND a separate comment.
         // Both qualify (separate reactable targets); design doc
         // accepts the duplication — workspace-level dedupe can
         // happen in the caller if it cares.
-        let c = comment("C_1", Some("alice"), "follow-up @pilot", false);
-        let i = issue(8, Some("alice"), Some("@pilot please"), false, vec![c]);
+        let c = comment("C_1", Some("alice"), "follow-up @lazybox", false);
+        let i = issue(8, Some("alice"), Some("@lazybox please"), false, vec![c]);
         let m = scan_issue(&i, &allow_only("alice"));
         assert_eq!(m.len(), 2);
     }
@@ -405,7 +416,7 @@ mod tests {
     fn scan_skips_comment_without_node_id() {
         // Defensive: GitHub returned a comment with no `id`. We
         // can't react idempotently, so we skip.
-        let mut c = comment("dummy", Some("alice"), "@pilot", false);
+        let mut c = comment("dummy", Some("alice"), "@lazybox", false);
         c.id = None;
         let i = issue(8, Some("bob"), None, false, vec![c]);
         let m = scan_issue(&i, &allow_only("alice"));

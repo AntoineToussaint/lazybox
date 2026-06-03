@@ -23,16 +23,16 @@ surface — daemon already broadcasts the data the chip needs (PR's
 
 **Status.** The Script-Editor-on-click surprise is fixed: the
 `osascript` fallback was dropped (newer macOS attributes the click
-action back to Script Editor, which is awful UX). On macOS pilot
+action back to Script Editor, which is awful UX). On macOS lazybox
 now only fires desktop notifications when `terminal-notifier` is on
 PATH; otherwise it silently no-ops with a one-time log line.
 
-**Still missing.** A real solution: bundle pilot as a `.app` with
+**Still missing.** A real solution: bundle lazybox as a `.app` with
 its own Info.plist + LSUIElement + bundle id so we can call
 `UNUserNotificationCenter` directly via objc bindings. Then:
 
-- The notification carries pilot's icon (not terminal-notifier's).
-- Click can register a custom URL scheme (`pilot://workspace/<key>`)
+- The notification carries lazybox's icon (not terminal-notifier's).
+- Click can register a custom URL scheme (`lazybox://workspace/<key>`)
   to focus the running daemon's TUI on the right row.
 - Users don't have to `brew install terminal-notifier` first.
 

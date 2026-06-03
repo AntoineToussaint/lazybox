@@ -1,9 +1,9 @@
 //! Slack provider — outbound notifications + inbound Socket Mode.
 //!
-//! Pilot uses Slack as a "second display" for the inbox: each
+//! Lazybox uses Slack as a "second display" for the inbox: each
 //! workspace gets a mirrored channel where workspace + agent events post,
-//! and inbound `@pilot` mentions route back to claude sessions
-//! running on the daemon. Designed for "pilot at home, control
+//! and inbound `@lazybox` mentions route back to claude sessions
+//! running on the daemon. Designed for "lazybox at home, control
 //! from phone."
 //!
 //! ## Why a single crate instead of one for in / one for out
@@ -11,7 +11,7 @@
 //! Inbound and outbound share the same Slack API client, the
 //! same token chain, the same channel-name slugifier, and the
 //! same `channel_id ↔ workspace_key` mapping. Splitting them
-//! would force a `pilot-slack-core` shared crate underneath —
+//! would force a `lazybox-slack-core` shared crate underneath —
 //! pure ceremony for the same call graph. One crate, two
 //! modules (`api` for HTTP, `socket` for WebSocket).
 //!
@@ -19,8 +19,8 @@
 //!
 //! Two tokens:
 //! - **Bot token** (`xoxb-...`) for HTTP API. Loaded via
-//!   `pilot_auth::CredentialChain` from `SLACK_BOT_TOKEN` env or
-//!   `~/.pilot/config.yaml::slack.bot_token`.
+//!   `lazybox_auth::CredentialChain` from `SLACK_BOT_TOKEN` env or
+//!   `~/.lazybox/config.yaml::slack.bot_token`.
 //! - **App token** (`xapp-...`) for Socket Mode WebSocket. Same
 //!   chain, distinct key (`SLACK_APP_TOKEN`).
 //!
@@ -33,10 +33,10 @@ pub mod socket;
 pub use api::{Client, Message, channel_name_for_workspace};
 pub use socket::{InboundEvent, SocketModeClient};
 
-use pilot_auth::{CredentialChain, EnvProvider};
+use lazybox_auth::{CredentialChain, EnvProvider};
 
-/// Workspace-key prefix this provider owns. Mirrors `pilot_gh::SOURCE`
-/// and `pilot_linear::SOURCE` so the daemon's mutation router can
+/// Workspace-key prefix this provider owns. Mirrors `lazybox_gh::SOURCE`
+/// and `lazybox_linear::SOURCE` so the daemon's mutation router can
 /// dispatch on `<source>-<rest>` consistently.
 ///
 /// Slack isn't a *task* source though — it's an io channel layered on
@@ -47,7 +47,7 @@ pub const SOURCE: &str = "slack";
 
 /// Credential chain for the bot token. Tried in order:
 /// `SLACK_BOT_TOKEN` env, then the daemon's config-file resolver
-/// (called separately, since pilot_auth doesn't read YAML).
+/// (called separately, since lazybox_auth doesn't read YAML).
 pub fn bot_credential_chain() -> CredentialChain {
     CredentialChain::new().with(EnvProvider::new("SLACK_BOT_TOKEN"))
 }
@@ -58,7 +58,7 @@ pub fn app_credential_chain() -> CredentialChain {
     CredentialChain::new().with(EnvProvider::new("SLACK_APP_TOKEN"))
 }
 
-/// Pilot-side errors from the Slack provider. Wraps HTTP + JSON +
+/// Lazybox-side errors from the Slack provider. Wraps HTTP + JSON +
 /// Slack's own structured error responses.
 #[derive(Debug, thiserror::Error)]
 pub enum SlackError {

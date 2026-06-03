@@ -227,7 +227,7 @@
 
 
 ────────────────────────────────────────────────────────────────────────────────
- PILOT  1  [7d]                            test/repo  ›  #1
+ LAZYBOX  1  [7d]                            test/repo  ›  #1
  f [all]  o [split]                         OPEN  Test workspace
                                           ───────────────────────────────────────────────────────────────
  ──────────────────────────────────────    ▶ Description  (d · expand)
@@ -256,7 +256,7 @@
 
  c / x / u spawn agent  ·  s shell  ·  e editor  ·  z snooze  ·  X archive (kills sessions)  ·  N new pro
 ────────────────────────────────────────────────────────────────────────────────
- PILOT  1  [7d]                            test/repo  ›  #1
+ LAZYBOX  1  [7d]                            test/repo  ›  #1
  f [all]  o [split]                         OPEN  Test workspace
                                           ───────────────────────────────────────────────────────────────
  ──────────────────────────────────────    ▶ Description  (d · expand)
@@ -285,7 +285,7 @@
 
  c / x / u spawn agent  ·  s shell  ·  e editor  ·  z snooze  ·  X archive (kills sessions)  ·  N new pro
 ────────────────────────────────────────────────────────────────────────────────
- PILOT  1  [7d]                            test/repo  ›  #1
+ LAZYBOX  1  [7d]                            test/repo  ›  #1
  f [all]  o [split]                         OPEN  Test workspace
                                           ───────────────────────────────────────────────────────────────
  ──────────────────────────────────────    ▶ Description  (d · expand)

@@ -1,4 +1,4 @@
-//! Pilot components ported to tuirealm.
+//! Lazybox components ported to tuirealm.
 //!
 //! Each module here corresponds to one pane or modal from the old
 //! `crate::components::*` tree. The render bodies are largely copied

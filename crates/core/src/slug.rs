@@ -1,11 +1,11 @@
 //! Slug helpers — turn human strings into filesystem-safe identifiers.
 //!
-//! Pilot uses these to derive on-disk worktree paths from PR titles
+//! Lazybox uses these to derive on-disk worktree paths from PR titles
 //! and user-supplied workspace names. The goal is something a person
 //! reading a shell prompt can identify at a glance:
 //!
 //! ```text
-//! ~/.pilot/v2/worktrees/PR-7413-propagate-status-code/
+//! ~/.lazybox/v2/worktrees/PR-7413-propagate-status-code/
 //! ```
 //!
 //! Rules:

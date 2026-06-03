@@ -28,7 +28,7 @@ make run       # build + run
 also needs libc++ + libc++abi (`sudo apt install build-essential pkg-config
 libc++-dev libc++abi-dev` on Debian/Ubuntu). Full build notes, troubleshooting,
 and the Homebrew/curl channels that land at 1.0 are in the
-[Quickstart](https://docs.lazybox.ai/tutorials/quickstart/).
+[Quickstart](https://lazybox.ai/docs/tutorials/quickstart/).
 
 ## First 60 seconds
 
@@ -55,12 +55,12 @@ an orientation of every command.
 
 ## Documentation
 
-📖 **[docs.lazybox.ai](https://docs.lazybox.ai/)** — organized by what you're trying to do:
+📖 **[lazybox.ai/docs](https://lazybox.ai/docs/)** — organized by what you're trying to do:
 
-- **[Quickstart](https://docs.lazybox.ai/tutorials/quickstart/)** — install → run → your first win, in ~5 minutes.
-- **[How-to guides](https://docs.lazybox.ai/how-to/)** — add a repo, run an agent per workspace, per-repo env/mounts, remote over SSH, mirror to Slack.
-- **[Reference](https://docs.lazybox.ai/reference/)** — every [CLI command](https://docs.lazybox.ai/reference/cli/), the full [keybindings](https://docs.lazybox.ai/reference/keybindings/), and the [`~/.lazybox/config.yaml`](https://docs.lazybox.ai/reference/configuration/) schema.
-- **[Explanation](https://docs.lazybox.ai/explanation/)** — the [mental model](https://docs.lazybox.ai/explanation/mental-model/) (worktree- and agent-per-workspace) and the [architecture](https://docs.lazybox.ai/explanation/architecture/).
+- **[Quickstart](https://lazybox.ai/docs/tutorials/quickstart/)** — install → run → your first win, in ~5 minutes.
+- **[How-to guides](https://lazybox.ai/docs/how-to/)** — add a repo, run an agent per workspace, per-repo env/mounts, remote over SSH, mirror to Slack.
+- **[Reference](https://lazybox.ai/docs/reference/)** — every [CLI command](https://lazybox.ai/docs/reference/cli/), the full [keybindings](https://lazybox.ai/docs/reference/keybindings/), and the [`~/.lazybox/config.yaml`](https://lazybox.ai/docs/reference/configuration/) schema.
+- **[Explanation](https://lazybox.ai/docs/explanation/)** — the [mental model](https://lazybox.ai/docs/explanation/mental-model/) (worktree- and agent-per-workspace) and the [architecture](https://lazybox.ai/docs/explanation/architecture/).
 
 Copy-paste config starters live in [`examples/`](examples/). Deep architecture
 notes are in [`CLAUDE.md`](CLAUDE.md) and [`DESIGN.md`](DESIGN.md); the
@@ -83,7 +83,7 @@ for the full overlay. The ones you'll reach for first:
 | `,` · `?` · `q q` | Settings · help · quit |
 | `]]` | Leave a terminal, back to the sidebar |
 
-The [full keybinding reference](https://docs.lazybox.ai/reference/keybindings/) covers every pane.
+The [full keybinding reference](https://lazybox.ai/docs/reference/keybindings/) covers every pane.
 
 ## Status
 

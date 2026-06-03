@@ -4,23 +4,23 @@
 
 ## Docs
 
-- [Home](https://docs.lazybox.ai/): What lazybox is, who it's for, and a map of the documentation.
-- [Tutorials](https://docs.lazybox.ai/tutorials/): Learning-oriented lessons for newcomers.
-- [Quickstart](https://docs.lazybox.ai/tutorials/quickstart/): Build from source and open your first workspace with a live terminal in ~5 minutes.
-- [How-to guides](https://docs.lazybox.ai/how-to/): Task-oriented recipes.
-- [Add a repo](https://docs.lazybox.ai/how-to/add-a-repo/): Bring a repository's PRs and issues into the inbox and filter by role.
-- [Run an agent per workspace](https://docs.lazybox.ai/how-to/run-an-agent-per-workspace/): Spawn Claude Code, Codex, or Cursor scoped to one worktree.
-- [Per-repo env and mounts](https://docs.lazybox.ai/how-to/per-repo-env-and-mounts/): Inject env vars, symlink shared dirs, materialize scripts.
-- [Remote over SSH](https://docs.lazybox.ai/how-to/remote-over-ssh/): Run the daemon remotely and the TUI locally over a forwarded socket.
-- [Mirror to Slack](https://docs.lazybox.ai/how-to/mirror-to-slack/): Reflect the inbox into Slack channels.
+- [Home](https://lazybox.ai/docs/): What lazybox is, who it's for, and a map of the documentation.
+- [Tutorials](https://lazybox.ai/docs/tutorials/): Learning-oriented lessons for newcomers.
+- [Quickstart](https://lazybox.ai/docs/tutorials/quickstart/): Build from source and open your first workspace with a live terminal in ~5 minutes.
+- [How-to guides](https://lazybox.ai/docs/how-to/): Task-oriented recipes.
+- [Add a repo](https://lazybox.ai/docs/how-to/add-a-repo/): Bring a repository's PRs and issues into the inbox and filter by role.
+- [Run an agent per workspace](https://lazybox.ai/docs/how-to/run-an-agent-per-workspace/): Spawn Claude Code, Codex, or Cursor scoped to one worktree.
+- [Per-repo env and mounts](https://lazybox.ai/docs/how-to/per-repo-env-and-mounts/): Inject env vars, symlink shared dirs, materialize scripts.
+- [Remote over SSH](https://lazybox.ai/docs/how-to/remote-over-ssh/): Run the daemon remotely and the TUI locally over a forwarded socket.
+- [Mirror to Slack](https://lazybox.ai/docs/how-to/mirror-to-slack/): Reflect the inbox into Slack channels.
 
 ## Reference
 
-- [CLI](https://docs.lazybox.ai/reference/cli/): Every lazybox subcommand, flag, and run mode.
-- [Keybindings](https://docs.lazybox.ai/reference/keybindings/): The full keymap for every pane and picker.
-- [Configuration](https://docs.lazybox.ai/reference/configuration/): The complete ~/.lazybox/config.yaml schema with an annotated example.
+- [CLI](https://lazybox.ai/docs/reference/cli/): Every lazybox subcommand, flag, and run mode.
+- [Keybindings](https://lazybox.ai/docs/reference/keybindings/): The full keymap for every pane and picker.
+- [Configuration](https://lazybox.ai/docs/reference/configuration/): The complete ~/.lazybox/config.yaml schema with an annotated example.
 
 ## Explanation
 
-- [Mental model](https://docs.lazybox.ai/explanation/mental-model/): Workspace = worktree + agent, the reactive inbox, read/unread, and the isolation rationale.
-- [Architecture](https://docs.lazybox.ai/explanation/architecture/): Client/daemon split, the crates, the event bus, the credential chain, and the embedded terminal.
+- [Mental model](https://lazybox.ai/docs/explanation/mental-model/): Workspace = worktree + agent, the reactive inbox, read/unread, and the isolation rationale.
+- [Architecture](https://lazybox.ai/docs/explanation/architecture/): Client/daemon split, the crates, the event bus, the credential chain, and the embedded terminal.

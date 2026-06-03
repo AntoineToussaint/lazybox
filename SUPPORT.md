@@ -20,7 +20,7 @@ Open an [issue](https://github.com/AntoineToussaint/lazybox/issues/new/choose):
 
 ## Documentation
 
-The docs site lives at <https://docs.lazybox.ai/>, and the
+The docs site lives at <https://lazybox.ai/docs/>, and the
 architecture notes are in [`CLAUDE.md`](./CLAUDE.md) and `DESIGN.md`.
 
 ## A note on response times

@@ -1,0 +1,88 @@
+# Builds the whole public site and publishes it to GitHub Pages on push
+# to main. ONE artifact, ONE domain (lazybox.ai):
+#
+#   lazybox.ai        → Astro homepage (web/)        → dist root
+#   lazybox.ai/docs/  → MkDocs docs   (docs-site/)   → dist/docs/
+#
+# Two toolchains (Node for Astro, Python for MkDocs) feed a single Pages
+# artifact, so there's no "one repo = one Pages site" collision and no
+# subdomain DNS. `mkdocs build --strict` and `astro build` both fail the
+# job on broken internal links or missing nav targets, so a bad PR breaks
+# here instead of shipping.
+#
+# Paths-scoped to site sources so Rust-only changes don't trigger a deploy
+# (and vice-versa). One-time setup: repo Settings → Pages → Source:
+# "GitHub Actions".
+
+name: pages
+
+on:
+  pull_request:
+    paths:
+      - "web/**"
+      - "docs-site/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
+      - ".github/workflows/pages.yml"
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "docs-site/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Astro homepage → dist/ (site root) ──────────────────────────
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build homepage (Astro)
+        working-directory: web
+        run: |
+          npm ci
+          npm run build   # → web/dist (includes public/CNAME = lazybox.ai)
+
+      # ── MkDocs docs → dist/docs/ (subpath) ──────────────────────────
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Build docs (MkDocs, strict) into /docs
+        run: |
+          pip install -r requirements-docs.txt
+          mkdocs build --strict --site-dir web/dist/docs
+
+      # ── One artifact for both ───────────────────────────────────────
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    name: deploy
+    # Publish only from main. PRs run `build` for validation but never
+    # touch the live site.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment

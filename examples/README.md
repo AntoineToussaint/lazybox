@@ -21,7 +21,7 @@ via the credential chain (`GH_TOKEN` → `GITHUB_TOKEN` → `gh auth token`); ru
 `gh auth login` once. For Linear, export `LINEAR_API_KEY`.
 
 For the full list of keys and defaults, see the configuration reference:
-<https://docs.lazybox.ai/reference/configuration/>.
+<https://lazybox.ai/docs/reference/configuration/>.
 
 ## How to use a template
 

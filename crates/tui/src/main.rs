@@ -158,7 +158,7 @@ Advanced:
 
 Credentials come from `gh auth token` by default; set LINEAR_API_KEY for Linear.
 Logs go to /tmp/lazybox.log (RUST_LOG=lazybox=debug for verbose). State lives in
-~/.lazybox/v2/state.db. Docs: https://docs.lazybox.ai/";
+~/.lazybox/v2/state.db. Docs: https://lazybox.ai/docs/";
 
 /// `-h` / `--help` anywhere in argv. Help is always available regardless of
 /// the rest of the command line, per clig.dev discoverability.

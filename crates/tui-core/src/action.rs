@@ -133,8 +133,6 @@ pub enum Action {
     /// Begin the two-press quit chord. Single-press from a remap
     /// just fires.
     Quit,
-    /// Detach the focused pane to a new lazybox process (Ctrl+Shift+D).
-    DetachPane,
     /// Resize the active splitter (Shift+Arrow).
     ResizeSplitter(ResizeDirection),
 
@@ -221,7 +219,6 @@ pub enum ActionKind {
     JumpToAsking,
     JumpToFailingCi,
     Quit,
-    DetachPane,
     ResizeSplitter,
     // Terminal
     TerminalScroll,
@@ -341,7 +338,6 @@ impl Action {
             Action::JumpToAsking => ActionKind::JumpToAsking,
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
             Action::Quit => ActionKind::Quit,
-            Action::DetachPane => ActionKind::DetachPane,
             Action::ResizeSplitter(_) => ActionKind::ResizeSplitter,
             Action::TerminalScroll(_) => ActionKind::TerminalScroll,
             Action::LeaveTerminal => ActionKind::LeaveTerminal,
@@ -429,13 +425,6 @@ impl ActionDef {
                 default_keys: "q q",
                 label: "quit",
                 describe: "Quit lazybox. Default is the two-key chord; a single-letter remap fires on first press.",
-                section: Section::Global,
-            },
-            ActionKind::DetachPane => &Self {
-                kind: ActionKind::DetachPane,
-                default_keys: "Ctrl-Shift-D",
-                label: "detach pane",
-                describe: "Spawn a new lazybox process pinned to the focused pane.",
                 section: Section::Global,
             },
             ActionKind::ResizeSplitter => &Self {
@@ -654,7 +643,6 @@ impl ActionDef {
             ActionKind::OpenSyncStatus,
             ActionKind::JumpToAsking,
             ActionKind::JumpToFailingCi,
-            ActionKind::DetachPane,
             ActionKind::ResizeSplitter,
             ActionKind::Quit,
             // Workspace
@@ -954,7 +942,6 @@ impl ActionKind {
             ActionKind::JumpToAsking => "jump_to_asking",
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
             ActionKind::Quit => "quit",
-            ActionKind::DetachPane => "detach_pane",
             ActionKind::ResizeSplitter => "resize_splitter",
             ActionKind::TerminalScroll => "terminal_scroll",
             ActionKind::LeaveTerminal => "leave_terminal",
@@ -1077,7 +1064,6 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::JumpToAsking
         | ActionKind::JumpToFailingCi
         | ActionKind::Quit
-        | ActionKind::DetachPane
         | ActionKind::ResizeSplitter
         | ActionKind::TerminalScroll
         | ActionKind::LeaveTerminal => true,

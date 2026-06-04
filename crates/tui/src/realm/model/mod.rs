@@ -38,7 +38,7 @@ pub use helpers::{run_loop_with_model, run_with_client};
 // the helpers moved out of mod.rs.
 pub(crate) use helpers::{
     emit_clipboard_copy, find_action_for_chord, key_event_to_chord, paint_selection, rect_contains,
-    spawn_detached_lazybox, split_for_footer,
+    split_for_footer,
 };
 
 use crate::PaneId;
@@ -615,8 +615,7 @@ impl Poll<UserEvent> for ChannelPort {
 
 /// CLI-driven post-snapshot focus target. Applied once after the
 /// first Snapshot so the user lands on a specific workspace +
-/// (optionally) session. Used by `--workspace KEY [--session ID]`
-/// and the detach flow that re-spawns lazybox with these flags.
+/// (optionally) session. Used by `--workspace KEY [--session ID]`.
 #[derive(Debug, Clone)]
 pub struct Preselect {
     /// Workspace key (e.g. `"github:owner/repo#42"`) to land on.

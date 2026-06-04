@@ -47,7 +47,7 @@ Every feature is documented as a section with the same shape:
 | [Providers](providers.md) | `TaskProvider`/`ScopeSource` traits, GitHub, Linear, Slack mirror |
 | [Workspaces & worktrees](workspaces-and-worktrees.md) | Workspace model, worktree manager, new/merge/archive/adopt/collapse, editors, per-repo overrides, persistence |
 | [Terminals & agents](terminals-and-agents.md) | Embedded terminal, agent spawn, Work command, autonomous sessions, state detection, structured runtime, LLM proxy, snippets |
-| [TUI & UX](tui-and-ux.md) | Three-pane layout, key/chord system, help, settings wizard, activity feed, reply, detach, mouse, modals, notifications |
+| [TUI & UX](tui-and-ux.md) | Three-pane layout, key/chord system, help, settings wizard, activity feed, reply, mouse, modals, notifications |
 | [Daemon, deployment & build](daemon-and-deployment.md) | Client/daemon split, standalone daemon, remote connect, JSON API, run modes, auth chain, config reference, build |
 
 ## Feature index
@@ -114,7 +114,6 @@ Status is best-effort as of this catalog's first pass; correct it as you audit.
 | [Guided tour](tui-and-ux.md#guided-tour) | beta | `tui` |
 | [Activity feed](tui-and-ux.md#activity-feed) | stable | `tui` |
 | [Reply](tui-and-ux.md#reply) | stable | `tui`, providers |
-| [Pane detach](tui-and-ux.md#pane-detach) | beta | `tui` |
 | [Mouse handling](tui-and-ux.md#mouse-handling) | stable | `tui` |
 | [Pickers / modals](tui-and-ux.md#pickers--modals) | stable | `tui` |
 | [Desktop notifications](tui-and-ux.md#desktop-notifications) | stable | `tui-core`, `tui` |

@@ -1489,13 +1489,6 @@ impl TerminalStack {
         "Terminals"
     }
 
-    /// Whether this pane can pop into a detached window. Terminals
-    /// don't (yet); the legacy trait default returned `None` and we
-    /// preserve that here.
-    pub fn detachable(&self) -> Option<crate::DetachSpec> {
-        None
-    }
-
     /// Bindings shown in the hint bar. Drops the legacy
     /// `all keys → PTY` entry — that describes an implementation mode
     /// rather than an actionable shortcut, so it was noise in the

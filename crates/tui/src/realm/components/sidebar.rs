@@ -316,11 +316,6 @@ impl Sidebar {
     pub fn toggle_repo_at_cursor(&mut self) -> bool {
         self.inner.toggle_repo_at_cursor()
     }
-
-    /// Forward to the inner pane's detach spec, if any.
-    pub fn detachable(&self) -> Option<crate::pane::DetachSpec> {
-        self.inner.detachable()
-    }
 }
 
 impl Component for Sidebar {

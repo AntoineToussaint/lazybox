@@ -137,9 +137,9 @@ impl Component for Splash {
 /// + `?` help modal. Reads from the catalog so footer / help / tour
 /// stay in lockstep — the single source of truth is `ActionDef`.
 ///
-/// Returns `(default_keys, label)` pairs. We pick the six globals
+/// Returns `(default_keys, label)` pairs. We pick the globals
 /// that matter for first-run discoverability: help, quit, settings,
-/// refresh, cycle pane, detach. The Resize splitter binding is
+/// refresh, cycle pane. The Resize splitter binding is
 /// available but not listed in the tour to keep the card scannable;
 /// the `?` help modal lists every global.
 pub fn universal_shortcuts() -> Vec<(&'static str, &'static str)> {
@@ -150,7 +150,6 @@ pub fn universal_shortcuts() -> Vec<(&'static str, &'static str)> {
         ActionKind::OpenSettings,
         ActionKind::Refresh,
         ActionKind::CyclePane,
-        ActionKind::DetachPane,
     ]
     .into_iter()
     .map(|k| {

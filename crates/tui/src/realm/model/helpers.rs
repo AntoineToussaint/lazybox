@@ -6,8 +6,7 @@
 //! - **Key / catalog**: `key_event_to_chord` (crossterm → catalog
 //!   chord), `find_action_for_chord` (catalog lookup honoring user
 //!   overrides).
-//! - **Detach + clipboard**: `spawn_detached_lazybox` (Ctrl-Shift-D
-//!   spawn), `emit_clipboard_copy` (OSC 52).
+//! - **Clipboard**: `emit_clipboard_copy` (OSC 52).
 //! - **Run loop entry points**: `run_with_client`, `run_loop_with_model`.
 //! - **Misc encoders**: `base64_encode` (OSC 52 payload).
 //!
@@ -188,33 +187,6 @@ pub(crate) fn find_action_for_chord(
     };
     ActionDef::all()
         .find(|d| allowed(d.section) && d.effective_chord(overrides).as_ref() == Some(chord))
-}
-
-/// Spawn a new `lazybox` process pinned to the focused pane's
-/// detachable scope. Detached: the new process gets its own session
-/// so closing the parent doesn't kill it. Errors are logged, not
-/// surfaced — detach is best-effort UX.
-pub(crate) fn spawn_detached_lazybox(spec: &crate::pane::DetachSpec) {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("detach: current_exe unavailable: {e}");
-            return;
-        }
-    };
-    let mut cmd = std::process::Command::new(exe);
-    cmd.args(&spec.args);
-    // Decouple from the parent so closing this lazybox doesn't take
-    // the detached one with it. Implementation lives in
-    // `crate::platform` — setsid() on unix, DETACHED_PROCESS on
-    // Windows (TODO).
-    crate::platform::detach_child_process(&mut cmd);
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
-    if let Err(e) = cmd.spawn() {
-        tracing::warn!("detach: spawn failed: {e}");
-    }
 }
 
 /// Carve the bottom row off for the footer. Returns

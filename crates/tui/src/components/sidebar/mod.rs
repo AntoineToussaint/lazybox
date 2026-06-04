@@ -1599,32 +1599,6 @@ impl Sidebar {
             })
             .collect()
     }
-
-    pub fn detachable(&self) -> Option<crate::DetachSpec> {
-        // Cursor on a session sub-row → detach that specific session.
-        // Cursor on a workspace row → detach the whole workspace
-        // (both spawn the same kind of child lazybox — different
-        // arg shape).
-        match self.visible.get(self.cursor)? {
-            VisibleRow::Session {
-                workspace,
-                session_id,
-            } => Some(crate::DetachSpec {
-                layout: "session",
-                args: vec![
-                    "--workspace".to_string(),
-                    workspace.as_str().to_string(),
-                    "--session".to_string(),
-                    session_id.0.to_string(),
-                ],
-            }),
-            VisibleRow::Workspace(k) => Some(crate::DetachSpec {
-                layout: "workspace",
-                args: vec!["--workspace".to_string(), k.as_str().to_string()],
-            }),
-            VisibleRow::RepoHeader(_) | VisibleRow::KindHeader(_) => None,
-        }
-    }
 }
 
 mod handlers;

@@ -2,7 +2,7 @@
 
 How lazybox is laid out and driven from the keyboard and mouse. This page covers
 the pane structure, the action/keybinding system, the overlays (help, settings,
-tour), the activity feed, reply, detach, mouse handling, modals, and desktop
+tour), the activity feed, reply, mouse handling, modals, and desktop
 notifications.
 
 See [`CLAUDE.md` § TUI tiers](../../CLAUDE.md) and
@@ -246,35 +246,6 @@ message).
 
 ### Known sharp edges
 - Reply support depends on the provider implementing the comment mutation; unsupported providers no-op.
-
----
-
-## Pane detach
-
-**Status:** beta
-**Crate(s):** `tui` (`pane.rs`, `realm/model/keys.rs`)
-**Config / flags:** —
-**Key bindings:** `Ctrl-Shift-D`
-
-### What it does
-Spawns a new lazybox window pinned to the focused pane — e.g. pop a terminal out
-into its own window.
-
-### How to use it
-Focus a pane and press `Ctrl-Shift-D`.
-
-### How it works (brief)
-`focused_detach_spec()` builds a `DetachSpec { layout, args }`
-(`crates/tui/src/pane.rs`); `spawn_detached_lazybox` launches a new lazybox process
-with those args (`crates/tui/src/realm/model/keys.rs`).
-
-### Test checklist
-- [ ] `Ctrl-Shift-D` on a terminal opens a new lazybox window showing that pane.
-- [ ] The detached window connects to the same daemon/state.
-- [ ] Distinct from `Shift-D` (sync status).
-
-### Known sharp edges
-- Spawns a whole new process; both windows talk to the same daemon, so state stays consistent but you now manage two windows.
 
 ---
 

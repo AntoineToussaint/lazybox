@@ -47,9 +47,8 @@ pub fn redirect_stderr_to_file(file: &std::fs::File) {
 }
 
 /// Detach a child `Command` from the parent's session group so the
-/// child survives the parent process exiting. Used by the
-/// `Ctrl-Shift-D` detach flow that re-spawns lazybox pinned to a
-/// specific workspace.
+/// child survives the parent process exiting. Used when launching
+/// external editors / browsers so they outlive lazybox.
 ///
 /// On unix: `setsid()` via `pre_exec`. On Windows: `CREATE_NEW_PROCESS_GROUP`
 /// + `DETACHED_PROCESS` flags (TODO).

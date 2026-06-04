@@ -257,3 +257,32 @@ write("permission_below_stale_composer.bin", [
     cup(14, 5), b"3. No, and tell Claude what to do differently\r\n",
     cup(16, 1), sgr(2), b"Esc to cancel", RESET,
 ])
+
+# ── FALSE NEGATIVE (#2): bash-approval dialog with the LONG footer ────────
+# A real Bash-command approval whose footer is the full
+# `Esc to cancel · Tab to amend · ctrl+e to explain` form — NOT the short
+# `Esc to cancel` the detector once assumed. The footer carries
+# `Tab to amend`, which `idle_box_pos` matched, so the recency gate read
+# the live `❯ 1. Yes` chooser above it as stale scrollback and returned
+# Idle — the `?` never showed. The `Esc to cancel` footer fragments
+# spaceless across the status bar exactly like the working/idle footers
+# do. A bash approval always asks a consent question, so the STRONG
+# standalone-phrase tier (gated on the reliable `? for shortcuts` / bypass
+# anchor, absent here) catches it. Must read InputNeeded, never ready.
+write("permission_bash_amend_footer.bin", [
+    cup(8, 1), CLEAR_LINE,
+    sgr(1, 34), b"Bash command", RESET, b"\r\n",
+    cup(9, 3), b"for c in git-ops gh-provider; do echo $c; done\r\n",
+    cup(11, 1), CLEAR_LINE,
+    sgr(1), b"Do you want to proceed?", RESET, b"\r\n",
+    cup(12, 3), "❯ ".encode("utf-8"),                       # arrow lands first…
+    cup(24, 1), CLEAR_LINE,                                  # …ticker repaints a far row
+    sgr(2), "(2s · 18 tokens)".encode("utf-8"), RESET,
+    cup(12, 5), sgr(7), b"1. Yes", RESET, b"\r\n",           # then the option text
+    cup(13, 5), b"2. No\r\n",
+    # the long footer, painted spaceless into the status bar
+    cup(15, 1), sgr(2), b"Esc", cup(15, 5), b"to", cup(15, 8), b"cancel",
+    cup(15, 16), "·".encode("utf-8"), cup(15, 18), b"Tab", cup(15, 22), b"to", cup(15, 25), b"amend",
+    cup(15, 33), "·".encode("utf-8"), cup(15, 35), b"ctrl+e", cup(15, 42), b"to", cup(15, 45), b"explain",
+    RESET,
+])

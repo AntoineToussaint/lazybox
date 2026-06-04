@@ -208,12 +208,14 @@ async fn ingest_hook_drives_agent_state_transitions() {
     .expect("deadline");
 }
 
-/// Hooks-primary, PTY-fallback: once a terminal reports a hook, the PTY
-/// detector must stop emitting `Working`/`InputNeeded` for it — those
-/// come from hooks. A PTY permission chooser that would normally fire
-/// `InputNeeded` is suppressed while the hook-derived state stands.
+/// Hooks own the Working↔Idle distinction, but the PTY may still RAISE
+/// `InputNeeded` on a hook-driven terminal: an inline mid-turn approval
+/// fires no hook, so the on-screen `Esc to cancel` dialog is the only
+/// source of truth. The PTY reading must surface even after a hook marked
+/// the terminal hook-driven (the policy the user approved over the older
+/// "hooks fully authoritative" design).
 #[tokio::test]
-async fn hook_driven_terminal_suppresses_pty_input_needed() {
+async fn hook_driven_terminal_honors_pty_input_needed() {
     timeout(TEST_DEADLINE, async {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let mut client = subscribed(config).await;
@@ -243,9 +245,9 @@ async fn hook_driven_terminal_suppresses_pty_input_needed() {
         .await;
         assert!(working.is_some(), "hook must set Working");
 
-        // Now the PTY paints a permission chooser. On a non-hook terminal
-        // this is the classic InputNeeded trigger; here it must be
-        // suppressed — hooks own that transition.
+        // Now the PTY paints a permission chooser. The hook-driven
+        // terminal must honor it — the inline approval fired no hook, so
+        // the screen is the only signal that the agent is blocked.
         mock.emit(
             &key,
             concat!(
@@ -256,7 +258,7 @@ async fn hook_driven_terminal_suppresses_pty_input_needed() {
             ),
         )
         .await;
-        let leaked = wait_for(
+        let raised = wait_for(
             &mut client,
             |e| {
                 matches!(
@@ -267,12 +269,81 @@ async fn hook_driven_terminal_suppresses_pty_input_needed() {
                     }
                 )
             },
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            raised.is_some(),
+            "PTY permission dialog must raise InputNeeded on a hook-driven terminal"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// The other half of the policy: hooks still OWN Working↔Idle. A PTY
+/// `Working` status line must NOT override a hook-derived `InputNeeded`,
+/// or the status-bar ticker would flap a hook-driven terminal's pill.
+/// Only `InputNeeded` and a confident ready-idle are honored from the PTY.
+#[tokio::test]
+async fn hook_driven_terminal_ignores_pty_working() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        // A permission Notification marks the terminal hook-driven and
+        // sets InputNeeded.
+        client
+            .send(Command::IngestHook {
+                terminal_id,
+                hook: lazybox_ipc::HookEvent {
+                    kind: lazybox_ipc::HookEventKind::Notification,
+                    session_id: Some("claude-session".into()),
+                    cwd: None,
+                    tool_name: None,
+                    notification: Some("Claude needs your permission to use Bash".into()),
+                },
+            })
+            .unwrap();
+        let asked = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::InputNeeded,
+                        ..
+                    }
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(asked.is_some(), "permission hook must set InputNeeded");
+
+        // The PTY now paints a live working status line. It must NOT flip
+        // the hook-driven terminal to Working — hooks own that edge.
+        mock.emit(&key, "✻ Cogitating… (8s · ↑ 412 tokens · esc to interrupt)")
+            .await;
+        let leaked = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::Working,
+                        ..
+                    }
+                )
+            },
             Duration::from_millis(500),
         )
         .await;
         assert!(
             leaked.is_none(),
-            "PTY chooser must NOT flip a hook-driven terminal to InputNeeded"
+            "PTY working status must NOT override a hook-driven terminal"
         );
     })
     .await

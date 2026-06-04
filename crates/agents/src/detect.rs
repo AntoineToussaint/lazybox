@@ -14,6 +14,14 @@
 //! `&str`) and returns a value — no `self`, no mutation, no clock. The
 //! `Agent` impls in [`crate::agent`] are thin wrappers that call into
 //! these functions.
+//!
+//! The one observation hook is level-gated `tracing`: `claude_state_of`
+//! emits a single `trace` record of *why* a state was chosen (which
+//! branch fired, the recency offsets, the matched consent phrase, a
+//! bounded tail of the buffer). It never affects the returned value, so
+//! the functions stay pure for testing; flip it on with
+//! `RUST_LOG=lazybox_agents=trace` to debug a misclassification against
+//! `/tmp/lazybox.log`.
 
 use lazybox_ipc::AgentState;
 
@@ -77,13 +85,17 @@ pub fn contains_paired(text: &str, choices: &[&str], questions: &[&str]) -> bool
 /// chooser outranks the working status line, which outranks the quiet
 /// input box.
 ///
-/// - **`InputNeeded`** — ONLY structural prompt markers: the chooser
-///   arrow + numbered options, the `Esc to cancel` permission footer
-///   (without the input box's `Tab to amend`), the standalone
-///   `do you want to …` consent phrases, or a bare yes/no pairing.
-///   Freeform conversational asks ("Want me to …?", a line that merely
-///   ends in `?`) are NOT flagged — they were the dominant
-///   false-positive source and fired spurious desktop notifications.
+/// - **`InputNeeded`** — ONLY structural prompt markers, split into two
+///   confidence tiers (see `classify`): WEAK chooser shapes (selection
+///   arrow + numbered options, or an `Esc to cancel` footer + options)
+///   gated on the full composer footer, and STRONG phrase shapes (a
+///   standalone `do you want to …` consent phrase, or a paired
+///   question + yes/no) gated only on the RELIABLE resting footer so a
+///   live command-approval dialog — whose footer carries the otherwise
+///   composer-like `Tab to amend` — still fires. Freeform conversational
+///   asks ("Want me to …?", a line that merely ends in `?`) are NOT
+///   flagged — they were the dominant false-positive source and fired
+///   spurious desktop notifications.
 /// - **`Working`** — Claude paints a live status line ONLY while busy:
 ///   `✦ Gusting… (2m 2s · ↓ 7.2k tokens · …)`. Its presence is the
 ///   reliable "working" pulser — far more robust than the old
@@ -104,10 +116,11 @@ pub fn claude_state(recent_output: &[u8]) -> Option<AgentState> {
 }
 
 /// Classify Claude's state from an already-stripped buffer `s` and its
-/// space-free form `compact` (see [`compact_lower`]). Returns
-/// `AgentState` directly (never the outer `Option`): every path
-/// classifies. Both forms are passed in so the public entry points build
-/// them once and share them — this runs on every PTY chunk.
+/// space-free form `compact` (see [`compact_lower`]), then emit one
+/// `trace`-level record of why. Returns `AgentState` directly (never the
+/// outer `Option`): every path classifies. Both forms are passed in so
+/// the public entry points build them once and share them — this runs on
+/// every PTY chunk.
 ///
 /// Why two forms:
 /// - `compact` (lowercased, spaces removed) is what every footer /
@@ -124,93 +137,127 @@ pub fn claude_state(recent_output: &[u8]) -> Option<AgentState> {
 /// - raw `s` is kept only for the arrow scan, whose ASCII form (`> 1.`)
 ///   depends on the space `compact` strips.
 fn claude_state_of(s: &str, compact: &str) -> AgentState {
+    let decision = classify(s, compact);
+    decision.log(compact);
+    decision.state
+}
+
+/// Which branch of [`classify`] selected `InputNeeded`. Captured so the
+/// decision is loggable and unit-testable without a `tracing`
+/// subscriber; `None` for the `Working`/`Idle` outcomes (their reason is
+/// the state itself).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    /// Selection arrow + numbered options, more recent than the composer.
+    StructuralChooser,
+    /// `Esc to cancel` permission footer + numbered options.
+    EscToCancelFooter,
+    /// A [`CLAUDE_STANDALONE_PROMPT_PHRASES`] consent phrase.
+    StandalonePhrase,
+    /// Bare yes/no: a choice marker paired with a question phrase.
+    PairedYesNo,
+}
+
+/// Full classification result: the chosen state plus the recency offsets
+/// and matched markers that drove it. [`classify`] returns it so
+/// [`claude_state_of`] can both hand back the state and emit a single
+/// `trace` record of *why* (issue #2: instrument the decision before
+/// tweaking the heuristic). Tests assert on `trigger` directly.
+struct Decision {
+    state: AgentState,
+    trigger: Option<Trigger>,
+    /// Composer footer offset gating the WEAK chooser shapes — includes
+    /// the ambiguous `Tab to amend`. See [`idle_box_pos`].
+    idle_pos: Option<usize>,
+    /// RELIABLE end-of-turn anchor gating the STRONG phrase shapes —
+    /// `? for shortcuts` / bypass only. See [`resting_composer_pos`].
+    resting_pos: Option<usize>,
+    chooser_pos: Option<usize>,
+    choice_pos: Option<usize>,
+    question_pos: Option<usize>,
+    work_pos: Option<usize>,
+    phrase_pos: Option<usize>,
+    matched_phrase: Option<&'static str>,
+}
+
+impl Decision {
+    /// Emit the decision at `trace` (off in normal runs; flip on with
+    /// `RUST_LOG=lazybox_agents=trace`). `tracing` evaluates the field
+    /// expressions only when the callsite is enabled, so the bounded
+    /// `tail` slice is built solely while debugging.
+    fn log(&self, compact: &str) {
+        tracing::trace!(
+            state = ?self.state,
+            trigger = ?self.trigger,
+            idle_pos = ?self.idle_pos,
+            resting_pos = ?self.resting_pos,
+            chooser_pos = ?self.chooser_pos,
+            choice_pos = ?self.choice_pos,
+            question_pos = ?self.question_pos,
+            work_pos = ?self.work_pos,
+            phrase_pos = ?self.phrase_pos,
+            matched_phrase = ?self.matched_phrase,
+            tail = %compact_tail(compact),
+            "claude_state_of",
+        );
+    }
+}
+
+/// The classifier. Ordered most-specific first; the priority is
+/// deliberate. The branches split into two confidence tiers that gate on
+/// DIFFERENT end-of-turn anchors — the crux of keeping the `?` honest:
+///
+/// - **WEAK shapes** (a bare selection arrow + numbered options, or an
+///   `Esc to cancel` footer + numbered options) gate on [`idle_box_pos`],
+///   which includes the `Tab to amend` composer footer. A numbered list
+///   the agent typed into its prose, or a multi-line prompt lazybox
+///   injected into the composer, satisfies "arrow + 1./2." but is NOT a
+///   live chooser — the `Tab to amend` footer below it proves the
+///   composer is in control, so these stay `Idle`.
+/// - **STRONG shapes** (a standalone `do you want to …` consent phrase,
+///   or a paired question + yes/no) gate on [`resting_composer_pos`] —
+///   `? for shortcuts` / bypass ONLY, never `Tab to amend`. These phrases
+///   never appear in an idle composer or injected prose, so the only
+///   reason to suppress one is a RELIABLE end-of-turn footer above which
+///   it's stale scrollback (#191). A real Claude command-approval dialog
+///   renders the `Esc to cancel · Tab to amend · ctrl+e to explain`
+///   footer — which carries `Tab to amend` — so gating these on
+///   `idle_box_pos` (as the chooser shapes do) wrongly read the live
+///   `Do you want to proceed?` prompt as stale and dropped the `?`
+///   entirely. Bash approvals always carry a consent phrase, so the
+///   strong tier catches them regardless of that ambiguous footer.
+fn classify(s: &str, compact: &str) -> Decision {
     let idle_pos = idle_box_pos(compact);
+    let resting_pos = resting_composer_pos(compact);
+    let chooser_pos = chooser_pos(compact);
 
     // A live chooser / permission dialog REPLACES the input box, so its
-    // markers are the bottom-most thing on screen. When the idle
-    // composer footer is MORE RECENT (further down the buffer) than the
-    // chooser markers, the arrow + numbered shape is scrollback — a
-    // parked `❯` prompt sitting in the composer above an agent's prose
-    // numbered list — NOT a live chooser. That combination was the
-    // dominant false positive: a `❯` in the composer plus any `1.`/`2.`
-    // list in the conversation fired InputNeeded on an idle screen.
-    //
-    // Gating on recency (chooser at least as recent as the composer
-    // footer) is also strictly better than the old `Tab to amend`
-    // absence heuristic for the permission branch: it FIRES correctly
-    // when a real dialog renders below a now-stale composer footer still
-    // sitting in the detect window.
-    let chooser_live = marker_at_least_as_recent(chooser_pos(compact), idle_pos);
+    // markers are the bottom-most thing on screen. When the composer
+    // footer is MORE RECENT (further down the buffer) than the chooser
+    // markers, the arrow + numbered shape is scrollback — a parked `❯`
+    // prompt above an agent's prose `1.`/`2.` list, or an injected
+    // multi-line prompt sitting in the composer — NOT a live chooser.
+    let chooser_live = marker_at_least_as_recent(chooser_pos, idle_pos);
 
     // tmux paints the screen by absolute cursor position, so the bytes
     // lazybox sees arrive in TEMPORAL order: a single visual line
     // `❯ 1. Yes` can land in the buffer as
-    // `<cursor-move>❯<cursor-move> <cursor-move>1.<…>Yes` and
-    // strip_ansi removes the CSI runs but NOT the absolute positioning
-    // gap that may be filled with other content. So strict substring
-    // matching for `❯ 1.` fails even when the prompt is visually on
-    // screen.
-    //
-    // Generalized matcher: the arrow `❯` ANYWHERE in the buffer paired
-    // with a numbered-choice shape (any `1.` / `1)` followed by a text
-    // option AND any `2.` / `2)`) catches every chooser claude renders
-    // today: permission prompts, tool-approval, multi-choice
-    // continuations, custom yes/no — anything with at least two
-    // numbered options. The `2.` / `2)` second requirement filters out
-    // chat lists that happen to start with `1.` (the second option is
-    // the giveaway: a chooser is always followed immediately by `2.`).
-    //
-    // ASCII arrow accepted on ANY option (`> 1.`, `> 2.`, `> 3.`, …) —
-    // the user moves the cursor with j/k, and claude re-renders the
-    // arrow at the new option.
-    //
-    // The shape match alone is not enough (issue #164): the idle composer
-    // draws its OWN `❯` prompt glyph, so a turn that ends with a numbered
-    // list in the agent's summary (`1. … 2. …`) above the input box
-    // satisfies arrow+chooser even though nothing is being asked. The
-    // `chooser_live` recency gate (computed above) discards that case —
-    // when the idle footer is the more-recent bottom marker the chooser
-    // shape is stale chat and the turn is over.
+    // `<cursor-move>❯<cursor-move> <cursor-move>1.<…>Yes`, and strip_ansi
+    // removes the CSI runs but NOT the absolute positioning gap that may
+    // be filled with other content. So strict substring matching for
+    // `❯ 1.` fails even when the prompt is visually on screen — the
+    // matcher pairs the arrow `❯` ANYWHERE with a numbered-choice shape
+    // (`1.`/`1)` AND `2.`/`2)`). The required second option filters chat
+    // lists that merely start with `1.`. The ASCII arrow is accepted on
+    // any option (`> 1.`, `> 2.`, …) since j/k moves the cursor.
     let has_arrow = s.contains('❯') || has_ascii_chooser_arrow(s);
     let has_chooser = has_numbered_chooser_options(s);
-    if has_arrow && has_chooser && chooser_live {
-        return AgentState::InputNeeded;
-    }
 
-    // Permission-chooser footer: `Esc to cancel` rendered alongside a
-    // numbered-options shape. The permission dialog uses a SHORTER
-    // footer than the input box ("Esc to cancel" alone, without "Tab to
-    // amend"), so the input-box paired check below doesn't fire. Matched
-    // space-free (`esctocancel`) because the footer arrives spaceless
-    // from the status bar. The `chooser_live` recency gate handles the
-    // input-box footer's own `Esc to cancel`: when that footer is the
-    // most recent marker the numbered shape is scrollback and the branch
-    // stays silent. This recency gate replaces the brittle `Tab to amend`
-    // absence heuristic and also FIRES correctly when a real dialog
-    // renders below a now-stale composer footer still in the detect
-    // window.
-    if compact.contains("esctocancel") && has_chooser && chooser_live {
-        return AgentState::InputNeeded;
-    }
-
-    // Standalone high-confidence prompts. These exact phrases appear
-    // only when claude is blocking on user input. Matched space-free so
-    // phrasing variants and the footer's stripped spacing both fire
-    // without expanding the table. Recency-gated like the chooser
-    // branches (#191): a consent phrase left in scrollback above a
-    // finished turn's composer footer is stale, not a live prompt.
-    if marker_at_least_as_recent(
-        last_compact_match_pos(compact, CLAUDE_STANDALONE_PROMPT_PHRASES),
-        idle_pos,
-    ) {
-        return AgentState::InputNeeded;
-    }
-
-    // Paired fallback for bare yes/no prompts (no arrow UI) + older
-    // prompt shapes. Question phrases ANY-ed with choice markers — both
-    // must be present in the buffer, and the most-recent of the two must
-    // be at least as recent as the composer footer (#191) so a stale
-    // pairing scrolled above a finished turn's footer doesn't fire.
+    let (phrase_pos, matched_phrase) =
+        match last_compact_match(compact, CLAUDE_STANDALONE_PROMPT_PHRASES) {
+            Some((pos, phrase)) => (Some(pos), Some(phrase)),
+            None => (None, None),
+        };
     let choice_pos = last_compact_match_pos(compact, &["1. Yes", "1) Yes", "(y/n)", "[y/n]"]);
     let question_pos = last_compact_match_pos(
         compact,
@@ -223,31 +270,80 @@ fn claude_state_of(s: &str, compact: &str) -> AgentState {
             "Proceed?",
         ],
     );
-    if choice_pos.is_some()
-        && question_pos.is_some()
-        && marker_at_least_as_recent(choice_pos.max(question_pos), idle_pos)
-    {
-        return AgentState::InputNeeded;
+    let work_pos = working_status_pos(compact);
+
+    let mut d = Decision {
+        state: AgentState::Idle,
+        trigger: None,
+        idle_pos,
+        resting_pos,
+        chooser_pos,
+        choice_pos,
+        question_pos,
+        work_pos,
+        phrase_pos,
+        matched_phrase,
+    };
+
+    // WEAK: arrow + numbered options, gated on the full composer footer
+    // (incl. `Tab to amend`) so injected prose / parked prompts stay Idle.
+    if has_arrow && has_chooser && chooser_live {
+        d.state = AgentState::InputNeeded;
+        d.trigger = Some(Trigger::StructuralChooser);
+        return d;
     }
 
-    // Working: the model is streaming or a tool is running. Claude
-    // paints a live status line ONLY while busy. Recency guard: the
-    // detection buffer is the append-only PTY byte stream, so a finished
-    // agent's last status line still sits in it — but Claude redraws the
-    // idle input box AFTER it. Treat the agent as working only when the
-    // status line is the MORE RECENT of the two bottom-line markers.
-    // Both positions are computed in `compact` so their relative order
-    // (all the recency guard needs) is preserved; `idle_pos` is the
-    // composer-footer offset already computed above.
-    if let Some(work_pos) = working_status_pos(compact)
+    // WEAK: `Esc to cancel` permission footer + numbered options — the
+    // arrow-less dialog shape (older builds, or the arrow fragmented out
+    // of the detect window). Same `idle_box_pos` recency gate.
+    if compact.contains("esctocancel") && has_chooser && chooser_live {
+        d.state = AgentState::InputNeeded;
+        d.trigger = Some(Trigger::EscToCancelFooter);
+        return d;
+    }
+
+    // STRONG: a standalone consent phrase, gated on the RELIABLE resting
+    // footer only. Such a phrase never appears in an idle composer or
+    // injected prose, so the sole reason to suppress it is a genuine
+    // end-of-turn footer (`? for shortcuts` / bypass) below which it's
+    // stale scrollback (#191). It must NOT be gated by `Tab to amend`,
+    // which the live command-approval dialog itself renders.
+    if marker_at_least_as_recent(phrase_pos, resting_pos) {
+        d.state = AgentState::InputNeeded;
+        d.trigger = Some(Trigger::StandalonePhrase);
+        return d;
+    }
+
+    // STRONG: a question phrase paired with a yes/no choice marker — the
+    // arrow-less bash/approval shape whose options are `1. Yes` / `(y/n)`.
+    // Both must be present, and the more-recent of the two at least as
+    // recent as the reliable resting footer.
+    if choice_pos.is_some()
+        && question_pos.is_some()
+        && marker_at_least_as_recent(choice_pos.max(question_pos), resting_pos)
+    {
+        d.state = AgentState::InputNeeded;
+        d.trigger = Some(Trigger::PairedYesNo);
+        return d;
+    }
+
+    // Working: Claude paints a live status line ONLY while busy. The
+    // append-only buffer still holds a finished agent's last status line,
+    // but Claude redraws the composer footer AFTER it — so treat the
+    // agent as working only when the status line is the more recent of
+    // the two. Gated on `idle_box_pos` (incl. `Tab to amend`): a stale
+    // `esc to interrupt` under a redrawn composer footer must read Idle,
+    // not forever-busy.
+    if let Some(work_pos) = work_pos
         && idle_pos.is_none_or(|ip| work_pos > ip)
     {
-        return AgentState::Working;
+        d.state = AgentState::Working;
+        return d;
     }
 
     // Nothing pending and not streaming: the input box is drawn and
     // quiet, or the output is plain non-interactive text.
-    AgentState::Idle
+    d
 }
 
 /// Claude is ready to receive a pasted prompt when its input box (the
@@ -276,8 +372,10 @@ pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
     let compact = compact_lower(&s);
     // A live chooser / permission / standalone-consent prompt means a
     // paste would be eaten by the gate. The state model already
-    // recognises every one of those shapes.
-    if claude_state_of(&s, &compact) == AgentState::InputNeeded {
+    // recognises every one of those shapes. Use `classify` directly (not
+    // `claude_state_of`) so the spawn-time injector's readiness polling
+    // doesn't double-emit the decision trace on every chunk.
+    if classify(&s, &compact).state == AgentState::InputNeeded {
         return false;
     }
     // Folder-trust prompts don't always render as a numbered chooser
@@ -340,15 +438,38 @@ fn compact_lower(s: &str) -> String {
 /// allocation total rather than N — this is on the per-chunk detection
 /// hot path.
 fn last_compact_match_pos(compact: &str, patterns: &[&str]) -> Option<usize> {
+    last_compact_match(compact, patterns).map(|(pos, _)| pos)
+}
+
+/// Like [`last_compact_match_pos`] but also returns WHICH pattern carried
+/// the most-recent match, so the decision trace can name the exact
+/// consent phrase that fired (issue #2) rather than just its offset.
+fn last_compact_match<'a>(compact: &str, patterns: &[&'a str]) -> Option<(usize, &'a str)> {
     let mut needle = String::new();
     patterns
         .iter()
         .filter_map(|p| {
             needle.clear();
             needle.extend(p.chars().filter(|c| *c != ' ').flat_map(char::to_lowercase));
-            compact.rfind(needle.as_str())
+            compact.rfind(needle.as_str()).map(|pos| (pos, *p))
         })
-        .max()
+        .max_by_key(|(pos, _)| *pos)
+}
+
+/// Last `MAX_TAIL` chars of the compacted buffer, snapped to a char
+/// boundary — the bounded, already-redacted (lowercased, space-free)
+/// slice that fed the decision, logged for debugging without dumping the
+/// whole 16 KiB detect window.
+fn compact_tail(compact: &str) -> &str {
+    const MAX_TAIL: usize = 200;
+    if compact.len() <= MAX_TAIL {
+        return compact;
+    }
+    let mut start = compact.len() - MAX_TAIL;
+    while start < compact.len() && !compact.is_char_boundary(start) {
+        start += 1;
+    }
+    &compact[start..]
 }
 
 /// Whether a prompt marker at `marker_pos` is at least as recent (as far
@@ -480,6 +601,32 @@ fn working_status_pos(compact: &str) -> Option<usize> {
 fn idle_box_pos(compact: &str) -> Option<usize> {
     [
         compact.rfind("tabtoamend"),
+        compact.rfind("?forshortcuts"),
+        compact.rfind("shift+tabtocycle"),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+}
+
+/// Byte offset of the most recent RELIABLE end-of-turn footer in
+/// `compact` — `? for shortcuts` (default) or the bypass-mode
+/// `shift+tab to cycle`. Unlike [`idle_box_pos`] this deliberately
+/// EXCLUDES `Tab to amend`.
+///
+/// `Tab to amend` is ambiguous: Claude renders it both for an idle
+/// composer holding draft text AND in a live command-approval dialog
+/// (`Esc to cancel · Tab to amend · ctrl+e to explain`). The chooser
+/// shapes can tolerate that ambiguity — a numbered list above a
+/// `Tab to amend` footer is prose, not a live chooser. But the STRONG
+/// consent-phrase shapes cannot: a real `Do you want to proceed?`
+/// approval carries exactly that footer, so gating those on
+/// `idle_box_pos` read the live prompt as stale scrollback and dropped
+/// the `?`. `? for shortcuts` / bypass appear ONLY when the turn is over
+/// and the composer is at rest, so they're the only trustworthy "this
+/// consent phrase is now scrollback" anchor.
+fn resting_composer_pos(compact: &str) -> Option<usize> {
+    [
         compact.rfind("?forshortcuts"),
         compact.rfind("shift+tabtocycle"),
     ]
@@ -855,5 +1002,111 @@ mod tests {
 
         let live = "? for shortcuts\nApprove this?\n1. Yes\n2. No";
         assert_eq!(claude_state(live.as_bytes()), Some(AgentState::InputNeeded));
+    }
+
+    #[test]
+    fn resting_composer_pos_excludes_tab_to_amend() {
+        // `? for shortcuts` / bypass anchor; `Tab to amend` does NOT, since
+        // it's also the live command-approval dialog footer.
+        assert!(resting_composer_pos(&compact_lower("? for shortcuts")).is_some());
+        assert!(
+            resting_composer_pos(&compact_lower("bypass permissions on (shift+tab to cycle)"))
+                .is_some()
+        );
+        assert_eq!(
+            resting_composer_pos(&compact_lower(
+                "Esc to cancel · Tab to amend · ctrl+e to explain"
+            )),
+            None,
+        );
+    }
+
+    #[test]
+    fn bash_approval_with_amend_footer_is_input_needed() {
+        // The real false NEGATIVE: a live Bash-command approval whose
+        // footer is the full `Esc to cancel · Tab to amend · ctrl+e to
+        // explain` form (NOT the short `Esc to cancel` the detector once
+        // assumed). The footer carries `Tab to amend`, so `idle_box_pos`
+        // mistook it for an idle composer and the recency gate read the
+        // live `❯ 1. Yes` chooser as stale scrollback → Idle, dropping the
+        // `?`. The standalone consent phrase fires on the reliable resting
+        // anchor (absent here) and rescues it.
+        let buf = concat!(
+            "Bash command\n",
+            "  for c in git-ops gh-provider; do echo $c; done\n",
+            "Do you want to proceed?\n",
+            "❯ 1. Yes\n",
+            "  2. No\n",
+            "Esc to cancel · Tab to amend · ctrl+e to explain",
+        );
+        assert_eq!(claude_state(buf.as_bytes()), Some(AgentState::InputNeeded));
+        assert!(!claude_ready_for_prompt(buf.as_bytes()));
+    }
+
+    #[test]
+    fn injected_prompt_list_above_amend_footer_stays_idle() {
+        // The guard the `Tab to amend` anchor must keep: a multi-line
+        // prompt (numbered list) sitting in the composer before submit —
+        // or a prose plan the agent printed — wears the `Tab to amend`
+        // footer too, but carries NO consent phrase and NO `1. Yes`. The
+        // weak chooser shapes gate on `idle_box_pos` (incl. `Tab to
+        // amend`), so this stays Idle instead of flashing a spurious `?`.
+        let buf = concat!(
+            "Here's the plan:\n",
+            "  1. Refactor the parser\n",
+            "  2. Add tests\n",
+            "│ > \n",
+            "Esc to cancel · Tab to amend · ctrl+e to explain",
+        );
+        assert_eq!(claude_state(buf.as_bytes()), Some(AgentState::Idle));
+    }
+
+    #[test]
+    fn classify_records_which_branch_fired() {
+        // The instrumentation (issue #2): the trigger names the branch so
+        // a misclassification is bisectable from the trace. Each shape
+        // exercises a distinct tier.
+        let trigger = |s: &str| classify(s, &compact_lower(s)).trigger;
+
+        // Weak structural chooser (arrow + options, no resting footer).
+        assert_eq!(
+            trigger("Allow Bash?\n❯ 1. Yes\n2. No\nEsc to cancel"),
+            Some(Trigger::StructuralChooser),
+        );
+        // Weak esc-to-cancel footer (arrow-less numbered dialog).
+        assert_eq!(
+            trigger("1. Approve\n2. Skip\n3. Cancel\nEsc to cancel"),
+            Some(Trigger::EscToCancelFooter),
+        );
+        // Strong standalone consent phrase, and it names the entry.
+        let d = classify(
+            "Do you want to overwrite the file?",
+            &compact_lower("Do you want to overwrite the file?"),
+        );
+        assert_eq!(d.trigger, Some(Trigger::StandalonePhrase));
+        assert_eq!(d.matched_phrase, Some("do you want to overwrite"));
+        // Strong paired question + yes/no (`Approve` is not a standalone).
+        assert_eq!(
+            trigger("Approve this command?\n1. Yes\n2. No"),
+            Some(Trigger::PairedYesNo),
+        );
+        // Idle / Working carry no InputNeeded trigger.
+        assert_eq!(trigger("just plain output"), None);
+        assert_eq!(
+            trigger("✻ Cogitating… (8s · ↑ 412 tokens · esc to interrupt)"),
+            None,
+        );
+    }
+
+    #[test]
+    fn compact_tail_is_bounded_and_char_aligned() {
+        assert_eq!(compact_tail("short"), "short");
+        let long = "x".repeat(500);
+        assert_eq!(compact_tail(&long).len(), 200);
+        // Snapping forward to a char boundary never panics on multi-byte
+        // glyphs straddling the cut.
+        let multi = format!("{}❯ 1. yes", "a".repeat(199));
+        let tail = compact_tail(&multi);
+        assert!(tail.len() <= 200);
     }
 }

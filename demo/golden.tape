@@ -25,14 +25,24 @@ Set Theme "Catppuccin Mocha"
 Hide
 Type "lazybox --test"
 Enter
-Sleep 3s
+# Boot settle: the daemon initializes and the first frame renders at the
+# full terminal size before we touch anything. On a loaded Linux CI
+# runner this can take longer than it does locally, so give it margin —
+# pressing `?` before the UI has settled at full size is what produces a
+# short overlay frame.
+Sleep 4s
 Show
 
 # Open the keybinding help overlay — fully deterministic, no live shell.
-# The overlay's keybinding table paints progressively; capturing too
-# early grabs a half-drawn table (rows after the first cut to blank),
-# which fails the byte-exact golden diff non-deterministically on the
-# Linux runner. Sleep long enough that the full table has settled
-# before the end-of-tape capture.
+# The keybinding table is static (built from `ActionDef::all()`, no live
+# data), so its content never changes between renders. The historical
+# flake was purely a capture race: VHS's end-of-tape frame selection
+# landed on a not-yet-settled frame on the Linux runner, truncating the
+# table mid-row with the remaining rows blanked. Sleep generously after
+# `?` so a long run of identical settled frames precedes the capture and
+# the grab reliably lands on the full table. (Bumped 1.5s → 3s → 6s as
+# the runner stayed marginal; sleep affects only WHEN the frame is
+# grabbed, never its content, so this stabilizes the diff without
+# touching the committed golden.)
 Type "?"
-Sleep 3s
+Sleep 6s

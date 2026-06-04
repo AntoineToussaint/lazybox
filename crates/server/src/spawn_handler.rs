@@ -530,20 +530,29 @@ pub async fn handle_spawn(
                 return;
             };
             // Hooks-primary, PTY-fallback. Once a terminal has reported
-            // any structured lifecycle hook, hooks are authoritative for
-            // `Working` / `InputNeeded` (deterministic, no screen-
-            // scraping). The PTY detector then contributes ONLY the
-            // idle/interrupt correction the `Stop` hook can't give us:
-            // Ctrl-C / Esc end Claude's turn without firing `Stop`, so a
-            // hook-driven terminal could otherwise stick at `Working`
-            // forever. We honor a PTY reading only when it's a confident
-            // idle (composer drawn, ready for a prompt). A terminal that
-            // never reported a hook isn't in the set and keeps full PTY
-            // detection unchanged.
+            // any structured lifecycle hook, hooks own the Working↔Idle
+            // distinction (deterministic, no screen-scraping flicker), so
+            // a PTY `Working` reading is ignored for it. The PTY detector
+            // still contributes two corrections hooks miss:
+            //   - a confident idle (composer drawn, ready for a prompt) —
+            //     Ctrl-C / Esc end Claude's turn without firing `Stop`, so
+            //     a hook-driven terminal could otherwise stick at
+            //     `Working` forever;
+            //   - an on-screen permission dialog → `InputNeeded`. An
+            //     inline mid-turn approval fires NO hook (`PreToolUse`
+            //     lands only AFTER approval, `Notification` only after
+            //     Claude goes idle), so the rendered `Esc to cancel`
+            //     dialog is the sole source of truth — without honoring it
+            //     the `?` never shows on a hook-driven terminal. The PTY
+            //     detector's recency gating keeps this from leaking the
+            //     stale-scrollback false positives it once produced.
+            // A terminal that never reported a hook isn't in the set and
+            // keeps full PTY detection unchanged.
             if hook_driven.lock().await.contains(&id) {
-                let idle_fallback = new_state == lazybox_ipc::AgentState::Idle
-                    && agent.detect_ready_for_prompt(detect_window);
-                if !idle_fallback {
+                let pty_correction = new_state == lazybox_ipc::AgentState::InputNeeded
+                    || (new_state == lazybox_ipc::AgentState::Idle
+                        && agent.detect_ready_for_prompt(detect_window));
+                if !pty_correction {
                     return;
                 }
             }
@@ -615,6 +624,7 @@ pub async fn handle_spawn(
             tracing::info!(
                 terminal_id = ?id,
                 %session_key,
+                previous = ?current,
                 state = ?new_state,
                 "agent state transition → broadcasting Event::AgentState",
             );
@@ -1844,6 +1854,7 @@ pub async fn handle_ingest_hook(
     tracing::info!(
         ?terminal_id,
         %session_key,
+        previous = ?prev,
         state = ?new_state,
         hook = ?hook.kind,
         "hook → broadcasting Event::AgentState",

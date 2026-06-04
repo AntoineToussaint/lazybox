@@ -2881,11 +2881,12 @@ fn ensure_project_for_workspace(config: &ServerConfig, workspace: &Workspace) {
     // Display name for the project. Prefer the workspace's
     // `primary_task().repo` (the "owner/repo" string) when present —
     // that's what the sidebar header has always shown. Fall back to
-    // the project key's string form.
+    // the key-derived name (`github-owner-repo` → `owner/repo`) rather
+    // than the raw key string.
     let name = workspace
         .primary_task()
         .and_then(|t| t.repo.clone())
-        .unwrap_or_else(|| project_key.as_str().to_string());
+        .unwrap_or_else(|| project_key.display_name());
     let project = lazybox_core::Project::new(project_key.clone(), name, Utc::now());
     let json = match serde_json::to_string(&project) {
         Ok(s) => Some(s),

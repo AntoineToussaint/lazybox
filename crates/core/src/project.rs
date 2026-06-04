@@ -66,6 +66,24 @@ impl ProjectKey {
     pub fn source_prefix(&self) -> &str {
         self.0.split_once('-').map(|(p, _)| p).unwrap_or("")
     }
+
+    /// Best-effort human-readable name derived from the key alone, for
+    /// add paths and renders that lack an upstream display name.
+    /// `github-<owner>-<repo>` → `<owner>/<repo>`; other prefixes
+    /// return the suffix after the source prefix; an unprefixed key
+    /// returns itself. The `owner`/`repo` split takes the first `-`,
+    /// so a repo with hyphens (`pretty-hackernews`) round-trips; an
+    /// owner with hyphens (rare) does not — acceptable for a fallback.
+    pub fn display_name(&self) -> String {
+        match self.0.split_once('-') {
+            Some(("github", rest)) => match rest.split_once('-') {
+                Some((owner, repo)) => format!("{owner}/{repo}"),
+                None => rest.to_string(),
+            },
+            Some((_, rest)) => rest.to_string(),
+            None => self.0.clone(),
+        }
+    }
 }
 
 impl std::fmt::Display for ProjectKey {
@@ -101,6 +119,19 @@ impl Project {
             created_at: now,
         }
     }
+
+    /// Display name for the sidebar, repairing the legacy raw-key
+    /// fallback. Some records stored the raw key as their `name` (a
+    /// self/local add that couldn't derive `owner/repo`); render the
+    /// key-derived name instead so the sidebar never shows
+    /// `github-owner-repo`.
+    pub fn display_name(&self) -> String {
+        if self.name == self.key.as_str() || self.name.is_empty() {
+            self.key.display_name()
+        } else {
+            self.name.clone()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -119,6 +150,40 @@ mod tests {
         let k = ProjectKey::local("my-experiment");
         assert_eq!(k.as_str(), "local-my-experiment");
         assert_eq!(k.source_prefix(), "local");
+    }
+
+    #[test]
+    fn github_key_display_name_is_owner_slash_repo() {
+        assert_eq!(
+            ProjectKey::github("AntoineToussaint", "lazybox").display_name(),
+            "AntoineToussaint/lazybox"
+        );
+        // Repo names with hyphens round-trip (split takes the first `-`).
+        assert_eq!(
+            ProjectKey::github("AntoineToussaint", "pretty-hackernews").display_name(),
+            "AntoineToussaint/pretty-hackernews"
+        );
+    }
+
+    #[test]
+    fn non_github_key_display_name_drops_source_prefix() {
+        assert_eq!(
+            ProjectKey::local("my-experiment").display_name(),
+            "my-experiment"
+        );
+        assert_eq!(ProjectKey::linear("TEAM").display_name(), "TEAM");
+        assert_eq!(ProjectKey::new("sandbox").display_name(), "sandbox");
+    }
+
+    #[test]
+    fn project_display_name_repairs_raw_key_fallback() {
+        let key = ProjectKey::github("AntoineToussaint", "lazybox");
+        // Legacy bug: `name` was defaulted to the raw key string.
+        let broken = Project::new(key.clone(), key.as_str(), Utc::now());
+        assert_eq!(broken.display_name(), "AntoineToussaint/lazybox");
+        // A proper name is left untouched.
+        let good = Project::new(key, "AntoineToussaint/lazybox", Utc::now());
+        assert_eq!(good.display_name(), "AntoineToussaint/lazybox");
     }
 
     #[test]

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# pilot pre-commit hook.
+# lazybox pre-commit hook.
 #
-# Runs the same fmt + clippy gates as CI so a botched format never
-# leaves the laptop. Install once: `make install-hooks`.
+# Runs the same fmt + clippy + rustdoc gates as CI so a botched format,
+# a clippy warning, or a broken doc link never leaves the laptop.
+# Install once: `make install-hooks`.
 #
 # Bypass for a one-off "I know what I'm doing" commit:
 #     git commit --no-verify
@@ -10,16 +11,16 @@
 
 set -euo pipefail
 
-# Honor pilot's pinned zig if present — same resolution run.sh and the
+# Honor lazybox's pinned zig if present — same resolution run.sh and the
 # Makefile use so anything the hook spawns picks up zig 0.15.2 instead
 # of whatever brew put on PATH (ghostty's build.zig rejects 0.16).
 # `make setup` drops the binary under a host-specific dir; glob for it
 # rather than assuming a fixed path. A per-worktree `vendor/zig/` wins
 # when present (a worktree can pin its own zig); otherwise fall back to
-# the shared cache at `${PILOT_ZIG_CACHE:-~/.cache/pilot/zig}/` (one
+# the shared cache at `${LAZYBOX_ZIG_CACHE:-~/.cache/lazybox/zig}/` (one
 # download shared across all worktrees).
 repo_root="$(git rev-parse --show-toplevel)"
-zig_cache="${PILOT_ZIG_CACHE:-${HOME}/.cache/pilot/zig}"
+zig_cache="${LAZYBOX_ZIG_CACHE:-${HOME}/.cache/lazybox/zig}"
 zig_bin=""
 for root in "${repo_root}/vendor/zig" "${zig_cache}"; do
     [ -d "${root}" ] || continue
@@ -52,6 +53,21 @@ if ! cargo clippy --workspace --all-targets -- -D warnings; then
 
 pre-commit: clippy warnings above. Fix them or bypass with
 \`git commit --no-verify\`.
+EOF
+    exit 1
+fi
+
+# 3. Rustdoc with warnings-as-errors — catches broken intra-doc links
+#    (`[\`Foo\`]` pointing at a symbol that isn't in scope). Same
+#    RUSTDOCFLAGS + invocation the CI rustdoc job runs. Cheap once the
+#    clippy build above has warmed the cache.
+echo "pre-commit: RUSTDOCFLAGS=-D warnings cargo doc --no-deps --workspace"
+if ! RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --quiet; then
+    cat <<EOF >&2
+
+pre-commit: rustdoc errors above (usually a broken intra-doc link —
+a \`[\`Symbol\`]\` whose target isn't imported in that module). Fix the
+link or bypass with \`git commit --no-verify\`.
 EOF
     exit 1
 fi

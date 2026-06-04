@@ -15,7 +15,7 @@
 //! - **Renderer** (`crate::realm::setup_screen::render`) turns a
 //!   [`Screen`] into a concrete modal widget.
 //! - **Executor** (`crate::realm::setup_screen::run_effect`) runs an
-//!   [`Effect`] against the registered [`ScopeSource`]s and feeds the
+//!   [`Effect`] against the registered `ScopeSource`s and feeds the
 //!   result back as a [`LoadResult`] via [`SetupRunner::step_loading_resolved`].
 //!
 //! Keeping IO and rendering at the edges means every transition —

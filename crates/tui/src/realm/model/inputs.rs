@@ -614,9 +614,22 @@ impl<T: TerminalAdapter> Model<T> {
     ) {
         use crate::setup_flow::RunnerStep;
         match step {
-            RunnerStep::Next(component) => {
+            RunnerStep::Show { screen, effect } => {
                 self.setup.runner = Some(runner);
+                // Layer 2: turn the pure Screen into a widget. Loading
+                // screens hand back a producer the executor delivers into.
+                let (component, result) = crate::realm::setup_screen::render(screen);
                 self.mount_setup_modal(component);
+                // Layer 3: run the paired effect (if any) against the
+                // registered scope sources. Result flows back as
+                // `Msg::LoadingResolved` when the Loading modal ticks.
+                if let (Some(effect), Some(result)) = (effect, result) {
+                    if let Some((_, sources)) = self.setup.inputs.as_ref() {
+                        crate::realm::setup_screen::run_effect(effect, sources.clone(), result);
+                    } else {
+                        tracing::warn!("handle_runner_step: effect requested but no scope sources");
+                    }
+                }
             }
             RunnerStep::Finish(outcome) => {
                 let sources: Vec<String> = outcome.enabled_providers.iter().cloned().collect();

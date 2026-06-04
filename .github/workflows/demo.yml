@@ -1,11 +1,11 @@
 # Re-renders the VHS demo so it never goes stale relative to the UI.
 #
-# There are two tapes, both driving a real `pilot --test` session:
-#   - demo/pilot.tape   → the pretty README GIF (demo/pilot.gif + .mp4 + .png).
+# There are two tapes, both driving a real `lazybox --test` session:
+#   - demo/lazybox.tape → the pretty README GIF (demo/lazybox.gif + .mp4 + .png).
 #                         It spawns a shell, so its text capture carries volatile
 #                         content (tempdir suffix, clock, username) and is NOT a golden.
 #   - demo/golden.tape  → demo/golden.ascii, a deterministic capture of the `?`
-#                         help overlay (static pilot chrome, no live shell). This
+#                         help overlay (static lazybox chrome, no live shell). This
 #                         is the committed golden snapshot.
 #
 # GOLDEN SNAPSHOT TEST: on a pull request we re-render golden.tape and
@@ -14,7 +14,7 @@
 # actually changed — i.e. the demo went stale. CI then fails with instructions
 # to re-render and commit. This keeps the recorded demo honest without anyone
 # having to eyeball the GIF. The pretty GIF is re-rendered too (a smoke test
-# that `pilot --test` still boots) but is not diffed.
+# that `lazybox --test` still boots) but is not diffed.
 #
 # We deliberately do NOT auto-commit regenerated artifacts from CI (see the
 # main-push job): maintainers regenerate and commit locally so the binary GIF
@@ -45,11 +45,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/rust-build-env
 
-      - name: Build pilot (release)
-        run: cargo build --release -p pilot-tui
+      - name: Build lazybox (release)
+        run: cargo build --release -p lazybox-tui
 
-      - name: Put pilot on PATH
-        # Both tapes invoke `pilot --test`; make the freshly built binary
+      - name: Put lazybox on PATH
+        # Both tapes invoke `lazybox --test`; make the freshly built binary
         # resolvable for the VHS render steps below.
         run: echo "${GITHUB_WORKSPACE}/target/release" >> "$GITHUB_PATH"
 
@@ -94,8 +94,8 @@ jobs:
           vhs --version
 
       - name: Render demo (smoke test)
-        # A failure here means `pilot --test` no longer boots or the tape broke.
-        run: vhs demo/pilot.tape
+        # A failure here means `lazybox --test` no longer boots or the tape broke.
+        run: vhs demo/lazybox.tape
 
       - name: Render golden snapshot
         run: vhs demo/golden.tape
@@ -117,21 +117,21 @@ jobs:
         # is stale relative to the current UI / keybindings.
         #
         # Row 0 caveat: VHS's own shell prompt ('>') sits at row 0 before
-        # `pilot --test` takes the screen, and whether it has scrolled off by
+        # `lazybox --test` takes the screen, and whether it has scrolled off by
         # the time VHS captures is a timing race on the Linux runner — the
         # exact same render flips row 0 between '>' and blank run-to-run. That
-        # cell is VHS chrome, never pilot UI (pilot's chrome starts lower), so
+        # cell is VHS chrome, never lazybox UI (lazybox's chrome starts lower), so
         # we normalize a lone leading '>' on row 0 of the fresh render to blank
         # before diffing (the committed file already stores row 0 blank). Rows
         # 1+ stay byte-exact, so a real UI / keybinding change still fails.
         run: |
           sed -i '1s/^>$//' demo/golden.ascii
           if ! git diff --exit-code demo/golden.ascii; then
-            echo "::error::demo/golden.ascii is stale. The pilot UI or a keybinding changed but the demo was not regenerated."
+            echo "::error::demo/golden.ascii is stale. The lazybox UI or a keybinding changed but the demo was not regenerated."
             echo "Re-render locally and commit the result:"
-            echo "  cargo build -p pilot-tui   # or: make build"
-            echo "  PATH=\"\$PWD/target/debug:\$PATH\" vhs demo/golden.tape && PATH=\"\$PWD/target/debug:\$PATH\" vhs demo/pilot.tape"
-            echo "  git add demo/golden.ascii demo/pilot.gif demo/pilot.mp4 demo/pilot.png && git commit"
+            echo "  cargo build -p lazybox-tui   # or: make build"
+            echo "  PATH=\"\$PWD/target/debug:\$PATH\" vhs demo/golden.tape && PATH=\"\$PWD/target/debug:\$PATH\" vhs demo/lazybox.tape"
+            echo "  git add demo/golden.ascii demo/lazybox.gif demo/lazybox.mp4 demo/lazybox.png && git commit"
             exit 1
           fi
 
@@ -142,8 +142,8 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
-          name: pilot-demo
+          name: lazybox-demo
           path: |
-            demo/pilot.gif
-            demo/pilot.mp4
+            demo/lazybox.gif
+            demo/lazybox.mp4
             demo/golden.ascii

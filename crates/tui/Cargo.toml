@@ -1,6 +1,7 @@
 [package]
 name = "lazybox-tui"
 description = "A reactive PR inbox in your terminal."
+default-run = "lazybox"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

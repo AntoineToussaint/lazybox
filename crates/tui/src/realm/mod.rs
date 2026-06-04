@@ -40,6 +40,7 @@ pub mod keymap;
 pub(crate) mod layout;
 pub mod model;
 pub(crate) mod setup_ctx;
+pub(crate) mod setup_screen;
 pub(crate) mod status_ctx;
 pub mod user_event;
 

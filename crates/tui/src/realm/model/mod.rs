@@ -741,6 +741,19 @@ impl<T: TerminalAdapter> Model<T> {
 /// from the panic hook so a crash doesn't strand the user's
 /// terminal in raw mode with mouse-tracking on, where every input
 /// becomes escape sequences pasted into the prompt.
+/// Provider ids that can enumerate scopes (orgs/repos). Passed to the
+/// pure `SetupRunner` so it knows which providers get a scope-picking
+/// step without holding the `ScopeSource`s themselves (those stay in
+/// `setup.inputs` for the executor).
+fn scope_provider_ids(
+    sources: &std::sync::Arc<Vec<Box<dyn lazybox_core::ScopeSource>>>,
+) -> std::collections::BTreeSet<String> {
+    sources
+        .iter()
+        .map(|s| s.provider_id().to_string())
+        .collect()
+}
+
 fn restore_terminal() {
     use crossterm::event::{
         DisableBracketedPaste, DisableMouseCapture, PopKeyboardEnhancementFlags,
@@ -881,8 +894,9 @@ impl<T: TerminalAdapter> Model<T> {
         report: crate::setup::SetupReport,
         sources: std::sync::Arc<Vec<Box<dyn lazybox_core::ScopeSource>>>,
     ) {
-        self.setup.inputs = Some((report.clone(), sources.clone()));
-        self.setup.runner = Some(crate::setup_flow::SetupRunner::new(report, sources));
+        let scope_providers = scope_provider_ids(&sources);
+        self.setup.inputs = Some((report.clone(), sources));
+        self.setup.runner = Some(crate::setup_flow::SetupRunner::new(report, scope_providers));
         self.mount_modal(Id::Splash, Splash::new());
     }
 
@@ -1764,7 +1778,7 @@ impl<T: TerminalAdapter> Model<T> {
             Some(p) => crate::setup_flow::persisted_to_outcome(p, report),
             None => crate::setup_flow::SetupOutcome::default_enabled(report),
         };
-        let (runner, step) = SetupRunner::at_partial(outcome, sources, entry);
+        let (runner, step) = SetupRunner::at_partial(outcome, scope_provider_ids(&sources), entry);
         self.setup.runner = Some(runner);
         let owned_runner = self.setup.runner.take().expect("just set");
         self.handle_runner_step(owned_runner, step);
@@ -1994,8 +2008,18 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Msg::LoadingResolved(carrier) => {
                 if let Some(mut runner) = self.setup.runner.take() {
-                    let payload = carrier.take().unwrap_or_else(|| Box::new(()));
-                    let step = runner.step_loading_resolved(payload);
+                    // Recover the typed LoadResult once, here at the
+                    // boundary — the runner stays free of `Box<dyn Any>`.
+                    let step = match carrier
+                        .take()
+                        .and_then(crate::realm::setup_screen::downcast_load_result)
+                    {
+                        Some(result) => runner.step_loading_resolved(result),
+                        None => {
+                            tracing::warn!("LoadingResolved: payload was not a LoadResult");
+                            crate::setup_flow::RunnerStep::Cancel
+                        }
+                    };
                     self.handle_runner_step(runner, step);
                 } else {
                     self.pop_modal();

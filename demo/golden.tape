@@ -29,5 +29,10 @@ Sleep 3s
 Show
 
 # Open the keybinding help overlay — fully deterministic, no live shell.
+# The overlay's keybinding table paints progressively; capturing too
+# early grabs a half-drawn table (rows after the first cut to blank),
+# which fails the byte-exact golden diff non-deterministically on the
+# Linux runner. Sleep long enough that the full table has settled
+# before the end-of-tape capture.
 Type "?"
-Sleep 1.5s
+Sleep 3s

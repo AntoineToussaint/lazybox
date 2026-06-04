@@ -24,11 +24,24 @@ make run       # build + run
 
 **Prerequisites:** Rust 1.85+, a C compiler (for bundled SQLite), the
 [GitHub CLI](https://cli.github.com/) logged in (`gh auth login` — lazybox reads
-`gh auth token`), and network access to github.com on the first build. Linux
-also needs libc++ + libc++abi (`sudo apt install build-essential pkg-config
-libc++-dev libc++abi-dev` on Debian/Ubuntu). Full build notes, troubleshooting,
-and the Homebrew/curl channels that land at 1.0 are in the
-[Quickstart](https://lazybox.ai/docs/tutorials/quickstart/).
+`gh auth token`), and network access to github.com on the first build.
+
+Linux also needs a C/C++ toolchain plus **libc++ and libc++abi** — the embedded
+ghostty terminal is built by zig against LLVM's libc++ (not GNU libstdc++), so
+the link step fails without them. `make setup` checks for these and points you
+at the right command for your distro:
+
+```sh
+# Debian/Ubuntu
+sudo apt install build-essential pkg-config libc++-dev libc++abi-dev
+# Fedora/RHEL
+sudo dnf install gcc gcc-c++ pkgconf-pkg-config libcxx-devel libcxxabi-devel
+# Arch
+sudo pacman -S --needed base-devel pkgconf libc++ libc++abi
+```
+
+Full build notes, troubleshooting, and the Homebrew/curl channels that land at
+1.0 are in the [Quickstart](https://lazybox.ai/docs/tutorials/quickstart/).
 
 ## First 60 seconds
 

@@ -11,6 +11,7 @@ lazybox-core    = { workspace = true }
 lazybox-ipc  = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
+tracing       = { workspace = true }
 
 [lints]
 workspace = true

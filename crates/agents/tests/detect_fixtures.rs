@@ -128,6 +128,18 @@ const FIXTURES: &[ByteFixture] = &[
         expected: AgentState::InputNeeded,
         ready: false,
     },
+    // #2 false negative: a real bash-approval dialog whose footer is the
+    // full `Esc to cancel · Tab to amend · ctrl+e to explain` form. The
+    // `Tab to amend` token made `idle_box_pos` treat the live chooser
+    // above it as stale scrollback, so the `?` never showed. The strong
+    // consent-phrase tier (gated on the reliable `? for shortcuts` /
+    // bypass anchor, not `Tab to amend`) now catches it.
+    ByteFixture {
+        name: "permission_bash_amend_footer",
+        bytes: include_bytes!("fixtures/permission_bash_amend_footer.bin"),
+        expected: AgentState::InputNeeded,
+        ready: false,
+    },
 ];
 
 #[test]

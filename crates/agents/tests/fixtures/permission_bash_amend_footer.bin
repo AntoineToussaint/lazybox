@@ -1,0 +1,6 @@
+[8;1H[2K[1;34mBash command[0m
+[9;3Hfor c in git-ops gh-provider; do echo $c; done
+[11;1H[2K[1mDo you want to proceed?[0m
+[12;3H❯ [24;1H[2K[2m(2s · 18 tokens)[0m[12;5H[7m1. Yes[0m
+[13;5H2. No
+[15;1H[2mEsc[15;5Hto[15;8Hcancel[15;16H·[15;18HTab[15;22Hto[15;25Hamend[15;33H·[15;35Hctrl+e[15;42Hto[15;45Hexplain[0m

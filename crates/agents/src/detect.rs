@@ -15,7 +15,7 @@
 //! `Agent` impls in [`crate::agent`] are thin wrappers that call into
 //! these functions.
 //!
-//! The one observation hook is level-gated `tracing`: [`claude_state_of`]
+//! The one observation hook is level-gated `tracing`: `claude_state_of`
 //! emits a single `trace` record of *why* a state was chosen (which
 //! branch fired, the recency offsets, the matched consent phrase, a
 //! bounded tail of the buffer). It never affects the returned value, so
@@ -86,7 +86,7 @@ pub fn contains_paired(text: &str, choices: &[&str], questions: &[&str]) -> bool
 /// input box.
 ///
 /// - **`InputNeeded`** — ONLY structural prompt markers, split into two
-///   confidence tiers (see [`classify`]): WEAK chooser shapes (selection
+///   confidence tiers (see `classify`): WEAK chooser shapes (selection
 ///   arrow + numbered options, or an `Esc to cancel` footer + options)
 ///   gated on the full composer footer, and STRONG phrase shapes (a
 ///   standalone `do you want to …` consent phrase, or a paired
@@ -1009,9 +1009,14 @@ mod tests {
         // `? for shortcuts` / bypass anchor; `Tab to amend` does NOT, since
         // it's also the live command-approval dialog footer.
         assert!(resting_composer_pos(&compact_lower("? for shortcuts")).is_some());
-        assert!(resting_composer_pos(&compact_lower("bypass permissions on (shift+tab to cycle)")).is_some());
+        assert!(
+            resting_composer_pos(&compact_lower("bypass permissions on (shift+tab to cycle)"))
+                .is_some()
+        );
         assert_eq!(
-            resting_composer_pos(&compact_lower("Esc to cancel · Tab to amend · ctrl+e to explain")),
+            resting_composer_pos(&compact_lower(
+                "Esc to cancel · Tab to amend · ctrl+e to explain"
+            )),
             None,
         );
     }

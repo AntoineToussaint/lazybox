@@ -3226,10 +3226,11 @@ pub async fn handle_collapse_into_pr(config: &ServerConfig, issue_workspace_key:
 }
 
 /// Manual "adopt": move every session out of `source_key`'s
-/// workspace and into `target_key`'s, rebadging `terminal_meta` so
-/// wire-side traffic follows them. Unlike the issue→PR merge, we
-/// do NOT delete the source workspace — the user may still want
-/// it as a tracking row (or remove it explicitly via `Shift-X`).
+/// workspace and into `target_key`'s, rebadging terminals so
+/// wire-side traffic follows them durably (see `rebadge_terminals`).
+/// Unlike the issue→PR merge, we do NOT delete the source workspace
+/// — the user may still want it as a tracking row (or remove it
+/// explicitly via `Shift-X`).
 ///
 /// No-op when either workspace is missing or `source == target`.
 pub async fn handle_adopt_sessions(
@@ -3269,13 +3270,7 @@ pub async fn handle_adopt_sessions(
         session.workspace_key = target_key.clone();
         target_ws.add_session(session);
     }
-    let mut meta = config.terminal_meta.lock().await;
-    for (_tid, entry) in meta.iter_mut() {
-        if entry.0 == source_session_key {
-            entry.0 = target_session_key.clone();
-        }
-    }
-    drop(meta);
+    rebadge_terminals(config, &source_session_key, &target_session_key).await;
 
     crate::spawn_handler::migrate_session_paths_if_needed(config, &mut target_ws).await;
 

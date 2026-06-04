@@ -2448,6 +2448,12 @@ async fn adopt_sessions_into_self_is_a_noop() {
 }
 #[tokio::test]
 async fn adopt_sessions_rewrites_terminal_meta() {
+    // Regression for #7: adopting sessions must repoint the live
+    // terminal both in memory AND in the persisted
+    // `terminal:{backend_key}` record `recover_sessions` reads at
+    // startup. Updating only the in-memory map left the persisted
+    // record pointing at the source workspace, so a daemon restart
+    // reattached the terminal under the old key and lost the session.
     use lazybox_core::{SessionKey, WorkspaceKey};
     use lazybox_ipc::{TerminalId, TerminalKind};
 
@@ -2456,21 +2462,52 @@ async fn adopt_sessions_rewrites_terminal_meta() {
     polling::upsert(&config, make_task("o/r#999")).await;
     let target_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#999")));
 
+    // Stand up a live terminal on the source: in-memory maps + the
+    // persisted record, exactly as `handle_spawn` would have left them.
     let source_session_key: SessionKey = (&source_key).into();
+    let backend_key = "lazybox-test-o-r-71-claude";
+    config.terminal_meta.lock().await.insert(
+        TerminalId(7),
+        (source_session_key.clone(), TerminalKind::Shell),
+    );
     config
-        .terminal_meta
+        .terminals
         .lock()
         .await
-        .insert(TerminalId(7), (source_session_key, TerminalKind::Shell));
+        .insert(TerminalId(7), backend_key.to_string());
+    config
+        .store
+        .set_kv(
+            &format!("terminal:{backend_key}"),
+            &serde_json::to_string(&(source_session_key.as_str(), TerminalKind::Shell)).unwrap(),
+        )
+        .unwrap();
 
     polling::handle_adopt_sessions(&config, source_key.clone(), target_key.clone()).await;
 
     let target_session_key: SessionKey = (&target_key).into();
-    let meta = config.terminal_meta.lock().await;
-    let entry = meta.get(&TerminalId(7)).expect("terminal_meta entry kept");
+    {
+        let meta = config.terminal_meta.lock().await;
+        let entry = meta.get(&TerminalId(7)).expect("terminal_meta entry kept");
+        assert_eq!(
+            entry.0, target_session_key,
+            "terminal_meta must repoint at the adopt target",
+        );
+    }
+
+    // The persisted record `recover_sessions` reads on the next start
+    // must follow the session to the target, not stay on the source.
+    let raw = config
+        .store
+        .get_kv(&format!("terminal:{backend_key}"))
+        .unwrap()
+        .expect("persisted terminal record must survive the adopt");
+    let (persisted_key, _kind): (String, TerminalKind) = serde_json::from_str(&raw).unwrap();
     assert_eq!(
-        entry.0, target_session_key,
-        "terminal_meta must repoint at the adopt target",
+        persisted_key,
+        target_session_key.as_str(),
+        "persisted terminal record must follow the session to the adopt target (else a \
+         restart reattaches it under the source workspace and loses it)",
     );
 }
 #[tokio::test]

@@ -139,7 +139,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // subscriptions).
     let mut all_repos: BTreeSet<String> = by_repo.keys().cloned().collect();
     if input.mailbox == Mailbox::Inbox {
-        all_repos.extend(input.projects.values().map(|p| p.name.clone()));
+        all_repos.extend(input.projects.values().map(|p| p.display_name()));
     }
 
     // Step 5: emit headers + workspace rows + session sub-rows.
@@ -205,7 +205,7 @@ fn group_label(w: &Workspace, projects: &BTreeMap<ProjectKey, Project>) -> Strin
     if let Some(pk) = lazybox_core::workspace_project_key(w)
         && let Some(p) = projects.get(&pk)
     {
-        return p.name.clone();
+        return p.display_name();
     }
     // Workspace knows its project but we haven't seen the record
     // yet (startup race, or polling hasn't completed). Fall back
@@ -457,6 +457,34 @@ mod tests {
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert_eq!(out.visible.len(), 1);
         assert!(matches!(&out.visible[0], VisibleRow::RepoHeader(name) if name == "owner/empty"));
+    }
+
+    /// A project whose stored `name` is the raw key (the legacy
+    /// self-add fallback) still renders as `owner/repo`, and its
+    /// workspaces group under that same prettified header.
+    #[test]
+    fn raw_key_project_renders_as_owner_slash_repo() {
+        let pk = ProjectKey::github("AntoineToussaint", "lazybox");
+        let mut w = workspace_with_task("k1", None, 10);
+        w.project_key = Some(pk.clone());
+        let mut ws = HashMap::new();
+        ws.insert(SessionKey::from(&w.key), w);
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashSet::new();
+        let mut projects = BTreeMap::new();
+        // Stored with `name == key` — the bug this fix repairs.
+        projects.insert(
+            pk.clone(),
+            Project::new(pk.clone(), pk.as_str(), chrono::Utc::now()),
+        );
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
+        assert!(out.summaries.contains_key("AntoineToussaint/lazybox"));
+        assert!(
+            !out.summaries
+                .contains_key("github-AntoineToussaint-lazybox")
+        );
     }
 
     /// Same setup, but Inactive mailbox: the empty project header

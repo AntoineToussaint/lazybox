@@ -3387,3 +3387,26 @@ async fn auto_fix_skips_and_burns_no_attempt_while_agent_already_running() {
         "tick 2 must NOT increment the attempt counter (got: {rec})"
     );
 }
+
+/// An empty workspace created under a GitHub project key (the
+/// self/local add path — no upstream task carries `owner/repo`)
+/// registers its project with a `owner/repo` display name, not the
+/// raw `github-owner-repo` key. Regression for the lazybox project
+/// rendering its raw key in the sidebar.
+#[tokio::test]
+async fn empty_workspace_registers_project_with_pretty_name() {
+    use lazybox_core::ProjectKey;
+
+    let config = ServerConfig::in_memory();
+    let project_key = ProjectKey::github("AntoineToussaint", "lazybox");
+    polling::create_empty_workspace(&config, "scratch", project_key.clone());
+
+    let record = config
+        .store
+        .get_project(&project_key)
+        .unwrap()
+        .expect("project registered for the empty workspace");
+    let project: lazybox_core::Project =
+        serde_json::from_str(&record.project_json.unwrap()).unwrap();
+    assert_eq!(project.name, "AntoineToussaint/lazybox");
+}

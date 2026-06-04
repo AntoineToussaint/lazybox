@@ -1192,7 +1192,7 @@ impl Sidebar {
     /// shouldn't happen for any user-driven action, since the user
     /// can only target a project that's on screen).
     pub fn project_label_for(&self, key: &lazybox_core::ProjectKey) -> Option<String> {
-        self.projects.get(key).map(|p| p.name.clone())
+        self.projects.get(key).map(|p| p.display_name())
     }
 
     /// Count how many workspaces in the local cache belong to the

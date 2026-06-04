@@ -174,6 +174,18 @@ impl<T: Clone + 'static + Send> Choice<T> {
         self
     }
 
+    /// Pre-tick items from a boolean mask aligned to `items`. Used by
+    /// the setup renderer, which receives the selection as pure data
+    /// (`Vec<bool>`) computed by the runner rather than a predicate.
+    /// A mask shorter than `items` leaves the trailing rows un-ticked;
+    /// extra entries are ignored.
+    pub fn selected_mask(mut self, mask: Vec<bool>) -> Self {
+        for (slot, want) in self.selected.iter_mut().zip(mask) {
+            *slot = want;
+        }
+        self
+    }
+
     fn is_selectable(&self, idx: usize) -> bool {
         match self.items.get(idx) {
             None => false,

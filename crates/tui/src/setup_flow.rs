@@ -1,27 +1,31 @@
-//! First-run / re-run setup as a state machine over realm modals.
+//! First-run / re-run setup as a **pure** state machine.
 //!
 //! The runner detects available tools, asks the user to enable
 //! integrations (providers + agents), configure per-provider filters,
 //! and pick scopes (orgs + repos) for providers that support them.
-//! Each step is a generic `Choice` / `Loading` / `ErrorModal` from
-//! `crate::realm::components::*` — lazybox-specific knowledge lives in
-//! `SetupRunner` which decides which step comes next.
+//!
+//! ## Three layers
+//!
+//! This module is layer 1 — pure logic, no tuirealm and no tokio. A
+//! transition takes the current state plus one input event and returns
+//! a [`RunnerStep`]: a [`Screen`] *descriptor* (what to show) and an
+//! optional [`Effect`] (IO to run). It never builds a widget or spawns
+//! a task.
+//!
+//! - **Renderer** (`crate::realm::setup_screen::render`) turns a
+//!   [`Screen`] into a concrete modal widget.
+//! - **Executor** (`crate::realm::setup_screen::run_effect`) runs an
+//!   [`Effect`] against the registered [`ScopeSource`]s and feeds the
+//!   result back as a [`LoadResult`] via [`SetupRunner::step_loading_resolved`].
+//!
+//! Keeping IO and rendering at the edges means every transition —
+//! including the load/refresh steps — is testable with a plain
+//! `#[test]`: feed an input, assert on the returned `Screen`/`Effect`.
 
-use crate::realm::components::{
-    choice::Choice,
-    error::{Accent, ErrorModal},
-    loading::Loading,
-    splash::Splash,
-};
-use crate::realm::{Msg, UserEvent};
 use crate::setup::{self, Category, SetupReport, ToolStatus};
-use lazybox_core::{
-    KV_KEY_SETUP, PersistedSetup, ProviderConfig, ProviderError, Scope, ScopeSource,
-};
+use lazybox_core::{KV_KEY_SETUP, PersistedSetup, ProviderConfig, ProviderError, Scope};
 use lazybox_store::Store;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::Arc;
-use tuirealm::component::AppComponent;
 
 /// Re-export for callers that want the canonical name.
 pub type ProviderFilter = ProviderConfig;
@@ -248,7 +252,9 @@ impl ToolChoice {
         }
     }
 
-    fn label(&self) -> String {
+    /// Display string for a picker row — `name · detail`. Used by the
+    /// renderer (`crate::realm::setup_screen`).
+    pub fn label(&self) -> String {
         if self.detail.is_empty() {
             self.display_name.clone()
         } else {
@@ -266,7 +272,7 @@ pub struct FilterOption {
 }
 
 /// Human-readable provider name for titles + prompts.
-fn provider_display(id: &str) -> String {
+pub fn provider_display(id: &str) -> String {
     match id {
         "github" => "GitHub".into(),
         "linear" => "Linear".into(),
@@ -348,18 +354,129 @@ pub async fn detect() -> SetupReport {
     setup::detect_all().await
 }
 
-// ── SetupRunner ─────────────────────────────────────────────────────────
+// ── Screens, effects, results (the runner's vocabulary) ─────────────────
+
+/// A screen the runner wants shown — pure data, no widget. The
+/// renderer (`crate::realm::setup_screen::render`) turns this into a
+/// concrete modal. Each picker variant carries its items plus a
+/// `selected` mask aligned to those items (pre-ticks), so the renderer
+/// needs no knowledge of which scopes/providers the user had before.
+pub enum Screen {
+    /// Welcome card. Confirm advances to Providers.
+    Splash,
+    /// Provider multi-select (github / linear / …).
+    Providers {
+        items: Vec<ToolChoice>,
+        selected: Vec<bool>,
+    },
+    /// Agent multi-select (claude / codex / …).
+    Agents {
+        items: Vec<ToolChoice>,
+        selected: Vec<bool>,
+    },
+    /// Per-provider role / item-type filter.
+    Filter {
+        provider_id: String,
+        options: Vec<FilterOption>,
+        selected: Vec<bool>,
+    },
+    /// Spinner shown while the paired [`Effect`] runs.
+    Loading { title: String, label: String },
+    /// Org picker for a provider.
+    ScopePick {
+        provider_id: String,
+        scopes: Vec<Scope>,
+        selected: Vec<bool>,
+    },
+    /// Repo picker for one org under a provider.
+    RepoPick {
+        provider_id: String,
+        parent_label: String,
+        scopes: Vec<Scope>,
+        selected: Vec<bool>,
+    },
+    /// Info / error modal — any key dismisses (resumes the next step).
+    Info {
+        title: String,
+        kind: InfoKind,
+        body: String,
+    },
+}
+
+/// Severity for an [`Screen::Info`] modal. The renderer maps this to a
+/// themed accent; classification (auth vs retryable vs permanent) is
+/// pure logic and lives in the runner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfoKind {
+    Auth,
+    Retryable,
+    Permanent,
+    Notice,
+}
+
+/// Background IO the runner wants run. Pure data — the executor
+/// (`crate::realm::setup_screen::run_effect`) performs it and feeds the
+/// outcome back through [`SetupRunner::step_loading_resolved`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effect {
+    /// Re-run tool detection (`setup::detect_all`).
+    Detect,
+    /// Enumerate a provider's top-level scopes (orgs).
+    ListScopes { provider_id: String },
+    /// Enumerate one org's children (repos).
+    ListChildren {
+        provider_id: String,
+        parent_id: String,
+    },
+}
+
+/// The typed outcome of an [`Effect`]. The Model downcasts the opaque
+/// loading payload into this once at the boundary, so the runner stays
+/// free of `Box<dyn Any>`.
+pub enum LoadResult {
+    /// `Effect::Detect` completed with a fresh report.
+    Detected(SetupReport),
+    /// `Effect::ListScopes` / `ListChildren` completed.
+    Scopes(Result<Vec<Scope>, ProviderError>),
+}
 
 /// What the runner wants the orchestrator to do next.
 pub enum RunnerStep {
-    /// Mount this component as the next modal step.
-    Next(Box<dyn AppComponent<Msg, UserEvent>>),
+    /// Show `screen`; if `effect` is `Some`, run it and feed the
+    /// result back via [`SetupRunner::step_loading_resolved`]. `effect`
+    /// is `Some` exactly when `screen` is [`Screen::Loading`].
+    Show {
+        screen: Screen,
+        effect: Option<Effect>,
+    },
     /// Setup completed; fire on_complete with this outcome.
     Finish(SetupOutcome),
     /// User cancelled. Drop the wizard, return to defaults.
     Cancel,
     /// No-op / stay on the current modal.
     Stay,
+}
+
+impl RunnerStep {
+    /// Shorthand for a pure screen transition (no IO).
+    fn show(screen: Screen) -> Self {
+        RunnerStep::Show {
+            screen,
+            effect: None,
+        }
+    }
+
+    /// Shorthand for a loading screen paired with the effect that
+    /// resolves it.
+    fn run(title: &str, label: String, effect: Effect) -> Self {
+        RunnerStep::Show {
+            screen: Screen::Loading {
+                title: title.to_string(),
+                label,
+            },
+            effect: Some(effect),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -406,12 +523,26 @@ enum CurrentChoice {
 /// / `Msg::ModalDismissed` here when it's active.
 pub struct SetupRunner {
     accumulator: SetupOutcome,
-    sources: Arc<Vec<Box<dyn ScopeSource>>>,
+    /// Provider ids that have a registered `ScopeSource` — used to
+    /// decide which providers get a scope-picking step. The runner
+    /// only needs to *know* which providers are enumerable, not how to
+    /// enumerate them; the actual `ScopeSource`s live in the executor.
+    /// This is what keeps the runner free of `ScopeSource` / IO.
+    scope_providers: BTreeSet<String>,
     pending_filters: VecDeque<String>,
     pending_scopes: VecDeque<String>,
     pending_repo_pickers: VecDeque<(String, String, String)>,
     expecting: ExpectingStep,
     current_choice: Option<CurrentChoice>,
+    /// Entered via Settings → "Edit scopes" specifically to change
+    /// repos. In this mode the scope-pick step walks the repo picker
+    /// for EVERY kept org, not just newly-added ones — otherwise a
+    /// returning user re-confirming their already-subscribed org skips
+    /// straight to Finish and can never re-narrow its repos (the modal
+    /// just vanishes). First-run / other flows leave this `false` so
+    /// re-confirming an untouched org doesn't drag the user through
+    /// its repo picker.
+    edit_scopes: bool,
 }
 
 /// Entry point for the in-session "Settings" palette. Each variant
@@ -436,15 +567,18 @@ pub enum PartialEntry {
 
 impl SetupRunner {
     /// Build a runner rooted at `report` (detection already done).
-    pub fn new(report: SetupReport, sources: Arc<Vec<Box<dyn ScopeSource>>>) -> Self {
+    /// `scope_providers` is the set of provider ids that have a
+    /// registered `ScopeSource` (i.e. can enumerate orgs/repos).
+    pub fn new(report: SetupReport, scope_providers: BTreeSet<String>) -> Self {
         Self {
             accumulator: SetupOutcome::default_enabled(report),
-            sources,
+            scope_providers,
             pending_filters: VecDeque::new(),
             pending_scopes: VecDeque::new(),
             pending_repo_pickers: VecDeque::new(),
             expecting: ExpectingStep::Splash,
             current_choice: None,
+            edit_scopes: false,
         }
     }
 
@@ -455,38 +589,39 @@ impl SetupRunner {
     /// the runner + the first `RunnerStep` to mount.
     pub fn at_partial(
         outcome: SetupOutcome,
-        sources: Arc<Vec<Box<dyn ScopeSource>>>,
+        scope_providers: BTreeSet<String>,
         entry: PartialEntry,
     ) -> (Self, RunnerStep) {
         let mut runner = Self {
             accumulator: outcome,
-            sources,
+            scope_providers,
             pending_filters: VecDeque::new(),
             pending_scopes: VecDeque::new(),
             pending_repo_pickers: VecDeque::new(),
             expecting: ExpectingStep::Splash,
             current_choice: None,
+            edit_scopes: matches!(entry, PartialEntry::EditScopes(_)),
         };
         let step = match entry {
             PartialEntry::EditProviders => {
-                let modal = runner.build_providers_modal();
+                let screen = runner.screen_providers();
                 runner.expecting = ExpectingStep::Providers;
-                RunnerStep::Next(modal)
+                RunnerStep::show(screen)
             }
             PartialEntry::EditAgents => {
-                let modal = runner.build_agents_modal();
+                let screen = runner.screen_agents();
                 runner.expecting = ExpectingStep::Agents;
-                RunnerStep::Next(modal)
+                RunnerStep::show(screen)
             }
             PartialEntry::EditFilter(provider_id) => {
-                let modal = runner.build_filter_modal(&provider_id);
+                let screen = runner.screen_filter(&provider_id);
                 runner.expecting = ExpectingStep::FilterFor(provider_id);
-                RunnerStep::Next(modal)
+                RunnerStep::show(screen)
             }
             PartialEntry::EditScopes(provider_id) => {
-                let modal = runner.build_scope_load_modal(provider_id.clone());
+                let step = runner.scope_load_step(provider_id.clone());
                 runner.expecting = ExpectingStep::ScopeLoadFor(provider_id);
-                RunnerStep::Next(modal)
+                step
             }
         };
         (runner, step)
@@ -497,9 +632,9 @@ impl SetupRunner {
     /// Splash already mounted at construction — `SplashConfirmed`
     /// advances to Providers.
     pub fn step_splash_confirmed(&mut self) -> RunnerStep {
-        let modal = self.build_providers_modal();
+        let screen = self.screen_providers();
         self.expecting = ExpectingStep::Providers;
-        RunnerStep::Next(modal)
+        RunnerStep::show(screen)
     }
 
     /// User picked items in the active Choice.
@@ -526,9 +661,9 @@ impl SetupRunner {
                     self.pending_filters.push_back(choice.id.clone());
                     self.pending_scopes.push_back(choice.id);
                 }
-                let modal = self.build_agents_modal();
+                let screen = self.screen_agents();
                 self.expecting = ExpectingStep::Agents;
-                RunnerStep::Next(modal)
+                RunnerStep::show(screen)
             }
             (ExpectingStep::Agents, CurrentChoice::Agents(items)) => {
                 let chosen: Vec<ToolChoice> = picks
@@ -612,12 +747,18 @@ impl SetupRunner {
                         existing.insert(org_id.clone());
                     }
                 }
-                // Queue the repo picker only for NEWLY-added orgs so the
-                // user can optionally narrow them. Orgs that were already
+                // Queue the repo picker for NEWLY-added orgs so the user
+                // can optionally narrow them. Orgs that were already
                 // subscribed keep their settled (possibly narrowed)
-                // scopes and are not re-walked.
+                // scopes and are not re-walked — EXCEPT when the user
+                // entered via Settings → "Edit scopes" specifically to
+                // change repos. In that mode every kept org walks its
+                // repo picker (pre-ticked with the current selection),
+                // otherwise re-confirming an existing org would skip
+                // straight to Finish and the modal would just vanish
+                // with no way to re-narrow.
                 for s in &picked {
-                    if already_subscribed.contains(&s.id) {
+                    if !self.edit_scopes && already_subscribed.contains(&s.id) {
                         continue;
                     }
                     self.pending_repo_pickers.push_back((
@@ -663,14 +804,12 @@ impl SetupRunner {
     pub fn step_choice_refresh(&mut self) -> RunnerStep {
         match self.expecting.clone() {
             ExpectingStep::Providers => {
-                let modal = build_detect_modal();
                 self.expecting = ExpectingStep::ProvidersRefresh;
-                RunnerStep::Next(modal)
+                detect_step()
             }
             ExpectingStep::Agents => {
-                let modal = build_detect_modal();
                 self.expecting = ExpectingStep::AgentsRefresh;
-                RunnerStep::Next(modal)
+                detect_step()
             }
             _ => RunnerStep::Stay,
         }
@@ -683,22 +822,22 @@ impl SetupRunner {
             ExpectingStep::Providers => {
                 self.current_choice = None;
                 self.expecting = ExpectingStep::Splash;
-                RunnerStep::Next(Box::new(Splash::new()))
+                RunnerStep::show(Screen::Splash)
             }
             ExpectingStep::Agents => {
-                let modal = self.build_providers_modal();
+                let screen = self.screen_providers();
                 self.expecting = ExpectingStep::Providers;
-                RunnerStep::Next(modal)
+                RunnerStep::show(screen)
             }
             ExpectingStep::ProvidersRefresh => {
-                let modal = self.build_providers_modal();
+                let screen = self.screen_providers();
                 self.expecting = ExpectingStep::Providers;
-                RunnerStep::Next(modal)
+                RunnerStep::show(screen)
             }
             ExpectingStep::AgentsRefresh => {
-                let modal = self.build_agents_modal();
+                let screen = self.screen_agents();
                 self.expecting = ExpectingStep::Agents;
-                RunnerStep::Next(modal)
+                RunnerStep::show(screen)
             }
             // Anything inside the per-provider portion → back to Agents.
             // Step-by-step rewind through filter→scope→repo gets
@@ -710,74 +849,70 @@ impl SetupRunner {
             | ExpectingStep::RepoLoadFor(_, _, _)
             | ExpectingStep::RepoPickFor(_, _) => {
                 self.rebuild_pending_queues();
-                let modal = self.build_agents_modal();
+                let screen = self.screen_agents();
                 self.expecting = ExpectingStep::Agents;
-                RunnerStep::Next(modal)
+                RunnerStep::show(screen)
             }
             ExpectingStep::InfoFor(_) => RunnerStep::Stay,
         }
     }
 
-    /// Loading modal resolved its background task — payload is the
-    /// boxed value the producer sent.
-    pub fn step_loading_resolved(&mut self, payload: Box<dyn std::any::Any + Send>) -> RunnerStep {
-        match self.expecting.clone() {
-            ExpectingStep::ProvidersRefresh => {
-                if let Ok(report) = payload.downcast::<crate::setup::SetupReport>() {
-                    self.accumulator.report = *report;
-                }
-                let modal = self.build_providers_modal();
+    /// A loading [`Effect`] resolved — `result` is the typed outcome the
+    /// executor produced (the Model downcasts the opaque payload once,
+    /// at the boundary, so this stays free of `Box<dyn Any>`).
+    pub fn step_loading_resolved(&mut self, result: LoadResult) -> RunnerStep {
+        match (self.expecting.clone(), result) {
+            (ExpectingStep::ProvidersRefresh, LoadResult::Detected(report)) => {
+                self.accumulator.report = report;
+                let screen = self.screen_providers();
                 self.expecting = ExpectingStep::Providers;
-                RunnerStep::Next(modal)
+                RunnerStep::show(screen)
             }
-            ExpectingStep::AgentsRefresh => {
-                if let Ok(report) = payload.downcast::<crate::setup::SetupReport>() {
-                    self.accumulator.report = *report;
-                }
-                let modal = self.build_agents_modal();
+            (ExpectingStep::AgentsRefresh, LoadResult::Detected(report)) => {
+                self.accumulator.report = report;
+                let screen = self.screen_agents();
                 self.expecting = ExpectingStep::Agents;
-                RunnerStep::Next(modal)
+                RunnerStep::show(screen)
             }
-            ExpectingStep::ScopeLoadFor(provider_id) => {
-                match downcast_load_result::<Scope>(payload) {
-                    LoadOutcome::Items(scopes) if scopes.is_empty() => self.next_scope_step(),
-                    LoadOutcome::Items(scopes) => {
-                        let modal = self.build_scope_pick_modal(&provider_id, scopes);
-                        self.expecting = ExpectingStep::ScopePickFor(provider_id);
-                        RunnerStep::Next(modal)
-                    }
-                    LoadOutcome::Failed(err) => {
-                        let info = scope_error_modal(&provider_id, "orgs", &err);
-                        self.expecting = ExpectingStep::InfoFor(Box::new(self.expecting.clone()));
-                        RunnerStep::Next(info)
-                    }
-                    LoadOutcome::BadType => RunnerStep::Cancel,
+            (ExpectingStep::ScopeLoadFor(provider_id), LoadResult::Scopes(res)) => match res {
+                Ok(scopes) if scopes.is_empty() => self.next_scope_step(),
+                Ok(scopes) => {
+                    let screen = self.screen_scope_pick(&provider_id, scopes);
+                    self.expecting = ExpectingStep::ScopePickFor(provider_id);
+                    RunnerStep::show(screen)
                 }
-            }
-            ExpectingStep::RepoLoadFor(provider_id, parent_id, parent_label) => {
-                match downcast_load_result::<Scope>(payload) {
-                    LoadOutcome::Items(scopes) if scopes.is_empty() => {
-                        let info = empty_repos_modal(&parent_label);
-                        self.expecting = ExpectingStep::InfoFor(Box::new(self.expecting.clone()));
-                        RunnerStep::Next(info)
-                    }
-                    LoadOutcome::Items(scopes) => {
-                        let modal = self.build_repo_pick_modal(&provider_id, &parent_label, scopes);
-                        self.expecting = ExpectingStep::RepoPickFor(provider_id, parent_id);
-                        RunnerStep::Next(modal)
-                    }
-                    LoadOutcome::Failed(err) => {
-                        let info = scope_error_modal(
-                            &provider_id,
-                            &format!("repos for {parent_label}"),
-                            &err,
-                        );
-                        self.expecting = ExpectingStep::InfoFor(Box::new(self.expecting.clone()));
-                        RunnerStep::Next(info)
-                    }
-                    LoadOutcome::BadType => RunnerStep::Cancel,
+                Err(err) => {
+                    let screen = scope_error_screen(&provider_id, "orgs", &err);
+                    self.expecting = ExpectingStep::InfoFor(Box::new(self.expecting.clone()));
+                    RunnerStep::show(screen)
                 }
-            }
+            },
+            (
+                ExpectingStep::RepoLoadFor(provider_id, parent_id, parent_label),
+                LoadResult::Scopes(res),
+            ) => match res {
+                Ok(scopes) if scopes.is_empty() => {
+                    let screen = empty_repos_screen(&parent_label);
+                    self.expecting = ExpectingStep::InfoFor(Box::new(self.expecting.clone()));
+                    RunnerStep::show(screen)
+                }
+                Ok(scopes) => {
+                    let screen = self.screen_repo_pick(&provider_id, &parent_label, scopes);
+                    self.expecting = ExpectingStep::RepoPickFor(provider_id, parent_id);
+                    RunnerStep::show(screen)
+                }
+                Err(err) => {
+                    let screen = scope_error_screen(
+                        &provider_id,
+                        &format!("repos for {parent_label}"),
+                        &err,
+                    );
+                    self.expecting = ExpectingStep::InfoFor(Box::new(self.expecting.clone()));
+                    RunnerStep::show(screen)
+                }
+            },
+            // Stale / mismatched result (e.g. user navigated away before
+            // the effect resolved) — ignore.
             _ => RunnerStep::Stay,
         }
     }
@@ -807,9 +942,9 @@ impl SetupRunner {
 
     fn next_filter_step(&mut self) -> RunnerStep {
         if let Some(provider_id) = self.pending_filters.pop_front() {
-            let modal = self.build_filter_modal(&provider_id);
+            let screen = self.screen_filter(&provider_id);
             self.expecting = ExpectingStep::FilterFor(provider_id);
-            return RunnerStep::Next(modal);
+            return RunnerStep::show(screen);
         }
         self.next_scope_step()
     }
@@ -819,13 +954,12 @@ impl SetupRunner {
         // enumerate their orgs, and "no narrowing" is the right
         // default for those.
         while let Some(provider_id) = self.pending_scopes.pop_front() {
-            let has_source = self.sources.iter().any(|s| s.provider_id() == provider_id);
-            if !has_source {
+            if !self.scope_providers.contains(&provider_id) {
                 continue;
             }
-            let modal = self.build_scope_load_modal(provider_id.clone());
+            let step = self.scope_load_step(provider_id.clone());
             self.expecting = ExpectingStep::ScopeLoadFor(provider_id);
-            return RunnerStep::Next(modal);
+            return step;
         }
         self.next_repo_step()
     }
@@ -836,13 +970,16 @@ impl SetupRunner {
             tracing::info!(
                 "next_repo_step: building Loading for provider={provider_id} parent={parent_id}"
             );
-            let modal = self.build_repo_load_modal(
-                provider_id.clone(),
-                parent_id.clone(),
-                parent_label.clone(),
+            let step = RunnerStep::run(
+                "Setup · repos",
+                format!("Fetching {parent_label} repos…"),
+                Effect::ListChildren {
+                    provider_id: provider_id.clone(),
+                    parent_id: parent_id.clone(),
+                },
             );
             self.expecting = ExpectingStep::RepoLoadFor(provider_id, parent_id, parent_label);
-            return RunnerStep::Next(modal);
+            return step;
         }
         tracing::info!("next_repo_step: no pending repo pickers — flow finishing");
         RunnerStep::Finish(self.accumulator.clone())
@@ -862,253 +999,144 @@ impl SetupRunner {
         }
     }
 
-    // ── Realm modal construction ──────────────────────────────────────
+    // ── Screen descriptors (pure) ─────────────────────────────────────
+    //
+    // Each `screen_*` records the items behind the picker in
+    // `current_choice` (so `step_choice_picked` can map indices back)
+    // and returns a pure [`Screen`] for the renderer. No widgets, no IO.
 
-    fn build_providers_modal(&mut self) -> Box<dyn AppComponent<Msg, UserEvent>> {
-        let items: Vec<ToolChoice> = self
-            .accumulator
-            .report
-            .tools
-            .iter()
-            .filter(|t| t.category == Category::Provider)
-            .map(ToolChoice::from_tool)
-            .collect();
-        let enabled_ids = self.accumulator.enabled_providers.clone();
+    fn screen_providers(&mut self) -> Screen {
+        let items = self.tools_in(Category::Provider);
+        let enabled = &self.accumulator.enabled_providers;
+        let selected = items.iter().map(|c| enabled.contains(&c.id)).collect();
         self.current_choice = Some(CurrentChoice::Providers(items.clone()));
-        Box::new(
-            Choice::multi(
-                "Where do your tasks come from?  Lazybox polls these for new \
-                 PRs, issues, and tickets so you don't have to refresh.",
-                items,
-            )
-            .title("Setup · providers")
-            .label(|c: &ToolChoice| c.label())
-            .selectable(|c: &ToolChoice| c.found)
-            .with_selected_by(move |c: &ToolChoice| enabled_ids.contains(&c.id))
-            .with_refresh(true)
-            .with_back(true),
-        )
+        Screen::Providers { items, selected }
     }
 
-    fn build_agents_modal(&mut self) -> Box<dyn AppComponent<Msg, UserEvent>> {
-        let items: Vec<ToolChoice> = self
-            .accumulator
-            .report
-            .tools
-            .iter()
-            .filter(|t| t.category == Category::Agent)
-            .map(ToolChoice::from_tool)
-            .collect();
-        let enabled_ids = self.accumulator.enabled_agents.clone();
+    fn screen_agents(&mut self) -> Screen {
+        let items = self.tools_in(Category::Agent);
+        let enabled = &self.accumulator.enabled_agents;
+        let selected = items.iter().map(|c| enabled.contains(&c.id)).collect();
         self.current_choice = Some(CurrentChoice::Agents(items.clone()));
-        Box::new(
-            Choice::multi(
-                "Which AI coding agents should lazybox let you spawn into a \
-                 worktree?  Press `c`/`x`/`u` on a row to drop into them.",
-                items,
-            )
-            .title("Setup · agents")
-            .label(|c: &ToolChoice| c.label())
-            .selectable(|c: &ToolChoice| c.found)
-            .with_selected_by(move |c: &ToolChoice| enabled_ids.contains(&c.id))
-            .with_refresh(true)
-            .with_back(true),
-        )
+        Screen::Agents { items, selected }
     }
 
-    fn build_filter_modal(&mut self, provider_id: &str) -> Box<dyn AppComponent<Msg, UserEvent>> {
-        let opts = filter_options(provider_id);
+    fn screen_filter(&mut self, provider_id: &str) -> Screen {
+        let options = filter_options(provider_id);
         let active = self
             .accumulator
             .provider_filters
             .get(provider_id)
             .cloned()
             .unwrap_or_else(|| ProviderConfig::default_for(provider_id));
-        let selected_keys: BTreeSet<String> = filter_keys_set(&active);
-        let display = provider_display(provider_id);
-        // Section headers: GitHub splits roles by item type (PR vs
-        // Issue); Linear shows a single flat role list.
-        let section_for: fn(&FilterOption) -> &'static str = match provider_id {
-            "github" => |f: &FilterOption| {
-                if f.key.starts_with("pr.") {
-                    "Pull Requests  ·  your relationship"
-                } else if f.key.starts_with("issue.") {
-                    "Issues  ·  your relationship"
-                } else {
-                    ""
-                }
-            },
-            _ => |_| "",
-        };
-        self.current_choice = Some(CurrentChoice::Filter(opts.clone()));
-        Box::new(
-            Choice::multi(
-                format!(
-                    "Which {display} items show up in your inbox?  \
-                     Untick everything in a section to skip that item type entirely."
-                ),
-                opts,
-            )
-            .title(format!("Setup · {display} · filters"))
-            .label(|f: &FilterOption| f.label.clone())
-            .section_for(section_for)
-            .with_selected_by(move |f: &FilterOption| selected_keys.contains(&f.key))
-            .with_back(true),
-        )
+        let selected_keys = filter_keys_set(&active);
+        let selected = options
+            .iter()
+            .map(|o| selected_keys.contains(&o.key))
+            .collect();
+        self.current_choice = Some(CurrentChoice::Filter(options.clone()));
+        Screen::Filter {
+            provider_id: provider_id.to_string(),
+            options,
+            selected,
+        }
     }
 
-    fn build_scope_load_modal(&self, provider_id: String) -> Box<dyn AppComponent<Msg, UserEvent>> {
-        let sources = self.sources.clone();
-        let pid = provider_id.clone();
-        let (modal, result) = Loading::pending(format!("Fetching {provider_id} orgs…"));
-        tokio::spawn(async move {
-            let value = match sources.iter().find(|s| s.provider_id() == pid) {
-                Some(src) => src.list_scopes().await,
-                None => Ok(Vec::<Scope>::new()),
-            };
-            let _ = result.send(value);
-        });
-        Box::new(modal.title("Setup · scopes"))
-    }
-
-    fn build_scope_pick_modal(
-        &mut self,
-        provider_id: &str,
-        scopes: Vec<Scope>,
-    ) -> Box<dyn AppComponent<Msg, UserEvent>> {
-        self.current_choice = Some(CurrentChoice::ScopePick(scopes.clone()));
+    fn screen_scope_pick(&mut self, provider_id: &str, scopes: Vec<Scope>) -> Screen {
         // Pre-tick orgs the user already subscribed to. `selected_scopes`
         // mixes two id flavors: an org-level id like `github:acme`
         // (whole-org subscription) and repo-level ids like
-        // `github:acme/widget` (narrowed). An org is "already
-        // selected" if EITHER its own id is in the set OR any repo
-        // under it is. Without the prefix check, an org you've narrowed
-        // to specific repos would show up unchecked, and confirming the
-        // picker would silently drop all those repos.
-        let already: std::collections::BTreeSet<String> = self
-            .accumulator
-            .selected_scopes
-            .get(provider_id)
-            .cloned()
-            .unwrap_or_default();
-        Box::new(
-            Choice::multi(format!("{provider_id} · pick orgs (none = all)"), scopes)
-                .title("Setup · scopes")
-                .label(|s: &Scope| match &s.parent {
-                    Some(p) => format!("{p} / {}", s.label),
-                    None => s.label.clone(),
-                })
-                .with_selected_by(move |s: &Scope| {
-                    let org_id = &s.id;
-                    let prefix = format!("{org_id}/");
-                    already.contains(org_id) || already.iter().any(|id| id.starts_with(&prefix))
-                })
-                .allow_empty(true)
-                .with_back(true),
-        )
+        // `github:acme/widget` (narrowed). An org is "already selected"
+        // if EITHER its own id is in the set OR any repo under it is.
+        // Without the prefix check, an org you've narrowed to specific
+        // repos would show up unchecked, and confirming the picker would
+        // silently drop all those repos.
+        let already = self.subscribed(provider_id);
+        let selected = scopes
+            .iter()
+            .map(|s| {
+                let prefix = format!("{}/", s.id);
+                already.contains(&s.id) || already.iter().any(|id| id.starts_with(&prefix))
+            })
+            .collect();
+        self.current_choice = Some(CurrentChoice::ScopePick(scopes.clone()));
+        Screen::ScopePick {
+            provider_id: provider_id.to_string(),
+            scopes,
+            selected,
+        }
     }
 
-    fn build_repo_load_modal(
-        &self,
-        provider_id: String,
-        parent_id: String,
-        parent_label: String,
-    ) -> Box<dyn AppComponent<Msg, UserEvent>> {
-        let sources = self.sources.clone();
-        let pid = provider_id.clone();
-        let parent = parent_id.clone();
-        let (modal, result) = Loading::pending(format!("Fetching {parent_label} repos…"));
-        tokio::spawn(async move {
-            let value = match sources.iter().find(|s| s.provider_id() == pid) {
-                Some(src) => src.list_children(&parent).await,
-                None => Ok(Vec::<Scope>::new()),
-            };
-            let _ = result.send(value);
-        });
-        Box::new(modal.title("Setup · repos"))
-    }
-
-    fn build_repo_pick_modal(
+    fn screen_repo_pick(
         &mut self,
         provider_id: &str,
         parent_label: &str,
         scopes: Vec<Scope>,
-    ) -> Box<dyn AppComponent<Msg, UserEvent>> {
+    ) -> Screen {
+        // Pre-tick this provider's existing repo subscriptions. Pre-
+        // seeding matters most for Settings → "Add / remove repos" —
+        // opening the picker and seeing zero ticks looks like all your
+        // repos vanished.
+        let already = self.subscribed(provider_id);
+        let selected = scopes.iter().map(|s| already.contains(&s.id)).collect();
         self.current_choice = Some(CurrentChoice::RepoPick(scopes.clone()));
-        // Find this provider's existing repo subscriptions and
-        // pre-tick the ones we recognize. Pre-seeding matters most
-        // for Settings → "Add / remove repos" — opening the picker
-        // and seeing zero ticks looks like all your repos vanished.
-        let already: std::collections::BTreeSet<String> = self
-            .accumulator
+        Screen::RepoPick {
+            provider_id: provider_id.to_string(),
+            parent_label: parent_label.to_string(),
+            scopes,
+            selected,
+        }
+    }
+
+    /// Loading screen + the `ListScopes` effect that resolves it.
+    fn scope_load_step(&self, provider_id: String) -> RunnerStep {
+        RunnerStep::run(
+            "Setup · scopes",
+            format!("Fetching {provider_id} orgs…"),
+            Effect::ListScopes { provider_id },
+        )
+    }
+
+    fn tools_in(&self, category: Category) -> Vec<ToolChoice> {
+        self.accumulator
+            .report
+            .tools
+            .iter()
+            .filter(|t| t.category == category)
+            .map(ToolChoice::from_tool)
+            .collect()
+    }
+
+    fn subscribed(&self, provider_id: &str) -> BTreeSet<String> {
+        self.accumulator
             .selected_scopes
             .get(provider_id)
             .cloned()
-            .unwrap_or_default();
-        Box::new(
-            Choice::multi(
-                format!(
-                    "Pick the {parent_label} repos to subscribe to.\n\n\
-                     Space toggles a repo. Enter confirms.\n\
-                     Backspace goes back without changing the existing \
-                     subscription.",
-                ),
-                scopes,
-            )
-            .title(format!("Setup · {parent_label} repos"))
-            .label(|s: &Scope| s.label.clone())
-            .with_selected_by(move |s: &Scope| already.contains(&s.id))
-            .with_back(true),
-        )
+            .unwrap_or_default()
     }
 }
 
-/// `Loading` modal running fresh `detect_all()`. Used by both
-/// `ProvidersRefresh` and `AgentsRefresh`.
-fn build_detect_modal() -> Box<dyn AppComponent<Msg, UserEvent>> {
-    let (modal, result) = Loading::pending("Re-detecting providers + agents…");
-    tokio::spawn(async move {
-        let _ = result.send(setup::detect_all().await);
-    });
-    Box::new(modal.title("Setup · refreshing"))
+/// Loading screen + the `Detect` effect that resolves it. Shared by the
+/// `r`-refresh paths from both the providers and agents pickers.
+fn detect_step() -> RunnerStep {
+    RunnerStep::run(
+        "Setup · refreshing",
+        "Re-detecting providers + agents…".to_string(),
+        Effect::Detect,
+    )
 }
 
-// ── Loading payload helpers ─────────────────────────────────────────────
-
-enum LoadOutcome<T> {
-    Items(Vec<T>),
-    Failed(ProviderError),
-    /// Programming error — payload type didn't match.
-    BadType,
-}
-
-fn downcast_load_result<T: std::any::Any + Send + 'static>(
-    payload: Box<dyn std::any::Any + Send>,
-) -> LoadOutcome<T> {
-    let result = match payload.downcast::<Result<Vec<T>, ProviderError>>() {
-        Ok(r) => *r,
-        Err(_) => return LoadOutcome::BadType,
-    };
-    match result {
-        Ok(v) => LoadOutcome::Items(v),
-        Err(e) => LoadOutcome::Failed(e),
-    }
-}
-
-/// Build an `ErrorModal` for a scope-load failure. Pushed instead of
-/// silently advancing — without this the user picks an org and sees
-/// the modal disappear with no explanation.
-fn scope_error_modal(
-    provider_id: &str,
-    what: &str,
-    err: &ProviderError,
-) -> Box<dyn AppComponent<Msg, UserEvent>> {
-    let accent = if err.is_auth() {
-        Accent::new("auth", crate::theme::current().hover)
+/// Classify a scope-load failure + build the dismiss-to-continue body.
+/// Returned as a pure [`Screen::Info`] instead of silently advancing —
+/// without it the user picks an org and sees the modal disappear with
+/// no explanation.
+fn scope_error_screen(provider_id: &str, what: &str, err: &ProviderError) -> Screen {
+    let kind = if err.is_auth() {
+        InfoKind::Auth
     } else if err.is_retryable() {
-        Accent::warn("retryable")
+        InfoKind::Retryable
     } else {
-        Accent::error("permanent")
+        InfoKind::Permanent
     };
     let body = format!(
         "Failed to load {what} for {provider_id}.\n\n{}\n\n\
@@ -1116,13 +1144,17 @@ fn scope_error_modal(
          configured so far.",
         err.diagnostic()
     );
-    Box::new(ErrorModal::new(provider_id, accent, body))
+    Screen::Info {
+        title: provider_id.to_string(),
+        kind,
+        body,
+    }
 }
 
-/// Info modal for "no repos visible under {parent}". Pushed instead
-/// of silently moving on so the user knows their org-level
-/// subscription is still active but per-repo narrowing didn't happen.
-fn empty_repos_modal(parent_label: &str) -> Box<dyn AppComponent<Msg, UserEvent>> {
+/// Info screen for "no repos visible under {parent}". Shown instead of
+/// silently moving on so the user knows their org-level subscription is
+/// still active but per-repo narrowing didn't happen.
+fn empty_repos_screen(parent_label: &str) -> Screen {
     let body = format!(
         "No repositories visible under {parent_label}.\n\n\
          This usually means your token doesn't have repo-read scope, \
@@ -1131,7 +1163,11 @@ fn empty_repos_modal(parent_label: &str) -> Box<dyn AppComponent<Msg, UserEvent>
          will poll for any items the token CAN see in {parent_label}.\n\n\
          Press any key to continue."
     );
-    Box::new(ErrorModal::new(parent_label, Accent::warn("notice"), body))
+    Screen::Info {
+        title: parent_label.to_string(),
+        kind: InfoKind::Notice,
+        body,
+    }
 }
 
 #[cfg(test)]
@@ -1251,15 +1287,15 @@ mod tests {
 
     #[test]
     fn runner_starts_at_splash() {
-        let runner = SetupRunner::new(report(), Arc::new(Vec::new()));
+        let runner = SetupRunner::new(report(), BTreeSet::new());
         assert!(matches!(runner.expecting, ExpectingStep::Splash));
     }
 
     #[test]
     fn splash_advances_to_providers() {
-        let mut runner = SetupRunner::new(report(), Arc::new(Vec::new()));
+        let mut runner = SetupRunner::new(report(), BTreeSet::new());
         match runner.step_splash_confirmed() {
-            RunnerStep::Next(_) => {
+            RunnerStep::Show { .. } => {
                 assert!(matches!(runner.expecting, ExpectingStep::Providers));
             }
             _ => panic!("expected Next (providers)"),
@@ -1268,11 +1304,11 @@ mod tests {
 
     #[test]
     fn providers_pick_advances_to_agents() {
-        let mut runner = SetupRunner::new(report(), Arc::new(Vec::new()));
+        let mut runner = SetupRunner::new(report(), BTreeSet::new());
         let _ = runner.step_splash_confirmed();
         // GitHub is index 0 (only provider in the report).
         match runner.step_choice_picked(vec![0]) {
-            RunnerStep::Next(_) => {
+            RunnerStep::Show { .. } => {
                 assert!(matches!(runner.expecting, ExpectingStep::Agents));
             }
             _ => panic!("expected Next (agents)"),
@@ -1282,7 +1318,7 @@ mod tests {
 
     #[test]
     fn agents_pick_with_no_provider_finishes() {
-        let mut runner = SetupRunner::new(report(), Arc::new(Vec::new()));
+        let mut runner = SetupRunner::new(report(), BTreeSet::new());
         let _ = runner.step_splash_confirmed();
         // Untick every provider.
         let _ = runner.step_choice_picked(vec![]);
@@ -1301,10 +1337,10 @@ mod tests {
 
     #[test]
     fn back_from_providers_returns_to_splash() {
-        let mut runner = SetupRunner::new(report(), Arc::new(Vec::new()));
+        let mut runner = SetupRunner::new(report(), BTreeSet::new());
         let _ = runner.step_splash_confirmed();
         match runner.step_choice_back() {
-            RunnerStep::Next(_) => {
+            RunnerStep::Show { .. } => {
                 assert!(matches!(runner.expecting, ExpectingStep::Splash));
             }
             _ => panic!("expected Next (splash)"),
@@ -1313,19 +1349,19 @@ mod tests {
 
     #[test]
     fn back_from_splash_cancels() {
-        let mut runner = SetupRunner::new(report(), Arc::new(Vec::new()));
+        let mut runner = SetupRunner::new(report(), BTreeSet::new());
         // expecting starts at Splash.
         assert!(matches!(runner.step_choice_back(), RunnerStep::Cancel));
     }
 
     #[test]
     fn back_from_agents_returns_to_providers_with_selection() {
-        let mut runner = SetupRunner::new(report(), Arc::new(Vec::new()));
+        let mut runner = SetupRunner::new(report(), BTreeSet::new());
         let _ = runner.step_splash_confirmed();
         let _ = runner.step_choice_picked(vec![0]); // pick GitHub
         // Now expecting Agents. Back should rebuild Providers.
         match runner.step_choice_back() {
-            RunnerStep::Next(_) => {
+            RunnerStep::Show { .. } => {
                 assert!(matches!(runner.expecting, ExpectingStep::Providers));
             }
             _ => panic!("expected Next (providers)"),
@@ -1360,8 +1396,6 @@ mod tests {
     /// every prior narrowed repo entry.
     #[tokio::test(flavor = "current_thread")]
     async fn editing_orgs_preserves_existing_narrowed_repos() {
-        use std::sync::Arc;
-
         // Start state: user is subscribed to ONE specific acme
         // repo and to the whole `acme` org. We simulate the Settings
         // → "Add a repo" flow by constructing a runner with this
@@ -1378,15 +1412,15 @@ mod tests {
             .selected_scopes
             .insert("github".into(), prior.clone());
 
-        let sources: Arc<Vec<Box<dyn ScopeSource>>> = Arc::new(Vec::new());
         let mut runner = SetupRunner {
             accumulator: outcome,
-            sources,
+            scope_providers: BTreeSet::new(),
             pending_filters: VecDeque::new(),
             pending_scopes: VecDeque::new(),
             pending_repo_pickers: VecDeque::new(),
             expecting: ExpectingStep::ScopePickFor("github".into()),
             current_choice: None,
+            edit_scopes: false,
         };
         // The picker offered three orgs; user kept acme +
         // acme ticked and added widget. The CurrentChoice
@@ -1438,7 +1472,6 @@ mod tests {
     async fn editing_orgs_removes_un_ticked_org_and_its_repos() {
         // If the user *unticks* an org in the picker, every entry
         // under it (whole-org or narrowed repos) should disappear.
-        use std::sync::Arc;
         let mut prior: BTreeSet<String> = BTreeSet::new();
         prior.insert("github:doomed".into());
         prior.insert("github:doomed/repo-a".into());
@@ -1446,15 +1479,15 @@ mod tests {
         let mut outcome = SetupOutcome::default_enabled(report());
         outcome.selected_scopes.insert("github".into(), prior);
 
-        let sources: Arc<Vec<Box<dyn ScopeSource>>> = Arc::new(Vec::new());
         let mut runner = SetupRunner {
             accumulator: outcome,
-            sources,
+            scope_providers: BTreeSet::new(),
             pending_filters: VecDeque::new(),
             pending_scopes: VecDeque::new(),
             pending_repo_pickers: VecDeque::new(),
             expecting: ExpectingStep::ScopePickFor("github".into()),
             current_choice: None,
+            edit_scopes: false,
         };
         // Picker shows both orgs; user keeps only `keepme`.
         let items = vec![
@@ -1491,22 +1524,21 @@ mod tests {
         // Regression: un-ticking one org used to drag the user through
         // the repo picker of every *other* still-subscribed org. The
         // repo picker must only be queued for NEWLY-added orgs.
-        use std::sync::Arc;
         let mut prior: BTreeSet<String> = BTreeSet::new();
         prior.insert("github:doomed".into());
         prior.insert("github:keepme/repo-x".into());
         let mut outcome = SetupOutcome::default_enabled(report());
         outcome.selected_scopes.insert("github".into(), prior);
 
-        let sources: Arc<Vec<Box<dyn ScopeSource>>> = Arc::new(Vec::new());
         let mut runner = SetupRunner {
             accumulator: outcome,
-            sources,
+            scope_providers: BTreeSet::new(),
             pending_filters: VecDeque::new(),
             pending_scopes: VecDeque::new(),
             pending_repo_pickers: VecDeque::new(),
             expecting: ExpectingStep::ScopePickFor("github".into()),
             current_choice: None,
+            edit_scopes: false,
         };
         let items = vec![
             Scope {
@@ -1539,21 +1571,20 @@ mod tests {
     async fn newly_added_org_queues_its_repo_picker() {
         // The flip side: adding a brand-new org still queues its repo
         // picker so the user can optionally narrow it.
-        use std::sync::Arc;
         let mut prior: BTreeSet<String> = BTreeSet::new();
         prior.insert("github:keepme/repo-x".into());
         let mut outcome = SetupOutcome::default_enabled(report());
         outcome.selected_scopes.insert("github".into(), prior);
 
-        let sources: Arc<Vec<Box<dyn ScopeSource>>> = Arc::new(Vec::new());
         let mut runner = SetupRunner {
             accumulator: outcome,
-            sources,
+            scope_providers: BTreeSet::new(),
             pending_filters: VecDeque::new(),
             pending_scopes: VecDeque::new(),
             pending_repo_pickers: VecDeque::new(),
             expecting: ExpectingStep::ScopePickFor("github".into()),
             current_choice: None,
+            edit_scopes: false,
         };
         let items = vec![
             Scope {
@@ -1593,26 +1624,193 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn edit_scopes_walks_repo_picker_for_already_subscribed_org() {
+        // Regression: pressing `,` → GitHub to change which repos an
+        // ALREADY-subscribed org tracks used to skip the repo picker
+        // (the org counts as `already_subscribed`), so the flow jumped
+        // straight to Finish and the modal vanished with no way to
+        // re-narrow. In `edit_scopes` mode every kept org must walk its
+        // repo picker.
+        let mut prior: BTreeSet<String> = BTreeSet::new();
+        prior.insert("github:acme".into());
+        let mut outcome = SetupOutcome::default_enabled(report());
+        outcome.selected_scopes.insert("github".into(), prior);
+
+        let mut runner = SetupRunner {
+            accumulator: outcome,
+            scope_providers: BTreeSet::new(),
+            pending_filters: VecDeque::new(),
+            pending_scopes: VecDeque::new(),
+            pending_repo_pickers: VecDeque::new(),
+            expecting: ExpectingStep::ScopePickFor("github".into()),
+            current_choice: None,
+            // The distinguishing bit: entered via Settings → Edit scopes.
+            edit_scopes: true,
+        };
+        let items = vec![Scope {
+            id: "github:acme".into(),
+            label: "acme".into(),
+            parent: None,
+            kind: lazybox_core::ScopeKind::Org,
+        }];
+        runner.current_choice = Some(CurrentChoice::ScopePick(items));
+
+        // Re-confirm the same (already-subscribed) org.
+        let _step = runner.step_choice_picked(vec![0]);
+
+        // The repo picker must be walked even though the org was already
+        // subscribed — collect both what's still queued and the active
+        // step (the first picker is popped immediately into RepoLoadFor).
+        let mut walked: Vec<String> = runner
+            .pending_repo_pickers
+            .iter()
+            .map(|(_, id, _)| id.clone())
+            .collect();
+        if let ExpectingStep::RepoLoadFor(_, parent_id, _) = &runner.expecting {
+            walked.push(parent_id.clone());
+        }
+        assert_eq!(
+            walked,
+            vec!["github:acme".to_string()],
+            "edit-scopes flow must walk the repo picker for the kept org"
+        );
+    }
+
+    // ── Load-path tests ───────────────────────────────────────────────
+    //
+    // These exercise the load → resolve transitions that the old
+    // widget-coupled runner could not test (they spawned tokio tasks and
+    // returned opaque widgets). Now they're pure `fn(state, input) ->
+    // RunnerStep`, so no runtime and no rendering — just assert on the
+    // Screen / Effect data. This is the seam the repo bug hid behind.
+
+    /// Helper: assert a step is a Loading screen carrying `effect`.
+    fn assert_loading_with(step: &RunnerStep, effect: &Effect) {
+        match step {
+            RunnerStep::Show {
+                screen: Screen::Loading { .. },
+                effect: Some(e),
+            } => assert_eq!(e, effect),
+            _ => panic!("expected a Loading screen paired with {effect:?}"),
+        }
+    }
+
+    #[test]
+    fn edit_scopes_entry_emits_list_scopes_effect() {
+        // Entering Settings → Edit scopes must show a spinner AND queue
+        // the ListScopes effect — no widget, no tokio, fully inspectable.
+        let outcome = SetupOutcome::default_enabled(report());
+        let providers: BTreeSet<String> = ["github"].iter().map(|s| s.to_string()).collect();
+        let (runner, step) = SetupRunner::at_partial(
+            outcome,
+            providers,
+            PartialEntry::EditScopes("github".into()),
+        );
+        assert_loading_with(
+            &step,
+            &Effect::ListScopes {
+                provider_id: "github".into(),
+            },
+        );
+        assert!(matches!(runner.expecting, ExpectingStep::ScopeLoadFor(_)));
+    }
+
+    #[test]
+    fn scope_load_resolving_with_orgs_shows_prechecked_pick() {
+        // The org load resolves → we should land on a ScopePick screen
+        // whose `selected` mask pre-ticks the org the user had narrowed.
+        let mut prior: BTreeSet<String> = BTreeSet::new();
+        prior.insert("github:acme/widget".into()); // narrowed repo under acme
+        let mut outcome = SetupOutcome::default_enabled(report());
+        outcome.selected_scopes.insert("github".into(), prior);
+        let providers: BTreeSet<String> = ["github"].iter().map(|s| s.to_string()).collect();
+        let (mut runner, _load) = SetupRunner::at_partial(
+            outcome,
+            providers,
+            PartialEntry::EditScopes("github".into()),
+        );
+
+        let orgs = vec![
+            Scope {
+                id: "github:acme".into(),
+                label: "acme".into(),
+                parent: None,
+                kind: lazybox_core::ScopeKind::Org,
+            },
+            Scope {
+                id: "github:other".into(),
+                label: "other".into(),
+                parent: None,
+                kind: lazybox_core::ScopeKind::Org,
+            },
+        ];
+        let step = runner.step_loading_resolved(LoadResult::Scopes(Ok(orgs)));
+        match step {
+            RunnerStep::Show {
+                screen: Screen::ScopePick { selected, .. },
+                effect: None,
+            } => {
+                // acme is pre-ticked via its narrowed repo; other is not.
+                assert_eq!(selected, vec![true, false]);
+            }
+            _ => panic!("expected ScopePick screen"),
+        }
+        assert!(matches!(runner.expecting, ExpectingStep::ScopePickFor(_)));
+    }
+
+    #[test]
+    fn scope_load_failure_shows_info_not_silent_dismiss() {
+        // An auth failure must surface an Info screen (classified Auth),
+        // not silently drop the modal.
+        let outcome = SetupOutcome::default_enabled(report());
+        let providers: BTreeSet<String> = ["github"].iter().map(|s| s.to_string()).collect();
+        let (mut runner, _load) = SetupRunner::at_partial(
+            outcome,
+            providers,
+            PartialEntry::EditScopes("github".into()),
+        );
+        let err = ProviderError::auth("github", "token expired");
+        let step = runner.step_loading_resolved(LoadResult::Scopes(Err(err)));
+        match step {
+            RunnerStep::Show {
+                screen: Screen::Info { kind, .. },
+                ..
+            } => assert_eq!(kind, InfoKind::Auth),
+            _ => panic!("expected an Info screen on load failure"),
+        }
+        // Dismissing the info resumes the flow rather than cancelling.
+        assert!(matches!(runner.expecting, ExpectingStep::InfoFor(_)));
+    }
+
+    #[test]
+    fn refresh_emits_detect_effect() {
+        let mut runner = SetupRunner::new(report(), BTreeSet::new());
+        let _ = runner.step_splash_confirmed(); // now at Providers
+        let step = runner.step_choice_refresh();
+        assert_loading_with(&step, &Effect::Detect);
+        assert!(matches!(runner.expecting, ExpectingStep::ProvidersRefresh));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn un_ticking_a_repo_removes_it_from_scopes() {
         // Regression: narrowing an org's repos used to only ADD picks,
         // never clearing previously-subscribed repos — so un-ticking a
         // repo left its stale entry (and its sidebar header) behind.
-        use std::sync::Arc;
         let mut prior: BTreeSet<String> = BTreeSet::new();
         prior.insert("github:acme/keep".into());
         prior.insert("github:acme/drop".into());
         let mut outcome = SetupOutcome::default_enabled(report());
         outcome.selected_scopes.insert("github".into(), prior);
 
-        let sources: Arc<Vec<Box<dyn ScopeSource>>> = Arc::new(Vec::new());
         let mut runner = SetupRunner {
             accumulator: outcome,
-            sources,
+            scope_providers: BTreeSet::new(),
             pending_filters: VecDeque::new(),
             pending_scopes: VecDeque::new(),
             pending_repo_pickers: VecDeque::new(),
             expecting: ExpectingStep::RepoPickFor("github".into(), "github:acme".into()),
             current_choice: None,
+            edit_scopes: false,
         };
         let items = vec![
             Scope {

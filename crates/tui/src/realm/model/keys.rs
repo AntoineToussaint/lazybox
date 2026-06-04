@@ -1,21 +1,21 @@
 //! Keyboard + mouse + paste handlers.
 //!
 //! The big `handle_pane_key` matcher (catalog-dispatch + per-key
-//! arms + terminal-escape latch), the quit-chord resolver, the
-//! detach lookup, and the mouse / paste handlers all live here.
+//! arms + terminal-escape latch), the quit-chord resolver, and the
+//! mouse / paste handlers all live here.
 //! Test-only `dispatch_*` entry points sit alongside so the
 //! integration tests can drive the same code paths the run loop
 //! does.
 //!
 //! Free helpers used only by this surface (`rect_contains`,
 //! `key_event_to_chord`, `find_action_for_chord`,
-//! `spawn_detached_lazybox`, `emit_clipboard_copy`) live in `mod.rs`
+//! `emit_clipboard_copy`) live in `mod.rs`
 //! today and are reachable from this submodule because child
 //! modules can see their parent's private items.
 
 use super::{
     Id, Model, PaneFocus, emit_clipboard_copy, find_action_for_chord, key_event_to_chord,
-    rect_contains, spawn_detached_lazybox,
+    rect_contains,
 };
 use crate::realm::keymap::realm_key_to_crossterm;
 use crate::realm::layout::pane_areas;
@@ -181,20 +181,6 @@ impl<T: TerminalAdapter> Model<T> {
                 };
                 if self.layout.nudge_splits(dx, dy) {
                     self.redraw = true;
-                }
-                return;
-            }
-            // Ctrl-Shift-D: detach the focused pane into a new lazybox
-            // process. Many terminals report Ctrl-Shift-letter as the
-            // capital letter with CONTROL set; some include SHIFT too.
-            // Match either form.
-            Key::Char('D')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.focus != PaneFocus::Terminals =>
-            {
-                self.q_latch.disarm();
-                if let Some(spec) = self.focused_detach_spec() {
-                    spawn_detached_lazybox(&spec);
                 }
                 return;
             }
@@ -589,16 +575,6 @@ impl<T: TerminalAdapter> Model<T> {
             return false;
         };
         input == first
-    }
-
-    /// DetachSpec for the focused pane, or None if it can't detach
-    /// (e.g. cursor on a repo header in the sidebar).
-    fn focused_detach_spec(&self) -> Option<crate::pane::DetachSpec> {
-        match self.focus {
-            PaneFocus::Sidebar => self.sidebar.detachable(),
-            PaneFocus::Right => self.right.detachable(),
-            PaneFocus::Terminals => self.terminals.detachable(),
-        }
     }
 
     /// Handle a bracketed-paste event from the host terminal. The

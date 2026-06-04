@@ -1214,20 +1214,6 @@ impl RightPane {
             .collect()
     }
 
-    pub fn detachable(&self) -> Option<crate::DetachSpec> {
-        // The activity feed itself isn't detachable — but the workspace
-        // it belongs to is. The detail layout will host the same data
-        // alongside additional terminals + a code viewer.
-        let workspace = self.workspace.as_ref()?;
-        Some(crate::DetachSpec {
-            layout: "detail",
-            args: vec![
-                "--workspace".to_string(),
-                workspace.key.as_str().to_string(),
-            ],
-        })
-    }
-
     pub fn handle_key(&mut self, key: KeyEvent, cmds: &mut Vec<Command>) -> PaneOutcome {
         // Toggle keys work without a workspace too — collapse state is
         // owned by the pane, not the workspace.

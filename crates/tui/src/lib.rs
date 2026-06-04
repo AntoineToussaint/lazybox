@@ -46,5 +46,5 @@ pub use lazybox_tui_core::{
     agent_attention, confirm_latch, editors, intent, notify, platform, prompts, util,
 };
 
-pub use pane::{Binding, DetachSpec, PaneId, PaneOutcome};
+pub use pane::{Binding, PaneId, PaneOutcome};
 pub use theme::Theme;

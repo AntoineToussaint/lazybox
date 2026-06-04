@@ -1,5 +1,5 @@
 //! Lightweight pane support types — `PaneId`, `PaneOutcome`,
-//! `DetachSpec`, `Binding`. Originally lived in the `tui-kit` crate;
+//! `Binding`. Originally lived in the `tui-kit` crate;
 //! kept here as plain types lazybox's panes use directly.
 
 /// Stable id for a Pane. Allocated by the host app at construction.
@@ -34,16 +34,6 @@ pub struct Binding {
     pub label: std::borrow::Cow<'static, str>,
 }
 
-/// Returned by `Pane::detachable()` when this pane (or its content)
-/// can pop out into a separate window.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DetachSpec {
-    /// Layout name the new window should run, e.g. `"detail"`.
-    pub layout: &'static str,
-    /// Extra args for the new client, forwarded verbatim.
-    pub args: Vec<String>,
-}
-
 /// What the host should do after a Pane finishes handling a key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneOutcome {
@@ -51,6 +41,4 @@ pub enum PaneOutcome {
     Consumed,
     /// Pane didn't handle. Host's global handler takes over.
     Pass,
-    /// Detach this Pane into a new window.
-    Detach(DetachSpec),
 }

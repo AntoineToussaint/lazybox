@@ -28,9 +28,8 @@
 //! ## Spawning
 //!
 //! The editor process is detached from lazybox — closing lazybox
-//! shouldn't take the editor with it. We use the same
-//! `crate::platform::detach_child_process` helper as `Ctrl-Shift-D`
-//! so the cross-platform story is consistent.
+//! shouldn't take the editor with it, via the
+//! `crate::platform::detach_child_process` helper.
 
 use serde::Deserialize;
 use std::path::Path;

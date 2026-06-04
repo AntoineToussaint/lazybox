@@ -135,7 +135,7 @@ pub fn render(
 
     // Left zone: focused-pane contextual bindings only. Universal
     // shortcuts (`?` help, `q q` quit, `,` settings, `Tab` cycle,
-    // resize, detach) used to be hardcoded into a separate "globals"
+    // resize) used to be hardcoded into a separate "globals"
     // block on the right side of the line — that's now in the
     // onboarding tour + the `?` help modal, where it gets shown once
     // instead of cluttering every screen. Keeping the footer to

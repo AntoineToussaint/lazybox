@@ -115,12 +115,6 @@ impl Terminals {
         crate::components::terminal_stack::TerminalStack::contextual_bindings(overrides)
     }
 
-    /// Detach spec for the focused tile, if any (delegates to the
-    /// inner stack's `detachable()` which scopes to the active tab).
-    pub fn detachable(&self) -> Option<crate::pane::DetachSpec> {
-        self.inner.detachable()
-    }
-
     /// Scroll the active terminal's viewport by `delta` rows. Negative
     /// = into scrollback; positive = back toward the live content.
     /// Driven from the orchestrator's mouse-wheel handler.

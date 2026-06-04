@@ -127,9 +127,9 @@ Each Pane (Sidebar / RightPane / TerminalStack) declares its own
 keymap; the bottom hint bar reads from the focused Pane's
 `Pane::keymap()`. Global keys live in `app::dispatch_key`.
 
-**Global**: `Tab` cycle panes, `?` help, `q q` quit, `Ctrl-Shift-D`
-detach focused pane to a new window, `Shift-arrows` resize splitters,
-mouse-click any pane to focus it, mouse-drag splitters to resize.
+**Global**: `Tab` cycle panes, `?` help, `q q` quit, `Shift-arrows`
+resize splitters, mouse-click any pane to focus it, mouse-drag
+splitters to resize.
 
 **Sidebar**: `j/k` navigate, `Enter` open, `c` claude, `b` shell,
 `x` codex, `u` cursor, `m` mark read, `/` search. `g` is a leader

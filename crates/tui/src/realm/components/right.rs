@@ -108,11 +108,6 @@ impl Right {
         self.inner.apply_ui_defaults(ui);
     }
 
-    /// Forward to the inner pane's detach spec, if any.
-    pub fn detachable(&self) -> Option<crate::pane::DetachSpec> {
-        self.inner.detachable()
-    }
-
     /// Forward a mouse click to the inner pane. Returns `true` when
     /// the click landed on a known target (section header or activity
     /// card) and the caller should redraw.

@@ -143,9 +143,6 @@ the latest state per provider. (`OpenSyncStatus` in
 - [ ] An induced provider error (bad token) shows up here with a readable message.
 - [ ] The window updates live while a poll is in flight.
 
-### Known sharp edges
-- `Shift-D` (sync status) is distinct from `Ctrl-Shift-D` (detach pane) — easy to confuse.
-
 ---
 
 ## Role filter

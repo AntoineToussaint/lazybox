@@ -12,7 +12,6 @@ from the focused pane. Global keys work everywhere.
 | `,` | Settings palette |
 | `q q` | Quit |
 | `!` | Jump to the next workspace whose agent is waiting |
-| `Ctrl-Shift-D` | Detach the focused pane to a new window |
 | `Shift-arrows` | Resize the splitters |
 | `F8` / `Alt-s` | Toggle mouse capture |
 

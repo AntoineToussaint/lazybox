@@ -139,8 +139,10 @@ async fn capture_prefetch_trace() {
         .expect("client builds from token")
         .with_watch_repos(watch_repos());
 
+    // `None` = unwindowed reconcile sweep (issue #14); this trace
+    // measures the prefetch phase, not the windowed-poll path.
     let tasks = client
-        .fetch_all_prs()
+        .fetch_all_prs(None)
         .await
         .expect("fetch_all_prs succeeds");
 

@@ -3,6 +3,13 @@
 # the Zig-built static archive links), and the Rust stable
 # toolchain + sccache-style Cargo cache.
 #
+# Zig is installed by running `scripts/bootstrap.sh` — the SAME script
+# contributors run via `make setup`. So CI exercises the real
+# download/extract/verify path (which has bitten users before) instead
+# of a parallel `setup-zig` install that only agreed by convention, and
+# the pinned version stays single-sourced in `.zig-version`. The script
+# appends the pinned zig dir to $GITHUB_PATH for the build/test steps.
+#
 # Used by every CI job that invokes `cargo build`/`test`/`clippy`/
 # `doc`. Jobs that don't compile workspace code (`deny`, `typos`,
 # `machete`, `fmt`) skip this and just install what they need.
@@ -19,11 +26,6 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install Zig 0.15.2
-      uses: mlugg/setup-zig@v2
-      with:
-        version: "0.15.2"
-
     - name: Install C toolchain (Linux)
       if: runner.os == 'Linux'
       # The Zig-built ghostty static archive vendors simdutf /
@@ -32,11 +34,27 @@ runs:
       # `std::__cxx11::`). Linking with -lstdc++ leaves every libc++
       # symbol unresolved (`std::__1::basic_string`, `typeinfo for
       # std::bad_optional_access`, `hwy::Abort`, …). Install libc++
-      # + libc++abi so the build script can link them.
+      # + libc++abi so the build script can link them. bootstrap.sh
+      # only warns about these (it can't sudo across arbitrary distros);
+      # CI must provision them, so this runs before bootstrap.sh.
       shell: bash
       run: |
         sudo apt-get update
         sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
+
+    - name: Cache pinned Zig
+      # bootstrap.sh downloads zig into this host-level cache. Restoring
+      # it across runs avoids re-fetching ~45MB per job; on a hit
+      # bootstrap.sh sees the binary and skips straight to PATH export.
+      # Keyed on `.zig-version` so a version bump invalidates the cache.
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/lazybox/zig
+        key: lazybox-zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.zig-version') }}
+
+    - name: Install pinned Zig (scripts/bootstrap.sh)
+      shell: bash
+      run: ./scripts/bootstrap.sh
 
     - uses: dtolnay/rust-toolchain@stable
       with:

@@ -28,7 +28,8 @@ else ifeq ($(UNAME_M),x86_64)
 else
   HOST_ARCH := unknown
 endif
-ZIG_VERSION := 0.15.2
+# Single source of truth, shared with scripts/bootstrap.sh and CI.
+ZIG_VERSION := $(shell cat .zig-version)
 ZIG_SLUG := $(HOST_ARCH)-$(HOST_OS)-$(ZIG_VERSION)
 # Pinned zig lives in a HOST-LEVEL cache, not inside the checkout, so
 # every clone and worktree shares one download. Override the cache

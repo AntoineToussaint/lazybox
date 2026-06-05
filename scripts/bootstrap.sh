@@ -22,7 +22,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ZIG_VERSION="0.15.2"
+# Single source of truth for the pinned zig version, shared with the
+# Makefile and CI (.github/actions/rust-build-env runs this script). Bump
+# `.zig-version` and every consumer follows.
+ZIG_VERSION="$(cat "${ROOT}/.zig-version")"
 # Shared cache root, overridable. Keep this default in lockstep with
 # the Makefile's `ZIG_CACHE` so `make build`/`run` (which compute the
 # pinned PATH themselves) find what `make setup` downloaded here.
@@ -97,6 +100,15 @@ else
     exit 1
   fi
   echo "zig ${ZIG_VERSION}: installed to ${zig_bin}"
+fi
+
+# ── Expose pinned zig to subsequent CI steps ────────────────────────────
+# In GitHub Actions, $GITHUB_PATH is the only way to mutate PATH for later
+# steps. Append the pinned zig dir so CI's `cargo build`/`test` resolve the
+# version we just installed — the same dir the Makefile prepends via
+# PINNED_PATH locally. Keeps CI on the exact toolchain contributors run.
+if [ -n "${GITHUB_PATH:-}" ]; then
+  echo "${zig_dir}" >> "${GITHUB_PATH}"
 fi
 
 # ── tmux (warn only) ────────────────────────────────────────────────────

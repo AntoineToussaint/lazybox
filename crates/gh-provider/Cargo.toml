@@ -25,6 +25,7 @@ http = "1.4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

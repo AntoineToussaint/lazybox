@@ -4,13 +4,17 @@
 #   - demo/lazybox.tape → the pretty README GIF (demo/lazybox.gif + .mp4 + .png).
 #                         It spawns a shell, so its text capture carries volatile
 #                         content (tempdir suffix, clock, username) and is NOT a golden.
-#   - demo/golden.tape  → demo/golden.ascii, a deterministic capture of the `?`
-#                         help overlay (static lazybox chrome, no live shell). This
-#                         is the committed golden snapshot.
+#   - demo/golden.tape  → renders the `?` help overlay (static lazybox chrome,
+#                         no live shell). demo/golden.ascii is the committed
+#                         golden snapshot — just the keybinding table extracted
+#                         from that render (see below).
 #
-# GOLDEN SNAPSHOT TEST: on a pull request we re-render golden.tape and
-# `git diff --exit-code demo/golden.ascii`. Because that frame is byte-stable
-# across renders and machines, it only diverges when the UI or a keybinding
+# GOLDEN SNAPSHOT TEST: on a pull request we re-render golden.tape and compare
+# the keybinding table against the committed demo/golden.ascii. We compare only
+# the table, not VHS's full .ascii capture: that capture is the terminal
+# scrollback at end-of-tape, whose repaint count and blank padding vary with
+# render timing and across machines, so diffing it whole is flaky. The table
+# content is byte-stable, so it only diverges when the UI or a keybinding
 # actually changed — i.e. the demo went stale. CI then fails with instructions
 # to re-render and commit. This keeps the recorded demo honest without anyone
 # having to eyeball the GIF. The pretty GIF is re-rendered too (a smoke test
@@ -113,24 +117,37 @@ jobs:
 
       - name: Check golden snapshot (PR only)
         if: github.event_name == 'pull_request'
-        # If the re-rendered golden differs from what's committed, the demo
-        # is stale relative to the current UI / keybindings.
+        # The committed demo/golden.ascii holds ONLY the keybinding table — the
+        # byte-stable, machine-independent part of the `?` overlay. We do NOT
+        # diff VHS's raw .ascii: that file is the terminal scrollback at
+        # end-of-tape, a vertical stack of however many full-screen repaints
+        # happened before capture, and both the repaint count and the blank
+        # padding around them vary with render timing and across machines
+        # (Linux CI vs. a dev's macOS). Diffing the whole capture is therefore
+        # inherently flaky — the historical failures were a partial last frame
+        # (table truncated mid-row) or a differing number of stacked frames,
+        # neither of which means the UI changed.
         #
-        # Row 0 caveat: VHS's own shell prompt ('>') sits at row 0 before
-        # `lazybox --test` takes the screen, and whether it has scrolled off by
-        # the time VHS captures is a timing race on the Linux runner — the
-        # exact same render flips row 0 between '>' and blank run-to-run. That
-        # cell is VHS chrome, never lazybox UI (lazybox's chrome starts lower), so
-        # we normalize a lone leading '>' on row 0 of the fresh render to blank
-        # before diffing (the committed file already stores row 0 blank). Rows
-        # 1+ stay byte-exact, so a real UI / keybinding change still fails.
+        # Instead extract the last COMPLETE keybinding table from the fresh
+        # render and diff just that. The tape's `Wait+Screen /snippets/`
+        # guarantees the final frame's table is fully painted, so a complete
+        # block always exists; the table content only changes when the UI or a
+        # keybinding actually changes, which is exactly what this guards.
         run: |
-          sed -i '1s/^>$//' demo/golden.ascii
+          awk '/  Tab .* cycle panes/{c=1;b=""} c{b=b $0 ORS} c&&/snippets/{last=b;c=0} END{printf "%s",last}' \
+            demo/golden.ascii > demo/golden.ascii.table
+          if [ ! -s demo/golden.ascii.table ]; then
+            echo "::error::No complete keybinding table found in the rendered overlay — the render did not settle. Re-run the job."
+            exit 1
+          fi
+          mv demo/golden.ascii.table demo/golden.ascii
           if ! git diff --exit-code demo/golden.ascii; then
             echo "::error::demo/golden.ascii is stale. The lazybox UI or a keybinding changed but the demo was not regenerated."
-            echo "Re-render locally and commit the result:"
+            echo "Re-render locally and commit the result (the tape writes the full"
+            echo "scrollback; extract the table with the same awk this check uses):"
             echo "  cargo build -p lazybox-tui   # or: make build"
             echo "  PATH=\"\$PWD/target/debug:\$PATH\" vhs demo/golden.tape && PATH=\"\$PWD/target/debug:\$PATH\" vhs demo/lazybox.tape"
+            echo "  awk '/  Tab .* cycle panes/{c=1;b=\"\"} c{b=b \$0 ORS} c&&/snippets/{last=b;c=0} END{printf \"%s\",last}' demo/golden.ascii > t && mv t demo/golden.ascii"
             echo "  git add demo/golden.ascii demo/lazybox.gif demo/lazybox.mp4 demo/lazybox.png && git commit"
             exit 1
           fi

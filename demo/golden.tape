@@ -4,16 +4,24 @@
 # prompt carries volatile content (a random tempdir suffix, the wall clock, the
 # OS username) — so its text capture changes on every render and can't be a
 # golden. This tape never spawns a shell. It boots `lazybox --test` and opens the
-# `?` help overlay, which is static lazybox-owned chrome (the keybinding table).
-# Lazybox's own rows are byte-stable across renders, so the demo workflow's
-# `git diff` only fails when the UI or a keybinding actually changes — i.e.
-# when the demo genuinely went stale. (The one exception is row 0, which holds
-# VHS's shell prompt, not lazybox UI, and races between '>' and blank on the
-# Linux runner; the workflow normalizes that cell before diffing.)
+# `?` help overlay, whose keybinding table is static lazybox-owned chrome (built
+# from `ActionDef::all()`, no live data), so its content only changes when the
+# UI or a keybinding actually changes.
+#
+# What the demo workflow diffs: NOT this whole `.ascii` file. VHS's `.ascii`
+# output is the terminal's scrollback at end-of-tape — a vertical concatenation
+# of however many full-screen repaints happened, which varies with render
+# timing and across machines (Linux CI vs. a dev's macOS). The byte-stable part
+# is the keybinding table itself, so the workflow extracts just that table from
+# the render and diffs it against the committed `golden.ascii` (which holds only
+# the table). See `.github/workflows/demo.yml`.
 #
 # Regenerate alongside lazybox.tape whenever the UI changes:
 #   cargo build -p lazybox-tui
 #   PATH="$PWD/target/debug:$PATH" vhs demo/golden.tape
+#   # then extract the table (same awk the workflow uses) into golden.ascii:
+#   awk '/  Tab .* cycle panes/{c=1;b=""} c{b=b $0 ORS} c&&/snippets/{last=b;c=0} END{printf "%s",last}' \
+#     demo/golden.ascii > demo/golden.ascii.tmp && mv demo/golden.ascii.tmp demo/golden.ascii
 
 Output "demo/golden.ascii"
 
@@ -33,24 +41,16 @@ Enter
 Sleep 4s
 Show
 
-# Open the keybinding help overlay — fully deterministic, no live shell.
-# The keybinding table is static (built from `ActionDef::all()`, no live
-# data), so its content never changes between renders. The historical
-# flake was purely a capture race: VHS's end-of-tape frame selection
-# landed on a not-yet-settled frame on the Linux runner, truncating the
-# table mid-row with the remaining rows blanked.
-#
-# A fixed Sleep only moves WHEN the frame is grabbed; it can never
-# guarantee the grab lands on a fully-painted overlay, so on a loaded
-# runner the race kept resurfacing (the sleep was bumped 1.5s → 3s → 6s
-# and still flaked). Instead, block on `Wait+Screen` until the overlay's
-# LAST row is actually on screen: `snippets` is the final cell of the
-# bottom-right keybinding (`]]<key>  snippets`), so once it appears the
-# whole table above it has been painted and the end-of-tape capture is
-# guaranteed to grab the settled, complete frame. The generous timeout
-# absorbs slow boots without ever capturing a partial frame. This makes
-# the render deterministic by construction rather than probabilistically,
-# and does not touch the committed golden's content.
+# Open the keybinding help overlay, then block on `Wait+Screen` until the
+# overlay's LAST row is actually on screen: `snippets` is the final cell of
+# the bottom-right keybinding (`]]<key>  snippets`), so once it appears the
+# whole table above it has been painted. This guarantees the final captured
+# frame contains a complete table for the workflow to extract — a fixed
+# Sleep only moves WHEN the frame is grabbed and can't guarantee it lands on
+# a fully-painted overlay (the historical flake: the grab landed mid-paint
+# and the table was truncated mid-row with the rest blanked; the sleep was
+# bumped 1.5s → 3s → 6s and still raced). The generous timeout absorbs slow
+# boots; the trailing Sleep lets the frame settle before capture.
 Type "?"
 Wait+Screen@30s /snippets/
 Sleep 1s

@@ -326,6 +326,20 @@ impl From<GhError> for lazybox_core::ProviderError {
     }
 }
 
+/// Search query for one watched repo's open-PR fan-out.
+///
+/// The `-involves:USER` exclusion is the fix for issue #15. A watched
+/// repo exists to surface PRs the user is *not* otherwise part of; the
+/// PRs they *are* involved in already come back through the main
+/// `involves:USER` branch in the very same poll, so fetching them here
+/// too is pure duplicate download (measured at 17% of the union, and
+/// 89.6 KB on one busy repo). Negating `involves` server-side keeps
+/// only the genuinely-new set, dropping both the redundant bytes and
+/// the cross-branch dedup waste.
+fn watched_repo_query(repo: &str, user: &str) -> String {
+    format!("is:open is:pr repo:{repo} archived:false -involves:{user}")
+}
+
 #[derive(Clone)]
 pub struct GhClient {
     inner: Octocrab,
@@ -1317,7 +1331,7 @@ impl GhClient {
         const WATCHED_CONCURRENCY: usize = 5;
         let watched_fut = stream::iter(self.watch_repos.iter().cloned())
             .map(|repo| async move {
-                let query = format!("is:open is:pr repo:{repo} archived:false");
+                let query = watched_repo_query(&repo, &self.user);
                 let result = self.fetch_pr_single_query("watched-repo", query).await;
                 (repo, result)
             })
@@ -2895,6 +2909,24 @@ mod tests {
 
     fn logins(names: &[&str]) -> std::collections::BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Issue #15: the watched-repo fan-out must exclude PRs the user
+    /// is already involved in — those come back through the main
+    /// `involves:` branch in the same poll, so re-fetching them here is
+    /// duplicate download. The `-involves:USER` negation pushes that
+    /// dedup to GitHub's side, cutting bytes *and* union dedup waste.
+    #[test]
+    fn watched_repo_query_excludes_involves() {
+        let q = watched_repo_query("octo/repo", "test-user");
+        assert_eq!(
+            q,
+            "is:open is:pr repo:octo/repo archived:false -involves:test-user"
+        );
+        assert!(
+            q.contains("-involves:test-user"),
+            "watched query must negate the user's involvement: {q}"
+        );
     }
 
     #[test]

@@ -38,11 +38,19 @@ Show
 # data), so its content never changes between renders. The historical
 # flake was purely a capture race: VHS's end-of-tape frame selection
 # landed on a not-yet-settled frame on the Linux runner, truncating the
-# table mid-row with the remaining rows blanked. Sleep generously after
-# `?` so a long run of identical settled frames precedes the capture and
-# the grab reliably lands on the full table. (Bumped 1.5s → 3s → 6s as
-# the runner stayed marginal; sleep affects only WHEN the frame is
-# grabbed, never its content, so this stabilizes the diff without
-# touching the committed golden.)
+# table mid-row with the remaining rows blanked.
+#
+# A fixed Sleep only moves WHEN the frame is grabbed; it can never
+# guarantee the grab lands on a fully-painted overlay, so on a loaded
+# runner the race kept resurfacing (the sleep was bumped 1.5s → 3s → 6s
+# and still flaked). Instead, block on `Wait+Screen` until the overlay's
+# LAST row is actually on screen: `snippets` is the final cell of the
+# bottom-right keybinding (`]]<key>  snippets`), so once it appears the
+# whole table above it has been painted and the end-of-tape capture is
+# guaranteed to grab the settled, complete frame. The generous timeout
+# absorbs slow boots without ever capturing a partial frame. This makes
+# the render deterministic by construction rather than probabilistically,
+# and does not touch the committed golden's content.
 Type "?"
-Sleep 6s
+Wait+Screen@30s /snippets/
+Sleep 1s

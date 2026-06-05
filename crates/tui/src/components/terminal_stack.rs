@@ -1913,11 +1913,17 @@ impl TerminalStack {
             );
         }
 
+        // Top chrome eats 3 rows (title + divider + blank). The bottom
+        // row is held back as a blank margin so the inner program's last
+        // line — e.g. Claude Code's "? for shortcuts" — never renders
+        // flush against the footer hint bar one row below. Without the
+        // gap that line abuts lazybox's hints and reads as one of them,
+        // appearing or vanishing purely with scroll position (#20).
         let inner = Rect {
             x: area.x + 1,
             y: area.y + 3,
             width: area.width.saturating_sub(2),
-            height: area.height.saturating_sub(3),
+            height: area.height.saturating_sub(4),
         };
 
         if visible.is_empty() {
@@ -3240,6 +3246,104 @@ mod resync_tests {
             seq: 5,
         });
         assert!(!stack.terminals.contains_key(&TerminalId(99)));
+    }
+}
+
+/// Regression coverage for #20: the footer hint bar (and the blank
+/// margin lazybox holds back above it) must look the same no matter
+/// where the focused terminal is scrolled. The bug was the inner
+/// program's last line — Claude Code prints "? for shortcuts" — landing
+/// flush against the hint bar at the live bottom and being read as one
+/// of lazybox's hints, then vanishing once the user scrolled up.
+#[cfg(test)]
+mod footer_scroll_independence {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    const W: u16 = 80;
+    const H: u16 = 24;
+
+    /// Render the terminal pane + footer the way `Model::view` does and
+    /// return the screen rows as plain strings (symbols only).
+    fn render_rows(stack: &mut TerminalStack) -> Vec<String> {
+        let backend = TestBackend::new(W, H);
+        let mut term = Terminal::new(backend).unwrap();
+        let binds = TerminalStack::contextual_bindings(&std::collections::BTreeMap::new());
+        term.draw(|f| {
+            // Footer owns the last row; the panes fill everything above.
+            let pane = Rect::new(0, 0, W, H - 1);
+            let footer = Rect::new(0, H - 1, W, 1);
+            stack.render(pane, f, true);
+            crate::realm::components::footer::render(f, footer, &binds, None, None);
+        })
+        .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..H)
+            .map(|y| {
+                (0..W)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn agent_stack_with_scrollback() -> TerminalStack {
+        let sk = SessionKey::new("s");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut slot =
+            TerminalStack::make_slot(sk.clone(), TerminalKind::Agent("claude".into()), 0, false);
+        slot.vt.ensure_size(W - 3, H - 4);
+        let mut payload = String::new();
+        for i in 0..40 {
+            payload.push_str(&format!("output line {i}\r\n"));
+        }
+        // Mirror Claude Code's persistent bottom chrome.
+        payload.push_str("? for shortcuts");
+        slot.vt.feed(payload.as_bytes());
+        stack.terminals.insert(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+        stack
+    }
+
+    #[test]
+    fn hint_bar_and_its_margin_are_identical_at_top_and_bottom() {
+        let mut stack = agent_stack_with_scrollback();
+
+        // At the live bottom the inner program's "? for shortcuts" is on
+        // screen; the margin row + footer below it must still be clean.
+        let at_bottom = render_rows(&mut stack);
+        // Scroll well up into scrollback, then back down to the live
+        // bottom — same two rows both times.
+        stack.scroll_active(-12);
+        let at_top = render_rows(&mut stack);
+
+        let margin = (H - 2) as usize; // blank row lazybox holds back
+        let footer_row = (H - 1) as usize; // the hint bar itself
+
+        assert_eq!(
+            at_top[margin], at_bottom[margin],
+            "margin row above the hint bar drifted with scroll: {:?} vs {:?}",
+            at_top[margin], at_bottom[margin]
+        );
+        assert_eq!(
+            at_top[footer_row], at_bottom[footer_row],
+            "hint bar drifted with scroll: {:?} vs {:?}",
+            at_top[footer_row], at_bottom[footer_row]
+        );
+
+        // The margin keeps inner-program output (the stray "?") from ever
+        // touching the hint bar, at either scroll position.
+        assert_eq!(at_bottom[margin], "", "agent output bled into the margin");
+        assert_eq!(at_top[margin], "");
+        assert!(
+            !at_bottom[footer_row].contains('?'),
+            "footer should never carry a `?` hint: {:?}",
+            at_bottom[footer_row]
+        );
     }
 }
 

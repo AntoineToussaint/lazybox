@@ -1142,17 +1142,22 @@ pub(crate) async fn cleanup_merged_worktrees_with(
 /// review-thread details so the right pane is hot when the user
 /// gets there.
 ///
-/// Why N=5 + concurrency=3: each `fetch_pr_details` call costs ~550
-/// graphql units; with N=5 + 60s cadence that's ~27500/hr against
-/// GitHub's 5000-cost-units-per-graphql-resource hourly budget. Fits
-/// comfortably. Concurrency=3 keeps the local rate budget healthy
-/// (capacity 30, refill 30/min) alongside the parallel main+merged+
-/// watched-repo branches of the same tick.
+/// Why N=5 + concurrency=3: a measured prefetch batch of 5 PRs costs
+/// ~1s wall-clock, ~59 KB, and 5 GraphQL units total — 1 unit per
+/// `fetch_pr_details` call, not the ~550 originally guessed (see
+/// `docs/sync-performance.md`). Both the GraphQL budget (5000/hr) and
+/// the local rate bucket (capacity 30, refill 30/min) absorb that
+/// trivially. Concurrency=3 keeps the local budget healthy alongside
+/// the parallel main+merged+watched-repo branches of the same tick.
 ///
 /// Dedup via `TickState::prefetched_pr_details`: once we've pulled a
 /// PR's threads this daemon session, the row's still subject to the
 /// TUI's lazy-fetch on focus (so re-opens get fresh data), but we
-/// don't re-pull every poll cycle. Cleared on daemon restart.
+/// don't re-pull every poll cycle. Cleared on daemon restart. This is
+/// why prefetch is *not* a fixed per-tick tax: it fires only for PRs
+/// that newly clear the score threshold, so on a steady inbox it goes
+/// quiet after warm-up and won't dominate the tick even once
+/// incremental sync (#14) makes the main poll cheap.
 ///
 /// Scoring (descending):
 /// - CI failing → +100 (highest-actionability — user wants to fix)

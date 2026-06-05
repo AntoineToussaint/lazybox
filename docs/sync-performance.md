@@ -18,7 +18,21 @@ ignored integration harness against your own account:
 ```sh
 # token resolves from $GH_TOKEN, $GITHUB_TOKEN, or `gh auth token`
 LAZYBOX_WATCH=owner/repo-a,owner/repo-b \
-  cargo test -p lazybox-gh --test sync_trace -- --ignored --nocapture
+  cargo test -p lazybox-gh --test sync_trace capture_fetch_all_prs_trace \
+    -- --ignored --nocapture
+```
+
+`capture_fetch_all_prs_trace` measures only the main poll. The
+`capture_prefetch_trace` test in the same file measures the second
+phase the server runs every tick — `prefetch_top_pr_details` — by
+scoring the just-polled PRs with the same logic as the handler and
+firing the top-5 `fetch_pr_details` calls (3 concurrent), each
+emitting a `branch="pr-details"` line:
+
+```sh
+LAZYBOX_WATCH=owner/repo-a,owner/repo-b \
+  cargo test -p lazybox-gh --test sync_trace capture_prefetch_trace \
+    -- --ignored --nocapture
 ```
 
 Each branch emits one line when it finishes:
@@ -97,6 +111,59 @@ involved in, which `involves-main` returned moments earlier. The busy
 watched repo alone re-downloaded 89.6 KB of mostly-duplicate PRs. At
 10+ watched repos this branch count and its overlap dominate.
 
+## Detail prefetch cost (#16)
+
+After every successful poll the server runs `prefetch_top_pr_details`:
+it scores the just-polled PRs (CI failing +100, review
+pending/changes-requested +50, unread +10 each capped at +50) and
+fires `fetch_pr_details` for the top 5 (3 concurrent) to warm the
+right pane. Issue #12 only traced `fetch_all_prs`, so this phase was
+unmeasured. `capture_prefetch_trace` reproduces it.
+
+### Measured trace
+
+Same account (`AntoineToussaint`), 5 watched repos, immediately after
+the `involves-main` poll above. All 5 prefetch slots filled (5 PRs
+cleared the score threshold):
+
+| Call (`branch="pr-details"`) | elapsed | requests | cost | bytes  |
+|------------------------------|--------:|---------:|-----:|-------:|
+| 1                            |   438 ms |       1 |    1 | 19.6 KB |
+| 2                            |   543 ms |       1 |    1 |  4.7 KB |
+| 3                            |   611 ms |       1 |    1 | 27.3 KB |
+| 4                            |   458 ms |       1 |    1 |  4.5 KB |
+| 5                            |   415 ms |       1 |    1 |  4.3 KB |
+| **phase total (conc. 3)**    | **959 ms** |     5 |  **5** | **60.5 KB** |
+
+### What the numbers say
+
+**1. GraphQL cost was over-estimated 100×.** The handler comment
+justified N=5 by assuming ~550 units per `fetch_pr_details` call.
+GitHub's reported `rateLimit.cost` is **1** per call — a single
+node-id lookup, not a paginated search. A full prefetch batch is 5
+units; at one batch/minute that's 300/hr against the 5000/hr budget.
+Cost is a non-issue, exactly as for the main poll.
+
+**2. Wall-clock and bytes are modest and bounded.** ~1 s and ~60 KB
+per batch — about 8% of today's ~11 s poll. Even once #14 collapses
+the main poll, this does **not** become a fixed per-tick tax: the
+`prefetched_pr_details` dedup set means a PR is prefetched at most
+once per daemon session, so prefetch fires only for PRs that *newly*
+clear the threshold. On a steady inbox it goes quiet after warm-up;
+on a churning inbox it tracks the rate of new actionable PRs, which is
+exactly when warming the cache pays off.
+
+### Decision: keep N=5, every tick
+
+No change to cadence or N. The cadence concern in the issue —
+"5 calls every tick" — is already mitigated by the per-session dedup,
+and the measured worst case (a full cold batch) is cheap in every
+dimension. Making it event-driven or reducing N would add complexity
+to shave ~1 s off a path that is already self-limiting and only runs
+when there is genuinely new detail worth pre-warming. The one fix
+warranted by the data was the wrong cost number in the handler
+comment, now corrected.
+
 ## Recommended follow-ups
 
 Filed as separate issues so each can be sized and shipped on its own
@@ -114,7 +181,8 @@ Filed as separate issues so each can be sized and shipped on its own
    main search, or fold watched repos into the main query via `repo:`
    qualifiers. Removes the 17%-and-growing duplicate download.
 
-3. **Quantify and reconsider per-tick detail prefetch** (#16). `fetch_pr_details`
-   is now instrumented (`branch="pr-details"`); capture its share under
-   a real prefetch cycle and decide whether the top-5 prefetch every
-   tick earns its cost once incremental sync lands.
+3. **Quantify and reconsider per-tick detail prefetch** (#16,
+   resolved). Measured: ~1 s / ~60 KB / 5 GraphQL units per batch, and
+   self-limiting via the per-session dedup set. Decision is to keep
+   N=5 on every tick — see [Detail prefetch cost (#16)](#detail-prefetch-cost-16)
+   above.

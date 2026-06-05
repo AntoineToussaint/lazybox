@@ -110,6 +110,7 @@ query($query: String!, $first: Int!, $after: String) {
     }
   }
   rateLimit {
+    cost
     limit
     remaining
     resetAt
@@ -180,6 +181,12 @@ pub struct GqlRateLimit {
     pub limit: u32,
     #[serde(rename = "resetAt")]
     pub reset_at: String,
+    /// GraphQL point cost of the query that returned this block.
+    /// Optional: only the poll-path queries (`SEARCH_QUERY`,
+    /// `PR_DETAILS_QUERY`) select `cost`; mutations and other reads
+    /// don't, and GitHub omits it unless asked.
+    #[serde(default)]
+    pub cost: Option<u32>,
 }
 
 fn default_limit() -> u32 {
@@ -906,6 +913,7 @@ query($id: ID!) {
     }
   }
   rateLimit {
+    cost
     limit
     remaining
     resetAt
@@ -3338,7 +3346,7 @@ mod tests {
                 }
               ]
             },
-            "rateLimit": { "limit": 5000, "remaining": 4999, "resetAt": "2026-05-28T13:00:00Z" }
+            "rateLimit": { "cost": 1, "limit": 5000, "remaining": 4999, "resetAt": "2026-05-28T13:00:00Z" }
           },
           "errors": null
         }"#
@@ -3361,6 +3369,9 @@ mod tests {
         assert_eq!(pr.comments.nodes.len(), 1);
         assert_eq!(pr.comments.nodes[0].body, "");
         assert_eq!(pr.comments.total_count, Some(3));
+        // The `cost` field selected for sync profiling must ride
+        // through onto the rate-limit block.
+        assert_eq!(data.rate_limit.expect("rateLimit present").cost, Some(1));
     }
 
     #[test]

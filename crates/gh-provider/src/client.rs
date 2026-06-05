@@ -349,6 +349,53 @@ pub struct GhClient {
     notifications_state: SharedNotificationsState,
 }
 
+/// Per-branch cost breakdown for one branch of a PR fetch, emitted
+/// under the `gh_sync_metrics` tracing target so a real poll can be
+/// profiled without changing the default log output. See
+/// `docs/sync-performance.md` for how to capture and read a trace.
+#[derive(Debug, Default, Clone)]
+struct BranchMetrics {
+    /// Branch label: `involves-main`, `review-requested`,
+    /// `merged-sweep`, `watched-repo`, `pr-details`, …
+    branch: &'static str,
+    /// Wall-clock from branch entry to all pages parsed.
+    elapsed_ms: u128,
+    /// HTTP round-trips the branch made (pages for the paginated
+    /// search; always 1 for single-shot queries).
+    requests: usize,
+    /// PRs the branch returned *before* cross-branch dedup.
+    prs: usize,
+    /// Sum of GitHub's reported GraphQL `rateLimit.cost` across this
+    /// branch's requests. 0 if GitHub didn't report it.
+    graphql_cost: u32,
+    /// Raw response bytes deserialized across this branch's requests.
+    resp_bytes: usize,
+}
+
+impl BranchMetrics {
+    fn new(branch: &'static str) -> Self {
+        Self {
+            branch,
+            ..Default::default()
+        }
+    }
+
+    /// Emit the breakdown. DEBUG so it's off by default and costs
+    /// nothing until `RUST_LOG=gh_sync_metrics=debug` turns it on.
+    fn emit(&self) {
+        tracing::debug!(
+            target: "gh_sync_metrics",
+            branch = self.branch,
+            elapsed_ms = self.elapsed_ms as u64,
+            requests = self.requests,
+            prs = self.prs,
+            graphql_cost = self.graphql_cost,
+            resp_bytes = self.resp_bytes,
+            "branch fetch complete",
+        );
+    }
+}
+
 impl GhClient {
     pub async fn from_credential(cred: Credential) -> Result<Self, GhError> {
         let source = cred.source.clone();
@@ -461,6 +508,21 @@ impl GhClient {
     where
         T: serde::de::DeserializeOwned,
     {
+        self.post_graphql_with_retry_measured(body)
+            .await
+            .map(|(parsed, _bytes)| parsed)
+    }
+
+    /// Like [`post_graphql_with_retry`] but also surfaces the byte
+    /// length of the successful response body. Used by the PR-fetch
+    /// path to record per-branch response size for sync profiling.
+    async fn post_graphql_with_retry_measured<T>(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<(T, usize), GhError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
         const DELAYS_MS: &[u64] = &[200, 800];
         // Per-request wall-clock cap. The default reqwest client has
         // no timeout — a flaky network can leave the HTTP call
@@ -547,7 +609,12 @@ impl GhClient {
     /// that path swallows the HTTP status on non-JSON responses
     /// (returns `octocrab::Error::Serde` with no access to the raw
     /// body), which is the bug in #13.
-    async fn post_graphql_once<T>(&self, body: &serde_json::Value) -> Result<T, GhError>
+    /// Returns the deserialized response alongside the byte length of
+    /// the raw HTTP body we parsed — the PR-fetch path uses the byte
+    /// count to attribute response size per branch in
+    /// `gh_sync_metrics`. Callers that don't care wrap this via
+    /// `post_graphql_with_retry` and drop the size.
+    async fn post_graphql_once<T>(&self, body: &serde_json::Value) -> Result<(T, usize), GhError>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -570,6 +637,7 @@ impl GhClient {
             .body_to_string(response)
             .await
             .map_err(GhError::Api)?;
+        let byte_len = raw_body.len();
         // Non-2xx or non-JSON: never attempt to parse — the body is
         // an HTML page / login redirect / GitHub error JSON we'd
         // rather surface verbatim than mis-deserialise.
@@ -580,12 +648,14 @@ impl GhClient {
         // failure here is a real schema mismatch between our types
         // and GitHub's response — surface it with status + content-
         // type intact instead of dropping to `Serde`.
-        serde_json::from_str::<T>(&raw_body).map_err(|e| GhError::HttpStatus {
-            status,
-            reason: " (json parse failed)".to_string(),
-            content_type,
-            body_excerpt: format!("{e} — body: {}", body_excerpt(&raw_body)),
-        })
+        serde_json::from_str::<T>(&raw_body)
+            .map(|parsed| (parsed, byte_len))
+            .map_err(|e| GhError::HttpStatus {
+                status,
+                reason: " (json parse failed)".to_string(),
+                content_type,
+                body_excerpt: format!("{e} — body: {}", body_excerpt(&raw_body)),
+            })
     }
 
     /// Gate-or-fail: spend one rate-budget token and convert the
@@ -1262,11 +1332,19 @@ impl GhClient {
         // sweep + watched + reviewer paths are best-effort: log +
         // continue.
         let mut tasks = main_res?;
+        // Per-branch fetched counts (pre-dedup) drive the union-level
+        // dedup hit-rate emitted below — how much of each poll was
+        // PRs already returned by an earlier branch.
+        let main_fetched = tasks.len();
+        let mut reviewer_fetched = 0usize;
+        let mut merged_fetched = 0usize;
+        let mut watched_fetched = 0usize;
         let mut existing: std::collections::HashSet<String> =
             tasks.iter().map(|t| t.id.key.clone()).collect();
 
         match reviewer_res {
             Ok(rev_tasks) => {
+                reviewer_fetched = rev_tasks.len();
                 let mut added = 0usize;
                 for t in rev_tasks {
                     if existing.insert(t.id.key.clone()) {
@@ -1287,6 +1365,7 @@ impl GhClient {
 
         match merged_res {
             Ok(merged_tasks) => {
+                merged_fetched = merged_tasks.len();
                 let mut added = 0usize;
                 for t in merged_tasks {
                     if existing.insert(t.id.key.clone()) {
@@ -1309,6 +1388,7 @@ impl GhClient {
         for (repo, result) in watched_results {
             match result {
                 Ok(repo_tasks) => {
+                    watched_fetched += repo_tasks.len();
                     for t in repo_tasks {
                         if existing.insert(t.id.key.clone()) {
                             tasks.push(t);
@@ -1327,6 +1407,31 @@ impl GhClient {
             "fetch_all_prs: completed in {elapsed_ms}ms — {} PRs (incl. {} watched repos + merged-sweep)",
             tasks.len(),
             self.watch_repos.len()
+        );
+        // Union-level breakdown: how many PRs each branch fetched vs
+        // how many survived dedup. `duplicates` is the redundant
+        // download every poll pays for overlapping search branches.
+        let total_fetched = main_fetched + reviewer_fetched + merged_fetched + watched_fetched;
+        let unique = tasks.len();
+        let duplicates = total_fetched.saturating_sub(unique);
+        let dedup_pct = if total_fetched > 0 {
+            duplicates as f64 / total_fetched as f64 * 100.0
+        } else {
+            0.0
+        };
+        tracing::debug!(
+            target: "gh_sync_metrics",
+            elapsed_ms = elapsed_ms as u64,
+            total_fetched,
+            unique,
+            duplicates,
+            dedup_pct = format!("{dedup_pct:.0}"),
+            main = main_fetched,
+            reviewer = reviewer_fetched,
+            merged = merged_fetched,
+            watched = watched_fetched,
+            watched_repos = self.watch_repos.len(),
+            "fetch_all_prs union breakdown",
         );
         if !self.watch_repos.is_empty() && watch_failures == self.watch_repos.len() {
             return Err(GhError::WatchAllFailed {
@@ -1491,6 +1596,8 @@ impl GhClient {
     /// fetch can `tokio::join!` it alongside the merged-sweep + the
     /// watched-repo fan-out.
     async fn fetch_pr_search_paginated(&self, search_query: &str) -> Result<Vec<Task>, GhError> {
+        let started = std::time::Instant::now();
+        let mut metrics = BranchMetrics::new("involves-main");
         let mut tasks: Vec<Task> = Vec::new();
         let mut cursor: Option<String> = None;
         let mut page = 0usize;
@@ -1501,8 +1608,10 @@ impl GhClient {
                 "GraphQL page {page} body: {}",
                 serde_json::to_string(&body).unwrap_or_default()
             );
-            let raw: serde_json::Value =
-                self.post_graphql_with_retry(&body).await.map_err(|e| {
+            let (raw, page_bytes): (serde_json::Value, usize) = self
+                .post_graphql_with_retry_measured(&body)
+                .await
+                .map_err(|e| {
                     tracing::error!("GraphQL HTTP error (page {page}): {e}\n{e:?}");
                     tracing::error!(
                         "GraphQL request body was: {}",
@@ -1510,6 +1619,8 @@ impl GhClient {
                     );
                     e
                 })?;
+            metrics.requests += 1;
+            metrics.resp_bytes += page_bytes;
             let response: graphql::GqlResponse = match serde_json::from_value(raw.clone()) {
                 Ok(r) => r,
                 Err(e) => {
@@ -1544,6 +1655,7 @@ impl GhClient {
                     rl.limit,
                     rl.reset_at
                 );
+                metrics.graphql_cost += rl.cost.unwrap_or(0);
                 self.observe_rate_limit(rl);
             }
             tasks.extend(
@@ -1572,6 +1684,9 @@ impl GhClient {
                 });
             }
         }
+        metrics.prs = tasks.len();
+        metrics.elapsed_ms = started.elapsed().as_millis();
+        metrics.emit();
         Ok(tasks)
     }
 
@@ -1585,6 +1700,8 @@ impl GhClient {
         op: &'static str,
         query: String,
     ) -> Result<Vec<Task>, GhError> {
+        let started = std::time::Instant::now();
+        let mut metrics = BranchMetrics::new(op);
         if let Err(reason) = self.try_acquire() {
             return Err(GhError::RateLimited {
                 retry_after_secs: 1,
@@ -1592,7 +1709,10 @@ impl GhClient {
             });
         }
         let body = graphql::query_body(&query);
-        let resp: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
+        let (resp, bytes): (graphql::GqlResponse, usize) =
+            self.post_graphql_with_retry_measured(&body).await?;
+        metrics.requests = 1;
+        metrics.resp_bytes = bytes;
         if let Some(errors) = resp.errors {
             let joined: String = errors
                 .iter()
@@ -1605,14 +1725,19 @@ impl GhClient {
             return Ok(Vec::new());
         };
         if let Some(rl) = &data.rate_limit {
+            metrics.graphql_cost = rl.cost.unwrap_or(0);
             self.observe_rate_limit(rl);
         }
-        Ok(data
+        let tasks: Vec<Task> = data
             .search
             .nodes
             .iter()
             .map(|pr| graphql::pr_to_task(pr, &self.user))
-            .collect())
+            .collect();
+        metrics.prs = tasks.len();
+        metrics.elapsed_ms = started.elapsed().as_millis();
+        metrics.emit();
+        Ok(tasks)
     }
 
     /// Fetch all open GitHub Issues involving the authenticated user,
@@ -2120,9 +2245,14 @@ impl GhClient {
         &self,
         pull_request_node_id: &str,
     ) -> Result<Option<graphql::PrDetails>, GhError> {
+        let started = std::time::Instant::now();
+        let mut metrics = BranchMetrics::new("pr-details");
         self.acquire_or_block("PR details lazy-fetch")?;
         let body = graphql::pr_details_body(pull_request_node_id);
-        let response: graphql::GqlPrDetailsResponse = self.post_graphql_with_retry(&body).await?;
+        let (response, bytes): (graphql::GqlPrDetailsResponse, usize) =
+            self.post_graphql_with_retry_measured(&body).await?;
+        metrics.requests = 1;
+        metrics.resp_bytes = bytes;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -2136,8 +2266,11 @@ impl GhClient {
             .data
             .ok_or_else(|| GhError::Graphql("fetch_pr_details: no data".into()))?;
         if let Some(rl) = &data.rate_limit {
+            metrics.graphql_cost = rl.cost.unwrap_or(0);
             self.observe_rate_limit(rl);
         }
+        metrics.elapsed_ms = started.elapsed().as_millis();
+        metrics.emit();
         let Some(node) = data.node else {
             tracing::info!(
                 "fetch_pr_details: node {} not found (deleted or scope changed)",
@@ -2960,6 +3093,27 @@ mod tests {
             matches!(err, GhError::HttpStatus { status: 200, .. }),
             "expected HttpStatus(200), got: {err:?}"
         );
+    }
+
+    /// The measured GraphQL helper must report the exact byte length
+    /// of the response body it deserialized — that count feeds the
+    /// per-branch `resp_bytes` metric used to profile sync waste.
+    #[tokio::test(flavor = "current_thread")]
+    async fn measured_helper_reports_response_byte_length() {
+        const BODY: &str = r#"{"data":{"hello":"world"},"errors":null}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        let body = serde_json::json!({"query": "{}"});
+        let (value, bytes) = client
+            .post_graphql_with_retry_measured::<serde_json::Value>(&body)
+            .await
+            .expect("canned 2xx JSON should parse");
+        assert_eq!(
+            bytes,
+            BODY.len(),
+            "reported byte length must equal the raw response body length"
+        );
+        assert_eq!(value["data"]["hello"], "world");
     }
 }
 

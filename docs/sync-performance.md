@@ -176,10 +176,11 @@ Filed as separate issues so each can be sized and shipped on its own
    the whole poll — by an order of magnitude. Needs a full-sweep
    fallback (the notifications heartbeat already has the scaffolding).
 
-2. **Stop the watched-repo fan-out from re-fetching `involves:` PRs** (#15).
-   Skip (or post-filter) watched-repo results already covered by the
-   main search, or fold watched repos into the main query via `repo:`
-   qualifiers. Removes the 17%-and-growing duplicate download.
+2. **Stop the watched-repo fan-out from re-fetching `involves:` PRs** (#15,
+   *done*). Each watched-repo query now carries `-involves:USER`, so
+   GitHub never returns the PRs the main `involves:` branch already
+   covers. The duplicate download is filtered server-side: bytes drop
+   and `dedup_pct` stays low as watched-repo count grows.
 
 3. **Quantify and reconsider per-tick detail prefetch** (#16,
    resolved). Measured: ~1 s / ~60 KB / 5 GraphQL units per batch, and

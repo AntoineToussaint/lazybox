@@ -103,11 +103,18 @@ Filed as separate issues so each can be sized and shipped on its own
 (#14, #15, #16):
 
 1. **Incremental `updated:>=` window on `involves-main`** (#14, highest
-   leverage). Narrow the main search to PRs changed since the last
-   poll. On a steady inbox this collapses 2 slow pages (~14 s, 143 KB)
-   to a near-empty first page, cutting the dominant branch — and thus
-   the whole poll — by an order of magnitude. Needs a full-sweep
-   fallback (the notifications heartbeat already has the scaffolding).
+   leverage). **Done.** The global `involves:` PR sweep now narrows to
+   `updated:>=<last sweep start>` on a steady inbox, collapsing the 2
+   slow pages (~14 s, 143 KB) to a near-empty first page. The window
+   floor advances each global sweep (`GhClient::record_pr_sweep_window`);
+   a windowed sweep can't observe PRs that left the search without an
+   `updatedAt` bump (silently closed, un-involved, transferred), so one
+   sweep per `FULL_RECONCILE_INTERVAL` (1 h) — plus the first sweep
+   after start and every manual refresh — drops the window and
+   reconciles the whole inbox. Only that unwindowed reconcile reports
+   `PolledScope::Exhaustive`, so a windowed sweep never drives deletion.
+   To profile the windowed path, pass a recent `Some(updated_since)` to
+   `fetch_all_prs` in the `sync_trace` harness instead of `None`.
 
 2. **Stop the watched-repo fan-out from re-fetching `involves:` PRs** (#15).
    Skip (or post-filter) watched-repo results already covered by the

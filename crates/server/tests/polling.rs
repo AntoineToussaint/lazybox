@@ -1640,15 +1640,16 @@ async fn rescope_with_exhaustive_scope_still_deletes_stale() {
 #[test]
 fn gh_polled_scope_downgrades_to_preserve_all_on_partial_sweep() {
     use polling::{PolledScope, gh_polled_scope};
-    // Clean global sweep → Exhaustive (rescope may delete stale rows).
+    // Clean, unwindowed (reconcile) global sweep → Exhaustive (rescope
+    // may delete stale rows).
     assert_eq!(
-        gh_polled_scope(true, &[], false),
+        gh_polled_scope(true, &[], false, false),
         PolledScope::Exhaustive,
-        "a clean global sweep authoritatively covers everything",
+        "a clean reconcile global sweep authoritatively covers everything",
     );
     // Clean round-robin tick → only the queried repos are authoritative.
     assert_eq!(
-        gh_polled_scope(false, &["owner/a".into()], false),
+        gh_polled_scope(false, &["owner/a".into()], false, false),
         PolledScope::Repos(vec!["owner/a".into()]),
     );
     // PARTIAL sweep (e.g. PR query errored, issues OK) → empty
@@ -1657,14 +1658,23 @@ fn gh_polled_scope_downgrades_to_preserve_all_on_partial_sweep() {
     // hiccupped rather than because it merged/closed. The `run_global`
     // flag is irrelevant once the sweep is partial.
     assert_eq!(
-        gh_polled_scope(true, &[], true),
+        gh_polled_scope(true, &[], true, false),
         PolledScope::Repos(Vec::new()),
         "a partial global sweep must NOT claim exhaustive coverage",
     );
     assert_eq!(
-        gh_polled_scope(false, &["owner/a".into()], true),
+        gh_polled_scope(false, &["owner/a".into()], true, false),
         PolledScope::Repos(Vec::new()),
         "a partial round-robin tick must preserve all, not just unqueried repos",
+    );
+    // WINDOWED global sweep (issue #14): only changed PRs came back, so
+    // the unchanged majority is absent — same data-loss shape as a
+    // partial sweep. Must preserve all; only the periodic reconcile
+    // sweep (windowed=false) drives deletion.
+    assert_eq!(
+        gh_polled_scope(true, &[], false, true),
+        PolledScope::Repos(Vec::new()),
+        "a windowed global sweep must NOT claim exhaustive coverage",
     );
 }
 
@@ -1719,7 +1729,7 @@ async fn rescope_preserves_prs_when_pr_fetch_partially_failed() {
         saw_unknown_mergeable: false,
         source_scopes: std::collections::HashMap::from([(
             "github".into(),
-            polling::gh_polled_scope(true, &[], true),
+            polling::gh_polled_scope(true, &[], true, false),
         )]),
         all_full: true,
     };

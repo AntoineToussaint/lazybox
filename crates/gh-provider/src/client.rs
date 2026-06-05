@@ -895,6 +895,21 @@ impl GhClient {
     /// `closed` with no comment) closes within a coffee break.
     pub const FULL_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
 
+    /// Cadence for the UNWINDOWED reconcile sweep (issue #14). Most
+    /// global sweeps narrow the `involves:` search to
+    /// `updated:>=<last sweep>` so a steady inbox collapses the
+    /// dominant `involves-main` branch from ~14s/143 KB to a near-empty
+    /// first page. That windowed search can't observe PRs that left the
+    /// window without bumping `updatedAt` — a silently-closed PR, one
+    /// the user got un-involved from, a transfer — so every
+    /// `FULL_RECONCILE_INTERVAL` (and on manual refresh / the first
+    /// sweep after start) one sweep drops the window and re-reconciles
+    /// the whole inbox. The reconcile sweep is also the only one that
+    /// reports exhaustive coverage, i.e. the only one allowed to drive
+    /// rescope deletion. An hour balances "delete stale rows promptly"
+    /// against "pay the heavy 143 KB download rarely."
+    pub const FULL_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
     /// Should the next sync cycle run a heavy full sweep, or is the
     /// notifications-driven incremental path safe to use? Returns true
     /// when no sweep has run yet (first tick after daemon start) or
@@ -932,6 +947,52 @@ impl GhClient {
         state.force_full_sweep = false;
         if state.last_modified.is_none() {
             state.last_modified = Some(notifications::format_http_date(chrono::Utc::now()));
+        }
+    }
+
+    /// Decide the `updated:>=` floor for the next GLOBAL `involves:` PR
+    /// sweep (issue #14). `None` → run an unwindowed reconcile (first
+    /// sweep, manual refresh, or the reconcile cadence elapsed): fetch
+    /// every involved PR so rescope can delete the gone ones. `Some(ts)`
+    /// → windowed sweep: only PRs updated since the previous sweep,
+    /// skipping the unchanged majority on a steady inbox.
+    ///
+    /// Read-only — the caller commits the outcome via
+    /// [`record_pr_sweep_window`](Self::record_pr_sweep_window) once the
+    /// sweep succeeds. Only meaningful on a global sweep tick; the
+    /// round-robin per-repo path doesn't use a window.
+    pub fn next_pr_sweep_window(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let state = self
+            .notifications_state
+            .lock()
+            .expect("notifications state mutex poisoned");
+        if state.is_full_reconcile_due(Self::FULL_RECONCILE_INTERVAL) {
+            return None;
+        }
+        state.last_pr_sweep_at_utc
+    }
+
+    /// Record a completed GLOBAL `involves:` PR sweep. `sweep_started`
+    /// (captured BEFORE the fetch, so a PR touched mid-sweep is caught
+    /// next time) becomes the `updated:>=` floor for the next windowed
+    /// sweep; a reconcile additionally re-arms the reconcile timer.
+    ///
+    /// Called ONLY when the tick actually ran the global search — a
+    /// round-robin per-repo full sweep never advances the floor, since
+    /// it didn't look at the whole involved set and moving the floor
+    /// past PRs it never fetched would drop them from the next window.
+    pub fn record_pr_sweep_window(
+        &self,
+        sweep_started: chrono::DateTime<chrono::Utc>,
+        was_reconcile: bool,
+    ) {
+        let mut state = self
+            .notifications_state
+            .lock()
+            .expect("notifications state mutex poisoned");
+        state.last_pr_sweep_at_utc = Some(sweep_started);
+        if was_reconcile {
+            state.last_full_reconcile_at = Some(std::time::Instant::now());
         }
     }
 
@@ -1225,7 +1286,16 @@ impl GhClient {
         Ok(issue.map(|i| graphql::issue_to_task(&i, &self.user)))
     }
 
-    pub async fn fetch_all_prs(&self) -> Result<Vec<Task>, GhError> {
+    /// `since` narrows the main `involves:` paginated search to PRs
+    /// updated at or after that instant (issue #14) — `None` fetches
+    /// every open involved PR (a reconcile sweep). The window applies
+    /// ONLY to the `involves-main` branch: the merged-sweep already has
+    /// its own `merged:>=` bound, and the reviewer/watched branches are
+    /// cheap single-page queries where a window would buy nothing.
+    pub async fn fetch_all_prs(
+        &self,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<Task>, GhError> {
         // Per-call wall-clock timer so the log can quantify the
         // parallelization win and so a regression jumps out in
         // `grep "fetch_all_prs: completed" /tmp/lazybox.log`. Cheap;
@@ -1249,6 +1319,12 @@ impl GhClient {
             quals.push(format!("involves:{}", self.user));
         } else {
             quals.extend(self.pr_filters.iter().cloned());
+        }
+        // Incremental window (issue #14): on a steady-state sweep this
+        // collapses the dominant `involves-main` branch to a near-empty
+        // first page. `None` (reconcile sweep) leaves the search wide.
+        if let Some(since) = since {
+            quals.push(graphql::updated_since_qualifier(since));
         }
         let search_query = graphql::build_query(&quals);
         tracing::info!("GraphQL search: {search_query}");
@@ -1896,7 +1972,7 @@ impl GhClient {
         }
         let pr_fut = async {
             if want_prs {
-                self.fetch_all_prs().await
+                self.fetch_all_prs(None).await
             } else {
                 Ok(Vec::new())
             }
@@ -1964,7 +2040,7 @@ impl GhClient {
         }
         let pr_fut = async {
             if want_prs {
-                self.fetch_all_prs().await
+                self.fetch_all_prs(None).await
             } else {
                 Ok(Vec::new())
             }
@@ -2024,6 +2100,10 @@ impl GhClient {
     /// the PR side is skipped entirely.
     ///
     /// [polling]: ../../../lazybox_server/polling/fn.pick_repos_for_tick.html
+    /// `pr_since` is the incremental `updated:>=` floor for the global
+    /// `involves:` branch (issue #14); `None` runs an unwindowed
+    /// reconcile. Ignored on the per-repo fan-out (those queries are
+    /// already cheap and scoped).
     pub async fn fetch_round_robin_with_status_and_mentions(
         &self,
         want_prs: bool,
@@ -2031,6 +2111,7 @@ impl GhClient {
         run_global: bool,
         want_issues: bool,
         allowed_logins: &std::collections::BTreeSet<String>,
+        pr_since: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<(Vec<Task>, Option<String>, Vec<crate::LazyboxMention>), GhError> {
         // Issues are queried for `@lazybox` mentions even when issue
         // *display* is off — see `should_query_issues` (issue #50).
@@ -2047,7 +2128,7 @@ impl GhClient {
                 // Global sweep on this tick — same payload as the
                 // pre-round-robin path. The per-repo fan-out is
                 // skipped because the global already covers it.
-                self.fetch_all_prs().await
+                self.fetch_all_prs(pr_since).await
             } else {
                 self.fetch_prs_for_repos(repos).await
             }
@@ -2112,7 +2193,7 @@ impl GhClient {
         }
         let pr_fut = async {
             if want_prs {
-                self.fetch_all_prs().await
+                self.fetch_all_prs(None).await
             } else {
                 Ok(Vec::new())
             }
@@ -2533,7 +2614,7 @@ impl lazybox_core::TaskProvider for GhClient {
     }
 
     async fn fetch_tasks(&self) -> Result<Vec<lazybox_core::Task>, lazybox_core::ProviderError> {
-        self.fetch_all_prs().await.map_err(Into::into)
+        self.fetch_all_prs(None).await.map_err(Into::into)
     }
 
     fn username(&self) -> Option<&str> {
@@ -3006,6 +3087,50 @@ mod tests {
             !client.should_full_sweep(),
             "completing the forced sweep must clear the flag"
         );
+    }
+
+    /// Issue #14: the `updated:>=` window state machine. The first
+    /// global sweep reconciles (no window); once a reconcile is on
+    /// record, subsequent sweeps narrow to the previous sweep's start;
+    /// a manual refresh forces a reconcile again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pr_sweep_window_alternates_reconcile_and_incremental() {
+        let client = make_client("http://127.0.0.1:1");
+        // Bootstrap: nothing reconciled yet → reconcile (no window).
+        assert!(
+            client.next_pr_sweep_window().is_none(),
+            "first global sweep must reconcile the whole inbox"
+        );
+
+        // A reconcile completes, stamping its start time as the floor.
+        let t0 = chrono::Utc::now() - chrono::Duration::minutes(10);
+        client.record_pr_sweep_window(t0, true);
+        // Reconcile timer is fresh (interval is an hour) → next sweep
+        // narrows to the recorded floor.
+        assert_eq!(
+            client.next_pr_sweep_window(),
+            Some(t0),
+            "with a recent reconcile, the next sweep windows on its floor"
+        );
+
+        // A windowed sweep advances the floor but does NOT re-arm the
+        // reconcile timer, so the sweep after it still windows.
+        let t1 = chrono::Utc::now();
+        client.record_pr_sweep_window(t1, false);
+        assert_eq!(client.next_pr_sweep_window(), Some(t1));
+
+        // Manual refresh forces a reconcile regardless of the timer.
+        client.force_full_sweep();
+        assert!(
+            client.next_pr_sweep_window().is_none(),
+            "a forced refresh must reconcile, not window"
+        );
+        // Completing the sweep clears the one-shot force flag, so we
+        // fall back to windowing on the freshly-recorded floor.
+        client.mark_full_sweep_done();
+        let t2 = chrono::Utc::now();
+        client.record_pr_sweep_window(t2, false);
+        assert_eq!(client.next_pr_sweep_window(), Some(t2));
     }
 
     /// Regression test for issue #13: GitHub returns a 502 HTML

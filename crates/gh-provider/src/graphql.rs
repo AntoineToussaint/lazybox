@@ -513,6 +513,17 @@ pub fn default_search_qualifiers() -> Vec<String> {
     ]
 }
 
+/// `updated:>=<since>` qualifier narrowing a search to items touched
+/// at or after `since`. Lets a steady-state `involves:` PR sweep skip
+/// the unchanged majority (issue #14). GitHub's search syntax takes an
+/// RFC3339 timestamp with an explicit offset; we always emit UTC
+/// (`+00:00`). The bound is inclusive, so re-using the previous sweep's
+/// start time re-fetches a handful of boundary PRs rather than risking
+/// a gap.
+pub fn updated_since_qualifier(since: DateTime<Utc>) -> String {
+    format!("updated:>={}", since.format("%Y-%m-%dT%H:%M:%S+00:00"))
+}
+
 pub fn query_body(search_query: &str) -> serde_json::Value {
     query_body_after(search_query, None)
 }
@@ -2477,6 +2488,34 @@ mod tests {
         let q = build_query(&quals);
         assert!(q.contains("org:myorg"));
         assert!(q.contains("involves:bob"));
+    }
+
+    #[test]
+    fn updated_since_qualifier_emits_utc_timestamp() {
+        let since = DateTime::parse_from_rfc3339("2026-06-05T09:30:00-04:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        // Offset normalized to UTC, RFC3339 with explicit `+00:00` —
+        // the form GitHub's search documents for `updated:>=`.
+        assert_eq!(
+            updated_since_qualifier(since),
+            "updated:>=2026-06-05T13:30:00+00:00"
+        );
+    }
+
+    #[test]
+    fn updated_since_qualifier_joins_into_search() {
+        let mut quals = default_search_qualifiers();
+        quals.push("involves:carol".into());
+        quals.push(updated_since_qualifier(
+            DateTime::parse_from_rfc3339("2026-06-05T13:30:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        ));
+        let q = build_query(&quals);
+        assert!(q.contains("involves:carol"));
+        assert!(q.contains("is:open"));
+        assert!(q.contains("updated:>=2026-06-05T13:30:00+00:00"));
     }
 
     // ── Issues ────────────────────────────────────────────────────────

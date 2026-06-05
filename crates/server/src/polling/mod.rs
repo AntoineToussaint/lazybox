@@ -182,8 +182,20 @@ pub enum PolledScope {
 /// coverage (`Repos([])`, matching no stored workspace) so the whole
 /// github inbox is preserved this tick; the next clean sweep
 /// reconciles legitimately-gone rows.
-pub fn gh_polled_scope(run_global: bool, repos: &[String], partial: bool) -> PolledScope {
-    if partial {
+///
+/// `windowed` is the same kind of override for the incremental
+/// `updated:>=` sweep (issue #14): a windowed global sweep only
+/// returned PRs that *changed*, so the unchanged majority is absent
+/// from the polled set — exactly the shape `rescope` would misread as
+/// "fell out of scope." Only the periodic unwindowed reconcile sweep
+/// reports `Exhaustive` and is allowed to drive deletion.
+pub fn gh_polled_scope(
+    run_global: bool,
+    repos: &[String],
+    partial: bool,
+    windowed: bool,
+) -> PolledScope {
+    if partial || windowed {
         return PolledScope::Repos(Vec::new());
     }
     if run_global {
@@ -262,6 +274,13 @@ pub struct GhSource {
     /// gone. Initialized `false` (a never-fetched source isn't
     /// partial).
     last_coverage_partial: std::sync::Mutex<bool>,
+    /// Whether the last global sweep narrowed the `involves:` search to
+    /// `updated:>=` (issue #14). A windowed sweep only returned changed
+    /// PRs, so — like `last_coverage_partial` — it must NOT report
+    /// `Exhaustive` coverage or rescope would delete every unchanged
+    /// row. Read by [`TaskSource::polled_scope`] after `fetch` resolves.
+    /// Initialized `false` (a never-fetched source isn't windowed).
+    last_windowed: std::sync::Mutex<bool>,
 }
 
 /// Out-of-band action a `TaskSource` may surface alongside the
@@ -335,6 +354,7 @@ impl GhSource {
             // accidentally block rescope.
             last_kind: std::sync::Mutex::new(FetchMode::Full),
             last_coverage_partial: std::sync::Mutex::new(false),
+            last_windowed: std::sync::Mutex::new(false),
         }
     }
 
@@ -350,6 +370,13 @@ impl GhSource {
             .last_coverage_partial
             .lock()
             .expect("GhSource.last_coverage_partial mutex poisoned") = partial;
+    }
+
+    fn set_windowed(&self, windowed: bool) {
+        *self
+            .last_windowed
+            .lock()
+            .expect("GhSource.last_windowed mutex poisoned") = windowed;
     }
 
     fn emit_progress(&self, message: impl Into<String>) {
@@ -439,6 +466,20 @@ impl GhSource {
         // here so the full sweep doesn't early-return before the scan.
         let scan_issues = want_issues || !self.mention_allowed_logins.is_empty();
 
+        // Incremental window (issue #14). Only a GLOBAL PR sweep runs
+        // the heavy `involves:` search, so only it carries a window;
+        // the round-robin per-repo path is already scoped + cheap.
+        // `since` is captured BEFORE the fetch (so a PR touched
+        // mid-sweep is caught next time) and committed via
+        // `record_pr_sweep_window` once the sweep succeeds.
+        let global_pr_sweep = want_prs && self.scheduling.run_global;
+        let sweep_started = chrono::Utc::now();
+        let pr_since = if global_pr_sweep {
+            self.client.next_pr_sweep_window()
+        } else {
+            None
+        };
+
         let plan = match (want_prs, scan_issues) {
             (true, true) => "PRs + Issues",
             (true, false) => "PRs",
@@ -455,7 +496,11 @@ impl GhSource {
         if want_prs {
             if self.scheduling.run_global {
                 self.emit_progress(format!(
-                    "PR query (global): {}",
+                    "PR query (global{}): {}",
+                    match pr_since {
+                        Some(ts) => format!(", updated:>={}", ts.format("%Y-%m-%dT%H:%M:%SZ")),
+                        None => String::new(),
+                    },
                     self.client.pr_search_query()
                 ));
             }
@@ -484,6 +529,7 @@ impl GhSource {
                 self.scheduling.run_global,
                 want_issues,
                 &self.mention_allowed_logins,
+                pr_since,
             )
             .await
             .map_err(lazybox_core::ProviderError::from)?;
@@ -493,6 +539,11 @@ impl GhSource {
         // failed side couldn't return (e.g. every PR when the PR
         // query errored). See `last_coverage_partial`.
         self.set_coverage_partial(partial_warning.is_some());
+        // A windowed sweep only returned changed PRs — it can't drive
+        // deletion (issue #14). `pr_since.is_some()` implies this was a
+        // global PR sweep, so this also clears the flag on reconcile +
+        // round-robin ticks. See `last_windowed`.
+        self.set_windowed(pr_since.is_some());
         // Surface partial sync failures to the user — one side
         // succeeded, the other errored, we kept the inbox alive but
         // the visible row set is incomplete. Without this notice the
@@ -637,6 +688,16 @@ impl GhSource {
         // eligible PRs. Drained + dispatched alongside mention spawns.
         self.queue_auto_fix_actions(&kept);
 
+        // Advance the `updated:>=` floor (issue #14) only when this
+        // tick actually ran the global `involves:` search — a
+        // round-robin per-repo sweep didn't look at the whole involved
+        // set, so moving the floor past PRs it never fetched would drop
+        // them from the next window. `pr_since.is_none()` here means a
+        // reconcile sweep, which re-arms the reconcile timer.
+        if global_pr_sweep {
+            self.client
+                .record_pr_sweep_window(sweep_started, pr_since.is_none());
+        }
         // Mark sweep complete BEFORE returning so the next tick's
         // `should_full_sweep` check sees fresh data.
         self.client.mark_full_sweep_done();
@@ -981,7 +1042,16 @@ impl TaskSource for GhSource {
             .last_coverage_partial
             .lock()
             .expect("GhSource.last_coverage_partial mutex poisoned");
-        gh_polled_scope(self.scheduling.run_global, &self.scheduling.repos, partial)
+        let windowed = *self
+            .last_windowed
+            .lock()
+            .expect("GhSource.last_windowed mutex poisoned");
+        gh_polled_scope(
+            self.scheduling.run_global,
+            &self.scheduling.repos,
+            partial,
+            windowed,
+        )
     }
     fn drain_actions(&self) -> Vec<ProviderAction> {
         let mut guard = self
@@ -1476,6 +1546,7 @@ pub async fn sources_for(
                             // source doesn't accidentally block rescope.
                             last_kind: std::sync::Mutex::new(FetchMode::Full),
                             last_coverage_partial: std::sync::Mutex::new(false),
+                            last_windowed: std::sync::Mutex::new(false),
                         }));
                     }
                     Err(e) => tracing::warn!("github client init failed: {e}"),

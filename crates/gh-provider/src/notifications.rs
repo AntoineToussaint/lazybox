@@ -198,6 +198,19 @@ pub(crate) struct NotificationsState {
     /// (issue #180). Cleared once the sweep completes
     /// (`mark_full_sweep_done`).
     pub(crate) force_full_sweep: bool,
+    /// Start time of the most recent GLOBAL `involves:` PR sweep, used
+    /// as the `updated:>=` floor for the next windowed sweep (issue
+    /// #14). Captured before the fetch so PRs touched mid-sweep are
+    /// caught next time. `None` until the first global sweep completes.
+    pub(crate) last_pr_sweep_at_utc: Option<DateTime<Utc>>,
+    /// When the last UNWINDOWED reconcile sweep completed. `None` means
+    /// "never" — the first global sweep is always a reconcile. Drives
+    /// [`is_full_reconcile_due`](Self::is_full_reconcile_due): most
+    /// global sweeps narrow to `updated:>=last_pr_sweep_at_utc`, but a
+    /// windowed search can't see PRs that left the window without an
+    /// update (silently closed, un-involved, transferred), so one
+    /// sweep per `FULL_RECONCILE_INTERVAL` drops the window.
+    pub(crate) last_full_reconcile_at: Option<std::time::Instant>,
 }
 
 impl NotificationsState {
@@ -222,6 +235,29 @@ impl NotificationsState {
             return true;
         }
         match self.last_full_sweep_at {
+            None => true,
+            Some(t) => t.elapsed() >= threshold,
+        }
+    }
+
+    /// Is an UNWINDOWED reconcile sweep due? Distinct from
+    /// [`is_full_sweep_due`](Self::is_full_sweep_due): that routes
+    /// full-vs-notifications every tick; this decides, once we're
+    /// already running a global sweep, whether to drop the
+    /// `updated:>=` window and re-reconcile the whole inbox (issue
+    /// #14).
+    ///
+    /// True when a manual refresh forced it, when no reconcile has run
+    /// yet (bootstrap), or when `threshold` has elapsed since the last
+    /// one. A heartbeat back-off is deliberately NOT a trigger: a
+    /// windowed sweep still catches every changed *open* PR, and a
+    /// broken heartbeat shouldn't force the heavy full download every
+    /// cycle.
+    pub fn is_full_reconcile_due(&self, threshold: std::time::Duration) -> bool {
+        if self.force_full_sweep {
+            return true;
+        }
+        match self.last_full_reconcile_at {
             None => true,
             Some(t) => t.elapsed() >= threshold,
         }
@@ -443,6 +479,57 @@ mod tests {
             ..Default::default()
         };
         assert!(s.is_full_sweep_due(std::time::Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn fresh_state_demands_reconcile() {
+        // Bootstrap: never reconciled → the first global sweep must run
+        // unwindowed so it seeds the whole inbox (issue #14).
+        let s = NotificationsState::default();
+        assert!(s.is_full_reconcile_due(std::time::Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn recent_reconcile_allows_windowed_sweep() {
+        // A reconcile just ran → the next global sweep can narrow to
+        // `updated:>=` instead of re-downloading every PR.
+        let s = NotificationsState {
+            last_full_reconcile_at: Some(std::time::Instant::now()),
+            ..Default::default()
+        };
+        assert!(!s.is_full_reconcile_due(std::time::Duration::from_secs(3600)));
+        // Degenerate zero threshold = always reconcile.
+        assert!(s.is_full_reconcile_due(std::time::Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn forced_sweep_overrides_recent_reconcile_timer() {
+        // A manual refresh must reconcile (drop the window) so a row
+        // that silently left the search — closed with no comment,
+        // un-involved — is reconciled immediately, not at the next
+        // scheduled reconcile up to an hour away.
+        let s = NotificationsState {
+            last_full_reconcile_at: Some(std::time::Instant::now()),
+            force_full_sweep: true,
+            ..Default::default()
+        };
+        assert!(s.is_full_reconcile_due(std::time::Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn heartbeat_back_off_does_not_force_reconcile() {
+        // Unlike `is_full_sweep_due`, a broken heartbeat must NOT force
+        // the heavy unwindowed download every cycle — a windowed sweep
+        // still catches every changed open PR.
+        let s = NotificationsState {
+            last_full_reconcile_at: Some(std::time::Instant::now()),
+            heartbeat_back_off_until: Some(
+                std::time::Instant::now() + std::time::Duration::from_secs(60),
+            ),
+            ..Default::default()
+        };
+        assert!(s.heartbeat_backed_off());
+        assert!(!s.is_full_reconcile_due(std::time::Duration::from_secs(3600)));
     }
 
     #[test]

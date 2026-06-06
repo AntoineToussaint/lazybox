@@ -138,3 +138,11 @@ octocrab           = "0.44"
 # compile).
 libghostty-vt     = { path = "crates/libghostty-vt" }
 libghostty-vt-sys = { path = "crates/libghostty-vt-sys" }
+
+# The release profile cargo-dist (`dist`) builds with: `cargo build --profile
+# dist`. cargo-dist requires this to exist (normally added by `dist init`);
+# without it the build fails with "profile `dist` is not defined". Mirrors the
+# profile cargo-dist generates by default.
+[profile.dist]
+inherits = "release"
+lto = "thin"

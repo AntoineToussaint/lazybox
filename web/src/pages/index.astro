@@ -7,55 +7,61 @@ const installCmd = 'cargo install lazybox-tui';
 
 const features = [
   {
-    icon: '◉',
-    title: 'Events flow to you',
-    body: 'New comments, CI failures, and review requests surface automatically with read/unread tracking. No more tab-checking GitHub.',
+    icon: '⌗',
+    title: 'A fleet, not a tab',
+    body: 'Every PR and issue becomes a workspace with its own agent. Run dozens at once — each in its own embedded terminal — and flip between them instantly without losing your place.',
     wide: true,
   },
   {
-    icon: '⌗',
-    title: 'A session per task',
-    body: 'Every PR or issue becomes a workspace with an embedded terminal — Claude Code or a shell, right where the work is.',
+    icon: '◉',
+    title: 'It pings you when an agent is stuck',
+    body: 'The instant an agent hits a permission prompt or needs a decision, lazybox fires a native desktop notification and flags the row. Press ! to jump straight to it. Stop babysitting terminals.',
     wide: true,
   },
   {
     icon: '⑂',
-    title: 'Isolated worktrees',
-    body: 'Each session gets its own git worktree from a bare clone. Switch tasks without stashing or rebasing.',
+    title: 'Worktrees, handled',
+    body: 'Every task gets a fresh, isolated git checkout — created automatically. No branches to make, nothing to stash, no collisions between agents running side by side. You never think about it.',
   },
   {
     icon: '⇄',
-    title: 'Source-agnostic',
-    body: 'GitHub is one provider. Linear, Jira, and others plug in the same way — one inbox for everything.',
+    title: 'GitHub and Linear, one inbox',
+    body: 'PRs, issues, and Linear tickets surface the same way, with read/unread tracking. Mirror activity to Slack — and kick off work with an @lazybox mention.',
   },
   {
     icon: '⌁',
-    title: 'Agents, built in',
-    body: 'Claude, Codex, Cursor, or any CLI — driving the repo directly with gh and git, no approval wrapper.',
+    title: 'The right prompt, one key',
+    body: 'Press w and lazybox reads the row — failing CI, a merge conflict, an open issue, review comments — and launches the agent with exactly the right brief.',
+  },
+  {
+    icon: '∑',
+    title: 'See what they cost',
+    body: 'A local pass-through proxy tracks tokens, tool calls, and dollar cost per session — live in the sidebar. Your API key goes straight to the model; the daemon never sees it.',
+    wide: true,
   },
   {
     icon: '⇲',
     title: 'Local or remote',
-    body: 'An in-process daemon by default, or split client/daemon over a Unix socket and forward it across SSH.',
+    body: 'Runs as an in-process daemon by default, or split client and daemon over a Unix socket and forward it across SSH — heavy lifting on a remote box, inbox on your laptop.',
     wide: true,
   },
 ];
 
 const steps = [
   {
-    title: 'Add a repo',
-    body: 'Point lazybox at any owner/name. It polls GitHub and your PRs and issues land in the sidebar, grouped by repo.',
+    title: 'Connect your sources',
+    body: 'Point lazybox at your GitHub repos and Linear. Every PR, issue, and ticket lands in one keyboard-driven inbox — grouped, tracked, read/unread.',
     code: 'owner/name',
   },
   {
-    title: 'Open a workspace',
-    body: 'Press Enter on a row to get an isolated git worktree, then c for Claude Code or b for a shell.',
-    code: 'Enter → c',
+    title: 'Spawn agents in parallel',
+    body: 'Press c, x, or u for Claude Code, Codex, or Cursor — or w to let lazybox pick the brief. Each gets its own isolated checkout. Run as many as you like.',
+    code: 'c · x · u · w',
   },
   {
-    title: 'Let work come to you',
-    body: 'New activity marks rows unread. Act on what needs you, merge with g m, and never refresh a browser tab again.',
-    code: 'g m',
+    title: 'Step in only when needed',
+    body: 'Agents work on their own. lazybox notifies you the moment one needs a decision — jump to it with !, unblock it, and move on.',
+    code: '!',
   },
 ];
 ---
@@ -91,12 +97,12 @@ const steps = [
   <main id="main">
     <header class="hero">
       <div class="container">
-        <span class="eyebrow"><span class="dot"></span> reactive PR inbox · runs in your terminal</span>
-        <h1>Stop checking GitHub.<br /><span class="grad">Let it come to you.</span></h1>
+        <span class="eyebrow"><span class="dot"></span> many agents · one terminal inbox</span>
+        <h1>Run a fleet of agents.<br /><span class="grad">Step in only when it matters.</span></h1>
         <p class="lead">
-          lazybox is a reactive PR inbox in your terminal. Comments, CI failures, and
-          review requests surface the moment they happen — each one a workspace with
-          an embedded terminal in its own git worktree.
+          lazybox turns every PR and issue — across GitHub and Linear — into a workspace
+          with its own coding agent. Run dozens in parallel; it pings you the moment one
+          needs you. No branches or worktrees to wrangle — lazybox handles all of that.
         </p>
 
         <div class="cta-row">
@@ -112,7 +118,7 @@ const steps = [
           </button>
         </div>
 
-        <div class="term" data-reveal aria-label="lazybox running in a terminal">
+        <div class="term" data-reveal aria-label="lazybox managing several agents in a terminal">
           <div class="bar">
             <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
             <span class="title">lazybox — inbox</span>
@@ -136,9 +142,9 @@ const steps = [
       <div class="container">
         <div class="row">
           <span><b class="mk">⌘</b> <b>Built in Rust</b></span>
-          <span><b class="mk">◇</b> Free &amp; open source</span>
-          <span><b class="mk">⇲</b> Local-first, remote-ready</span>
+          <span><b class="mk">⇄</b> GitHub + Linear</span>
           <span><b class="mk">⌁</b> Claude · Codex · Cursor</span>
+          <span><b class="mk">◉</b> Native desktop alerts</span>
         </div>
       </div>
     </div>
@@ -147,8 +153,8 @@ const steps = [
       <div class="container">
         <div class="section-head" data-reveal>
           <p class="kicker">An inbox, not a dashboard</p>
-          <h2>Everything that needs you, in one place</h2>
-          <p>A terminal for every task — and the work surfaces on its own.</p>
+          <h2>Built to run a lot of agents at once</h2>
+          <p>Many agents in flight, one calm inbox — and it tells you which one needs you.</p>
         </div>
         <div class="bento">
           {features.map((f, i) => (
@@ -166,8 +172,8 @@ const steps = [
       <div class="container">
         <div class="section-head" data-reveal>
           <p class="kicker">How it works</p>
-          <h2>From clone to a live terminal in minutes</h2>
-          <p>Three keys to a worktree, an agent, and an inbox that triages itself.</p>
+          <h2>From zero to a fleet in three steps</h2>
+          <p>Wire up your sources, spawn agents in parallel, and let the inbox triage itself.</p>
         </div>
         <div class="steps">
           {steps.map((s, i) => (
@@ -189,14 +195,15 @@ const steps = [
             <p class="kicker">Terminal-native</p>
             <h2>Your hands never leave the keyboard</h2>
             <p>
-              Every pane declares its own keymap; the hint bar always shows what's live.
-              Navigate, spawn agents, and ship — all without reaching for a mouse.
+              Every pane has its own keymap and the hint bar always shows what's live.
+              Navigate a fleet, unblock the agent that's waiting, and ship — all without
+              reaching for a mouse.
             </p>
             <div class="keys-list">
               <div class="k"><kbd>j</kbd><kbd>k</kbd> navigate the inbox</div>
-              <div class="k"><kbd>c</kbd> spawn Claude Code &nbsp;·&nbsp; <kbd>b</kbd> shell</div>
-              <div class="k"><kbd>w</kbd> let lazybox pick the right prompt for the row</div>
-              <div class="k"><kbd>g</kbd><kbd>m</kbd> merge &nbsp;·&nbsp; <kbd>/</kbd> search</div>
+              <div class="k"><kbd>c</kbd>&nbsp;·&nbsp;<kbd>x</kbd>&nbsp;·&nbsp;<kbd>u</kbd> spawn Claude / Codex / Cursor</div>
+              <div class="k"><kbd>w</kbd> auto-prompt for the row's state</div>
+              <div class="k"><kbd>!</kbd> jump to the next agent that needs you</div>
             </div>
           </div>
           <div class="keys-card" data-reveal>
@@ -204,13 +211,13 @@ const steps = [
               <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
             </div>
             <pre><span class="c-dim">┌─ inbox ──────────────────────────────┐</span>
-<span class="unread">● #209  Rework snippet invocation</span>      <span class="c-green">✓ ci</span>
-<span class="unread">● #207  Bucket untyped workspaces</span>     <span class="c-amber">2 comments</span>
+<span class="unread">● #209  Implement export endpoint</span>     <span class="c-amber">⚠ needs you</span>
+<span class="unread">● #207  Bucket untyped workspaces</span>     <span class="c-accent">◐ working</span>
 <span class="c-dim">○ #206  Wrap multi-line snippet bodies</span>  <span class="c-green">✓ ci</span>
 <span class="unread">● #197  Drop bot-authored Slack msgs</span>    <span class="c-red">✗ ci failed</span>
 <span class="c-dim">○ #195  Collapse out-of-scope issue</span>      <span class="c-green">merged</span>
 <span class="c-dim">└──────────────────────────────────────┘</span>
-  <span class="c-accent">c</span> claude  <span class="c-accent">b</span> shell  <span class="c-accent">g m</span> merge  <span class="c-accent">/</span> search</pre>
+  <span class="c-accent">c</span> claude  <span class="c-accent">x</span> codex  <span class="c-accent">w</span> work  <span class="c-accent">!</span> waiting</pre>
           </div>
         </div>
       </div>
@@ -218,8 +225,8 @@ const steps = [
 
     <section class="band">
       <div class="container" data-reveal>
-        <h2>Your PRs, where you already live.</h2>
-        <p>Free and open source. Built in Rust. Drive it entirely from the keyboard.</p>
+        <h2>Spend your attention where it counts.</h2>
+        <p>Free and open source, built in Rust. Run a fleet of agents and let lazybox tell you when one needs you.</p>
         <div class="cta-row">
           <a class="btn btn-primary" href={docs}>Read the docs →</a>
           <a class="btn btn-ghost" href={repo}>View source</a>

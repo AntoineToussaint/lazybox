@@ -1,8 +1,12 @@
-# Configuration reference
+---
+title: Configuration reference
+description: The complete ~/.lazybox/config.yaml schema with an annotated example.
+---
 
-lazybox reads `~/.lazybox/config.yaml`. Every key is optional — lazybox runs with an
-empty config by auto-detecting agents and editors and reading GitHub credentials
-from `gh auth token`. The sections below document each top-level key.
+lazybox reads `~/.lazybox/config.yaml`. Every key is optional — lazybox runs
+with an empty config by auto-detecting agents and editors and reading GitHub
+credentials from `gh auth token`. The sections below document each top-level
+key.
 
 `LAZYBOX_HOME` overrides the base directory lazybox writes to, which moves the
 config, state, and worktree paths accordingly.
@@ -122,7 +126,7 @@ Provide either `content` or `source` per script.
 | `anchor_channel` | string | Channel the mirror anchors to |
 | `per_workspace_channels` | bool | Give each workspace its own channel |
 
-See [Mirror to Slack](../how-to/mirror-to-slack.md) for setup.
+See [Mirror to Slack](/docs/how-to/mirror-to-slack/) for setup.
 
 ## `agent`
 

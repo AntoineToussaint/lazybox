@@ -1,8 +1,11 @@
-# Run an agent per workspace
+---
+title: Run an agent per workspace
+description: Spawn Claude Code, Codex, or Cursor scoped to one worktree, including autonomous runs.
+---
 
 Goal: spawn a coding agent (Claude Code, Codex, or Cursor) scoped to a single
-workspace's git worktree — including letting lazybox pick the right prompt for the
-row's state, and running autonomously.
+workspace's git worktree — including letting lazybox pick the right prompt for
+the row's state, and running autonomously.
 
 Each workspace gets one worktree and one agent session. The agent operates
 directly in that worktree with the same `git` and `gh` tools it would have in
@@ -10,7 +13,7 @@ any checkout; lazybox does not wrap those actions behind an approval layer.
 
 ## Prerequisites
 
-- A workspace is open in the sidebar (see [Add a repo](add-a-repo.md)).
+- A workspace is open in the sidebar (see [Add a repo](/docs/how-to/add-a-repo/)).
 - The agent's CLI is installed and on your `PATH` (for example the `claude`
   binary for Claude Code). lazybox detects installed agents at startup.
 
@@ -30,8 +33,8 @@ Press `]]` (twice) to return to the sidebar; the session keeps running.
 
 ## Let lazybox choose the prompt: `w`
 
-Press `w` for **work** instead of picking an agent manually. lazybox spawns Claude
-Code with a prompt tailored to the selected row's current state:
+Press `w` for **work** instead of picking an agent manually. lazybox spawns
+Claude Code with a prompt tailored to the selected row's current state:
 
 - failing CI → fix CI
 - merge conflict → fix the conflict
@@ -54,17 +57,18 @@ agent:
   skip_permissions: false
 ```
 
-!!! warning
-    `--dangerously-skip-permissions` lets the agent run tools without asking.
-    lazybox confines the agent to the worktree, but only enable this once you are
-    comfortable with autonomous edits in that directory.
+:::caution
+`--dangerously-skip-permissions` lets the agent run tools without asking.
+lazybox confines the agent to the worktree, but only enable this once you are
+comfortable with autonomous edits in that directory.
+:::
 
-See the [configuration reference](../reference/configuration.md#agent) for the
+See the [configuration reference](/docs/reference/configuration/#agent) for the
 full schema.
 
 ## Related
 
-- [Per-repo env and mounts](per-repo-env-and-mounts.md) to give every agent
-  session the environment and shared files it needs.
-- The [keybindings reference](../reference/keybindings.md) for every sidebar
+- [Per-repo env and mounts](/docs/how-to/per-repo-env-and-mounts/) to give every
+  agent session the environment and shared files it needs.
+- The [keybindings reference](/docs/reference/keybindings/) for every sidebar
   action.

@@ -1,4 +1,7 @@
-# Keybindings reference
+---
+title: Keybindings reference
+description: The full keymap for every pane and picker.
+---
 
 The full keymap. Each pane declares its own keymap; the bottom hint bar reads
 from the focused pane. Global keys work everywhere.

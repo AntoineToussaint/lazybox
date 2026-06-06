@@ -1,12 +1,15 @@
-# Mental model
+---
+title: Mental model
+description: Workspace = worktree + agent, the reactive inbox, read/unread, and the isolation rationale.
+---
 
 This page explains how to think about lazybox. Once these few ideas click, the
 keybindings and configuration follow naturally.
 
 ## A workspace is a worktree plus an agent session
 
-The central unit in lazybox is the **workspace**. A workspace is two things bound
-together:
+The central unit in lazybox is the **workspace**. A workspace is two things
+bound together:
 
 1. **A git worktree** — an isolated checkout of the repository, separate from
    your main working copy and from every other workspace.
@@ -53,12 +56,11 @@ and blast radius scoped to one task. The agent works directly with `git` and
 `gh` in that worktree — lazybox does not wrap those actions behind an approval
 layer, so the agent has exactly the tools it would have in any checkout. When
 you let an agent run autonomously (see
-[Run an agent per workspace](../how-to/run-an-agent-per-workspace.md)), the
+[Run an agent per workspace](/docs/how-to/run-an-agent-per-workspace/)), the
 worktree boundary is what bounds the damage it can do.
 
 ## Where to go next
 
 - See how these pieces are wired together in the
-  [architecture explanation](architecture.md).
-- Put the model to work with the
-  [How-to guides](../how-to/index.md).
+  [architecture explanation](/docs/explanation/architecture/).
+- Put the model to work with the [How-to guides](/docs/how-to/).

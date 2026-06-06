@@ -1,0 +1,64 @@
+/* Theme Starlight to match the lazybox homepage: terminal-dark, mono accents,
+   the same blue/green gradient identity. Starlight exposes its palette as CSS
+   custom properties; we override the accent ramp and the gray/background ramp
+   so the docs feel like the same product as the splash page. */
+
+:root {
+  /* Accent ramp — lazybox blue (#7cc4ff). */
+  --sl-color-accent-low: #11233a;
+  --sl-color-accent: #2f7fd1;
+  --sl-color-accent-high: #b8dcff;
+
+  /* Brand fonts: sans for prose, mono for code — same stacks as the homepage. */
+  --sl-font: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial,
+    sans-serif;
+  --sl-font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Fira Code', Menlo,
+    Consolas, monospace;
+}
+
+:root[data-theme='dark'] {
+  --sl-color-bg: #0b0e14;
+  --sl-color-bg-nav: rgba(11, 14, 20, 0.72);
+  --sl-color-bg-sidebar: #0b0e14;
+  --sl-color-bg-inline-code: #151a24;
+  --sl-color-hairline-light: #232a38;
+  --sl-color-hairline: #1a202c;
+  --sl-color-gray-1: #e6e9ef;
+  --sl-color-gray-2: #c3cad6;
+  --sl-color-gray-3: #9aa4b2;
+  --sl-color-gray-4: #6b7585;
+  --sl-color-gray-5: #3a4250;
+  --sl-color-gray-6: #1a202c;
+  --sl-color-gray-7: #151a24;
+  --sl-color-text-accent: #7cc4ff;
+  --sl-color-white: #ffffff;
+}
+
+/* Translucent, blurred top nav to match the homepage chrome. */
+.header {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--sl-color-hairline);
+}
+
+/* Site title set in mono with a green prompt feel. */
+.site-title {
+  font-family: var(--sl-font-mono);
+  letter-spacing: -0.01em;
+  font-weight: 600;
+}
+
+/* Gradient page titles, echoing the hero headline. */
+:root[data-theme='dark'] .content-panel h1#_top {
+  background: linear-gradient(120deg, #7cc4ff, #6ee7a8);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Inline code: subtle accent border like the homepage install pill. */
+:root[data-theme='dark'] code:not(pre code) {
+  border: 1px solid var(--sl-color-hairline-light);
+  border-radius: 0.4rem;
+  padding: 0.1rem 0.35rem;
+}

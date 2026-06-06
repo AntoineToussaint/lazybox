@@ -1,6 +1,4 @@
 /target
-# MkDocs build output (`mkdocs build` renders the docs-site/ sources here).
-/site/
 *.swp
 *.swo
 .DS_Store

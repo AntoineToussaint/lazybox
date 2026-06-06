@@ -1,4 +1,7 @@
-# Remote over SSH
+---
+title: Remote over SSH
+description: Run the daemon remotely and the TUI locally over a forwarded Unix socket.
+---
 
 Goal: run the lazybox daemon on a remote machine (where your repos and agents
 live) while driving the TUI from your laptop, over a forwarded Unix socket.
@@ -11,7 +14,7 @@ bridges the two machines.
 ## Prerequisites
 
 - lazybox built and runnable on the remote host (see the
-  [Quickstart](../tutorials/quickstart.md)).
+  [Quickstart](/docs/tutorials/quickstart/)).
 - SSH access to the remote host.
 
 ## 1. Start the daemon on the remote host
@@ -55,7 +58,7 @@ lazybox server stop       # run on the remote host
 
 ## Related
 
-- The [CLI reference](../reference/cli.md) for `server` subcommands and
+- The [CLI reference](/docs/reference/cli/) for `server` subcommands and
   `--connect`.
-- The [architecture explanation](../explanation/architecture.md) for how the
+- The [architecture explanation](/docs/explanation/architecture/) for how the
   client/daemon split works.

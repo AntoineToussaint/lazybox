@@ -1232,6 +1232,7 @@ impl TerminalStack {
         }
         let cell_col = col - inner_x;
         let target_row = row - inner_y;
+        let hyperlink = hyperlink_uri_at(&slot.vt.terminal, cell_col, target_row);
         let snapshot = slot.vt.render_state.update(&slot.vt.terminal).ok()?;
         let mut row_iter = slot.vt.row_iter.update(&snapshot).ok()?;
         // Walk graphemes — wide-glyph cells contribute one grapheme
@@ -1267,7 +1268,7 @@ impl TerminalStack {
             return None;
         }
         let byte_pos = *cell_byte_starts.get(cell_col as usize)?;
-        detect_target(&row_text, byte_pos)
+        detect_target(&row_text, byte_pos, hyperlink.as_deref())
     }
 
     pub fn scroll_active(&mut self, delta: isize) -> ScrollOutcome {
@@ -2639,11 +2640,52 @@ pub(crate) fn find_url_at_byte(row_text: &str, byte_pos: usize) -> Option<&str> 
     None
 }
 
-/// Classify the token at `byte_pos` in `row_text`. Tries detectors
-/// in specificity order: a URL (begins with a scheme) wins over an
+/// Read the OSC 8 hyperlink URI attached to the viewport cell at
+/// `(col, row)`, if any. `libghostty-vt` parses OSC 8 hyperlinks but
+/// the render-state cell iterator used to build `row_text` doesn't
+/// expose them, so we resolve the cell through the grid-ref API (fast
+/// for viewport coordinates) and read its URI directly. Returns
+/// `None` for a cell with no hyperlink or on any FFI error.
+fn hyperlink_uri_at(
+    terminal: &vt::Terminal<'static, 'static>,
+    col: u16,
+    row: u16,
+) -> Option<String> {
+    let point = vt::terminal::Point::Viewport(vt::terminal::PointCoordinate {
+        x: col,
+        y: row as u32,
+    });
+    let grid_ref = terminal.grid_ref(point).ok()?;
+    let mut buf = vec![0u8; 256];
+    loop {
+        match grid_ref.hyperlink_uri(&mut buf) {
+            Ok(0) => return None,
+            Ok(n) => return String::from_utf8(buf[..n].to_vec()).ok(),
+            Err(vt::error::Error::OutOfSpace { required }) if required > buf.len() => {
+                buf.resize(required, 0);
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Classify the click at `byte_pos` in `row_text`. An OSC 8
+/// hyperlink attached to the clicked cell (`hyperlink`) is
+/// authoritative — the program told us exactly where this text
+/// points, so it wins over any heuristic scan of the visible glyphs,
+/// which are often a title rather than the literal URL. Otherwise we
+/// fall back to scanning the row text, trying detectors in
+/// specificity order: a URL (begins with a scheme) wins over an
 /// issue reference, which wins over a bare file path. Returns `None`
 /// when the click landed on whitespace or an unrecognized token.
-pub(crate) fn detect_target(row_text: &str, byte_pos: usize) -> Option<ClickTarget> {
+pub(crate) fn detect_target(
+    row_text: &str,
+    byte_pos: usize,
+    hyperlink: Option<&str>,
+) -> Option<ClickTarget> {
+    if let Some(uri) = hyperlink {
+        return Some(ClickTarget::Url(uri.to_string()));
+    }
     if let Some(url) = find_url_at_byte(row_text, byte_pos) {
         return Some(ClickTarget::Url(url.to_string()));
     }
@@ -2862,8 +2904,28 @@ mod detect_target_tests {
     fn url_wins_over_everything() {
         let row = "open https://github.com/o/r/issues/9 now";
         assert_eq!(
-            detect_target(row, 6),
+            detect_target(row, 6, None),
             Some(ClickTarget::Url("https://github.com/o/r/issues/9".into()))
+        );
+    }
+
+    #[test]
+    fn osc8_hyperlink_wins_over_visible_text() {
+        // The visible glyphs are a title, not a URL — only the OSC 8
+        // URI knows where the link points, and it must win.
+        let row = "view the docs";
+        assert_eq!(
+            detect_target(row, 0, Some("https://example.com/docs")),
+            Some(ClickTarget::Url("https://example.com/docs".into()))
+        );
+    }
+
+    #[test]
+    fn osc8_hyperlink_overrides_a_different_visible_url() {
+        let row = "https://decoy.example";
+        assert_eq!(
+            detect_target(row, 0, Some("https://real.example/page")),
+            Some(ClickTarget::Url("https://real.example/page".into()))
         );
     }
 
@@ -2871,7 +2933,7 @@ mod detect_target_tests {
     fn detects_absolute_path() {
         let row = "see /etc/hosts for config";
         assert_eq!(
-            detect_target(row, 5),
+            detect_target(row, 5, None),
             Some(ClickTarget::Path {
                 path: "/etc/hosts".into(),
                 line: None,
@@ -2884,7 +2946,7 @@ mod detect_target_tests {
     fn detects_home_relative_path() {
         let row = "edit ~/.config/lazybox.yaml please";
         assert_eq!(
-            detect_target(row, 6),
+            detect_target(row, 6, None),
             Some(ClickTarget::Path {
                 path: "~/.config/lazybox.yaml".into(),
                 line: None,
@@ -2897,7 +2959,7 @@ mod detect_target_tests {
     fn detects_dot_relative_path() {
         let row = "open ./src/main.rs here";
         assert_eq!(
-            detect_target(row, 5),
+            detect_target(row, 5, None),
             Some(ClickTarget::Path {
                 path: "./src/main.rs".into(),
                 line: None,
@@ -2910,7 +2972,7 @@ mod detect_target_tests {
     fn detects_path_with_line() {
         let row = "at ./src/main.rs:42 boom";
         assert_eq!(
-            detect_target(row, 4),
+            detect_target(row, 4, None),
             Some(ClickTarget::Path {
                 path: "./src/main.rs".into(),
                 line: Some(42),
@@ -2923,7 +2985,7 @@ mod detect_target_tests {
     fn detects_path_with_line_and_col() {
         let row = "panic at /abs/file.rs:12:3 here";
         assert_eq!(
-            detect_target(row, 10),
+            detect_target(row, 10, None),
             Some(ClickTarget::Path {
                 path: "/abs/file.rs".into(),
                 line: Some(12),
@@ -2936,7 +2998,7 @@ mod detect_target_tests {
     fn trims_wrapping_punctuation_on_path() {
         let row = "see (./README.md).";
         assert_eq!(
-            detect_target(row, 6),
+            detect_target(row, 6, None),
             Some(ClickTarget::Path {
                 path: "./README.md".into(),
                 line: None,
@@ -2948,7 +3010,7 @@ mod detect_target_tests {
     #[test]
     fn bare_word_is_not_a_path() {
         let row = "the quick brown fox";
-        assert_eq!(detect_target(row, 5), None);
+        assert_eq!(detect_target(row, 5, None), None);
     }
 
     #[test]
@@ -2956,14 +3018,14 @@ mod detect_target_tests {
         // `src/main.rs` (no leading ./) is too ambiguous — could be
         // prose — so we require an explicit prefix.
         let row = "src/main.rs changed";
-        assert_eq!(detect_target(row, 2), None);
+        assert_eq!(detect_target(row, 2, None), None);
     }
 
     #[test]
     fn detects_same_repo_issue() {
         let row = "fixed in #42 today";
         assert_eq!(
-            detect_target(row, 10),
+            detect_target(row, 10, None),
             Some(ClickTarget::Issue {
                 repo: None,
                 number: 42,
@@ -2975,7 +3037,7 @@ mod detect_target_tests {
     fn detects_cross_repo_issue() {
         let row = "see acme/widgets#7 upstream";
         assert_eq!(
-            detect_target(row, 4),
+            detect_target(row, 4, None),
             Some(ClickTarget::Issue {
                 repo: Some("acme/widgets".into()),
                 number: 7,
@@ -2987,7 +3049,7 @@ mod detect_target_tests {
     fn issue_with_trailing_punctuation() {
         let row = "closes #99.";
         assert_eq!(
-            detect_target(row, 7),
+            detect_target(row, 7, None),
             Some(ClickTarget::Issue {
                 repo: None,
                 number: 99,
@@ -2998,14 +3060,14 @@ mod detect_target_tests {
     #[test]
     fn hash_without_digits_is_not_an_issue() {
         let row = "a #section heading";
-        assert_eq!(detect_target(row, 2), None);
+        assert_eq!(detect_target(row, 2, None), None);
     }
 
     #[test]
     fn whitespace_click_returns_none() {
         let row = "see /etc/hosts here";
         // Column 3 is the space before the path.
-        assert_eq!(detect_target(row, 3), None);
+        assert_eq!(detect_target(row, 3, None), None);
     }
 
     #[test]
@@ -3140,6 +3202,30 @@ mod extract_text_offset_tests {
         // No recap: grid top stays at screen row 3.
         let text = stack.extract_text(Rect::new(0, 0, 80, 30), (1, 3), (10, 3));
         assert_eq!(text, "line0");
+    }
+
+    #[test]
+    fn osc8_hyperlink_is_a_click_target_when_mouse_tracking_off() {
+        // An OSC 8 hyperlink whose visible text ("docs") isn't a URL.
+        // Right-click-to-open must resolve it via the hyperlink URI,
+        // not the text scan — and it must do so while the inner
+        // program isn't tracking the mouse (the idle state where the
+        // event would otherwise never reach the PTY either, #22).
+        let link = "\x1b]8;;https://example.com/page\x1b\\docs\x1b]8;;\x1b\\";
+        let mut stack = stack_with(TerminalKind::Shell, None, &[link]);
+
+        assert!(
+            !stack.focused_terminal_tracks_mouse(),
+            "precondition: a freshly-fed shell isn't mouse-tracking",
+        );
+
+        // Shell has no recap: grid row 0 renders at screen row 3, and
+        // the body starts one column in past the left border.
+        let target = stack.target_at(Rect::new(0, 0, 80, 30), 1, 3);
+        assert_eq!(
+            target,
+            Some(ClickTarget::Url("https://example.com/page".into())),
+        );
     }
 
     #[test]

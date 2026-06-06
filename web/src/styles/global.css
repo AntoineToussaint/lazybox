@@ -221,6 +221,17 @@ img, video { max-width: 100%; display: block; }
   margin: 0 auto 2.1rem;
   line-height: 1.6;
 }
+.quip {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--fg-faint);
+  max-width: 38rem;
+  margin: -0.6rem auto 1.9rem;
+}
+.quip .c { color: var(--accent-2); user-select: none; }
+.quip b { color: var(--fg-dim); font-weight: 600; }
+
 .cta-row {
   display: flex;
   gap: 0.85rem;

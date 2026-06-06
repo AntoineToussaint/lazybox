@@ -40,7 +40,7 @@ jobs:
 
       - id: plan
         run: |
-          cargo dist plan --output-format=json > plan.json
+          dist plan --output-format=json > plan.json
           echo "manifest=$(cat plan.json | base64 -w0)" >> $GITHUB_OUTPUT
           echo "tag=$GITHUB_REF_NAME" >> $GITHUB_OUTPUT
 
@@ -88,7 +88,7 @@ jobs:
         run: cargo install --locked --version 0.28.0 cargo-dist
 
       - name: Build release artifacts
-        run: cargo dist build --target=${{ matrix.target }} --output-format=json
+        run: dist build --target=${{ matrix.target }} --output-format=json
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -116,7 +116,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cargo dist host --steps=upload --steps=release \
+          dist host --steps=upload --steps=release \
             --tag=${{ needs.plan.outputs.tag }}
 
       - name: Push Homebrew formula
@@ -127,5 +127,5 @@ jobs:
           # HOMEBREW_TAP_TOKEN.
           GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          cargo dist host --steps=announce \
+          dist host --steps=announce \
             --tag=${{ needs.plan.outputs.tag }}

@@ -242,6 +242,9 @@ footer .row {
   gap: 1rem;
 }
 footer .brand { font-family: var(--mono); color: var(--fg-dim); }
+footer .brand .by { color: var(--fg-faint); }
+footer .brand .by a { color: var(--fg-dim); }
+footer .brand .by a:hover { color: var(--fg); text-decoration: none; }
 footer .links { display: flex; gap: 1.25rem; }
 footer .links a { color: var(--fg-faint); }
 footer .links a:hover { color: var(--fg); text-decoration: none; }

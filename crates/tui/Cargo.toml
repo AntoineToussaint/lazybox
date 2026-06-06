@@ -10,6 +10,15 @@ publish.workspace = true
 repository.workspace = true
 readme = "../../README.md"
 
+# The workspace sets `publish = false`, which cargo-dist (`dist`) treats as
+# "not distributable" and skips — leaving the release with nothing to ship.
+# This crate produces the `lazybox` binary, so opt it back into releases.
+[package.metadata.dist]
+dist = true
+# Name the Homebrew formula after the binary (`lazybox`), not the crate
+# (`lazybox-tui`), so installs read `brew install …/lazybox`.
+formula = "lazybox"
+
 [lib]
 name = "lazybox_tui"
 path = "src/lib.rs"

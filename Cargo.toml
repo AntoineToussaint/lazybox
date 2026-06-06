@@ -73,6 +73,10 @@ targets = [
 github-build-setup = "../release-setup.yml"
 # Publish all pushes to GitHub Releases (including pre-releases).
 pr-run-mode = "plan"
+# `release.yml` is hand-curated (see its header), so it intentionally diverges
+# from what `dist generate` would emit. Tell dist not to fail the plan step on
+# that mismatch.
+allow-dirty = ["ci"]
 
 [workspace.package]
 version = "0.1.0"

@@ -50,14 +50,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # v0.1.0 ships the two targets that build cleanly today. Intel macOS
+          # (x86_64-apple-darwin) is blocked on scarce macos-13 runners, and
+          # aarch64-unknown-linux-gnu hits a Zig libc++ sub-compilation error;
+          # both are tracked for a follow-up. Re-add their matrix entries (and
+          # the targets in Cargo.toml's [workspace.metadata.dist]) once fixed.
           - target: aarch64-apple-darwin
             runner: macos-14
-          - target: x86_64-apple-darwin
-            runner: macos-13
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4

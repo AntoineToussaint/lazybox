@@ -60,12 +60,13 @@ installers = ["shell", "homebrew"]
 # Tap repo to push the Homebrew formula to. Must exist + give the
 # release workflow write access via a deploy key or PAT.
 tap = "AntoineToussaint/homebrew-lazybox"
-# Build matrix. Add `x86_64-pc-windows-msvc` once the Windows port lands.
+# Build matrix. v0.1.0 ships the two targets that build cleanly today; Intel
+# macOS (scarce macos-13 runners) and aarch64-unknown-linux-gnu (a Zig libc++
+# sub-compilation error) are deferred to a follow-up. Keep this list in sync
+# with the matrix in .github/workflows/release.yml.
 targets = [
     "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
 ]
 # Extra runner setup steps. libghostty-vt's build.rs invokes
 # `zig build` during compilation — every CI runner needs Zig 0.15.2+

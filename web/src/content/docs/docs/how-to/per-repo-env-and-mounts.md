@@ -1,4 +1,7 @@
-# Per-repo env and mounts
+---
+title: Per-repo env and mounts
+description: Inject environment variables, symlink shared directories, and materialize scripts into worktrees.
+---
 
 Goal: make every worktree lazybox creates for a repository feel like a real
 checkout — with the environment variables, shared directories, and helper
@@ -78,5 +81,5 @@ ls -l node_modules .secrets _lazybox/scripts
 
 ## Related
 
-- The full [configuration reference](../reference/configuration.md#repos) for
+- The full [configuration reference](/docs/reference/configuration/#repos) for
   the `repos` schema.

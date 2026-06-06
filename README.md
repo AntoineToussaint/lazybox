@@ -13,7 +13,17 @@ ready-to-run workspace.
 
 ## Install
 
-No prebuilt release yet (pre-1.0 — see [Status](#status)), so build from source:
+Prebuilt binaries (macOS · Linux):
+
+```sh
+brew install AntoineToussaint/lazybox/lazybox
+# …or: curl --proto '=https' --tlsv1.2 -LsSf \
+#   https://github.com/AntoineToussaint/lazybox/releases/latest/download/lazybox-tui-installer.sh | sh
+```
+
+Then `gh auth login` (if you haven't) and run `lazybox`.
+
+Prefer to build it yourself, or hacking on lazybox? Build from source:
 
 ```sh
 git clone https://github.com/AntoineToussaint/lazybox.git
@@ -40,8 +50,8 @@ sudo dnf install gcc gcc-c++ pkgconf-pkg-config libcxx-devel libcxxabi-devel
 sudo pacman -S --needed base-devel pkgconf libc++ libc++abi
 ```
 
-Full build notes, troubleshooting, and the Homebrew/curl channels that land at
-1.0 are in the [Quickstart](https://lazybox.ai/docs/tutorials/quickstart/).
+Full install options (Homebrew, `curl | sh`, source), build notes, and
+troubleshooting are in the [Quickstart](https://lazybox.ai/docs/tutorials/quickstart/).
 
 ## First 60 seconds
 
@@ -102,9 +112,9 @@ The [full keybinding reference](https://lazybox.ai/docs/reference/keybindings/) 
 
 Pre-1.0, **early-adopter dev mode**. Daily-driver for the author on macOS; Linux
 runs the same code paths but gets less testing. Expect sharp edges, log spam in
-`/tmp/lazybox.log`, and the occasional breaking change. Prebuilt release channels
-(Homebrew tap, `curl | sh`, GitHub Releases) are scaffolded but not yet active —
-no version tag has been pushed.
+`/tmp/lazybox.log`, and the occasional breaking change. Prebuilt binaries ship
+via the Homebrew tap, the `curl | sh` installer, and GitHub Releases (see
+[Install](#install)).
 
 Run a side-by-side dev instance against its own state with `make dev`
 (`LAZYBOX_HOME=~/.lazybox-dev`) if you want to try lazybox without disturbing your

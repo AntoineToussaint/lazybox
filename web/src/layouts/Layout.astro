@@ -7,14 +7,15 @@ interface Props {
 }
 
 const {
-  title = 'lazybox — a reactive PR inbox in your terminal',
-  description = 'Stop checking GitHub. New comments, CI failures, and review requests flow to you — each task becomes a session with an embedded terminal in a git worktree.',
+  title = 'lazybox — run a fleet of coding agents from your terminal',
+  description = 'lazybox turns every PR and issue across GitHub and Linear into a workspace with its own coding agent. Run dozens in parallel and get pinged the moment one needs you — no branches or worktrees to manage.',
 } = Astro.props;
 
 // Canonical URL: derived from `site` in astro.config.mjs at build time,
 // with a hardcoded fallback for `astro dev` (where Astro.site can be
 // undefined). Keep the fallback domain in sync with astro.config.mjs.
 const canonical = new URL(Astro.url.pathname, Astro.site ?? 'https://lazybox.ai').href;
+const ogImage = new URL('/demo/lazybox.png', Astro.site ?? 'https://lazybox.ai').href;
 ---
 
 <!doctype html>
@@ -31,9 +32,11 @@ const canonical = new URL(Astro.url.pathname, Astro.site ?? 'https://lazybox.ai'
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={ogImage} />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
 
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   </head>

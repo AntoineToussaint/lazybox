@@ -3,116 +3,281 @@ import Layout from '../layouts/Layout.astro';
 
 const repo = 'https://github.com/AntoineToussaint/lazybox';
 const docs = '/docs/';
+const installCmd = 'brew install AntoineToussaint/lazybox/lazybox';
 
 const features = [
   {
-    icon: '◉',
-    title: 'Events flow to you',
-    body: 'New comments, CI failures, and review requests surface automatically with read/unread tracking. No more tab-checking GitHub.',
+    icon: '⌗',
+    title: 'A fleet, not a tab',
+    body: 'Every PR and issue becomes a workspace with its own agent. Run dozens at once — each in its own embedded terminal — and flip between them instantly without losing your place.',
+    wide: true,
   },
   {
-    icon: '⌗',
-    title: 'A session per task',
-    body: 'Every PR or issue becomes a session with an embedded terminal — run Claude Code or a shell, right where the work is.',
+    icon: '◉',
+    title: 'It pings you when an agent is stuck',
+    body: 'The instant an agent hits a permission prompt or needs a decision, lazybox fires a native desktop notification and flags the row. Press ! to jump straight to it. Stop babysitting terminals.',
+    wide: true,
   },
   {
     icon: '⑂',
-    title: 'Isolated worktrees',
-    body: 'Each session gets its own git worktree from a bare clone. Switch tasks without stashing, rebasing, or losing your place.',
+    title: 'Worktrees, handled',
+    body: 'Every task gets a fresh, isolated git checkout — created automatically. No branches to make, nothing to stash, no collisions between agents running side by side. You never think about it.',
   },
   {
     icon: '⇄',
-    title: 'Source-agnostic',
-    body: 'GitHub is one provider. Linear, Jira, and others plug in the same way — one inbox for everything that needs you.',
+    title: 'GitHub and Linear, one inbox',
+    body: 'PRs, issues, and Linear tickets surface the same way, with read/unread tracking. Mirror activity to Slack — and kick off work with an @lazybox mention.',
   },
   {
     icon: '⌁',
-    title: 'Agents, built in',
-    body: 'Claude, Codex, Cursor, or any CLI. Spawned agents drive the repo directly with gh and git — no tool-approval wrapper.',
+    title: 'The right prompt, one key',
+    body: 'Press w and lazybox reads the row — failing CI, a merge conflict, an open issue, review comments — and launches the agent with exactly the right brief.',
+  },
+  {
+    icon: '∑',
+    title: 'See what they cost',
+    body: 'A local pass-through proxy tracks tokens, tool calls, and dollar cost per session — live in the sidebar. Your API key goes straight to the model; the daemon never sees it.',
+    wide: true,
   },
   {
     icon: '⇲',
     title: 'Local or remote',
-    body: 'Runs as an in-process daemon by default, or split client/daemon over a Unix socket and forward it across SSH.',
+    body: 'Runs as an in-process daemon by default, or split client and daemon over a Unix socket and forward it across SSH — heavy lifting on a remote box, inbox on your laptop.',
+    wide: true,
+  },
+];
+
+const steps = [
+  {
+    title: 'Connect your sources',
+    body: 'Point lazybox at your GitHub repos and Linear. Every PR, issue, and ticket lands in one keyboard-driven inbox — grouped, tracked, read/unread.',
+    code: 'owner/name',
+  },
+  {
+    title: 'Spawn agents in parallel',
+    body: 'Press c, x, or u for Claude Code, Codex, or Cursor — or w to let lazybox pick the brief. Each gets its own isolated checkout. Run as many as you like.',
+    code: 'c · x · u · w',
+  },
+  {
+    title: 'Step in only when needed',
+    body: 'Agents work on their own. lazybox notifies you the moment one needs a decision — jump to it with !, unblock it, and move on.',
+    code: '!',
   },
 ];
 ---
 
 <Layout>
-  <div class="container">
-    <nav class="nav">
-      <span class="brand"><span class="prompt">›</span> lazybox</span>
-      <div class="links">
-        <a href="#features">Features</a>
-        <a href={docs} class="hide-sm">Docs</a>
-        <a href={repo}>GitHub</a>
-      </div>
-    </nav>
+  <a href="#main" class="skip-link">Skip to content</a>
+
+  <div class="nav-wrap" id="nav">
+    <div class="container">
+      <nav class="nav">
+        <a href="/" class="brand" aria-label="lazybox home">
+          <svg viewBox="0 0 32 32" aria-hidden="true">
+            <rect width="32" height="32" rx="7" fill="#0b0e14"></rect>
+            <rect x="3.5" y="3.5" width="25" height="25" rx="5.5" fill="none" stroke="#232a38"></rect>
+            <path d="M8 11l4 4-4 4" fill="none" stroke="#6ee7a8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"></path>
+            <line x1="15" y1="20" x2="22" y2="20" stroke="#7cc4ff" stroke-width="2.2" stroke-linecap="round"></line>
+          </svg>
+          lazybox
+        </a>
+        <div class="links">
+          <a href="#features" class="hide-sm">Features</a>
+          <a href="#how" class="hide-sm">How it works</a>
+          <a href={docs}>Docs</a>
+          <a href={repo} class="ghbtn">
+            <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+            <span class="hide-sm">Star</span>
+          </a>
+        </div>
+      </nav>
+    </div>
   </div>
 
-  <header class="hero">
-    <div class="container">
-      <span class="eyebrow">reactive PR inbox · TUI</span>
-      <h1>Stop checking GitHub.<br /><span class="grad">Let it come to you.</span></h1>
-      <p class="lead">
-        lazybox is a reactive PR inbox in your terminal. Comments, CI failures, and
-        review requests surface the moment they happen — each one a session with
-        an embedded terminal in its own git worktree.
-      </p>
+  <main id="main">
+    <header class="hero">
+      <div class="container">
+        <span class="eyebrow"><span class="dot"></span> many agents · one terminal inbox</span>
+        <h1>Run a fleet of agents.<br /><span class="grad">Step in only when it matters.</span></h1>
+        <p class="lead">
+          lazybox turns every PR and issue — across GitHub and Linear — into a workspace
+          with its own coding agent. Run dozens in parallel; it pings you the moment one
+          needs you. No branches or worktrees to wrangle — lazybox handles all of that.
+        </p>
 
-      <div class="cta-row">
-        <a class="btn btn-primary" href={docs}>Get started →</a>
-        <a class="btn btn-ghost" href={repo}>★ Star on GitHub</a>
-      </div>
-      <p class="install">
-        <code><span class="prompt">$ </span>cargo install lazybox-tui</code>
-      </p>
+        <p class="quip">
+          <span class="c">//</span> basically: <b>email and Claude&nbsp;Code had a baby</b> — the inbox brings you the work, the agent does it.
+        </p>
 
-      <div class="term" aria-hidden="true">
-        <div class="bar">
-          <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
-          <span class="title">lazybox — inbox</span>
+        <div class="cta-row">
+          <a class="btn btn-primary" href={docs}>Get started →</a>
+          <a class="btn btn-ghost" href={repo}>★ Star on GitHub</a>
         </div>
-        <pre><span class="c-dim">┌─ inbox ──────────────────────────────┐</span>
-<span class="unread">● #209  Rework snippet invocation</span>      <span class="c-green">✓ ci</span>
-<span class="unread">● #207  Bucket untyped workspaces</span>     <span class="c-amber">2 comments</span>
+
+        <div class="install" data-install>
+          <code><span class="prompt">$</span>{installCmd}</code>
+          <button class="copy" type="button" aria-label="Copy install command" data-copy={installCmd}>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" data-icon="copy"><rect x="5" y="5" width="9" height="9" rx="1.5"></rect><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5"></path></svg>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" data-icon="check" style="display:none"><path d="M3.5 8.5l3 3 6-6"></path></svg>
+          </button>
+        </div>
+
+        <div class="term" data-reveal aria-label="lazybox managing several agents in a terminal">
+          <div class="bar">
+            <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+            <span class="title">lazybox — inbox</span>
+          </div>
+          <video
+            src="/demo/lazybox.mp4"
+            poster="/demo/lazybox.png"
+            autoplay
+            loop
+            muted
+            playsinline
+            preload="metadata"
+          >
+            <img src="/demo/lazybox.gif" alt="lazybox inbox with workspaces, CI status, and an embedded terminal" />
+          </video>
+        </div>
+      </div>
+    </header>
+
+    <div class="strip">
+      <div class="container">
+        <div class="row">
+          <span><b class="mk">⌘</b> <b>Built in Rust</b></span>
+          <span><b class="mk">⇄</b> GitHub + Linear</span>
+          <span><b class="mk">⌁</b> Claude · Codex · Cursor</span>
+          <span><b class="mk">◉</b> Native desktop alerts</span>
+        </div>
+      </div>
+    </div>
+
+    <section id="features">
+      <div class="container">
+        <div class="section-head" data-reveal>
+          <p class="kicker">An inbox, not a dashboard</p>
+          <h2>Built to run a lot of agents at once</h2>
+          <p>Many agents in flight, one calm inbox — and it tells you which one needs you.</p>
+        </div>
+        <div class="bento">
+          {features.map((f, i) => (
+            <div class={f.wide ? 'card wide' : 'card'} data-reveal style={`transition-delay:${(i % 3) * 60}ms`}>
+              <div class="icon">{f.icon}</div>
+              <h3>{f.title}</h3>
+              <p>{f.body}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <section id="how">
+      <div class="container">
+        <div class="section-head" data-reveal>
+          <p class="kicker">How it works</p>
+          <h2>From zero to a fleet in three steps</h2>
+          <p>Wire up your sources, spawn agents in parallel, and let the inbox triage itself.</p>
+        </div>
+        <div class="steps">
+          {steps.map((s, i) => (
+            <div class="step" data-reveal style={`transition-delay:${i * 80}ms`}>
+              <span class="n">{i + 1}</span>
+              <h3>{s.title}</h3>
+              <p>{s.body}</p>
+              <p style="margin-top:0.9rem"><code>{s.code}</code></p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <section id="compare">
+      <div class="container">
+        <div class="section-head" data-reveal>
+          <p class="kicker">The shift</p>
+          <h2>The same work, minus the busywork</h2>
+          <p>What chasing tasks across browser tabs turns into once the inbox does the chasing.</p>
+        </div>
+        <div class="compare-grid">
+          <div class="compare-col before" data-reveal>
+            <div class="lbl">Without lazybox</div>
+            <ul>
+              <li>Refresh GitHub. Scan tabs for what changed.</li>
+              <li>Copy an issue into your agent, paste the context by hand.</li>
+              <li>Cut a branch; stash whatever you were on.</li>
+              <li>Babysit the run in case it stops to ask a question.</li>
+              <li>Do it again for the next task — and lose your place.</li>
+            </ul>
+          </div>
+          <div class="compare-col after" data-reveal style="transition-delay:80ms">
+            <div class="lbl">With lazybox</div>
+            <ul>
+              <li>Issues and PRs land in one inbox, flagged unread.</li>
+              <li>Press <kbd>w</kbd> — the agent starts with the right brief, already in context.</li>
+              <li>A fresh worktree appears on its own. Nothing to stash.</li>
+              <li>Get a desktop ping the moment one needs a decision.</li>
+              <li>Run a dozen at once. Step in only where it counts.</li>
+            </ul>
+          </div>
+        </div>
+        <div class="workflow" data-reveal>
+          <span class="tag">in practice</span>
+          <p>
+            <span class="c">$</span> I keep a workspace called <b>Issues &amp; Features</b>. When something
+            comes up, I drop a GitHub issue in it. It shows up in lazybox, I hit <kbd>w</kbd>, and the
+            agent goes to work — I only look up when it needs me.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="keys-section">
+      <div class="container">
+        <div class="keys-grid">
+          <div class="keys-copy" data-reveal>
+            <p class="kicker">Terminal-native</p>
+            <h2>Your hands never leave the keyboard</h2>
+            <p>
+              Every pane has its own keymap and the hint bar always shows what's live.
+              Navigate a fleet, unblock the agent that's waiting, and ship — all without
+              reaching for a mouse.
+            </p>
+            <div class="keys-list">
+              <div class="k"><kbd>j</kbd><kbd>k</kbd> navigate the inbox</div>
+              <div class="k"><kbd>c</kbd>&nbsp;·&nbsp;<kbd>x</kbd>&nbsp;·&nbsp;<kbd>u</kbd> spawn Claude / Codex / Cursor</div>
+              <div class="k"><kbd>w</kbd> auto-prompt for the row's state</div>
+              <div class="k"><kbd>!</kbd> jump to the next agent that needs you</div>
+            </div>
+          </div>
+          <div class="keys-card" data-reveal>
+            <div class="bar">
+              <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+            </div>
+            <pre><span class="c-dim">┌─ inbox ──────────────────────────────┐</span>
+<span class="unread">● #209  Implement export endpoint</span>     <span class="c-amber">⚠ needs you</span>
+<span class="unread">● #207  Bucket untyped workspaces</span>     <span class="c-accent">◐ working</span>
 <span class="c-dim">○ #206  Wrap multi-line snippet bodies</span>  <span class="c-green">✓ ci</span>
 <span class="unread">● #197  Drop bot-authored Slack msgs</span>    <span class="c-red">✗ ci failed</span>
 <span class="c-dim">○ #195  Collapse out-of-scope issue</span>      <span class="c-green">merged</span>
 <span class="c-dim">└──────────────────────────────────────┘</span>
-  <span class="c-accent">c</span> claude  <span class="c-accent">b</span> shell  <span class="c-accent">g m</span> merge  <span class="c-accent">/</span> search</pre>
-      </div>
-    </div>
-  </header>
-
-  <section id="features">
-    <div class="container">
-      <div class="section-head">
-        <h2>An inbox, not a dashboard</h2>
-        <p>Everything that needs your attention, in one place — and a terminal for every task.</p>
-      </div>
-      <div class="grid">
-        {features.map((f) => (
-          <div class="card">
-            <div class="icon">{f.icon}</div>
-            <h3>{f.title}</h3>
-            <p>{f.body}</p>
+  <span class="c-accent">c</span> claude  <span class="c-accent">x</span> codex  <span class="c-accent">w</span> work  <span class="c-accent">!</span> waiting</pre>
           </div>
-        ))}
+        </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <section class="band">
-    <div class="container">
-      <h2>Your PRs, where you already live.</h2>
-      <p>Free and open source. Built in Rust.</p>
-      <div class="cta-row">
-        <a class="btn btn-primary" href={docs}>Read the docs →</a>
-        <a class="btn btn-ghost" href={repo}>View source</a>
+    <section class="band">
+      <div class="container" data-reveal>
+        <h2>Spend your attention where it counts.</h2>
+        <p>Free and open source, built in Rust. Run a fleet of agents and let lazybox tell you when one needs you.</p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href={docs}>Read the docs →</a>
+          <a class="btn btn-ghost" href={repo}>View source</a>
+        </div>
       </div>
-    </div>
-  </section>
+    </section>
+  </main>
 
   <footer>
     <div class="container row">
@@ -124,4 +289,54 @@ const features = [
       </div>
     </div>
   </footer>
+
+  <script>
+    // Nav border on scroll
+    const nav = document.getElementById('nav');
+    const onScroll = () => nav?.classList.toggle('scrolled', window.scrollY > 8);
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+
+    // Copy-to-clipboard for the install command
+    document.querySelectorAll<HTMLButtonElement>('.copy').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const text = btn.dataset.copy ?? '';
+        try {
+          await navigator.clipboard.writeText(text);
+          btn.classList.add('copied');
+          const copy = btn.querySelector<HTMLElement>('[data-icon="copy"]');
+          const check = btn.querySelector<HTMLElement>('[data-icon="check"]');
+          if (copy) copy.style.display = 'none';
+          if (check) check.style.display = 'block';
+          setTimeout(() => {
+            btn.classList.remove('copied');
+            if (copy) copy.style.display = 'block';
+            if (check) check.style.display = 'none';
+          }, 1600);
+        } catch {
+          /* clipboard unavailable — no-op */
+        }
+      });
+    });
+
+    // Scroll reveal
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const items = document.querySelectorAll('[data-reveal]');
+    if (reduce || !('IntersectionObserver' in window)) {
+      items.forEach((el) => el.classList.add('in'));
+    } else {
+      const io = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((e) => {
+            if (e.isIntersecting) {
+              e.target.classList.add('in');
+              io.unobserve(e.target);
+            }
+          });
+        },
+        { rootMargin: '0px 0px -10% 0px', threshold: 0.1 }
+      );
+      items.forEach((el) => io.observe(el));
+    }
+  </script>
 </Layout>

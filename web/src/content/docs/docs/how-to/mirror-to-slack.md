@@ -1,4 +1,7 @@
-# Mirror to Slack
+---
+title: Mirror to Slack
+description: Reflect your lazybox inbox into Slack channels.
+---
 
 Goal: reflect your lazybox inbox into Slack so workspace activity shows up in
 channels — useful for visibility or for triaging away from the terminal.
@@ -28,10 +31,10 @@ slack:
   bot_token: xoxb-your-bot-token
   app_token: xapp-your-app-token
   anchor_channel: lazybox-inbox       # the channel the mirror anchors to
-  per_workspace_channels: true      # give each workspace its own channel
+  per_workspace_channels: true        # give each workspace its own channel
 ```
 
-See the [configuration reference](../reference/configuration.md#slack) for the
+See the [configuration reference](/docs/reference/configuration/#slack) for the
 full schema.
 
 ## 3. Initialize and check
@@ -52,4 +55,4 @@ lazybox slack prune      # remove stale per-workspace channels
 
 ## Related
 
-- The [CLI reference](../reference/cli.md) for the `slack` subcommands.
+- The [CLI reference](/docs/reference/cli/) for the `slack` subcommands.

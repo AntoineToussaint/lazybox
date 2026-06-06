@@ -3,15 +3,11 @@ title: CLI reference
 description: Every lazybox subcommand, flag, and run mode.
 ---
 
-All commands assume lazybox has been built from source (see the
-[Quickstart](/docs/tutorials/quickstart/)). Where this page writes `lazybox`,
-you can substitute `cargo run -p lazybox-tui --` if you have not put a built
-binary on your `PATH`.
-
-:::note[No prebuilt releases yet]
-`brew install` and `curl | sh` install paths are scaffolded but not active —
-no version has been tagged. Build from source until 1.0 ships.
-:::
+All commands assume a `lazybox` binary on your `PATH` — installed via Homebrew
+(`brew install AntoineToussaint/lazybox/lazybox`), the `curl | sh` installer, or
+a source build (see the [Quickstart](/docs/tutorials/quickstart/)). From a
+source checkout without a built binary on `PATH`, substitute
+`cargo run -p lazybox-tui --`.
 
 ## Make targets
 

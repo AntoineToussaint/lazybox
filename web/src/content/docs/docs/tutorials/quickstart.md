@@ -1,49 +1,69 @@
 ---
 title: Quickstart
-description: Build lazybox from source and open your first workspace with a live terminal in about five minutes.
+description: Install lazybox and open your first workspace with a live terminal in about five minutes.
 ---
 
-In about five minutes you will build lazybox from source, launch it, and open a
-workspace with a live embedded terminal. That is the whole goal of this
-tutorial — one visible win. Everything else can wait.
+In a few minutes you will install lazybox, launch it, and open a workspace with
+a live embedded terminal. That is the whole goal of this tutorial — one visible
+win. Everything else can wait.
 
-## Prerequisites
+One prerequisite either way: the **GitHub CLI**, logged in. Run `gh auth login`
+once — lazybox reads your token from `gh auth token`.
 
-Before you start, make sure you have:
+## 1. Install
 
-- **Rust 1.85 or newer** (`rustc --version`).
-- **A C compiler** — lazybox bundles SQLite and compiles it on the first build.
-- **The GitHub CLI**, logged in: run `gh auth login` once. lazybox reads your
-  token from `gh auth token`.
-- **Network access to github.com** on the first build.
+The fastest path is a prebuilt binary.
 
-On Linux you also need libc++ and libc++abi. On Debian/Ubuntu:
+**Homebrew** (macOS · Linux):
+
+```sh
+brew install AntoineToussaint/lazybox/lazybox
+```
+
+**Or `curl | sh`:**
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/AntoineToussaint/lazybox/releases/latest/download/lazybox-tui-installer.sh | sh
+```
+
+Both drop a `lazybox` binary on your `PATH`. Skip to [Launch](#2-launch).
+
+:::note[Pre-1.0]
+lazybox is daily-driven on macOS; Linux runs the same code paths but is less
+tested. Expect sharp edges — logs land in `/tmp/lazybox.log`.
+:::
+
+### Build from source instead
+
+Prefer to build it yourself, or hacking on lazybox? You will need **Rust 1.85+**
+and a **C compiler** (lazybox bundles SQLite). On Debian/Ubuntu also install
+libc++:
 
 ```sh
 sudo apt install build-essential pkg-config libc++-dev libc++abi-dev
 ```
 
-## 1. Clone and build
+Then clone and build:
 
 ```sh
 git clone https://github.com/AntoineToussaint/lazybox.git
 cd lazybox
-make setup
+make setup   # one-shot: downloads pinned Zig 0.15.2 to ~/.cache/lazybox/zig/
 ```
 
-`make setup` is a one-shot step that downloads a pinned Zig 0.15.2 toolchain to
-`~/.cache/lazybox/zig/`. You only run it once.
-
-:::note[First build takes a moment]
 The first compile builds the bundled SQLite and the embedded terminal, so it
 takes around 30 seconds longer than later builds.
-:::
 
 ## 2. Launch
 
+If you installed a prebuilt binary, just run:
+
 ```sh
-make run
+lazybox
 ```
+
+From a source checkout, use `make run` instead (it builds, then launches).
 
 On first launch lazybox runs a short **setup wizard** to pick up your GitHub
 credentials and detect installed agents and editors. When it finishes you land

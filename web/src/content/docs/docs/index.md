@@ -16,8 +16,9 @@ all in the same inbox, with the same keys.
 
 :::caution[Pre-1.0, early-adopter dev mode]
 lazybox is daily-driven on macOS; Linux runs the same code paths but is less
-tested. There is no prebuilt release yet, so every install path here builds
-from source. Expect sharp edges; logs land in `/tmp/lazybox.log`.
+tested. Prebuilt binaries ship via a Homebrew tap and a `curl | sh` installer
+(see the [Quickstart](/docs/tutorials/quickstart/)), or build from source.
+Expect sharp edges; logs land in `/tmp/lazybox.log`.
 :::
 
 ## Who it's for
@@ -47,9 +48,10 @@ The documentation is split into four sections, following the
 ## Fastest path
 
 ```sh
-git clone https://github.com/AntoineToussaint/lazybox.git
-cd lazybox && make setup && make run
+brew install AntoineToussaint/lazybox/lazybox
+gh auth login   # if you haven't already
+lazybox
 ```
 
 Then follow the [Quickstart](/docs/tutorials/quickstart/) for what you see on
-first launch.
+first launch — it also covers the `curl | sh` and build-from-source paths.

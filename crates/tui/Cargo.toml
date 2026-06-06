@@ -8,6 +8,7 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 repository.workspace = true
+homepage.workspace = true
 readme = "../../README.md"
 
 # The workspace sets `publish = false`, which cargo-dist (`dist`) treats as

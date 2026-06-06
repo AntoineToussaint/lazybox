@@ -82,9 +82,12 @@ async fn capture_fetch_all_prs_trace() {
         .expect("client builds from token")
         .with_watch_repos(watch_repos());
 
+    // `None` = unwindowed reconcile sweep, the heavy path this trace
+    // exists to measure. Pass a recent `Some(updated_since)` instead to
+    // profile a steady-state windowed sweep (issue #14).
     let started = std::time::Instant::now();
     let tasks = client
-        .fetch_all_prs()
+        .fetch_all_prs(None)
         .await
         .expect("fetch_all_prs succeeds");
     eprintln!(
@@ -136,8 +139,10 @@ async fn capture_prefetch_trace() {
         .expect("client builds from token")
         .with_watch_repos(watch_repos());
 
+    // `None` = unwindowed reconcile sweep (issue #14); this trace
+    // measures the prefetch phase, not the windowed-poll path.
     let tasks = client
-        .fetch_all_prs()
+        .fetch_all_prs(None)
         .await
         .expect("fetch_all_prs succeeds");
 

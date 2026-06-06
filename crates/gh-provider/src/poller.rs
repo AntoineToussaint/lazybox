@@ -57,7 +57,7 @@ impl GhPoller {
 
     async fn poll_cycle(&mut self) {
         // One GraphQL call gets everything.
-        let tasks = match self.client.fetch_all_prs().await {
+        let tasks = match self.client.fetch_all_prs(None).await {
             Ok(t) => t,
             Err(e) => {
                 warn!("GitHub poll failed: {e}");

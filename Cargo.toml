@@ -57,6 +57,10 @@ ci = ["github"]
 # `shell` = `curl ... | sh` script for Linux/macOS.
 # `homebrew` = a tap-pushed Homebrew formula.
 installers = ["shell", "homebrew"]
+# Enable the dedicated Homebrew publish job that pushes the formula to the tap
+# (needs the HOMEBREW_TAP_TOKEN secret). Without this, the formula is generated
+# but never pushed.
+publish-jobs = ["homebrew"]
 # Tap repo to push the Homebrew formula to. Must exist + give the
 # release workflow write access via a deploy key or PAT.
 tap = "AntoineToussaint/homebrew-lazybox"
@@ -74,10 +78,13 @@ targets = [
 github-build-setup = "../release-setup.yml"
 # Publish all pushes to GitHub Releases (including pre-releases).
 pr-run-mode = "plan"
-# `release.yml` is hand-curated (see its header), so it intentionally diverges
-# from what `dist generate` would emit. Tell dist not to fail the plan step on
-# that mismatch.
-allow-dirty = ["ci"]
+# Override dist's default runners: it picks macos-13 (Intel, scarce) for the
+# Apple-Silicon build and the retired ubuntu-20.04 for Linux. `global` sets the
+# runner for the orchestration jobs (plan/host/publish/announce).
+[workspace.metadata.dist.github-custom-runners]
+global = "ubuntu-22.04"
+aarch64-apple-darwin = "macos-14"
+x86_64-unknown-linux-gnu = "ubuntu-22.04"
 
 [workspace.package]
 version = "0.1.0"
@@ -85,6 +92,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/AntoineToussaint/lazybox"
+homepage = "https://lazybox.ai"
 readme = "README.md"
 # Lazybox ships as a single binary built by cargo-dist (see
 # `[workspace.metadata.dist]`); the individual workspace crates are

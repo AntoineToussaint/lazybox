@@ -540,6 +540,13 @@ pub struct Model<T: TerminalAdapter> {
     /// j/k (RepoHeader rows are skipped by `move_cursor_by`) and the
     /// user has no clear next step.
     pending_focus_project_name: Option<String>,
+    /// Issue workspace the user was viewing when it was removed by a
+    /// merge. Set in the `WorkspaceRemoved` handler (before the sidebar
+    /// moves the cursor off the gone row) and consumed by the matching
+    /// `WorkspaceMerged` to follow the moved sessions onto the PR
+    /// workspace — otherwise the cursor lands on an arbitrary row and
+    /// the merged session looks lost.
+    merge_follow_from: Option<lazybox_core::WorkspaceKey>,
     /// Loaded + merged snippet collection (`<lazybox_home>/snippets.yaml`
     /// + `<cwd>/.lazybox/snippets.yaml`). Populated at startup by
     /// `apply_snippets`; the terminal-pane `]` latch reads this to
@@ -724,6 +731,7 @@ impl<T: TerminalAdapter> Model<T> {
             pending_inspect_target: None,
             pending_new_workspace_project: None,
             pending_focus_project_name: None,
+            merge_follow_from: None,
             snippets: lazybox_config::Snippets::default(),
             snippet_choices: Vec::new(),
             auto_tour_pending: false,

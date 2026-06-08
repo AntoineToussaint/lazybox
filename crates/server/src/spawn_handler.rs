@@ -1671,6 +1671,60 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     });
 }
 
+/// How long the inject path waits for an active permission gate /
+/// chooser to clear before giving up. These prompts are user-blocking,
+/// so resolution is normally seconds; the bound only stops an abandoned
+/// prompt from leaking the waiter task indefinitely.
+const INJECT_INPUT_DEADLINE: Duration = Duration::from_secs(120);
+
+/// Park until the agent on `terminal_id` leaves `InputNeeded` — i.e. the
+/// permission gate / chooser / Y-N prompt it was blocked on has been
+/// answered and it's safe to deliver an injected prompt. Returns `true`
+/// once the agent reports any non-`InputNeeded` state, `false` if the
+/// terminal exits first or `deadline` elapses while still blocked.
+///
+/// `events` must be subscribed BEFORE the caller reads the current state
+/// so a transition that races the read isn't missed. On a `Lagged`
+/// receiver (the very transition may have been dropped) the authoritative
+/// `states` map is consulted rather than risk blocking to the deadline.
+async fn wait_until_input_resolved(
+    mut events: tokio::sync::broadcast::Receiver<Event>,
+    terminal_id: TerminalId,
+    states: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
+    >,
+    deadline: Duration,
+) -> bool {
+    let wait = async {
+        loop {
+            match events.recv().await {
+                Ok(Event::AgentState {
+                    terminal_id: tid,
+                    state,
+                    ..
+                }) if tid == terminal_id => {
+                    if state != lazybox_ipc::AgentState::InputNeeded {
+                        return true;
+                    }
+                }
+                Ok(Event::TerminalExited {
+                    terminal_id: tid, ..
+                }) if tid == terminal_id => return false,
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    if states.lock().await.get(&terminal_id)
+                        != Some(&lazybox_ipc::AgentState::InputNeeded)
+                    {
+                        return true;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+            }
+        }
+    };
+    matches!(tokio::time::timeout(deadline, wait).await, Ok(true))
+}
+
 /// Inject a prompt into an existing agent terminal. Same paste +
 /// submit split as the spawn-time initial_prompt path, just
 /// targeted at a live terminal instead of a fresh one. Quietly
@@ -1742,29 +1796,31 @@ pub async fn handle_inject_prompt(
     let paste = agent.inject_prompt(prompt);
     let submit = agent.inject_submit();
 
-    // NO Asking-wait in this path. Two earlier iterations of this
-    // code waited for `agent_states[id] != Asking` before injecting,
-    // motivated by the spawn-time race where Claude's "Trust this
-    // folder? y/n" permission prompt would eat the first char of
-    // the inject. That race is real but it only happens at SPAWN —
-    // by the time the user is pressing `w` to inject into an
-    // EXISTING claude session, the permission gate has been past
-    // for a while.
+    // Readiness gate (issue #32). If the agent is parked on a
+    // permission gate / chooser / Y-N prompt, that dialog owns input —
+    // it expects `y`/`n`/`1`/`2`, not a pasted prompt. Writing the
+    // paste now feeds it into the dialog, which rejects it, and the
+    // injection is silently lost. Claude emits these prompts at ANY
+    // point in a session, not just at spawn, so the inject path needs
+    // its own gate keyed on `InputNeeded`: wait for the prompt to
+    // clear, then deliver the context.
     //
-    // The Asking detector is intentionally permissive (matches
-    // claude's idle main prompt via the "last line ends with `?`"
-    // heuristic so the `?` sidebar pill surfaces "you're owed
-    // input"). That same permissiveness makes it a bad gate for
-    // inject: it stays Asking on the normal idle screen, so an
-    // inject-wait waited the full 60s deadline EVERY time + then
-    // injected after. From the user's perspective: pressing `w`
-    // did nothing.
-    //
-    // For the spawn-time race we keep the wait in `handle_spawn`
-    // where `Asking` near t=0 actually means a permission prompt.
-    // For inject into a long-running claude, just write the paste.
+    // Subscribe BEFORE reading the current state so a transition that
+    // races between the read and the wait isn't missed.
+    let events = config.bus.subscribe();
+    let blocked =
+        config.agent_state_for(terminal_id).await == Some(lazybox_ipc::AgentState::InputNeeded);
     let backend = config.backend.clone();
+    let states = config.agent_states.clone();
+    let id = terminal_id;
     tokio::spawn(async move {
+        if blocked && !wait_until_input_resolved(events, id, &states, INJECT_INPUT_DEADLINE).await {
+            tracing::warn!(
+                terminal_id = ?id,
+                "inject_prompt: agent still blocked on input after {INJECT_INPUT_DEADLINE:?}; dropping injection rather than feeding it into the prompt"
+            );
+            return;
+        }
         if let Err(e) = backend.write(&backend_key, &paste).await {
             tracing::warn!("inject_prompt: backend.write(paste) failed: {e}");
             return;
@@ -2243,6 +2299,69 @@ mod tests {
     fn env_for_repo_returns_empty_when_repo_not_configured() {
         let cfg = lazybox_config::Config::default();
         assert!(env_for_repo(&cfg, "no/such-repo").is_empty());
+    }
+
+    fn input_resolved_states() -> std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
+    > {
+        std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
+    }
+
+    #[tokio::test]
+    async fn wait_until_input_resolved_releases_on_non_input_needed_state() {
+        let (tx, rx) = tokio::sync::broadcast::channel(16);
+        let id = TerminalId(1);
+        // A different terminal's transition is ignored; ours releases it.
+        tx.send(Event::AgentState {
+            session_key: "ws:other".into(),
+            terminal_id: TerminalId(2),
+            state: lazybox_ipc::AgentState::Idle,
+        })
+        .unwrap();
+        tx.send(Event::AgentState {
+            session_key: "ws:1".into(),
+            terminal_id: id,
+            state: lazybox_ipc::AgentState::Working,
+        })
+        .unwrap();
+        assert!(
+            wait_until_input_resolved(rx, id, &input_resolved_states(), Duration::from_secs(1))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_until_input_resolved_gives_up_on_deadline_while_blocked() {
+        let (tx, rx) = tokio::sync::broadcast::channel(16);
+        let id = TerminalId(1);
+        // Prompt stays up: only InputNeeded arrives, so the wait must
+        // time out rather than write into the live prompt.
+        tx.send(Event::AgentState {
+            session_key: "ws:1".into(),
+            terminal_id: id,
+            state: lazybox_ipc::AgentState::InputNeeded,
+        })
+        .unwrap();
+        assert!(
+            !wait_until_input_resolved(rx, id, &input_resolved_states(), Duration::from_millis(80))
+                .await
+        );
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn wait_until_input_resolved_returns_false_when_terminal_exits() {
+        let (tx, rx) = tokio::sync::broadcast::channel(16);
+        let id = TerminalId(1);
+        tx.send(Event::TerminalExited {
+            terminal_id: id,
+            exit_code: Some(0),
+        })
+        .unwrap();
+        assert!(
+            !wait_until_input_resolved(rx, id, &input_resolved_states(), Duration::from_secs(1))
+                .await
+        );
     }
 
     #[test]

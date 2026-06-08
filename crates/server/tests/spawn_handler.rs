@@ -853,6 +853,117 @@ async fn inject_prompt_without_fallback_is_silent_noop() {
     .expect("deadline");
 }
 
+/// Regression (issue #32): pressing `w` (inject work context) while a
+/// Claude permission prompt is up must NOT write the paste into the
+/// dialog — the dialog expects `y`/`n`/`1`/`2` and would reject it,
+/// silently losing the injection. The daemon queues the injection and
+/// flushes it only once the agent leaves `InputNeeded`.
+#[tokio::test]
+async fn inject_prompt_waits_for_input_needed_to_clear() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        // Drive the agent into InputNeeded via a permission hook — the
+        // same state a live "Do you want to proceed?" dialog produces.
+        client
+            .send(Command::IngestHook {
+                terminal_id,
+                hook: lazybox_ipc::HookEvent {
+                    kind: lazybox_ipc::HookEventKind::Notification,
+                    session_id: Some("claude-session".into()),
+                    cwd: None,
+                    tool_name: None,
+                    notification: Some("Claude needs your permission to use Bash".into()),
+                },
+            })
+            .unwrap();
+        wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::InputNeeded,
+                        ..
+                    }
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("permission hook must raise InputNeeded");
+
+        const WORK: &str = "CI is red on PR #7; here are the failing checks.";
+        client
+            .send(Command::InjectPrompt {
+                terminal_id,
+                prompt: WORK.into(),
+                fallback_spawn: None,
+            })
+            .unwrap();
+
+        // While the permission prompt owns input, nothing may reach the
+        // PTY — feeding the paste into the dialog is the bug.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let early = mock
+            .writes_for(&key)
+            .await
+            .into_iter()
+            .flatten()
+            .collect::<Vec<u8>>();
+        assert!(
+            !String::from_utf8_lossy(&early).contains(WORK),
+            "injection was written into the live permission prompt; writes = {:?}",
+            String::from_utf8_lossy(&early)
+        );
+
+        // Resolve the prompt: a PreToolUse hook flips the agent to
+        // Working (the user approved the tool). The queued injection
+        // must now flush in full.
+        client
+            .send(Command::IngestHook {
+                terminal_id,
+                hook: lazybox_ipc::HookEvent {
+                    kind: lazybox_ipc::HookEventKind::PreToolUse,
+                    session_id: Some("claude-session".into()),
+                    cwd: None,
+                    tool_name: None,
+                    notification: None,
+                },
+            })
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let joined = loop {
+            let joined = mock
+                .writes_for(&key)
+                .await
+                .into_iter()
+                .flatten()
+                .collect::<Vec<u8>>();
+            let done = String::from_utf8_lossy(&joined).contains(WORK) && joined.contains(&b'\r');
+            if done || tokio::time::Instant::now() >= deadline {
+                break joined;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let text = String::from_utf8_lossy(&joined);
+        assert!(
+            text.contains(WORK),
+            "context never delivered after the prompt cleared; writes = {text:?}"
+        );
+        assert!(
+            joined.contains(&b'\r'),
+            "context was pasted but never submitted (no Enter); writes = {text:?}"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
 /// Regression: a single wedged backend session must not block the
 /// daemon's Subscribe handler. Pre-fix, `snapshot_terminals` would
 /// `.await` `backend.snapshot(key)` with no timeout — one stuck tmux

@@ -1778,6 +1778,24 @@ impl TerminalStack {
                 self.clamp_active_tab();
                 self.auto_collapse_on_emptiness();
             }
+            Event::TerminalsRebadged { from, to } => {
+                // The daemon moved every terminal keyed to `from` onto
+                // `to` (issue→PR collapse or manual adopt). Re-point our
+                // slots so they follow — and crucially so the
+                // `WorkspaceRemoved(from)` that trails a collapse no
+                // longer matches them and drops the live session.
+                for slot in self.terminals.values_mut() {
+                    if &slot.session_key == from {
+                        slot.session_key = to.clone();
+                    }
+                }
+                if let Some(id) = self.last_focused.remove(from) {
+                    self.last_focused.insert(to.clone(), id);
+                }
+                if self.active_session.as_ref() == Some(from) {
+                    self.active_session = Some(to.clone());
+                }
+            }
             Event::WorkspaceRemoved(workspace_key) => {
                 // Drop every terminal that belonged to the removed
                 // workspace. Wire-side the slot's session_key carries
@@ -3511,5 +3529,70 @@ mod summarize_message_tests {
             summarize_message("just normal text here"),
             "just normal text here"
         );
+    }
+}
+
+#[cfg(test)]
+mod rebadge_tests {
+    //! Issue→PR collapse rebadges terminals onto the PR workspace. The
+    //! terminal stack must follow that move BEFORE the trailing
+    //! `WorkspaceRemoved(issue)` arrives — otherwise the moved slots
+    //! still carry the issue key, the removal handler drops them, and
+    //! the live session vanishes from view (#34).
+    use super::*;
+
+    fn spawned_stack(id: TerminalId, sk: &SessionKey) -> TerminalStack {
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.on_event(&Event::TerminalSpawned {
+            terminal_id: id,
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+        stack.set_active_session(Some(sk.clone()));
+        stack
+    }
+
+    #[test]
+    fn rebadge_then_remove_keeps_the_moved_terminal() {
+        let issue = SessionKey::new("github:o/r#1");
+        let pr = SessionKey::new("github:o/r#2");
+        let mut stack = spawned_stack(TerminalId(1), &issue);
+
+        stack.on_event(&Event::TerminalsRebadged {
+            from: issue.clone(),
+            to: pr.clone(),
+        });
+
+        // Slot now belongs to the PR session, and the active session
+        // followed.
+        assert_eq!(stack.active_session(), Some(&pr));
+        assert_eq!(
+            stack.terminals.get(&TerminalId(1)).map(|s| &s.session_key),
+            Some(&pr),
+        );
+
+        // The trailing removal of the (now-gone) issue workspace must
+        // NOT drop the moved terminal.
+        stack.on_event(&Event::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(
+            issue.as_str().to_string(),
+        )));
+        assert!(
+            stack.terminals.contains_key(&TerminalId(1)),
+            "rebadged terminal survived the issue-workspace removal",
+        );
+    }
+
+    #[test]
+    fn without_rebadge_removal_still_drops_the_issue_terminal() {
+        // Guards the rebadge's necessity: a removal that ISN'T preceded
+        // by a rebadge drops the terminal, exactly as before the fix.
+        let issue = SessionKey::new("github:o/r#1");
+        let mut stack = spawned_stack(TerminalId(1), &issue);
+
+        stack.on_event(&Event::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(
+            issue.as_str().to_string(),
+        )));
+        assert!(!stack.terminals.contains_key(&TerminalId(1)));
     }
 }

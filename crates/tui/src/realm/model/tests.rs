@@ -1362,3 +1362,157 @@ mod modal_input_responsiveness_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod merge_focus_follow_tests {
+    //! Issue→PR collapse (#34): when the user is viewing the issue
+    //! workspace as it gets absorbed, focus must follow the moved
+    //! sessions onto the PR workspace — otherwise the cursor lands on an
+    //! arbitrary row and the merged session looks lost.
+    use super::super::*;
+    use chrono::{Duration, Utc};
+    use lazybox_core::{SessionKey, Task, TaskId, Workspace, WorkspaceKey};
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    /// `/pull/` in the URL routes the task into the PR slot; anything
+    /// else lands as an issue (`pr == None`). `age` orders rows: the
+    /// sidebar sorts updated_at desc, so a smaller age sits higher.
+    fn task(key: &str, is_pr: bool, age: Duration) -> Task {
+        let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
+        let segment = if is_pr { "pull" } else { "issues" };
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("task: {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{path}/{segment}/{num}"),
+            repo: Some("owner/repo".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now() - age,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    fn workspace(key: &str, is_pr: bool, age: Duration) -> Workspace {
+        Workspace::from_task(task(key, is_pr, age), Utc::now())
+    }
+
+    fn agent_session(workspace_key: &WorkspaceKey) -> lazybox_core::WorkspaceSession {
+        lazybox_core::WorkspaceSession::new(
+            workspace_key.clone(),
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            std::path::PathBuf::from("/tmp/wt"),
+            Utc::now(),
+        )
+    }
+
+    #[test]
+    fn merge_while_viewing_issue_follows_focus_to_pr() {
+        let mut m = build_model();
+
+        // A decoy PR sits at the top of the list (newest). Without the
+        // focus-follow it would win the "land on the first row" fallback
+        // after the issue is removed — so this test only passes when
+        // focus genuinely follows the merge to its target.
+        let decoy = workspace("owner/repo#9", true, Duration::minutes(1));
+        let issue = workspace("owner/repo#1", false, Duration::hours(1));
+        let mut pr = workspace("owner/repo#2", true, Duration::hours(2));
+        let issue_key = issue.key.clone();
+        let pr_key = pr.key.clone();
+        let decoy_key = decoy.key.clone();
+
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(decoy)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(issue.clone())));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr.clone())));
+        assert!(
+            m.sidebar.focus_workspace_key(&SessionKey::from(&issue_key)),
+            "issue workspace row should be focusable",
+        );
+
+        // Daemon-side merge event sequence: PR upsert (now holding the
+        // moved session) → issue removal → merge notice.
+        pr.add_session(agent_session(&pr_key));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(issue_key.clone()));
+        m.handle_daemon_event(IpcEvent::WorkspaceMerged {
+            issue_workspace_key: issue_key,
+            pr_workspace_key: pr_key.clone(),
+            issue_label: "owner/repo#1".into(),
+            pr_label: "owner/repo#2".into(),
+        });
+
+        let selected = m.sidebar.selected_workspace().expect("a row is selected");
+        assert_eq!(
+            selected.key, pr_key,
+            "focus followed the merge onto the PR workspace (not the decoy {decoy_key:?})",
+        );
+        assert!(
+            !selected.sessions.is_empty(),
+            "the merged session is visible under the PR workspace",
+        );
+    }
+
+    #[test]
+    fn merge_while_viewing_elsewhere_does_not_steal_focus() {
+        let mut m = build_model();
+
+        // Three rows; the user is parked on an unrelated PR, NOT on the
+        // issue being merged.
+        let issue = workspace("owner/repo#1", false, Duration::hours(1));
+        let pr = workspace("owner/repo#2", true, Duration::hours(2));
+        let other = workspace("owner/repo#3", true, Duration::minutes(1));
+        let issue_key = issue.key.clone();
+        let pr_key = pr.key.clone();
+        let other_key = other.key.clone();
+
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(issue.clone())));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr.clone())));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(other)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&other_key)));
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(issue_key.clone()));
+        m.handle_daemon_event(IpcEvent::WorkspaceMerged {
+            issue_workspace_key: issue_key,
+            pr_workspace_key: pr_key,
+            issue_label: "owner/repo#1".into(),
+            pr_label: "owner/repo#2".into(),
+        });
+
+        assert_eq!(
+            m.sidebar.selected_workspace().map(|w| w.key.clone()),
+            Some(other_key),
+            "a merge the user wasn't watching must not yank their cursor",
+        );
+    }
+}

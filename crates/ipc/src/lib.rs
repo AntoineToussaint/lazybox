@@ -886,6 +886,16 @@ pub enum Event {
     TerminalFocusRequested {
         terminal_id: TerminalId,
     },
+    /// Every terminal keyed to `from` now belongs to `to`. Broadcast
+    /// when the daemon rebadges terminals during an issue→PR collapse
+    /// (or a manual adopt) so live TUI clients re-point their terminal
+    /// slots BEFORE the `WorkspaceRemoved` for `from` arrives — without
+    /// this the terminal stack drops the moved terminals on removal and
+    /// the session vanishes from view until the next daemon restart.
+    TerminalsRebadged {
+        from: SessionKey,
+        to: SessionKey,
+    },
     AgentState {
         /// Workspace the asking agent lives in. Kept for backwards
         /// compatibility with TUI consumers that index by workspace

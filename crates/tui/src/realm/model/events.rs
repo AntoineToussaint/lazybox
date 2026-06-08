@@ -204,12 +204,25 @@ impl<T: TerminalAdapter> Model<T> {
         // its PR without prompting (no live sessions to worry about).
         // Flash a footer line so the row disappearance has context.
         if let IpcEvent::WorkspaceMerged {
+            issue_workspace_key,
+            pr_workspace_key,
             issue_label,
             pr_label,
-            ..
         } = &event
         {
             self.flash_info(format!("merged {issue_label} into {pr_label}"));
+            // If the user was viewing the issue workspace that just got
+            // absorbed, follow the moved sessions onto the PR workspace
+            // so they don't land on an arbitrary row with the session
+            // seemingly gone. `WorkspaceRemoved` (handled above, earlier
+            // in the event stream) recorded the viewed key.
+            if self.merge_follow_from.take().as_ref() == Some(issue_workspace_key) {
+                let pr_key: lazybox_core::SessionKey = pr_workspace_key.into();
+                if self.sidebar.focus_workspace_key(&pr_key) {
+                    self.sync_panes();
+                }
+            }
+            self.redraw = true;
             return;
         }
         // Shift-M completed: GitHub accepted the merge. Optimistically
@@ -267,6 +280,13 @@ impl<T: TerminalAdapter> Model<T> {
         // filter) gets a fresh details fetch on next focus.
         if let IpcEvent::WorkspaceRemoved(key) = &event {
             self.pr_details_fetched.remove(key);
+            // Capture this BEFORE the sidebar (below) moves the cursor
+            // off the now-gone row: if the user was viewing the
+            // workspace being removed, a trailing `WorkspaceMerged`
+            // should follow the moved sessions onto the PR workspace.
+            if self.sidebar.selected_workspace_key().map(|k| k.as_str()) == Some(key.as_str()) {
+                self.merge_follow_from = Some(key.clone());
+            }
         }
         // Response to a `FetchRepoLabels` command — mount the picker
         // once the daemon has the repo's label set. We tolerate

@@ -3424,6 +3424,14 @@ async fn rebadge_terminals(
     for (backend_key, kind) in &backend_keys {
         crate::spawn_handler::persist_terminal_meta(config, backend_key, to, kind).await;
     }
+    // Tell live TUI clients to re-point their terminal slots. This must
+    // reach them before the `WorkspaceRemoved` that follows an issue→PR
+    // collapse — otherwise the terminal stack drops the moved slots
+    // (they still carry `from`'s key) and the session disappears.
+    let _ = config.bus.send(Event::TerminalsRebadged {
+        from: from.clone(),
+        to: to.clone(),
+    });
 }
 
 /// Synthesize the workspace key an issue TaskId would have produced

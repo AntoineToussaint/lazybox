@@ -227,16 +227,26 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         let candidates = self.gather_candidate_logins(&workspace_key, true);
-        if candidates.is_empty() {
-            self.flash_info("no candidate reviewers yet — interact with the PR first");
-            return;
-        }
-        let labels: Vec<String> = candidates.iter().map(|l| format!("@{l}")).collect();
-        self.review_choices = candidates;
-        self.pending_review_request = Some(workspace_key);
-        let modal = Choice::multi("Request review from", labels)
+        // With no candidates, mount the picker with an explanatory
+        // empty state rather than only flashing — a bare footer flash
+        // is easy to miss, and the framed notice reads clearly over
+        // the panes. `Choice` sizes itself down when its list is
+        // empty so this never renders as a blank rectangle (#35).
+        let modal = if candidates.is_empty() {
+            Choice::<String>::multi(
+                "No candidate reviewers yet.\n\nInteract with the PR — comment, review, or assign\nsomeone — and they'll show up here to pick from.",
+                Vec::new(),
+            )
             .title("Add reviewers")
-            .label(|s: &String| s.clone());
+            .label(|s: &String| s.clone())
+        } else {
+            let labels: Vec<String> = candidates.iter().map(|l| format!("@{l}")).collect();
+            self.review_choices = candidates;
+            Choice::multi("Request review from", labels)
+                .title("Add reviewers")
+                .label(|s: &String| s.clone())
+        };
+        self.pending_review_request = Some(workspace_key);
         self.mount_modal(Id::RequestReviewers, modal);
     }
 

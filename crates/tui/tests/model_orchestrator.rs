@@ -1259,3 +1259,73 @@ fn leader_g_does_not_arm_without_workspace() {
     m.dispatch_key(key(Key::Char('g')));
     assert_eq!(m.leader_pending(), None);
 }
+
+/// Flatten the current frame buffer into a newline-joined string of
+/// cell symbols, so a render test can assert on what's actually on
+/// screen.
+fn render_to_string(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) -> String {
+    use tuirealm::terminal::TerminalAdapter;
+    m.view();
+    let buf = m.terminal.raw().backend().buffer().clone();
+    let area = buf.area;
+    let mut out = String::new();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Regression for #35: `g v` on a PR with no candidate reviewers must
+/// surface a framed empty-state over the still-visible panes — NOT a
+/// blank/black screen. Previously the empty case only fired a footer
+/// flash, and an empty `Choice` (when it was mounted) rendered as a
+/// full-height blank rectangle.
+#[test]
+fn gv_with_no_candidate_reviewers_shows_framed_empty_state() {
+    let mut m = build_model();
+    let ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+        projects: vec![],
+    });
+
+    m.dispatch_key(key(Key::Char('g')));
+    m.dispatch_key(key(Key::Char('v')));
+
+    // A framed picker is mounted (not a bare flash).
+    assert_eq!(
+        m.top_modal(),
+        Some(&Id::RequestReviewers),
+        "empty-candidate g v must mount the reviewers picker, not bail with only a flash",
+    );
+
+    let screen = render_to_string(&mut m);
+    // The empty-state explains itself inside its bordered box…
+    assert!(
+        screen.contains("No candidate reviewers yet"),
+        "empty state must explain why there's nothing to pick:\n{screen}",
+    );
+    assert!(
+        screen.contains("Add reviewers"),
+        "the picker keeps its framed title:\n{screen}",
+    );
+    // …and the panes behind it are STILL drawn — the bug was a
+    // black/blank screen, so the sidebar PR row + footer must survive.
+    assert!(
+        screen.contains("PR o/r#1"),
+        "panes must remain visible behind the empty state:\n{screen}",
+    );
+
+    // Enter dismisses the empty picker (an empty `require_one` multi
+    // would otherwise latch the "pick at least one" hint forever).
+    m.dispatch_modal_key(key(Key::Enter));
+    assert_eq!(
+        m.top_modal(),
+        None,
+        "Enter on the empty picker must close it",
+    );
+}

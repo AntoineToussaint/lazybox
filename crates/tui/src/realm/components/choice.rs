@@ -245,6 +245,12 @@ impl<T: Clone + 'static + Send> Choice<T> {
     }
 
     fn confirm_picks(&mut self) -> ConfirmResult {
+        // An empty list has nothing to confirm — Enter dismisses
+        // instead of latching the "pick at least one" hint, which a
+        // `require_one` multi-select would otherwise do forever.
+        if self.items.is_empty() {
+            return ConfirmResult::Cancel;
+        }
         let picked: Vec<usize> = match self.mode {
             Mode::Single => {
                 if self.items.is_empty() {
@@ -378,7 +384,18 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
         let theme = crate::theme::current();
         let modal_w = 80u16.min(area.width.saturating_sub(4));
-        let modal_h = 24u16.min(area.height.saturating_sub(4));
+        // An empty list has no rows to show, so a full-height modal
+        // would render as a large blank rectangle over the panes —
+        // the "black screen" from issue #35. Size the box to the
+        // prompt instead so the empty state reads as a small framed
+        // notice. `+ 5` covers the blank line after the prompt, the
+        // two-row body/help gap, and the borders.
+        let modal_h = if self.items.is_empty() {
+            self.prompt.split('\n').count() as u16 + 5
+        } else {
+            24
+        }
+        .min(area.height.saturating_sub(4));
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;
         let modal = Rect::new(x, y, modal_w, modal_h);
@@ -396,36 +413,47 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
         frame.render_widget(block, modal);
 
         let (lines, cursor_line) = self.build_lines(inner.width);
-        // Help footer
-        let mut help_spans = vec![
-            Span::styled("↑↓", Style::default().fg(theme.accent).bold()),
-            Span::raw(" navigate  "),
-        ];
-        if self.mode == Mode::Multi {
+        // Help footer — an empty list can only be dismissed, so drop
+        // the navigate/toggle/confirm hints that don't apply.
+        let help_spans = if self.items.is_empty() {
+            vec![
+                Span::styled("Esc", Style::default().fg(theme.error).bold()),
+                Span::raw("/"),
+                Span::styled("Enter", Style::default().fg(theme.accent).bold()),
+                Span::raw(" close"),
+            ]
+        } else {
+            let mut help_spans = vec![
+                Span::styled("↑↓", Style::default().fg(theme.accent).bold()),
+                Span::raw(" navigate  "),
+            ];
+            if self.mode == Mode::Multi {
+                help_spans.push(Span::styled(
+                    "Space",
+                    Style::default().fg(theme.accent).bold(),
+                ));
+                help_spans.push(Span::raw(" toggle  "));
+            }
             help_spans.push(Span::styled(
-                "Space",
-                Style::default().fg(theme.accent).bold(),
+                "Enter",
+                Style::default().fg(theme.success).bold(),
             ));
-            help_spans.push(Span::raw(" toggle  "));
-        }
-        help_spans.push(Span::styled(
-            "Enter",
-            Style::default().fg(theme.success).bold(),
-        ));
-        help_spans.push(Span::raw(" confirm  "));
-        if self.can_refresh {
-            help_spans.push(Span::styled("r", Style::default().fg(theme.warn).bold()));
-            help_spans.push(Span::raw(" refresh  "));
-        }
-        if self.can_back {
-            help_spans.push(Span::styled(
-                "Backspace",
-                Style::default().fg(theme.warn).bold(),
-            ));
-            help_spans.push(Span::raw(" back  "));
-        }
-        help_spans.push(Span::styled("Esc", Style::default().fg(theme.error).bold()));
-        help_spans.push(Span::raw(" cancel"));
+            help_spans.push(Span::raw(" confirm  "));
+            if self.can_refresh {
+                help_spans.push(Span::styled("r", Style::default().fg(theme.warn).bold()));
+                help_spans.push(Span::raw(" refresh  "));
+            }
+            if self.can_back {
+                help_spans.push(Span::styled(
+                    "Backspace",
+                    Style::default().fg(theme.warn).bold(),
+                ));
+                help_spans.push(Span::raw(" back  "));
+            }
+            help_spans.push(Span::styled("Esc", Style::default().fg(theme.error).bold()));
+            help_spans.push(Span::raw(" cancel"));
+            help_spans
+        };
 
         // Layout: lines occupy inner.height-2 rows; help at bottom
         let help_area = Rect {
@@ -643,5 +671,46 @@ mod tests {
         let items = vec![Item("a"), Item("b"), Item("c")];
         let c = Choice::multi("p", items).with_selected_by(|i: &Item| i.0 == "b");
         assert_eq!(c.selected, vec![false, true, false]);
+    }
+
+    #[test]
+    fn empty_multi_confirm_cancels_instead_of_latching_hint() {
+        // Regression for #35: a `require_one` multi with no items must
+        // dismiss on Enter, not trap the user on the "pick one" hint.
+        let mut c: Choice<Item> = Choice::multi("nothing here", vec![]);
+        match c.confirm_picks() {
+            ConfirmResult::Cancel => {}
+            other => panic!("expected Cancel, got {:?}", core::mem::discriminant(&other)),
+        }
+        assert!(!c.show_empty_hint);
+    }
+
+    #[test]
+    fn empty_choice_renders_compact_framed_box_not_full_height() {
+        // Regression for #35: an empty picker must size to its prompt
+        // so it reads as a small framed notice, not a near-full-height
+        // blank rectangle (the reported "black screen").
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+
+        let prompt = "line one\nline two";
+        let mut c: Choice<Item> = Choice::multi(prompt, vec![]).title("Empty");
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| c.view(f, f.area())).unwrap();
+        let buf = term.backend().buffer().clone();
+
+        // Count rows touched by the modal border (the rounded box).
+        let bordered_rows = (0..buf.area.height)
+            .filter(|&y| {
+                (0..buf.area.width).any(|x| matches!(buf[(x, y)].symbol(), "│" | "╭" | "╰"))
+            })
+            .count();
+        // Prompt is 2 lines → a handful of rows, nowhere near the
+        // full-list height of 24 the old code always used.
+        assert!(
+            bordered_rows <= 9,
+            "empty box should be compact, spanned {bordered_rows} rows",
+        );
+        assert!(bordered_rows >= 4, "box must still be a visible frame");
     }
 }

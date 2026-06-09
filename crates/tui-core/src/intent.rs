@@ -114,6 +114,11 @@ pub enum WorkPriority {
     /// gets a "review this PR" prompt (walk the diff, leave
     /// inline comments, submit an overall review).
     ReviewCode,
+    /// PR with nothing specific flagged (no conflict, green CI, no
+    /// unread, viewer isn't the reviewer). `w` is still the default
+    /// agent everywhere, so the agent gets a neutral "keep working
+    /// on this PR" prompt rather than `w` doing nothing.
+    WorkOnPr,
     /// Issue-only workspace (no PR yet). Agent gets an "implement
     /// this issue" prompt.
     ImplementIssue,
@@ -129,6 +134,7 @@ impl WorkPriority {
             Self::FixConflict => "fix conflict",
             Self::FixCi => "fix CI",
             Self::ReviewCode => "review",
+            Self::WorkOnPr => "work on this",
             Self::ImplementIssue => "implement",
         }
     }
@@ -169,19 +175,19 @@ pub fn classify_work(
         // Role-based defaults for healthy PRs. Reviewer always gets
         // ReviewCode — even with no unread, "press w to review" is
         // the natural action when you land on a PR you owe a review
-        // on. Author/Assignee get AddressComments only when there's
+        // on. Author/Assignee get AddressComments when there's
         // something new to look at.
-        match pr.role {
-            lazybox_core::TaskRole::Reviewer => return Some(WorkPriority::ReviewCode),
-            lazybox_core::TaskRole::Author
-            | lazybox_core::TaskRole::Assignee
-            | lazybox_core::TaskRole::Mentioned => {
-                if ws.unread_count() > 0 {
-                    return Some(WorkPriority::AddressComments);
-                }
-                return None;
-            }
+        if pr.role == lazybox_core::TaskRole::Reviewer {
+            return Some(WorkPriority::ReviewCode);
         }
+        if ws.unread_count() > 0 {
+            return Some(WorkPriority::AddressComments);
+        }
+        // Nothing specific flagged. `w` is the default-agent key on
+        // every workspace, so it still fires here with a neutral
+        // "keep working on this PR" prompt — never a silent no-op
+        // that leaves the hint bar blank and the key unpressable.
+        return Some(WorkPriority::WorkOnPr);
     }
     if !ws.gh_issues.is_empty() {
         return Some(WorkPriority::ImplementIssue);
@@ -233,6 +239,7 @@ pub fn resolve_work(
                 .1
         }
         WorkPriority::ReviewCode => build_review_pr_prompt(ws),
+        WorkPriority::WorkOnPr => build_general_pr_prompt(ws),
         WorkPriority::ImplementIssue => {
             let issue = ws
                 .gh_issues
@@ -287,6 +294,45 @@ fn build_review_pr_prompt(workspace: &Workspace) -> String {
          `--request-changes` if there are blockers, or `--comment` if \
          it's nuanced. Be concise — reviewers read review comments, \
          not essays."
+    )
+}
+
+/// Build the neutral "keep working on this PR" agent prompt. Fires
+/// when `w` lands on a PR with nothing specific flagged — the agent
+/// is oriented on the PR and told to pick up wherever the work
+/// stands, rather than `w` doing nothing.
+fn build_general_pr_prompt(workspace: &Workspace) -> String {
+    let (pr_ref, body_block) = workspace
+        .pr
+        .as_ref()
+        .map(|pr| {
+            let n = pr
+                .id
+                .key
+                .rsplit_once('#')
+                .map(|(_, n)| n)
+                .unwrap_or(&pr.id.key);
+            let repo = pr.repo.as_deref().unwrap_or("unknown");
+            let branch = pr.branch.as_deref().unwrap_or("unknown");
+            let r = format!("PR #{n} in {repo} (branch `{branch}`)");
+            let body = pr
+                .body
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("\n\nPR description:\n{s}\n"))
+                .unwrap_or_default();
+            (r, body)
+        })
+        .unwrap_or_else(|| (format!("workspace {}", workspace.key), String::new()));
+
+    format!(
+        "Continue work on {pr_ref}.{body_block}\n\n\
+         Inspect the current state with `gh pr view` and `gh pr diff`, \
+         then pick up whatever's outstanding — unfinished implementation, \
+         review feedback, or follow-up cleanup. Run the project's local \
+         checks until they pass, then commit and push. Reply with a short \
+         summary of what changed."
     )
 }
 
@@ -668,7 +714,12 @@ mod tests {
                 thread_id: None,
             });
             vec![
-                ("healthy PR", None, healthy_pr, &[][..]),
+                (
+                    "healthy PR",
+                    Some(WorkPriority::WorkOnPr),
+                    healthy_pr,
+                    &[][..],
+                ),
                 ("ci-fail PR", Some(WorkPriority::FixCi), ci_fail, &[][..]),
                 (
                     "conflict PR",
@@ -719,6 +770,8 @@ mod tests {
             WorkPriority::AddressComments,
             WorkPriority::FixConflict,
             WorkPriority::FixCi,
+            WorkPriority::ReviewCode,
+            WorkPriority::WorkOnPr,
             WorkPriority::ImplementIssue,
         ] {
             let label = p.label();
@@ -761,17 +814,30 @@ mod tests {
     }
 
     #[test]
-    fn work_on_healthy_pr_is_noop() {
+    fn work_on_healthy_pr_spawns_default_agent() {
+        // `w` is the default-agent key on every workspace: a healthy
+        // PR with nothing flagged still fires, with a neutral
+        // "keep working on this PR" prompt — never a silent no-op.
         let ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Pending);
-        assert_eq!(resolve_work(Some(&ws), &[], "claude"), Intent::NoOp);
+        match resolve_work(Some(&ws), &[], "claude") {
+            Intent::SpawnAgent { prompt, .. } => {
+                let prompt = prompt.expect("work-on-PR carries a prompt");
+                assert!(prompt.contains("Continue work on"), "{prompt}");
+            }
+            other => panic!("expected SpawnAgent, got {other:?}"),
+        }
     }
 
     #[test]
-    fn work_on_ready_pr_is_noop() {
-        // READY (approved + green) has its own action — Merge. `w`
-        // should NOT also fire here.
+    fn work_on_ready_pr_spawns_default_agent() {
+        // READY (approved + green) surfaces Merge as the primary
+        // footer action, but `w` must still launch the default agent
+        // when pressed — the user expects it to work from every PR.
         let ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
-        assert_eq!(resolve_work(Some(&ws), &[], "claude"), Intent::NoOp);
+        match resolve_work(Some(&ws), &[], "claude") {
+            Intent::SpawnAgent { .. } => {}
+            other => panic!("expected SpawnAgent, got {other:?}"),
+        }
     }
 
     #[test]

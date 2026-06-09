@@ -951,31 +951,40 @@ fn w_on_ci_failing_pr_emits_fix_ci_spawn() {
 }
 
 #[test]
-fn w_on_ready_pr_is_noop() {
+fn w_on_ready_pr_spawns_default_agent() {
     let mut s = sidebar_with_pr(|t| {
         t.review = ReviewStatus::Approved;
         t.ci = CiStatus::Success;
     });
     let mut cmds: Vec<Command> = Vec::new();
     s.handle_key(key_code(KeyCode::Char('w')), &mut cmds);
-    // READY = nothing to "work on" — the user should be merging,
-    // not spawning a fix-CI agent.
+    // READY surfaces Merge as the primary footer hint, but `w` is the
+    // default-agent key everywhere — pressing it still launches the
+    // agent rather than being a silent no-op.
     assert!(
-        cmds.is_empty(),
-        "w on a READY PR must not spawn anything: {cmds:?}"
+        matches!(cmds.first(), Some(Command::Spawn { .. })),
+        "w on a READY PR must still spawn the default agent: {cmds:?}"
     );
 }
 
 #[test]
-fn w_on_healthy_open_pr_is_noop() {
-    // Open + pending review + green CI = nothing actionable.
+fn w_on_healthy_open_pr_spawns_default_agent() {
+    // Open + pending review + green CI: nothing specific flagged, but
+    // `w` still launches the default agent with a neutral "keep
+    // working on this PR" prompt.
     let mut s = sidebar_with_pr(|t| {
         t.ci = CiStatus::Success;
         t.review = ReviewStatus::Pending;
     });
     let mut cmds: Vec<Command> = Vec::new();
     s.handle_key(key_code(KeyCode::Char('w')), &mut cmds);
-    assert!(cmds.is_empty(), "{cmds:?}");
+    let prompt = match cmds.first() {
+        Some(Command::Spawn { initial_prompt, .. }) => initial_prompt
+            .clone()
+            .expect("Spawn must carry an initial_prompt"),
+        other => panic!("expected Spawn(default agent), got {other:?}"),
+    };
+    assert!(prompt.contains("Continue work on"), "{prompt}");
 }
 
 #[test]

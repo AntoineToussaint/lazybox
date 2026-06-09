@@ -1247,6 +1247,16 @@ pub(crate) fn skip_permissions_for(autonomous: bool, cfg: &lazybox_config::Confi
     }
 }
 
+/// Whether a client `Spawn` should run as an autonomous, unattended
+/// launch. A spawn that carries a pre-built initial prompt is a
+/// lazybox-driven "work on this" (the `w` key / address-comments
+/// flows) — the same end-state as an `@lazybox` mention — so it runs
+/// unattended. Bare interactive spawns (`c` / `x` / `u` / `s`) carry
+/// no prompt and stay human-in-the-loop.
+pub(crate) fn spawn_is_autonomous(initial_prompt: &Option<String>) -> bool {
+    initial_prompt.is_some()
+}
+
 /// Hysteresis decision for the edge that LEAVES `InputNeeded`.
 ///
 /// Claude's status-bar ticker can scroll the prompt out of the detect
@@ -2444,6 +2454,16 @@ mod tests {
         cfg.agent.autonomous_skip_permissions = false;
         assert!(!skip_permissions_for(true, &cfg));
         assert!(skip_permissions_for(false, &cfg));
+    }
+
+    #[test]
+    fn prompt_carrying_spawn_is_autonomous() {
+        // `w` / address-comments spawns carry a pre-built work prompt
+        // → autonomous (unattended), so they skip the permission gate
+        // that would otherwise hang the launch and eat the submit.
+        assert!(spawn_is_autonomous(&Some("fix CI on PR #1".into())));
+        // Bare `c` / `s` spawns carry no prompt → interactive.
+        assert!(!spawn_is_autonomous(&None));
     }
 
     #[test]

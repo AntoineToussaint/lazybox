@@ -190,15 +190,11 @@ fn w_with_selected_comments_addresses_them() {
 }
 
 #[test]
-fn w_on_author_healthy_pr_no_unread_is_noop() {
-    // Sanity: a PR I AUTHORED with green CI, no conflicts, no
-    // unread activity has nothing actionable to do. Pressing `w`
-    // here is a no-op (don't pre-emptively spawn an agent just
-    // because the user pressed a key).
-    //
-    // Reviewer + healthy now fires ReviewCode (the user explicitly
-    // wants `w` to mean "review this" when you're the reviewer);
-    // this test covers the author side.
+fn w_on_author_healthy_pr_no_unread_spawns_default_agent() {
+    // `w` is the default-agent key on every workspace: even a PR I
+    // AUTHORED with green CI, no conflicts and no unread activity
+    // still spawns the default agent (with a neutral "keep working
+    // on this PR" prompt) so the key is never silently unpressable.
     use lazybox_ipc::Command;
     let mut rp = RightPane::new(PaneId::new(1));
     let mut t = make_task("o/r#1");
@@ -215,11 +211,11 @@ fn w_on_author_healthy_pr_no_unread_is_noop() {
         KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
         &mut cmds,
     );
-    assert!(
-        cmds.is_empty(),
-        "w on a healthy PR I authored with no unread activity must NOT spawn anything, \
-         got {cmds:?}",
-    );
+    let Some(Command::Spawn { initial_prompt, .. }) = cmds.first() else {
+        panic!("w on a healthy authored PR must spawn the default agent, got {cmds:?}");
+    };
+    let prompt = initial_prompt.as_deref().expect("work spawn carries a prompt");
+    assert!(prompt.contains("Continue work on"), "{prompt}");
 }
 
 #[test]

@@ -646,6 +646,19 @@ impl Server {
                             cwd,
                             initial_prompt,
                         } => {
+                            // A spawn carrying a pre-built work prompt is
+                            // an autonomous "work on this" launch (`w` /
+                            // address-comments) — the same end-state as an
+                            // `@lazybox` mention. Run it unattended (skip
+                            // permissions, subject to the
+                            // `autonomous_skip_permissions` toggle) so it
+                            // doesn't stall on the folder-trust / tool-
+                            // approval gate, which also blocks the post-
+                            // spawn prompt inject and eats the submit
+                            // keystroke. Bare interactive spawns (`c` / `x`
+                            // / `u` / `s`) carry no prompt and keep the
+                            // human-in-the-loop approval.
+                            let autonomous = spawn_handler::spawn_is_autonomous(&initial_prompt);
                             spawn_handler::handle_spawn(
                                 &self.config,
                                 session_key,
@@ -653,11 +666,7 @@ impl Server {
                                 kind,
                                 cwd,
                                 initial_prompt,
-                                // User-initiated spawn (sidebar `c`,
-                                // `f`-for-fix, split shell). Interactive
-                                // sessions keep permission prompts on —
-                                // the human is right there to approve.
-                                false,
+                                autonomous,
                             )
                             .await;
                         }

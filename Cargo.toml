@@ -64,12 +64,13 @@ publish-jobs = ["homebrew"]
 # Tap repo to push the Homebrew formula to. Must exist + give the
 # release workflow write access via a deploy key or PAT.
 tap = "AntoineToussaint/homebrew-lazybox"
-# Build matrix. v0.1.0 ships the two targets that build cleanly today; Intel
-# macOS (scarce macos-13 runners) and aarch64-unknown-linux-gnu (a Zig libc++
-# sub-compilation error) are deferred to a follow-up. Keep this list in sync
-# with the matrix in .github/workflows/release.yml.
+# Build matrix. Both macOS arches + Linux x64. Intel macOS is cross-compiled on
+# the macos-14 (Apple Silicon) runner — see github-custom-runners below — to
+# avoid the scarce macos-13 runners. aarch64-unknown-linux-gnu is still deferred
+# (a Zig libc++ sub-compilation error on that target).
 targets = [
     "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
 ]
 # Extra runner setup steps. libghostty-vt's build.rs invokes
@@ -84,10 +85,13 @@ pr-run-mode = "plan"
 [workspace.metadata.dist.github-custom-runners]
 global = "ubuntu-22.04"
 aarch64-apple-darwin = "macos-14"
+# Build Intel macOS on the Apple-Silicon runner (cross-compile) — macos-13
+# Intel runners are scarce and stall the release.
+x86_64-apple-darwin = "macos-14"
 x86_64-unknown-linux-gnu = "ubuntu-22.04"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"

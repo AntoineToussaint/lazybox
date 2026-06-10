@@ -94,6 +94,13 @@ bind-key -T copy-mode WheelDownPane send-keys -X scroll-down
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
 
+/// Wall-clock cap on every tmux subprocess invocation. tmux commands
+/// are local and complete in milliseconds; a tmux server wedged on a
+/// dead socket (or a hung first-start) must surface as an error, not
+/// freeze whichever daemon task awaited it. `kill_on_drop` on the
+/// commands ensures a timed-out tmux child is reaped.
+const TMUX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Per-session state. The DaemonPty is the tmux-attach client that
 /// streams I/O between lazybox and the underlying tmux session.
 struct Slot {
@@ -196,14 +203,23 @@ impl TmuxBackend {
             }
             let _ = std::fs::write(&self.config_path, TMUX_TRANSPARENT_CONF);
         }
-        let out = tokio::process::Command::new("tmux")
+        let fut = tokio::process::Command::new("tmux")
             .arg("-L")
             .arg(&self.socket)
             .arg("-f")
             .arg(&self.config_path)
             .args(args)
-            .output()
+            .kill_on_drop(true)
+            .output();
+        let out = tokio::time::timeout(TMUX_TIMEOUT, fut)
             .await
+            .map_err(|_| {
+                BackendError::Other(format!(
+                    "tmux {} timed out after {}s",
+                    args.join(" "),
+                    TMUX_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|e| BackendError::Other(format!("tmux invoke: {e}")))?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -416,14 +432,22 @@ impl SessionBackend for TmuxBackend {
             // name per line. Empty stdout / no-server errors mean
             // "no sessions"; we treat them as Ok([]). Async to avoid
             // blocking the runtime on a slow tmux server start.
-            let out = tokio::process::Command::new("tmux")
+            let fut = tokio::process::Command::new("tmux")
                 .arg("-L")
                 .arg(&self.socket)
                 .arg("-f")
                 .arg(&self.config_path)
                 .args(["list-sessions", "-F", "#{session_name}"])
-                .output()
+                .kill_on_drop(true)
+                .output();
+            let out = tokio::time::timeout(TMUX_TIMEOUT, fut)
                 .await
+                .map_err(|_| {
+                    BackendError::Other(format!(
+                        "tmux list-sessions timed out after {}s",
+                        TMUX_TIMEOUT.as_secs()
+                    ))
+                })?
                 .map_err(|e| BackendError::Other(format!("tmux list: {e}")))?;
             if out.status.success() {
                 for line in String::from_utf8_lossy(&out.stdout).lines() {
@@ -486,23 +510,54 @@ impl SessionBackend for TmuxBackend {
             let mut sub = pty.subscribe().await;
             let replay = std::mem::take(&mut sub.replay);
             let last_seq = sub.last_seq;
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<OutputChunk>();
+            // Bounded bridge: a stalled subscriber drops chunks via
+            // `try_send` instead of growing an unbounded backlog. The
+            // `seq` gap + resync machinery recovers the consumer.
+            let (tx, rx) = tokio::sync::mpsc::channel::<OutputChunk>(
+                crate::backend::SUBSCRIPTION_CHANNEL_CAPACITY,
+            );
 
             let pty_pump = pty.clone();
+            let bridge_key = key.to_string();
             tokio::spawn(async move {
                 loop {
                     tokio::select! {
                         biased;
                         chunk = sub.live.recv() => match chunk {
                             Ok(c) => {
-                                if tx.send(OutputChunk {
+                                match tx.try_send(OutputChunk {
                                     seq: c.seq,
                                     bytes: c.bytes.to_vec(),
-                                }).is_err() {
-                                    return;
+                                }) {
+                                    Ok(()) => {}
+                                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                        // Drop the chunk — the consumer's
+                                        // seq-gap detection schedules a
+                                        // resync from the replay ring.
+                                        tracing::debug!(
+                                            key = %bridge_key,
+                                            seq = c.seq,
+                                            "tmux bridge channel full — dropping chunk"
+                                        );
+                                    }
+                                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                        return;
+                                    }
                                 }
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                // The bridge fell behind the PTY broadcast;
+                                // `n` chunks vanished from the detection
+                                // buffer. Surface it — silent holes here
+                                // looked like a corrupted screen with no
+                                // breadcrumb.
+                                tracing::info!(
+                                    key = %bridge_key,
+                                    missed = n,
+                                    "tmux bridge lagged behind PTY broadcast — chunks skipped"
+                                );
+                                continue;
+                            }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         },
                         _ = pty_pump.wait_finished() => break,
@@ -546,7 +601,7 @@ impl SessionBackend for TmuxBackend {
             // we'll re-attach in `resume`. Best-effort: silently
             // succeed if tmux complains (no clients to detach is a
             // success state for our purpose).
-            let _ = tokio::process::Command::new("tmux")
+            let fut = tokio::process::Command::new("tmux")
                 .arg("-L")
                 .arg(&self.socket)
                 .arg("detach-client")
@@ -556,8 +611,14 @@ impl SessionBackend for TmuxBackend {
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .output()
-                .await;
+                .kill_on_drop(true)
+                .output();
+            if tokio::time::timeout(TMUX_TIMEOUT, fut).await.is_err() {
+                return Err(BackendError::Other(format!(
+                    "tmux detach-client -s {key} timed out after {}s",
+                    TMUX_TIMEOUT.as_secs()
+                )));
+            }
             Ok(())
         })
     }

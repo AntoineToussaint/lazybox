@@ -209,18 +209,27 @@ async fn detect_github() -> ToolStatus {
     // Step 1: is the `gh` CLI on PATH at all? Knowing the binary is
     // missing tells the user to install — different problem from
     // "installed but no token."
-    let gh_present = tokio::task::spawn_blocking(|| {
-        std::process::Command::new("gh")
-            .arg("--version")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    })
+    // Bounded: `gh --version` is instant when healthy, but a broken
+    // install (hung shim, dead network FS on PATH) must degrade to
+    // "not present" instead of stalling setup detection.
+    let gh_present = match tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::task::spawn_blocking(|| {
+            std::process::Command::new("gh")
+                .arg("--version")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }),
+    )
     .await
-    .unwrap_or(false);
+    {
+        Ok(Ok(present)) => present,
+        _ => false,
+    };
 
     let cred = match tokio::time::timeout(
         Duration::from_secs(3),

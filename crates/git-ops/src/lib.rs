@@ -724,11 +724,33 @@ pub(crate) fn apply_git_env(cmd: &mut Command) -> &mut Command {
 }
 
 async fn run_git(args: &[&str]) -> Result<String, GitError> {
+    // Wall-clock cap. `run_git` is the no-cwd variant used for
+    // `git clone --bare` — slow by nature (a big repo over a slow
+    // link takes minutes), but it must still be FINITE: a clone
+    // wedged on a dead network or a silent credential prompt would
+    // otherwise hang its caller forever. 10 minutes is generous for
+    // any real clone; `run_git_in` keeps its tighter 30s cap for
+    // the cheap in-repo operations. `kill_on_drop` so the timed-out
+    // child is actually reaped instead of cloning on in the
+    // background.
+    const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
     let started = std::time::Instant::now();
     tracing::info!("git {}", args.join(" "));
-    let output = apply_git_env(Command::new("git").args(args))
-        .output()
-        .await?;
+    let fut = apply_git_env(Command::new("git").args(args))
+        .kill_on_drop(true)
+        .output();
+    let output = match tokio::time::timeout(GIT_TIMEOUT, fut).await {
+        Ok(res) => res?,
+        Err(_) => {
+            let elapsed = started.elapsed();
+            tracing::error!("git {} TIMED OUT after {elapsed:?}", args.join(" "));
+            return Err(GitError::Command(format!(
+                "`git {}` exceeded {}s wall-clock",
+                args.join(" "),
+                GIT_TIMEOUT.as_secs()
+            )));
+        }
+    };
     let elapsed = started.elapsed();
     if output.status.success() {
         tracing::info!("git {} ok ({elapsed:?})", args.join(" "));
@@ -891,7 +913,9 @@ async fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
     const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     let started = std::time::Instant::now();
     tracing::info!("git (in {}) {}", cwd.display(), args.join(" "));
-    let fut = apply_git_env(Command::new("git").current_dir(cwd).args(args)).output();
+    let fut = apply_git_env(Command::new("git").current_dir(cwd).args(args))
+        .kill_on_drop(true)
+        .output();
     let output = match tokio::time::timeout(GIT_TIMEOUT, fut).await {
         Ok(res) => res?,
         Err(_) => {

@@ -50,8 +50,14 @@ impl CredentialProvider for CommandProvider {
         // this, every hung `gh auth token` leaks a process that lives
         // until it exits on its own — and on a flaky network they can
         // pile up.
+        // stdin is nulled so a credential helper that decides to
+        // prompt interactively (`gh` re-auth flow, a vault asking for
+        // a passphrase) reads EOF and fails fast instead of waiting
+        // on the inherited TTY — invisible under the TUI's alternate
+        // screen.
         let run = tokio::process::Command::new(&self.program)
             .args(&self.args)
+            .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
             .output();
         let output = match tokio::time::timeout(TIMEOUT, run).await {

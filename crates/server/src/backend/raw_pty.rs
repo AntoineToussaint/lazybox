@@ -213,26 +213,49 @@ impl SessionBackend for RawPtyBackend {
             // the trait stays simple. A spawned task drains the
             // broadcast and forwards as OutputChunks; on Closed or
             // child finished it just drops the sender (closes mpsc).
+            // Bounded: a stalled subscriber drops chunks (`try_send`)
+            // instead of buffering without limit — the consumer's
+            // seq-gap detection resyncs from the replay ring.
             let mut sub = pty.subscribe().await;
             let replay = std::mem::take(&mut sub.replay);
             let last_seq = sub.last_seq;
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<OutputChunk>();
+            let (tx, rx) = tokio::sync::mpsc::channel::<OutputChunk>(
+                crate::backend::SUBSCRIPTION_CHANNEL_CAPACITY,
+            );
 
             let pty_for_pump = pty.clone();
+            let bridge_key = key.to_string();
             tokio::spawn(async move {
                 loop {
                     tokio::select! {
                         biased;
                         chunk = sub.live.recv() => match chunk {
                             Ok(c) => {
-                                if tx.send(OutputChunk {
+                                match tx.try_send(OutputChunk {
                                     seq: c.seq,
                                     bytes: c.bytes.to_vec(),
-                                }).is_err() {
-                                    return; // subscriber dropped
+                                }) {
+                                    Ok(()) => {}
+                                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                        tracing::debug!(
+                                            key = %bridge_key,
+                                            seq = c.seq,
+                                            "raw-pty bridge channel full — dropping chunk"
+                                        );
+                                    }
+                                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                        return; // subscriber dropped
+                                    }
                                 }
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                tracing::info!(
+                                    key = %bridge_key,
+                                    missed = n,
+                                    "raw-pty bridge lagged behind PTY broadcast — chunks skipped"
+                                );
+                                continue;
+                            }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         },
                         _ = pty_for_pump.wait_finished() => break,

@@ -58,6 +58,24 @@ pub fn app_credential_chain() -> CredentialChain {
     CredentialChain::new().with(EnvProvider::new("SLACK_APP_TOKEN"))
 }
 
+/// Shared reqwest client construction for every Slack HTTP call.
+/// Explicit timeouts: without them a black-holed connection to
+/// `slack.com` parks the calling task forever (reqwest's default has
+/// NO overall timeout). 30s total / 10s connect comfortably covers
+/// Slack's slowest endpoints while keeping a dead network finite.
+/// Builder failure (TLS init) falls back to the default client —
+/// degraded but never panicking in a library crate.
+pub(crate) fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|e| {
+            tracing::warn!("slack http client builder failed ({e}); using default client");
+            reqwest::Client::new()
+        })
+}
+
 /// Lazybox-side errors from the Slack provider. Wraps HTTP + JSON +
 /// Slack's own structured error responses.
 #[derive(Debug, thiserror::Error)]

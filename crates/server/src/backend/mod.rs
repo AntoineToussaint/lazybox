@@ -57,6 +57,13 @@ pub struct OutputChunk {
     pub bytes: Vec<u8>,
 }
 
+/// Capacity of a `Subscription`'s live channel. Bounded so a stalled
+/// consumer puts a hard ceiling on daemon-side buffering: producers
+/// `try_send` and drop chunks on overflow (the `seq` gap + resync
+/// machinery recovers the consumer from the replay ring) instead of
+/// accumulating an unbounded backlog.
+pub const SUBSCRIPTION_CHANNEL_CAPACITY: usize = 256;
+
 /// A live subscription to a session's output. Receives chunks until
 /// the channel closes (session exited).
 pub struct Subscription {
@@ -69,8 +76,10 @@ pub struct Subscription {
     /// `live` start at `seq > last_seq`.
     pub last_seq: u64,
     /// Live chunks. Closes when the session exits or the backend
-    /// stops streaming.
-    pub live: mpsc::UnboundedReceiver<OutputChunk>,
+    /// stops streaming. Bounded (`SUBSCRIPTION_CHANNEL_CAPACITY`);
+    /// chunks may be dropped under sustained consumer stall — detect
+    /// via `seq` gaps and recover from the replay ring.
+    pub live: mpsc::Receiver<OutputChunk>,
 }
 
 /// Stateless future-returning trait. We use `Pin<Box<dyn Future>>`

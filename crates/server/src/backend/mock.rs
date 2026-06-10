@@ -54,8 +54,9 @@ struct MockSession {
     /// Monotonic chunk counter — matches real backend semantics.
     last_seq: u64,
     /// Fan-out to live subscribers. Each `subscribe()` registers one
-    /// `mpsc::UnboundedSender`; `emit()` sends to all of them.
-    subscribers: Vec<mpsc::UnboundedSender<OutputChunk>>,
+    /// bounded `mpsc::Sender`; `emit()` try-sends to all of them
+    /// (drop-on-full, matching the real backends' bridge semantics).
+    subscribers: Vec<mpsc::Sender<OutputChunk>>,
     /// Exit code once `finish()` (or `kill()`) fires. None until then.
     exit_code: Option<i32>,
     /// Waiters parked in `wait_exit()`.
@@ -90,10 +91,15 @@ impl MockBackend {
             bytes: bytes.clone(),
         };
         session.replay.extend_from_slice(&bytes);
-        // Drop disconnected subscribers as we go.
-        session
-            .subscribers
-            .retain(|tx| tx.send(chunk.clone()).is_ok());
+        // Drop disconnected subscribers as we go; a full (stalled)
+        // subscriber keeps its slot but misses this chunk — same
+        // drop-on-overflow contract as the real backends.
+        session.subscribers.retain(|tx| {
+            !matches!(
+                tx.try_send(chunk.clone()),
+                Err(mpsc::error::TrySendError::Closed(_))
+            )
+        });
     }
 
     /// Mark the session exited with `code`. Subsequent `wait_exit`
@@ -290,7 +296,7 @@ impl SessionBackend for MockBackend {
                 .ok_or_else(|| BackendError::NotFound(key.into()))?;
             let replay = session.replay.clone();
             let last_seq = session.last_seq;
-            let (tx, rx) = mpsc::unbounded_channel();
+            let (tx, rx) = mpsc::channel(crate::backend::SUBSCRIPTION_CHANNEL_CAPACITY);
             // If the session has already exited, close the channel
             // immediately so the subscriber's `recv()` returns None
             // straight away — matches the real backend's contract.

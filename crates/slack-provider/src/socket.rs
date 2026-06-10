@@ -88,7 +88,7 @@ impl SocketModeClient {
     pub fn new(app_token: impl Into<String>) -> Self {
         Self {
             app_token: app_token.into(),
-            http: reqwest::Client::new(),
+            http: crate::http_client(),
         }
     }
 
@@ -172,6 +172,13 @@ impl SocketModeClient {
     }
 
     async fn run_once(&self, tx: &mpsc::Sender<InboundEvent>) -> Result<(), SlackError> {
+        // Slack pings every few seconds; a healthy socket never goes
+        // quiet for anywhere near this long. Going 90s without ANY
+        // frame means the connection is half-open (peer gone, TCP
+        // never noticed) — treat it as a disconnect so the
+        // reconnect/backoff loop in `run_forever` takes over instead
+        // of waiting on a dead socket forever.
+        const WS_READ_TIMEOUT: Duration = Duration::from_secs(90);
         let url = self.open_wss_url().await?;
         tracing::debug!("slack: connecting to socket mode");
         let (ws_stream, _resp) = tokio_tungstenite::connect_async(&url)
@@ -179,7 +186,17 @@ impl SocketModeClient {
             .map_err(|e| SlackError::WebSocket(e.to_string()))?;
         let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
-        while let Some(msg) = ws_stream.next().await {
+        loop {
+            let msg = match tokio::time::timeout(WS_READ_TIMEOUT, ws_stream.next()).await {
+                Ok(Some(msg)) => msg,
+                Ok(None) => break,
+                Err(_) => {
+                    return Err(SlackError::WebSocket(format!(
+                        "no frames for {}s — treating half-open socket as disconnected",
+                        WS_READ_TIMEOUT.as_secs()
+                    )));
+                }
+            };
             let msg = msg.map_err(|e| SlackError::WebSocket(e.to_string()))?;
             let text = match msg {
                 WsMessage::Text(t) => t.to_string(),

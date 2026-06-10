@@ -71,9 +71,15 @@ impl ProxyServer {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         // reqwest client is cheap to clone (it's an Arc internally).
+        // `connect_timeout` only — deliberately NO overall `.timeout`:
+        // streaming completions hold the response open for minutes,
+        // and an overall timeout would sever them mid-stream. Connect
+        // is the phase that hangs on a black-holed upstream, so that's
+        // the one we bound.
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .pool_max_idle_per_host(8)
+            .connect_timeout(std::time::Duration::from_secs(10))
             .build()?;
 
         let ctx = Arc::new(ServerCtx {

@@ -30,6 +30,16 @@ pub const REPLAY_RING_BYTES: usize = 64 * 1024;
 /// replay on reconnect is how we recover that client.
 pub const BROADCAST_CAPACITY: usize = 1024;
 
+/// Capacity of the per-PTY write queue feeding the dedicated writer
+/// thread. Generous for keystrokes + prompt injections; only a child
+/// that stops draining its stdin (full kernel PTY buffer) can fill it.
+pub const WRITE_QUEUE_CAPACITY: usize = 256;
+
+/// How long `write()` is willing to wait for queue space before
+/// reporting the PTY as stalled. Short — the caller is usually the
+/// daemon serve path and must never wedge on a dead child.
+const WRITE_ENQUEUE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 #[derive(Debug, thiserror::Error)]
 pub enum PtyError {
     #[error("PTY open: {0}")]
@@ -40,6 +50,11 @@ pub enum PtyError {
     Write(#[from] std::io::Error),
     #[error("PTY already closed")]
     Closed,
+    /// The write queue stayed full past the enqueue timeout — the
+    /// child has stopped draining stdin (wedged process, full kernel
+    /// buffer). The write is dropped rather than blocking the caller.
+    #[error("PTY write queue full — child not draining stdin")]
+    WriteStalled,
 }
 
 /// One chunk of PTY output with its monotonic sequence number.
@@ -52,9 +67,16 @@ pub struct OutputChunk {
 
 /// Server-side handle to a running PTY. `Send + Sync`.
 pub struct DaemonPty {
-    /// Writer into the PTY's stdin. Behind a Mutex because `tokio::spawn`'d
-    /// tasks can't hold a `&mut` across await points without one.
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Bounded queue into the dedicated writer thread. The PTY's
+    /// stdin writer is synchronous; calling `write_all` + `flush` on
+    /// the tokio runtime blocked an OS worker thread whenever the
+    /// kernel PTY buffer filled (wedged child) — which wedged the
+    /// whole serve loop. The writer thread mirrors the reader-thread
+    /// pattern: it owns the blocking IO, and `write()` is a bounded
+    /// send that fails fast instead of blocking forever. The thread
+    /// exits when the channel closes (DaemonPty dropped) or a write
+    /// errors.
+    writer_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     /// Master end of the PTY, needed for resize.
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     /// Broadcast channel for live output. Subscribers get chunks with
@@ -194,6 +216,28 @@ impl DaemonPty {
             .take_writer()
             .map_err(|e| PtyError::Open(e.to_string()))?;
 
+        // Writer thread: drains the bounded queue into the PTY's
+        // blocking stdin writer. Dedicated thread (like the reader
+        // below) so a full kernel PTY buffer can only stall this
+        // thread, never a tokio worker. `blocking_recv` returns
+        // `None` when every sender is dropped (the DaemonPty), which
+        // is the thread's exit signal.
+        let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(WRITE_QUEUE_CAPACITY);
+        std::thread::Builder::new()
+            .name("lazybox-server-pty-writer".into())
+            .spawn(move || {
+                let mut writer = writer;
+                while let Some(bytes) = writer_rx.blocking_recv() {
+                    if let Err(e) = writer.write_all(&bytes).and_then(|()| writer.flush()) {
+                        tracing::warn!("PTY writer: {e}");
+                        break;
+                    }
+                }
+                // Receiver drops here; pending `send`s fail with
+                // Closed, which `write()` maps to PtyError::Closed.
+            })
+            .map_err(|e| PtyError::Spawn(e.to_string()))?;
+
         let reader = pair
             .master
             .try_clone_reader()
@@ -274,7 +318,7 @@ impl DaemonPty {
             .map_err(|e| PtyError::Spawn(e.to_string()))?;
 
         Ok(Self {
-            writer: Arc::new(Mutex::new(writer)),
+            writer_tx,
             master: Arc::new(Mutex::new(pair.master)),
             output_tx,
             ring,
@@ -343,14 +387,30 @@ impl DaemonPty {
         (ring.snapshot(), self.last_seq.load(Ordering::SeqCst))
     }
 
+    /// Queue bytes for the writer thread. Returns promptly in every
+    /// case: a healthy PTY enqueues immediately; a wedged child (write
+    /// queue full past `WRITE_ENQUEUE_TIMEOUT`) gets a `WriteStalled`
+    /// error and the bytes are dropped — never an indefinite block on
+    /// the runtime.
     pub async fn write(&self, bytes: &[u8]) -> Result<(), PtyError> {
         if self.finished.load(Ordering::Acquire) {
             return Err(PtyError::Closed);
         }
-        let mut w = self.writer.lock().await;
-        w.write_all(bytes)?;
-        w.flush()?;
-        Ok(())
+        match tokio::time::timeout(WRITE_ENQUEUE_TIMEOUT, self.writer_tx.send(bytes.to_vec()))
+            .await
+        {
+            Ok(Ok(())) => Ok(()),
+            // Writer thread gone (write error or PTY torn down).
+            Ok(Err(_)) => Err(PtyError::Closed),
+            Err(_) => {
+                tracing::warn!(
+                    "PTY write queue full for {}ms — dropping {} byte write",
+                    WRITE_ENQUEUE_TIMEOUT.as_millis(),
+                    bytes.len()
+                );
+                Err(PtyError::WriteStalled)
+            }
+        }
     }
 
     pub async fn resize(&self, size: PtySize) -> Result<(), PtyError> {
@@ -366,8 +426,11 @@ impl DaemonPty {
     /// unobservable (rare — `child.wait` error). Can only be called
     /// once per PTY; subsequent calls return None.
     pub async fn wait_exit(&self) -> Option<i32> {
-        let mut slot = self.exit_rx.lock().await;
-        let rx = slot.take()?;
+        // Take the receiver out under the lock, then drop the guard
+        // BEFORE awaiting the child's exit — holding the mutex across
+        // that await would block every concurrent `wait_exit` caller
+        // for the child's whole lifetime.
+        let rx = self.exit_rx.lock().await.take()?;
         rx.await.ok().flatten()
     }
 

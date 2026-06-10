@@ -560,7 +560,13 @@ impl Server {
                         lazybox_ipc::Command::DeleteOrphanedWorktree { .. } => "DeleteOrphanedWorktree",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
-                    tracing::info!("daemon ← {label}");
+                    // `Write` fires on every keystroke — at info it floods
+                    // the log and makes real lifecycle lines unreadable.
+                    if matches!(cmd, lazybox_ipc::Command::Write { .. }) {
+                        tracing::debug!("daemon ← {label}");
+                    } else {
+                        tracing::info!("daemon ← {label}");
+                    }
                     // Time how long the serve loop spends INLINE on this
                     // command. `tokio::select!` is single-task: while a
                     // handler `.await`s (or worse, makes a synchronous
@@ -659,25 +665,40 @@ impl Server {
                             // / `u` / `s`) carry no prompt and keep the
                             // human-in-the-loop approval.
                             let autonomous = spawn_handler::spawn_is_autonomous(&initial_prompt);
-                            spawn_handler::handle_spawn(
-                                &self.config,
-                                session_key,
-                                session_id,
-                                kind,
-                                cwd,
-                                initial_prompt,
-                                autonomous,
-                            )
-                            .await;
+                            // Detach — a spawn can provision a worktree,
+                            // which on a cold cache runs `git clone --bare`
+                            // (minutes on a big repo). Awaiting that inline
+                            // freezes every keystroke `Write` behind it.
+                            // The handler only touches Arc'd config state
+                            // and broadcasts on the bus, so ordering with
+                            // the serve loop doesn't matter.
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                spawn_handler::handle_spawn(
+                                    &cfg,
+                                    session_key,
+                                    session_id,
+                                    kind,
+                                    cwd,
+                                    initial_prompt,
+                                    autonomous,
+                                )
+                                .await;
+                            });
                         }
                         lazybox_ipc::Command::CreateSession { session_key, kind, label } => {
-                            spawn_handler::handle_create_session(
-                                &self.config,
-                                session_key,
-                                kind,
-                                label,
-                            )
-                            .await;
+                            // Detach — provisions a fresh worktree folder
+                            // (same clone exposure as Spawn).
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                spawn_handler::handle_create_session(
+                                    &cfg,
+                                    session_key,
+                                    kind,
+                                    label,
+                                )
+                                .await;
+                            });
                         }
                         lazybox_ipc::Command::Write { terminal_id, bytes } => {
                             spawn_handler::handle_write(&self.config, terminal_id, &bytes).await;
@@ -840,27 +861,48 @@ impl Server {
                             polling::set_snooze(&self.config, &key, None);
                         }
                         lazybox_ipc::Command::Kill { session_key } => {
+                            // Detach — tears down worktrees (git ops +
+                            // filesystem removal) and backend sessions; a
+                            // slow disk or wedged git must not freeze the
+                            // serve loop.
                             let key = lazybox_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
-                            polling::delete_workspace(&self.config, &key).await;
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::delete_workspace(&cfg, &key).await;
+                            });
                         }
                         lazybox_ipc::Command::RemoveMergedWorkspace { session_key } => {
+                            // Detach — same worktree-teardown exposure as Kill.
                             let key = lazybox_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
-                            polling::remove_merged_workspace(&self.config, &key).await;
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::remove_merged_workspace(&cfg, &key).await;
+                            });
                         }
                         lazybox_ipc::Command::DeleteProject { project_key } => {
-                            polling::delete_project(&self.config, &project_key).await;
+                            // Detach — deletes every workspace in the
+                            // project (N worktree teardowns).
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::delete_project(&cfg, &project_key).await;
+                            });
                         }
                         lazybox_ipc::Command::CollapseIntoPr {
                             issue_workspace_key,
                         } => {
+                            // Detach — moves worktrees + freezes/kills
+                            // backend sessions; can shell out to git.
                             let key = lazybox_core::WorkspaceKey::new(
                                 issue_workspace_key.as_str().to_string(),
                             );
-                            polling::handle_collapse_into_pr(&self.config, key).await;
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_collapse_into_pr(&cfg, key).await;
+                            });
                         }
                         lazybox_ipc::Command::Refresh => {
                             // Manual poll trigger. Wakes the long-lived
@@ -950,12 +992,18 @@ impl Server {
                             source_workspace_key,
                             target_workspace_key,
                         } => {
-                            polling::handle_adopt_sessions(
-                                &self.config,
-                                source_workspace_key,
-                                target_workspace_key,
-                            )
-                            .await;
+                            // Detach — session adoption migrates worktrees
+                            // (git worktree move + freeze/resume), which
+                            // can stall on a wedged git or tmux.
+                            let cfg = self.config.clone();
+                            tokio::spawn(async move {
+                                polling::handle_adopt_sessions(
+                                    &cfg,
+                                    source_workspace_key,
+                                    target_workspace_key,
+                                )
+                                .await;
+                            });
                         }
                         lazybox_ipc::Command::MergePr { workspace_key } => {
                             // Detach for the same reason as
@@ -1065,11 +1113,46 @@ impl Server {
                             let _ = conn.tx.send(evt);
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
-                            // Slow client missed `n` events. Tracing
-                            // tells us when this is happening; the loop
-                            // continues from the next still-buffered
-                            // event so we don't block the bus.
-                            tracing::warn!("client lagged behind bus by {n} events");
+                            // Slow client missed `n` events — possibly
+                            // including one-shot lifecycle events
+                            // (TerminalSpawned/Exited, SessionUpserted)
+                            // that never repeat, leaving the client with
+                            // zombie tabs / stuck spinners forever. Push
+                            // a synthetic full Snapshot (same payload the
+                            // Subscribe handler builds) so the client
+                            // self-heals. Detached: the snapshot hits the
+                            // store + backend and must not stall the
+                            // serve loop. The loop continues from the
+                            // next still-buffered event so we don't
+                            // block the bus.
+                            tracing::warn!(
+                                "client lagged behind bus by {n} events — sending recovery snapshot"
+                            );
+                            let cfg = self.config.clone();
+                            let tx = conn.tx.clone();
+                            tokio::spawn(async move {
+                                let store = cfg.store.clone();
+                                let (workspaces, projects) = match tokio::task::spawn_blocking(
+                                    move || (load_workspaces(&*store), load_projects(&*store)),
+                                )
+                                .await
+                                {
+                                    Ok(pair) => pair,
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "lag-recovery snapshot load failed: {e} — sending empty snapshot",
+                                        );
+                                        (Vec::new(), Vec::new())
+                                    }
+                                };
+                                let terminals =
+                                    spawn_handler::snapshot_terminals(&cfg).await;
+                                let _ = tx.send(Event::Snapshot {
+                                    workspaces,
+                                    terminals,
+                                    projects,
+                                });
+                            });
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }

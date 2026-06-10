@@ -380,8 +380,28 @@ async fn run_embedded_realm(
     let (client, server) = channel::pair();
     let config = ServerConfig::from_user_config();
 
-    lazybox_server::spawn_handler::recover_sessions(&config).await;
-    lazybox_server::spawn_handler::restore_persisted_sessions(&config).await;
+    // Recovery probes the backend (`tmux list-sessions`) before the UI
+    // paints — bound it so a wedged tmux server degrades to "no
+    // recovered sessions" instead of a frozen launch.
+    if tokio::time::timeout(
+        Duration::from_secs(5),
+        lazybox_server::spawn_handler::recover_sessions(&config),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("recover_sessions timed out after 5s — continuing without recovery");
+    }
+    // Restore persisted sessions AFTER the UI is up: each restore can
+    // touch git worktrees and the backend, and restored terminals
+    // announce themselves via `TerminalSpawned` events — the same path
+    // live spawns use — so the TUI picks them up whenever they land.
+    {
+        let config = config.clone();
+        tokio::spawn(async move {
+            lazybox_server::spawn_handler::restore_persisted_sessions(&config).await;
+        });
+    }
     lazybox_server::polling::migrate_legacy_sandbox(&config);
 
     let serve_config = config.clone();
@@ -436,7 +456,18 @@ async fn run_embedded_realm(
     // a `spawn_blocking` task. Both calls are read-only + cheap-ish
     // (sub-second on a warm cache).
     let setup_report = lazybox_tui::setup::detect_all().await;
-    let setup_sources = std::sync::Arc::new(build_scope_sources().await);
+    // Scope-source discovery does network IO (GitHub credential +
+    // client build). Bounded so a stalled network can't hold the UI
+    // hostage pre-paint; the wizard degrades to no scope suggestions.
+    let setup_sources = std::sync::Arc::new(
+        match tokio::time::timeout(Duration::from_secs(10), build_scope_sources()).await {
+            Ok(sources) => sources,
+            Err(_) => {
+                tracing::warn!("build_scope_sources timed out after 10s — continuing without");
+                Vec::new()
+            }
+        },
+    );
     let needs_wizard = persisted_setup(&*config.store).is_none();
     let wizard_seed = if needs_wizard {
         Some((setup_report.clone(), setup_sources.clone()))
@@ -645,7 +676,15 @@ async fn server_start() -> anyhow::Result<()> {
     let pid_file = lifecycle::pid_path();
 
     let config = ServerConfig::from_user_config();
-    lazybox_server::spawn_handler::recover_sessions(&config).await;
+    if tokio::time::timeout(
+        Duration::from_secs(5),
+        lazybox_server::spawn_handler::recover_sessions(&config),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("recover_sessions timed out after 5s — continuing without recovery");
+    }
     polling::migrate_legacy_sandbox(&config);
     polling::spawn(config.clone(), resolve_poll_interval());
     if let Ok(yaml) = lazybox_config::Config::load() {
@@ -704,7 +743,15 @@ async fn server_api(addr_arg: Option<&String>) -> anyhow::Result<()> {
         .filter(|s| !s.is_empty());
 
     let config = ServerConfig::from_user_config();
-    lazybox_server::spawn_handler::recover_sessions(&config).await;
+    if tokio::time::timeout(
+        Duration::from_secs(5),
+        lazybox_server::spawn_handler::recover_sessions(&config),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("recover_sessions timed out after 5s — continuing without recovery");
+    }
     println!("lazybox API listening on http://{bind_addr}");
     if token.is_some() {
         println!("lazybox API bearer auth enabled via LAZYBOX_API_TOKEN");

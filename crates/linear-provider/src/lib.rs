@@ -109,8 +109,22 @@ impl LinearClient {
 
     /// Build a client with an explicit API key.
     pub fn with_key(api_key: impl Into<String>) -> Self {
+        // Explicit overall timeout — reqwest's default has none, so a
+        // black-holed connection to Linear would park the polling task
+        // forever. 25s clears Linear's slowest GraphQL responses while
+        // staying inside the daemon's poll cadence. Builder failure
+        // (TLS init) falls back to the default client rather than
+        // panicking in a library crate.
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(25))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|e| {
+                tracing::warn!("linear http client builder failed ({e}); using default client");
+                reqwest::Client::new()
+            });
         Self {
-            http: reqwest::Client::new(),
+            http,
             api_key: api_key.into(),
             endpoint: LINEAR_GRAPHQL.to_string(),
         }

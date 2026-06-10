@@ -31,7 +31,7 @@ impl Client {
     /// so accidental tracing doesn't leak it.
     pub fn new(bot_token: impl Into<String>) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::http_client(),
             bot_token: bot_token.into(),
             base: SLACK_API.to_string(),
         }

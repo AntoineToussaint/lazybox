@@ -376,3 +376,120 @@ mod undo_auto_mark_tests {
         );
     }
 }
+
+/// Encapsulation regression tests for issue #42 — scrolling must never
+/// rebuild the activity virtual-line buffer (the expensive markdown +
+/// header layout), or a large feed makes the UI unresponsive while
+/// scrolling. The buffer is memoized on a key that deliberately omits
+/// `comment_scroll`; these tests pin that contract from both ends — the
+/// key itself and the observable rebuild count through `render`.
+#[cfg(test)]
+mod scroll_does_not_rebuild_tests {
+    use super::super::{PaneId, RightPane};
+    use chrono::Utc;
+    use lazybox_core::{Activity, ActivityKind, Workspace, WorkspaceKey};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    fn ws_with_n_activities(n: usize) -> Workspace {
+        let mut w = Workspace::empty(WorkspaceKey::new("k"), "main", Utc::now());
+        for i in 0..n {
+            w.activity.push(Activity {
+                author: format!("user{i}"),
+                body: format!("comment body number {i}\nwith a second line"),
+                created_at: Utc::now(),
+                kind: ActivityKind::Comment,
+                node_id: Some(format!("n-{i}")),
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
+            });
+        }
+        w
+    }
+
+    fn draw(pane: &mut RightPane, term: &mut Terminal<TestBackend>) {
+        term.draw(|f| pane.render(Rect::new(0, 0, 80, 24), f, true))
+            .unwrap();
+    }
+
+    #[test]
+    fn scrolling_reuses_the_cached_buffer() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws_with_n_activities(60)));
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        // First paint builds the buffer once.
+        draw(&mut pane, &mut term);
+        assert_eq!(pane.activity_rebuilds(), 1);
+
+        // A no-op repaint must hit the cache.
+        draw(&mut pane, &mut term);
+        assert_eq!(pane.activity_rebuilds(), 1, "idle repaint must not rebuild");
+
+        // Scroll, repeatedly, and repaint each time — this is the
+        // gesture that used to lock up the UI. Not one rebuild.
+        for _ in 0..20 {
+            assert!(pane.scroll_activity(2));
+            draw(&mut pane, &mut term);
+        }
+        assert_eq!(
+            pane.activity_rebuilds(),
+            1,
+            "scrolling rebuilt the activity buffer — issue #42 regression"
+        );
+        // The scroll actually moved (otherwise the test proves nothing).
+        assert!(pane.comment_scroll() > 0);
+    }
+
+    #[test]
+    fn content_and_layout_changes_do_rebuild() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws_with_n_activities(60)));
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        draw(&mut pane, &mut term);
+        assert_eq!(pane.activity_rebuilds(), 1);
+
+        // Expanding a card changes what's drawn — must rebuild.
+        pane.feed.toggle_expand(0);
+        draw(&mut pane, &mut term);
+        assert_eq!(pane.activity_rebuilds(), 2, "expansion must rebuild");
+    }
+
+    /// Lowest-level pin: the cache key is invariant to anything scroll
+    /// touches and sensitive to anything the buffer's content depends
+    /// on. `comment_scroll` isn't even an input — that's the guarantee.
+    #[test]
+    fn buffer_key_excludes_scroll_includes_content() {
+        let ws = ws_with_n_activities(10);
+        let mut feed = crate::components::activity_feed::ActivityFeed::new();
+        let logins = std::collections::HashMap::new();
+
+        let base = RightPane::activity_buffer_key(&ws, &feed, &logins, "Dark", 60, true);
+        // Same inputs → same key (deterministic).
+        assert_eq!(
+            base,
+            RightPane::activity_buffer_key(&ws, &feed, &logins, "Dark", 60, true)
+        );
+        // Expansion is part of the buffer → key changes.
+        feed.toggle_expand(0);
+        assert_ne!(
+            base,
+            RightPane::activity_buffer_key(&ws, &feed, &logins, "Dark", 60, true),
+            "expanded set must be part of the key"
+        );
+        // Width + theme are part of the buffer → key changes.
+        feed.toggle_expand(0);
+        assert_ne!(
+            base,
+            RightPane::activity_buffer_key(&ws, &feed, &logins, "Dark", 40, true)
+        );
+        assert_ne!(
+            base,
+            RightPane::activity_buffer_key(&ws, &feed, &logins, "Light", 60, true)
+        );
+    }
+}

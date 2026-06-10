@@ -120,6 +120,15 @@ pub struct RightPane {
     /// this after dispatching the click and surfaces it as a
     /// footer Hint — pure `✓` visual was too subtle on its own.
     pending_selection_notice: Option<String>,
+    /// Memoized activity virtual-line buffer. Rebuilt only when an input
+    /// that actually affects the rendered cards changes; scrolling
+    /// (which only moves `comment_scroll`) reuses it untouched. See
+    /// [`ActivityBuffer`] for why this is what keeps scroll responsive.
+    activity_buffer: Option<ActivityBuffer>,
+    /// Count of activity-buffer rebuilds, for the encapsulation
+    /// regression test that pins "scrolling never rebuilds the feed."
+    #[cfg(test)]
+    activity_rebuilds: u32,
 }
 
 /// Click-target geometry captured during render. Three regions are
@@ -139,6 +148,35 @@ struct ClickHits {
     /// body line of the card. Empty when the section is collapsed
     /// or there's no activity.
     activity_cards: Vec<(usize, std::ops::RangeInclusive<u16>)>,
+}
+
+/// Memoized activity virtual-line buffer.
+///
+/// Building this buffer is the expensive part of painting the feed:
+/// one `Line` (≈10 allocated `Span`s) per card header, plus a full
+/// markdown→ratatui render of every *expanded* card's body. Rebuilding
+/// it on every frame is what made wheel-scrolling lock up the UI — a
+/// scroll only changes `comment_scroll`, a windowing offset, yet the
+/// old render path re-laid-out the entire feed on every wheel tick.
+///
+/// The buffer is a pure function of the inputs folded into `key`
+/// (`RightPane::activity_buffer_key`). `comment_scroll` is *deliberately
+/// absent* from that key: scrolling cannot change the key, so it can
+/// never miss the cache, so it can never trigger a rebuild. The window
+/// the scroll selects (`skip`/`take` in `render_activity`) runs against
+/// this cached buffer in O(viewport). That decoupling is the
+/// encapsulation guarantee — a future change can only make scroll
+/// expensive again by adding `comment_scroll` to the key, which would
+/// be obviously wrong on sight.
+struct ActivityBuffer {
+    /// Fingerprint of every input that determines the buffer's content.
+    key: u64,
+    /// One entry per virtual line: collapsed cards are 1 line, expanded
+    /// cards are header + wrapped body lines.
+    cards: Vec<Line<'static>>,
+    /// `(activity_index, start_line, end_line)` — inclusive line span of
+    /// each card within `cards`, for click hit-testing after windowing.
+    card_spans: Vec<(usize, u16, u16)>,
 }
 
 // `MARK_READ_DELAY` retired — value lives on `self.auto_mark_delay`
@@ -285,6 +323,9 @@ impl RightPane {
             auto_mark_delay: lazybox_config::UiDefaults::default().auto_mark_delay,
             click_hits: ClickHits::default(),
             pending_selection_notice: None,
+            activity_buffer: None,
+            #[cfg(test)]
+            activity_rebuilds: 0,
         }
     }
 
@@ -892,6 +933,75 @@ impl RightPane {
         frame.render_widget(para, area);
     }
 
+    /// Test accessor — how many times the activity buffer has been
+    /// rebuilt. The encapsulation regression test asserts this stays
+    /// flat across scrolls.
+    #[cfg(test)]
+    pub(super) fn activity_rebuilds(&self) -> u32 {
+        self.activity_rebuilds
+    }
+
+    /// Fingerprint every input that determines the activity virtual-line
+    /// buffer, so [`render_activity`](Self::render_activity) can skip the
+    /// rebuild when nothing relevant changed.
+    ///
+    /// Crucially, `comment_scroll` is *not* hashed: scrolling cannot
+    /// alter this key, so it can never invalidate the cached buffer.
+    /// That is the encapsulation that makes "scrolling rebuilds the whole
+    /// feed" — the unresponsiveness this guards against — impossible by
+    /// construction rather than merely tuned away.
+    ///
+    /// `now` (the timestamp feeding relative ages like "2m") is also
+    /// excluded: folding it in would defeat the cache on every frame.
+    /// Relative ages refresh whenever any real change rebuilds the
+    /// buffer, and a poll lands at least once a minute, so staleness is
+    /// bounded and invisible.
+    fn activity_buffer_key(
+        workspace: &Workspace,
+        feed: &crate::components::activity_feed::ActivityFeed,
+        viewer_logins: &std::collections::HashMap<String, String>,
+        theme_name: &str,
+        body_width: u16,
+        focused: bool,
+    ) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // XOR-fold sets/maps so the result is independent of iteration
+        // order — two logically-equal sets MUST hash equal, otherwise an
+        // unrelated mutation could silently invalidate the cache.
+        fn fold_indices(set: &std::collections::HashSet<usize>) -> u64 {
+            // `+1` so index 0 doesn't multiply to zero, which would make
+            // `{0}` fold identically to the empty set.
+            set.iter().fold(0u64, |acc, &i| {
+                acc ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            })
+        }
+
+        let mut h = DefaultHasher::new();
+        body_width.hash(&mut h);
+        focused.hash(&mut h);
+        theme_name.hash(&mut h);
+        feed.cursor.hash(&mut h);
+        fold_indices(feed.expanded()).hash(&mut h);
+        fold_indices(feed.selected()).hash(&mut h);
+        let viewer_fold = viewer_logins.iter().fold(0u64, |acc, (k, v)| {
+            let mut e = DefaultHasher::new();
+            k.hash(&mut e);
+            v.hash(&mut e);
+            acc ^ e.finish()
+        });
+        viewer_fold.hash(&mut h);
+        for (i, a) in workspace.activity.iter().enumerate() {
+            a.author.hash(&mut h);
+            a.body.hash(&mut h);
+            a.created_at.timestamp_millis().hash(&mut h);
+            (a.kind as u8).hash(&mut h);
+            workspace.is_activity_unread(i).hash(&mut h);
+        }
+        h.finish()
+    }
+
     /// Render the activity section. Always renders the header row;
     /// only renders the list body when `!activity_collapsed`. The
     /// header carries: collapse glyph, "Activity", total count, and
@@ -1043,46 +1153,49 @@ impl RightPane {
         // were never rendered AND the wheel only ever advanced by
         // an entire activity, so you'd skip past the very lines you
         // wanted to read.
-        let mut cards: Vec<Line<'static>> = Vec::new();
-        let mut card_spans: Vec<(usize, u16, u16)> = Vec::new(); // (activity_idx, start_line, end_line)
-        self.click_hits.activity_cards.clear();
-        let now = chrono::Utc::now();
-        for (i, activity) in workspace.activity.iter().enumerate() {
-            let start_line = cards.len() as u16;
-            let state = CardState {
-                is_cursor: i == self.feed.cursor,
-                is_unread: workspace.is_activity_unread(i),
-                is_expanded: self.feed.is_expanded(i),
-                is_selected: self.feed.is_selected(i),
-                focused,
-            };
-            cards.push(render_card_header(
-                &state,
-                activity,
-                theme,
-                now,
-                TEASER_CELLS,
+        //
+        // Building that buffer is expensive (a markdown render per
+        // expanded card), so it's memoized in `self.activity_buffer`
+        // keyed on every input that affects it — but NOT on
+        // `comment_scroll`. Scrolling reuses the cached buffer and only
+        // re-windows it below; that's what keeps the feed responsive at
+        // any list size. See [`ActivityBuffer`].
+        let key = Self::activity_buffer_key(
+            workspace,
+            &self.feed,
+            &self.viewer_logins,
+            theme.name,
+            body_width,
+            focused,
+        );
+        if self.activity_buffer.as_ref().map(|b| b.key) != Some(key) {
+            self.activity_buffer = Some(build_activity_buffer(
+                key,
+                workspace,
+                &self.feed,
                 &self.viewer_logins,
+                theme,
+                focused,
+                body_width,
+                BODY_INDENT,
+                TEASER_CELLS,
             ));
-            if state.is_expanded {
-                cards.extend(render_card_body(
-                    activity,
-                    theme,
-                    &state,
-                    body_width,
-                    BODY_INDENT,
-                ));
+            #[cfg(test)]
+            {
+                self.activity_rebuilds += 1;
             }
-            let end_line = cards.len().saturating_sub(1) as u16;
-            card_spans.push((i, start_line, end_line));
         }
-
         // Clamp `comment_scroll` to a valid line offset (the buffer
         // may have shrunk since the last render, e.g. a card was
         // collapsed). `last_visible_lines` is the height of the
         // window we're about to draw — used by `scroll_activity`
         // and `clamp_scroll_to_cursor` to bound the scroll.
-        let total_lines = cards.len();
+        let total_lines = self
+            .activity_buffer
+            .as_ref()
+            .expect("activity_buffer set above")
+            .cards
+            .len();
         let window = (inner.height as usize).min(total_lines);
         let max_scroll = total_lines.saturating_sub(window);
         if self.comment_scroll > max_scroll {
@@ -1094,9 +1207,21 @@ impl RightPane {
         // each card's line span into absolute on-screen y-range for
         // hit-testing. Cards fully above / below the window are
         // dropped from the click index — they're not visible, no
-        // click target.
-        let visible: Vec<Line<'static>> = cards.into_iter().skip(scroll).take(window).collect();
-        for (i, start, end) in card_spans {
+        // click target. This is O(viewport) — the only per-frame work
+        // a scroll triggers; the buffer itself is reused.
+        let buffer = self
+            .activity_buffer
+            .as_ref()
+            .expect("activity_buffer set above");
+        let visible: Vec<Line<'static>> = buffer
+            .cards
+            .iter()
+            .skip(scroll)
+            .take(window)
+            .cloned()
+            .collect();
+        let mut hits: Vec<(usize, std::ops::RangeInclusive<u16>)> = Vec::new();
+        for &(i, start, end) in &buffer.card_spans {
             let s = start as usize;
             let e = end as usize;
             if e < scroll || s >= scroll + window {
@@ -1106,10 +1231,9 @@ impl RightPane {
             let visible_end = e.min(scroll + window - 1) - scroll;
             let abs_start = inner.y.saturating_add(visible_start as u16);
             let abs_end = inner.y.saturating_add(visible_end as u16);
-            self.click_hits
-                .activity_cards
-                .push((i, abs_start..=abs_end));
+            hits.push((i, abs_start..=abs_end));
         }
+        self.click_hits.activity_cards = hits;
 
         frame.render_widget(Paragraph::new(visible), inner);
         // Scroll-position indicator in the right padding column —
@@ -1124,6 +1248,63 @@ impl RightPane {
         self.last_visible_cards = window.max(1);
         self.last_total_lines = total_lines;
         area.height
+    }
+}
+
+/// Lay every activity out into one virtual line buffer: one header
+/// `Line` per card, plus the wrapped markdown body for expanded cards.
+/// Pure — no scroll, no `&mut self`, no `Frame`. This is the expensive
+/// step `render_activity` memoizes behind [`ActivityBuffer`]; keeping it
+/// a free function of explicit inputs (never `comment_scroll`) is what
+/// stops a scroll from ever reaching it.
+#[allow(clippy::too_many_arguments)]
+fn build_activity_buffer(
+    key: u64,
+    workspace: &Workspace,
+    feed: &crate::components::activity_feed::ActivityFeed,
+    viewer_logins: &std::collections::HashMap<String, String>,
+    theme: &crate::theme::Theme,
+    focused: bool,
+    body_width: u16,
+    body_indent: u16,
+    teaser_cells: usize,
+) -> ActivityBuffer {
+    let mut cards: Vec<Line<'static>> = Vec::new();
+    let mut card_spans: Vec<(usize, u16, u16)> = Vec::new();
+    let now = chrono::Utc::now();
+    for (i, activity) in workspace.activity.iter().enumerate() {
+        let start_line = cards.len() as u16;
+        let state = CardState {
+            is_cursor: i == feed.cursor,
+            is_unread: workspace.is_activity_unread(i),
+            is_expanded: feed.is_expanded(i),
+            is_selected: feed.is_selected(i),
+            focused,
+        };
+        cards.push(render_card_header(
+            &state,
+            activity,
+            theme,
+            now,
+            teaser_cells,
+            viewer_logins,
+        ));
+        if state.is_expanded {
+            cards.extend(render_card_body(
+                activity,
+                theme,
+                &state,
+                body_width,
+                body_indent,
+            ));
+        }
+        let end_line = cards.len().saturating_sub(1) as u16;
+        card_spans.push((i, start_line, end_line));
+    }
+    ActivityBuffer {
+        key,
+        cards,
+        card_spans,
     }
 }
 

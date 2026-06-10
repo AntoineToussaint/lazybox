@@ -95,3 +95,43 @@ pub enum SlackError {
     #[error("config: {0}")]
     Config(String),
 }
+
+/// Canonical code carried by rate-limit errors. Matches Slack's own
+/// application-level code so HTTP-429 and `{ok:false, error:
+/// "ratelimited"}` surfaces look the same to callers.
+const RATE_LIMITED_CODE: &str = "ratelimited";
+
+impl SlackError {
+    /// Rate-limit error, optionally carrying the `Retry-After`
+    /// header value (seconds). Encoded through the `Api` variant —
+    /// adding a dedicated enum variant would break downstream
+    /// exhaustive matches — with typed constructors/accessors so
+    /// callers never parse the string themselves.
+    pub fn rate_limited(retry_after_secs: Option<u64>) -> Self {
+        match retry_after_secs {
+            Some(secs) => SlackError::Api(format!("{RATE_LIMITED_CODE}; retry-after={secs}")),
+            None => SlackError::Api(RATE_LIMITED_CODE.to_string()),
+        }
+    }
+
+    /// Whether this error is a rate limit (HTTP 429, or Slack's
+    /// `ratelimited` / legacy `rate_limited` application codes).
+    pub fn is_rate_limited(&self) -> bool {
+        match self {
+            SlackError::Api(code) => {
+                code == RATE_LIMITED_CODE
+                    || code.starts_with("ratelimited;")
+                    || code == "rate_limited"
+            }
+            _ => false,
+        }
+    }
+
+    /// `Retry-After` hint in seconds, when the server sent one.
+    pub fn retry_after_secs(&self) -> Option<u64> {
+        let SlackError::Api(code) = self else {
+            return None;
+        };
+        code.split("retry-after=").nth(1)?.trim().parse().ok()
+    }
+}

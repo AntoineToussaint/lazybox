@@ -65,12 +65,19 @@
 use crate::ServerConfig;
 use lazybox_ipc::{AgentState, Event, TerminalId, TerminalKind};
 use lazybox_store::Store;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+
+/// Size of the inbound (channel, ts) dedup window. Slack delivers one
+/// user message in a tracked channel as BOTH `app_mention` and
+/// `message` events; without dedup the text hits the agent PTY twice
+/// (two turns). 64 entries is plenty: the duplicate pair arrives
+/// within milliseconds of each other.
+const INBOUND_DEDUP_CAPACITY: usize = 64;
 
 /// How long the agent must be quiet (no PTY bytes) before the
 /// Asking state reads as `done — waiting for next task` rather than
@@ -155,6 +162,15 @@ pub trait ChatProvider: Send + Sync {
     /// `<@Uxxx>`, discord `<@!123>`, matrix `@bot:server`).
     fn strip_self_mention<'a>(&self, text: &'a str) -> &'a str;
 
+    /// May this provider-level user id drive an agent PTY? Read-only
+    /// queries (`status`) are never gated — this only guards the
+    /// "write into a skip-permissions agent" path. Default allows
+    /// everyone; providers with an allowlist (slack
+    /// `slack.allowed_users`) override.
+    fn is_user_allowed(&self, _user: &str) -> bool {
+        true
+    }
+
     /// Pick the chat surface for a freshly-spawned (workspace,
     /// session_id, agent_id) terminal. See [`TerminalTarget`].
     fn terminal_target(
@@ -224,11 +240,41 @@ pub struct RouterState {
     /// fires the dispatcher reads this to label notifications as
     /// "paused" (recent output) vs "done" (quiet for a while).
     last_output_at: HashMap<TerminalId, Instant>,
+    /// Bounded LRU of recently-seen inbound `(channel, ts)` pairs.
+    /// See [`INBOUND_DEDUP_CAPACITY`].
+    recent_inbound: VecDeque<(String, String)>,
 }
 
 impl RouterState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record an inbound message identity. Returns `true` if it's
+    /// new, `false` if it was already seen (a duplicate delivery of
+    /// the same Slack message via both `app_mention` and `message`).
+    /// Oldest entries are evicted past [`INBOUND_DEDUP_CAPACITY`].
+    pub(crate) fn note_inbound(&mut self, channel: &str, ts: &str) -> bool {
+        if self
+            .recent_inbound
+            .iter()
+            .any(|(c, t)| c == channel && t == ts)
+        {
+            return false;
+        }
+        self.recent_inbound
+            .push_back((channel.to_string(), ts.to_string()));
+        if self.recent_inbound.len() > INBOUND_DEDUP_CAPACITY {
+            self.recent_inbound.pop_front();
+        }
+        true
+    }
+
+    /// Whether the terminal already has a chat surface. Used by the
+    /// lag-recovery rescan to find terminals whose `TerminalSpawned`
+    /// was dropped by the broadcast bus.
+    pub(crate) fn has_terminal(&self, id: TerminalId) -> bool {
+        self.terminal_to_channel.contains_key(&id)
     }
 
     /// Test helper — record a terminal as living on a dedicated
@@ -326,62 +372,142 @@ pub fn parse_command(text: &str) -> Option<ChatCommand> {
     }
 }
 
+/// What [`handle_inbound`] should do with a (deduplicated) message.
+/// Pure decision so the routing + authorization matrix is unit-
+/// testable without a backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InboundDecision {
+    /// Not actionable: empty text, or untracked channel/thread.
+    Ignore,
+    /// Read-only status query — replied to regardless of sender
+    /// (never gated; it leaks no control over the agent).
+    Status,
+    /// Forward the text to this terminal's PTY.
+    Forward(TerminalId),
+    /// A terminal was routed, but the sender isn't on the provider's
+    /// allowlist — drop the message instead of driving the agent.
+    Unauthorized(TerminalId),
+}
+
+/// Routing + authorization matrix. `allowed` is the provider's
+/// verdict on the sender ([`ChatProvider::is_user_allowed`]).
+pub(crate) fn decide_inbound(
+    state: &RouterState,
+    allowed: bool,
+    channel: &str,
+    thread_ts: Option<&str>,
+    text: &str,
+) -> InboundDecision {
+    if text.is_empty() {
+        return InboundDecision::Ignore;
+    }
+    // Query commands short-circuit before the PTY-forward: `status`
+    // in an unmapped channel (e.g. anchor / DMs) still gets a reply,
+    // and stays open to every sender — it's read-only.
+    if parse_command(text).is_some() {
+        return InboundDecision::Status;
+    }
+    let Some(terminal_id) = route_inbound(state, channel, thread_ts) else {
+        return InboundDecision::Ignore;
+    };
+    if !allowed {
+        return InboundDecision::Unauthorized(terminal_id);
+    }
+    InboundDecision::Forward(terminal_id)
+}
+
 /// Top-level inbound handler. Provider-specific code maps its own
 /// wire event into [`ChatInbound`] and calls this. Either the
 /// message is a [`ChatCommand`] (we reply via the provider) or it's
 /// agent input (we forward to the channel's terminal).
+///
+/// Duplicate deliveries of the same message — Slack sends one user
+/// message in a tracked channel as BOTH `app_mention` and `message`
+/// — are collapsed by `(channel, ts)` before any side effect.
 pub async fn handle_inbound(
     provider: &dyn ChatProvider,
     server: &ServerConfig,
     state: &Arc<Mutex<RouterState>>,
     msg: ChatInbound,
 ) {
-    let (channel, raw_text, in_thread_ts) = match msg {
+    let (channel, user, raw_text, ts, in_thread_ts) = match msg {
         ChatInbound::Message {
             channel,
+            user,
             text,
+            ts,
             thread_ts,
-            ..
-        } => (channel, text, thread_ts),
+        } => (channel, user, text, ts, thread_ts),
         ChatInbound::Connected | ChatInbound::Disconnected { .. } => return,
     };
     let text = provider.strip_self_mention(&raw_text).trim();
     if text.is_empty() {
         return;
     }
-    // Routing order: thread first (anchor mode), then channel
-    // (dedicated mode). A `thread_ts` we don't know about falls
-    // through to the channel lookup — could be a brand-new thread the
-    // user started in the anchor channel, in which case we have
-    // nothing to write to. The channel-level fallback also lets the
-    // status command work from inside a thread we don't track.
-    let terminal_id = {
-        let s = state.lock().await;
-        route_inbound(&s, &channel, in_thread_ts.as_deref())
+    // Routing order inside `decide_inbound`: thread first (anchor
+    // mode), then channel (dedicated mode). A `thread_ts` we don't
+    // know about falls through to the channel lookup — could be a
+    // brand-new thread the user started in the anchor channel, in
+    // which case we have nothing to write to. The channel-level
+    // fallback also lets the status command work from inside a
+    // thread we don't track.
+    let decision = {
+        let mut s = state.lock().await;
+        if !ts.is_empty() && !s.note_inbound(&channel, &ts) {
+            tracing::debug!(
+                provider = provider.id(),
+                channel = %channel,
+                ts = %ts,
+                "chat: duplicate inbound delivery — ignoring"
+            );
+            return;
+        }
+        decide_inbound(
+            &s,
+            provider.is_user_allowed(&user),
+            &channel,
+            in_thread_ts.as_deref(),
+            text,
+        )
     };
-    // Query commands short-circuit before the PTY-forward: `status`
-    // in an unmapped channel (e.g. anchor / DMs) still gets a reply.
-    // Status replies post in the same thread as the query so the
-    // anchor channel doesn't fill with top-level status lines.
-    if let Some(cmd) = parse_command(text) {
-        let body = build_status_reply(server, state, terminal_id, cmd).await;
-        if let Err(e) = post_into(provider, &channel, in_thread_ts.as_deref(), &body).await {
+    let terminal_id = match decision {
+        InboundDecision::Ignore => {
+            tracing::debug!(
+                provider = provider.id(),
+                channel = %channel,
+                thread_ts = ?in_thread_ts,
+                "chat: inbound in untracked channel/thread — ignoring"
+            );
+            return;
+        }
+        InboundDecision::Status => {
+            let routed = {
+                let s = state.lock().await;
+                route_inbound(&s, &channel, in_thread_ts.as_deref())
+            };
+            // Status replies post in the same thread as the query so
+            // the anchor channel doesn't fill with top-level lines.
+            let body = build_status_reply(server, state, routed, ChatCommand::Status).await;
+            if let Err(e) = post_into(provider, &channel, in_thread_ts.as_deref(), &body).await {
+                tracing::warn!(
+                    provider = provider.id(),
+                    channel = %channel,
+                    "chat: status post failed: {e}"
+                );
+            }
+            return;
+        }
+        InboundDecision::Unauthorized(tid) => {
             tracing::warn!(
                 provider = provider.id(),
                 channel = %channel,
-                "chat: status post failed: {e}"
+                user = %user,
+                ?tid,
+                "chat: sender not in allowed_users — dropping agent input"
             );
+            return;
         }
-        return;
-    }
-    let Some(terminal_id) = terminal_id else {
-        tracing::debug!(
-            provider = provider.id(),
-            channel = %channel,
-            thread_ts = ?in_thread_ts,
-            "chat: inbound in untracked channel/thread — ignoring"
-        );
-        return;
+        InboundDecision::Forward(tid) => tid,
     };
     // Multi-line messages need bracket-paste sequences (`ESC[200~
     // ... ESC[201~`) — without them claude's terminal interprets
@@ -594,6 +720,53 @@ pub(crate) async fn on_terminal_spawned(
             }
             s.last_output_at.insert(terminal_id, Instant::now());
         }
+    }
+}
+
+/// Lag recovery: the broadcast bus drops events when a subscriber
+/// falls behind, and a dropped `TerminalSpawned` used to orphan that
+/// terminal from chat permanently — no channel, no thread, every
+/// notification silently skipped. Re-scan the daemon's live terminal
+/// metadata (`terminal_meta` is the authoritative spawn-time record)
+/// and run the on-spawned hook for any agent terminal the router
+/// doesn't know yet.
+pub(crate) async fn resync_spawned_terminals(
+    provider: &dyn ChatProvider,
+    server: &ServerConfig,
+    state: &Arc<Mutex<RouterState>>,
+) {
+    let meta: HashMap<TerminalId, (lazybox_core::SessionKey, TerminalKind)> =
+        { server.terminal_meta.lock().await.clone() };
+    let sessions: HashMap<TerminalId, lazybox_core::SessionId> =
+        { server.terminal_sessions.lock().await.clone() };
+    for (terminal_id, (session_key, kind)) in meta {
+        let TerminalKind::Agent(agent_id) = kind else {
+            continue;
+        };
+        if state.lock().await.has_terminal(terminal_id) {
+            continue;
+        }
+        let Some(session_id) = sessions.get(&terminal_id) else {
+            continue;
+        };
+        let workspace_key = session_key.as_str().to_string();
+        let target = provider.terminal_target(&workspace_key, &session_id.to_string(), &agent_id);
+        tracing::info!(
+            provider = provider.id(),
+            ?terminal_id,
+            workspace = %workspace_key,
+            "chat: re-attaching terminal missed during bus lag"
+        );
+        on_terminal_spawned(
+            provider,
+            &*server.store,
+            state,
+            terminal_id,
+            &workspace_key,
+            &agent_id,
+            target,
+        )
+        .await;
     }
 }
 
@@ -1372,6 +1545,165 @@ mod tests {
         assert_eq!(
             route_inbound(&s, "C-ANCHOR", Some("ts-second")),
             Some(TerminalId(2))
+        );
+    }
+
+    // ── inbound dedup (Slack double delivery) ─────────────────────────
+
+    #[test]
+    fn note_inbound_flags_duplicate_channel_ts_pairs() {
+        let mut state = RouterState::new();
+        assert!(state.note_inbound("C1", "100.1"));
+        assert!(
+            !state.note_inbound("C1", "100.1"),
+            "same message delivered twice (app_mention + message) must dedupe"
+        );
+        // Different ts / channel are distinct messages.
+        assert!(state.note_inbound("C1", "100.2"));
+        assert!(state.note_inbound("C2", "100.1"));
+    }
+
+    #[test]
+    fn note_inbound_is_bounded() {
+        let mut state = RouterState::new();
+        for i in 0..(INBOUND_DEDUP_CAPACITY + 10) {
+            assert!(state.note_inbound("C1", &format!("{i}.0")));
+        }
+        assert!(state.recent_inbound.len() <= INBOUND_DEDUP_CAPACITY);
+        // The oldest entries were evicted — re-noting them succeeds.
+        assert!(state.note_inbound("C1", "0.0"));
+    }
+
+    /// End-to-end shape of the Slack double-delivery bug: one user
+    /// message arrives twice (same channel + ts). Only the first
+    /// produces a side effect.
+    #[tokio::test]
+    async fn handle_inbound_drops_duplicate_delivery() {
+        use lazybox_store::MemoryStore;
+        let provider = MockProvider::new(TerminalTarget::NoSurface, vec![]);
+        let server = crate::ServerConfig::with_store(Arc::new(MemoryStore::new()));
+        let state = Arc::new(Mutex::new(RouterState::new()));
+        let msg = ChatInbound::Message {
+            channel: "C1".into(),
+            user: "U1".into(),
+            text: "status".into(),
+            ts: "1700.1".into(),
+            thread_ts: None,
+        };
+        handle_inbound(&provider, &server, &state, msg.clone()).await;
+        handle_inbound(&provider, &server, &state, msg).await;
+        assert_eq!(
+            provider.posts.lock().unwrap().len(),
+            1,
+            "the duplicate delivery must not produce a second reply"
+        );
+    }
+
+    // ── decide_inbound (routing + authorization matrix) ───────────────
+
+    #[test]
+    fn decide_inbound_forwards_allowed_users_to_routed_terminal() {
+        let mut state = RouterState::new();
+        state.record_dedicated(TerminalId(1), "C1");
+        assert_eq!(
+            decide_inbound(&state, true, "C1", None, "yes"),
+            InboundDecision::Forward(TerminalId(1))
+        );
+    }
+
+    #[test]
+    fn decide_inbound_blocks_unauthorized_senders_from_pty() {
+        let mut state = RouterState::new();
+        state.record_dedicated(TerminalId(1), "C1");
+        assert_eq!(
+            decide_inbound(&state, false, "C1", None, "rm -rf please"),
+            InboundDecision::Unauthorized(TerminalId(1)),
+            "a sender outside allowed_users must never reach the PTY"
+        );
+    }
+
+    /// Pinned: `status` is read-only and stays open to every sender,
+    /// even ones outside the allowlist — it leaks no agent control.
+    #[test]
+    fn decide_inbound_status_is_open_to_unauthorized_senders() {
+        let mut state = RouterState::new();
+        state.record_dedicated(TerminalId(1), "C1");
+        assert_eq!(
+            decide_inbound(&state, false, "C1", None, "status"),
+            InboundDecision::Status
+        );
+    }
+
+    #[test]
+    fn decide_inbound_ignores_untracked_channels() {
+        let state = RouterState::new();
+        assert_eq!(
+            decide_inbound(&state, true, "C-unknown", None, "hello"),
+            InboundDecision::Ignore
+        );
+    }
+
+    // ── lag recovery rescan ───────────────────────────────────────────
+
+    /// A `TerminalSpawned` dropped by broadcast lag must be
+    /// recoverable from the daemon's live terminal metadata: the
+    /// rescan attaches the unknown agent terminal and skips already-
+    /// known ones (no duplicate headers).
+    #[tokio::test]
+    async fn resync_spawned_terminals_attaches_missed_agent_terminals() {
+        use lazybox_store::MemoryStore;
+        let provider = MockProvider::new(
+            TerminalTarget::DedicatedChannel("ws-a-claude".into()),
+            vec![],
+        );
+        let server = crate::ServerConfig::with_store(Arc::new(MemoryStore::new()));
+        let missed = TerminalId(7);
+        let known = TerminalId(8);
+        let shell = TerminalId(9);
+        {
+            let mut meta = server.terminal_meta.lock().await;
+            meta.insert(
+                missed,
+                (
+                    lazybox_core::SessionKey::new("ws-a"),
+                    TerminalKind::Agent("claude".into()),
+                ),
+            );
+            meta.insert(
+                known,
+                (
+                    lazybox_core::SessionKey::new("ws-b"),
+                    TerminalKind::Agent("claude".into()),
+                ),
+            );
+            meta.insert(
+                shell,
+                (lazybox_core::SessionKey::new("ws-c"), TerminalKind::Shell),
+            );
+        }
+        {
+            let mut sessions = server.terminal_sessions.lock().await;
+            sessions.insert(missed, lazybox_core::SessionId::new());
+            sessions.insert(known, lazybox_core::SessionId::new());
+            sessions.insert(shell, lazybox_core::SessionId::new());
+        }
+        let state = Arc::new(Mutex::new(RouterState::new()));
+        state.lock().await.record_dedicated(known, "C-already");
+
+        resync_spawned_terminals(&provider, &server, &state).await;
+
+        let s = state.lock().await;
+        assert!(s.has_terminal(missed), "missed terminal re-attached");
+        assert!(!s.has_terminal(shell), "shell terminals get no surface");
+        assert_eq!(
+            s.terminal_to_channel.get(&known).map(String::as_str),
+            Some("C-already"),
+            "already-known terminal untouched"
+        );
+        assert_eq!(
+            provider.ensured.lock().unwrap().len(),
+            1,
+            "only the missed terminal triggered a channel ensure"
         );
     }
 

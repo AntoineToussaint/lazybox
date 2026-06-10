@@ -387,16 +387,28 @@ async fn inspect_one(
         },
         size_and_mtime(path),
         uncommitted(path),
-        unpushed(path),
+        unpushed(path, bare_path.as_deref()),
     );
     let (size_bytes, last_modified) = size_pair;
 
     // Branch-existence reasons only fire when we knew the branch +
     // bare in the first place; otherwise the lookups defaulted to
     // `false` and would spuriously flag detached HEADs.
-    if bare_path.is_some() && branch.is_some() {
+    if let (Some(bare), Some(branch_name)) = (bare_path.as_deref(), branch.as_deref()) {
         if !remote_exists && local_exists {
-            reasons.push(OrphanReason::BranchDeletedUpstream);
+            // Only classify "deleted upstream" when the remote ref
+            // plausibly existed: the branch has tracking config, or
+            // its tip is reachable from a remote-tracking ref. A
+            // never-pushed local branch (`lazybox/issue-N` cut off
+            // origin/main) never had a remote ref to delete — calling
+            // it BranchDeletedUpstream made `is_safe_to_delete` true
+            // and the rescope reaper deleted committed local work.
+            // (Both probes are sequential + lazy: this arm is rare.)
+            if branch_has_upstream_config(bare, branch_name).await
+                || branch_tip_on_remote(bare, branch_name).await
+            {
+                reasons.push(OrphanReason::BranchDeletedUpstream);
+            }
         }
         if !local_exists {
             reasons.push(OrphanReason::BranchMissingLocally);
@@ -541,27 +553,96 @@ async fn uncommitted(worktree: &Path) -> bool {
     output.status.success() && !output.stdout.is_empty()
 }
 
-async fn unpushed(worktree: &Path) -> bool {
-    // `@{u}` resolves the configured upstream. If there's no upstream
-    // set the command fails — we treat "no upstream" as "no unpushed
-    // commits to worry about" because the cleanup path assumes a
-    // lazybox-created worktree where the branch either tracks origin or
-    // was never published.
-    let Ok(output) = apply_git_env(Command::new("git").current_dir(worktree).args([
-        "rev-list",
-        "--count",
-        "@{u}..HEAD",
+/// `git rev-list --count <range>` in `worktree`. `None` when the
+/// range doesn't resolve (missing ref, no upstream, not a repo).
+async fn rev_list_count(worktree: &Path, range: &str) -> Option<u64> {
+    let output = apply_git_env(Command::new("git").current_dir(worktree).args([
+        "rev-list", "--count", range,
+    ]))
+    .output()
+    .await
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+/// Does the worktree hold commits that never made it upstream?
+///
+/// `@{u}` resolves the configured upstream — the precise answer when
+/// tracking is set up. With no upstream (a never-pushed local branch
+/// like `lazybox/issue-N`, or a tracking branch whose remote ref was
+/// pruned) the old behavior reported `false`, which let the reaper
+/// classify committed-but-unpushed work as deletable. Instead, fall
+/// back to counting commits ahead of the remote's default branch
+/// (`origin/HEAD`, then the bare clone's HEAD branch); if nothing
+/// resolves, report `true` — conservative: never call work "pushed"
+/// without evidence.
+///
+/// `bare == None` means git doesn't even list this directory as a
+/// worktree ("ghost on disk"); there's no branch state to lose, so
+/// the legacy `false` stands and the Untracked cleanup path keeps
+/// working.
+async fn unpushed(worktree: &Path, bare: Option<&Path>) -> bool {
+    if let Some(n) = rev_list_count(worktree, "@{u}..HEAD").await {
+        return n > 0;
+    }
+    let Some(bare) = bare else {
+        return false;
+    };
+    if let Some(n) = rev_list_count(worktree, "refs/remotes/origin/HEAD..HEAD").await {
+        return n > 0;
+    }
+    if let Some(default_branch) = bare_head_branch(bare).await {
+        for base in [
+            format!("refs/remotes/origin/{default_branch}..HEAD"),
+            format!("refs/heads/{default_branch}..HEAD"),
+        ] {
+            if let Some(n) = rev_list_count(worktree, &base).await {
+                return n > 0;
+            }
+        }
+    }
+    true
+}
+
+/// Whether `branch` has tracking configuration recorded in the bare
+/// clone (`branch.<name>.remote`). Lazybox's `checkout_at` records it
+/// when the worktree was created off a remote-tracking ref, so its
+/// presence is evidence the branch genuinely existed upstream.
+async fn branch_has_upstream_config(bare: &Path, branch: &str) -> bool {
+    apply_git_env(Command::new("git").current_dir(bare).args([
+        "config",
+        "--get",
+        &format!("branch.{branch}.remote"),
+    ]))
+    .output()
+    .await
+    .map(|o| o.status.success())
+    .unwrap_or(false)
+}
+
+/// Whether the branch tip is reachable from ANY remote-tracking ref —
+/// i.e. its commits made it to the remote at some point (covers
+/// worktrees created before upstream config was recorded, as long as
+/// the merge wasn't a squash).
+async fn branch_tip_on_remote(bare: &Path, branch: &str) -> bool {
+    let Ok(output) = apply_git_env(Command::new("git").current_dir(bare).args([
+        "branch",
+        "-r",
+        "--contains",
+        &format!("refs/heads/{branch}"),
     ]))
     .output()
     .await
     else {
         return false;
     };
-    if !output.status.success() {
-        return false;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.trim().parse::<u64>().map(|n| n > 0).unwrap_or(false)
+    output.status.success() && !output.stdout.iter().all(|b| b.is_ascii_whitespace())
 }
 
 /// Recursive `du`-style size + max mtime walk. Best-effort: any entry

@@ -318,6 +318,145 @@ async fn fetch_all_graphql_error_surfaces() {
     mock.shutdown().await;
 }
 
+/// Mock that answers every request with a fixed non-200 status (plus
+/// optional headers). Used for the 429 classification test.
+async fn spawn_status_mock(status: StatusCode, headers: Vec<(&'static str, String)>) -> MockLinear {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let requests_c = requests.clone();
+    let headers = Arc::new(headers);
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => return,
+                accept = listener.accept() => {
+                    let Ok((stream, _)) = accept else { continue };
+                    let requests = requests_c.clone();
+                    let headers = headers.clone();
+                    tokio::spawn(async move {
+                        let io = TokioIo::new(stream);
+                        let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
+                            let requests = requests.clone();
+                            let headers = headers.clone();
+                            async move {
+                                let _ = req.into_body().collect().await;
+                                requests.fetch_add(1, Ordering::SeqCst);
+                                let mut builder = Response::builder().status(status);
+                                for (k, v) in headers.iter() {
+                                    builder = builder.header(*k, v);
+                                }
+                                Ok::<_, std::convert::Infallible>(
+                                    builder.body(Full::new(Bytes::from("{}"))).unwrap(),
+                                )
+                            }
+                        });
+                        let _ = http1::Builder::new().serve_connection(io, svc).await;
+                    });
+                }
+            }
+        }
+    });
+
+    MockLinear {
+        addr,
+        shutdown: Some(shutdown_tx),
+        requests,
+    }
+}
+
+/// HTTP 429 used to classify as Permanent (the string probes never
+/// matched "429"), so the polling layer gave up on a transient rate
+/// limit. It must surface as a retryable ProviderError carrying the
+/// Retry-After hint.
+#[tokio::test]
+async fn http_429_classifies_as_retryable_with_retry_after() {
+    let mock = spawn_status_mock(
+        StatusCode::TOO_MANY_REQUESTS,
+        vec![("retry-after", "42".to_string())],
+    )
+    .await;
+
+    let client = LinearClient::with_key("k").with_endpoint(mock.url());
+    let err = client.fetch_all().await.expect_err("429 must error");
+    let provider_err: lazybox_core::ProviderError = err.into();
+    match provider_err {
+        lazybox_core::ProviderError::Retryable {
+            retry_after_secs, ..
+        } => assert_eq!(retry_after_secs, Some(42), "Retry-After carried through"),
+        other => panic!("429 must be retryable, got {other:?}"),
+    }
+
+    mock.shutdown().await;
+}
+
+/// A page failing mid-pagination keeps the prefix (inbox stays
+/// alive) but the result must be flagged PARTIAL — rescope can't
+/// treat "absent from this fetch" as "gone upstream".
+#[tokio::test]
+async fn mid_pagination_failure_marks_result_partial() {
+    let page1 = serde_json::json!([
+        {
+            "id": "a", "identifier": "ENG-1", "title": "one", "description": null,
+            "url": "https://l.app/1", "updatedAt": "2026-01-01T00:00:00Z",
+            "priority": null,
+            "state": { "name": "", "type": "unstarted" },
+            "assignee": null, "creator": null,
+            "team": { "key": "ENG" }, "labels": { "nodes": [] }
+        }
+    ]);
+    let page2_error = serde_json::json!({
+        "errors": [{ "message": "boom on page 2" }]
+    })
+    .to_string();
+    let mock = spawn_mock(vec![
+        viewer_response("me"),
+        issues_response(page1, true, Some("cur")),
+        page2_error,
+    ])
+    .await;
+
+    let client = LinearClient::with_key("k").with_endpoint(mock.url());
+    let outcome = client.fetch_all_with_coverage().await.unwrap();
+    assert_eq!(outcome.tasks.len(), 1, "prefix preserved");
+    assert!(
+        outcome.is_partial(),
+        "a truncated pagination is non-authoritative"
+    );
+
+    mock.shutdown().await;
+}
+
+/// The happy path stays authoritative: full pagination → Complete.
+#[tokio::test]
+async fn full_pagination_marks_result_complete() {
+    let page = serde_json::json!([
+        {
+            "id": "a", "identifier": "ENG-1", "title": "one", "description": null,
+            "url": "https://l.app/1", "updatedAt": "2026-01-01T00:00:00Z",
+            "priority": null,
+            "state": { "name": "", "type": "unstarted" },
+            "assignee": null, "creator": null,
+            "team": { "key": "ENG" }, "labels": { "nodes": [] }
+        }
+    ]);
+    let mock = spawn_mock(vec![
+        viewer_response("me"),
+        issues_response(page, false, None),
+    ])
+    .await;
+
+    let client = LinearClient::with_key("k").with_endpoint(mock.url());
+    let outcome = client.fetch_all_with_coverage().await.unwrap();
+    assert!(!outcome.is_partial());
+    assert_eq!(outcome.tasks.len(), 1);
+
+    mock.shutdown().await;
+}
+
 /// Env-var wiring. Combined into one test so the two cases don't
 /// race each other through the shared process env in parallel
 /// execution.

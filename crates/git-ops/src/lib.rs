@@ -3,11 +3,34 @@
 //! Git worktree management. Maintains a base directory with bare clones,
 //! creates worktrees per-branch for parallel work.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::process::Command;
 
 mod inspect;
 pub use inspect::{OrphanReason, TrackedSession, WorktreeInspection};
+
+/// Process-wide per-repo serialization. Keyed by the bare-clone path:
+/// two concurrent cold spawns for the same repo would otherwise race
+/// `git clone --bare` into one directory, and concurrent fetch /
+/// `worktree add` invocations can collide on ref locks inside the
+/// shared bare clone. Every mutating `WorktreeManager` operation
+/// acquires the repo's async mutex first; distinct repos proceed in
+/// parallel.
+///
+/// The outer `std::sync::Mutex` only guards the map lookup/insert —
+/// never held across an `.await`. The returned `Arc<tokio::Mutex>`
+/// is what callers hold for the duration of the git work.
+fn repo_lock(bare_path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .entry(bare_path.to_path_buf())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -126,6 +149,58 @@ impl WorktreeManager {
             .join(format!("{owner}-{repo}-{safe_branch}"))
     }
 
+    /// Ensure a healthy bare clone exists at the canonical path,
+    /// cloning if needed. Caller must hold the repo lock.
+    ///
+    /// Crash-safety: the clone lands in `<path>.partial` and is
+    /// renamed into place only on success. A killed / timed-out
+    /// clone therefore never leaves a half-populated directory at
+    /// the final path — which used to poison the cache forever,
+    /// because every later provision saw `exists() == true`, skipped
+    /// the clone, and failed on the broken repo. Existing directories
+    /// that fail validation (interrupted clones from before this
+    /// scheme, manual tampering) are deleted and re-cloned; stale
+    /// `.partial` leftovers are cleared before cloning.
+    async fn ensure_bare_clone(&self, owner: &str, repo: &str) -> Result<PathBuf, GitError> {
+        let bare_path = self.bare_clone_path(owner, repo);
+        // Re-clone from the same remote the previous clone used when
+        // its config survived (covers rewritten origins — enterprise
+        // hosts, local mirrors); fall back to the canonical GitHub
+        // URL otherwise.
+        let mut url = format!("git@github.com:{owner}/{repo}.git");
+        if bare_path.exists() {
+            if bare_repo_is_healthy(&bare_path).await {
+                return Ok(bare_path);
+            }
+            if let Some(prev) = configured_origin_url(&bare_path).await {
+                url = prev;
+            }
+            tracing::warn!(
+                owner,
+                repo,
+                path = %bare_path.display(),
+                "bare clone failed validation (interrupted clone?); deleting and re-cloning"
+            );
+            tokio::fs::remove_dir_all(&bare_path).await?;
+        }
+        if let Some(parent) = bare_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let partial = partial_clone_path(&bare_path);
+        if partial.exists() {
+            tracing::warn!(
+                owner,
+                repo,
+                path = %partial.display(),
+                "removing stale partial clone before re-cloning"
+            );
+            tokio::fs::remove_dir_all(&partial).await?;
+        }
+        run_git(&["clone", "--bare", &url, &partial.to_string_lossy()]).await?;
+        tokio::fs::rename(&partial, &bare_path).await?;
+        Ok(bare_path)
+    }
+
     /// Ensure a bare clone exists, then create a worktree for the branch.
     /// Idempotent: returns existing worktree if already checked out.
     /// Picks the path for you (`<base>/worktrees/<owner>-<repo>-<branch>`).
@@ -152,10 +227,18 @@ impl WorktreeManager {
         branch: &str,
     ) -> Result<Worktree, GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
+        let lock = repo_lock(&bare_path);
+        let _guard = lock.lock().await;
 
-        // Return early if worktree already exists. Idempotent — lazybox
-        // calls this on every session bring-up.
-        if wt_path.exists() {
+        // Return early if a *valid* worktree already exists.
+        // Idempotent — lazybox calls this on every session bring-up.
+        // The directory must actually be a worktree of this bare
+        // clone: an empty dir left behind by a failed provision used
+        // to "succeed" here forever, dumping sessions into a non-git
+        // folder.
+        if wt_path.exists()
+            && validate_worktree_dir(wt_path, &bare_path).await? == WorktreeDirState::Valid
+        {
             let name = wt_path
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
@@ -167,14 +250,8 @@ impl WorktreeManager {
             });
         }
 
-        // Ensure bare clone exists.
-        if !bare_path.exists() {
-            if let Some(parent) = bare_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            let url = format!("git@github.com:{owner}/{repo}.git");
-            run_git(&["clone", "--bare", &url, &bare_path.to_string_lossy()]).await?;
-        }
+        // Ensure a healthy bare clone exists.
+        let bare_path = self.ensure_bare_clone(owner, repo).await?;
 
         // Refresh the remote-tracking ref (not refs/heads/*: that
         // would collide with a worktree currently holding the same
@@ -213,6 +290,30 @@ impl WorktreeManager {
             ],
         )
         .await?;
+
+        // Record the upstream when we branched off the remote-tracking
+        // ref. `git worktree add -B` doesn't set it, so without this
+        // `@{u}` never resolves: unpushed-commit detection silently
+        // degrades and the inspector can't tell a once-pushed branch
+        // (whose remote ref later vanished — PR merged + auto-delete)
+        // from a never-pushed local one. Best-effort: a failure here
+        // must not fail the checkout.
+        if start_point.starts_with("refs/remotes/origin/") {
+            let _ = run_git_in(
+                &bare_path,
+                &["config", &format!("branch.{branch}.remote"), "origin"],
+            )
+            .await;
+            let _ = run_git_in(
+                &bare_path,
+                &[
+                    "config",
+                    &format!("branch.{branch}.merge"),
+                    &format!("refs/heads/{branch}"),
+                ],
+            )
+            .await;
+        }
 
         let name = wt_path
             .file_name()
@@ -254,8 +355,15 @@ impl WorktreeManager {
         base_branch: &str,
     ) -> Result<Worktree, GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
+        let lock = repo_lock(&bare_path);
+        let _guard = lock.lock().await;
 
-        if wt_path.exists() {
+        // Same validation as `checkout_at`: only a real worktree of
+        // this bare clone short-circuits; an empty leftover dir is
+        // cleared and re-provisioned.
+        if wt_path.exists()
+            && validate_worktree_dir(wt_path, &bare_path).await? == WorktreeDirState::Valid
+        {
             let name = wt_path
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
@@ -267,13 +375,7 @@ impl WorktreeManager {
             });
         }
 
-        if !bare_path.exists() {
-            if let Some(parent) = bare_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            let url = format!("git@github.com:{owner}/{repo}.git");
-            run_git(&["clone", "--bare", &url, &bare_path.to_string_lossy()]).await?;
-        }
+        let bare_path = self.ensure_bare_clone(owner, repo).await?;
 
         // Refresh origin/<base_branch> AND force-update the bare
         // clone's local `refs/heads/<base_branch>` to match — without
@@ -369,15 +471,9 @@ impl WorktreeManager {
     /// where the task has no PR branch — we cut a fresh branch
     /// off the default.
     pub async fn default_branch(&self, owner: &str, repo: &str) -> Result<String, GitError> {
-        let bare_path = self.bare_clone_path(owner, repo);
-
-        if !bare_path.exists() {
-            if let Some(parent) = bare_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            let url = format!("git@github.com:{owner}/{repo}.git");
-            run_git(&["clone", "--bare", &url, &bare_path.to_string_lossy()]).await?;
-        }
+        let lock = repo_lock(&self.bare_clone_path(owner, repo));
+        let _guard = lock.lock().await;
+        let bare_path = self.ensure_bare_clone(owner, repo).await?;
 
         // Pull origin/HEAD if we don't already have it. Tolerate
         // failure — we still try the local symbolic-ref lookup
@@ -575,6 +671,8 @@ impl WorktreeManager {
         old: &Path,
         new: &Path,
     ) -> Result<(), GitError> {
+        let lock = repo_lock(bare_path);
+        let _guard = lock.lock().await;
         run_git_in(
             bare_path,
             &[
@@ -596,6 +694,8 @@ impl WorktreeManager {
 
     pub async fn remove(&self, owner: &str, repo: &str, branch: &str) -> Result<(), GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
+        let lock = repo_lock(&bare_path);
+        let _guard = lock.lock().await;
         let wt_path = self.worktree_path(owner, repo, branch);
         if wt_path.exists() {
             run_git_in(
@@ -621,6 +721,8 @@ impl WorktreeManager {
         bare_path: &Path,
         worktree_path: &Path,
     ) -> Result<(), GitError> {
+        let lock = repo_lock(bare_path);
+        let _guard = lock.lock().await;
         if worktree_path.exists() {
             let result = run_git_in(
                 bare_path,
@@ -648,6 +750,136 @@ impl WorktreeManager {
         }
         Ok(())
     }
+}
+
+/// Sibling staging path for an in-flight bare clone:
+/// `<bare>.partial`. The clone writes here and is renamed into place
+/// atomically on success, so the canonical path either holds a
+/// complete clone or nothing.
+fn partial_clone_path(bare: &Path) -> PathBuf {
+    let mut os = bare.as_os_str().to_os_string();
+    os.push(".partial");
+    PathBuf::from(os)
+}
+
+/// Validation gate for an existing bare-clone directory. An
+/// interrupted clone (pre-`.partial` scheme, or a tampered dir) can
+/// leave something `exists()` accepts but git can't use. Two probes:
+/// `rev-parse --is-bare-repository` must print `true`, and `HEAD`
+/// must resolve to a commit (a half-fetched clone has a HEAD symref
+/// but no refs behind it).
+async fn bare_repo_is_healthy(bare: &Path) -> bool {
+    // Quiet probes (no error-level logging): failing here is an
+    // expected, recoverable state, not a git invocation bug.
+    async fn probe(bare: &Path, args: &[&str]) -> Option<String> {
+        let out = apply_git_env(Command::new("git").current_dir(bare).args(args))
+            .output()
+            .await
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+    match probe(bare, &["rev-parse", "--is-bare-repository"]).await {
+        Some(out) if out.trim() == "true" => {}
+        _ => return false,
+    }
+    probe(bare, &["rev-parse", "--verify", "--quiet", "HEAD"])
+        .await
+        .is_some()
+}
+
+/// Read `remote.origin.url` straight from the config file of a (possibly
+/// broken) bare clone. Uses `git config --file` so it works even when
+/// the directory is too damaged for normal repo commands.
+async fn configured_origin_url(bare: &Path) -> Option<String> {
+    let config = bare.join("config");
+    let out = apply_git_env(Command::new("git").args([
+        "config",
+        "--file",
+        &config.to_string_lossy(),
+        "--get",
+        "remote.origin.url",
+    ]))
+    .output()
+    .await
+    .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!url.is_empty()).then_some(url)
+}
+
+/// Verdict for a directory that already exists at a worktree path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorktreeDirState {
+    /// Genuine worktree of the expected bare clone — reuse it.
+    Valid,
+    /// Not a worktree, but empty enough that it was safely removed;
+    /// the caller should proceed with a fresh provision.
+    Reprovision,
+}
+
+/// Decide whether an existing directory at `wt_path` is a real
+/// worktree of `bare_path`. A worktree's `.git` is a *file* whose
+/// `gitdir:` line points into `<bare>/worktrees/<name>`. Anything
+/// else (empty dir from a failed provision fallback, a dir whose
+/// `.git` points at some other repo, a plain folder) must not pass —
+/// the old bare `exists()` check let every later spawn "succeed"
+/// into a non-git directory.
+///
+/// Invalid + effectively empty (only a stray `.git` at most) → the
+/// dir is removed and `Reprovision` returned. Invalid with real
+/// content → loud error; we never delete user data.
+async fn validate_worktree_dir(
+    wt_path: &Path,
+    bare_path: &Path,
+) -> Result<WorktreeDirState, GitError> {
+    let dot_git = wt_path.join(".git");
+    if let Ok(contents) = tokio::fs::read_to_string(&dot_git).await {
+        let gitdir = contents
+            .lines()
+            .find_map(|l| l.strip_prefix("gitdir:"))
+            .map(|p| PathBuf::from(p.trim()));
+        if let Some(gitdir) = gitdir {
+            let expected = canonical_or_self(&bare_path.join("worktrees"));
+            if canonical_or_self(&gitdir).starts_with(&expected) {
+                return Ok(WorktreeDirState::Valid);
+            }
+        }
+    }
+    // Not a worktree of our bare clone. Empty-ish dirs (at most a
+    // stray `.git` entry) are leftovers from a failed provision —
+    // clear and re-provision. Anything with real content is refused.
+    let mut has_real_content = false;
+    let mut entries = tokio::fs::read_dir(wt_path).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        if entry.file_name() != ".git" {
+            has_real_content = true;
+            break;
+        }
+    }
+    if has_real_content {
+        return Err(GitError::Command(format!(
+            "{} exists but is not a worktree of {} — refusing to reuse or overwrite it; \
+             move the directory aside and retry",
+            wt_path.display(),
+            bare_path.display()
+        )));
+    }
+    tracing::warn!(
+        path = %wt_path.display(),
+        "removing invalid empty worktree directory (failed earlier provision?) before re-provisioning"
+    );
+    tokio::fs::remove_dir_all(wt_path).await?;
+    Ok(WorktreeDirState::Reprovision)
+}
+
+/// Canonicalize when possible (resolves macOS `/var` → `/private/var`
+/// and friends), fall back to the literal path for non-existent ones.
+fn canonical_or_self(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// Fetch a single branch from origin into the bare clone, updating

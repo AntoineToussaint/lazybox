@@ -158,6 +158,49 @@ async fn add_wt(fx: &Fixture, name: &str, branch: &str, upstream_branch: &str) -
         ],
     )
     .await;
+    // Production `checkout_at` records tracking config when the
+    // worktree branches off a remote-tracking ref (so `@{u}` resolves
+    // and the inspector can tell once-pushed branches from
+    // never-pushed local ones). Mirror it here.
+    run(
+        &fx.bare,
+        &["config", &format!("branch.{branch}.remote"), "origin"],
+    )
+    .await;
+    run(
+        &fx.bare,
+        &[
+            "config",
+            &format!("branch.{branch}.merge"),
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .await;
+    run(&wt, &["config", "user.email", "t@e.st"]).await;
+    run(&wt, &["config", "user.name", "tester"]).await;
+    wt
+}
+
+/// Add a worktree on a brand-new local branch that never existed
+/// upstream — the shape `checkout_new_branch_at` produces for
+/// issue-spawn sessions (`lazybox/issue-N`). No remote-tracking ref,
+/// no upstream config.
+async fn add_local_only_wt(fx: &Fixture, name: &str, branch: &str) -> PathBuf {
+    let wt = fx.base.path().join("worktrees").join(name);
+    std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+    run(
+        &fx.bare,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-B",
+            branch,
+            &wt.to_string_lossy(),
+            "refs/heads/main",
+        ],
+    )
+    .await;
     run(&wt, &["config", "user.email", "t@e.st"]).await;
     run(&wt, &["config", "user.name", "tester"]).await;
     wt
@@ -457,6 +500,87 @@ async fn delete_inspected_never_deletes_default_branch() {
     assert!(
         local_branch_exists(&fx, "main").await,
         "default branch must never be deleted on worktree reaping"
+    );
+}
+
+/// A never-pushed local branch (issue-spawn shape) with committed
+/// work must NOT classify as BranchDeletedUpstream and must NOT be
+/// safe to delete — the remote ref never existed, and reaping it
+/// would destroy the only copy of the commits.
+#[tokio::test]
+async fn never_pushed_local_branch_with_commits_is_not_safe() {
+    let fx = setup_fixture().await;
+    let wt = add_local_only_wt(&fx, "issue7", "lazybox/issue-7").await;
+    std::fs::write(wt.join("work.txt"), "local work").unwrap();
+    run(&wt, &["add", "."]).await;
+    run(&wt, &["commit", "-q", "-m", "committed but never pushed"]).await;
+
+    let report = mgr(&fx).inspect_worktrees(&[]).await.unwrap();
+    let row = report
+        .iter()
+        .find(|r| r.path.ends_with("issue7"))
+        .expect("issue7 row");
+    assert!(
+        !row.reasons.contains(&OrphanReason::BranchDeletedUpstream),
+        "a branch that never existed upstream must not classify as deleted-upstream: {:?}",
+        row.reasons
+    );
+    assert!(
+        row.has_unpushed_commits,
+        "committed-but-never-pushed work must count as unpushed"
+    );
+    assert!(
+        !row.is_safe_to_delete,
+        "reaping would destroy the only copy of the commits"
+    );
+}
+
+/// The legit cleanup path: a branch that WAS pushed, merged into
+/// main, and auto-deleted upstream stays classified
+/// BranchDeletedUpstream and safe to delete.
+#[tokio::test]
+async fn merged_and_deleted_upstream_branch_is_still_safe() {
+    let fx = setup_fixture().await;
+    let wt = add_wt(&fx, "feature", "feature", "main").await;
+
+    // Real work, pushed to the remote.
+    std::fs::write(wt.join("feat.txt"), "feature work").unwrap();
+    run(&wt, &["add", "."]).await;
+    run(&wt, &["commit", "-q", "-m", "feature work"]).await;
+    run(&wt, &["push", "-q", "origin", "feature"]).await;
+
+    // Upstream merges the PR and auto-deletes the branch.
+    run(&fx.upstream_path, &["merge", "-q", "feature"]).await;
+    run(&fx.upstream_path, &["branch", "-D", "feature"]).await;
+    // The bare clone's next prune-style fetch reflects both.
+    run(
+        &fx.bare,
+        &["fetch", "-q", "origin", "+main:refs/remotes/origin/main"],
+    )
+    .await;
+    run(
+        &fx.bare,
+        &["update-ref", "-d", "refs/remotes/origin/feature"],
+    )
+    .await;
+
+    let report = mgr(&fx).inspect_worktrees(&[]).await.unwrap();
+    let row = report
+        .iter()
+        .find(|r| r.path.ends_with("feature"))
+        .expect("feature row");
+    assert!(
+        row.reasons.contains(&OrphanReason::BranchDeletedUpstream),
+        "pushed-then-deleted branch keeps the classification: {:?}",
+        row.reasons
+    );
+    assert!(
+        !row.has_unpushed_commits,
+        "every commit reached the remote before the merge"
+    );
+    assert!(
+        row.is_safe_to_delete,
+        "the legit auto-cleanup path must keep working"
     );
 }
 

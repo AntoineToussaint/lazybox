@@ -34,6 +34,10 @@ use tokio::sync::broadcast;
 struct ProviderCfg {
     channel_prefix: String,
     per_workspace_channels: bool,
+    /// Slack user ids allowed to drive agent PTYs from chat. Empty =
+    /// allow everyone (the dispatcher logs a one-time warning at
+    /// startup recommending it be set).
+    allowed_users: Vec<String>,
 }
 
 /// Slack-specific provider state. Wraps the API client + a name→id
@@ -68,6 +72,7 @@ impl SlackProvider {
             cfg: ProviderCfg {
                 channel_prefix: cfg.channel_prefix,
                 per_workspace_channels: cfg.per_workspace_channels,
+                allowed_users: cfg.allowed_users,
             },
             bot_user_id,
             name_to_id: std::sync::Mutex::new(seed),
@@ -86,6 +91,14 @@ impl ChatProvider for SlackProvider {
         text.strip_prefix(prefix.as_str())
             .map(str::trim_start)
             .unwrap_or(text)
+    }
+
+    /// `slack.allowed_users` gate. Empty list = allow all (warned
+    /// about once at startup in `run`); non-empty = only those user
+    /// ids may drive an agent PTY. Read-only status queries are
+    /// exempted upstream in the chat dispatcher.
+    fn is_user_allowed(&self, user: &str) -> bool {
+        self.cfg.allowed_users.is_empty() || self.cfg.allowed_users.iter().any(|u| u == user)
     }
 
     fn post<'a>(
@@ -255,6 +268,13 @@ async fn run(
     }
 
     // ── Plumbing ──────────────────────────────────────────────────
+    if slack.allowed_users.is_empty() {
+        tracing::warn!(
+            "slack: `slack.allowed_users` is empty — every member of a routed \
+             channel can drive the agent PTY. Set `slack.allowed_users: [U…]` \
+             in config.yaml to restrict who may send agent input",
+        );
+    }
     let provider: Arc<dyn ChatProvider> =
         Arc::new(SlackProvider::new(api, slack, auth.user_id.clone(), seed));
     let state = Arc::new(tokio::sync::Mutex::new(RouterState::new()));
@@ -265,37 +285,59 @@ async fn run(
     // ── Outbound bus ──────────────────────────────────────────────
     let bus_rx = config.bus.subscribe();
 
-    drive(
-        &*provider,
-        &config,
-        &state,
-        bus_rx,
-        inbound_rx,
-        &auth.user_id,
-    )
-    .await;
+    let bot_user_id = auth.user_id.clone();
+    drive(provider, config, state, bus_rx, inbound_rx, &bot_user_id).await;
     Ok(())
 }
 
 /// Drive both halves from one task — `select!` over the two streams
-/// keeps state ownership single-threaded. Returns when either stream
-/// is exhausted (bus closed or inbound socket gone).
+/// keeps state ownership behind the shared `RouterState` mutex.
+/// Returns when either stream is exhausted (bus closed or inbound
+/// socket gone).
+///
+/// Events whose handling performs Slack HTTP (`TerminalSpawned`
+/// channel creation + header post, `AgentState` notifications) run
+/// on detached tasks so a slow `slack.com` round-trip can't stall
+/// the select loop into broadcast lag. Trade-off, accepted and
+/// deliberate: status-style posts may reorder relative to each
+/// other, and a notification racing its own terminal's spawn may be
+/// dropped (the router map isn't populated yet) — the lag-recovery
+/// rescan plus the next notification self-heal both cases. Cheap
+/// state-only bookkeeping (`TerminalOutput`, `TerminalExited`) stays
+/// inline to preserve its ordering.
 async fn drive(
-    provider: &dyn ChatProvider,
-    config: &ServerConfig,
-    state: &Arc<tokio::sync::Mutex<RouterState>>,
+    provider: Arc<dyn ChatProvider>,
+    config: ServerConfig,
+    state: Arc<tokio::sync::Mutex<RouterState>>,
     mut bus_rx: broadcast::Receiver<lazybox_ipc::Event>,
     mut inbound_rx: tokio::sync::mpsc::Receiver<InboundEvent>,
     bot_user_id: &str,
 ) {
+    use lazybox_ipc::Event;
     loop {
         tokio::select! {
             biased;
             evt = bus_rx.recv() => {
                 match evt {
-                    Ok(e) => chat::handle_bus_event(provider, config, state, e).await,
-                    // Lagged: the broadcast channel skipped events — keep going.
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Ok(e @ (Event::TerminalSpawned { .. } | Event::AgentState { .. })) => {
+                        // HTTP-bearing handling — off the loop.
+                        let provider = provider.clone();
+                        let config = config.clone();
+                        let state = state.clone();
+                        tokio::spawn(async move {
+                            chat::handle_bus_event(&*provider, &config, &state, e).await;
+                        });
+                    }
+                    Ok(e) => chat::handle_bus_event(&*provider, &config, &state, e).await,
+                    // Lagged: the broadcast channel dropped events. A
+                    // dropped `TerminalSpawned` would orphan that
+                    // terminal from chat forever — rescan the live
+                    // terminal metadata and re-attach anything missed.
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(missed = n, "slack: bus lagged; rescanning live terminals");
+                        chat::resync_spawned_terminals(&*provider, &config, &state).await;
+                        continue;
+                    }
                     // Closed: the bus is gone (shutdown) — stop the loop instead
                     // of spinning on an arm that will never block again.
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -304,7 +346,7 @@ async fn drive(
             msg = inbound_rx.recv() => {
                 let Some(msg) = msg else { break };
                 if let Some(normalized) = map_inbound(msg, bot_user_id) {
-                    chat::handle_inbound(provider, config, state, normalized).await;
+                    chat::handle_inbound(&*provider, &config, &state, normalized).await;
                 }
             }
         }
@@ -381,7 +423,7 @@ mod tests {
     async fn drive_returns_when_bus_closes() {
         use lazybox_store::MemoryStore;
 
-        let provider = provider();
+        let provider: Arc<dyn ChatProvider> = Arc::new(provider());
         let config = ServerConfig::with_store(Arc::new(MemoryStore::new()));
         let state = Arc::new(tokio::sync::Mutex::new(RouterState::new()));
 
@@ -397,10 +439,32 @@ mod tests {
 
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            drive(&provider, &config, &state, bus_rx, inbound_rx, "UBOT"),
+            drive(provider, config, state, bus_rx, inbound_rx, "UBOT"),
         )
         .await
         .expect("drive should return promptly once the bus closes");
+    }
+
+    #[test]
+    fn is_user_allowed_empty_list_allows_everyone() {
+        let p = provider();
+        assert!(p.is_user_allowed("U-anyone"));
+    }
+
+    #[test]
+    fn is_user_allowed_nonempty_list_restricts() {
+        let p = SlackProvider::new(
+            ApiClient::new("xoxb-test".to_string()),
+            SlackConfig {
+                allowed_users: vec!["U111".into(), "U222".into()],
+                ..SlackConfig::default()
+            },
+            "UBOT".to_string(),
+            HashMap::new(),
+        );
+        assert!(p.is_user_allowed("U111"));
+        assert!(p.is_user_allowed("U222"));
+        assert!(!p.is_user_allowed("U-intruder"));
     }
 
     #[test]

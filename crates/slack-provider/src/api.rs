@@ -222,15 +222,33 @@ impl Client {
         body: &Req,
     ) -> Result<Resp, SlackError> {
         let url = format!("{}/{endpoint}", self.base);
-        let raw = self
+        let resp = self
             .http
             .post(&url)
             .bearer_auth(&self.bot_token)
             .json(body)
             .send()
-            .await?
-            .text()
             .await?;
+        // HTTP status gates the parse: Slack's 429 (and proxy-level
+        // 5xx pages) carry non-JSON bodies that used to surface as
+        // an opaque `json:` error. 429 maps to the typed rate-limit
+        // error with the Retry-After hint when present.
+        let status = resp.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok());
+            return Err(SlackError::rate_limited(retry_after));
+        }
+        let raw = resp.text().await?;
+        if !status.is_success() {
+            return Err(SlackError::Api(format!(
+                "{endpoint}: http {}",
+                status.as_u16()
+            )));
+        }
         // Two-step parse: first into a {ok, error} probe, then into
         // the typed response. Lets the application-error path
         // surface `error` regardless of which endpoint failed.
@@ -387,6 +405,12 @@ pub fn channel_name_for_terminal(
 /// digits, hyphens, underscores, periods. Caps at 80 chars and trims
 /// trailing punctuation Slack rejects.
 ///
+/// Names that overflow the cap get a deterministic 8-hex-char hash
+/// suffix of the FULL slug in the last segment, so two long
+/// (session, agent) pairs that share their first 80 chars can't
+/// collide on the truncated name (which would silently route two
+/// agents into one channel via the `name_taken` recovery path).
+///
 /// `pub` so `lazybox slack prune --workspace` can normalize the user's
 /// input (e.g. `acme/widget#186`) the same way before matching it
 /// against parsed channel names.
@@ -400,12 +424,29 @@ pub fn sluggify(input: &str) -> String {
         }
     }
     if s.chars().count() > 80 {
-        s = s.chars().take(80).collect();
+        let digest = fnv1a_64(s.as_bytes());
+        let mut head: String = s.chars().take(71).collect();
+        while matches!(head.chars().last(), Some('-' | '.' | '_')) {
+            head.pop();
+        }
+        s = format!("{head}-{:08x}", digest as u32);
     }
     while matches!(s.chars().last(), Some('-' | '.' | '_')) {
         s.pop();
     }
     s
+}
+
+/// FNV-1a 64-bit. Stable across processes and Rust releases (unlike
+/// `DefaultHasher`), which matters because channel names persist on
+/// the Slack side across lazybox restarts. No new deps.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -534,6 +575,121 @@ mod tests {
         let long = format!("github-{}", "a".repeat(100));
         let n = channel_name_for_terminal(&long, "deadbeef", "claude", "");
         assert!(n.chars().count() <= 80);
+    }
+
+    /// One-shot raw HTTP server returning a fixed status line +
+    /// headers + body. Lets the client-side status handling be
+    /// tested without slack.com.
+    async fn spawn_status_server(status_line: &'static str, headers: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => continue,
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    let body = "rate limited";
+                    let response = format!(
+                        "HTTP/1.1 {status_line}\r\n{headers}Content-Type: text/plain\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// HTTP 429 used to fall through to the JSON parse and surface as
+    /// an opaque `json:` error. It must map to the typed rate-limit
+    /// error, carrying the Retry-After hint.
+    #[tokio::test]
+    async fn http_429_maps_to_rate_limited_with_retry_after() {
+        let base = spawn_status_server("429 Too Many Requests", "Retry-After: 7\r\n").await;
+        let client = Client::new("xoxb-test").with_base(base);
+        let err = client.auth_test().await.expect_err("429 must error");
+        assert!(err.is_rate_limited(), "got: {err}");
+        assert_eq!(err.retry_after_secs(), Some(7));
+    }
+
+    #[tokio::test]
+    async fn http_429_without_retry_after_still_rate_limited() {
+        let base = spawn_status_server("429 Too Many Requests", "").await;
+        let client = Client::new("xoxb-test").with_base(base);
+        let err = client.auth_test().await.expect_err("429 must error");
+        assert!(err.is_rate_limited());
+        assert_eq!(err.retry_after_secs(), None);
+    }
+
+    /// Non-JSON 5xx bodies (proxy error pages) surface as a typed
+    /// API error naming the status, not a `json:` parse failure.
+    #[tokio::test]
+    async fn http_5xx_surfaces_status_not_json_error() {
+        let base = spawn_status_server("502 Bad Gateway", "").await;
+        let client = Client::new("xoxb-test").with_base(base);
+        let err = client.auth_test().await.expect_err("502 must error");
+        match err {
+            SlackError::Api(code) => assert!(code.contains("http 502"), "got: {code}"),
+            other => panic!("expected Api error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_constructor_round_trips() {
+        let e = SlackError::rate_limited(Some(30));
+        assert!(e.is_rate_limited());
+        assert_eq!(e.retry_after_secs(), Some(30));
+        let e = SlackError::rate_limited(None);
+        assert!(e.is_rate_limited());
+        assert_eq!(e.retry_after_secs(), None);
+        // Slack's own application code counts too.
+        assert!(SlackError::Api("ratelimited".into()).is_rate_limited());
+        assert!(!SlackError::Api("name_taken".into()).is_rate_limited());
+    }
+
+    /// Two long (session, agent) pairs sharing their first 80 chars
+    /// used to truncate to the SAME channel name — the `name_taken`
+    /// recovery then silently routed both agents into one channel.
+    /// The hash suffix keeps them distinct (and deterministic).
+    #[test]
+    fn long_names_get_distinct_hash_suffixes() {
+        let shared = format!("github-{}", "a".repeat(100));
+        // Distinct sessions in the same long-named workspace: the
+        // 8-char session shorts differ but sit past the 80-char cut.
+        let one = channel_name_for_terminal(&shared, "11111111-aaaa", "claude", "");
+        let two = channel_name_for_terminal(&shared, "22222222-bbbb", "claude", "");
+        assert_ne!(one, two, "shared 80-char prefix must not collide");
+        for n in [&one, &two] {
+            assert!(n.chars().count() <= 80, "{n} exceeds slack's cap");
+            assert!(
+                n.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-_.".contains(c)),
+                "{n} has invalid chars"
+            );
+            assert!(!n.ends_with(['-', '.', '_']));
+        }
+        // Deterministic across calls — the name must be findable on
+        // the next lazybox boot.
+        assert_eq!(
+            one,
+            channel_name_for_terminal(&shared, "11111111-aaaa", "claude", "")
+        );
+    }
+
+    #[test]
+    fn short_names_keep_legacy_shape_without_hash() {
+        // Under the cap nothing changes — existing channels keep
+        // matching their stored names.
+        assert_eq!(
+            channel_name_for_workspace("github-acme-widget-186", ""),
+            "github-acme-widget-186"
+        );
     }
 
     #[test]

@@ -80,6 +80,19 @@ impl std::fmt::Display for SessionId {
     }
 }
 
+/// Upper bound on the merged activity feed. Generous — a feed this
+/// long is far past anything the UI surfaces — but finite, so a
+/// years-old PR with endless bot chatter can't grow the serialized
+/// workspace JSON without bound. `merge_activity` drops the oldest
+/// items past this.
+pub const MAX_ACTIVITY_ITEMS: usize = 500;
+
+/// Content identity used to carry read/seen state across re-sorts
+/// and to de-duplicate node-id-less activity.
+fn activity_key(a: &Activity) -> (String, String, DateTime<Utc>) {
+    (a.author.clone(), a.body.clone(), a.created_at)
+}
+
 /// One workspace = one unit of work (PR + linked issues), holding
 /// **zero or more sessions**. A session is one folder worktree on
 /// disk; without sessions the workspace is purely a tracking row
@@ -270,47 +283,109 @@ impl Workspace {
     }
 
     /// Merge a slice of activity items into the feed, de-duping by
-    /// (author, body, created_at) and re-sorting. Cheap to call
-    /// repeatedly — provider polls produce overlapping feeds.
+    /// `node_id` when both sides carry one (an *edited* comment keeps
+    /// its node id but changes its body — upserting by node id
+    /// replaces the stale copy instead of appending a duplicate
+    /// forever), falling back to the (author, body, created_at)
+    /// content tuple for node-id-less items. Re-sorts newest-first
+    /// afterwards. Cheap to call repeatedly — provider polls produce
+    /// overlapping feeds.
     ///
-    /// Remaps `read_indices` across the sort: read state stores
-    /// positions, but the activity list reshuffles newest-first when
-    /// new items arrive. Without the remap, a new item landing at
-    /// index 0 inherits the read flag the user set on a different
-    /// item — every poll that introduced a new activity item could
-    /// silently flip random older marks onto fresh content.
+    /// Read/seen state is remapped *content-wise* across the merge:
+    /// both `read_indices` (explicit per-item marks) and `seen_count`
+    /// (the positional "oldest N items are seen" tail) store
+    /// positions, but the list reshuffles when new items arrive — and
+    /// not only at the top: the lazy PR-details backfill inserts
+    /// review comments *older* than everything already seen. A purely
+    /// positional `seen_count` would shift across such a merge,
+    /// flipping already-seen newest items back to unread while the
+    /// backfilled items silently land inside the seen tail. Instead
+    /// we snapshot the content keys of the read set AND the seen tail
+    /// before mutating, then reconstruct: an item is read iff its key
+    /// was read or seen before. `seen_count` is recomputed as the
+    /// longest all-previously-seen suffix; previously-seen items
+    /// stranded above that suffix move into `read_indices`.
+    ///
+    /// An edited comment's key changes (new body), so it deliberately
+    /// resurfaces as unread — the content changed, the user should
+    /// see it.
+    ///
+    /// The feed is capped at [`MAX_ACTIVITY_ITEMS`], dropping the
+    /// oldest entries, so a long-lived PR can't grow the serialized
+    /// workspace without bound.
     pub fn merge_activity(&mut self, incoming: &[Activity]) {
-        // Snapshot the read items by content key BEFORE we mutate.
+        // A no-op merge must not disturb anything — in particular not
+        // re-derive `seen_count`/`read_indices`, which callers may
+        // have set on a workspace whose activity hasn't been fetched
+        // yet (every poll upserts tasks with empty `recent_activity`).
+        if incoming.is_empty() {
+            return;
+        }
+        // Snapshot read + seen state by content key BEFORE we mutate.
         let read_keys: HashSet<(String, String, DateTime<Utc>)> = self
             .read_indices
             .iter()
             .filter_map(|i| self.activity.get(*i))
-            .map(|a| (a.author.clone(), a.body.clone(), a.created_at))
+            .map(activity_key)
+            .collect();
+        let seen_start = self.activity.len().saturating_sub(self.seen_count);
+        let seen_keys: HashSet<(String, String, DateTime<Utc>)> = self
+            .activity
+            .get(seen_start..)
+            .unwrap_or(&[])
+            .iter()
+            .map(activity_key)
             .collect();
 
         for act in incoming {
-            let already = self.activity.iter().any(|a| {
+            // Upsert by node id when both sides have one — replaces
+            // the body/edited fields of the stored copy.
+            if let Some(nid) = act.node_id.as_deref()
+                && let Some(existing) = self
+                    .activity
+                    .iter_mut()
+                    .find(|a| a.node_id.as_deref() == Some(nid))
+            {
+                *existing = act.clone();
+                continue;
+            }
+            // Tuple fallback. Upsert rather than skip so a re-poll
+            // that gained a node_id migrates it onto the stored item.
+            if let Some(existing) = self.activity.iter_mut().find(|a| {
                 a.author == act.author && a.body == act.body && a.created_at == act.created_at
-            });
-            if !already {
+            }) {
+                *existing = act.clone();
+            } else {
                 self.activity.push(act.clone());
             }
         }
         self.sort_activity();
+        // Sorted newest-first, so truncation drops the oldest items.
+        self.activity.truncate(MAX_ACTIVITY_ITEMS);
 
-        // Rebuild read_indices against the post-sort positions so
-        // each previously-read item keeps its mark.
+        // Reconstruct seen/read content-wise. `seen_count` becomes
+        // the longest suffix (= oldest run) of previously-seen items;
+        // everything read-or-seen above that suffix gets an explicit
+        // read mark instead.
+        let mut suffix = 0usize;
+        for a in self.activity.iter().rev() {
+            if seen_keys.contains(&activity_key(a)) {
+                suffix += 1;
+            } else {
+                break;
+            }
+        }
+        self.seen_count = suffix;
+        let cut = self.activity.len() - suffix;
         self.read_indices = self
             .activity
+            .get(..cut)
+            .unwrap_or(&[])
             .iter()
             .enumerate()
             .filter_map(|(i, a)| {
-                let key = (a.author.clone(), a.body.clone(), a.created_at);
-                if read_keys.contains(&key) {
-                    Some(i)
-                } else {
-                    None
-                }
+                let key = activity_key(a);
+                (read_keys.contains(&key) || seen_keys.contains(&key)).then_some(i)
             })
             .collect();
     }
@@ -377,10 +452,16 @@ impl Workspace {
         // Also reduce seen_count if this index was inside the auto-
         // seen tail (`activity.len() - seen_count`). Without this, an
         // undo immediately after a snapshot-driven seen bump would
-        // not restore the unread state.
+        // not restore the unread state. Shrinking the tail to start
+        // below `index` also un-seens every newer item that shared
+        // the tail, so those displaced indices get explicit read
+        // marks — only the target index becomes unread.
         let auto_seen_threshold = self.activity.len().saturating_sub(self.seen_count);
         if index >= auto_seen_threshold {
             self.seen_count = self.activity.len().saturating_sub(index + 1);
+            for displaced in auto_seen_threshold..index {
+                self.read_indices.insert(displaced);
+            }
         }
     }
 
@@ -1396,6 +1477,173 @@ mod tests {
             ws.read_indices.contains(&2),
             "second's read mark followed it to its new position"
         );
+    }
+
+    fn activity_with_node(seconds: i64, body: &str, node_id: &str) -> Activity {
+        let mut a = activity_at(seconds, body);
+        a.node_id = Some(node_id.into());
+        a
+    }
+
+    /// Regression: `seen_count` is positional ("oldest N are seen"),
+    /// so merging OLDER items (the lazy PR-details backfill) used to
+    /// shift the threshold — already-seen newest items flipped back
+    /// to unread while the backfilled items landed inside the seen
+    /// tail and never surfaced. After `mark_read_all`, a backfilled
+    /// older item must be the ONLY unread one.
+    #[test]
+    fn merge_activity_backfilled_older_items_after_mark_read_all() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        ws.merge_activity(&[activity_at(10, "a"), activity_at(20, "b")]);
+        ws.mark_read_all();
+        assert_eq!(ws.unread_count(), 0);
+
+        // Lazy backfill discovers a review comment OLDER than
+        // everything in the feed.
+        ws.merge_activity(&[activity_at(0, "old-review-comment")]);
+        assert_eq!(ws.activity[0].body, "b");
+        assert_eq!(ws.activity[1].body, "a");
+        assert_eq!(ws.activity[2].body, "old-review-comment");
+
+        assert!(!ws.is_activity_unread(0), "'b' was seen — must stay read");
+        assert!(!ws.is_activity_unread(1), "'a' was seen — must stay read");
+        assert!(
+            ws.is_activity_unread(2),
+            "the backfilled item is new content — must surface as unread"
+        );
+        assert_eq!(ws.unread_count(), 1);
+    }
+
+    /// Interleaved ages: seen items on both sides of a backfilled
+    /// one. Only the backfilled item is unread; both seen neighbors
+    /// keep their read state regardless of position.
+    #[test]
+    fn merge_activity_interleaved_backfill_keeps_seen_state() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        ws.merge_activity(&[activity_at(0, "oldest"), activity_at(20, "newest")]);
+        ws.mark_read_all();
+
+        ws.merge_activity(&[activity_at(10, "middle")]);
+        assert_eq!(ws.activity[0].body, "newest");
+        assert_eq!(ws.activity[1].body, "middle");
+        assert_eq!(ws.activity[2].body, "oldest");
+
+        assert!(!ws.is_activity_unread(0), "newest stays read");
+        assert!(ws.is_activity_unread(1), "middle is the new content");
+        assert!(!ws.is_activity_unread(2), "oldest stays read");
+        assert_eq!(ws.unread_count(), 1);
+        assert_eq!(ws.unread_activity_indices(), vec![1]);
+    }
+
+    /// Explicit per-item read marks (not mark_read_all) also survive
+    /// an older-item backfill.
+    #[test]
+    fn merge_activity_backfill_preserves_explicit_read_marks() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        ws.merge_activity(&[activity_at(10, "a"), activity_at(20, "b")]);
+        // Mark only "a" (index 1) read; "b" stays unread.
+        ws.mark_activity_read(1);
+
+        ws.merge_activity(&[activity_at(0, "older")]);
+        // [b, a, older]
+        assert!(ws.is_activity_unread(0), "'b' was never read");
+        assert!(!ws.is_activity_unread(1), "'a' keeps its explicit mark");
+        assert!(ws.is_activity_unread(2), "backfilled item is unread");
+    }
+
+    /// An edited comment (same node_id, new body) replaces the stored
+    /// copy instead of appending a duplicate forever.
+    #[test]
+    fn merge_activity_edit_replaces_by_node_id_not_duplicates() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        ws.merge_activity(&[activity_with_node(10, "original text", "n1")]);
+        assert_eq!(ws.activity.len(), 1);
+
+        ws.merge_activity(&[activity_with_node(10, "edited text", "n1")]);
+        assert_eq!(ws.activity.len(), 1, "edit must upsert, not append");
+        assert_eq!(ws.activity[0].body, "edited text");
+    }
+
+    /// Pinned decision: an edited comment resurfaces as unread (the
+    /// content changed, the user should see it), while a re-poll of
+    /// the SAME body keeps the read state.
+    #[test]
+    fn merge_activity_edit_resurfaces_as_unread_unchanged_stays_read() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        ws.merge_activity(&[activity_with_node(10, "v1", "n1")]);
+        ws.mark_read_all();
+        assert_eq!(ws.unread_count(), 0);
+
+        // Re-poll with identical content → still read.
+        ws.merge_activity(&[activity_with_node(10, "v1", "n1")]);
+        assert_eq!(ws.unread_count(), 0, "unchanged re-poll keeps read state");
+
+        // Edit arrives → unread again.
+        ws.merge_activity(&[activity_with_node(10, "v2", "n1")]);
+        assert_eq!(ws.activity.len(), 1);
+        assert!(
+            ws.is_activity_unread(0),
+            "edited comment must resurface as unread"
+        );
+    }
+
+    /// Node-id-less items keep the (author, body, created_at) tuple
+    /// dedup, including against a node-id-carrying twin (tuple match).
+    #[test]
+    fn merge_activity_tuple_fallback_still_dedupes() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        ws.merge_activity(&[activity_at(10, "same")]);
+        ws.merge_activity(&[activity_at(10, "same")]);
+        assert_eq!(ws.activity.len(), 1);
+
+        // A later poll attaches a node_id to the same content — the
+        // stored item gains it rather than duplicating.
+        ws.merge_activity(&[activity_with_node(10, "same", "n9")]);
+        assert_eq!(ws.activity.len(), 1);
+        assert_eq!(ws.activity[0].node_id.as_deref(), Some("n9"));
+    }
+
+    /// The feed is capped at `MAX_ACTIVITY_ITEMS`, dropping oldest.
+    #[test]
+    fn merge_activity_caps_feed_dropping_oldest() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        let many: Vec<Activity> = (0..(MAX_ACTIVITY_ITEMS as i64 + 50))
+            .map(|i| activity_at(i, &format!("item-{i}")))
+            .collect();
+        ws.merge_activity(&many);
+        assert_eq!(ws.activity.len(), MAX_ACTIVITY_ITEMS);
+        // Newest survives, oldest dropped.
+        assert_eq!(
+            ws.activity[0].body,
+            format!("item-{}", MAX_ACTIVITY_ITEMS as i64 + 49)
+        );
+        assert!(ws.activity.iter().all(|a| a.body != "item-0"));
+    }
+
+    /// Regression: lowering `seen_count` in `unmark_activity_read`
+    /// used to un-read every NEWER item that shared the seen tail.
+    /// Only the target index may become unread.
+    #[test]
+    fn unmark_activity_read_unreads_only_the_target() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        ws.merge_activity(&[
+            activity_at(30, "newest"),
+            activity_at(20, "middle"),
+            activity_at(10, "oldest"),
+        ]);
+        ws.mark_read_all();
+        assert_eq!(ws.unread_count(), 0);
+
+        // Undo the middle item (index 1).
+        ws.unmark_activity_read(1);
+        assert!(!ws.is_activity_unread(0), "newest must stay read");
+        assert!(ws.is_activity_unread(1), "target becomes unread");
+        assert!(!ws.is_activity_unread(2), "oldest must stay read");
+        assert_eq!(ws.unread_count(), 1);
+
+        // Re-mark and the workspace is fully read again.
+        ws.mark_activity_read(1);
+        assert_eq!(ws.unread_count(), 0);
     }
 
     #[test]

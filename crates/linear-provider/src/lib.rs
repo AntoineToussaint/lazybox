@@ -43,6 +43,10 @@ pub enum LinearError {
     MissingKey,
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
+    /// HTTP 429 from Linear. `retry_after_secs` carries the
+    /// `Retry-After` header when Linear sent one.
+    #[error("rate limited (retry after {retry_after_secs:?}s)")]
+    RateLimited { retry_after_secs: Option<u64> },
     #[error("graphql: {0}")]
     Graphql(String),
 }
@@ -52,7 +56,19 @@ impl From<LinearError> for ProviderError {
         const SOURCE: &str = "linear";
         match &err {
             LinearError::MissingKey => ProviderError::auth(SOURCE, err.to_string()),
-            LinearError::Http(_) => {
+            LinearError::RateLimited { retry_after_secs } => match retry_after_secs {
+                Some(secs) => ProviderError::retryable_after(SOURCE, err.to_string(), *secs),
+                None => ProviderError::retryable(SOURCE, err.to_string()),
+            },
+            LinearError::Http(http_err) => {
+                // 429 must classify as retryable: it's the provider
+                // saying "later", not a permanent failure. Matched on
+                // the typed status (the display string for a status
+                // error doesn't reliably hit the substring probes
+                // below).
+                if http_err.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) {
+                    return ProviderError::retryable(SOURCE, err.to_string());
+                }
                 let s = err.to_string().to_lowercase();
                 if s.contains("401") || s.contains("403") || s.contains("unauthorized") {
                     ProviderError::auth(SOURCE, err.to_string())
@@ -80,6 +96,21 @@ impl From<LinearError> for ProviderError {
             }
         }
     }
+}
+
+/// Truncate to at most `max` bytes without splitting a UTF-8
+/// character. `&text[..200]` panics when byte 200 lands inside a
+/// multi-byte char — which a GraphQL error body with non-ASCII
+/// content (user names, smart quotes) can trivially hit.
+fn truncate_on_char_boundary(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// Client for Linear's GraphQL API.
@@ -148,20 +179,54 @@ impl LinearClient {
             .header("content-type", "application/json")
             .json(&body)
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        // 429 gets its own typed error (with the Retry-After hint
+        // when present) so the polling layer backs off instead of
+        // treating it as permanent. Must run before
+        // `error_for_status`, which discards the headers.
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after_secs = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok());
+            return Err(LinearError::RateLimited { retry_after_secs });
+        }
+        let resp = resp.error_for_status()?;
         let text = resp.text().await?;
         serde_json::from_str::<T>(&text).map_err(|e| {
             LinearError::Graphql(format!(
                 "parse: {e}; body starts with {:?}",
-                &text[..text.len().min(200)]
+                truncate_on_char_boundary(&text, 200)
             ))
         })
     }
 
     /// Fetch all open issues for the authenticated viewer (assigned or
     /// created). Paginates. Results are converted to `Task`s.
+    ///
+    /// Convenience wrapper over [`Self::fetch_all_with_coverage`]
+    /// that drops the coverage marker. Prefer the marker-carrying
+    /// variant anywhere the result drives workspace *removal*.
     pub async fn fetch_all(&self) -> Result<Vec<Task>, LinearError> {
+        self.fetch_all_with_coverage().await.map(|o| o.tasks)
+    }
+
+    /// Like [`Self::fetch_all`], but reports whether the result is
+    /// COMPLETE or a partial prefix (a page failed mid-pagination,
+    /// or the safety cap truncated the tail). Partial results keep
+    /// the inbox alive but are NOT authoritative: a workspace absent
+    /// from a partial result may simply live on a page we never got,
+    /// so rescope must not delete based on it.
+    ///
+    /// TODO(linear-partial-rescope): wire `FetchCoverage::Partial`
+    /// through `LinearSource` in `crates/server/src/polling/mod.rs` —
+    /// on a partial fetch `polled_scope()` must downgrade from
+    /// `PolledScope::Exhaustive` to `PolledScope::Repos(vec![])`
+    /// (mirroring `GhSource::last_coverage_partial`). That file is
+    /// owned elsewhere right now; this return shape is ready for the
+    /// one-line wiring.
+    pub async fn fetch_all_with_coverage(&self) -> Result<FetchOutcome, LinearError> {
         // 1. Identify the viewer so we can assign TaskRole correctly.
         let viewer_body = serde_json::json!({
             "query": graphql::VIEWER_QUERY,
@@ -180,6 +245,7 @@ impl LinearClient {
         let mut tasks = Vec::new();
         let mut cursor: Option<String> = None;
         let mut page = 0usize;
+        let mut partial = false;
         loop {
             let body = graphql::build_issues_body(cursor.as_deref());
             let resp: graphql::IssuesResponse = match self.graphql(&body).await {
@@ -190,6 +256,7 @@ impl LinearClient {
                          returning {} partial issues. error: {e}",
                         tasks.len()
                     );
+                    partial = true;
                     break;
                 }
                 Err(e) => return Err(e),
@@ -205,6 +272,7 @@ impl LinearClient {
                         "Linear GraphQL errors at page {page}; returning {} partial issues. errors: {joined}",
                         tasks.len()
                     );
+                    partial = true;
                     break;
                 }
                 return Err(LinearError::Graphql(joined));
@@ -228,10 +296,41 @@ impl LinearClient {
                 tracing::error!(
                     "Linear paged: bailing after {page} pages (safety cap; tail truncated)"
                 );
+                partial = true;
                 break;
             }
         }
-        Ok(tasks)
+        let coverage = if partial {
+            FetchCoverage::Partial
+        } else {
+            FetchCoverage::Complete
+        };
+        Ok(FetchOutcome { tasks, coverage })
+    }
+}
+
+/// Result of a paginated fetch plus how much of the upstream set it
+/// actually covered.
+#[derive(Debug, Clone)]
+pub struct FetchOutcome {
+    pub tasks: Vec<Task>,
+    pub coverage: FetchCoverage,
+}
+
+/// Whether a fetch walked the entire upstream set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchCoverage {
+    /// Every page was consumed — the result is authoritative and may
+    /// drive rescope deletion.
+    Complete,
+    /// A later page failed or the safety cap truncated the tail —
+    /// non-authoritative; rescope must preserve everything this tick.
+    Partial,
+}
+
+impl FetchOutcome {
+    pub fn is_partial(&self) -> bool {
+        self.coverage == FetchCoverage::Partial
     }
 }
 
@@ -296,5 +395,55 @@ impl TaskProvider for LinearClient {
         self.post_comment(issue_id, body)
             .await
             .map_err(|e| ProviderError::permanent("linear", e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `&text[..200]` panicked when byte 200 fell inside a multi-byte
+    /// char. The boundary-safe truncation must back off to the
+    /// previous char start instead.
+    #[test]
+    fn truncate_on_char_boundary_never_splits_a_char() {
+        // 'é' is 2 bytes; an odd byte limit lands mid-char.
+        let s = "ééééé"; // 10 bytes
+        let out = truncate_on_char_boundary(s, 5);
+        assert_eq!(out, "éé", "5 → backs off to byte 4");
+        assert!(s.is_char_boundary(out.len()));
+
+        // Emoji (4 bytes) with the cut inside it.
+        let s = "ab🚀cd"; // 'a','b' = 2 bytes, 🚀 = 4 bytes
+        assert_eq!(truncate_on_char_boundary(s, 3), "ab");
+        assert_eq!(truncate_on_char_boundary(s, 6), "ab🚀");
+    }
+
+    #[test]
+    fn truncate_on_char_boundary_passes_short_strings_through() {
+        assert_eq!(truncate_on_char_boundary("short", 200), "short");
+        assert_eq!(truncate_on_char_boundary("", 0), "");
+        let exact = "abcd";
+        assert_eq!(truncate_on_char_boundary(exact, 4), "abcd");
+    }
+
+    #[test]
+    fn rate_limited_error_classifies_retryable_with_hint() {
+        let err = LinearError::RateLimited {
+            retry_after_secs: Some(30),
+        };
+        match ProviderError::from(err) {
+            ProviderError::Retryable {
+                retry_after_secs, ..
+            } => assert_eq!(retry_after_secs, Some(30)),
+            other => panic!("429 must be retryable, got {other:?}"),
+        }
+        let err = LinearError::RateLimited {
+            retry_after_secs: None,
+        };
+        assert!(matches!(
+            ProviderError::from(err),
+            ProviderError::Retryable { .. }
+        ));
     }
 }

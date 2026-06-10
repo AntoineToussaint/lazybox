@@ -109,6 +109,44 @@ pub struct RoundRobinPick {
     pub run_global: bool,
 }
 
+/// Per-tick scheduling entry point used by `sources_for`. Wraps
+/// [`pick_repos_for_tick`] with the state mutations (prune, cursor
+/// stamps, tick counter) that must only happen when the tick will
+/// actually run a full sweep.
+///
+/// `will_full_sweep == false` means the fetch will take the
+/// notifications fast path and never consult the pick, so we leave
+/// the rotation untouched: stamping repos "synced" without querying
+/// them would starve genuinely-stale repos, and advancing the tick
+/// counter would evaluate the global-sweep modulus against ticks
+/// that fetched nothing. The returned pick still sets
+/// `run_global = true` so the heartbeat-failure promotion path
+/// (incremental → full sweep mid-tick) runs the exhaustive global
+/// sweep rather than an empty one.
+pub fn plan_round_robin_tick(
+    state: &mut RoundRobinState,
+    will_full_sweep: bool,
+    n: usize,
+    now: Instant,
+) -> RoundRobinPick {
+    if !will_full_sweep {
+        return RoundRobinPick {
+            repos: Vec::new(),
+            run_global: true,
+        };
+    }
+    state.prune(now);
+    let pick = pick_repos_for_tick(&state.cursor, state.focused_repo.as_deref(), state.tick, n);
+    // Bump the cursor for repos we're about to query (even a
+    // 0-result query advances the rotation — without it, an empty
+    // repo stays "stalest" forever).
+    for repo in &pick.repos {
+        state.record_sync(repo, now);
+    }
+    state.tick = state.tick.wrapping_add(1);
+    pick
+}
+
 /// Decide what this tick should fetch.
 ///
 /// Inputs:
@@ -331,6 +369,59 @@ mod tests {
             !state.cursor.contains_key("stale/repo"),
             "entries older than CURSOR_TTL must be evicted"
         );
+    }
+
+    /// An incremental (no-full-sweep) tick must not advance the
+    /// scheduler: no cursor stamps, no tick increment. Pre-fix, every
+    /// 60s tick stamped its pick "synced" and bumped the counter even
+    /// though the actual fetch only happens on full-sweep ticks
+    /// (every ~10 min) — repos rotated out without ever being queried
+    /// and the global-sweep modulus ran against an inflated counter.
+    #[test]
+    fn plan_skips_state_advance_when_no_full_sweep() {
+        let mut state = RoundRobinState::default();
+        let now = Instant::now();
+        state.cursor.insert("a/a".into(), now - Duration::from_secs(60));
+        state.tick = 3;
+
+        let pick = plan_round_robin_tick(&mut state, /*will_full_sweep=*/ false, 3, now);
+
+        assert!(pick.repos.is_empty(), "no repos queried on a fast tick");
+        assert!(
+            pick.run_global,
+            "promotion fallback must run the global sweep, not an empty one"
+        );
+        assert_eq!(state.tick, 3, "tick counter must not advance");
+        assert_eq!(
+            state.cursor.get("a/a"),
+            Some(&(now - Duration::from_secs(60))),
+            "cursor must not be stamped for repos that were never queried"
+        );
+    }
+
+    /// A full-sweep tick advances the rotation exactly like the
+    /// historical inline path: picked repos get stamped, the counter
+    /// increments.
+    #[test]
+    fn plan_advances_state_on_full_sweep() {
+        let mut state = RoundRobinState::default();
+        let now = Instant::now();
+        let stale = now - Duration::from_secs(600);
+        state.cursor.insert("a/a".into(), stale);
+        state.cursor.insert("b/b".into(), stale);
+        state.tick = 1;
+
+        let pick = plan_round_robin_tick(&mut state, /*will_full_sweep=*/ true, 3, now);
+
+        assert_eq!(pick.repos.len(), 2, "both known repos fan out");
+        assert_eq!(state.tick, 2, "tick counter advances after the pick");
+        for repo in ["a/a", "b/b"] {
+            assert_eq!(
+                state.cursor.get(repo),
+                Some(&now),
+                "queried repo must be stamped as just-synced"
+            );
+        }
     }
 
     /// Prune is a no-op when every entry is within the window — must

@@ -18,6 +18,14 @@ impl SqliteStore {
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open(path).map_err(|e| StoreError::Backend(e.to_string()))?;
+        // WAL keeps readers (the TUI snapshot path) from blocking
+        // behind the poll loop's writes; the busy timeout makes a
+        // second process (e.g. `lazybox daemon status` racing the
+        // daemon) wait briefly instead of failing with SQLITE_BUSY.
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        conn.pragma_update(None, "busy_timeout", 5000)
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -98,7 +106,7 @@ impl Store for SqliteStore {
             let key = key.trim_start_matches("workspace:").to_string();
             out.push(crate::WorkspaceRecord {
                 key,
-                created_at: chrono::Utc::now(),
+                created_at: crate::traits::created_at_from_json(&value),
                 workspace_json: Some(value),
             });
         }
@@ -127,7 +135,7 @@ impl Store for SqliteStore {
             let key = key.trim_start_matches("project:").to_string();
             out.push(crate::ProjectRecord {
                 key,
-                created_at: chrono::Utc::now(),
+                created_at: crate::traits::created_at_from_json(&value),
                 project_json: Some(value),
             });
         }
@@ -146,5 +154,81 @@ impl<T> OptionalExt<T> for Result<T, rusqlite::Error> {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::Store;
+
+    /// Unique on-disk db path per test, cleaned up on drop. Hand-rolled
+    /// (std::env::temp_dir + counter) so the crate doesn't grow a
+    /// tempfile dev-dependency for two tests.
+    struct TempDb(std::path::PathBuf);
+
+    impl TempDb {
+        fn new(tag: &str) -> Self {
+            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Self(std::env::temp_dir().join(format!(
+                "lazybox-store-test-{tag}-{}-{n}.db",
+                std::process::id()
+            )))
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let mut p = self.0.as_os_str().to_owned();
+                p.push(suffix);
+                let _ = std::fs::remove_file(std::path::PathBuf::from(p));
+            }
+        }
+    }
+
+    /// `open` must put the connection in WAL mode with a busy timeout
+    /// so a second process contending on the file waits instead of
+    /// failing with SQLITE_BUSY.
+    #[test]
+    fn open_enables_wal_and_busy_timeout() {
+        let db = TempDb::new("wal");
+        let store = SqliteStore::open(&db.0).unwrap();
+        let conn = store.conn();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+        let busy: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(busy, 5000);
+    }
+
+    /// `list_workspaces` must surface the record's REAL `created_at`
+    /// (carried inside the JSON), not fabricate `Utc::now()` per call
+    /// — a consumer sorting by it would see every row's timestamp
+    /// shift on every read.
+    #[test]
+    fn list_workspaces_returns_created_at_from_json() {
+        let store = SqliteStore::in_memory().unwrap();
+        let created_at = chrono::DateTime::parse_from_rfc3339("2024-03-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        store
+            .save_workspace(&crate::WorkspaceRecord {
+                key: "github-o-r-1".into(),
+                created_at,
+                workspace_json: Some(format!(
+                    r#"{{"key":"github-o-r-1","created_at":"{}"}}"#,
+                    created_at.to_rfc3339()
+                )),
+            })
+            .unwrap();
+
+        let rows = store.list_workspaces().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].created_at, created_at);
     }
 }

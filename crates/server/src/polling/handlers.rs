@@ -9,7 +9,7 @@
 //! helpers (`commit_upsert`, `load_workspace`) leak across via
 //! `pub(super)`.
 
-use super::{TickState, commit_upsert, fetch_and_apply, load_workspace};
+use super::{TickState, apply_and_commit, commit_upsert, load_workspace};
 use crate::ServerConfig;
 use lazybox_core::{CiStatus, ReviewStatus, Workspace, WorkspaceKey};
 use lazybox_gh::GhClient;
@@ -517,60 +517,73 @@ pub async fn handle_fetch_pr_details(config: &ServerConfig, workspace_key: Works
         }
     };
 
-    // `fetch_and_apply` runs the network call against the initial
-    // workspace snapshot, then re-loads right before the transform
-    // so the activity merge applies to the freshest state — locks
-    // in the race fix that the open-coded version had to discover
-    // the hard way (PR row stuck on "CI RUN" after GitHub flipped
-    // to SUCCESS because a 1-2s GraphQL write clobbered fresh poll
-    // state with a stale snapshot).
-    let result = fetch_and_apply(
-        config,
-        &workspace_key,
-        |initial| {
-            let client = client.clone();
-            async move {
-                let Some(pr) = initial.pr.as_ref() else {
-                    return Ok::<_, ()>(None);
-                };
-                let Some(node_id) = pr.node_id.clone() else {
-                    return Ok(None);
-                };
-                match client.fetch_pr_details(&node_id).await {
-                    Ok(Some(details)) => Ok(Some(details)),
-                    Ok(None) => Ok(None),
-                    Err(e) => {
-                        tracing::warn!("fetch_pr_details({node_id}): {e}");
-                        Ok(None)
-                    }
-                }
-            }
-        },
-        |ws, details_opt| {
-            let Some(details) = details_opt else {
-                return;
-            };
-            let merged_count = details.activities.len();
-            // `Workspace::merge_activity` dedups by (author, body,
-            // created_at) AND remaps `read_indices` across the
-            // post-sort positions. A prior implementation here did a
-            // raw push + sort, which left `read_indices` pointing at
-            // stale slots — every lazy-fetch silently scrambled the
-            // user's read marks.
-            ws.merge_activity(&details.activities);
-            merge_pr_details_into_workspace(ws, details);
-            tracing::info!(
-                workspace = %ws.key,
-                merged = merged_count,
-                "fetch_pr_details: merged review-thread activities + PR fields"
-            );
-        },
-    )
-    .await;
-    // Result is Result<MutationOutcome, ()> — the fetcher swallows
-    // its own provider errors; both Applied and Missing are
-    // user-visible-silent successes.
-    let _ = result;
+    // The node id comes from the workspace snapshot at call time; the
+    // apply step re-loads right before the transform so the activity
+    // merge applies to the freshest state — see `apply_pr_details`.
+    let Some(initial) = load_workspace(config, &workspace_key) else {
+        return;
+    };
+    let Some(node_id) = initial.pr.as_ref().and_then(|pr| pr.node_id.clone()) else {
+        return;
+    };
+    let details = match client.fetch_pr_details(&node_id).await {
+        Ok(Some(details)) => details,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!("fetch_pr_details({node_id}): {e}");
+            return;
+        }
+    };
+    let merged_count = details.activities.len();
+    apply_pr_details(config, &workspace_key, details).await;
+    tracing::info!(
+        workspace = %workspace_key,
+        merged = merged_count,
+        "fetch_pr_details: merged review-thread activities + PR fields"
+    );
+}
+
+/// Splice freshly-fetched `PrDetails` into the stored workspace and
+/// persist + broadcast the result. The transform runs against a
+/// *re-loaded* copy (via `apply_and_commit`) so a concurrent poll
+/// write between the GraphQL fetch and this apply isn't clobbered —
+/// the race fix `handle_fetch_pr_details` discovered the hard way
+/// (PR row stuck on "CI RUN" after GitHub flipped to SUCCESS).
+///
+/// `Workspace::merge_activity` dedups by (author, body, created_at)
+/// AND remaps `read_indices` across the post-sort positions. A prior
+/// implementation did a raw push + sort, which left `read_indices`
+/// pointing at stale slots — every lazy-fetch silently scrambled the
+/// user's read marks.
+///
+/// When the backfill populates a previously-empty `closes_issues`,
+/// the issue→PR collapse re-runs afterwards: the inbox SEARCH_QUERY
+/// omits `closingIssuesReferences`, so for most PRs THIS is the first
+/// moment lazybox learns about the linked issue — without the re-run
+/// the standalone issue workspace would sit next to the PR until some
+/// future poll happened to carry the refs.
+pub async fn apply_pr_details(
+    config: &ServerConfig,
+    workspace_key: &WorkspaceKey,
+    details: lazybox_gh::PrDetails,
+) {
+    let mut closes_backfilled = false;
+    let outcome = apply_and_commit(config, workspace_key, |ws| {
+        let had_closes = ws
+            .pr
+            .as_ref()
+            .is_some_and(|pr| !pr.closes_issues.is_empty());
+        ws.merge_activity(&details.activities);
+        merge_pr_details_into_workspace(ws, details);
+        let has_closes = ws
+            .pr
+            .as_ref()
+            .is_some_and(|pr| !pr.closes_issues.is_empty());
+        closes_backfilled = !had_closes && has_closes;
+    });
+    if outcome.is_applied() && closes_backfilled {
+        super::collapse_closing_issues_for(config, workspace_key).await;
+    }
 }
 
 /// Splice a freshly-fetched `PrDetails` into a workspace's PR slot.
@@ -626,11 +639,15 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
 
     // Snapshot live session ids — anything in `terminal_sessions`
     // (the per-terminal owning-session map) is a session we must
-    // not touch. Lock dropped before any async fs work.
+    // not touch. Lock dropped before any async fs work. Recovered
+    // (post-restart) terminals never land in `terminal_sessions`, so
+    // also honor `terminal_meta`'s workspace-key view — see
+    // `live_workspace_keys`.
     let live_sessions: std::collections::HashSet<lazybox_core::SessionId> = {
         let map = config.terminal_sessions.lock().await;
         map.values().copied().collect()
     };
+    let live_keys = live_workspace_keys(config).await;
 
     let mgr = lazybox_git_ops::WorktreeManager::default_base();
     let mut removed: usize = 0;
@@ -659,7 +676,9 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
         let mut wrote = false;
         for idx in (0..session_count).rev() {
             let session = workspace.sessions[idx].clone();
-            if live_sessions.contains(&session.id) {
+            if live_sessions.contains(&session.id)
+                || live_keys.contains(session.workspace_key.as_str())
+            {
                 skipped += 1;
                 continue;
             }
@@ -1021,11 +1040,27 @@ fn workspace_worktree_paths(
 
 /// Count live terminals (PTY/tmux sessions) bound to a workspace key,
 /// via the authoritative `terminal_meta` map.
-async fn count_live_terminals(config: &ServerConfig, key: &WorkspaceKey) -> usize {
+pub(super) async fn count_live_terminals(config: &ServerConfig, key: &WorkspaceKey) -> usize {
     let meta = config.terminal_meta.lock().await;
     meta.values()
         .filter(|(sk, _)| sk.as_str() == key.as_str())
         .count()
+}
+
+/// Workspace keys (as `SessionKey` strings) that currently have a
+/// live terminal, per `terminal_meta`. Complements the
+/// `terminal_sessions`-derived `SessionId` set in the cleanup paths:
+/// terminals recovered after a daemon restart repopulate
+/// `terminal_meta` but never `terminal_sessions` (the spawn-time
+/// terminal → SessionId map), so a session-id-only liveness check
+/// would happily reap a worktree under a live recovered agent. The
+/// key-level set is coarser (it pins every session in the workspace)
+/// but errs on the safe side.
+async fn live_workspace_keys(config: &ServerConfig) -> std::collections::HashSet<String> {
+    let meta = config.terminal_meta.lock().await;
+    meta.values()
+        .map(|(sk, _)| sk.as_str().to_string())
+        .collect()
 }
 
 /// Silent worktree reaper for the opt-in `auto_cleanup_merged` path —
@@ -1055,11 +1090,14 @@ pub(crate) async fn cleanup_merged_worktrees_with(
     // Never yank a worktree the user is still attached to, even if its
     // tree is clean — that's the "don't pull a folder out from under
     // an active agent" guard the inspector's safety check can't make
-    // on its own.
+    // on its own. Union with `terminal_meta`'s workspace-key view so
+    // terminals recovered after a daemon restart (which never
+    // repopulate `terminal_sessions`) still count as live.
     let live: std::collections::HashSet<lazybox_core::SessionId> = {
         let map = config.terminal_sessions.lock().await;
         map.values().copied().collect()
     };
+    let live_keys = live_workspace_keys(config).await;
 
     let tracked = collect_tracked_sessions(config);
     let inspections = match mgr.inspect_worktrees(&tracked).await {
@@ -1091,7 +1129,9 @@ pub(crate) async fn cleanup_merged_worktrees_with(
     for idx in (0..workspace.sessions.len()).rev() {
         let session_id = workspace.sessions[idx].id;
         let worktree_path = workspace.sessions[idx].worktree_path.clone();
-        if live.contains(&session_id) {
+        if live.contains(&session_id)
+            || live_keys.contains(workspace.sessions[idx].workspace_key.as_str())
+        {
             continue;
         }
         let Some(&row) = by_path.get(&canon(&worktree_path)) else {
@@ -1134,6 +1174,91 @@ pub(crate) async fn cleanup_merged_worktrees_with(
             title: "lazybox".into(),
             body: format!("Cleaned up {removed} {noun} for merged PR #{pr_number}"),
         });
+    }
+}
+
+/// Reap a workspace's worktrees ahead of a rescope delete. Once the
+/// row is gone `collect_tracked_sessions` can never find the paths
+/// again, so this is the last chance to clean the dirs up. Same
+/// safety contract as the auto-cleanup path: only worktrees the
+/// inspector flags `is_safe_to_delete` (clean tree, pushed, unlocked)
+/// AND with no live terminal are removed, never force — a dirty
+/// worktree stays on disk for manual recovery even though its
+/// workspace row is about to disappear.
+pub(super) async fn reap_safe_workspace_worktrees(
+    config: &ServerConfig,
+    workspace: &lazybox_core::Workspace,
+) {
+    reap_safe_workspace_worktrees_with(
+        config,
+        &lazybox_git_ops::WorktreeManager::default_base(),
+        workspace,
+    )
+    .await
+}
+
+/// Test seam for [`reap_safe_workspace_worktrees`] — explicit manager
+/// so tests can root it at a tempdir without mutating `LAZYBOX_HOME`.
+pub(crate) async fn reap_safe_workspace_worktrees_with(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    workspace: &lazybox_core::Workspace,
+) {
+    if workspace.sessions.is_empty() {
+        return;
+    }
+    // Same liveness union as `cleanup_merged_worktrees_with`:
+    // spawn-time session ids plus the recovered-terminal workspace
+    // keys from `terminal_meta`.
+    let live: std::collections::HashSet<lazybox_core::SessionId> = {
+        let map = config.terminal_sessions.lock().await;
+        map.values().copied().collect()
+    };
+    let live_keys = live_workspace_keys(config).await;
+
+    let tracked = collect_tracked_sessions(config);
+    let inspections = match mgr.inspect_worktrees(&tracked).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(workspace = %workspace.key, "reap_workspace_worktrees: inspect failed: {e}");
+            return;
+        }
+    };
+    let by_path: std::collections::HashMap<
+        std::path::PathBuf,
+        &lazybox_git_ops::WorktreeInspection,
+    > = inspections.iter().map(|r| (canon(&r.path), r)).collect();
+
+    for session in &workspace.sessions {
+        if live.contains(&session.id) || live_keys.contains(session.workspace_key.as_str()) {
+            continue;
+        }
+        let Some(&row) = by_path.get(&canon(&session.worktree_path)) else {
+            continue;
+        };
+        if !row.is_safe_to_delete {
+            tracing::info!(
+                workspace = %workspace.key,
+                worktree = %session.worktree_path.display(),
+                "reap_workspace_worktrees: preserving (not safe to delete)"
+            );
+            continue;
+        }
+        match mgr.delete_inspected(row, /*force=*/ false).await {
+            Ok(()) => {
+                tracing::info!(
+                    workspace = %workspace.key,
+                    worktree = %session.worktree_path.display(),
+                    "reap_workspace_worktrees: removed"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    worktree = %session.worktree_path.display(),
+                    "reap_workspace_worktrees: delete refused: {e}"
+                );
+            }
+        }
     }
 }
 
@@ -1241,39 +1366,22 @@ pub async fn prefetch_top_pr_details(
         .map(|(_score, node_id, key)| {
             let client = client.clone();
             async move {
-                // Route through `fetch_and_apply` so the race fix in
-                // `handle_fetch_pr_details` applies here too: re-load
-                // before the activity merge so a concurrent poll
-                // write isn't clobbered.
-                let mut merged_here = 0usize;
-                let _ = fetch_and_apply(
-                    config,
-                    &key,
-                    |_initial| {
-                        let client = client.clone();
-                        let node_id = node_id.clone();
-                        async move {
-                            match client.fetch_pr_details(&node_id).await {
-                                Ok(details) => Ok::<_, ()>(details),
-                                Err(e) => {
-                                    tracing::debug!(
-                                        "prefetch_top_pr_details: fetch_pr_details({node_id}) failed: {e}",
-                                    );
-                                    Ok(None)
-                                }
-                            }
-                        }
-                    },
-                    |ws, details_opt| {
-                        let Some(details) = details_opt else {
-                            return;
-                        };
-                        merged_here = details.activities.len();
-                        ws.merge_activity(&details.activities);
-                        merge_pr_details_into_workspace(ws, details);
-                    },
-                )
-                .await;
+                // Route through `apply_pr_details` so the race fix in
+                // `handle_fetch_pr_details` applies here too (re-load
+                // before the activity merge), along with the
+                // closes-issues collapse re-run.
+                let details = match client.fetch_pr_details(&node_id).await {
+                    Ok(Some(details)) => details,
+                    Ok(None) => return 0usize,
+                    Err(e) => {
+                        tracing::debug!(
+                            "prefetch_top_pr_details: fetch_pr_details({node_id}) failed: {e}",
+                        );
+                        return 0usize;
+                    }
+                };
+                let merged_here = details.activities.len();
+                apply_pr_details(config, &key, details).await;
                 merged_here
             }
         })
@@ -1847,6 +1955,102 @@ mod inspect_tests {
         );
         let reloaded = load_workspace(&config, &key).expect("workspace");
         assert!(reloaded.sessions.is_empty(), "session should be dropped");
+    }
+
+    /// Stopgap for recovered terminals (post-daemon-restart): they
+    /// populate `terminal_meta` but never `terminal_sessions`, so the
+    /// session-id liveness check alone would reap a worktree under a
+    /// live recovered agent. The workspace-key union must keep it.
+    #[tokio::test]
+    async fn cleanup_skips_recovered_terminal_via_terminal_meta() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "merged-recovered", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        // Recovered terminal: terminal_meta only, no terminal_sessions.
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        config.terminal_meta.lock().await.insert(
+            lazybox_ipc::TerminalId(1),
+            (session_key, lazybox_ipc::TerminalKind::Shell),
+        );
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+
+        cleanup_merged_worktrees_with(&config, &mgr, &key, 1).await;
+
+        assert!(
+            wt.exists(),
+            "recovered terminal's worktree must be preserved"
+        );
+        let reloaded = load_workspace(&config, &key).expect("workspace");
+        assert_eq!(reloaded.sessions.len(), 1, "session must be retained");
+    }
+
+    /// Rescope-delete pre-pass: a safe (clean, remote branch gone)
+    /// worktree with no live terminal is reaped so the dir doesn't
+    /// leak once the workspace row disappears.
+    #[tokio::test]
+    async fn reap_removes_safe_worktree() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "reap-safe", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let workspace = load_workspace(&config, &key).expect("workspace");
+
+        reap_safe_workspace_worktrees_with(&config, &mgr, &workspace).await;
+
+        assert!(!wt.exists(), "safe worktree should be reaped");
+    }
+
+    /// The reap NEVER force-removes: a dirty worktree survives even
+    /// though its workspace row is about to be rescope-deleted — the
+    /// user's uncommitted work stays on disk for manual recovery.
+    #[tokio::test]
+    async fn reap_preserves_dirty_worktree() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "reap-dirty", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let workspace = load_workspace(&config, &key).expect("workspace");
+
+        reap_safe_workspace_worktrees_with(&config, &mgr, &workspace).await;
+
+        assert!(wt.exists(), "dirty worktree must never be force-removed");
+    }
+
+    /// A live terminal (recovered-terminal shape: terminal_meta only)
+    /// pins the worktree even when the tree itself is reap-safe.
+    #[tokio::test]
+    async fn reap_skips_worktree_with_live_terminal() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "reap-live", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        config.terminal_meta.lock().await.insert(
+            lazybox_ipc::TerminalId(2),
+            (session_key, lazybox_ipc::TerminalKind::Shell),
+        );
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let workspace = load_workspace(&config, &key).expect("workspace");
+
+        reap_safe_workspace_worktrees_with(&config, &mgr, &workspace).await;
+
+        assert!(wt.exists(), "live terminal's worktree must be preserved");
     }
 
     /// A session with a live terminal attached is skipped even when

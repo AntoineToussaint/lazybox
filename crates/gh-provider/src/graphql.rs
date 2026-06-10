@@ -524,10 +524,6 @@ pub fn updated_since_qualifier(since: DateTime<Utc>) -> String {
     format!("updated:>={}", since.format("%Y-%m-%dT%H:%M:%S+00:00"))
 }
 
-pub fn query_body(search_query: &str) -> serde_json::Value {
-    query_body_after(search_query, None)
-}
-
 /// Per-page size for the PR search. Was 100 (GraphQL's maximum)
 /// but with the heavy SEARCH_QUERY payload, GitHub's GraphQL
 /// gateway timed out (HTTP 502 / 504 "We couldn't respond to your

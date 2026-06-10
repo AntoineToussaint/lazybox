@@ -420,9 +420,16 @@ impl GhClient {
         // be a string" — ~1 in every 5 GraphQL polls during rate-limited
         // periods. We eat the retry feature; polling runs every few seconds
         // so we just try again on the next tick.
+        // Global HTTP timeouts so no single request can hang the
+        // caller indefinitely — `current().user()` below runs on the
+        // poll loop's critical path (outside the per-tick timeout),
+        // and a dead TCP connection without these waited forever.
+        // 30s is far above any healthy GitHub round-trip yet bounded.
         let inner = Octocrab::builder()
             .personal_token(cred.into_token())
             .add_retry_config(octocrab::service::middleware::retry::RetryConfig::None)
+            .set_connect_timeout(Some(std::time::Duration::from_secs(30)))
+            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
             .build()
             .map_err(GhError::Api)?;
         let user = inner.current().user().await.map_err(GhError::Api)?.login;
@@ -1780,11 +1787,15 @@ impl GhClient {
         Ok(tasks)
     }
 
-    /// One-shot PR search (no pagination). Used by the merged-sweep
-    /// and the watched-repo fan-out — both have small expected
-    /// result sets and a `first: 100` page is fine. Returns `Ok(empty)`
-    /// when the rate budget gates the request, so failures are
-    /// distinguishable from "no results."
+    /// Companion PR search used by the merged-sweep, the watched-repo
+    /// fan-out, the review-requested pass, and the round-robin per-repo
+    /// queries. Usually one page, but FOLLOWS the cursor when GitHub
+    /// reports more: these branches feed `polled_scope` as authoritative
+    /// coverage, so a silently-truncated first page (`PR_PAGE_SIZE = 25`)
+    /// made rescope delete every workspace past the cap. Errors on
+    /// rate-budget exhaustion mid-walk rather than returning a partial
+    /// set — a failed branch is preserved-conservatively by the caller,
+    /// a truncated "success" is not.
     async fn fetch_pr_single_query(
         &self,
         op: &'static str,
@@ -1792,38 +1803,65 @@ impl GhClient {
     ) -> Result<Vec<Task>, GhError> {
         let started = std::time::Instant::now();
         let mut metrics = BranchMetrics::new(op);
-        if let Err(reason) = self.try_acquire() {
-            return Err(GhError::RateLimited {
-                retry_after_secs: 1,
-                reason: format!("{op} blocked: {reason}"),
-            });
+        let mut tasks: Vec<Task> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut page = 0usize;
+        loop {
+            if let Err(reason) = self.try_acquire() {
+                return Err(GhError::RateLimited {
+                    retry_after_secs: 1,
+                    reason: format!("{op} blocked: {reason}"),
+                });
+            }
+            let body = graphql::query_body_after(&query, cursor.as_deref());
+            let (resp, bytes): (graphql::GqlResponse, usize) =
+                self.post_graphql_with_retry_measured(&body).await?;
+            metrics.requests += 1;
+            metrics.resp_bytes += bytes;
+            if let Some(errors) = resp.errors {
+                let joined: String = errors
+                    .iter()
+                    .map(|e| e.full())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(GhError::Graphql(format!("{op}: {joined}")));
+            }
+            let Some(data) = resp.data else {
+                break;
+            };
+            if let Some(rl) = &data.rate_limit {
+                metrics.graphql_cost += rl.cost.unwrap_or(0);
+                self.observe_rate_limit(rl);
+            }
+            tasks.extend(
+                data.search
+                    .nodes
+                    .iter()
+                    .map(|pr| graphql::pr_to_task(pr, &self.user)),
+            );
+            let page_info = data.search.page_info.unwrap_or_default();
+            if !page_info.has_next_page {
+                break;
+            }
+            cursor = page_info.end_cursor;
+            if cursor.is_none() {
+                tracing::warn!("{op} paged: hasNextPage=true but endCursor=null");
+                break;
+            }
+            page += 1;
+            if page >= 20 {
+                // Same safety-cap visibility as the main paginated
+                // search: error (don't silently truncate) so the
+                // caller treats this branch's coverage as failed.
+                tracing::error!(
+                    "{op} paged: bailing after {page} pages (safety cap; tail truncated)"
+                );
+                return Err(GhError::Truncated {
+                    count: tasks.len(),
+                    pages: page,
+                });
+            }
         }
-        let body = graphql::query_body(&query);
-        let (resp, bytes): (graphql::GqlResponse, usize) =
-            self.post_graphql_with_retry_measured(&body).await?;
-        metrics.requests = 1;
-        metrics.resp_bytes = bytes;
-        if let Some(errors) = resp.errors {
-            let joined: String = errors
-                .iter()
-                .map(|e| e.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(GhError::Graphql(format!("{op}: {joined}")));
-        }
-        let Some(data) = resp.data else {
-            return Ok(Vec::new());
-        };
-        if let Some(rl) = &data.rate_limit {
-            metrics.graphql_cost = rl.cost.unwrap_or(0);
-            self.observe_rate_limit(rl);
-        }
-        let tasks: Vec<Task> = data
-            .search
-            .nodes
-            .iter()
-            .map(|pr| graphql::pr_to_task(pr, &self.user))
-            .collect();
         metrics.prs = tasks.len();
         metrics.elapsed_ms = started.elapsed().as_millis();
         metrics.emit();
@@ -3070,6 +3108,40 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Like `spawn_canned_response_server`, but serves a SEQUENCE of
+    /// bodies — the i-th connection gets `bodies[i]` (the last body
+    /// repeats once exhausted). Lets pagination tests hand back
+    /// page 1 / page 2 in order.
+    async fn spawn_sequenced_response_server(bodies: Vec<&'static str>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut served = 0usize;
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => continue,
+                };
+                let body = bodies[served.min(bodies.len() - 1)];
+                served += 1;
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: application/json\r\n\
+                         Content-Length: {}\r\n\
+                         Connection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
     fn make_client(base_uri: &str) -> GhClient {
         // Bypass `from_credential` (which calls `/user`) — we want
         // a `GhClient` that talks to the mock server directly.
@@ -3090,6 +3162,81 @@ mod tests {
             )),
             notifications_state: NotificationsState::shared(),
         }
+    }
+
+    /// Minimal-but-valid SEARCH_QUERY wire page: one PR node, with the
+    /// given pageInfo. Mirrors the trimmed inbox-scan response shape
+    /// (see `graphql::search_query_wire_response`).
+    fn pr_search_page(number: u64, has_next: bool, end_cursor: &str) -> String {
+        let cursor_json = if has_next {
+            format!(r#""{end_cursor}""#)
+        } else {
+            "null".to_string()
+        };
+        format!(
+            r#"{{
+              "data": {{
+                "search": {{
+                  "pageInfo": {{ "hasNextPage": {has_next}, "endCursor": {cursor_json} }},
+                  "nodes": [
+                    {{
+                      "id": "PR_node{number}",
+                      "number": {number},
+                      "title": "PR {number}",
+                      "body": null,
+                      "url": "https://github.com/o/r/pull/{number}",
+                      "updatedAt": "2026-05-28T12:00:00Z",
+                      "createdAt": "2026-05-27T09:00:00Z",
+                      "isDraft": false,
+                      "state": "OPEN",
+                      "merged": false,
+                      "headRefName": "feat-{number}",
+                      "baseRefName": "main",
+                      "mergeable": "MERGEABLE",
+                      "reviewDecision": null,
+                      "autoMergeRequest": null,
+                      "isInMergeQueue": false,
+                      "author": {{ "login": "carol" }},
+                      "commits": {{ "nodes": [] }},
+                      "labels": {{ "nodes": [] }},
+                      "assignees": {{ "nodes": [] }},
+                      "reviewRequests": {{ "nodes": [] }},
+                      "comments": {{ "totalCount": 0, "nodes": [] }}
+                    }}
+                  ]
+                }},
+                "rateLimit": {{ "cost": 1, "limit": 5000, "remaining": 4999, "resetAt": "2026-05-28T13:00:00Z" }}
+              }},
+              "errors": null
+            }}"#
+        )
+    }
+
+    /// Data-loss regression: the companion searches (merged-sweep,
+    /// watched-repo, review-requested, round-robin) used a single
+    /// 25-result page and reported authoritative coverage anyway, so
+    /// every PR past the first page was rescope-deleted. The query
+    /// must now follow `pageInfo.endCursor` until exhaustion.
+    #[tokio::test(flavor = "current_thread")]
+    async fn single_query_follows_pagination_cursor() {
+        let page1: &'static str =
+            Box::leak(pr_search_page(1, true, "CUR1").into_boxed_str());
+        let page2: &'static str =
+            Box::leak(pr_search_page(2, false, "").into_boxed_str());
+        let base_uri = spawn_sequenced_response_server(vec![page1, page2]).await;
+        let client = make_client(&base_uri);
+
+        let tasks = client
+            .fetch_pr_single_query("test-branch", "is:open is:pr repo:o/r".to_string())
+            .await
+            .expect("paginated single query should succeed");
+
+        let keys: Vec<&str> = tasks.iter().map(|t| t.id.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["o/r#1", "o/r#2"],
+            "both pages' PRs must be returned — page 2 was previously dropped"
+        );
     }
 
     /// Regression test for issue #180: a manual `Command::Refresh`

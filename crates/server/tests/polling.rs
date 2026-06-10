@@ -2098,9 +2098,28 @@ async fn seed_issue_with_session(
     (issue_key, session_id)
 }
 
+/// Register a live terminal (in `terminal_meta`, the authoritative
+/// liveness map) bound to the given workspace key. The merge safety
+/// gate keys off live terminals, not session records — a session
+/// whose PTY died long ago must not stall the auto-transfer.
+async fn attach_live_terminal(
+    config: &ServerConfig,
+    key: &lazybox_core::WorkspaceKey,
+    terminal_id: u64,
+) {
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{TerminalId, TerminalKind};
+    let session_key: SessionKey = key.into();
+    config
+        .terminal_meta
+        .lock()
+        .await
+        .insert(TerminalId(terminal_id), (session_key, TerminalKind::Shell));
+}
+
 #[tokio::test]
 async fn live_issue_session_stalls_merge_and_emits_pending_event() {
-    // Safety net: an issue workspace with live sessions must NOT be
+    // Safety net: an issue workspace with a LIVE terminal must NOT be
     // silently absorbed by its closing PR. The daemon emits a
     // `WorkspaceMergePending` event and leaves both rows alone until
     // the user confirms via `Command::ConfirmMerge`.
@@ -2109,6 +2128,7 @@ async fn live_issue_session_stalls_merge_and_emits_pending_event() {
     let config = ServerConfig::in_memory();
     let mut bus = config.bus.subscribe();
     let (issue_key, _session_id) = seed_issue_with_session(&config, "o/r#71").await;
+    attach_live_terminal(&config, &issue_key, 71).await;
 
     polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
 
@@ -2152,6 +2172,7 @@ async fn merge_collapse_does_not_deadlock_while_poll_state_held() {
     let config = ServerConfig::in_memory();
     let mut bus = config.bus.subscribe();
     let (issue_key, _session_id) = seed_issue_with_session(&config, "o/r#71").await;
+    attach_live_terminal(&config, &issue_key, 71).await;
 
     // Hold the guard exactly as `run_one_tick` does for the whole tick.
     let guard = config.poll_state.lock().await;
@@ -2287,6 +2308,7 @@ async fn confirm_merge_accept_runs_the_merge() {
 
     let config = ServerConfig::in_memory();
     let (issue_key, session_id) = seed_issue_with_session(&config, "o/r#71").await;
+    attach_live_terminal(&config, &issue_key, 71).await;
     polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
     let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_pr_closing(
         "o/r#141",
@@ -2310,6 +2332,245 @@ async fn confirm_merge_accept_runs_the_merge() {
         .expect("session must have moved");
     assert_eq!(moved.workspace_key, pr_key);
 }
+
+#[tokio::test]
+async fn dead_session_records_do_not_block_silent_merge() {
+    // Regression: the merge gate used to key off `sessions.is_empty()`,
+    // so an issue whose agent session's PTY died long ago (a session
+    // RECORD with no live terminal) prompted every 5 minutes forever
+    // and the auto-transfer never completed unattended. The gate is
+    // live terminals now — dead records move over silently.
+    use lazybox_core::WorkspaceKey;
+
+    let config = ServerConfig::in_memory();
+    let mut bus = config.bus.subscribe();
+    // Session record exists, but NO terminal_meta entry → not live.
+    let (issue_key, session_id) = seed_issue_with_session(&config, "o/r#71").await;
+
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+
+    assert!(
+        config.store.get_workspace(&issue_key).unwrap().is_none(),
+        "issue workspace with only dead session records must merge silently",
+    );
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_pr_closing(
+        "o/r#141",
+        &["o/r#71"],
+    )));
+    let pr_ws: lazybox_core::Workspace = {
+        let record = config.store.get_workspace(&pr_key).unwrap().unwrap();
+        serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
+    };
+    assert!(
+        pr_ws.sessions.iter().any(|s| s.id == session_id),
+        "the dead session record must move onto the PR (still recoverable)",
+    );
+
+    let (mut saw_pending, mut saw_merged) = (false, false);
+    while let Ok(evt) = bus.try_recv() {
+        match evt {
+            Event::WorkspaceMergePending { .. } => saw_pending = true,
+            Event::WorkspaceMerged { .. } => saw_merged = true,
+            _ => {}
+        }
+    }
+    assert!(!saw_pending, "no modal for a workspace with no live terminal");
+    assert!(saw_merged, "silent merge still emits the footer notice");
+}
+
+#[tokio::test]
+async fn silent_merge_commits_pr_before_deleting_issue_row() {
+    // Regression: the auto-merge path used to delete the issue row
+    // BEFORE the PR (carrying the moved sessions) was committed — a
+    // cancellation in that window (the 15s per-task upsert timeout)
+    // left the sessions in neither stored workspace. Pin the bus
+    // ordering: the PR upsert that contains the absorbed issue must
+    // be broadcast before the issue's WorkspaceRemoved.
+    use lazybox_core::WorkspaceKey;
+
+    let config = ServerConfig::in_memory();
+    let mut bus = config.bus.subscribe();
+    let (issue_key, _session_id) = seed_issue_with_session(&config, "o/r#71").await;
+
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_pr_closing(
+        "o/r#141",
+        &["o/r#71"],
+    )));
+    let mut events: Vec<Event> = Vec::new();
+    while let Ok(evt) = bus.try_recv() {
+        events.push(evt);
+    }
+    let removed_at = events
+        .iter()
+        .position(|e| matches!(e, Event::WorkspaceRemoved(k) if *k == issue_key))
+        .expect("issue row must be removed");
+    let committed_at = events
+        .iter()
+        .position(|e| {
+            matches!(e, Event::WorkspaceUpserted(ws)
+                if ws.key == pr_key && ws.gh_issues.iter().any(|t| t.id.key == "o/r#71"))
+        })
+        .expect("PR workspace carrying the absorbed issue must be broadcast");
+    assert!(
+        committed_at < removed_at,
+        "PR commit must land before the issue row is deleted \
+         (commit-then-delete keeps the moved sessions recoverable)",
+    );
+}
+
+#[tokio::test]
+async fn branch_name_fallback_collapses_issue_workspace() {
+    // A PR whose head branch is the lazybox-named `lazybox/issue-N`
+    // worktree branch claims issue #N even when `closes_issues` is
+    // empty (the agent forgot the "Closes #N" line and the lazy
+    // details fetch hasn't run yet).
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_issue_task("o/r#42")).await;
+
+    let mut pr = make_task("o/r#141");
+    pr.branch = Some("lazybox/issue-42".into());
+    assert!(pr.closes_issues.is_empty(), "fixture: no closing refs");
+    polling::upsert(&config, pr).await;
+
+    let records = config.store.list_workspaces().unwrap();
+    assert_eq!(
+        records.len(),
+        1,
+        "issue + branch-linked PR must collapse to one row, got {:?}",
+        records.iter().map(|r| &r.key).collect::<Vec<_>>(),
+    );
+    let ws: lazybox_core::Workspace =
+        serde_json::from_str(records[0].workspace_json.as_deref().unwrap()).unwrap();
+    assert_eq!(ws.pr.as_ref().unwrap().id.key, "o/r#141");
+    assert_eq!(ws.gh_issues.len(), 1);
+    assert_eq!(ws.gh_issues[0].id.key, "o/r#42");
+}
+
+#[tokio::test]
+async fn details_backfill_collapses_issue_workspace() {
+    // Regression: the inbox SEARCH_QUERY omits closingIssuesReferences,
+    // so a PR's `closes_issues` only arrives via the lazy details
+    // fetch. That commit path never re-ran the collapse — the issue
+    // workspace sat standalone forever (the next polls saw the refs
+    // already attached and the empty-refs early return... never fired
+    // because the POLLED task still carried no refs).
+    use lazybox_core::{TaskId, WorkspaceKey};
+
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_issue_task("o/r#71")).await;
+    // PR enters WITHOUT closing refs — two standalone rows.
+    polling::upsert(&config, make_task("o/r#141")).await;
+    assert_eq!(config.store.list_workspaces().unwrap().len(), 2);
+
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#141")));
+    let details = lazybox_gh::PrDetails {
+        activities: vec![],
+        closes_issues: vec![TaskId {
+            source: "github".into(),
+            key: "o/r#71".into(),
+        }],
+        checks: vec![],
+        ci: CiStatus::Success,
+        review: ReviewStatus::Pending,
+        role: TaskRole::Reviewer,
+        needs_reply: false,
+        last_commenter: None,
+    };
+    polling::apply_pr_details(&config, &pr_key, details).await;
+
+    let records = config.store.list_workspaces().unwrap();
+    assert_eq!(
+        records.len(),
+        1,
+        "details backfill must fold the issue workspace into the PR, got {:?}",
+        records.iter().map(|r| &r.key).collect::<Vec<_>>(),
+    );
+    let ws: lazybox_core::Workspace =
+        serde_json::from_str(records[0].workspace_json.as_deref().unwrap()).unwrap();
+    assert_eq!(ws.key, pr_key);
+    assert_eq!(ws.gh_issues.len(), 1);
+    assert_eq!(ws.gh_issues[0].id.key, "o/r#71");
+}
+
+#[tokio::test]
+async fn rescope_delete_does_not_archive_workspace() {
+    // Regression: rescope's silent delete routed through the same
+    // path as the user's Shift-X and ARCHIVED the key — so a
+    // workspace deleted for upstream/transient reasons (truncated
+    // query, scope edit, reopened PR) was permanently blocked from
+    // re-creation by the upsert archive guard.
+    use lazybox_core::WorkspaceKey;
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_task("o/r#1")).await;
+    polling::upsert(&config, make_task("o/r#2")).await;
+
+    let outcome = polling::TickOutcome {
+        polled: vec![WorkspaceKey::new(lazybox_core::workspace_key_for(
+            &make_task("o/r#1"),
+        ))],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::new(),
+        all_full: true,
+    };
+    polling::rescope(&config, &outcome).await;
+    let key2 = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#2")));
+    assert!(
+        config.store.get_workspace(&key2).unwrap().is_none(),
+        "rescope should have deleted the out-of-scope workspace"
+    );
+
+    // The item comes back into scope — the workspace must re-create.
+    polling::upsert(&config, make_task("o/r#2")).await;
+    assert!(
+        config.store.get_workspace(&key2).unwrap().is_some(),
+        "rescope-deleted workspace must be re-creatable when it returns to scope",
+    );
+}
+
+#[tokio::test]
+async fn user_delete_archives_and_blocks_resurrection() {
+    // Counterpart to `rescope_delete_does_not_archive_workspace`: a
+    // user-intent delete (Shift-X) still archives, so the next poll
+    // does NOT resurrect the dismissed row.
+    use lazybox_core::WorkspaceKey;
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_task("o/r#1")).await;
+    let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#1")));
+
+    polling::delete_workspace(&config, &key).await;
+    polling::upsert(&config, make_task("o/r#1")).await;
+
+    assert!(
+        config.store.get_workspace(&key).unwrap().is_none(),
+        "user-dismissed workspace must stay gone across polls",
+    );
+}
+
+#[tokio::test]
+async fn unchanged_upsert_skips_store_write_and_broadcast() {
+    // Hot-loop waste regression: re-upserting a byte-identical task
+    // must not rewrite SQLite or re-broadcast `WorkspaceUpserted` —
+    // the steady-state poll was doing both for every workspace every
+    // tick.
+    let config = ServerConfig::in_memory();
+    let task = make_task("o/r#1");
+    polling::upsert(&config, task.clone()).await;
+
+    let mut bus = config.bus.subscribe();
+    polling::upsert(&config, task).await;
+
+    while let Ok(evt) = bus.try_recv() {
+        assert!(
+            !matches!(evt, Event::WorkspaceUpserted(_)),
+            "identical re-upsert must not re-broadcast WorkspaceUpserted",
+        );
+    }
+}
+
 #[tokio::test]
 async fn closing_pr_transfers_live_session_durably_to_pr() {
     // Regression for #173: a LIVE session on the issue must reparent
@@ -2529,6 +2790,7 @@ async fn confirm_merge_reject_pins_against_re_prompting() {
 
     let config = ServerConfig::in_memory();
     let (issue_key, _) = seed_issue_with_session(&config, "o/r#71").await;
+    attach_live_terminal(&config, &issue_key, 71).await;
     polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
     let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_pr_closing(
         "o/r#141",
@@ -2632,10 +2894,11 @@ async fn pr_with_no_closing_issues_leaves_other_workspaces_alone() {
 #[tokio::test]
 async fn merge_rewrites_terminal_meta_so_terminals_dont_orphan() {
     // Pre-seed terminal_meta as if a terminal had been spawned
-    // against the issue's session_key. After the PR merges the
-    // issue, the meta entry must be rebadged to the PR's key —
-    // otherwise reconnecting TUI clients see a terminal pointing
-    // to a workspace that no longer exists.
+    // against the issue's session_key. A live terminal stalls the
+    // auto-merge behind the confirm prompt; once the user accepts,
+    // the meta entry must be rebadged to the PR's key — otherwise
+    // reconnecting TUI clients see a terminal pointing to a
+    // workspace that no longer exists.
     use lazybox_core::{SessionKey, WorkspaceKey};
     use lazybox_ipc::{TerminalId, TerminalKind};
 
@@ -2655,6 +2918,9 @@ async fn merge_rewrites_terminal_meta_so_terminals_dont_orphan() {
         "o/r#141",
         &["o/r#71"],
     )));
+    // Live terminal → the upsert prompted instead of merging; the
+    // user's "yes" completes the merge.
+    polling::handle_confirm_merge(&config, issue_key.clone(), pr_key.clone(), true).await;
     let pr_session_key: SessionKey = (&pr_key).into();
     let meta = config.terminal_meta.lock().await;
     let entry = meta
@@ -3005,11 +3271,12 @@ async fn collapse_into_pr_folds_issue_workspace_into_claiming_pr() {
 
     let config = ServerConfig::in_memory();
 
-    // Seed an issue workspace with a live session — this is what
+    // Seed an issue workspace with a live terminal — this is what
     // triggers the auto-prompt path that the manual flow has to
-    // override. Without a session the auto path silently merges and
-    // there's nothing for the manual key to do.
+    // override. Without a live terminal the auto path silently merges
+    // and there's nothing for the manual key to do.
     let (issue_key, _session_id) = seed_issue_with_session(&config, "o/r#71").await;
+    attach_live_terminal(&config, &issue_key, 71).await;
 
     // Seed the PR that closes the issue.
     polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;

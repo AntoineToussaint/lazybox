@@ -9,6 +9,22 @@ pub enum StoreError {
     NotFound(String),
 }
 
+/// Recover the record's real `created_at` from its serialized JSON
+/// (both `Workspace` and `Project` carry the field). The kv table
+/// only stores the JSON blob, so without this every read fabricated
+/// `Utc::now()` — anything sorting or aging on the record timestamp
+/// saw a value that changed on every call. Falls back to now() when
+/// the JSON is missing the field or unparseable (legacy rows).
+pub(crate) fn created_at_from_json(json: &str) -> DateTime<Utc> {
+    #[derive(serde::Deserialize)]
+    struct CreatedAt {
+        created_at: DateTime<Utc>,
+    }
+    serde_json::from_str::<CreatedAt>(json)
+        .map(|c| c.created_at)
+        .unwrap_or_else(|_| Utc::now())
+}
+
 /// A persisted workspace record — full workspace data (PR + linked
 /// issues + worktree path + activity + read state) serialized as JSON,
 /// keyed by `WorkspaceKey`.
@@ -70,7 +86,7 @@ pub trait Store: Send + Sync {
         };
         Ok(Some(WorkspaceRecord {
             key: key.as_str().to_string(),
-            created_at: Utc::now(),
+            created_at: created_at_from_json(&json),
             workspace_json: Some(json),
         }))
     }
@@ -105,7 +121,7 @@ pub trait Store: Send + Sync {
         };
         Ok(Some(ProjectRecord {
             key: key.as_str().to_string(),
-            created_at: Utc::now(),
+            created_at: created_at_from_json(&json),
             project_json: Some(json),
         }))
     }

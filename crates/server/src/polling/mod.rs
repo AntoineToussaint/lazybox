@@ -29,13 +29,14 @@ mod scheduler;
 
 pub use scheduler::{
     CURSOR_TTL, DEFAULT_ROUND_ROBIN_N, RoundRobinPick, RoundRobinState, pick_repos_for_tick,
+    plan_round_robin_tick,
 };
 
 pub use handlers::{
-    ProviderHandle, handle_add_assignees, handle_clean_worktrees, handle_delete_orphaned_worktree,
-    handle_fetch_pr_details, handle_fetch_repo_labels, handle_inspect_worktrees, handle_merge_pr,
-    handle_request_reviewers, handle_set_assignees, handle_set_labels, post_reply,
-    prefetch_top_pr_details, remove_merged_workspace,
+    ProviderHandle, apply_pr_details, handle_add_assignees, handle_clean_worktrees,
+    handle_delete_orphaned_worktree, handle_fetch_pr_details, handle_fetch_repo_labels,
+    handle_inspect_worktrees, handle_merge_pr, handle_request_reviewers, handle_set_assignees,
+    handle_set_labels, post_reply, prefetch_top_pr_details, remove_merged_workspace,
 };
 pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 
@@ -1421,9 +1422,29 @@ pub async fn sources_for(
                     .expect("gh_client_cache poisoned")
                     .clone()
                     .filter(|c| c.credential_source() == cred_source.as_str());
-                let client_result: Result<GhClient, _> = match cached {
+                // Cap the cold-cache client build. `from_credential`
+                // makes an untimed `/user` REST call, and this runs
+                // OUTSIDE the 180s tick timeout — without a cap a
+                // hung TCP connection here wedges the poll loop
+                // forever (no tick ever starts, so no tick timeout
+                // ever fires).
+                const CLIENT_INIT_TIMEOUT: Duration = Duration::from_secs(15);
+                let client_result: Result<GhClient, String> = match cached {
                     Some(existing) => Ok(existing),
-                    None => GhClient::from_credential(cred).await,
+                    None => {
+                        match tokio::time::timeout(
+                            CLIENT_INIT_TIMEOUT,
+                            GhClient::from_credential(cred),
+                        )
+                        .await
+                        {
+                            Ok(result) => result.map_err(|e| e.to_string()),
+                            Err(_) => Err(format!(
+                                "client init timed out after {}s",
+                                CLIENT_INIT_TIMEOUT.as_secs()
+                            )),
+                        }
+                    }
                 };
                 match client_result {
                     Ok(client) => {
@@ -1497,28 +1518,30 @@ pub async fn sources_for(
                             .map(|c| c.auto_fix.to_settings())
                             .unwrap_or_default();
                         // Round-robin scheduling. Pre-fetch we:
-                        //   1. Prune stale cursor entries so repos
-                        //      the user stopped touching age out
-                        //      (otherwise the cursor would grow with
-                        //      every new involvement, never shrink).
-                        //   2. Pick the per-tick slice from the
-                        //      remaining cursor.
-                        //   3. Bump the cursor for repos we're about
-                        //      to query (even a 0-result query
-                        //      advances the rotation — without it, an
-                        //      empty repo stays "stalest" forever).
-                        //   4. Increment the tick counter AFTER the
-                        //      pick so the scheduler's K-th-tick rule
-                        //      observes the value we passed in.
+                        //   1. Ask the client whether this tick will
+                        //      actually run a full sweep. Most ticks
+                        //      take the notifications fast path and
+                        //      never consult the round-robin pick —
+                        //      advancing the cursor / tick counter on
+                        //      those stamped repos "synced" without a
+                        //      single query and evaluated the global-
+                        //      sweep modulus against an inflated
+                        //      counter.
+                        //   2. On a full-sweep tick: prune stale
+                        //      cursor entries, pick the per-tick
+                        //      slice, bump the cursor for repos we're
+                        //      about to query, and increment the tick
+                        //      counter AFTER the pick so the K-th-tick
+                        //      rule observes the value we passed in.
+                        let will_full_sweep = client.should_full_sweep();
                         let now = std::time::Instant::now();
-                        state.round_robin.prune(now);
-                        let scheduling = pick_repos_for_tick(
-                            &state.round_robin.cursor,
-                            state.round_robin.focused_repo.as_deref(),
-                            state.round_robin.tick,
+                        let scheduling = plan_round_robin_tick(
+                            &mut state.round_robin,
+                            will_full_sweep,
                             DEFAULT_ROUND_ROBIN_N,
+                            now,
                         );
-                        if scheduling.run_global || !scheduling.repos.is_empty() {
+                        if will_full_sweep {
                             tracing::info!(
                                 source = lazybox_gh::SOURCE,
                                 tick = state.round_robin.tick,
@@ -1529,10 +1552,6 @@ pub async fn sources_for(
                                 "round-robin scheduling decision"
                             );
                         }
-                        for repo in &scheduling.repos {
-                            state.round_robin.record_sync(repo, now);
-                        }
-                        state.round_robin.tick = state.round_robin.tick.wrapping_add(1);
                         sources.push(Box::new(GhSource {
                             client,
                             filter,
@@ -1791,6 +1810,10 @@ pub async fn tick_with_state(
                         state.round_robin.record_sync(repo, now);
                     }
                 }
+                // One store scan for the whole batch instead of a
+                // KV read + full workspace-list deserialize per task
+                // — see `UpsertContext`.
+                let mut upsert_ctx = UpsertContext::build(config);
                 for (i, task) in tasks.into_iter().enumerate() {
                     if task.mergeable == lazybox_core::Mergeable::Unknown {
                         saw_unknown_mergeable = true;
@@ -1799,7 +1822,11 @@ pub async fn tick_with_state(
                     let task_id = task.id.to_string();
                     polled.push(key);
                     let one_started = std::time::Instant::now();
-                    match tokio::time::timeout(UPSERT_TIMEOUT_PER_TASK, upsert(config, task)).await
+                    match tokio::time::timeout(
+                        UPSERT_TIMEOUT_PER_TASK,
+                        upsert_with_context(config, &mut upsert_ctx, task),
+                    )
+                    .await
                     {
                         Ok(()) => {
                             let one_ms = one_started.elapsed().as_millis();
@@ -2196,7 +2223,21 @@ pub async fn rescope_with_state(
                     workspace_key = %r.key,
                     "rescope: removing out-of-scope workspace"
                 );
-                delete_workspace(config, &key).await;
+                // Reap the workspace's worktrees BEFORE the row goes
+                // away — once it's deleted, `collect_tracked_sessions`
+                // can never find the paths again and the dirs leak
+                // forever. Only worktrees the inspector deems safe
+                // (clean tree, pushed, no live terminal) are removed;
+                // dirty ones are left on disk for manual recovery.
+                if let Some(ws) = stored_ws.as_ref() {
+                    handlers::reap_safe_workspace_worktrees(config, ws).await;
+                }
+                // `archive: false` — rescope is a system decision, not
+                // user intent. Archiving here would permanently block
+                // the workspace from re-creation when the upstream
+                // item comes back into scope (truncated query, scope
+                // re-add, reopened PR).
+                delete_workspace_internal(config, &key, /*archive=*/ false).await;
                 state.prompted_out_of_scope.remove(r.key.as_str());
             }
             Some(count) => {
@@ -2700,12 +2741,61 @@ async fn run_tick_inner(
 /// polled and a PR already claims it, we route the issue update into
 /// the PR workspace instead of building a duplicate.
 pub async fn upsert(config: &ServerConfig, task: Task) {
+    let mut ctx = UpsertContext::build(config);
+    upsert_with_context(config, &mut ctx, task).await;
+}
+
+/// Per-tick context shared across a batch of `upsert` calls. Both
+/// fields used to be re-derived from the store on EVERY task — a
+/// KV read + JSON parse for the archive set, and a full workspace-
+/// list deserialize for the closes-issue lookup — which made the
+/// upsert loop's cost quadratic in inbox size. The tick builds this
+/// once and threads it through; the one-off public `upsert` builds a
+/// fresh context per call (identical behavior, just not batched).
+struct UpsertContext {
+    /// Workspace keys the user explicitly archived (`Shift-X`).
+    archived: std::collections::HashSet<String>,
+    /// `closes_issues` TaskId → claiming PR workspace key. Mirrors
+    /// what `pr_workspace_claiming_issue` derives per call. Updated
+    /// inline as PR tasks flow through the batch so an issue polled
+    /// AFTER its PR in the same tick still routes correctly.
+    closes_index: std::collections::HashMap<lazybox_core::TaskId, WorkspaceKey>,
+}
+
+impl UpsertContext {
+    fn build(config: &ServerConfig) -> Self {
+        let archived = load_archived_set(config);
+        let mut closes_index = std::collections::HashMap::new();
+        if let Ok(records) = config.store.list_workspaces() {
+            for record in records {
+                let Some(json) = record.workspace_json else {
+                    continue;
+                };
+                let Ok(ws) = serde_json::from_str::<Workspace>(&json) else {
+                    continue;
+                };
+                let Some(pr) = &ws.pr else {
+                    continue;
+                };
+                for id in &pr.closes_issues {
+                    closes_index.entry(id.clone()).or_insert_with(|| ws.key.clone());
+                }
+            }
+        }
+        Self {
+            archived,
+            closes_index,
+        }
+    }
+}
+
+async fn upsert_with_context(config: &ServerConfig, ctx: &mut UpsertContext, task: Task) {
     // Skip re-creating workspaces the user explicitly archived
     // (`Shift-X`). Without this, every 60s tick re-creates the row
     // from the upstream task and the dismiss feels broken. Cached
     // archive set lives in the store under KV_KEY_ARCHIVED.
     let candidate_key = lazybox_core::workspace_key_for(&task);
-    if load_archived_set(config).contains(&candidate_key) {
+    if ctx.archived.contains(&candidate_key) {
         tracing::debug!(
             workspace_key = %candidate_key,
             "upsert: skipping archived workspace"
@@ -2713,14 +2803,23 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
         return;
     }
 
-    // For issues: if a PR somewhere already claims this issue as
-    // closed-by, route the upsert into that PR workspace. This is
-    // the "issue polled AFTER its PR" path. We only kick in when
-    // the issue has no standalone workspace yet — once one exists,
-    // either the PR poll will collapse them or the issue's own row
-    // remains until the PR shows up. Polling is cheap to scan: the
-    // workspace list is bounded by the user's filter scope.
-    if !is_pr_task(&task) {
+    if is_pr_task(&task) {
+        // Keep the per-tick index current: a PR carrying closing refs
+        // claims those issues for the rest of this batch, so an issue
+        // task later in the same tick routes into this PR workspace
+        // instead of building a standalone row.
+        for id in &task.closes_issues {
+            ctx.closes_index
+                .entry(id.clone())
+                .or_insert_with(|| WorkspaceKey::new(candidate_key.clone()));
+        }
+    } else {
+        // For issues: if a PR somewhere already claims this issue as
+        // closed-by, route the upsert into that PR workspace. This is
+        // the "issue polled AFTER its PR" path. We only kick in when
+        // the issue has no standalone workspace yet — once one exists,
+        // either the PR poll will collapse them or the issue's own row
+        // remains until the PR shows up.
         let issue_key = WorkspaceKey::new(candidate_key.clone());
         let already_standalone = config
             .store
@@ -2728,7 +2827,7 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
             .ok()
             .flatten()
             .is_some();
-        if !already_standalone && let Some(pr_key) = pr_workspace_claiming_issue(config, &task.id) {
+        if !already_standalone && let Some(pr_key) = ctx.closes_index.get(&task.id).cloned() {
             tracing::info!(
                 issue = %task.id,
                 pr_workspace = %pr_key,
@@ -2766,7 +2865,7 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
     //    polls in with `closes_issues`, we fold standalone issue
     //    workspaces into it here. Async (touches the store +
     //    `terminal_meta`) but doesn't yet write the PR's own row.
-    let mut workspace = prepare_upsert(config, key, task).await;
+    let (mut workspace, pending_merges) = prepare_upsert(config, key, task).await;
 
     // 2. MIGRATE: rename worktree dirs to match the (possibly
     //    new) PR slug. Async git operation. If it fails, log
@@ -2777,8 +2876,11 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
 
     // 3. COMMIT: persist the final state + broadcast it. Failures
     //    here log at `error` so an operator can spot a workspace
-    //    that won't survive restart.
+    //    that won't survive restart. Issue rows absorbed by the
+    //    merge are deleted only AFTER this commit lands — see
+    //    `finalize_issue_merges` for why the order matters.
     commit_upsert(config, key, workspace);
+    finalize_issue_merges(config, key, pending_merges);
 
     // 4. MERGED: the PR just merged → either reap its safe-to-delete
     //    worktrees silently (when `worktree.auto_cleanup_merged` is
@@ -2832,7 +2934,11 @@ fn merged_transition_pr_number(prev: Option<&Workspace>, task: &Task) -> Option<
 /// drive the prepare step against a mock store without committing
 /// real state — the "did the merge attach the issue task?" question
 /// is now answerable without the full IPC bus + store side effects.
-async fn prepare_upsert(config: &ServerConfig, key: &WorkspaceKey, task: Task) -> Workspace {
+async fn prepare_upsert(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    task: Task,
+) -> (Workspace, Vec<PendingIssueMerge>) {
     let existing = config
         .store
         .get_workspace(key)
@@ -2871,8 +2977,8 @@ async fn prepare_upsert(config: &ServerConfig, key: &WorkspaceKey, task: Task) -
     // Issue-collapse pass — see `merge_closing_issue_workspaces`.
     // Happens here (in prepare) so the migration step sees the
     // final session set and renames worktrees in one pass.
-    merge_closing_issue_workspaces(config, &mut workspace).await;
-    workspace
+    let pending_merges = merge_closing_issue_workspaces(config, &mut workspace).await;
+    (workspace, pending_merges)
 }
 
 /// Side-effect-only commit: serialize + persist + broadcast.
@@ -2906,6 +3012,29 @@ pub(super) fn commit_upsert(config: &ServerConfig, key: &WorkspaceKey, workspace
             None
         }
     };
+    // No-change short-circuit: the steady-state poll re-commits every
+    // workspace every tick even when the upstream task is byte-for-byte
+    // identical. Comparing against the stored serialization skips both
+    // the SQLite write and the `WorkspaceUpserted` broadcast (every
+    // connected client re-renders on that event) when nothing changed.
+    // Byte equality only — any real change (task fields, read state,
+    // sessions) produces different JSON and flows through normally.
+    if let Some(new_json) = json.as_deref() {
+        let unchanged = config
+            .store
+            .get_workspace(key)
+            .ok()
+            .flatten()
+            .and_then(|r| r.workspace_json)
+            .is_some_and(|prev| prev == new_json);
+        if unchanged {
+            tracing::trace!(
+                workspace_key = %key.as_str(),
+                "commit_upsert: unchanged — skipping write + broadcast"
+            );
+            return;
+        }
+    }
     let record = WorkspaceRecord {
         key: key.as_str().to_string(),
         created_at: workspace.created_at,
@@ -3043,24 +3172,68 @@ fn pr_workspace_claiming_issue(
 /// finish what they were doing).
 const MERGE_REPROMPT_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
 
-async fn merge_closing_issue_workspaces(config: &ServerConfig, workspace: &mut Workspace) {
+/// An issue workspace absorbed into a PR during
+/// [`merge_closing_issue_workspaces`], whose store row must still be
+/// deleted. Deletion is deferred to [`finalize_issue_merges`] — AFTER
+/// the PR's own commit — so a crash or timeout between the absorb and
+/// the commit can't leave the moved sessions in neither stored
+/// workspace.
+struct PendingIssueMerge {
+    issue_key: WorkspaceKey,
+    issue_label: String,
+    pr_label: String,
+}
+
+/// Issue id a lazybox-named branch implies. Issue spawns check out
+/// `lazybox/issue-<n>` (see `spawn_handler::derive_branch_for_branchless`),
+/// so a PR opened from that worktree closes issue `<repo>#<n>` even
+/// when neither GitHub's `closingIssuesReferences` nor the body text
+/// says so yet (the agent forgot the "Closes #N" line, or the lazy
+/// details fetch hasn't run). Used as an extra collapse candidate —
+/// the "target must be an ISSUE workspace" filter downstream keeps a
+/// false positive harmless.
+fn issue_id_from_branch(pr: &Task) -> Option<lazybox_core::TaskId> {
+    let number = pr
+        .branch
+        .as_deref()?
+        .strip_prefix("lazybox/issue-")
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))?;
+    let repo = pr.repo.as_deref().filter(|r| !r.is_empty())?;
+    Some(lazybox_core::TaskId {
+        source: pr.id.source.clone(),
+        key: format!("{repo}#{number}"),
+    })
+}
+
+async fn merge_closing_issue_workspaces(
+    config: &ServerConfig,
+    workspace: &mut Workspace,
+) -> Vec<PendingIssueMerge> {
+    let mut pending: Vec<PendingIssueMerge> = Vec::new();
     let Some(pr) = workspace.pr.as_ref() else {
-        return;
+        return pending;
     };
-    if pr.closes_issues.is_empty() {
+    let mut closed_ids: Vec<lazybox_core::TaskId> = pr.closes_issues.clone();
+    // Branch-name fallback: a `lazybox/issue-N` head branch claims
+    // issue #N even before the closing refs are known.
+    if let Some(id) = issue_id_from_branch(pr)
+        && !closed_ids.contains(&id)
+    {
+        closed_ids.push(id);
+    }
+    if closed_ids.is_empty() {
         tracing::trace!(
             workspace = %workspace.key,
             "merge: PR has no closes_issues — nothing to fold"
         );
-        return;
+        return pending;
     }
     tracing::debug!(
         workspace = %workspace.key,
-        candidates = ?pr.closes_issues.iter().map(|t| &t.key).collect::<Vec<_>>(),
+        candidates = ?closed_ids.iter().map(|t| &t.key).collect::<Vec<_>>(),
         "merge: scanning closes_issues for collapse candidates"
     );
 
-    let mut closed_ids: Vec<lazybox_core::TaskId> = pr.closes_issues.clone();
     closed_ids.dedup();
 
     for issue_id in closed_ids {
@@ -3091,12 +3264,18 @@ async fn merge_closing_issue_workspaces(config: &ServerConfig, workspace: &mut W
             continue;
         }
 
-        // Live-session safety net: stall and prompt rather than
-        // silently absorbing the user's running work. `merge_prompts`
-        // dedupes so a user staring at the modal doesn't see fresh
-        // copies every 60s; its `rejected` set is the "no, leave them
-        // separate" pin until lazybox restarts.
-        if !issue_ws.sessions.is_empty() {
+        // Live-terminal safety net: stall and prompt rather than
+        // silently absorbing the user's running work. The gate is
+        // LIVE terminals (`terminal_meta`), not session records: a
+        // session whose PTY died long ago is just metadata, and
+        // prompting on it would park the auto-transfer behind a modal
+        // forever (re-fired every 5 min, never completing unattended).
+        // Dead session records move over silently with the merge.
+        // `merge_prompts` dedupes so a user staring at the modal
+        // doesn't see fresh copies every 60s; its `rejected` set is
+        // the "no, leave them separate" pin until lazybox restarts.
+        let live_terminals = handlers::count_live_terminals(config, &issue_key).await;
+        if live_terminals > 0 {
             let issue_key_str = issue_key.as_str().to_string();
             let should_prompt = {
                 let mut prompts = config.merge_prompts.lock().await;
@@ -3123,28 +3302,22 @@ async fn merge_closing_issue_workspaces(config: &ServerConfig, workspace: &mut W
                     pr_workspace_key: workspace.key.clone(),
                     issue_label: workspace_label_for(&issue_ws, &issue_key),
                     pr_label: workspace_label_for(workspace, &workspace.key),
-                    active_terminal_count: issue_ws.sessions.len(),
+                    active_terminal_count: live_terminals,
                 });
             }
             continue;
         }
 
-        // Empty issue workspace — safe to merge silently. Emit a
-        // notice so the user sees the row collapse rather than
-        // mysteriously vanish.
+        // No live terminal — safe to merge silently. Sessions (and
+        // their dead-but-recoverable records) move onto the PR here;
+        // the issue's store row is deleted by `finalize_issue_merges`
+        // only after the PR commit lands, so a cancellation between
+        // the two never strands the moved sessions row-less.
         let issue_label = workspace_label_for(&issue_ws, &issue_key);
         let pr_label = workspace_label_for(workspace, &workspace.key);
         absorb_issue_workspace(config, workspace, issue_ws).await;
-        if let Err(e) = config.store.delete_workspace(&issue_key) {
-            tracing::warn!(
-                issue_workspace = %issue_key,
-                "delete_workspace during PR merge failed: {e}"
-            );
-        }
-        let _ = config.bus.send(Event::WorkspaceRemoved(issue_key.clone()));
-        let _ = config.bus.send(Event::WorkspaceMerged {
-            issue_workspace_key: issue_key.clone(),
-            pr_workspace_key: workspace.key.clone(),
+        pending.push(PendingIssueMerge {
+            issue_key: issue_key.clone(),
             issue_label,
             pr_label,
         });
@@ -3155,6 +3328,62 @@ async fn merge_closing_issue_workspaces(config: &ServerConfig, workspace: &mut W
             "merged issue workspace into PR (closingIssuesReferences)"
         );
     }
+    pending
+}
+
+/// Second half of the silent issue→PR merge: drop the absorbed issue
+/// rows + broadcast the removal/merge notices. MUST run after
+/// `commit_upsert` persisted the PR (now carrying the moved sessions)
+/// — the auto path used to delete first, and a cancellation (e.g. the
+/// 15s per-task upsert timeout) between the delete and the commit
+/// left the sessions in neither stored workspace. Commit-then-delete
+/// keeps them recoverable under the PR key throughout the window,
+/// matching what `handle_confirm_merge` always did.
+fn finalize_issue_merges(
+    config: &ServerConfig,
+    pr_key: &WorkspaceKey,
+    pending: Vec<PendingIssueMerge>,
+) {
+    for merge in pending {
+        if let Err(e) = config.store.delete_workspace(&merge.issue_key) {
+            tracing::warn!(
+                issue_workspace = %merge.issue_key,
+                "delete_workspace during PR merge failed: {e}"
+            );
+        }
+        let _ = config
+            .bus
+            .send(Event::WorkspaceRemoved(merge.issue_key.clone()));
+        let _ = config.bus.send(Event::WorkspaceMerged {
+            issue_workspace_key: merge.issue_key,
+            pr_workspace_key: pr_key.clone(),
+            issue_label: merge.issue_label,
+            pr_label: merge.pr_label,
+        });
+    }
+}
+
+/// Re-run the issue-collapse pass for a stored PR workspace and
+/// persist the result. Used when something OTHER than a provider poll
+/// populates `closes_issues` — today the lazy details backfill
+/// (`apply_pr_details`): the inbox SEARCH_QUERY omits
+/// `closingIssuesReferences`, so the collapse inside `prepare_upsert`
+/// never sees the refs until the details fetch writes them, and that
+/// commit path didn't re-run the merge — the issue workspace stalled
+/// standalone until the next full PR poll.
+pub(super) async fn collapse_closing_issues_for(config: &ServerConfig, key: &WorkspaceKey) {
+    let Some(mut workspace) = load_workspace(config, key) else {
+        return;
+    };
+    let pending = merge_closing_issue_workspaces(config, &mut workspace).await;
+    if pending.is_empty() {
+        // Nothing absorbed (no candidates, or a live-terminal prompt
+        // fired instead) — skip the redundant commit + broadcast.
+        return;
+    }
+    crate::spawn_handler::migrate_session_paths_if_needed(config, &mut workspace).await;
+    commit_upsert(config, key, workspace);
+    finalize_issue_merges(config, key, pending);
 }
 
 /// The TUI replied to a `WorkspaceMergePending` prompt. Accept → run
@@ -3772,12 +4001,25 @@ pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) {
 }
 
 pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) {
+    delete_workspace_internal(config, key, /*archive=*/ true).await
+}
+
+/// Inner delete with the archive decision explicit. User-intent
+/// deletes (`Shift-X`, project cascade, merged-PR removal) archive so
+/// the next poll doesn't resurrect the row. System-driven deletes
+/// (rescope) must NOT archive: the workspace fell out of the polled
+/// set for upstream/transient reasons (truncated query, scope edit, a
+/// PR that closed and later reopens), and the archive guard in
+/// `upsert` would permanently block it from ever being re-created.
+async fn delete_workspace_internal(config: &ServerConfig, key: &WorkspaceKey, archive: bool) {
     let key_str = key.as_str();
     // Record the archive so the next poll's upsert skips re-creating
     // this row. Without this, the user pressed `Shift-X`, the row
     // disappeared briefly, then the next 60s tick re-added it from
     // the upstream task — extremely confusing.
-    archive_workspace_key(config, key_str);
+    if archive {
+        archive_workspace_key(config, key_str);
+    }
 
     // Find every terminal whose session_key matches via
     // terminal_meta — the authoritative wire-side mapping. Earlier

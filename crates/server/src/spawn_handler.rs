@@ -53,8 +53,28 @@ const SNAPSHOT_PER_SESSION_TIMEOUT: Duration = Duration::from_millis(500);
 /// a future "kill all" command).
 static NEXT_TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
 
-fn alloc_terminal_id() -> TerminalId {
-    TerminalId(NEXT_TERMINAL_ID.fetch_add(1, Ordering::Relaxed))
+/// Store key for the highest terminal id ever allocated. Seeding the
+/// allocator from it on every allocation makes ids unique across
+/// daemon restarts, not just within one process — a terminal id is
+/// referenced by artifacts that outlive the process (the per-terminal
+/// hook settings file path), so a fresh daemon restarting at 1 would
+/// silently reuse a surviving session's id.
+const TERMINAL_ID_HIGH_WATER_KEY: &str = "terminal-id-high-water";
+
+fn alloc_terminal_id(store: &dyn lazybox_store::Store) -> TerminalId {
+    // `fetch_max` (not a one-shot seed) so the allocator is correct
+    // even when several stores are seen in one process (tests) — the
+    // counter only ever moves forward.
+    if let Ok(Some(raw)) = store.get_kv(TERMINAL_ID_HIGH_WATER_KEY)
+        && let Ok(high_water) = raw.trim().parse::<u64>()
+    {
+        NEXT_TERMINAL_ID.fetch_max(high_water + 1, Ordering::Relaxed);
+    }
+    let id = NEXT_TERMINAL_ID.fetch_add(1, Ordering::Relaxed);
+    if let Err(e) = store.set_kv(TERMINAL_ID_HIGH_WATER_KEY, &id.to_string()) {
+        tracing::warn!("terminal-id high-water mark: store write failed: {e}");
+    }
+    TerminalId(id)
 }
 
 /// Build the argv for `kind`. None means we don't know how to spawn
@@ -106,15 +126,35 @@ fn hook_settings_path(terminal_id: TerminalId) -> PathBuf {
 
 /// The shell command Claude runs on each lifecycle hook. Uses the
 /// running lazybox binary's absolute path (so it works regardless of
-/// `$PATH` inside the agent's environment) and bakes in the terminal id
-/// lazybox allocated, so the daemon correlates the hook back to this exact
-/// terminal with no guessing.
-fn hook_command(terminal_id: TerminalId) -> String {
-    let exe = std::env::current_exe()
+/// `$PATH` inside the agent's environment) and bakes in the backend
+/// session key (the tmux session name), so the daemon correlates the
+/// hook back to this exact terminal with no guessing. The backend key
+/// — not the wire `TerminalId` — because the agent process can outlive
+/// the daemon (tmux): after a restart the surviving session's hooks
+/// must still resolve, and the backend key is the identity that
+/// survives while terminal ids are reallocated.
+fn hook_command(backend_key: &str) -> String {
+    format!(
+        "\"{}\" hook-ingest --backend-key \"{backend_key}\"",
+        lazybox_exe()
+    )
+}
+
+/// Hook command with no correlation flag — what the pre-spawn
+/// placeholder settings file carries (see [`write_hook_settings`]'s
+/// callers). `hook-ingest` without a correlation flag drains stdin and
+/// exits 0, so if the agent ever races the post-spawn rewrite and
+/// reads the placeholder, its hooks are harmless no-ops and the
+/// session just keeps PTY detection.
+fn hook_command_placeholder() -> String {
+    format!("\"{}\" hook-ingest", lazybox_exe())
+}
+
+fn lazybox_exe() -> String {
+    std::env::current_exe()
         .ok()
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "lazybox".to_string());
-    format!("\"{exe}\" hook-ingest --terminal {}", terminal_id.0)
+        .unwrap_or_else(|| "lazybox".to_string())
 }
 
 /// Read and parse the user's `~/.claude/settings.json`, if present, so
@@ -134,18 +174,32 @@ fn read_user_claude_settings() -> Option<serde_json::Value> {
 /// the agent's settings flag, or `None` when the agent has no hook
 /// support or writing failed (in which case the spawn proceeds without
 /// hooks and falls back to PTY detection).
+///
+/// Written in two phases by `handle_spawn`, because the hook command
+/// carries the backend session key and that key only exists once
+/// `backend.spawn` returns — while the settings *path* must already be
+/// in the argv the backend launches:
+///   1. pre-spawn, with [`hook_command_placeholder`] — so the file
+///      exists (with the user's settings merged in) by the time the
+///      agent boots, whatever the timing;
+///   2. post-spawn, with [`hook_command`]`(backend_key)` — an atomic
+///      rewrite (temp + rename) that lands within the same tick as
+///      `backend.spawn` returning, long before the agent's runtime
+///      gets around to reading its settings. If the agent somehow
+///      reads the placeholder first, its hooks are no-ops and the
+///      session falls back to PTY detection — degraded, never wrong.
 fn write_hook_settings(
     config: &ServerConfig,
     kind: &TerminalKind,
     terminal_id: TerminalId,
+    command: &str,
 ) -> Option<PathBuf> {
     let TerminalKind::Agent(agent_id) = kind else {
         return None;
     };
     let agent = config.agents.get(agent_id)?;
-    let command = hook_command(terminal_id);
     let user = read_user_claude_settings();
-    let settings = agent.build_hook_settings(&command, user.as_ref())?;
+    let settings = agent.build_hook_settings(command, user.as_ref())?;
     let path = hook_settings_path(terminal_id);
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -154,13 +208,20 @@ fn write_hook_settings(
         }
     }
     let json = serde_json::to_string_pretty(&settings).ok()?;
-    match std::fs::write(&path, json) {
+    // Write-to-temp + rename so a concurrent reader (the just-launched
+    // agent) can never observe a torn file on the phase-2 rewrite.
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, json) {
+        tracing::warn!("hook settings: write {}: {e}", tmp.display());
+        return None;
+    }
+    match std::fs::rename(&tmp, &path) {
         Ok(()) => {
             tracing::info!(?terminal_id, path = %path.display(), "wrote hook settings file");
             Some(path)
         }
         Err(e) => {
-            tracing::warn!("hook settings: write {}: {e}", path.display());
+            tracing::warn!("hook settings: rename into {}: {e}", path.display());
             None
         }
     }
@@ -277,18 +338,27 @@ pub async fn handle_spawn(
         elapsed_ms = t0.elapsed().as_millis(),
         "handle_spawn: session/worktree resolved",
     );
-    // Allocate the terminal id up front so the hook settings file can
-    // bake it into the `lazybox hook-ingest --terminal <id>` command —
-    // that gives the daemon an exact, guess-free correlation from a
-    // later hook payload back to this terminal. (The auxiliary/primary
-    // map inserts still happen below, after the backend spawn.)
-    let terminal_id = alloc_terminal_id();
+    // Allocate the terminal id up front — the per-session hook settings
+    // file path is derived from it, and that path must be in the argv
+    // before the backend spawns. (The auxiliary/primary map inserts
+    // still happen below, after the backend spawn.)
+    let terminal_id = alloc_terminal_id(&*config.store);
     // For agents that report state through structured lifecycle hooks
     // (Claude), generate a per-session settings file wiring our hook
     // command into every tracked event, then launch with `--settings`.
     // Agents without hook support get `None` and keep PTY detection.
-    let hook_settings = write_hook_settings(config, &kind, terminal_id);
-    let argv = match argv_for(config, &kind, &cwd_path, skip_permissions, hook_settings) {
+    // Phase 1 of 2: placeholder hook command — the real one needs the
+    // backend key, which only exists after `backend.spawn` (see
+    // `write_hook_settings`).
+    let hook_settings =
+        write_hook_settings(config, &kind, terminal_id, &hook_command_placeholder());
+    let argv = match argv_for(
+        config,
+        &kind,
+        &cwd_path,
+        skip_permissions,
+        hook_settings.clone(),
+    ) {
         Some(a) => a,
         None => {
             let _ = config.bus.send(Event::provider_error_permanent(
@@ -342,6 +412,11 @@ pub async fn handle_spawn(
         elapsed_ms = t0.elapsed().as_millis(),
         "handle_spawn: backend.spawn ok",
     );
+    // Phase 2 of 2: now the backend key exists, atomically rewrite the
+    // settings file with the real correlated hook command.
+    if hook_settings.is_some() {
+        let _ = write_hook_settings(config, &kind, terminal_id, &hook_command(&backend_key));
+    }
 
     // `terminal_id` was allocated above (before argv) so the hook
     // settings file could embed it. Insert the auxiliary maps BEFORE the
@@ -405,6 +480,7 @@ pub async fn handle_spawn(
     let agent_states_map = config.agent_states.clone();
     let agent_detect_resets_map = config.agent_detect_resets.clone();
     let hook_driven_map = config.hook_driven_terminals.clone();
+    let prompt_submit_map = config.prompt_submit_signals.clone();
     let terminal_meta_map = config.terminal_meta.clone();
     let no_permission_map = config.no_permission_terminals.clone();
     let store_for_pump = config.store.clone();
@@ -504,7 +580,9 @@ pub async fn handle_spawn(
             session_key: &SessionKey,
             last_input_needed_at: &mut Option<std::time::Instant>,
             hysteresis: std::time::Duration,
-            hook_driven: &std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<TerminalId>>>,
+            hook_driven: &std::sync::Arc<
+                tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
+            >,
         ) {
             const STATE_BUF_CAP: usize = 32 * 1024;
             let Some(agent) = agent else {
@@ -558,15 +636,22 @@ pub async fn handle_spawn(
             //     the `?` never shows on a hook-driven terminal. The PTY
             //     detector's recency gating keeps this from leaking the
             //     stale-scrollback false positives it once produced.
-            // A terminal that never reported a hook isn't in the set and
+            // When the last hook is older than `HOOK_STALENESS`, the
+            // gate opens entirely: hooks that stopped flowing (socket
+            // hiccup, helper failure) must degrade the terminal back to
+            // scraping rather than freeze it on the last hook state.
+            // A terminal that never reported a hook isn't in the map and
             // keeps full PTY detection unchanged.
-            if hook_driven.lock().await.contains(&id) {
-                let pty_correction = new_state == lazybox_ipc::AgentState::InputNeeded
-                    || (new_state == lazybox_ipc::AgentState::Idle
-                        && agent.detect_ready_for_prompt(detect_window));
-                if !pty_correction {
-                    return;
-                }
+            let last_hook_at = hook_driven.lock().await.get(&id).copied();
+            if let Some(last_hook_at) = last_hook_at
+                && !pty_reading_allowed(
+                    new_state,
+                    agent.detect_ready_for_prompt(detect_window),
+                    last_hook_at.elapsed(),
+                    HOOK_STALENESS,
+                )
+            {
+                return;
             }
             // Trace-level on steady-state runs (claude emits 100+
             // chunks/sec during streaming and we don't want to drown
@@ -789,6 +874,7 @@ pub async fn handle_spawn(
         agent_states_map.lock().await.remove(&id_for_pump);
         agent_detect_resets_map.lock().await.remove(&id_for_pump);
         hook_driven_map.lock().await.remove(&id_for_pump);
+        prompt_submit_map.lock().await.remove(&id_for_pump);
         terminal_meta_map.lock().await.remove(&id_for_pump);
         no_permission_map.lock().await.remove(&id_for_pump);
         let _ = store_for_pump.delete_kv(&format!("terminal:{key_for_pump}"));
@@ -821,6 +907,7 @@ pub async fn handle_spawn(
         let ready_signal = ready_signal_for_inject;
         let agent_states = config.agent_states.clone();
         let t0_for_inject = t0;
+        let config_for_inject = config.clone();
         tokio::spawn(async move {
             // Wait for the agent's input box to be drawn AND no
             // permission gate to be up — i.e. "claude is genuinely
@@ -912,11 +999,23 @@ pub async fn handle_spawn(
             // here and we skip the second write entirely.
             if let Some(submit_bytes) = submit {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let confirm = prepare_submit_confirmation(&config_for_inject, id).await;
                 if let Err(e) = backend.write(&backend_key, &submit_bytes).await {
                     tracing::warn!(
                         terminal_id = ?id,
                         "initial_prompt: backend.write(submit) failed: {e}"
                     );
+                    return;
+                }
+                if let Some(confirm) = confirm {
+                    confirm_prompt_submission(
+                        confirm,
+                        &*backend,
+                        &backend_key,
+                        &submit_bytes,
+                        SUBMIT_CONFIRM_DEADLINE,
+                    )
+                    .await;
                 }
             }
         });
@@ -1310,6 +1409,33 @@ pub(crate) fn skip_permissions_for(autonomous: bool, cfg: &lazybox_config::Confi
 /// no prompt and stay human-in-the-loop.
 pub(crate) fn spawn_is_autonomous(initial_prompt: &Option<String>) -> bool {
     initial_prompt.is_some()
+}
+
+/// How old a terminal's most recent hook may be before the PTY
+/// detector regains full authority over it. Hooks normally arrive
+/// every few seconds while Claude works (each tool call fires two);
+/// half a minute of silence on a terminal whose PTY says `Working`
+/// means the hook pipeline has stopped flowing (socket hiccup, helper
+/// failure) and screen-scraping is the better signal again.
+const HOOK_STALENESS: Duration = Duration::from_secs(30);
+
+/// Whether a PTY-detector reading may be emitted for a hook-driven
+/// terminal. Fresh hooks own Working↔Idle, so only two corrections
+/// pass: an on-screen permission dialog (`InputNeeded`) and an
+/// affirmatively-recognized idle composer. Once the last hook is older
+/// than `staleness`, every reading passes — the terminal degrades to
+/// plain PTY detection instead of freezing on the last hook state.
+fn pty_reading_allowed(
+    new_state: lazybox_ipc::AgentState,
+    ready_for_prompt: bool,
+    since_last_hook: Duration,
+    staleness: Duration,
+) -> bool {
+    if since_last_hook >= staleness {
+        return true;
+    }
+    new_state == lazybox_ipc::AgentState::InputNeeded
+        || (new_state == lazybox_ipc::AgentState::Idle && ready_for_prompt)
 }
 
 /// Hysteresis decision for the edge that LEAVES `InputNeeded`.
@@ -1750,6 +1876,133 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
 /// prompt from leaking the waiter task indefinitely.
 const INJECT_INPUT_DEADLINE: Duration = Duration::from_secs(120);
 
+/// How long the inject paths wait for proof an injected prompt's
+/// submit actually registered — a `UserPromptSubmit` hook or a
+/// `Working` transition — before resending the Enter keystroke once.
+/// Claude fires `UserPromptSubmit` synchronously with the submit, so
+/// in the healthy case this resolves in well under a second.
+const SUBMIT_CONFIRM_DEADLINE: Duration = Duration::from_secs(3);
+
+/// Wait plumbing for [`confirm_prompt_submission`], registered BEFORE
+/// the submit keystroke is written so a fast hook can't race the
+/// waiter (`Notify::notify_one` stores a permit; the bus receiver is
+/// subscribed up front for the same reason).
+struct SubmitConfirmation {
+    terminal_id: TerminalId,
+    signal: std::sync::Arc<tokio::sync::Notify>,
+    events: tokio::sync::broadcast::Receiver<Event>,
+    signals_map: std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<TerminalId, std::sync::Arc<tokio::sync::Notify>>,
+        >,
+    >,
+}
+
+/// Register the proof-of-submission watchers for `terminal_id`.
+/// Returns `None` when the terminal isn't hook-driven: without hooks
+/// there's no submission evidence to wait for, so those terminals keep
+/// the existing fire-and-forget submit.
+async fn prepare_submit_confirmation(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+) -> Option<SubmitConfirmation> {
+    if !config
+        .hook_driven_terminals
+        .lock()
+        .await
+        .contains_key(&terminal_id)
+    {
+        return None;
+    }
+    let signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    config
+        .prompt_submit_signals
+        .lock()
+        .await
+        .insert(terminal_id, signal.clone());
+    Some(SubmitConfirmation {
+        terminal_id,
+        signal,
+        events: config.bus.subscribe(),
+        signals_map: config.prompt_submit_signals.clone(),
+    })
+}
+
+/// After the paste + Enter on a hook-driven terminal, wait up to
+/// `deadline` for evidence the prompt actually entered Claude's turn:
+/// the `UserPromptSubmit` hook (forwarded by `handle_ingest_hook`
+/// through the registered signal) or a `Working` transition on the
+/// bus. If neither arrives, the prompt is almost certainly parked in
+/// the composer — the paste landed but the Enter was swallowed as a
+/// soft line break (issue #122) — so the submit keystroke is resent
+/// exactly ONCE. Only the Enter, never the prompt body: the body did
+/// land, and resending it would duplicate the instruction.
+async fn confirm_prompt_submission(
+    mut confirm: SubmitConfirmation,
+    backend: &dyn crate::backend::SessionBackend,
+    backend_key: &str,
+    submit_bytes: &[u8],
+    deadline: Duration,
+) {
+    let confirmed = await_submit_evidence(
+        &confirm.signal,
+        &mut confirm.events,
+        confirm.terminal_id,
+        deadline,
+    )
+    .await;
+    confirm
+        .signals_map
+        .lock()
+        .await
+        .remove(&confirm.terminal_id);
+    if confirmed {
+        return;
+    }
+    tracing::info!(
+        terminal_id = ?confirm.terminal_id,
+        "no UserPromptSubmit / Working within {deadline:?} of the submit — \
+         prompt likely parked in the composer; resending Enter once",
+    );
+    if let Err(e) = backend.write(backend_key, submit_bytes).await {
+        tracing::warn!(
+            terminal_id = ?confirm.terminal_id,
+            "submit resend: backend.write failed: {e}"
+        );
+    }
+}
+
+/// True when submission evidence arrived before `deadline`: the
+/// per-terminal `UserPromptSubmit` signal, or an `Event::AgentState`
+/// flipping this terminal to `Working`.
+async fn await_submit_evidence(
+    signal: &tokio::sync::Notify,
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    terminal_id: TerminalId,
+    deadline: Duration,
+) -> bool {
+    let wait = async {
+        tokio::select! {
+            _ = signal.notified() => true,
+            confirmed = async {
+                loop {
+                    match events.recv().await {
+                        Ok(Event::AgentState {
+                            terminal_id: tid,
+                            state: lazybox_ipc::AgentState::Working,
+                            ..
+                        }) if tid == terminal_id => break true,
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break false,
+                    }
+                }
+            } => confirmed,
+        }
+    };
+    matches!(tokio::time::timeout(deadline, wait).await, Ok(true))
+}
+
 /// Park until the agent on `terminal_id` leaves `InputNeeded` — i.e. the
 /// permission gate / chooser / Y-N prompt it was blocked on has been
 /// answered and it's safe to deliver an injected prompt. Returns `true`
@@ -1892,6 +2145,7 @@ pub async fn handle_inject_prompt(
     let states = config.agent_states.clone();
     let bus = config.bus.clone();
     let id = terminal_id;
+    let config_for_confirm = config.clone();
     tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + INJECT_INPUT_DEADLINE;
         let mut events = events;
@@ -1934,8 +2188,20 @@ pub async fn handle_inject_prompt(
         // paste is a soft line break).
         if let Some(submit_bytes) = submit {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let confirm = prepare_submit_confirmation(&config_for_confirm, id).await;
             if let Err(e) = backend.write(&backend_key, &submit_bytes).await {
                 tracing::warn!("inject_prompt: backend.write(submit) failed: {e}");
+                return;
+            }
+            if let Some(confirm) = confirm {
+                confirm_prompt_submission(
+                    confirm,
+                    &*backend,
+                    &backend_key,
+                    &submit_bytes,
+                    SUBMIT_CONFIRM_DEADLINE,
+                )
+                .await;
             }
         }
     });
@@ -1967,6 +2233,20 @@ pub async fn handle_close(config: &ServerConfig, terminal_id: TerminalId) {
 /// hook-driven (so the PTY pump yields `Working`/`InputNeeded` to hooks)
 /// and, when the hook implies a state, broadcasts the transition.
 ///
+/// Correlation is by `backend_key` — the stable backend session key the
+/// daemon baked into the hook command at spawn — reverse-resolved over
+/// the live `terminals` map. The backend key survives daemon restarts,
+/// so a tmux-surviving agent's hooks keep landing on the right terminal
+/// after `recover_sessions` re-registers it; a wire `TerminalId` would
+/// name a different terminal in the new process. Hooks that resolve to
+/// nothing are dropped. Hooks carrying only the legacy `terminal_id`
+/// (a settings file written before backend-key correlation) are
+/// dropped too: every settings file this daemon writes carries the
+/// backend key, so a legacy-only hook can only come from an older
+/// process whose id space has no relation to ours — accepting it risks
+/// cross-terminal state corruption, while dropping it just leaves that
+/// session on PTY detection, same as before it had hooks at all.
+///
 /// Deduped against the cached `agent_states` so a stream of `PreToolUse`
 /// hooks doesn't re-broadcast `Working` on every tool call — the
 /// `AgentState` event only fires on an actual change, exactly like the
@@ -1974,11 +2254,41 @@ pub async fn handle_close(config: &ServerConfig, terminal_id: TerminalId) {
 pub async fn handle_ingest_hook(
     config: &ServerConfig,
     terminal_id: TerminalId,
+    backend_key: Option<String>,
     hook: lazybox_ipc::HookEvent,
 ) {
-    // Resolve the workspace first; an unknown terminal (already exited,
-    // or a stale hook from a process lazybox no longer tracks) is dropped
-    // without marking anything hook-driven.
+    let terminal_id = match backend_key.as_deref() {
+        Some(key) => {
+            let resolved = {
+                let terminals = config.terminals.lock().await;
+                terminals
+                    .iter()
+                    .find_map(|(id, k)| (k == key).then_some(*id))
+            };
+            match resolved {
+                Some(id) => id,
+                None => {
+                    tracing::debug!(
+                        backend_key = %key,
+                        kind = ?hook.kind,
+                        "hook for unknown backend key, dropping"
+                    );
+                    return;
+                }
+            }
+        }
+        None => {
+            tracing::debug!(
+                ?terminal_id,
+                kind = ?hook.kind,
+                "legacy terminal-id-only hook (pre-backend-key settings file), dropping"
+            );
+            return;
+        }
+    };
+    // Resolve the workspace; a terminal mid-teardown (terminals entry
+    // resolved but meta already swept) is dropped without marking
+    // anything hook-driven.
     let session_key = {
         let meta = config.terminal_meta.lock().await;
         match meta.get(&terminal_id) {
@@ -1990,29 +2300,43 @@ pub async fn handle_ingest_hook(
         }
     };
     // From now on this terminal is hook-driven: the PTY detector defers
-    // to hooks for Working/InputNeeded. Done even for events that carry
-    // no state change (e.g. SessionStart) — the signal is "this terminal
-    // speaks hooks", not the specific transition.
+    // to hooks for Working/InputNeeded (until the timestamp recorded
+    // here goes stale — see `HOOK_STALENESS`). Done even for events
+    // that carry no state change (e.g. SessionStart) — the signal is
+    // "this terminal speaks hooks", not the specific transition.
     config
         .hook_driven_terminals
         .lock()
         .await
-        .insert(terminal_id);
+        .insert(terminal_id, std::time::Instant::now());
 
-    let Some(new_state) = lazybox_agents::hook::hook_to_state(&hook) else {
-        return;
-    };
+    // Proof-of-submission signal for the prompt-inject paths: a
+    // `UserPromptSubmit` hook means the injected prompt actually
+    // entered Claude's turn (issue #122's failure is the prompt parked
+    // in the composer, which fires nothing).
+    if hook.kind == lazybox_ipc::HookEventKind::UserPromptSubmit
+        && let Some(signal) = config.prompt_submit_signals.lock().await.get(&terminal_id)
+    {
+        signal.notify_one();
+    }
+
     // Compare-and-set under one lock guard — a read under one
     // acquisition and an insert under another lets a concurrent PTY
-    // pump transition slip between them and be clobbered.
-    let prev = {
+    // pump transition slip between them and be clobbered. The hook →
+    // state mapping consults the current state (an unrecognized
+    // `Notification` is a no-change while `InputNeeded`), so it runs
+    // under the same guard.
+    let (prev, new_state) = {
         let mut states = config.agent_states.lock().await;
         let prev = states.get(&terminal_id).copied();
+        let Some(new_state) = lazybox_agents::hook::hook_to_state(&hook, prev) else {
+            return;
+        };
         if prev == Some(new_state) {
             return;
         }
         states.insert(terminal_id, new_state);
-        prev
+        (prev, new_state)
     };
     tracing::info!(
         ?terminal_id,
@@ -2056,7 +2380,7 @@ pub async fn recover_sessions(config: &ServerConfig) {
             .await
             .unwrap_or_else(|| (SessionKey::from(""), TerminalKind::Shell));
         let no_permission = load_no_permission(config, &key).await;
-        let terminal_id = alloc_terminal_id();
+        let terminal_id = alloc_terminal_id(&*config.store);
         config
             .terminals
             .lock()
@@ -2526,6 +2850,198 @@ mod tests {
             None,
             hyst,
         ));
+    }
+
+    /// PTY readings on a hook-driven terminal: fresh hooks own
+    /// Working↔Idle, only the two corrections pass; stale hooks open
+    /// the gate entirely so the terminal degrades to scraping instead
+    /// of freezing on the last hook state.
+    #[test]
+    fn pty_reading_allowed_gates_on_hook_freshness() {
+        use lazybox_ipc::AgentState::{Idle, InputNeeded, Working};
+        let staleness = Duration::from_secs(30);
+        let fresh = Duration::from_secs(1);
+        let stale = Duration::from_secs(31);
+
+        // Fresh hooks: only the corrections pass.
+        assert!(pty_reading_allowed(InputNeeded, false, fresh, staleness));
+        assert!(pty_reading_allowed(Idle, true, fresh, staleness));
+        assert!(!pty_reading_allowed(Idle, false, fresh, staleness));
+        assert!(!pty_reading_allowed(Working, false, fresh, staleness));
+        assert!(!pty_reading_allowed(Working, true, fresh, staleness));
+
+        // Stale hooks: everything passes — full PTY fallback.
+        assert!(pty_reading_allowed(Working, false, stale, staleness));
+        assert!(pty_reading_allowed(Idle, false, stale, staleness));
+        assert!(pty_reading_allowed(InputNeeded, false, stale, staleness));
+    }
+
+    /// Terminal ids seed from the persisted high-water mark so a
+    /// restarted daemon can never reuse an id that a surviving
+    /// session's artifacts (hook settings file path) still reference.
+    #[test]
+    fn terminal_ids_seed_from_persisted_high_water_mark() {
+        use lazybox_store::Store;
+        let store = lazybox_store::MemoryStore::new();
+        store.set_kv(TERMINAL_ID_HIGH_WATER_KEY, "50000").unwrap();
+
+        let id = alloc_terminal_id(&store);
+        assert!(id.0 > 50_000, "id must start past the persisted mark");
+        // Allocation bumps the persisted mark to the allocated id.
+        let persisted: u64 = store
+            .get_kv(TERMINAL_ID_HIGH_WATER_KEY)
+            .unwrap()
+            .expect("mark written on allocation")
+            .parse()
+            .unwrap();
+        assert_eq!(persisted, id.0);
+
+        // A store with no mark (fresh DB) can't move the allocator
+        // backwards — ids stay strictly monotonic in-process.
+        let fresh = lazybox_store::MemoryStore::new();
+        let next = alloc_terminal_id(&fresh);
+        assert!(next.0 > id.0);
+    }
+
+    /// Without hooks there's nothing to confirm a submit against — the
+    /// inject paths must keep their fire-and-forget behavior.
+    #[tokio::test]
+    async fn prepare_submit_confirmation_skips_non_hook_driven_terminals() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        assert!(
+            prepare_submit_confirmation(&config, TerminalId(7))
+                .await
+                .is_none()
+        );
+    }
+
+    /// The #122 fix: a hook-driven terminal that produces neither a
+    /// `UserPromptSubmit` hook nor a `Working` transition after the
+    /// submit gets exactly one Enter resend — the prompt is parked in
+    /// the composer and only the keystroke is missing.
+    #[tokio::test]
+    async fn silent_submit_on_hook_driven_terminal_resends_enter_once() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(4242);
+        config
+            .hook_driven_terminals
+            .lock()
+            .await
+            .insert(id, std::time::Instant::now());
+
+        let confirm = prepare_submit_confirmation(&config, id)
+            .await
+            .expect("hook-driven terminal must get a confirmation");
+        confirm_prompt_submission(
+            confirm,
+            &*config.backend,
+            &key,
+            b"\r",
+            Duration::from_millis(100),
+        )
+        .await;
+
+        assert_eq!(
+            mock.writes_for(&key).await,
+            vec![b"\r".to_vec()],
+            "exactly one Enter resend, never the prompt body"
+        );
+        assert!(
+            config.prompt_submit_signals.lock().await.is_empty(),
+            "signal registration cleaned up"
+        );
+    }
+
+    /// A `UserPromptSubmit` hook (via the registered signal) is proof
+    /// of submission — no resend.
+    #[tokio::test]
+    async fn user_prompt_submit_signal_suppresses_the_resend() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(4243);
+        config
+            .hook_driven_terminals
+            .lock()
+            .await
+            .insert(id, std::time::Instant::now());
+
+        let confirm = prepare_submit_confirmation(&config, id).await.unwrap();
+        // What handle_ingest_hook does when UserPromptSubmit lands.
+        // notify_one stores a permit, so firing before the wait is the
+        // hard case this pins.
+        config
+            .prompt_submit_signals
+            .lock()
+            .await
+            .get(&id)
+            .unwrap()
+            .notify_one();
+        confirm_prompt_submission(
+            confirm,
+            &*config.backend,
+            &key,
+            b"\r",
+            Duration::from_millis(100),
+        )
+        .await;
+
+        assert!(
+            mock.writes_for(&key).await.is_empty(),
+            "confirmed submit must not resend Enter"
+        );
+    }
+
+    /// A `Working` transition on the bus is equally valid evidence —
+    /// covers a hook path where `UserPromptSubmit` was missed but the
+    /// turn clearly started.
+    #[tokio::test]
+    async fn working_transition_suppresses_the_resend() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(4244);
+        config
+            .hook_driven_terminals
+            .lock()
+            .await
+            .insert(id, std::time::Instant::now());
+
+        let confirm = prepare_submit_confirmation(&config, id).await.unwrap();
+        // The receiver was subscribed in prepare_submit_confirmation,
+        // so this event is buffered for it.
+        config
+            .bus
+            .send(Event::AgentState {
+                session_key: "test:ws".into(),
+                terminal_id: id,
+                state: lazybox_ipc::AgentState::Working,
+            })
+            .unwrap();
+        confirm_prompt_submission(
+            confirm,
+            &*config.backend,
+            &key,
+            b"\r",
+            Duration::from_millis(100),
+        )
+        .await;
+
+        assert!(
+            mock.writes_for(&key).await.is_empty(),
+            "a Working transition counts as submission evidence"
+        );
     }
 
     #[test]

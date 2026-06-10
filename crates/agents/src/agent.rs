@@ -108,7 +108,7 @@ pub trait Agent: Send + Sync {
     /// state through structured lifecycle hooks instead of (or
     /// alongside) PTY screen-scraping. `hook_command` is the shell
     /// command the agent should run on each lifecycle event — lazybox's
-    /// `hook-ingest` helper, carrying the terminal id. `user_settings`
+    /// `hook-ingest` helper, carrying the backend session key. `user_settings`
     /// is the user's own parsed settings, merged in so we don't clobber
     /// their hooks.
     ///
@@ -494,11 +494,11 @@ mod tests {
     fn claude_build_hook_settings_wires_command() {
         let claude = Claude;
         let settings = claude
-            .build_hook_settings("lazybox hook-ingest --terminal 7", None)
+            .build_hook_settings("lazybox hook-ingest --backend-key lazybox-ws-claude-1-7", None)
             .expect("claude supports hooks");
         assert_eq!(
             settings["hooks"]["Stop"][0]["hooks"][0]["command"],
-            "lazybox hook-ingest --terminal 7"
+            "lazybox hook-ingest --backend-key lazybox-ws-claude-1-7"
         );
     }
 

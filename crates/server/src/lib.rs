@@ -255,14 +255,26 @@ pub struct ServerConfig {
     /// re-establishes `InputNeeded`.
     pub agent_detect_resets: Arc<Mutex<HashSet<TerminalId>>>,
     /// Agent terminals that have reported at least one structured
-    /// lifecycle hook (`Command::IngestHook`). For these, hooks are the
+    /// lifecycle hook (`Command::IngestHook`), mapped to the arrival
+    /// time of their most recent hook. For these, hooks are the
     /// authoritative source of `Working` / `InputNeeded`; the PTY
     /// detector only supplies the idle/interrupt fallback the `Stop`
-    /// hook misses (Ctrl-C / Esc don't fire `Stop`). A terminal that
-    /// never reports a hook (old Claude version, hooks disabled,
-    /// non-Claude agent) is absent here and keeps full PTY detection.
-    /// Populated by `handle_ingest_hook`, cleaned on `TerminalExited`.
-    pub hook_driven_terminals: Arc<Mutex<HashSet<TerminalId>>>,
+    /// hook misses (Ctrl-C / Esc don't fire `Stop`) — unless the last
+    /// hook is stale (see `spawn_handler::HOOK_STALENESS`), in which
+    /// case the terminal degrades back to full PTY detection instead
+    /// of freezing on the last hook state. A terminal that never
+    /// reports a hook (old Claude version, hooks disabled, non-Claude
+    /// agent) is absent here and keeps full PTY detection. Populated
+    /// by `handle_ingest_hook`, cleaned on `TerminalExited`.
+    pub hook_driven_terminals: Arc<Mutex<HashMap<TerminalId, std::time::Instant>>>,
+    /// Per-terminal signal fired by `handle_ingest_hook` when a
+    /// `UserPromptSubmit` hook lands. The prompt-inject paths register
+    /// a `Notify` here before sending the submit keystroke so they can
+    /// verify the prompt actually entered Claude's turn (and resend
+    /// the Enter once if it didn't — issue #122). Entries are removed
+    /// by the registering inject task; the pump also sweeps on
+    /// `TerminalExited`.
+    pub prompt_submit_signals: Arc<Mutex<HashMap<TerminalId, Arc<tokio::sync::Notify>>>>,
     /// Structured stream-json agent runs. Keyed by wire-side run id.
     pub agent_runs: Arc<Mutex<HashMap<AgentRunId, agent_runs::AgentRunHandle>>>,
     /// Process-wide structured run id allocator.
@@ -396,7 +408,8 @@ impl ServerConfig {
             terminal_meta: Arc::new(Mutex::new(HashMap::new())),
             no_permission_terminals: Arc::new(Mutex::new(HashSet::new())),
             agent_detect_resets: Arc::new(Mutex::new(HashSet::new())),
-            hook_driven_terminals: Arc::new(Mutex::new(HashSet::new())),
+            hook_driven_terminals: Arc::new(Mutex::new(HashMap::new())),
+            prompt_submit_signals: Arc::new(Mutex::new(HashMap::new())),
             agent_runs: Arc::new(Mutex::new(HashMap::new())),
             next_agent_run_id: Arc::new(AtomicU64::new(1)),
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),
@@ -722,9 +735,14 @@ impl Server {
                         lazybox_ipc::Command::Close { terminal_id } => {
                             spawn_handler::handle_close(&self.config, terminal_id).await;
                         }
-                        lazybox_ipc::Command::IngestHook { terminal_id, hook } => {
-                            spawn_handler::handle_ingest_hook(&self.config, terminal_id, hook)
-                                .await;
+                        lazybox_ipc::Command::IngestHook { terminal_id, hook, backend_key } => {
+                            spawn_handler::handle_ingest_hook(
+                                &self.config,
+                                terminal_id,
+                                backend_key,
+                                hook,
+                            )
+                            .await;
                         }
                         lazybox_ipc::Command::StartAgentRun {
                             session_key,

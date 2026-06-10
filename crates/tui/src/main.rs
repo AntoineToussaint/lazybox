@@ -14,7 +14,7 @@
 //!   lazybox slack init              interactive Slack token setup wizard
 //!   lazybox slack doctor            read-only validation of an existing setup
 //!   lazybox slack prune             archive stale per-(session, agent) channels
-//!   lazybox hook-ingest --terminal N  forward a Claude lifecycle hook
+//!   lazybox hook-ingest --backend-key K  forward a Claude lifecycle hook
 //!                                  payload (stdin JSON) to the daemon;
 //!                                  injected into Claude via --settings
 //!
@@ -220,24 +220,30 @@ pub async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// `lazybox hook-ingest --terminal <id>` — the command Claude Code runs
-/// on each lifecycle hook (lazybox injects it via `--settings` at spawn).
-/// Reads the hook's JSON payload from stdin, normalizes it, and forwards
-/// it to the running daemon over the IPC socket so the daemon can map it
-/// to an `AgentState` transition.
+/// `lazybox hook-ingest --backend-key <key>` — the command Claude Code
+/// runs on each lifecycle hook (lazybox injects it via `--settings` at
+/// spawn). Reads the hook's JSON payload from stdin, normalizes it, and
+/// forwards it to the running daemon over the IPC socket so the daemon
+/// can map it to an `AgentState` transition. The backend key (the tmux
+/// session name) is the correlation handle: it stays stable across
+/// daemon restarts, unlike the legacy `--terminal <id>` (still parsed
+/// and forwarded for the daemon to log-and-drop — pre-change settings
+/// files baked it in, and after a restart it would name the wrong
+/// terminal).
 ///
 /// Designed to never disrupt Claude: a missing daemon, a bad payload, or
-/// no terminal id all resolve to a silent no-op (exit 0). A hook command
-/// that errored or hung would stall Claude's turn.
+/// no correlation flag all resolve to a silent no-op (exit 0). A hook
+/// command that errored or hung would stall Claude's turn.
 async fn hook_ingest_subcommand(args: &[String]) -> anyhow::Result<()> {
     let mut args = args.to_vec();
-    let Some(terminal_id) = take_value(&mut args, "--terminal").and_then(|s| s.parse::<u64>().ok())
-    else {
-        // No terminal id → nothing to correlate. Drain stdin so Claude's
-        // write doesn't block on a full pipe, then exit cleanly.
+    let backend_key = take_value(&mut args, "--backend-key").filter(|k| !k.is_empty());
+    let terminal_id = take_value(&mut args, "--terminal").and_then(|s| s.parse::<u64>().ok());
+    if backend_key.is_none() && terminal_id.is_none() {
+        // Nothing to correlate by. Drain stdin so Claude's write
+        // doesn't block on a full pipe, then exit cleanly.
         let _ = read_stdin_to_string();
         return Ok(());
-    };
+    }
 
     let payload = read_stdin_to_string();
     let Some(hook) = lazybox_agents::hook::parse_claude_hook(&payload) else {
@@ -245,8 +251,9 @@ async fn hook_ingest_subcommand(args: &[String]) -> anyhow::Result<()> {
     };
 
     let command = lazybox_ipc::Command::IngestHook {
-        terminal_id: lazybox_ipc::TerminalId(terminal_id),
+        terminal_id: lazybox_ipc::TerminalId(terminal_id.unwrap_or_default()),
         hook,
+        backend_key,
     };
 
     // Best-effort forward. Connect, write one framed command, done — no
@@ -412,6 +419,43 @@ async fn run_embedded_realm(
         }
     });
 
+    // Bind the IPC socket in embedded mode too, sharing the same
+    // `ServerConfig` (store, bus, terminal maps) as the in-process
+    // transport above. This is what lets `lazybox hook-ingest` — the
+    // helper Claude's lifecycle hooks run — and `--connect` clients
+    // reach an embedded instance; without it the hook helper connects
+    // to nothing and every agent silently falls back to PTY scraping.
+    // Skipped with a warning when a standalone daemon already owns the
+    // socket (the same pid-file liveness check `lazybox server start`
+    // uses), so two processes never fight over the bind. A stale
+    // socket from a crashed run is reclaimed by `SocketService::run`
+    // exactly as the server subcommand reclaims it.
+    let embedded_socket = match lifecycle::status() {
+        ServerStatus::Running { pid } => {
+            tracing::warn!(
+                pid,
+                "standalone daemon already running — skipping embedded socket bind; \
+                 hook-ingest payloads will reach that daemon, not this instance"
+            );
+            None
+        }
+        ServerStatus::Stopped => {
+            let factory_config = config.clone();
+            let service = SocketService::new(
+                lifecycle::socket_path(),
+                lifecycle::pid_path(),
+                move || factory_config.clone(),
+            );
+            let shutdown = service.shutdown_handle();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = service.run().await {
+                    tracing::warn!("embedded socket service: {e}");
+                }
+            });
+            Some((shutdown, handle))
+        }
+    };
+
     // Two paths into the polling loop:
     //   1. Persisted setup exists → kick polling immediately.
     //   2. No persisted setup → run detection, hand the wizard to
@@ -476,7 +520,7 @@ async fn run_embedded_realm(
     };
 
     let store_for_save = config.store.clone();
-    tokio::task::spawn_blocking(move || {
+    let realm_result = tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client)?;
         // Returning user with persisted setup → mount the polling
         // modal up front so the first poll cycle has UI feedback.
@@ -558,7 +602,16 @@ async fn run_embedded_realm(
         lazybox_tui::realm::model::run_loop_with_model(model)
     })
     .await
-    .map_err(|e| anyhow::anyhow!("realm task panicked: {e}"))?
+    .map_err(|e| anyhow::anyhow!("realm task panicked: {e}"));
+    // Tear the embedded socket service down the same way the server
+    // subcommand does on SIGTERM: `SocketService::run` removes the
+    // socket + pid file on its way out, so the next start doesn't
+    // mistake this exited instance for still-running.
+    if let Some((shutdown, handle)) = embedded_socket {
+        shutdown.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+    realm_result?
 }
 
 /// Build the scope sources used by the setup wizard. GitHub today;

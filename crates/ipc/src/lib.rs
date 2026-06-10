@@ -136,7 +136,7 @@ pub enum AgentState {
 pub struct HookEvent {
     pub kind: HookEventKind,
     /// The agent's own session id (Claude's `session_id`). Informational
-    /// — lazybox correlates by the `terminal_id` it baked into the hook
+    /// — lazybox correlates by the backend key it baked into the hook
     /// command, not this — but captured for the structured-stream path.
     pub session_id: Option<String>,
     pub cwd: Option<String>,
@@ -149,6 +149,12 @@ pub struct HookEvent {
 
 /// The lifecycle point a [`HookEvent`] fired at. `Other` is the
 /// catch-all for hook names lazybox doesn't map to a state transition.
+///
+/// `PermissionRequest`, `SubagentStart`, and `PostCompact` are events
+/// Claude Code does not actually fire — nothing produces them anymore,
+/// but the variants stay (in place) because the socket transport
+/// encodes this enum by bincode ordinal. `UserPromptSubmit` is appended
+/// at the end for the same reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HookEventKind {
     SessionStart,
@@ -163,6 +169,7 @@ pub enum HookEventKind {
     PreCompact,
     PostCompact,
     Other,
+    UserPromptSubmit,
 }
 
 /// User input sent to a structured agent runtime.
@@ -393,13 +400,25 @@ pub enum Command {
     },
     /// A lifecycle hook fired by an agent (Claude Code), forwarded by
     /// the `lazybox hook-ingest` helper the daemon injects at spawn. The
-    /// daemon maps it to an [`AgentState`] transition for `terminal_id`
-    /// — deterministic state, no PTY screen-scraping. `terminal_id` is
-    /// the value lazybox baked into the hook command, so correlation is
-    /// exact.
+    /// daemon maps it to an [`AgentState`] transition — deterministic
+    /// state, no PTY screen-scraping.
+    ///
+    /// Correlation is by `backend_key` — the stable backend session
+    /// key (tmux session name) lazybox baked into the hook command at
+    /// spawn. Backend keys survive daemon restarts, unlike
+    /// `TerminalId`s, which restart at the process boundary while a
+    /// tmux-backed agent keeps running with the old id in its settings
+    /// file. `terminal_id` is the legacy correlation field from
+    /// pre-backend-key settings files; the daemon drops hooks that
+    /// carry only it (such a session just falls back to PTY
+    /// detection). The field stays in this position — and
+    /// `backend_key` is appended last — because the socket transport
+    /// encodes commands with bincode, which is field-order sensitive.
     IngestHook {
         terminal_id: TerminalId,
         hook: HookEvent,
+        #[serde(default)]
+        backend_key: Option<String>,
     },
     Kill {
         session_key: SessionKey,

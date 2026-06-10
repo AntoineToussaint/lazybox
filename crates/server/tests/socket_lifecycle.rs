@@ -5,6 +5,7 @@
 
 use lazybox_ipc::{Command, Event, socket};
 use lazybox_server::ServerConfig;
+use lazybox_server::backend::SessionBackend;
 use lazybox_server::lifecycle;
 use lazybox_server::socket_service::SocketService;
 use std::path::PathBuf;
@@ -122,6 +123,101 @@ async fn stale_socket_is_cleaned_up_on_bind() {
     shutdown.notify_one();
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
 }
+/// The embedded-mode wiring: one shared `ServerConfig` serves both the
+/// in-process transport and the Unix socket. A hook forwarded over the
+/// socket (what `lazybox hook-ingest --backend-key` does) must land on
+/// the same bus the in-process TUI subscribes to — this is the path
+/// that was structurally dead when the default `lazybox` invocation
+/// bound no socket at all.
+#[tokio::test]
+async fn hook_ingest_over_socket_reaches_shared_embedded_config() {
+    let base = TempDir::new().unwrap();
+    let (sock, pid) = runtime_paths(&base);
+
+    // Shared config — the socket service's factory hands out clones of
+    // it, exactly like `run_embedded_realm` does.
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let factory_config = config.clone();
+    let service = SocketService::new(sock.clone(), pid, move || factory_config.clone());
+    let shutdown = service.shutdown_handle();
+    let handle = tokio::spawn(async move {
+        service.run().await.unwrap();
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while !sock.exists() {
+        assert!(tokio::time::Instant::now() < deadline, "socket never bound");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // The "TUI" client spawns an agent and listens on the shared bus.
+    let mut tui = socket::connect(&sock).await.expect("connect tui");
+    tui.send(Command::Subscribe).expect("subscribe");
+    let _snapshot = tokio::time::timeout(Duration::from_secs(2), tui.recv())
+        .await
+        .expect("timeout")
+        .expect("snapshot");
+    tui.send(Command::Spawn {
+        session_key: "test:ws-hooks".into(),
+        session_id: None,
+        kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
+        cwd: None,
+        initial_prompt: None,
+    })
+    .expect("spawn");
+    let spawned = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match tui.recv().await {
+                Some(Event::TerminalSpawned { terminal_id, .. }) => break terminal_id,
+                Some(_) => continue,
+                None => panic!("stream closed before TerminalSpawned"),
+            }
+        }
+    })
+    .await
+    .expect("TerminalSpawned");
+    let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+    // A separate, short-lived connection forwards the hook — exactly
+    // what the `hook-ingest` helper does: connect, one frame, done.
+    let ingest = socket::connect(&sock).await.expect("connect ingest");
+    ingest
+        .send(Command::IngestHook {
+            terminal_id: lazybox_ipc::TerminalId(0),
+            hook: lazybox_ipc::HookEvent {
+                kind: lazybox_ipc::HookEventKind::PreToolUse,
+                session_id: Some("claude-session".into()),
+                cwd: None,
+                tool_name: Some("Bash".into()),
+                notification: None,
+            },
+            backend_key: Some(key),
+        })
+        .expect("send hook");
+
+    // The TUI connection sees the resulting state transition.
+    let state = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match tui.recv().await {
+                Some(Event::AgentState {
+                    terminal_id: tid,
+                    state,
+                    ..
+                }) if tid == spawned => break state,
+                Some(_) => continue,
+                None => panic!("stream closed before AgentState"),
+            }
+        }
+    })
+    .await
+    .expect("AgentState from socket-forwarded hook");
+    assert_eq!(state, lazybox_ipc::AgentState::Working);
+
+    drop(ingest);
+    drop(tui);
+    shutdown.notify_one();
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}
+
 // ── Pure lifecycle helpers ─────────────────────────────────────────────
 
 #[test]

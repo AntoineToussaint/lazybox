@@ -45,15 +45,13 @@ fn kind_from_name(name: Option<&str>) -> HookEventKind {
     match name.unwrap_or_default() {
         "SessionStart" => HookEventKind::SessionStart,
         "SessionEnd" => HookEventKind::SessionEnd,
+        "UserPromptSubmit" => HookEventKind::UserPromptSubmit,
         "PreToolUse" => HookEventKind::PreToolUse,
         "PostToolUse" => HookEventKind::PostToolUse,
         "Notification" => HookEventKind::Notification,
-        "PermissionRequest" => HookEventKind::PermissionRequest,
         "Stop" => HookEventKind::Stop,
-        "SubagentStart" => HookEventKind::SubagentStart,
         "SubagentStop" => HookEventKind::SubagentStop,
         "PreCompact" => HookEventKind::PreCompact,
-        "PostCompact" => HookEventKind::PostCompact,
         _ => HookEventKind::Other,
     }
 }
@@ -63,34 +61,43 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 /// Map a hook event to the [`AgentState`] it implies, or `None` when
-/// the event carries no state change (e.g. an unmapped hook name).
+/// the event carries no state change. `current` is the terminal's
+/// cached state at the moment the hook arrived — only the unrecognized-
+/// `Notification` case consults it (see [`notification_state`]).
 ///
-/// The mapping is deliberately total over the lifecycle:
-///   - tool use, compaction, and subagent activity all mean the main
-///     agent is **busy** → [`AgentState::Working`];
-///   - a permission request, or a `Notification` whose text asks for
-///     permission or elicitation, means Claude is **waiting on the
-///     user** → [`AgentState::InputNeeded`];
-///   - `Stop`, `SessionStart`/`SessionEnd`, and every other
-///     `Notification` (the idle "waiting for your input" nudge
-///     included) mean the composer is **quiet** → [`AgentState::Idle`].
+/// The mapping over the events Claude Code actually fires:
+///   - a submitted prompt, tool use, compaction, and subagent
+///     completion all mean the main agent is **busy** →
+///     [`AgentState::Working`] (`UserPromptSubmit` matters: a turn
+///     that streams text with no tool calls fires no other
+///     working-shaped hook at all);
+///   - a `Notification` whose text asks for permission or elicitation
+///     means Claude is **waiting on the user** →
+///     [`AgentState::InputNeeded`];
+///   - `Stop` and `SessionStart`/`SessionEnd` mean the composer is
+///     **quiet** → [`AgentState::Idle`].
 ///
-/// `Stop` does NOT fire on a manual interrupt (Ctrl-C / Esc); the
-/// daemon keeps the PTY detector as a fallback for that gap.
-pub fn hook_to_state(event: &HookEvent) -> Option<AgentState> {
+/// `PermissionRequest` / `SubagentStart` / `PostCompact` are wire
+/// variants Claude Code never fires — they map to no transition, like
+/// `Other`. `Stop` does NOT fire on a manual interrupt (Ctrl-C / Esc);
+/// the daemon keeps the PTY detector as a fallback for that gap.
+pub fn hook_to_state(event: &HookEvent, current: Option<AgentState>) -> Option<AgentState> {
     let state = match event.kind {
-        HookEventKind::PreToolUse
+        HookEventKind::UserPromptSubmit
+        | HookEventKind::PreToolUse
         | HookEventKind::PostToolUse
         | HookEventKind::PreCompact
-        | HookEventKind::PostCompact
-        | HookEventKind::SubagentStart
         | HookEventKind::SubagentStop => AgentState::Working,
-        HookEventKind::PermissionRequest => AgentState::InputNeeded,
-        HookEventKind::Notification => notification_state(event.notification.as_deref()),
+        HookEventKind::Notification => {
+            return notification_state(event.notification.as_deref(), current);
+        }
         HookEventKind::Stop | HookEventKind::SessionStart | HookEventKind::SessionEnd => {
             AgentState::Idle
         }
-        HookEventKind::Other => return None,
+        HookEventKind::PermissionRequest
+        | HookEventKind::SubagentStart
+        | HookEventKind::PostCompact
+        | HookEventKind::Other => return None,
     };
     Some(state)
 }
@@ -100,16 +107,23 @@ pub fn hook_to_state(event: &HookEvent) -> Option<AgentState> {
 /// the idle nudge ("Claude is waiting for your input") and anything
 /// else mean the composer is sitting ready, not blocked → `Idle`.
 ///
-/// We match the blocking case affirmatively and default the rest to
-/// `Idle`: Claude's permission/elicitation payloads carry a stable
-/// keyword, while its idle wording does not, so an unrecognized
-/// notification is far more likely to be the idle nudge than a real
-/// prompt — and a real prompt still surfaces via the `PermissionRequest`
-/// hook and the PTY detector fallback.
-fn notification_state(notification: Option<&str>) -> AgentState {
+/// We match the blocking case affirmatively: Claude's permission/
+/// elicitation payloads carry a stable keyword, while its idle wording
+/// does not, so an unrecognized notification is far more likely the
+/// idle nudge than a real prompt. One exception keeps a wrong guess
+/// from destroying real signal: when the terminal is already
+/// `InputNeeded`, an unrecognized notification is a NO-CHANGE (`None`)
+/// rather than a force-clear to `Idle` — an unrecognized *blocking*
+/// notification must not kill the `?` pill. The pill still clears via
+/// `Stop` or the PTY detector's affirmative idle reading.
+fn notification_state(
+    notification: Option<&str>,
+    current: Option<AgentState>,
+) -> Option<AgentState> {
     match notification {
-        Some(n) if blocks_on_user(n) => AgentState::InputNeeded,
-        _ => AgentState::Idle,
+        Some(n) if blocks_on_user(n) => Some(AgentState::InputNeeded),
+        _ if current == Some(AgentState::InputNeeded) => None,
+        _ => Some(AgentState::Idle),
     }
 }
 
@@ -142,7 +156,18 @@ mod tests {
     fn parse_unknown_hook_name_is_other_not_none() {
         let ev = parse(r#"{"hook_event_name":"SomethingNew","session_id":"x"}"#);
         assert_eq!(ev.kind, HookEventKind::Other);
-        assert_eq!(hook_to_state(&ev), None);
+        assert_eq!(hook_to_state(&ev, None), None);
+    }
+
+    #[test]
+    fn names_claude_never_fires_parse_as_other() {
+        // These were once in the hooked set but Claude Code doesn't
+        // fire them; they must not map to a state transition.
+        for name in ["PermissionRequest", "SubagentStart", "PostCompact"] {
+            let ev = parse(&format!(r#"{{"hook_event_name":"{name}"}}"#));
+            assert_eq!(ev.kind, HookEventKind::Other, "{name} should be Other");
+            assert_eq!(hook_to_state(&ev, None), None, "{name} should be a no-op");
+        }
     }
 
     #[test]
@@ -153,17 +178,10 @@ mod tests {
 
     #[test]
     fn tool_and_compaction_and_subagent_are_working() {
-        for name in [
-            "PreToolUse",
-            "PostToolUse",
-            "PreCompact",
-            "PostCompact",
-            "SubagentStart",
-            "SubagentStop",
-        ] {
+        for name in ["PreToolUse", "PostToolUse", "PreCompact", "SubagentStop"] {
             let ev = parse(&format!(r#"{{"hook_event_name":"{name}"}}"#));
             assert_eq!(
-                hook_to_state(&ev),
+                hook_to_state(&ev, None),
                 Some(AgentState::Working),
                 "{name} should be Working",
             );
@@ -171,11 +189,25 @@ mod tests {
     }
 
     #[test]
+    fn user_prompt_submit_is_working() {
+        // Without this, a turn that streams text with no tool calls
+        // produces NO working signal at all in hook mode.
+        let ev = parse(r#"{"hook_event_name":"UserPromptSubmit","session_id":"abc"}"#);
+        assert_eq!(ev.kind, HookEventKind::UserPromptSubmit);
+        assert_eq!(hook_to_state(&ev, None), Some(AgentState::Working));
+        // ...regardless of what the terminal was doing before.
+        assert_eq!(
+            hook_to_state(&ev, Some(AgentState::Idle)),
+            Some(AgentState::Working)
+        );
+    }
+
+    #[test]
     fn stop_and_session_lifecycle_are_idle() {
         for name in ["Stop", "SessionStart", "SessionEnd"] {
             let ev = parse(&format!(r#"{{"hook_event_name":"{name}"}}"#));
             assert_eq!(
-                hook_to_state(&ev),
+                hook_to_state(&ev, None),
                 Some(AgentState::Idle),
                 "{name} should be Idle",
             );
@@ -183,16 +215,10 @@ mod tests {
     }
 
     #[test]
-    fn permission_request_is_input_needed() {
-        let ev = parse(r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#);
-        assert_eq!(hook_to_state(&ev), Some(AgentState::InputNeeded));
-    }
-
-    #[test]
     fn notification_permission_prompt_is_input_needed() {
         let ev =
             parse(r#"{"hook_event_name":"Notification","notification_type":"permission_prompt"}"#);
-        assert_eq!(hook_to_state(&ev), Some(AgentState::InputNeeded));
+        assert_eq!(hook_to_state(&ev, None), Some(AgentState::InputNeeded));
     }
 
     #[test]
@@ -202,14 +228,14 @@ mod tests {
         let ev = parse(
             r#"{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash"}"#,
         );
-        assert_eq!(hook_to_state(&ev), Some(AgentState::InputNeeded));
+        assert_eq!(hook_to_state(&ev, None), Some(AgentState::InputNeeded));
     }
 
     #[test]
     fn notification_elicitation_is_input_needed() {
         let ev =
             parse(r#"{"hook_event_name":"Notification","notification_type":"elicitation_dialog"}"#);
-        assert_eq!(hook_to_state(&ev), Some(AgentState::InputNeeded));
+        assert_eq!(hook_to_state(&ev, None), Some(AgentState::InputNeeded));
     }
 
     #[test]
@@ -220,7 +246,7 @@ mod tests {
         let ev = parse(
             r#"{"hook_event_name":"Notification","message":"Claude is waiting for your input"}"#,
         );
-        assert_eq!(hook_to_state(&ev), Some(AgentState::Idle));
+        assert_eq!(hook_to_state(&ev, None), Some(AgentState::Idle));
     }
 
     #[test]
@@ -228,6 +254,29 @@ mod tests {
         // An unrecognized notification is far more likely the idle nudge
         // than a real prompt; real prompts say "permission"/"elicit".
         let ev = parse(r#"{"hook_event_name":"Notification"}"#);
-        assert_eq!(hook_to_state(&ev), Some(AgentState::Idle));
+        assert_eq!(hook_to_state(&ev, None), Some(AgentState::Idle));
+        assert_eq!(
+            hook_to_state(&ev, Some(AgentState::Working)),
+            Some(AgentState::Idle)
+        );
+    }
+
+    #[test]
+    fn unrecognized_notification_does_not_clear_input_needed() {
+        // An unrecognized notification while the terminal is blocked is
+        // a NO-CHANGE, not a force-clear: an unrecognized *blocking*
+        // notification must not kill the `?` pill.
+        let ev = parse(
+            r#"{"hook_event_name":"Notification","message":"Some wording lazybox has never seen"}"#,
+        );
+        assert_eq!(hook_to_state(&ev, Some(AgentState::InputNeeded)), None);
+        // A recognized blocking notification still (re)asserts the pill.
+        let blocking = parse(
+            r#"{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash"}"#,
+        );
+        assert_eq!(
+            hook_to_state(&blocking, Some(AgentState::InputNeeded)),
+            Some(AgentState::InputNeeded)
+        );
     }
 }

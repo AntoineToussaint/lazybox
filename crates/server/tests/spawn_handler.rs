@@ -129,18 +129,26 @@ fn hook(kind: lazybox_ipc::HookEventKind) -> lazybox_ipc::HookEvent {
 /// Structured hooks drive Claude's state deterministically through the
 /// full daemon dispatch (`Command::IngestHook` → `handle_ingest_hook` →
 /// `Event::AgentState`), with no PTY output involved at all.
+/// Correlation is by the stable backend key the daemon baked into the
+/// hook command; the wire `terminal_id` is the legacy field and is not
+/// trusted.
 #[tokio::test]
 async fn ingest_hook_drives_agent_state_transitions() {
     timeout(TEST_DEADLINE, async {
-        let config = ServerConfig::in_memory();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
         let mut client = subscribed(config).await;
-        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let _ = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+        // Deliberately bogus legacy id: resolution must come from the
+        // backend key alone.
+        let terminal_id = lazybox_ipc::TerminalId(0);
 
         // PreToolUse → Working.
         client
             .send(Command::IngestHook {
                 terminal_id,
                 hook: hook(lazybox_ipc::HookEventKind::PreToolUse),
+                backend_key: Some(key.clone()),
             })
             .unwrap();
         let ev = wait_for(
@@ -165,6 +173,7 @@ async fn ingest_hook_drives_agent_state_transitions() {
             .send(Command::IngestHook {
                 terminal_id,
                 hook: needs_input,
+                backend_key: Some(key.clone()),
             })
             .unwrap();
         let ev = wait_for(
@@ -187,6 +196,7 @@ async fn ingest_hook_drives_agent_state_transitions() {
             .send(Command::IngestHook {
                 terminal_id,
                 hook: hook(lazybox_ipc::HookEventKind::Stop),
+                backend_key: Some(key.clone()),
             })
             .unwrap();
         let ev = wait_for(
@@ -227,6 +237,7 @@ async fn hook_driven_terminal_honors_pty_input_needed() {
             .send(Command::IngestHook {
                 terminal_id,
                 hook: hook(lazybox_ipc::HookEventKind::PreToolUse),
+                backend_key: Some(key.clone()),
             })
             .unwrap();
         let working = wait_for(
@@ -305,6 +316,7 @@ async fn hook_driven_terminal_ignores_pty_working() {
                     tool_name: None,
                     notification: Some("Claude needs your permission to use Bash".into()),
                 },
+                backend_key: Some(key.clone()),
             })
             .unwrap();
         let asked = wait_for(
@@ -344,6 +356,163 @@ async fn hook_driven_terminal_ignores_pty_working() {
         assert!(
             leaked.is_none(),
             "PTY working status must NOT override a hook-driven terminal"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// A hook whose backend key resolves to no live terminal must be
+/// dropped — no state transition, no hook-driven marking. This is the
+/// restart-survivor case: a tmux session whose owning workspace was
+/// killed keeps firing hooks until the agent exits.
+#[tokio::test]
+async fn hook_with_unknown_backend_key_is_dropped() {
+    timeout(TEST_DEADLINE, async {
+        let config = ServerConfig::in_memory();
+        let mut client = subscribed(config.clone()).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+
+        client
+            .send(Command::IngestHook {
+                terminal_id,
+                hook: hook(lazybox_ipc::HookEventKind::PreToolUse),
+                backend_key: Some("lazybox-no-such-session-1-1".into()),
+            })
+            .unwrap();
+
+        let leaked = wait_for(
+            &mut client,
+            |e| matches!(e, Event::AgentState { .. }),
+            Duration::from_millis(300),
+        )
+        .await;
+        assert!(
+            leaked.is_none(),
+            "unknown backend key must not produce a state transition"
+        );
+        assert!(
+            config.hook_driven_terminals.lock().await.is_empty(),
+            "unknown backend key must not mark any terminal hook-driven"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// A hook carrying only the legacy `--terminal` id (a settings file
+/// written before backend-key correlation) must be dropped even when
+/// that id names a live terminal: after a daemon restart the id very
+/// likely belongs to a DIFFERENT terminal than the one the surviving
+/// agent was spawned as — accepting it is cross-terminal corruption.
+#[tokio::test]
+async fn legacy_terminal_id_only_hook_is_dropped() {
+    timeout(TEST_DEADLINE, async {
+        let config = ServerConfig::in_memory();
+        let mut client = subscribed(config.clone()).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+
+        client
+            .send(Command::IngestHook {
+                terminal_id,
+                hook: hook(lazybox_ipc::HookEventKind::PreToolUse),
+                backend_key: None,
+            })
+            .unwrap();
+
+        let leaked = wait_for(
+            &mut client,
+            |e| matches!(e, Event::AgentState { .. }),
+            Duration::from_millis(300),
+        )
+        .await;
+        assert!(
+            leaked.is_none(),
+            "legacy terminal-id-only hooks must be dropped, not trusted"
+        );
+        assert!(
+            config.hook_driven_terminals.lock().await.is_empty(),
+            "a dropped legacy hook must not mark the terminal hook-driven"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// Heartbeat staleness: a hook-driven terminal whose hooks stopped
+/// flowing (socket hiccup, helper failure) must degrade back to PTY
+/// scraping instead of freezing on the last hook state. A PTY
+/// `Working` reading is suppressed while hooks are fresh (pinned by
+/// `hook_driven_terminal_ignores_pty_working`) but honored once the
+/// last hook is older than the staleness window.
+#[tokio::test]
+async fn stale_hooks_degrade_to_pty_detection() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config.clone()).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        // Hook-driven, blocked on a permission prompt.
+        client
+            .send(Command::IngestHook {
+                terminal_id,
+                hook: lazybox_ipc::HookEvent {
+                    kind: lazybox_ipc::HookEventKind::Notification,
+                    session_id: Some("claude-session".into()),
+                    cwd: None,
+                    tool_name: None,
+                    notification: Some("Claude needs your permission to use Bash".into()),
+                },
+                backend_key: Some(key.clone()),
+            })
+            .unwrap();
+        wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::InputNeeded,
+                        ..
+                    }
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("permission hook must set InputNeeded");
+
+        // Backdate the last-hook timestamp past the staleness window —
+        // equivalent to 31s of hook silence without sleeping for it.
+        let stale = std::time::Instant::now() - Duration::from_secs(31);
+        config
+            .hook_driven_terminals
+            .lock()
+            .await
+            .insert(terminal_id, stale);
+
+        // The PTY paints a live working status line. With stale hooks
+        // the reading must now pass the gate and flip the state.
+        mock.emit(&key, "✻ Cogitating… (8s · ↑ 412 tokens · esc to interrupt)")
+            .await;
+        let degraded = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::Working,
+                        ..
+                    }
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            degraded.is_some(),
+            "stale hooks must hand Working detection back to the PTY"
         );
     })
     .await
@@ -947,6 +1116,7 @@ async fn inject_prompt_waits_for_input_needed_to_clear() {
                     tool_name: None,
                     notification: Some("Claude needs your permission to use Bash".into()),
                 },
+                backend_key: Some(key.clone()),
             })
             .unwrap();
         wait_for(
@@ -1002,6 +1172,7 @@ async fn inject_prompt_waits_for_input_needed_to_clear() {
                     tool_name: None,
                     notification: None,
                 },
+                backend_key: Some(key.clone()),
             })
             .unwrap();
 

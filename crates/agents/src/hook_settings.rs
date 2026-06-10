@@ -14,30 +14,30 @@
 
 use serde_json::{Map, Value, json};
 
-/// Lifecycle events lazybox injects its hook command on. `PreToolUse` /
-/// `PostToolUse` give the "working, running `<tool>`" signal;
-/// `Notification` / `PermissionRequest` give "needs input"; `Stop` /
-/// `SessionEnd` give "done / idle"; the rest fill in subagent and
-/// compaction activity. Each maps cleanly through
+/// Lifecycle events lazybox injects its hook command on — exactly the
+/// set Claude Code actually fires. `UserPromptSubmit` / `PreToolUse` /
+/// `PostToolUse` give the "working" signal (`UserPromptSubmit` covers
+/// turns that stream text with no tool calls at all); `Notification`
+/// gives "needs input" when its text carries a permission/elicitation
+/// marker; `Stop` / `SessionEnd` give "done / idle"; the rest fill in
+/// subagent and compaction activity. Each maps through
 /// [`crate::hook::hook_to_state`].
 pub const HOOKED_EVENTS: &[&str] = &[
     "SessionStart",
     "SessionEnd",
+    "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
     "Notification",
-    "PermissionRequest",
     "Stop",
-    "SubagentStart",
     "SubagentStop",
     "PreCompact",
-    "PostCompact",
 ];
 
 /// Build the merged Claude settings JSON. `user_settings` is the
 /// parsed `~/.claude/settings.json` (or `None` if absent / unreadable);
 /// `hook_command` is the shell command Claude runs on each event
-/// (`lazybox hook-ingest --terminal <id>`).
+/// (`lazybox hook-ingest --backend-key <key>`).
 pub fn build_settings(user_settings: Option<&Value>, hook_command: &str) -> Value {
     // Clone the user's settings so their non-hook keys (model, theme,
     // env, permissions, …) survive into the file we hand Claude.
@@ -75,7 +75,7 @@ pub fn build_settings(user_settings: Option<&Value>, hook_command: &str) -> Valu
 mod tests {
     use super::*;
 
-    const CMD: &str = "lazybox hook-ingest --terminal 7";
+    const CMD: &str = "lazybox hook-ingest --backend-key lazybox-ws-claude-1-7";
 
     fn hook_commands_for(settings: &Value, event: &str) -> Vec<String> {
         settings["hooks"][event]

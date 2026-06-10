@@ -191,6 +191,13 @@ pub use crate::detect;
 pub mod builtins {
     use super::*;
 
+    /// How far back the simple-pattern agents (Codex, Cursor,
+    /// GenericCli) look for a prompt marker. Their patterns carry no
+    /// recency anchors like Claude's, so bounding the scan to the
+    /// visible-screen tail is the only thing that lets an answered
+    /// prompt stop matching once fresh output arrives.
+    const PROMPT_TAIL_WINDOW: usize = 2 * 1024;
+
     /// Append `--settings <path>` when the daemon generated a hooks
     /// settings file for this spawn. Claude's `--settings` accepts a
     /// file path and takes precedence over user/project settings — the
@@ -245,18 +252,24 @@ pub mod builtins {
         }
 
         /// Claude Code's input area batches rapid byte arrival as a
-        /// paste. We deliberately return JUST the prompt bytes here
-        /// (no trailing `\r`) so `\r` doesn't get folded into the
-        /// paste blob — inside a paste, Enter is interpreted as a
-        /// soft line break, not a submit. The trailing `\r` is sent
-        /// separately by `inject_submit` after a brief delay, once
-        /// the paste batch has settled.
+        /// paste. The prompt body is wrapped in explicit bracketed-
+        /// paste markers (`ESC[200~` … `ESC[201~`) so Claude's paste
+        /// detection is deterministic — without them it relies on
+        /// arrival timing, and a write that coalesces with the later
+        /// `\r` can swallow the submit as a soft line break. No `\r`
+        /// is included here: the trailing Enter is sent separately by
+        /// `inject_submit` after a brief delay, once the paste batch
+        /// has settled, so it's unambiguously a keystroke.
         ///
         /// Any literal `\n` inside the prompt stays a line break in
         /// Claude's input box, which is what we want for multi-
         /// paragraph instructions.
         fn inject_prompt(&self, prompt: &str) -> Vec<u8> {
-            prompt.as_bytes().to_vec()
+            let mut bytes = Vec::with_capacity(prompt.len() + 12);
+            bytes.extend_from_slice(b"\x1b[200~");
+            bytes.extend_from_slice(prompt.as_bytes());
+            bytes.extend_from_slice(b"\x1b[201~");
+            bytes
         }
 
         /// Send `\r` (Enter) separately from the paste body. Without
@@ -308,8 +321,9 @@ pub mod builtins {
         /// Codex prompt phrasing just appends to the slice.
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
             let s = detect::strip_ansi_lossy(recent_output);
-            if detect::contains_any(&s, detect::YN_PROMPT_PATTERNS)
-                || detect::contains_any(&s, &["approve?"])
+            let tail = detect::recent_tail(&s, PROMPT_TAIL_WINDOW);
+            if detect::contains_any(tail, detect::YN_PROMPT_PATTERNS)
+                || detect::contains_any(tail, &["approve?"])
             {
                 return Some(AgentState::InputNeeded);
             }
@@ -338,7 +352,8 @@ pub mod builtins {
         /// slice with Codex / GenericCli.
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
             let s = detect::strip_ansi_lossy(recent_output);
-            if detect::contains_any(&s, detect::YN_PROMPT_PATTERNS) {
+            let tail = detect::recent_tail(&s, PROMPT_TAIL_WINDOW);
+            if detect::contains_any(tail, detect::YN_PROMPT_PATTERNS) {
                 return Some(AgentState::InputNeeded);
             }
             // No Cursor "working" pulser is recognised yet — fall back
@@ -377,14 +392,19 @@ pub mod builtins {
                 return None;
             }
             // YAML-supplied patterns flow through the shared
-            // `contains_any` helper so the GenericCli matcher
-            // behaves identically to the built-ins.
-            let text = String::from_utf8_lossy(recent_output);
+            // `contains_any` helper so the GenericCli matcher behaves
+            // identically to the built-ins: ANSI-stripped first (a
+            // colored prompt would otherwise split the marker), and
+            // `Idle` on no-match — returning `None` left the cached
+            // `InputNeeded` stuck forever once a prompt was answered,
+            // since consumers only update on `Some` readings.
+            let s = detect::strip_ansi_lossy(recent_output);
+            let tail = detect::recent_tail(&s, PROMPT_TAIL_WINDOW);
             let refs: Vec<&str> = self.asking_patterns.iter().map(String::as_str).collect();
-            if super::detect::contains_any(&text, &refs) {
+            if detect::contains_any(tail, &refs) {
                 Some(AgentState::InputNeeded)
             } else {
-                None
+                Some(AgentState::Idle)
             }
         }
     }

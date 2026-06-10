@@ -85,20 +85,23 @@ fn cursor_argv() {
 }
 
 #[test]
-fn claude_inject_prompt_is_just_the_prompt_body() {
-    // Claude Code batches rapid byte arrival as a paste. If we
-    // included `\r` here it would land inside the paste blob and
-    // Claude would interpret it as a soft line break in the input
-    // buffer, not a submit — the prompt would sit in the input box
-    // waiting on a keystroke (the bug this test guards against).
-    // The trailing Enter is delivered separately by `inject_submit`,
+fn claude_inject_prompt_is_a_bracketed_paste_without_submit() {
+    // Claude Code batches rapid byte arrival as a paste. The body is
+    // wrapped in explicit bracketed-paste markers so paste detection
+    // is deterministic rather than timing-dependent — a write that
+    // coalesces with the later `\r` could otherwise swallow the
+    // submit as a soft line break. No `\r` may appear here: the
+    // trailing Enter is delivered separately by `inject_submit`,
     // after a brief delay so the paste batch settles first.
     let agent = Claude;
-    assert_eq!(agent.inject_prompt("hi"), b"hi");
-    assert_eq!(agent.inject_prompt(""), b"");
+    assert_eq!(agent.inject_prompt("hi"), b"\x1b[200~hi\x1b[201~");
+    assert_eq!(agent.inject_prompt(""), b"\x1b[200~\x1b[201~");
     // Internal `\n` is preserved verbatim — it's intentionally a
     // line break inside Claude's input.
-    assert_eq!(agent.inject_prompt("multi\nline"), b"multi\nline");
+    assert_eq!(
+        agent.inject_prompt("multi\nline"),
+        b"\x1b[200~multi\nline\x1b[201~"
+    );
 }
 
 #[test]
@@ -416,7 +419,46 @@ fn generic_cli_asking_pattern_matching() {
         agent.detect_state(b"Install all? [y/N]"),
         Some(AgentState::InputNeeded)
     );
-    assert_eq!(agent.detect_state(b"just normal output"), None);
+    // No match → Idle, not None: returning None left the cached
+    // InputNeeded stuck forever once the prompt was answered.
+    assert_eq!(
+        agent.detect_state(b"just normal output"),
+        Some(AgentState::Idle)
+    );
+    // ANSI-colored prompts are stripped before matching, like the
+    // built-ins — a SGR run inside the marker must not split it.
+    assert_eq!(
+        agent.detect_state(b"Install all? \x1b[1m[y/N]\x1b[0m"),
+        Some(AgentState::InputNeeded)
+    );
+}
+
+#[test]
+fn simple_pattern_agents_ignore_prompts_that_scrolled_past_the_tail() {
+    // Codex / Cursor / GenericCli match only the last ~2 KiB of the
+    // detect window. A prompt buried under more than that of fresh
+    // output was answered long ago — it must read Idle, not pin
+    // InputNeeded until the 16 KiB window finally evicts it.
+    let mut buf = b"run rm -rf? [y/n]\n".to_vec();
+    buf.extend(std::iter::repeat_n(b'x', 4 * 1024));
+    assert_eq!(Codex.detect_state(&buf), Some(AgentState::Idle));
+    assert_eq!(Cursor.detect_state(&buf), Some(AgentState::Idle));
+    let generic = GenericCli {
+        id: "custom",
+        display_name: "Custom",
+        spawn_cmd: vec!["custom".into()],
+        resume_cmd: None,
+        asking_patterns: vec!["[y/n]".into()],
+    };
+    assert_eq!(generic.detect_state(&buf), Some(AgentState::Idle));
+    // The same prompt within the tail still fires.
+    let mut recent = b"some output\n".to_vec();
+    recent.extend_from_slice(b"run rm -rf? [y/n]");
+    assert_eq!(Codex.detect_state(&recent), Some(AgentState::InputNeeded));
+    assert_eq!(
+        generic.detect_state(&recent),
+        Some(AgentState::InputNeeded)
+    );
 }
 
 #[test]
@@ -910,6 +952,18 @@ const PROMPT_FIXTURES: &[PromptFixture] = &[
         // `esc to interrupt`.
         name: "working_status_line_phase_suffix_no_interrupt_hint",
         buffer: "✦ Gusting… (2m 2s · ↓ 7.2k tokens · thinking some more)",
+        expected: AgentState::Working,
+    },
+    PromptFixture {
+        // A consent phrase the user already answered, with the LIVE
+        // working status line painted after it. tmux repaints the
+        // token-counter / `esc to interrupt` line continuously while
+        // the agent is busy, but the static prompt footer is never
+        // re-sent — so the stale phrase above the working anchor must
+        // read Working, not pin InputNeeded until it scrolls out of
+        // the detect window.
+        name: "working_status_line_after_stale_consent_phrase",
+        buffer: "Do you want to proceed?\n\u{273b} (8s · ↑ 412 tokens · esc to interrupt)",
         expected: AgentState::Working,
     },
     PromptFixture {

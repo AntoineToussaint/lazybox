@@ -229,8 +229,20 @@ pub async fn handle_spawn(
     if let Some(existing) = find_existing_singleton(config, &session_key, &kind).await {
         tracing::info!(
             terminal_id = ?existing,
+            has_initial_prompt = initial_prompt.is_some(),
             "handle_spawn: existing singleton found, sending TerminalFocusRequested"
         );
+        // A prompt-carrying Spawn collapsing onto a live singleton must
+        // still deliver its work prompt — otherwise `w` on a PR whose
+        // agent is already running silently drops the instruction and
+        // the user just gets focused onto an idle terminal.
+        if let Some(prompt) = initial_prompt.as_deref() {
+            // Boxed: `handle_inject_prompt`'s fallback arm can call back
+            // into `handle_spawn`, and a recursive async cycle needs one
+            // pointer indirection to keep the futures finitely sized.
+            // (This call passes no fallback, so it can't actually recurse.)
+            Box::pin(handle_inject_prompt(config, existing, prompt, None)).await;
+        }
         let _ = config.bus.send(Event::TerminalFocusRequested {
             terminal_id: existing,
         });
@@ -579,10 +591,6 @@ pub async fn handle_spawn(
                 );
                 *last_input_needed_at = Some(std::time::Instant::now());
             }
-            let current = {
-                let map = states.lock().await;
-                map.get(&id).copied()
-            };
             // Hysteresis. Claude's status-bar updates make the
             // detector miss the prompt for one chunk, then catch
             // it on the next. Without this guard the pill flickers
@@ -597,25 +605,35 @@ pub async fn handle_spawn(
             let clear_exit_signal = new_state == lazybox_ipc::AgentState::Working
                 || (new_state == lazybox_ipc::AgentState::Idle
                     && agent.detect_ready_for_prompt(detect_window));
-            if should_suppress_input_needed_exit(
-                current,
-                new_state,
-                clear_exit_signal,
-                last_input_needed_at.map(|t| t.elapsed()),
-                hysteresis,
-            ) {
-                tracing::debug!(
-                    terminal_id = ?id,
-                    ?new_state,
-                    "state hysteresis: suppressing InputNeeded → {:?}",
+            // Read + decide + insert under ONE lock acquisition. A
+            // separate read-then-insert let a concurrent writer (hook
+            // ingest, the optimistic Enter flip) land between the two
+            // and be silently clobbered by a stale decision.
+            let current = {
+                let mut map = states.lock().await;
+                let current = map.get(&id).copied();
+                if should_suppress_input_needed_exit(
+                    current,
                     new_state,
-                );
-                return;
-            }
-            if current == Some(new_state) {
-                return;
-            }
-            states.lock().await.insert(id, new_state);
+                    clear_exit_signal,
+                    last_input_needed_at.map(|t| t.elapsed()),
+                    hysteresis,
+                ) {
+                    drop(map);
+                    tracing::debug!(
+                        terminal_id = ?id,
+                        ?new_state,
+                        "state hysteresis: suppressing InputNeeded → {:?}",
+                        new_state,
+                    );
+                    return;
+                }
+                if current == Some(new_state) {
+                    return;
+                }
+                map.insert(id, new_state);
+                current
+            };
             // Loud log so when the user reports "the pill didn't
             // show", we can confirm whether the daemon-side
             // detector actually fired vs. the event got lost
@@ -661,7 +679,12 @@ pub async fn handle_spawn(
                 const DETECT_WINDOW: usize = 16 * 1024;
                 let tail = &state_buf[state_buf.len().saturating_sub(DETECT_WINDOW)..];
                 if agent.detect_ready_for_prompt(tail) {
-                    signal.notify_waiters();
+                    // `notify_one` STORES a permit when no waiter is
+                    // registered yet; `notify_waiters` is edge-triggered
+                    // and a ready signal fired before the inject task
+                    // started waiting was lost forever, riding the
+                    // inject path to its hard deadline.
+                    signal.notify_one();
                     *signaled = true;
                 }
             };
@@ -684,7 +707,10 @@ pub async fn handle_spawn(
                 bytes: sub.replay.clone(),
                 seq: sub.last_seq,
             });
-            first_output_signal_for_pump.notify_waiters();
+            // Permit-storing, like the live first-output path below — a
+            // replay that lands before the inject task registers its
+            // waiter must not be lost.
+            first_output_signal_for_pump.notify_one();
             signaled_first_output = true;
             check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
         }
@@ -793,6 +819,7 @@ pub async fn handle_spawn(
         let id = terminal_id;
         let first_output = first_output_signal_for_inject;
         let ready_signal = ready_signal_for_inject;
+        let agent_states = config.agent_states.clone();
         let t0_for_inject = t0;
         tokio::spawn(async move {
             // Wait for the agent's input box to be drawn AND no
@@ -834,6 +861,34 @@ pub async fn handle_spawn(
                 SETTLE,
             )
             .await;
+            // The deadline rung pastes blindly — but if the screen is a
+            // boot-time gate (folder-trust / login / bypass chooser),
+            // the paste plus its follow-up `\r` would blindly ANSWER
+            // the chooser instead of landing in the input box. When the
+            // cached state says the agent is parked on a gate, keep
+            // waiting for the next ready / state change rather than
+            // pasting, with an overall cap; past the cap, drop the
+            // prompt loudly rather than feed it into the dialog.
+            if trigger == InjectTrigger::Deadline {
+                const GATE_CAP: std::time::Duration = std::time::Duration::from_secs(600);
+                let gate_start = std::time::Instant::now();
+                while agent_states.lock().await.get(&id).copied()
+                    == Some(lazybox_ipc::AgentState::InputNeeded)
+                {
+                    if gate_start.elapsed() >= GATE_CAP {
+                        tracing::warn!(
+                            terminal_id = ?id,
+                            "initial_prompt: agent still on an input gate after {GATE_CAP:?}; dropping the prompt rather than answering the gate with it"
+                        );
+                        return;
+                    }
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(1),
+                        ready_signal.notified(),
+                    )
+                    .await;
+                }
+            }
             tracing::info!(
                 terminal_id = ?id,
                 paste_len = paste.len(),
@@ -1631,18 +1686,25 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     if let Err(e) = config.backend.write(&key, bytes).await {
         tracing::warn!("backend write {key}: {e}");
     }
-    // If the user just sent Enter (`\r` or `\n`) to an agent
-    // terminal that's currently in `InputNeeded` state, optimistically
-    // flip it to `Working` — the user answered the prompt, so the
-    // agent is about to act on it. The detect_state loop will correct
-    // this on the next output chunk (back to `InputNeeded` if the
-    // response turned out to be another prompt, or to `Idle` once the
-    // agent goes quiet); but for the common case (user typed
-    // `y`/`yes`/`1`/<text> + Enter), the `?` pill clears immediately
-    // instead of lingering through the 8s hysteresis window.
-    // Bracket-paste markers (`ESC[200~` / `ESC[201~`) count too —
-    // those wrap claude's submit at the end.
-    if !bytes.contains(&b'\r') && !bytes.contains(&b'\n') {
+    // If the user just answered a prompt on an agent terminal that's
+    // currently in `InputNeeded` state, optimistically flip it to
+    // `Working` — the agent is about to act on the answer. The
+    // detect_state loop will correct this on the next output chunk
+    // (back to `InputNeeded` if the response turned out to be another
+    // prompt, or to `Idle` once the agent goes quiet); but for the
+    // common case the `?` pill clears immediately instead of lingering
+    // through the 8s hysteresis window.
+    //
+    // An answer is either Enter (`\r`/`\n` — `y`/`yes`/`1`/<text> +
+    // Enter; bracket-paste markers wrapping claude's submit count too)
+    // OR a bare chooser keystroke: Claude's choosers accept a single
+    // digit, y/n, or Esc (dismiss) with no Enter at all. Without the
+    // bare-key arm, answering a chooser with `1` left the stale
+    // markers pinning `InputNeeded` until fresh output evicted them.
+    let pressed_enter = bytes.contains(&b'\r') || bytes.contains(&b'\n');
+    let answered_chooser =
+        bytes.len() == 1 && matches!(bytes[0], b'1'..=b'9' | b'y' | b'n' | 0x1b);
+    if !pressed_enter && !answered_chooser {
         return;
     }
     if config.agent_state_for(terminal_id).await != Some(lazybox_ipc::AgentState::InputNeeded) {
@@ -1672,7 +1734,8 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     config.agent_detect_resets.lock().await.insert(terminal_id);
     tracing::debug!(
         ?terminal_id,
-        "user pressed Enter; optimistically flipping InputNeeded → Working"
+        pressed_enter,
+        "user answered the prompt; optimistically flipping InputNeeded → Working"
     );
     let _ = config.bus.send(Event::AgentState {
         session_key,
@@ -1764,15 +1827,20 @@ pub async fn handle_inject_prompt(
                 tracing::info!(
                     "inject_prompt: terminal {terminal_id:?} gone — falling back to Spawn"
                 );
+                // Same autonomy rule as a direct prompt-carrying Spawn
+                // (`spawn_is_autonomous`): the rewritten Spawn hands the
+                // agent pre-built work to run unattended, so it must not
+                // park on permission prompts no human is watching.
+                let prompt = Some(prompt.to_string());
+                let autonomous = spawn_is_autonomous(&prompt);
                 handle_spawn(
                     config,
                     fb.session_key,
                     fb.session_id,
                     fb.kind,
                     fb.cwd,
-                    Some(prompt.to_string()),
-                    // `w`-driven inject is a user action — keep prompts on.
-                    false,
+                    prompt,
+                    autonomous,
                 )
                 .await;
                 return;
@@ -1822,14 +1890,40 @@ pub async fn handle_inject_prompt(
         config.agent_state_for(terminal_id).await == Some(lazybox_ipc::AgentState::InputNeeded);
     let backend = config.backend.clone();
     let states = config.agent_states.clone();
+    let bus = config.bus.clone();
     let id = terminal_id;
     tokio::spawn(async move {
-        if blocked && !wait_until_input_resolved(events, id, &states, INJECT_INPUT_DEADLINE).await {
-            tracing::warn!(
-                terminal_id = ?id,
-                "inject_prompt: agent still blocked on input after {INJECT_INPUT_DEADLINE:?}; dropping injection rather than feeding it into the prompt"
-            );
-            return;
+        let deadline = tokio::time::Instant::now() + INJECT_INPUT_DEADLINE;
+        let mut events = events;
+        let mut blocked = blocked;
+        while blocked {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero()
+                || !wait_until_input_resolved(events, id, &states, remaining).await
+            {
+                tracing::warn!(
+                    terminal_id = ?id,
+                    "inject_prompt: agent still blocked on input after {INJECT_INPUT_DEADLINE:?}; dropping injection rather than feeding it into the prompt"
+                );
+                // The drop must be visible, not just a log line — the
+                // user pressed `w` and their prompt evaporated.
+                let _ = bus.send(Event::provider_error_retryable(
+                    "inject_prompt",
+                    "the agent stayed on a permission prompt, so the injected work \
+                     context was dropped — answer the prompt and press w again",
+                ));
+                return;
+            }
+            // The release may be the optimistic InputNeeded → Working
+            // flip from the user's keystroke, not a genuinely cleared
+            // prompt (the answer could re-render another chooser).
+            // Debounce, then re-check the cached state; if the prompt is
+            // back, go around again. Re-subscribe BEFORE the re-read so
+            // a transition racing the check isn't missed.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            events = bus.subscribe();
+            blocked = states.lock().await.get(&id).copied()
+                == Some(lazybox_ipc::AgentState::InputNeeded);
         }
         if let Err(e) = backend.write(&backend_key, &paste).await {
             tracing::warn!("inject_prompt: backend.write(paste) failed: {e}");
@@ -1908,15 +2002,18 @@ pub async fn handle_ingest_hook(
     let Some(new_state) = lazybox_agents::hook::hook_to_state(&hook) else {
         return;
     };
-    let prev = config.agent_states.lock().await.get(&terminal_id).copied();
-    if prev == Some(new_state) {
-        return;
-    }
-    config
-        .agent_states
-        .lock()
-        .await
-        .insert(terminal_id, new_state);
+    // Compare-and-set under one lock guard — a read under one
+    // acquisition and an insert under another lets a concurrent PTY
+    // pump transition slip between them and be clobbered.
+    let prev = {
+        let mut states = config.agent_states.lock().await;
+        let prev = states.get(&terminal_id).copied();
+        if prev == Some(new_state) {
+            return;
+        }
+        states.insert(terminal_id, new_state);
+        prev
+    };
     tracing::info!(
         ?terminal_id,
         %session_key,
@@ -2680,6 +2777,42 @@ mod tests {
             } => unreachable!(),
         };
         assert_eq!(trigger, InjectTrigger::Ready);
+    }
+
+    /// A ready signal fired BEFORE the inject task registers its waiter
+    /// must release the window immediately. `notify_one` stores a
+    /// permit; the old `notify_waiters` was edge-triggered, so a fast
+    /// pump that signalled ready first lost the wakeup forever and the
+    /// inject rode the 10s hard deadline.
+    #[tokio::test(start_paused = true)]
+    async fn gated_agent_consumes_ready_signal_fired_before_wait() {
+        let ready = tokio::sync::Notify::new();
+        let first_output = tokio::sync::Notify::new();
+        ready.notify_one();
+        let start = tokio::time::Instant::now();
+        let trigger = await_inject_window(true, &ready, &first_output, HARD, SETTLE).await;
+        assert_eq!(trigger, InjectTrigger::Ready);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "pre-fired ready signal must release promptly, not ride a deadline",
+        );
+    }
+
+    /// Same permit semantics for the detector-less first-output path —
+    /// a replay that lands before the inject task waits must still
+    /// release the settle rung.
+    #[tokio::test(start_paused = true)]
+    async fn detectorless_agent_consumes_first_output_fired_before_wait() {
+        let ready = tokio::sync::Notify::new();
+        let first_output = tokio::sync::Notify::new();
+        first_output.notify_one();
+        let start = tokio::time::Instant::now();
+        let trigger = await_inject_window(false, &ready, &first_output, HARD, SETTLE).await;
+        assert_eq!(trigger, InjectTrigger::Settle);
+        assert!(
+            start.elapsed() <= SETTLE + std::time::Duration::from_millis(50),
+            "pre-fired first-output must release after one settle, not the deadline",
+        );
     }
 
     /// Gated agents with a stuck readiness detector still inject at the

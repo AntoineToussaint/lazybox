@@ -766,6 +766,75 @@ async fn spawn_with_initial_prompt_delivers_work_to_agent() {
     .expect("deadline");
 }
 
+/// Regression: a prompt-carrying Spawn that collapses onto an existing
+/// singleton must still deliver its prompt. Pre-fix, `handle_spawn`
+/// only broadcast `TerminalFocusRequested` and the `w`-built work
+/// instruction was silently discarded — the user got focused onto an
+/// idle agent that never learned what to do.
+#[tokio::test]
+async fn spawn_onto_existing_singleton_injects_the_prompt() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        let _ = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        const WORK: &str = "Address the review comments on PR #9.";
+        client
+            .send(Command::Spawn {
+                session_key: "test:ws-1".into(),
+                session_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                initial_prompt: Some(WORK.into()),
+            })
+            .unwrap();
+
+        // The duplicate collapses onto the live terminal — focus is
+        // requested instead of spawning a second agent.
+        let focused = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalFocusRequested { .. }),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(focused.is_some(), "duplicate spawn must request focus");
+        assert_eq!(
+            mock.list().await.unwrap().len(),
+            1,
+            "singleton guard must not spawn a second agent"
+        );
+
+        // ...and the prompt still reaches the existing agent's PTY,
+        // paste + separate submit.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let joined = loop {
+            let joined = mock
+                .writes_for(&key)
+                .await
+                .into_iter()
+                .flatten()
+                .collect::<Vec<u8>>();
+            let done = String::from_utf8_lossy(&joined).contains(WORK) && joined.contains(&b'\r');
+            if done || tokio::time::Instant::now() >= deadline {
+                break joined;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let text = String::from_utf8_lossy(&joined);
+        assert!(
+            text.contains(WORK),
+            "existing singleton never received the work prompt; writes = {text:?}"
+        );
+        assert!(
+            joined.contains(&b'\r'),
+            "prompt was pasted into the singleton but never submitted; writes = {text:?}"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
 /// Regression: stale `terminal_id` in `InjectPrompt` falls back to
 /// Spawn when `fallback_spawn` is supplied. Symptom pre-fix: user
 /// presses `w` (work) right after the agent crashed, the TUI's
@@ -1147,6 +1216,93 @@ async fn answering_a_prompt_clears_input_needed_and_does_not_bounce_back() {
             ),
             _ => unreachable!(),
         }
+    })
+    .await
+    .expect("deadline");
+}
+
+/// Companion regression to the above: Claude's choosers accept a BARE
+/// digit (1-9), y/n, or Esc — no Enter at all. Pre-fix the optimistic
+/// InputNeeded → Working flip (and the detect-buffer reset behind it)
+/// only fired on `\r`/`\n`, so answering a chooser with `1` or
+/// dismissing it with Esc left the `?` pill pinned until ~16 KiB of
+/// fresh output evicted the stale prompt markers.
+#[tokio::test]
+async fn bare_chooser_keystroke_clears_input_needed() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        let chooser = concat!(
+            "Do you want to create MEMORY.md?\n",
+            "❯ 1. Yes\n",
+            "  2. No\n",
+            "Esc to cancel",
+        );
+        let input_needed = |e: &Event| {
+            matches!(
+                e,
+                Event::AgentState {
+                    state: lazybox_ipc::AgentState::InputNeeded,
+                    ..
+                }
+            )
+        };
+        let working = |e: &Event| {
+            matches!(
+                e,
+                Event::AgentState {
+                    state: lazybox_ipc::AgentState::Working,
+                    ..
+                }
+            )
+        };
+
+        // Chooser up → InputNeeded; the user picks option 1 with a bare
+        // digit (no Enter) → optimistic flip to Working.
+        mock.emit(&key, chooser).await;
+        assert!(
+            wait_for(&mut client, input_needed, Duration::from_secs(2))
+                .await
+                .is_some(),
+            "chooser must be detected as InputNeeded"
+        );
+        client
+            .send(Command::Write {
+                terminal_id,
+                bytes: b"1".to_vec(),
+            })
+            .unwrap();
+        assert!(
+            wait_for(&mut client, working, Duration::from_secs(2))
+                .await
+                .is_some(),
+            "a bare digit answer must flip InputNeeded → Working"
+        );
+
+        // Same for a lone Esc (dismiss the chooser).
+        mock.emit(&key, chooser).await;
+        assert!(
+            wait_for(&mut client, input_needed, Duration::from_secs(2))
+                .await
+                .is_some(),
+            "re-rendered chooser must re-raise InputNeeded"
+        );
+        client
+            .send(Command::Write {
+                terminal_id,
+                bytes: vec![0x1b],
+            })
+            .unwrap();
+        assert!(
+            wait_for(&mut client, working, Duration::from_secs(2))
+                .await
+                .is_some(),
+            "a lone Esc must flip InputNeeded → Working"
+        );
     })
     .await
     .expect("deadline");

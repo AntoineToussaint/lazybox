@@ -230,6 +230,7 @@ fn classify(s: &str, compact: &str) -> Decision {
     let idle_pos = idle_box_pos(compact);
     let resting_pos = resting_composer_pos(compact);
     let chooser_pos = chooser_pos(compact);
+    let work_pos = working_status_pos(compact);
 
     // A live chooser / permission dialog REPLACES the input box, so its
     // markers are the bottom-most thing on screen. When the composer
@@ -237,7 +238,15 @@ fn classify(s: &str, compact: &str) -> Decision {
     // markers, the arrow + numbered shape is scrollback — a parked `❯`
     // prompt above an agent's prose `1.`/`2.` list, or an injected
     // multi-line prompt sitting in the composer — NOT a live chooser.
-    let chooser_live = marker_at_least_as_recent(chooser_pos, idle_pos);
+    //
+    // The live working status line is an end-of-prompt anchor too: tmux
+    // repaints the `esc to interrupt` / token-counter line continuously
+    // while the agent is busy, but a static prompt footer is never
+    // re-sent. A prompt marker ABOVE the working anchor is therefore an
+    // already-answered prompt the agent has moved past, not a live gate
+    // — without this, the stale marker pins InputNeeded for as long as
+    // it stays in the detect window.
+    let chooser_live = marker_at_least_as_recent(chooser_pos, idle_pos.max(work_pos));
 
     // tmux paints the screen by absolute cursor position, so the bytes
     // lazybox sees arrive in TEMPORAL order: a single visual line
@@ -270,7 +279,6 @@ fn classify(s: &str, compact: &str) -> Decision {
             "Proceed?",
         ],
     );
-    let work_pos = working_status_pos(compact);
 
     let mut d = Decision {
         state: AgentState::Idle,
@@ -306,9 +314,11 @@ fn classify(s: &str, compact: &str) -> Decision {
     // footer only. Such a phrase never appears in an idle composer or
     // injected prose, so the sole reason to suppress it is a genuine
     // end-of-turn footer (`? for shortcuts` / bypass) below which it's
-    // stale scrollback (#191). It must NOT be gated by `Tab to amend`,
-    // which the live command-approval dialog itself renders.
-    if marker_at_least_as_recent(phrase_pos, resting_pos) {
+    // stale scrollback (#191) — or a live working anchor painted after
+    // it, which proves the agent already moved past the prompt. It must
+    // NOT be gated by `Tab to amend`, which the live command-approval
+    // dialog itself renders.
+    if marker_at_least_as_recent(phrase_pos, resting_pos.max(work_pos)) {
         d.state = AgentState::InputNeeded;
         d.trigger = Some(Trigger::StandalonePhrase);
         return d;
@@ -320,7 +330,7 @@ fn classify(s: &str, compact: &str) -> Decision {
     // recent as the reliable resting footer.
     if choice_pos.is_some()
         && question_pos.is_some()
-        && marker_at_least_as_recent(choice_pos.max(question_pos), resting_pos)
+        && marker_at_least_as_recent(choice_pos.max(question_pos), resting_pos.max(work_pos))
     {
         d.state = AgentState::InputNeeded;
         d.trigger = Some(Trigger::PairedYesNo);
@@ -648,6 +658,22 @@ fn last_line_pos(s: &str, pred: impl Fn(&str) -> bool) -> Option<usize> {
         offset += line.len();
     }
     best
+}
+
+/// Last `max` bytes of `s`, snapped forward to a char boundary. The
+/// simple-pattern agents (Codex, Cursor, GenericCli) match only this
+/// recent tail of the detect window so a prompt that scrolled past it
+/// stops matching — without the bound, a stale `[y/n]` anywhere in the
+/// 16 KiB window pins `InputNeeded` long after the user answered.
+pub fn recent_tail(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut start = s.len() - max;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
 }
 
 /// Filter out ANSI escape sequences, then UTF-8-decode the remainder.

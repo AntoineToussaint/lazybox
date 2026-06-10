@@ -550,6 +550,23 @@ impl Sidebar {
         true
     }
 
+    /// True when the sidebar already displays `state` for this
+    /// session — i.e. applying the event again would change nothing
+    /// on screen. The orchestrator uses this to skip the redraw (and
+    /// the workspace re-projection) for the daemon's repeated
+    /// `AgentState` pings, which otherwise arrive every detector
+    /// tick while an agent streams.
+    pub fn displays_agent_state(
+        &self,
+        session_key: &SessionKey,
+        state: lazybox_ipc::AgentState,
+    ) -> bool {
+        let asking = self.agents_asking.contains(session_key);
+        let working = self.agents_working.contains(session_key);
+        asking == matches!(state, lazybox_ipc::AgentState::InputNeeded)
+            && working == matches!(state, lazybox_ipc::AgentState::Working)
+    }
+
     /// Take any pending desktop notifications queued by event
     /// handling since the last drain. The outer (IO-aware) layer is
     /// responsible for actually firing them via

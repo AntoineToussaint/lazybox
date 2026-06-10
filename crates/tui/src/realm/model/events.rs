@@ -74,6 +74,43 @@ impl<T: TerminalAdapter> Model<T> {
     /// first Snapshot, apply any pending CLI preselect. Also feeds
     /// the polling modal so it can detect "first task arrived".
     pub fn handle_daemon_event(&mut self, event: IpcEvent) {
+        // Hot path: PTY output. Bytes only mutate one terminal's grid
+        // — no workspace / sidebar / layout state changes — so skip
+        // the full fan-out (and the Workspace clone inside
+        // `sync_panes`) entirely. A chatty agent emits hundreds of
+        // these per second; cloning the selected workspace for each
+        // one was measurable. Redraw only when the target terminal is
+        // actually on screen — output for a background workspace's
+        // terminal changes no pixels.
+        if let IpcEvent::TerminalOutput { terminal_id, .. } = &event {
+            let visible = self.terminals.is_terminal_visible(*terminal_id);
+            self.terminals.on_daemon_event(&event);
+            if visible {
+                self.redraw = true;
+            }
+            return;
+        }
+        // Agent-state pings repeat at the detector's cadence while an
+        // agent streams. Forward them (the asking/working sets and the
+        // terminal tab badges live downstream) but skip `sync_panes` —
+        // the event can't change the selection or workspace data — and
+        // only redraw when the displayed state actually flips.
+        if let IpcEvent::AgentState {
+            session_key, state, ..
+        } = &event
+        {
+            let changed = !self.sidebar.displays_agent_state(session_key, *state);
+            self.sidebar.on_daemon_event(&event);
+            if let Some(msg) = self.sidebar.drain_pending_asking_notices().pop() {
+                self.flash_hint(msg);
+            }
+            self.right.on_daemon_event(&event);
+            self.terminals.on_daemon_event(&event);
+            if changed {
+                self.redraw = true;
+            }
+            return;
+        }
         // Viewer identities — fold into the local map and forward
         // to RightPane so activity bylines can render `@me`. This
         // arrives once per daemon connection (just after Snapshot)

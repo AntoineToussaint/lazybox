@@ -1153,8 +1153,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// - OS momentum tail (the run keeps coming at the ~16 ms frame
     ///   cadence): STEP decays — 5 → 3 at event 5, → 1 at event 8,
     ///   then events past `STOP_AT` are dropped entirely so the tail
-    ///   stops the view within ~200 ms instead of trickling for the
-    ///   full 1–2 s.
+    ///   stops the view instead of trickling for the full 1–2 s.
     /// - Anything that breaks the run — the first scroll, a direction
     ///   reversal, or a deliberate tick spaced wider than
     ///   `MOMENTUM_GAP` — starts a fresh burst at full STEP. This is
@@ -1189,11 +1188,14 @@ impl<T: TerminalAdapter> Model<T> {
         /// Within a burst, the step drops at these counts.
         const DECAY_AT: u32 = 5;
         const TAIL_AT: u32 = 8;
-        /// Hard stop. At ~16 ms per event, dropping past event 12
-        /// puts the visible scroll-stop ~190 ms after the user's last
-        /// physical input — inside the issue's 100–200 ms acceptance
-        /// window with one frame of slack.
-        const STOP_AT: u32 = 12;
+        /// Hard stop. Past this count the remaining momentum tail is
+        /// dropped. At ~16 ms per event that's ~640 ms of inertia —
+        /// long enough that a genuine flick travels a useful distance
+        /// (the SGR path batches each event's full `scaled` step into
+        /// one Write now, so the tail isn't N round trips of one line
+        /// anymore), while a runaway OS momentum stream still gets
+        /// cut instead of trickling for the full 1–2 s.
+        const STOP_AT: u32 = 40;
 
         let new_dir: i8 = if is_up { -1 } else { 1 };
 

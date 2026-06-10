@@ -28,11 +28,21 @@ impl Sidebar {
             // `FocusWorkspace` emission is centralized in
             // `Model::sync_panes` (called after every key dispatch);
             // local handlers only mutate the cursor.
+            // `j`/`k` are the vim synonyms; both letters are free in
+            // the catalog and the right pane binds them the same way.
             (KeyCode::Down, m) if !m.contains(KeyModifiers::SHIFT) => {
                 self.move_cursor_by(1);
                 PaneOutcome::Consumed
             }
+            (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                self.move_cursor_by(1);
+                PaneOutcome::Consumed
+            }
             (KeyCode::Up, m) if !m.contains(KeyModifiers::SHIFT) => {
+                self.move_cursor_by(-1);
+                PaneOutcome::Consumed
+            }
+            (KeyCode::Char('k'), KeyModifiers::NONE) => {
                 self.move_cursor_by(-1);
                 PaneOutcome::Consumed
             }

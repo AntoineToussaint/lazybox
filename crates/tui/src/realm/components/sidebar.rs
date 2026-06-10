@@ -79,6 +79,17 @@ impl Sidebar {
         }
     }
 
+    /// Forward `displays_agent_state` — true when the inner sidebar
+    /// already shows `state` for this session, so a repeated
+    /// `AgentState` ping needs no redraw.
+    pub fn displays_agent_state(
+        &self,
+        session_key: &lazybox_core::SessionKey,
+        state: lazybox_ipc::AgentState,
+    ) -> bool {
+        self.inner.displays_agent_state(session_key, state)
+    }
+
     /// Drain footer-notice strings the inner sidebar queued in
     /// response to AgentState transitions. Returns one short string
     /// per Active→Asking edge, suitable for `Notice` rendering. The

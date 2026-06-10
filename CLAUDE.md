@@ -22,7 +22,7 @@ Logs go to `/tmp/lazybox.log`. State persisted in `~/.lazybox/v2/state.db`.
 
 ## Architecture
 
-14 crates organized as a client/daemon split with shared library crates. The
+18 crates organized as a client/daemon split with shared library crates. The
 core library crates (core, auth, events, store) must NEVER depend on each
 other.
 
@@ -31,16 +31,19 @@ crates/
   # ── shared libraries ────────────────────────────────────────────────
   core/            # Task, Session, Activity, SessionKey, time helpers. Source-agnostic.
   auth/            # CredentialProvider trait + chain. Env, Command, Static providers.
-  events/          # In-process event bus (broadcast channel). EventKind enum.
+  events/          # LEGACY in-process event bus. Dead code: only the unused
+                   #   GhPoller consumes it; live eventing is `ipc::Event`.
   store/           # Store trait + SQLite backend. Sessions, read/unread, snooze.
   config/          # YAML loader for ~/.lazybox/config.yaml.
   git-ops/         # Worktree manager (bare clones + per-task worktrees).
-  tui-term/        # Embedded terminal: portable-pty + ghostty-vt + widget. Used
-                   #   by both daemon (PTY ownership) and TUI (replay).
+  tui-term/        # Embedded terminal: portable-pty + libghostty-vt + widget.
+  libghostty-vt/   # Vendored safe Rust bindings for ghostty's VT parser.
+  libghostty-vt-sys/ # Raw FFI layer under libghostty-vt (builds the C lib).
 
   # ── providers ───────────────────────────────────────────────────────
-  gh-provider/     # GitHub PRs + Issues: octocrab polling → generic Events.
+  gh-provider/     # GitHub PRs + Issues via octocrab polling.
   linear-provider/ # Linear issues via GraphQL.
+  slack-provider/  # Slack DMs/channels via Web API + Socket Mode.
 
   # ── daemon-side ─────────────────────────────────────────────────────
   ipc/             # Wire types (Command/Event), framing, transport traits
@@ -53,7 +56,9 @@ crates/
                    #   polling, agent runs, JSON API gateway.
 
   # ── client / binary ─────────────────────────────────────────────────
-  tui/             # Component-tree TUI client. Hosts `lazybox` binary with
+  tui-core/        # Ratatui-free TUI logic: action catalog, intent
+                   #   resolvers, latches, editors, platform shims.
+  tui/             # tuirealm-based TUI client. Hosts `lazybox` binary with
                    #   subcommands: default (in-process daemon + TUI),
                    #   `daemon start/stop/status`, `server api`,
                    #   `--connect <socket>`.
@@ -65,30 +70,36 @@ crates/
   TUI is a thin renderer. Same process by default — transport is a tokio mpsc
   channel pair, no serialization. Out-of-process mode uses a Unix socket
   (length-prefixed bincode); SSH `-L` forwards it for remote use.
-- **TUI tiers**: three traits, three jobs.
-  - **`Pane`** (`crates/tui/src/pane.rs`) — focusable region. Owns keymap,
-    border, handles keys, reacts to events. Three impls: `Sidebar`,
-    `RightPane`, `TerminalStack`. `App` holds them as concrete fields, no
-    `dyn Pane` indirection; focus is a single `PaneId`.
-  - **`Modal`** (`crates/tui/src/modal.rs`) — full-screen overlay. Stack-
-    based via `ModalStack`. Owns input while mounted; `tick()` polls async
-    work (e.g. `LoadingModal` waits on a future).
-  - **`Component`** (`crates/tui/src/component.rs`) — dumb sub-widget.
-    Pure `render(area, frame)` + optional `on_event`. No focus, no keymap.
-- **Configuration as `Flow`** (`crates/tui/src/flow.rs`): multi-step wizards
-  (first-run setup, "Add Linear", "Edit scopes") are `Flow` impls that chain
-  generic Modal primitives in `crates/tui/src/components/config/`
-  (`ChoiceModal<T>`, `InputModal`, `ConfirmModal`, `LoadingModal<T>`). The
-  App routes modal payloads back through `Flow::step()`; each flow accumulates
-  its own state and emits a typed `Output`.
+- **TUI structure** (tuirealm-based; see `crates/tui/src/realm/MIGRATION.md`):
+  - **`Model`** (`crates/tui/src/realm/model/`) — the orchestrator. Holds the
+    three panes as typed fields, owns focus (`PaneFocus`), keyboard/mouse
+    dispatch, daemon-event fan-out, and the IPC client. Split into
+    `keys.rs` / `events.rs` / `dispatch.rs` / `modals.rs` / `helpers.rs`.
+  - **Panes** — the domain structs `Sidebar`, `RightPane`, `TerminalStack`
+    live in `crates/tui/src/components/`; thin tuirealm wrappers in
+    `crates/tui/src/realm/components/` delegate render + key dispatch to
+    their inherent methods.
+  - **Modals** (`crates/tui/src/realm/components/`) — tuirealm
+    `AppComponent`s (`Confirm`, `Input`, `Choice`, `Textarea`, `Help`,
+    `Loading`, …) mounted on a stack tracked by `Model::modal_stack`.
+  - **Action catalog** (`crates/tui-core/src/action.rs`) — one `ActionDef`
+    per user action (key chord, label, section, availability). Keyboard
+    dispatch, footer hints, context menu, and the help panel all read it;
+    user remaps come from `ui.action_keys` in YAML.
+  - **Setup wizard** (`crates/tui/src/setup_flow.rs`) — realm-native
+    `SetupRunner` state machine driving Choice/Loading/Error modals.
 - **Event bus**: `tokio::sync::broadcast` inside the daemon. Providers
   produce; subscribers (TUI clients, JSON API gateway) consume.
 - **Credential chain**: `EnvProvider("GH_TOKEN") → EnvProvider("GITHUB_TOKEN") → CommandProvider("gh auth token")`. Trait-based, extensible (Vault, Keychain, OAuth).
 - **Store**: `Store` trait with `SqliteStore` backend at `~/.lazybox/v2/state.db`.
   Read/unread, snooze, and session metadata persist across launches.
-- **Terminal**: PTY reader on std::thread. ghostty-vt parser behind Mutex.
-  Daemon keeps a per-terminal ring buffer (64 KB) for replay on reconnect.
-- **Markdown**: PR descriptions rendered via `tui-markdown` (pulldown-cmark + syntect).
+- **Terminal**: daemon owns the PTYs (reader on std::thread, per-terminal
+  ring buffer for replay on reconnect); the TUI parses the byte stream with
+  the vendored `libghostty-vt` bindings (`!Send`, lives on the UI thread —
+  one VT instance per terminal slot in `TerminalStack`).
+- **Markdown**: comment/description rendering is hand-rolled
+  (`components/comment_render.rs` + `right_pane/markdown.rs`) — inline-noise
+  stripping and teaser extraction, no markdown crate.
 - **Structured agent runs**: Claude Code launched with `-p --input-format
   stream-json --output-format stream-json` for non-terminal clients (Tauri,
   iOS, JSON API). Raw JSON is preserved alongside normalized events.
@@ -99,10 +110,10 @@ crates/
 
 ### Adding a new provider
 
-1. Create `crates/foo-provider/` depending on `lazybox-core` + `lazybox-events` + `lazybox-auth`
+1. Create `crates/foo-provider/` depending on `lazybox-core` + `lazybox-auth`
 2. Build a credential chain for auth
-3. Implement client returning `Vec<Task>` + poller emitting `Event`s
-4. Wire in `crates/server/` alongside the GitHub and Linear pollers
+3. Implement client returning `Vec<Task>`
+4. Wire in `crates/server/` alongside the GitHub / Linear / Slack pollers
 
 ### Adding a new auth source
 
@@ -123,22 +134,38 @@ via YAML config without recompilation.
 
 ## Keybindings
 
-Each Pane (Sidebar / RightPane / TerminalStack) declares its own
-keymap; the bottom hint bar reads from the focused Pane's
-`Pane::keymap()`. Global keys live in `app::dispatch_key`.
+Most keys live in the action catalog (`crates/tui-core/src/action.rs`,
+remappable via `ui.action_keys`) and dispatch through
+`Model::handle_pane_key` → `dispatch_action`; navigation/latch keys are
+per-pane match arms in `components/{sidebar,right_pane,terminal_stack}`.
+The footer hint bar reads each pane's `contextual_bindings()`.
 
-**Global**: `Tab` cycle panes, `?` help, `q q` quit, `Shift-arrows`
-resize splitters, mouse-click any pane to focus it, mouse-drag
-splitters to resize.
+**Global**: `Tab` cycle panes, `?` help, `q q` quit, `,` settings,
+`Shift-R` refresh, `Shift-T` tour, `Shift-D` sync status, `!` jump to
+agent-asking workspace, `Shift-F` jump to failing CI, `Shift-arrows`
+resize splitters, `F8` / `Alt-s` / `Ctrl-Alt-s` toggle mouse capture
+(host-native text selection), mouse-click any pane to focus it,
+mouse-drag splitters to resize.
 
-**Sidebar**: `j/k` navigate, `Enter` open, `c` claude, `b` shell,
-`x` codex, `u` cursor, `m` mark read, `/` search. `g` is a leader
-key that opens the **github** group as a two-step chord (which-key
-popup): `g m` merge, `g v` reviewers, `g a` assignees, `g l` labels,
-`g o` open in browser. The legacy `Shift-{M,V,G,L,O}` keys remain as
-direct aliases.
+**Sidebar**: `j/k` or arrows navigate, `Enter` open (focus activity),
+`w` work on this (contextual agent prompt), `c` claude, `x` codex,
+`u` cursor, `s` shell, `e` editor, `m` mark read, `z` snooze,
+`Shift-Z` long snooze, `f` cycle role filter, `o` cycle sort,
+`Space` collapse/expand repo group, `Shift-S` cycle mailbox
+(Inbox → Inactive → Snoozed), `/` search, `n` new workspace,
+`Shift-N` new project, `Shift-A` adopt sessions, `Shift-J` join issue
+into PR, `Shift-X` archive. `g` is a leader key that opens the
+**github** group as a two-step chord (which-key popup): `g m` merge,
+`g v` reviewers, `g a` assignees, `g l` labels, `g o` open in
+browser. The legacy `Shift-{M,V,G,L,O}` keys remain as direct
+aliases (Activity-section bindings shadow them while the right pane
+is focused — e.g. `Shift-G` is jump-to-bottom there).
 
-**RightPane (Activity)**: `j/k` scroll, `g/G` top/bottom.
+**RightPane (Activity)**: `j/k` or arrows move the row cursor,
+`g/G` top/bottom, `→/l` expand row, `←/h` collapse row, `Enter`
+toggle the section, `Space`/`v` multi-select rows, `w` work on
+selection, `d` toggle PR/issue description, `m` mark the focused row
+read, `z` undo mark-read, `r` reply.
 
 **TerminalStack**: all keys forward to the PTY. `]]` (configurable
 escape sequence) is a leader: bare `]]` returns to the sidebar, while
@@ -146,13 +173,16 @@ escape sequence) is a leader: bare `]]` returns to the sidebar, while
 [`docs/snippets.md`](docs/snippets.md)) — fuzzy-filters by snippet
 key, auto-submits when the filter uniquely matches. A lone `]`
 followed by any non-`]` key is sent to the agent verbatim. `Ctrl-c`
-is forwarded as an interrupt.
+is forwarded as an interrupt. `Ctrl-w` is the tile prefix:
+`Ctrl-w |` / `Ctrl-w -` split, `Ctrl-w <arrow>` moves tile focus,
+`Ctrl-w q` closes the focused tile. `Shift-PgUp/PgDn` scroll the
+scrollback, `Shift-Home/End` jump top/bottom (mouse wheel works too).
 
 ## Conventions
 
 - `thiserror` for errors in library crates, `anyhow` in the binary (`tui`)
 - No `unwrap()` in library crates
 - Core 4 libraries (core, auth, events, store) must not depend on each other
-- Provider crates depend on core + events + auth only
+- Provider crates depend on core + auth only
 - Every public function has a test; every TUI component has a render snapshot
   (insta + ratatui `TestBackend`); every bug fix lands with a regression test

@@ -193,15 +193,22 @@ impl<T: TerminalAdapter> Model<T> {
             Action::MarkAllRead => {
                 // Context-sensitive: when the user has activities
                 // multi-selected in the right pane, `m` marks only
-                // THOSE rows. When no selection, falls back to the
-                // bulk "mark all of this workspace" behaviour. Same
-                // key, smarter semantics based on what's selected.
+                // THOSE rows. With no selection but the activity
+                // cursor on a row (right pane focused), `m` marks
+                // just that row — the explicit counterpart to the
+                // auto-mark-on-hover timer. Otherwise it falls back
+                // to the bulk "mark all of this workspace"
+                // behaviour. Same key, smarter semantics based on
+                // where the user is acting.
                 let Some(sk) = session_key else {
                     return cmds;
                 };
                 let selected = self.right.selected_activity_indices();
                 if selected.is_empty() {
-                    cmds.push(IpcCommand::MarkRead { session_key: sk });
+                    if self.focus != PaneFocus::Right || !self.right.mark_cursor_row_read(&mut cmds)
+                    {
+                        cmds.push(IpcCommand::MarkRead { session_key: sk });
+                    }
                 } else {
                     let n = selected.len();
                     for index in selected {

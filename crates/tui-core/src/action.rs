@@ -205,6 +205,8 @@ pub enum ActionKind {
     // Activity
     ToggleActivity,
     ToggleRow,
+    ActivityTop,
+    ActivityBottom,
     Reply,
     SelectRow,
     ToggleDescription,
@@ -573,6 +575,20 @@ impl ActionDef {
                 describe: "Expand or collapse the focused activity row.",
                 section: Section::Activity,
             },
+            ActionKind::ActivityTop => &Self {
+                kind: ActionKind::ActivityTop,
+                default_keys: "g",
+                label: "top",
+                describe: "Jump the activity cursor to the first row.",
+                section: Section::Activity,
+            },
+            ActionKind::ActivityBottom => &Self {
+                kind: ActionKind::ActivityBottom,
+                default_keys: "Shift-G",
+                label: "bottom",
+                describe: "Jump the activity cursor to the last row.",
+                section: Section::Activity,
+            },
             ActionKind::Reply => &Self {
                 kind: ActionKind::Reply,
                 default_keys: "r",
@@ -671,6 +687,8 @@ impl ActionDef {
             // Activity
             ActionKind::ToggleActivity,
             ActionKind::ToggleRow,
+            ActionKind::ActivityTop,
+            ActionKind::ActivityBottom,
             ActionKind::ToggleDescription,
             ActionKind::SelectRow,
             ActionKind::UndoMarkRead,
@@ -929,6 +947,8 @@ impl ActionKind {
             ActionKind::OpenInBrowser => "open_in_browser",
             ActionKind::ToggleActivity => "toggle_activity",
             ActionKind::ToggleRow => "toggle_row",
+            ActionKind::ActivityTop => "activity_top",
+            ActionKind::ActivityBottom => "activity_bottom",
             ActionKind::Reply => "reply",
             ActionKind::SelectRow => "select_row",
             ActionKind::ToggleDescription => "toggle_description",
@@ -1049,6 +1069,8 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // tighten further if it wants.
         ActionKind::ToggleActivity
         | ActionKind::ToggleRow
+        | ActionKind::ActivityTop
+        | ActionKind::ActivityBottom
         | ActionKind::SelectRow
         | ActionKind::ToggleDescription
         | ActionKind::UndoMarkRead => has_ws,

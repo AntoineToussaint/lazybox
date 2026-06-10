@@ -141,6 +141,20 @@ impl Right {
         self.inner.selected_activity_indices()
     }
 
+    /// Per-row mark-read at the activity cursor. Used by the `m`
+    /// dispatch when this pane is focused; returns `false` when no
+    /// row is actionable so the caller falls back to the
+    /// workspace-wide mark.
+    pub fn mark_cursor_row_read(&mut self, cmds: &mut Vec<IpcCommand>) -> bool {
+        self.inner.mark_cursor_row_read(cmds)
+    }
+
+    /// Current activity-cursor position. Read-only; used by tests to
+    /// assert navigation keys land where they should.
+    pub fn comment_cursor(&self) -> usize {
+        self.inner.comment_cursor()
+    }
+
     /// Drop the multi-select set. Called by `w` dispatch once the
     /// selection has been consumed into an agent spawn.
     pub fn clear_activity_selection(&mut self) {

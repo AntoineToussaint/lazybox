@@ -164,29 +164,42 @@ pub(crate) fn find_action_for_chord(
     focus: PaneFocus,
     overrides: &std::collections::BTreeMap<String, String>,
 ) -> Option<&'static lazybox_tui_core::action::ActionDef> {
-    use lazybox_tui_core::action::{ActionDef, Section};
-    let allowed = |s: Section| -> bool {
-        match (s, focus) {
-            (Section::Global, _) => true,
-            // Workspace = "operates on the focused workspace". The
-            // workspace cursor lives in the sidebar, but it's still
-            // the active reference frame when the user is reading
-            // the right pane — so accept both. Reply / Shift-V /
-            // Shift-G all dual-fire today, and this widening lets
-            // their inline match arms retire.
-            (Section::Workspace, PaneFocus::Sidebar | PaneFocus::Right) => true,
-            // Activity = "operates on the focused activity row" —
-            // the row cursor only exists on the right pane.
-            (Section::Activity, PaneFocus::Right) => true,
-            // Terminal section binds to actual PTY keys; we don't
-            // route them through the catalog yet — the terminal
-            // pane forwards `all keys` to the PTY and the escape
-            // sequence (`]]`) has its own latch logic.
-            _ => false,
-        }
-    };
+    use lazybox_tui_core::action::ActionDef;
     ActionDef::all()
-        .find(|d| allowed(d.section) && d.effective_chord(overrides).as_ref() == Some(chord))
+        .filter_map(|d| section_rank(d.section, focus).map(|rank| (rank, d)))
+        .filter(|(_, d)| d.effective_chord(overrides).as_ref() == Some(chord))
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, d)| d)
+}
+
+/// Resolution priority of a catalog section under the given focus.
+/// `None` = unreachable from this focus; lower rank wins a chord
+/// collision.
+///
+/// Globals always resolve, first. Beyond that, the pane that owns the
+/// cursor's reference frame wins:
+/// - Sidebar focus: the Workspace section.
+/// - Right focus: the Activity section first (the row cursor lives
+///   there — `z` undo-mark-read, `Shift-G` jump-to-bottom must beat
+///   the Workspace section's `z` snooze / `Shift-G` assignees), then
+///   the Workspace section, which stays reachable because the sidebar
+///   selection is still the active reference frame while reading
+///   activity (Reply / Shift-V / merge all dual-fire on purpose).
+/// - Terminal focus never reaches the catalog: the terminal pane
+///   forwards `all keys` to the PTY and the escape sequence (`]]`)
+///   has its own latch logic.
+pub(crate) fn section_rank(
+    section: lazybox_tui_core::action::Section,
+    focus: PaneFocus,
+) -> Option<u8> {
+    use lazybox_tui_core::action::Section;
+    match (section, focus) {
+        (Section::Global, _) => Some(0),
+        (Section::Workspace, PaneFocus::Sidebar) => Some(1),
+        (Section::Activity, PaneFocus::Right) => Some(1),
+        (Section::Workspace, PaneFocus::Right) => Some(2),
+        _ => None,
+    }
 }
 
 /// Carve the bottom row off for the footer. Returns

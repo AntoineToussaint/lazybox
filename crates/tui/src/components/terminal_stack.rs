@@ -741,7 +741,16 @@ impl TerminalStack {
     /// Apply a session's persisted layout. Called by the App when the
     /// active workspace + session change so the renderer matches the
     /// user's last arrangement.
+    ///
+    /// No-op when the layout is unchanged: this is called from
+    /// `sync_panes` after every key dispatch and daemon event, and
+    /// unconditionally resetting the `Ctrl-w` latch / pending split
+    /// here meant ANY daemon event landing between `Ctrl-w |` and the
+    /// `TerminalSpawned` it waits on silently cancelled the split.
     pub fn set_layout(&mut self, layout: lazybox_core::SessionLayout) {
+        if self.layout == layout {
+            return;
+        }
         self.layout = layout;
         self.ctrl_w_latch.disarm();
         self.pending_split = None;
@@ -1287,7 +1296,7 @@ impl TerminalStack {
             .terminal
             .scroll_viewport(vt::terminal::ScrollViewport::Delta(delta));
         let after = slot.vt.terminal.scrollbar().ok();
-        tracing::info!(
+        tracing::debug!(
             terminal_id = ?id,
             delta = delta,
             screen = ?screen,
@@ -3594,5 +3603,74 @@ mod rebadge_tests {
             issue.as_str().to_string(),
         )));
         assert!(!stack.terminals.contains_key(&TerminalId(1)));
+    }
+}
+
+#[cfg(test)]
+mod set_layout_tests {
+    //! `set_layout` runs inside `sync_panes`, i.e. after EVERY key
+    //! dispatch and daemon event. It must be a no-op when the layout
+    //! is unchanged — otherwise any daemon event landing between
+    //! `Ctrl-w |` and the `TerminalSpawned` it waits on resets the
+    //! latch and silently cancels the pending split.
+    use super::*;
+
+    fn stack_with_terminal(sk: &SessionKey) -> TerminalStack {
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            kind: TerminalKind::Shell,
+            no_permission: false,
+        });
+        stack.set_active_session(Some(sk.clone()));
+        stack
+    }
+
+    #[test]
+    fn unchanged_layout_keeps_the_pending_split() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = stack_with_terminal(&sk);
+        stack.pending_split = Some(PendingSplit::Vertical);
+
+        // Same layout re-projected (what every daemon event does via
+        // sync_panes) — the armed split must survive.
+        stack.set_layout(stack.layout().clone());
+        assert_eq!(
+            stack.pending_split,
+            Some(PendingSplit::Vertical),
+            "an unchanged layout must not cancel the pending split",
+        );
+
+        // The deferred spawn then completes the split as intended.
+        stack.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(2),
+            session_key: sk,
+            kind: TerminalKind::Shell,
+            no_permission: false,
+        });
+        assert!(stack.pending_split.is_none(), "spawn consumed the split");
+        assert!(
+            matches!(stack.layout(), lazybox_core::SessionLayout::Splits { .. }),
+            "the new terminal landed in a split layout",
+        );
+    }
+
+    #[test]
+    fn changed_layout_still_resets_the_latch() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = stack_with_terminal(&sk);
+        stack.pending_split = Some(PendingSplit::Horizontal);
+
+        // A genuine workspace switch swaps the layout — stale split
+        // intent must not leak into the next workspace.
+        stack.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::Leaf { terminal_id: 9 },
+            focused: vec![],
+        });
+        assert!(
+            stack.pending_split.is_none(),
+            "a layout change must clear the stale pending split",
+        );
     }
 }

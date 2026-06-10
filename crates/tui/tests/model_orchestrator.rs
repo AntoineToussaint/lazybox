@@ -1329,3 +1329,195 @@ fn gv_with_no_candidate_reviewers_shows_framed_empty_state() {
         "Enter on the empty picker must close it",
     );
 }
+
+// ───────────────────────────────────────────────────────────────────
+// Right-pane chord shadowing regressions: with the activity pane
+// focused, `G` / `z` / `m` used to resolve to the Workspace section's
+// catalog entries (assignees picker / snooze picker / mark-ALL-read)
+// before the pane's own bindings ever saw the key.
+// ───────────────────────────────────────────────────────────────────
+
+fn activity(author: &str, body: &str, age_minutes: i64) -> lazybox_core::Activity {
+    lazybox_core::Activity {
+        author: author.into(),
+        body: body.into(),
+        created_at: Utc::now() - chrono::Duration::minutes(age_minutes),
+        kind: lazybox_core::ActivityKind::Comment,
+        node_id: None,
+        path: None,
+        line: None,
+        diff_hunk: None,
+        thread_id: None,
+    }
+}
+
+/// PR workspace with two unread activity rows and a GraphQL node id
+/// (so a mis-dispatched AddAssignees would really mount its picker).
+fn model_on_activity_pane() -> (
+    lazybox_tui::realm::Model<tuirealm::terminal::TestTerminalAdapter>,
+    lazybox_ipc::Connection,
+) {
+    let (client, server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let mut task = task_with_pr("o/r#1");
+    task.node_id = Some("PR_node".into());
+    task.recent_activity = vec![
+        activity("alice", "newest comment", 1),
+        activity("bob", "older comment", 5),
+    ];
+    let ws = Workspace::from_task(task, Utc::now());
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+        projects: vec![],
+    });
+    // Enter on the sidebar row moves focus to the activity pane.
+    m.dispatch_key(key(Key::Enter));
+    assert_eq!(m.focus(), PaneFocus::Right, "test setup: focus right pane");
+    (m, server)
+}
+
+fn drain_cmds(server: &mut lazybox_ipc::Connection) -> Vec<lazybox_ipc::Command> {
+    let mut commands = Vec::new();
+    while let Ok(cmd) = server.rx.try_recv() {
+        commands.push(cmd);
+    }
+    commands
+}
+
+#[test]
+fn right_focus_shift_g_scrolls_to_bottom_not_assignees_picker() {
+    let (mut m, _server) = model_on_activity_pane();
+    assert_eq!(m.__test_right().comment_cursor(), 0);
+
+    m.dispatch_key(key_with(Key::Char('G'), KeyModifiers::SHIFT));
+
+    assert_eq!(
+        m.top_modal(),
+        None,
+        "G on the activity pane must not open the assignees picker",
+    );
+    assert_eq!(
+        m.__test_right().comment_cursor(),
+        1,
+        "G must jump the activity cursor to the last row",
+    );
+}
+
+#[test]
+fn right_focus_z_undoes_mark_read_not_snooze_picker() {
+    use lazybox_ipc::Command;
+    let (mut m, mut server) = model_on_activity_pane();
+
+    // `m` marks the cursor row read (and records the undo target).
+    m.dispatch_key(key(Key::Char('m')));
+    let cmds = drain_cmds(&mut server);
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::MarkActivityRead { index: 0, .. })),
+        "test setup: per-row mark must fire first, got {cmds:#?}",
+    );
+
+    // `z` must undo it — not open the snooze picker.
+    m.dispatch_key(key(Key::Char('z')));
+    assert_eq!(
+        m.top_modal(),
+        None,
+        "z on the activity pane must not open the snooze picker",
+    );
+    let cmds = drain_cmds(&mut server);
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::UnmarkActivityRead { index: 0, .. })),
+        "z must emit UnmarkActivityRead for the just-marked row, got {cmds:#?}",
+    );
+    assert!(
+        !cmds.iter()
+            .any(|c| matches!(c, Command::Snooze { .. } | Command::Unsnooze { .. })),
+        "z must not touch snooze state from the activity pane",
+    );
+}
+
+#[test]
+fn right_focus_m_marks_cursor_row_not_whole_workspace() {
+    use lazybox_ipc::Command;
+    let (mut m, mut server) = model_on_activity_pane();
+
+    m.dispatch_key(key(Key::Char('m')));
+
+    let cmds = drain_cmds(&mut server);
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::MarkActivityRead { index: 0, .. })),
+        "m with the cursor on an activity row marks THAT row, got {cmds:#?}",
+    );
+    assert!(
+        !cmds.iter().any(|c| matches!(c, Command::MarkRead { .. })),
+        "m on a focused row must not bulk-mark the workspace",
+    );
+}
+
+#[test]
+fn sidebar_focus_m_still_marks_whole_workspace() {
+    use lazybox_ipc::Command;
+    let (mut m, mut server) = model_on_activity_pane();
+    // Return to the sidebar: workspace-wide semantics apply there.
+    m.dispatch_key(key(Key::Tab)); // Right → Terminals (empty)
+    m.dispatch_key(key(Key::Tab)); // Terminals → Sidebar
+    assert_eq!(m.focus(), PaneFocus::Sidebar);
+    drain_cmds(&mut server);
+
+    m.dispatch_key(key(Key::Char('m')));
+
+    let cmds = drain_cmds(&mut server);
+    assert!(
+        cmds.iter().any(|c| matches!(c, Command::MarkRead { .. })),
+        "sidebar m keeps the workspace-wide mark, got {cmds:#?}",
+    );
+}
+
+#[test]
+fn j_and_k_navigate_the_sidebar() {
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let newer = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    let mut older_task = task_with_pr("o/r#2");
+    older_task.updated_at = Utc::now() - chrono::Duration::hours(2);
+    let older = Workspace::from_task(older_task, Utc::now());
+    let (newer_key, older_key) = (newer.key.clone(), older.key.clone());
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![newer, older],
+        terminals: vec![],
+        projects: vec![],
+    });
+    assert_eq!(
+        m.__test_sidebar_mut().selected_workspace().map(|w| &w.key),
+        Some(&newer_key),
+    );
+
+    m.dispatch_key(key(Key::Char('j')));
+    assert_eq!(
+        m.__test_sidebar_mut().selected_workspace().map(|w| &w.key),
+        Some(&older_key),
+        "j must move the sidebar cursor down (and not be eaten by the catalog)",
+    );
+
+    m.dispatch_key(key(Key::Char('k')));
+    assert_eq!(
+        m.__test_sidebar_mut().selected_workspace().map(|w| &w.key),
+        Some(&newer_key),
+        "k must move the sidebar cursor back up",
+    );
+}
+
+#[test]
+fn j_and_k_navigate_the_activity_feed() {
+    let (mut m, _server) = model_on_activity_pane();
+    assert_eq!(m.__test_right().comment_cursor(), 0);
+
+    m.dispatch_key(key(Key::Char('j')));
+    assert_eq!(m.__test_right().comment_cursor(), 1, "j moves down");
+
+    m.dispatch_key(key(Key::Char('k')));
+    assert_eq!(m.__test_right().comment_cursor(), 0, "k moves back up");
+}

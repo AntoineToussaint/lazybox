@@ -451,6 +451,40 @@ impl RightPane {
         Some((lazybox_core::SessionKey::from(&workspace.key), i))
     }
 
+    /// Mark the activity row under the cursor read — the explicit
+    /// per-row counterpart to the auto-mark-on-hover timer, fired by
+    /// `m` while this pane is focused (via the catalog's
+    /// `MarkAllRead` dispatch). Records the undo target so `z` can
+    /// revert, exactly like the timer path.
+    ///
+    /// Returns `true` when the cursor is on an actionable activity
+    /// row (the per-row semantics apply, even if the row was already
+    /// read and nothing was pushed); `false` when there is no row to
+    /// act on — collapsed section, empty feed, or no workspace — so
+    /// the caller can fall back to the workspace-wide mark.
+    pub fn mark_cursor_row_read(&mut self, cmds: &mut Vec<Command>) -> bool {
+        let Some(workspace) = &self.workspace else {
+            return false;
+        };
+        if self.activity_collapsed || workspace.activity.is_empty() {
+            return false;
+        }
+        let cursor = self.feed.cursor;
+        if workspace.is_activity_unread(cursor) {
+            cmds.push(Command::MarkActivityRead {
+                session_key: workspace.key.clone().into(),
+                index: cursor,
+            });
+            if let Some(act) = workspace.activity.get(cursor) {
+                self.last_marked_read = Some(AutoMarkRecord {
+                    last_index: cursor,
+                    fingerprint: ActivityFingerprint::of(act),
+                });
+            }
+        }
+        true
+    }
+
     /// Undo the most recent auto-mark, if any. Returns
     /// `(session_key, index)` for the caller to persist via
     /// `Command::UnmarkActivityRead`.
@@ -1431,7 +1465,7 @@ impl RightPane {
         let last = workspace.activity.len().saturating_sub(1);
 
         let result = match (key.code, key.modifiers) {
-            (KeyCode::Down, _) => {
+            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                 if workspace.activity.is_empty() {
                     return PaneOutcome::Consumed;
                 }
@@ -1441,7 +1475,7 @@ impl RightPane {
                 self.clamp_scroll_to_cursor();
                 PaneOutcome::Consumed
             }
-            (KeyCode::Up, _) => {
+            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
                 self.feed.cursor = self.feed.cursor.saturating_sub(1);
                 self.clamp_scroll_to_cursor();
                 PaneOutcome::Consumed
@@ -1534,28 +1568,11 @@ impl RightPane {
                 }
                 PaneOutcome::Consumed
             }
-            // `m` marks the focused activity row as read — the
-            // explicit per-row counterpart to the sidebar's bulk
-            // `m` (which marks the whole workspace). Auto-mark-on-
-            // hover already does this passively; this binding is
-            // for the user who wants to clear without the timer.
-            (KeyCode::Char('m'), KeyModifiers::NONE) => {
-                if !workspace.activity.is_empty() && workspace.is_activity_unread(self.feed.cursor)
-                {
-                    let cursor = self.feed.cursor;
-                    cmds.push(Command::MarkActivityRead {
-                        session_key: workspace.key.clone().into(),
-                        index: cursor,
-                    });
-                    if let Some(act) = workspace.activity.get(cursor) {
-                        self.last_marked_read = Some(AutoMarkRecord {
-                            last_index: cursor,
-                            fingerprint: ActivityFingerprint::of(act),
-                        });
-                    }
-                }
-                PaneOutcome::Consumed
-            }
+            // `m` (mark the focused row read) is dispatched through
+            // the catalog — see `Model::dispatch_action(MarkAllRead)`,
+            // which calls `mark_cursor_row_read` when this pane is
+            // focused and falls back to the workspace-wide mark
+            // otherwise.
             _ => PaneOutcome::Pass,
         };
 

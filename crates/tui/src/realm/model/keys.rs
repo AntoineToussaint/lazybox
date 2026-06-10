@@ -548,6 +548,13 @@ impl<T: TerminalAdapter> Model<T> {
         &mut self.sidebar
     }
 
+    /// Test accessor — read-only handle to the right-pane wrapper.
+    /// Same contract as `__test_sidebar_mut`: integration tests only.
+    #[doc(hidden)]
+    pub fn __test_right(&self) -> &crate::realm::components::right::Right {
+        &self.right
+    }
+
     /// Look up the Quit chord — catalog default OR
     /// `ui.action_keys.quit` override. Returns the parsed `KeyChord`
     /// (`Double` for `q q`, `Single` for a single-letter remap).
@@ -927,7 +934,18 @@ impl<T: TerminalAdapter> Model<T> {
                         cell_col,
                         cell_row,
                     ) {
-                        self.send_cmd(IpcCommand::Write { terminal_id, bytes });
+                        // One wheel notch encodes one line for the
+                        // inner program, but the damper computed a
+                        // multi-line step. Repeat the encoding
+                        // `scaled` times in a SINGLE Write so the
+                        // gesture moves the full step in one daemon
+                        // round trip instead of N writes of one
+                        // notch each.
+                        let payload = bytes.repeat(scaled.max(1) as usize);
+                        self.send_cmd(IpcCommand::Write {
+                            terminal_id,
+                            bytes: payload,
+                        });
                         self.redraw = true;
                         return;
                     }

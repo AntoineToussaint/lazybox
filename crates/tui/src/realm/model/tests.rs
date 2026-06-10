@@ -398,20 +398,23 @@ mod effects_tests {
         }
     }
 
-    /// Past `STOP_AT` (event 12) a momentum stream returns 0, killing
-    /// the OS momentum tail so the view actually stops within the
-    /// issue's 100–200 ms acceptance window instead of trickling
-    /// onward at STEP=1 for the full 1–2 s tail.
+    /// Past `STOP_AT` (event 40) a momentum stream returns 0, killing
+    /// the OS momentum tail so the view actually stops instead of
+    /// trickling onward at STEP=1 for the full 1–2 s tail.
     #[test]
     fn dampen_scroll_step_momentum_tail_hard_stops_past_stop_at() {
         let mut m = build_model();
         let base = std::time::Instant::now();
-        // Saturate the burst (11 events still admit at TAIL=1).
-        for i in 0..11 {
-            let _ = m.dampen_scroll_step_at(false, base + MOMENTUM_GAP * i);
+        // Saturate the burst (39 events still admit at TAIL=1).
+        for i in 0..39 {
+            assert_ne!(
+                m.dampen_scroll_step_at(false, base + MOMENTUM_GAP * i),
+                0,
+                "event {i} is inside the burst budget and must still admit",
+            );
         }
-        // Event 12 onwards: dropped.
-        for i in 11..41 {
+        // Event 40 onwards: dropped.
+        for i in 39..60 {
             assert_eq!(m.dampen_scroll_step_at(false, base + MOMENTUM_GAP * i), 0);
         }
     }
@@ -1514,5 +1517,252 @@ mod merge_focus_follow_tests {
             Some(other_key),
             "a merge the user wasn't watching must not yank their cursor",
         );
+    }
+}
+
+#[cfg(test)]
+mod chord_resolution_tests {
+    //! Catalog chord resolution must be focus-aware. Regression for
+    //! the right-pane shadowing bugs: `G` / `z` / `m` resolved to the
+    //! Workspace section's AddAssignees / ToggleSnooze / MarkAllRead
+    //! before the activity pane's own bindings ever saw the key.
+    use super::super::PaneFocus;
+    use super::super::helpers::{find_action_for_chord, section_rank};
+    use lazybox_tui_core::action::{ActionDef, ActionKind, KeyChord};
+    use std::collections::BTreeMap;
+
+    fn chord(s: &str) -> KeyChord {
+        KeyChord::parse(s).unwrap_or_else(|| panic!("{s:?} must parse"))
+    }
+
+    fn resolve(s: &str, focus: PaneFocus) -> Option<ActionKind> {
+        find_action_for_chord(&chord(s), focus, &BTreeMap::new()).map(|d| d.kind)
+    }
+
+    /// Chord collisions that exist on purpose: the same key binds an
+    /// Activity action (wins under Right focus) and a Workspace
+    /// action (wins under Sidebar focus, still reachable from Right
+    /// when no Activity entry claims the chord). Anything NOT listed
+    /// here that collides is a shipped ambiguity.
+    fn known_aliases() -> Vec<(KeyChord, Vec<ActionKind>)> {
+        vec![
+            (
+                chord("Enter"),
+                vec![ActionKind::OpenWorkspace, ActionKind::ToggleActivity],
+            ),
+            (
+                chord("z"),
+                vec![ActionKind::ToggleSnooze, ActionKind::UndoMarkRead],
+            ),
+            (
+                chord("Shift-G"),
+                vec![ActionKind::AddAssignees, ActionKind::ActivityBottom],
+            ),
+        ]
+    }
+
+    #[test]
+    fn right_focus_resolves_activity_bindings_over_workspace() {
+        assert_eq!(
+            resolve("z", PaneFocus::Right),
+            Some(ActionKind::UndoMarkRead),
+            "`z` on the activity pane is undo-mark-read, not snooze",
+        );
+        assert_eq!(
+            resolve("Shift-G", PaneFocus::Right),
+            Some(ActionKind::ActivityBottom),
+            "`G` on the activity pane is jump-to-bottom, not assignees",
+        );
+        assert_eq!(
+            resolve("g", PaneFocus::Right),
+            Some(ActionKind::ActivityTop),
+        );
+        // `m` stays on the Workspace MarkAllRead entry — the dispatch
+        // decides per-row vs workspace-wide based on focus + cursor.
+        assert_eq!(
+            resolve("m", PaneFocus::Right),
+            Some(ActionKind::MarkAllRead),
+        );
+    }
+
+    #[test]
+    fn sidebar_focus_resolution_is_unchanged() {
+        assert_eq!(
+            resolve("z", PaneFocus::Sidebar),
+            Some(ActionKind::ToggleSnooze),
+        );
+        assert_eq!(
+            resolve("Shift-G", PaneFocus::Sidebar),
+            Some(ActionKind::AddAssignees),
+        );
+        assert_eq!(
+            resolve("m", PaneFocus::Sidebar),
+            Some(ActionKind::MarkAllRead),
+        );
+        // Activity-only entries must not leak into sidebar dispatch
+        // (`g` is the github group leader there).
+        assert_eq!(resolve("g", PaneFocus::Sidebar), None);
+    }
+
+    #[test]
+    fn navigation_synonyms_stay_clear_of_the_catalog() {
+        // `j` / `k` are pane-handler bindings (cursor movement); the
+        // catalog must never claim them or the panes go deaf.
+        for focus in [PaneFocus::Sidebar, PaneFocus::Right] {
+            assert_eq!(resolve("j", focus), None, "j must reach the pane");
+            assert_eq!(resolve("k", focus), None, "k must reach the pane");
+        }
+    }
+
+    /// No two bindings reachable from the same focus may share a
+    /// chord, except the explicitly-known aliases above — and those
+    /// must never collide *within* the same rank (a same-rank tie has
+    /// no deterministic winner by design).
+    #[test]
+    fn no_ambiguous_chords_per_focus() {
+        let overrides = BTreeMap::new();
+        for focus in [PaneFocus::Sidebar, PaneFocus::Right] {
+            let mut by_chord: std::collections::HashMap<KeyChord, Vec<(u8, ActionKind)>> =
+                std::collections::HashMap::new();
+            for def in ActionDef::all() {
+                let Some(rank) = section_rank(def.section, focus) else {
+                    continue;
+                };
+                let Some(chord) = def.effective_chord(&overrides) else {
+                    continue;
+                };
+                by_chord.entry(chord).or_default().push((rank, def.kind));
+            }
+            let aliases = known_aliases();
+            for (chord, entries) in by_chord {
+                if entries.len() < 2 {
+                    continue;
+                }
+                // Same-rank ties are always a bug.
+                for (i, (rank_a, kind_a)) in entries.iter().enumerate() {
+                    for (rank_b, kind_b) in entries.iter().skip(i + 1) {
+                        assert_ne!(
+                            rank_a, rank_b,
+                            "{focus:?}: {kind_a:?} and {kind_b:?} share chord {chord:?} \
+                             at the same rank — no deterministic winner",
+                        );
+                    }
+                }
+                // Cross-rank shadowing must be a documented alias.
+                let mut kinds: Vec<ActionKind> = entries.iter().map(|(_, k)| *k).collect();
+                kinds.sort_by_key(|k| format!("{k:?}"));
+                let known = aliases.iter().any(|(c, ks)| {
+                    let mut ks = ks.clone();
+                    ks.sort_by_key(|k| format!("{k:?}"));
+                    *c == chord && ks == kinds
+                });
+                assert!(
+                    known,
+                    "{focus:?}: chord {chord:?} is bound by {kinds:?} but isn't a \
+                     known intentional alias — add an explicit entry or rebind",
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod daemon_event_fastpath_tests {
+    //! Perf contracts for the two highest-frequency daemon events:
+    //! `TerminalOutput` and `AgentState`. Both used to run the full
+    //! `handle_daemon_event` tail — a per-event Workspace clone in
+    //! `sync_panes` plus an unconditional redraw — even when nothing
+    //! on screen could have changed.
+    use super::super::Model;
+    use chrono::Utc;
+    use lazybox_core::{Workspace, WorkspaceKey};
+    use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn seed_workspace(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) -> WorkspaceKey {
+        let ws = Workspace::empty(WorkspaceKey::new("github:o/r#1"), "main", Utc::now());
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![ws],
+            terminals: vec![],
+            projects: vec![],
+        });
+        key
+    }
+
+    #[test]
+    fn output_for_an_invisible_terminal_does_not_redraw() {
+        let mut m = build_model();
+        seed_workspace(&mut m);
+        m.redraw = false;
+        m.handle_daemon_event(IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(99),
+            bytes: b"background noise".to_vec(),
+            seq: 1,
+        });
+        assert!(
+            !m.redraw,
+            "output addressed at a terminal that isn't on screen must not redraw",
+        );
+    }
+
+    #[test]
+    fn output_for_a_visible_terminal_still_redraws() {
+        let mut m = build_model();
+        let key = seed_workspace(&mut m);
+        // Spawn a terminal on the selected workspace — the spawn
+        // handler focuses the terminal pane and makes it visible.
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(7),
+            session_key: (&key).into(),
+            kind: lazybox_ipc::TerminalKind::Shell,
+            no_permission: false,
+        });
+        m.redraw = false;
+        m.handle_daemon_event(IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(7),
+            bytes: b"$ ls\n".to_vec(),
+            seq: 1,
+        });
+        assert!(m.redraw, "visible-terminal output must trigger a redraw");
+    }
+
+    #[test]
+    fn repeated_agent_state_pings_do_not_redraw() {
+        let mut m = build_model();
+        let key = seed_workspace(&mut m);
+        let session_key: lazybox_core::SessionKey = (&key).into();
+
+        m.redraw = false;
+        m.handle_daemon_event(IpcEvent::AgentState {
+            terminal_id: TerminalId(7),
+            session_key: session_key.clone(),
+            state: AgentState::Working,
+        });
+        assert!(m.redraw, "the Idle→Working edge must redraw");
+
+        m.redraw = false;
+        m.handle_daemon_event(IpcEvent::AgentState {
+            terminal_id: TerminalId(7),
+            session_key: session_key.clone(),
+            state: AgentState::Working,
+        });
+        assert!(
+            !m.redraw,
+            "a repeated Working ping changes nothing on screen — no redraw",
+        );
+
+        m.redraw = false;
+        m.handle_daemon_event(IpcEvent::AgentState {
+            terminal_id: TerminalId(7),
+            session_key,
+            state: AgentState::InputNeeded,
+        });
+        assert!(m.redraw, "the Working→InputNeeded edge must redraw");
     }
 }

@@ -177,6 +177,15 @@ impl Terminals {
         self.inner.visible_terminals().is_empty()
     }
 
+    /// True when `id` belongs to the active session's visible set and
+    /// the pane isn't collapsed to its header — i.e. bytes appended to
+    /// it can change pixels on screen. The orchestrator uses this to
+    /// skip redraws for output addressed at terminals the user isn't
+    /// looking at.
+    pub fn is_terminal_visible(&self, id: TerminalId) -> bool {
+        !self.inner.is_collapsed() && self.inner.visible_terminals().contains(&id)
+    }
+
     /// True when the focused terminal's inner program has enabled
     /// mouse tracking (CSI ?1000h / ?1002h / ?1003h / ?1006h SGR).
     /// Drives the "forward to PTY vs scroll the scrollback"

@@ -958,7 +958,7 @@ mod input_starvation_tests {
 
         // One iteration's drain: must report a backlog (more queued)…
         assert!(
-            drain_daemon_events(&mut m),
+            drain_daemon_events(&mut m, None),
             "drain should signal a backlog when the channel is over the cap"
         );
         // …and must have left events behind (didn't drain everything).
@@ -983,7 +983,7 @@ mod input_starvation_tests {
         let mut backlog = true;
         let mut iterations = 0;
         while backlog {
-            backlog = drain_daemon_events(&mut m);
+            backlog = drain_daemon_events(&mut m, None);
             iterations += 1;
             assert!(iterations <= 64, "drain never converged — possible spin");
         }
@@ -1008,8 +1008,204 @@ mod input_starvation_tests {
                 })
                 .expect("room for resync");
         }
-        drain_daemon_events(&mut m);
+        drain_daemon_events(&mut m, None);
         assert_eq!(m.event_backlog.resyncs(), 3);
+    }
+
+    /// A daemon event the idle wait woke on (`Wake::Daemon`) is handed
+    /// to the next drain as `carried` — it must be processed even when
+    /// the channel itself is empty, and it counts toward the batch.
+    #[test]
+    fn carried_event_is_processed_when_channel_is_empty() {
+        let (mut m, _evt_tx, _cmd_rx) = model_with_event_sender();
+
+        let carried = Event::TerminalResync {
+            terminal_id: TerminalId(1),
+            replay: b"hello".to_vec(),
+            seq: 1,
+        };
+        let backlog = drain_daemon_events(&mut m, Some(carried));
+        assert!(!backlog, "a single carried event is no backlog");
+        // The resync was dispatched + observed — proof the carried
+        // event didn't get dropped on the floor.
+        assert_eq!(m.event_backlog.resyncs(), 1);
+    }
+}
+
+#[cfg(test)]
+mod wake_tests {
+    //! The unified idle wait (`wait_for_wake`) is the latency fix for
+    //! "daemon events sit in the channel until the 16ms input poll
+    //! expires": both sources must interrupt the wait immediately,
+    //! idle must still tick on schedule, and a closed source must
+    //! degrade to the heartbeat instead of busy-spinning. These tests
+    //! freeze that contract.
+    use super::super::helpers::{LoopRuntime, Wake, wait_for_wake};
+    use lazybox_ipc::{Event, TerminalId};
+    use std::time::{Duration, Instant};
+
+    fn rt() -> LoopRuntime {
+        LoopRuntime::acquire().expect("loop runtime")
+    }
+
+    fn daemon_event(seq: u64) -> Event {
+        Event::TerminalOutput {
+            terminal_id: TerminalId(1),
+            bytes: b"echo".to_vec(),
+            seq,
+        }
+    }
+
+    type InputChannel = (
+        tokio::sync::mpsc::Sender<crossterm::event::Event>,
+        tokio::sync::mpsc::Receiver<crossterm::event::Event>,
+    );
+
+    fn channels() -> (InputChannel, tokio::sync::mpsc::Sender<Event>, tokio::sync::mpsc::Receiver<Event>) {
+        let (itx, irx) = tokio::sync::mpsc::channel(8);
+        let (dtx, drx) = tokio::sync::mpsc::channel(8);
+        ((itx, irx), dtx, drx)
+    }
+
+    /// A queued daemon event wakes the wait immediately — no input
+    /// event required, and nowhere near the (deliberately huge)
+    /// timeout. This is the regression test for the old behavior
+    /// where daemon events waited out `crossterm::event::poll(16ms)`.
+    #[test]
+    fn daemon_event_wakes_idle_wait_without_input() {
+        let rt = rt();
+        let ((_itx, mut irx), dtx, mut drx) = channels();
+        dtx.try_send(daemon_event(1)).expect("room");
+
+        let (mut input_open, mut daemon_open) = (true, true);
+        let start = Instant::now();
+        let wake = wait_for_wake(
+            &rt,
+            &mut irx,
+            &mut input_open,
+            &mut drx,
+            &mut daemon_open,
+            Duration::from_secs(30),
+        );
+        assert!(matches!(wake, Wake::Daemon(_)));
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "daemon event must interrupt the wait, not ride out the timeout"
+        );
+    }
+
+    /// Same, but the event lands while the wait is already blocked —
+    /// proves the wakeup path, not just the non-empty fast path.
+    #[test]
+    fn daemon_event_posted_mid_wait_interrupts_it() {
+        let rt = rt();
+        let ((_itx, mut irx), dtx, mut drx) = channels();
+        let poster = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            let _ = dtx.try_send(daemon_event(1));
+        });
+
+        let (mut input_open, mut daemon_open) = (true, true);
+        let start = Instant::now();
+        let wake = wait_for_wake(
+            &rt,
+            &mut irx,
+            &mut input_open,
+            &mut drx,
+            &mut daemon_open,
+            Duration::from_secs(30),
+        );
+        poster.join().expect("poster thread");
+        assert!(matches!(wake, Wake::Daemon(_)));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "wait should wake on the posted event, not the 30s timeout"
+        );
+    }
+
+    /// With both sources ready, input wins (`biased` order) — a
+    /// streaming burst must never delay a keystroke.
+    #[test]
+    fn input_beats_daemon_when_both_are_ready() {
+        let rt = rt();
+        let ((itx, mut irx), dtx, mut drx) = channels();
+        dtx.try_send(daemon_event(1)).expect("room");
+        itx.try_send(crossterm::event::Event::FocusGained)
+            .expect("room");
+
+        let (mut input_open, mut daemon_open) = (true, true);
+        let wake = wait_for_wake(
+            &rt,
+            &mut irx,
+            &mut input_open,
+            &mut drx,
+            &mut daemon_open,
+            Duration::from_secs(30),
+        );
+        assert!(matches!(wake, Wake::Input(_)));
+    }
+
+    /// Nothing queued: the wait holds for the idle bound, then ticks.
+    /// The heartbeat is what drives latch timeouts (`q q`, `]]`),
+    /// spinner frames, and the modal-redraw window.
+    #[test]
+    fn idle_wait_times_out_to_tick() {
+        let rt = rt();
+        let ((_itx, mut irx), _dtx, mut drx) = channels();
+
+        let (mut input_open, mut daemon_open) = (true, true);
+        let idle = Duration::from_millis(20);
+        let start = Instant::now();
+        let wake = wait_for_wake(
+            &rt,
+            &mut irx,
+            &mut input_open,
+            &mut drx,
+            &mut daemon_open,
+            idle,
+        );
+        assert!(matches!(wake, Wake::Tick));
+        assert!(
+            start.elapsed() >= idle,
+            "idle tick must wait out the full bound — no busy spin"
+        );
+    }
+
+    /// A closed daemon channel flips its open flag and the NEXT wait
+    /// degrades to the timed heartbeat — a hung-up daemon must not
+    /// turn the loop into a busy spin.
+    #[test]
+    fn closed_daemon_channel_degrades_to_heartbeat() {
+        let rt = rt();
+        let ((_itx, mut irx), dtx, mut drx) = channels();
+        drop(dtx);
+
+        let (mut input_open, mut daemon_open) = (true, true);
+        let wake = wait_for_wake(
+            &rt,
+            &mut irx,
+            &mut input_open,
+            &mut drx,
+            &mut daemon_open,
+            Duration::from_secs(30),
+        );
+        assert!(matches!(wake, Wake::Tick));
+        assert!(!daemon_open, "closed source must disable its branch");
+
+        // Branch disabled: the next wait runs out the idle bound
+        // instead of returning instantly on the closed channel.
+        let idle = Duration::from_millis(20);
+        let start = Instant::now();
+        let wake = wait_for_wake(
+            &rt,
+            &mut irx,
+            &mut input_open,
+            &mut drx,
+            &mut daemon_open,
+            idle,
+        );
+        assert!(matches!(wake, Wake::Tick));
+        assert!(start.elapsed() >= idle);
     }
 }
 

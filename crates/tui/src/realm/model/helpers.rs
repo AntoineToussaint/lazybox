@@ -284,6 +284,10 @@ const DRAIN_BUDGET: Duration = Duration::from_millis(8);
 /// idle poll-wait and loop straight back — output keeps flowing at
 /// full speed while the keyboard is still checked between every batch.
 ///
+/// `carried` is the daemon event the unified idle wait pulled off the
+/// channel to wake up (see [`wait_for_wake`]) — it's the oldest event
+/// of this batch, so it goes first to preserve daemon-stream order.
+///
 /// Coalescing is what keeps memory bounded under a chatty agent: the
 /// daemon emits one event per PTY chunk, and `vt.feed(a); vt.feed(b)`
 /// is identical to `vt.feed(a ++ b)` (the parser is a byte stream), so
@@ -291,9 +295,15 @@ const DRAIN_BUDGET: Duration = Duration::from_millis(8);
 /// `append_output` per terminal. The residual depth left in the
 /// channel after the drain is handed to [`BacklogMonitor`] so a
 /// consumer that's falling behind surfaces in the log.
-pub(super) fn drain_daemon_events<T: TerminalAdapter>(model: &mut Model<T>) -> bool {
+pub(super) fn drain_daemon_events<T: TerminalAdapter>(
+    model: &mut Model<T>,
+    carried: Option<IpcEvent>,
+) -> bool {
     let start = std::time::Instant::now();
     let mut collected: Vec<IpcEvent> = Vec::new();
+    if let Some(evt) = carried {
+        collected.push(evt);
+    }
     let mut backlog = false;
     while let Ok(evt) = model.client.rx.try_recv() {
         collected.push(evt);
@@ -459,11 +469,165 @@ impl BacklogMonitor {
     }
 }
 
+/// Upper bound on the idle wait: when nothing is queued on either
+/// source the loop still wakes this often to run its periodic work
+/// (latch timeouts like `q q` and the `]]` leader, spinner frames,
+/// the modal-redraw window, `BacklogMonitor` observations). Events
+/// interrupt the wait immediately — this is purely the heartbeat
+/// floor, not a latency floor.
+const POLL_IDLE: Duration = Duration::from_millis(16);
+
+/// Bound on host-terminal input events buffered between the reader
+/// thread and the run loop. Human input is tiny (bracketed paste
+/// arrives as ONE `Paste` event, not per-char), so this never fills
+/// in practice; if it somehow does, `blocking_send` parks the reader
+/// thread — events then queue in the OS tty buffer exactly as they
+/// did when the loop read crossterm directly.
+const INPUT_CHANNEL_CAP: usize = 1024;
+
+/// What woke the run loop's unified idle wait.
+pub(super) enum Wake {
+    /// Host-terminal event from the crossterm reader thread.
+    Input(crossterm::event::Event),
+    /// One daemon event pulled off `client.rx` by the wait itself.
+    /// Carried into the next iteration's [`drain_daemon_events`] as
+    /// the head of the batch so daemon-stream order is preserved.
+    /// Boxed: `IpcEvent` is ~250 bytes (inline output buffers) and
+    /// the other variants are small.
+    Daemon(Box<IpcEvent>),
+    /// Idle heartbeat (timeout elapsed, or a source closed).
+    Tick,
+}
+
+/// The executor the run loop blocks on for its unified wait. The loop
+/// runs on a `spawn_blocking` thread, so normally we borrow the
+/// ambient runtime's handle (`Handle::block_on` from a blocking
+/// thread is the supported pattern). Test/standalone callers without
+/// a runtime get a private current-thread runtime instead — `block_on`
+/// on an owned runtime drives its timers itself.
+pub(super) enum LoopRuntime {
+    Handle(tokio::runtime::Handle),
+    Owned(tokio::runtime::Runtime),
+}
+
+impl LoopRuntime {
+    pub(super) fn acquire() -> anyhow::Result<Self> {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => Ok(Self::Handle(handle)),
+            Err(_) => Ok(Self::Owned(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()?,
+            )),
+        }
+    }
+
+    fn block_on<F: std::future::Future>(&self, fut: F) -> F::Output {
+        match self {
+            Self::Handle(handle) => handle.block_on(fut),
+            Self::Owned(rt) => rt.block_on(fut),
+        }
+    }
+}
+
+/// Spawn the dedicated crossterm reader thread. `crossterm::event::
+/// read()` is a blocking call with no async story, so it gets its own
+/// thread that forwards every host-terminal event into a bounded
+/// channel the run loop can select on. The thread is detached on
+/// purpose: at quit it's parked inside `read()`, and joining it would
+/// block shutdown on the user pressing one more key — instead the
+/// receiver drops with the loop, the next forwarded event hits a
+/// closed channel, and the thread exits (or process exit reaps it).
+///
+/// Reading from a side thread is safe across the mouse-capture toggle
+/// (F8 / Alt-s), bracketed paste, and the shutdown restore sequence:
+/// those are all stdout writes / termios changes on the main thread,
+/// independent of the blocked stdin read.
+fn spawn_input_reader() -> anyhow::Result<tokio::sync::mpsc::Receiver<crossterm::event::Event>> {
+    let (tx, rx) = tokio::sync::mpsc::channel(INPUT_CHANNEL_CAP);
+    std::thread::Builder::new()
+        .name("lazybox-input".into())
+        .spawn(move || {
+            loop {
+                match crossterm::event::read() {
+                    Ok(event) => {
+                        if tx.blocking_send(event).is_err() {
+                            // Run loop is gone — nobody to deliver to.
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("input reader thread exiting: {e}");
+                        break;
+                    }
+                }
+            }
+        })?;
+    Ok(rx)
+}
+
+/// Block until SOMETHING needs the loop: a host-terminal event, a
+/// daemon event, or the idle heartbeat. This is the latency fix for
+/// "typing in the embedded terminal feels laggy": the old loop blocked
+/// in `crossterm::event::poll(16ms)`, which only input could
+/// interrupt — every daemon event (keystroke echo, streaming agent
+/// output) sat in the channel for up to a full 16ms until the poll
+/// expired. Selecting over both sources means either one wakes the
+/// loop immediately; the sleep only wins when truly idle.
+///
+/// `biased` checks input first so a ready keystroke is never queued
+/// behind a ready output event — input latency is at worst what it was
+/// when the loop blocked on input alone. Daemon events stay in
+/// `client.rx` until this wait pops at most ONE to wake on; the
+/// bounded channel (and the daemon's drop-and-resync overflow path)
+/// remains the only buffering and the only backpressure point.
+///
+/// A `None` recv (source closed: reader thread died, daemon hung up)
+/// flips the corresponding `*_open` flag so the branch is disabled on
+/// subsequent calls — a closed channel must degrade to the heartbeat,
+/// not a busy spin.
+pub(super) fn wait_for_wake(
+    rt: &LoopRuntime,
+    input_rx: &mut tokio::sync::mpsc::Receiver<crossterm::event::Event>,
+    input_open: &mut bool,
+    daemon_rx: &mut tokio::sync::mpsc::Receiver<IpcEvent>,
+    daemon_open: &mut bool,
+    idle: Duration,
+) -> Wake {
+    rt.block_on(async {
+        tokio::select! {
+            biased;
+            event = input_rx.recv(), if *input_open => match event {
+                Some(event) => Wake::Input(event),
+                None => {
+                    *input_open = false;
+                    Wake::Tick
+                }
+            },
+            event = daemon_rx.recv(), if *daemon_open => match event {
+                Some(event) => Wake::Daemon(Box::new(event)),
+                None => {
+                    *daemon_open = false;
+                    Wake::Tick
+                }
+            },
+            () = tokio::time::sleep(idle) => Wake::Tick,
+        }
+    })
+}
+
 fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
+    let rt = LoopRuntime::acquire()?;
+    let mut input_rx = spawn_input_reader()?;
+    let mut input_open = true;
+    let mut daemon_open = true;
+    // Daemon event the previous idle wait woke on — head of the next
+    // drain batch (see `Wake::Daemon`).
+    let mut carried: Option<IpcEvent> = None;
     while !model.quit {
         // 1. Drain inbound daemon events — BOUNDED so heavy PTY output
         // can never starve keyboard input (see `drain_daemon_events`).
-        let had_backlog = drain_daemon_events(model);
+        let had_backlog = drain_daemon_events(model, carried.take());
 
         // 2. Polling-modal spinner heartbeat + retryable notice fade.
         if let Some(msg) = model.polling_tick() {
@@ -512,40 +676,54 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             model.redraw = false;
         }
 
-        // 5. Block briefly for input. One event per iteration,
-        // render between events — the "drain all then render once"
-        // pattern looked good on paper (fewer renders per second)
-        // but broke scroll fluidity: a 30-event trackpad gesture
-        // collapsed into a single jump-cut render, so the user saw
-        // the screen teleport from start to end with no
+        // 5. Block on the unified wait. One input event per
+        // iteration, render between events — the "drain all then
+        // render once" pattern looked good on paper (fewer renders
+        // per second) but broke scroll fluidity: a 30-event trackpad
+        // gesture collapsed into a single jump-cut render, so the
+        // user saw the screen teleport from start to end with no
         // intermediate frames ("not progressive, I don't even see
         // which direction I'm going"). The render cost is 1-2ms
         // (verified via the `render frame_ms` debug log) so per-
         // event rendering at 50-100Hz easily keeps up.
         //
-        // The 16ms poll is the IDLE-WAIT bound: when no events are
-        // queued, we block here up to one display refresh worth.
-        // With events queued, `poll` returns immediately — we don't
-        // pay the 16ms; the loop body runs again. So during an
-        // active scroll burst, this loop runs as fast as the
-        // render + daemon-roundtrip allows, which is what gives
-        // the progressive-scroll feel.
+        // `POLL_IDLE` is the IDLE-WAIT bound: with nothing queued we
+        // block up to one display-refresh worth so the periodic work
+        // above keeps its ~16ms heartbeat. Any event on EITHER source
+        // interrupts the wait immediately (see `wait_for_wake`) — we
+        // never pay the 16ms when there's work; during an active
+        // scroll or output burst this loop runs as fast as render +
+        // daemon-roundtrip allows, which is what gives the
+        // progressive-scroll feel.
         //
         // When the daemon drain hit its cap (`had_backlog`), there are
-        // more events waiting — poll with ZERO timeout so we service
-        // any pending key immediately and then loop straight back to
+        // more events already waiting — don't block at all: service
+        // any pending key non-blocking and loop straight back to
         // drain the rest. That keeps output flowing at full speed
         // without ever blocking the keyboard behind it.
-        const POLL_IDLE: Duration = Duration::from_millis(16);
-        let poll_for = if had_backlog {
-            Duration::ZERO
+        let wake = if had_backlog {
+            match input_rx.try_recv() {
+                Ok(event) => Wake::Input(event),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Wake::Tick,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    input_open = false;
+                    Wake::Tick
+                }
+            }
         } else {
-            POLL_IDLE
+            wait_for_wake(
+                &rt,
+                &mut input_rx,
+                &mut input_open,
+                &mut model.client.rx,
+                &mut daemon_open,
+                POLL_IDLE,
+            )
         };
-        if let Ok(true) = crossterm::event::poll(poll_for)
-            && let Ok(event) = crossterm::event::read()
-        {
-            dispatch_event(model, event);
+        match wake {
+            Wake::Input(event) => dispatch_event(model, event),
+            Wake::Daemon(event) => carried = Some(*event),
+            Wake::Tick => {}
         }
     }
     Ok(())

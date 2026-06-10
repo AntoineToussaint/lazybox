@@ -93,16 +93,24 @@ impl SocketService {
                     break;
                 }
                 accept = listener.accept() => {
-                    let (rd, wr) = match accept {
+                    let (mut rd, mut wr) = match accept {
                         Ok(pair) => pair,
                         Err(e) => {
                             tracing::warn!("accept error: {e}");
                             continue;
                         }
                     };
-                    let server = socket::serve(rd, wr);
                     let config = (self.config_factory)();
                     tokio::spawn(async move {
+                        // Handshake before the frame loop: a client from
+                        // a different build (or a non-lazybox peer) is
+                        // turned away here instead of feeding bincode
+                        // garbage into `Server::serve`.
+                        if let Err(e) = socket::server_handshake(&mut rd, &mut wr).await {
+                            tracing::warn!("rejecting connection: {e}");
+                            return;
+                        }
+                        let server = socket::serve(rd, wr);
                         let daemon = Server::new(config);
                         if let Err(e) = daemon.serve(server).await {
                             tracing::warn!("daemon serve: {e}");

@@ -79,8 +79,8 @@ Defaults:
 
 - Bind address: `127.0.0.1:8787`
 - Override with: `LAZYBOX_API_ADDR`
-- Optional bearer token: `LAZYBOX_API_TOKEN`
-- Launch with: `lazybox server api [addr:port]`
+- Bearer token: `LAZYBOX_API_TOKEN` (required unless `--insecure-no-auth`)
+- Launch with: `lazybox server api [addr:port] [--insecure-no-auth]`
 
 Next:
 

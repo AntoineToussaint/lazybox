@@ -69,6 +69,16 @@ impl Listener {
                     path: path.to_path_buf(),
                     source: e,
                 })?;
+            // Owner-only socket file: connecting at all requires write
+            // permission on it, so 0600 shuts out other local users
+            // even before the per-connection peer_cred check below.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |e| TransportError::Bind {
+                    path: path.to_path_buf(),
+                    source: e,
+                },
+            )?;
             Ok(Self {
                 inner: ListenerInner::Unix {
                     listener,
@@ -87,14 +97,32 @@ impl Listener {
     /// Accept the next connection, returning the (read, write)
     /// halves. The streams are type-erased so callers don't need to
     /// know which transport delivered them.
+    ///
+    /// Connections from any uid other than this process's effective
+    /// uid are dropped with a warning and never surfaced to the
+    /// caller — the daemon speaks for one user only.
     pub async fn accept(&self) -> Result<(BoxRead, BoxWrite), TransportError> {
         match &self.inner {
             #[cfg(unix)]
-            ListenerInner::Unix { listener, .. } => {
+            ListenerInner::Unix { listener, .. } => loop {
                 let (stream, _addr) = listener.accept().await.map_err(TransportError::Accept)?;
-                let (rd, wr) = stream.into_split();
-                Ok((Box::new(rd), Box::new(wr)))
-            }
+                match stream.peer_cred() {
+                    Ok(cred) if cred.uid() == process_euid() => {
+                        let (rd, wr) = stream.into_split();
+                        return Ok((Box::new(rd), Box::new(wr)));
+                    }
+                    Ok(cred) => {
+                        tracing::warn!(
+                            peer_uid = cred.uid(),
+                            our_uid = process_euid(),
+                            "rejecting daemon socket connection from another uid"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("rejecting connection: peer_cred failed: {e}");
+                    }
+                }
+            },
             #[cfg(not(unix))]
             ListenerInner::Unsupported => Err(TransportError::Unsupported),
         }
@@ -110,6 +138,49 @@ impl Listener {
             #[cfg(not(unix))]
             ListenerInner::Unsupported => Path::new(""),
         }
+    }
+}
+
+/// This process's effective uid, via the raw libc symbol — `geteuid`
+/// can never fail, so it's declared `safe`. Avoids pulling the `libc`
+/// crate into the protocol crate for one call.
+#[cfg(unix)]
+fn process_euid() -> u32 {
+    unsafe extern "C" {
+        safe fn geteuid() -> u32;
+    }
+    geteuid()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn temp_sock(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("lazybox-transport-{tag}-{}.sock", std::process::id()))
+    }
+
+    #[tokio::test]
+    async fn bind_sets_socket_owner_only_and_accepts_same_uid() {
+        use std::os::unix::fs::PermissionsExt;
+        let sock = temp_sock("perms");
+        let _ = std::fs::remove_file(&sock);
+
+        let listener = Listener::bind(&sock).await.expect("bind");
+        let mode = std::fs::metadata(&sock)
+            .expect("stat socket")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "socket file must be owner-only");
+
+        // Same-uid peers (the only kind a test can produce) pass the
+        // peer_cred gate.
+        let (accepted, connected) = tokio::join!(listener.accept(), connect(&sock));
+        accepted.expect("accept same-uid peer");
+        connected.expect("connect");
+
+        let _ = std::fs::remove_file(&sock);
     }
 }
 

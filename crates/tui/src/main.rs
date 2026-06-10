@@ -98,11 +98,29 @@ fn init_tracing() -> anyhow::Result<()> {
     use std::fs::OpenOptions;
 
     let log_path = resolve_log_path();
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    // The log lives in world-writable /tmp by default and captures
+    // daemon traces — owner-only. `mode` covers the create path...
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
         .open(&log_path)
         .map_err(|e| anyhow::anyhow!("open {}: {e}", log_path.display()))?;
+    // ...and set_permissions covers a pre-existing looser file.
+    // eprintln (not tracing — the subscriber isn't up yet) and keep
+    // going: a log we can't chmod shouldn't block launch.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600))
+        {
+            eprintln!("warning: couldn't tighten {} to 0600: {e}", log_path.display());
+        }
+    }
 
     // Route the OS stderr into the same log file so native logs from
     // below the Rust layer (libghostty-vt Zig log, libgit2 stderr,
@@ -148,7 +166,8 @@ Remote & services:
   lazybox server start        run a standalone daemon (for SSH / multi-client)
   lazybox server stop         stop a running standalone daemon
   lazybox server status       show daemon status
-  lazybox server api [addr]   JSON HTTP API gateway (default 127.0.0.1:8787)
+  lazybox server api [addr]   JSON HTTP API gateway (default 127.0.0.1:8787;
+                              needs LAZYBOX_API_TOKEN or --insecure-no-auth)
   lazybox --connect <socket>  attach a TUI to a running daemon
   lazybox slack init          set up the optional Slack mirror
   lazybox slack doctor        validate an existing Slack setup
@@ -256,12 +275,20 @@ async fn hook_ingest_subcommand(args: &[String]) -> anyhow::Result<()> {
         backend_key,
     };
 
-    // Best-effort forward. Connect, write one framed command, done — no
-    // reply expected. A connect/write error means no daemon is listening
-    // (e.g. hooks fired against a session whose daemon already exited);
-    // that's a no-op, not a failure.
-    if let Ok((_rd, mut wr)) = lazybox_ipc::transport::connect(&lifecycle::socket_path()).await {
-        let _ = socket::write_frame(&mut wr, &command).await;
+    // Best-effort forward. Connect, handshake, write one framed
+    // command, done — no reply expected. A connect/write error means no
+    // daemon is listening (e.g. hooks fired against a session whose
+    // daemon already exited); that's a no-op, not a failure. A
+    // handshake error means a version-skewed daemon — logged (never
+    // surfaced to Claude, whose turn would stall on a non-zero exit)
+    // so the operator can see why agent state stopped updating.
+    if let Ok((mut rd, mut wr)) = lazybox_ipc::transport::connect(&lifecycle::socket_path()).await {
+        match socket::client_handshake(&mut rd, &mut wr).await {
+            Ok(()) => {
+                let _ = socket::write_frame(&mut wr, &command).await;
+            }
+            Err(e) => tracing::warn!("hook-ingest handshake failed: {e}"),
+        }
     }
     Ok(())
 }
@@ -363,9 +390,16 @@ async fn run_remote(
             socket_path.display()
         );
     }
-    let client = socket::connect(socket_path)
-        .await
-        .map_err(|e| anyhow::anyhow!("connect {}: {e}", socket_path.display()))?;
+    let client = match socket::connect(socket_path).await {
+        Ok(client) => client,
+        Err(e) => {
+            // println, not just the bail: stderr already points at the
+            // log file, and a protocol-version mismatch needs to reach
+            // the user's terminal to be actionable.
+            println!("connect {}: {e}", socket_path.display());
+            anyhow::bail!("connect {}: {e}", socket_path.display());
+        }
+    };
 
     tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client)?;
@@ -712,9 +746,11 @@ async fn server_subcommand(args: &[String]) -> anyhow::Result<()> {
         Some("start") => server_start().await,
         Some("stop") => server_stop(),
         Some("status") => server_status(),
-        Some("api") => server_api(args.get(1)).await,
+        Some("api") => server_api(&args[1..]).await,
         _ => {
-            eprintln!("usage: lazybox server [start|stop|status|api [addr:port]]");
+            eprintln!(
+                "usage: lazybox server [start|stop|status|api [addr:port] [--insecure-no-auth]]"
+            );
             std::process::exit(2);
         }
     }
@@ -781,8 +817,10 @@ fn server_status() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn server_api(addr_arg: Option<&String>) -> anyhow::Result<()> {
-    let bind_addr = match addr_arg {
+async fn server_api(args: &[String]) -> anyhow::Result<()> {
+    let mut args = args.to_vec();
+    let insecure_no_auth = take_flag(&mut args, "--insecure-no-auth");
+    let bind_addr = match args.first() {
         Some(raw) => raw
             .parse::<SocketAddr>()
             .map_err(|e| anyhow::anyhow!("invalid API bind address {raw:?}: {e}"))?,
@@ -794,6 +832,20 @@ async fn server_api(addr_arg: Option<&String>) -> anyhow::Result<()> {
     let token = std::env::var("LAZYBOX_API_TOKEN")
         .ok()
         .filter(|s| !s.is_empty());
+
+    // Auth is opt-out, not opt-in: the API drives agents that hold the
+    // user's gh/git identity, so an unauthenticated gateway is only
+    // served when explicitly demanded. println (not bail) — stderr is
+    // redirected into the log file by init_tracing, so an anyhow error
+    // would be invisible to the user.
+    if token.is_none() && !insecure_no_auth {
+        println!(
+            "refusing to serve the JSON API without auth.\n\
+             Set LAZYBOX_API_TOKEN (clients then send `Authorization: Bearer <token>`),\n\
+             or pass --insecure-no-auth to explicitly serve unauthenticated."
+        );
+        std::process::exit(2);
+    }
 
     let config = ServerConfig::from_user_config();
     if tokio::time::timeout(
@@ -809,7 +861,10 @@ async fn server_api(addr_arg: Option<&String>) -> anyhow::Result<()> {
     if token.is_some() {
         println!("lazybox API bearer auth enabled via LAZYBOX_API_TOKEN");
     } else {
-        println!("lazybox API bearer auth disabled; bound to localhost by default");
+        println!(
+            "WARNING: lazybox API bearer auth disabled (--insecure-no-auth); \
+             anything that can reach {bind_addr} can drive your agents"
+        );
     }
 
     lazybox_server::api_gateway::serve(

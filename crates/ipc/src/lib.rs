@@ -30,6 +30,22 @@ pub use proxy::{ApiProvider, ProxyRecord, ToolCall};
 
 pub const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 
+/// Magic prefix of the 8-byte connection preamble each side sends
+/// before any frames (`PROTOCOL_MAGIC ++ PROTOCOL_VERSION as u32 LE`).
+/// Lets a peer distinguish "wrong-version lazybox" from "not lazybox
+/// at all" before bincode ever touches the stream.
+pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
+
+/// Wire protocol version, negotiated by the connection handshake
+/// (`socket::client_handshake` / `socket::server_handshake`).
+///
+/// MUST be bumped on ANY change to the `Command` / `Event` encodings —
+/// bincode identifies enum variants by ordinal and structs by field
+/// order, so adding, removing, or reordering a variant or field makes
+/// an old peer silently misread every subsequent frame. The handshake
+/// turns that garbage into a clear "restart the daemon" error.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 /// Stable id for a spawned terminal. Distinct from SessionKey because a
 /// single session may hold multiple terminals (agent + shell + logs).
 ///

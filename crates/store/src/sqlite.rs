@@ -17,7 +17,17 @@ impl SqliteStore {
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
         let conn = Connection::open(path).map_err(|e| StoreError::Backend(e.to_string()))?;
+        // The DB holds session metadata and provider credential rows —
+        // owner-only, whether we just created it or inherited a looser
+        // file from an earlier build.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| StoreError::Backend(e.to_string()))?;
+        }
         // WAL keeps readers (the TUI snapshot path) from blocking
         // behind the poll loop's writes; the busy timeout makes a
         // second process (e.g. `lazybox daemon status` racing the
@@ -204,6 +214,24 @@ mod tests {
             .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
             .unwrap();
         assert_eq!(busy, 5000);
+    }
+
+    /// The on-disk DB carries credential rows — `open` must leave it
+    /// owner-only whether it created the file or inherited a looser
+    /// one from an earlier build.
+    #[cfg(unix)]
+    #[test]
+    fn open_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let db = TempDb::new("perms");
+        drop(SqliteStore::open(&db.0).unwrap());
+        let mode = std::fs::metadata(&db.0).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "fresh state.db must be 0600");
+
+        std::fs::set_permissions(&db.0, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(SqliteStore::open(&db.0).unwrap());
+        let mode = std::fs::metadata(&db.0).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "re-open must tighten a loose state.db");
     }
 
     /// `list_workspaces` must surface the record's REAL `created_at`

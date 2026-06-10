@@ -543,3 +543,147 @@ async fn socket_binary_terminal_output_round_trip() {
         panic!("expected TerminalOutput, got {got:?}");
     }
 }
+
+// ── Protocol handshake ─────────────────────────────────────────────────
+//
+// The 8-byte preamble (magic + version) is exchanged before any frames.
+// These tests pin the success path, the rejection of version skew in
+// both directions, garbage preambles, and the EOF a pre-handshake
+// daemon produces.
+
+mod handshake {
+    use lazybox_ipc::socket::{HandshakeError, client_handshake, server_handshake};
+    use lazybox_ipc::{PROTOCOL_MAGIC, PROTOCOL_VERSION};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
+
+    fn preamble(version: u32) -> [u8; 8] {
+        let mut p = [0u8; 8];
+        p[..4].copy_from_slice(&PROTOCOL_MAGIC);
+        p[4..].copy_from_slice(&version.to_le_bytes());
+        p
+    }
+
+    #[tokio::test]
+    async fn succeeds_when_versions_match() {
+        let (client, server) = duplex(64);
+        let (mut crd, mut cwr) = tokio::io::split(client);
+        let (mut srd, mut swr) = tokio::io::split(server);
+        let server_task = tokio::spawn(async move { server_handshake(&mut srd, &mut swr).await });
+        client_handshake(&mut crd, &mut cwr)
+            .await
+            .expect("client handshake");
+        server_task
+            .await
+            .expect("join")
+            .expect("server handshake");
+    }
+
+    #[tokio::test]
+    async fn server_rejects_newer_client_but_still_replies() {
+        let (client, server) = duplex(64);
+        let (mut crd, mut cwr) = tokio::io::split(client);
+        let (mut srd, mut swr) = tokio::io::split(server);
+
+        cwr.write_all(&preamble(PROTOCOL_VERSION + 1))
+            .await
+            .expect("send fake preamble");
+        let err = server_handshake(&mut srd, &mut swr)
+            .await
+            .expect_err("must reject");
+        assert!(matches!(
+            err,
+            HandshakeError::VersionMismatch { peer, ours }
+                if peer == PROTOCOL_VERSION + 1 && ours == PROTOCOL_VERSION
+        ));
+
+        // The server replied with its own preamble before closing, so
+        // the mismatched client can render the clear version error.
+        let mut reply = [0u8; 8];
+        crd.read_exact(&mut reply).await.expect("server reply");
+        assert_eq!(reply, preamble(PROTOCOL_VERSION));
+    }
+
+    #[tokio::test]
+    async fn client_rejects_version_skewed_daemon() {
+        let (client, server) = duplex(64);
+        let (mut crd, mut cwr) = tokio::io::split(client);
+        let (mut srd, mut swr) = tokio::io::split(server);
+
+        let fake_daemon = tokio::spawn(async move {
+            let mut got = [0u8; 8];
+            srd.read_exact(&mut got).await.expect("client preamble");
+            assert_eq!(got, preamble(PROTOCOL_VERSION));
+            swr.write_all(&preamble(PROTOCOL_VERSION + 7))
+                .await
+                .expect("reply");
+        });
+        let err = client_handshake(&mut crd, &mut cwr)
+            .await
+            .expect_err("must reject");
+        assert!(matches!(
+            err,
+            HandshakeError::VersionMismatch { peer, ours }
+                if peer == PROTOCOL_VERSION + 7 && ours == PROTOCOL_VERSION
+        ));
+        // The message tells the user what to do, not just that bytes
+        // disagreed.
+        assert!(err.to_string().contains("restart the daemon"));
+        fake_daemon.await.expect("join");
+    }
+
+    #[tokio::test]
+    async fn server_rejects_garbage_preamble_without_replying() {
+        let (client, server) = duplex(64);
+        let (mut crd, mut cwr) = tokio::io::split(client);
+        let (mut srd, mut swr) = tokio::io::split(server);
+
+        cwr.write_all(b"GARBAGE!").await.expect("send garbage");
+        let err = server_handshake(&mut srd, &mut swr)
+            .await
+            .expect_err("must reject");
+        assert!(matches!(err, HandshakeError::BadMagic(m) if &m == b"GARB"));
+
+        // No reply preamble for a non-lazybox peer: once the server
+        // side drops, the client read hits EOF with zero bytes seen.
+        drop(srd);
+        drop(swr);
+        let mut buf = [0u8; 8];
+        assert!(crd.read_exact(&mut buf).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn client_rejects_garbage_reply() {
+        let (client, server) = duplex(64);
+        let (mut crd, mut cwr) = tokio::io::split(client);
+        let (mut srd, mut swr) = tokio::io::split(server);
+
+        let fake_daemon = tokio::spawn(async move {
+            let mut got = [0u8; 8];
+            srd.read_exact(&mut got).await.expect("client preamble");
+            swr.write_all(b"NOTLZBX!").await.expect("reply");
+        });
+        let err = client_handshake(&mut crd, &mut cwr)
+            .await
+            .expect_err("must reject");
+        assert!(matches!(err, HandshakeError::BadMagic(_)));
+        fake_daemon.await.expect("join");
+    }
+
+    #[tokio::test]
+    async fn client_surfaces_pre_handshake_daemon_as_clear_error() {
+        let (client, server) = duplex(64);
+        let (mut crd, mut cwr) = tokio::io::split(client);
+        // A pre-handshake daemon reads our preamble as an oversized
+        // frame length and closes without replying — modeled here by
+        // dropping the server end outright.
+        drop(server);
+        let err = client_handshake(&mut crd, &mut cwr)
+            .await
+            .expect_err("must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("predates the protocol handshake"),
+            "error must mention the pre-handshake-daemon case, got: {msg}"
+        );
+    }
+}

@@ -37,11 +37,27 @@ pub fn pid_path() -> PathBuf {
 }
 
 /// Ensure the runtime dir exists. Called at daemon start + status.
+/// Created 0700 (it holds the daemon socket — other local users must
+/// not be able to traverse into it); any parent we create (typically
+/// `~/.lazybox` itself) gets the same mode.
 pub fn ensure_runtime_dir() -> std::io::Result<()> {
     let dir = runtime_dir();
-    if !dir.exists() {
-        std::fs::create_dir_all(&dir)?;
+    if dir.exists() {
+        return Ok(());
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)?;
+        // DirBuilder's mode is filtered through the umask; pin the
+        // final dir to exactly 0700.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(&dir)?;
     Ok(())
 }
 

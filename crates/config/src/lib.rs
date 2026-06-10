@@ -555,6 +555,12 @@ impl Config {
         let contents = std::fs::read_to_string(path)?;
         let config: Config = serde_yaml::from_str(&contents)?;
         tracing::info!("Loaded config from {}", path.display());
+        // The file can hold Slack tokens — tighten pre-existing
+        // group/other-readable configs to owner-only. Best-effort:
+        // a read-only mount must not make the config unloadable.
+        if let Err(e) = restrict_to_owner(path) {
+            tracing::warn!("couldn't tighten {} to 0600: {e}", path.display());
+        }
         Ok(config)
     }
 
@@ -566,6 +572,7 @@ impl Config {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(path, yaml)?;
+        restrict_to_owner(path)?;
         Ok(())
     }
 
@@ -584,6 +591,9 @@ impl Config {
         }
         let tmp = path.with_extension("yaml.tmp");
         std::fs::write(&tmp, yaml)?;
+        // 0600 before the rename so the secret-bearing YAML is never
+        // visible to other users, even transiently.
+        restrict_to_owner(&tmp)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
@@ -613,6 +623,28 @@ impl Config {
     pub fn default_path() -> PathBuf {
         lazybox_core::paths::config_yaml()
     }
+}
+
+/// Chmod `path` to 0600 if any group/other permission bit is set.
+/// config.yaml can carry Slack tokens, so it's owner-only like an SSH
+/// key. No-op on non-Unix and on files that are already tight.
+fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)?.permissions().mode();
+        if mode & 0o077 != 0 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            tracing::info!(
+                "tightened {} from {:o} to 600 (it can contain tokens)",
+                path.display(),
+                mode & 0o777,
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 // ─── Mention auto-spawn ────────────────────────────────────────────────────
@@ -928,6 +960,30 @@ mod duration_secs_opt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// config.yaml can hold Slack tokens: every write path must land
+    /// owner-only, and loading a pre-existing loose file tightens it.
+    #[cfg(unix)]
+    #[test]
+    fn config_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode_of = |p: &Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+        let dir = std::env::temp_dir().join(format!("lazybox-config-perms-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("config.yaml");
+
+        Config::write_default(&path).expect("write_default");
+        assert_eq!(mode_of(&path), 0o600, "write_default must produce 0600");
+
+        Config::default().save_to(&path).expect("save_to");
+        assert_eq!(mode_of(&path), 0o600, "save_to must produce 0600");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("loosen");
+        Config::load_from(&path).expect("load");
+        assert_eq!(mode_of(&path), 0o600, "load must tighten a loose file");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// `repos.<owner/name>.{env,mounts}` should round-trip cleanly
     /// through serde so a hand-edited YAML survives a save_with

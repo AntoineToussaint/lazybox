@@ -49,7 +49,6 @@ crates/
   ipc/             # Wire types (Command/Event), framing, transport traits
                    #   (in-process channel and Unix-socket variants).
   agents/          # Agent trait + Claude/Codex/Cursor/GenericCli built-ins.
-                   #   SessionWrapper trait (tmux is the default).
   llm-proxy/       # 127.0.0.1 HTTP pass-through that records structured
                    #   telemetry (tokens, tool calls, cost) from agent traffic.
   server/          # Server library: PTY lifecycle, ring buffers, provider

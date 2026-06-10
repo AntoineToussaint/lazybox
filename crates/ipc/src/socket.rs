@@ -10,6 +10,7 @@
 use crate::transport;
 use crate::{
     Client, Command, Connection, EVENT_CHANNEL_CAPACITY, Event, EventForward, MAX_FRAME_BYTES,
+    PROTOCOL_MAGIC, PROTOCOL_VERSION,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::Path;
@@ -24,6 +25,109 @@ pub enum FrameError {
     TooLarge(u32),
     #[error("encode/decode: {0}")]
     Codec(#[from] bincode::Error),
+}
+
+/// A protocol handshake failed before any frames were exchanged.
+#[derive(Debug, thiserror::Error)]
+pub enum HandshakeError {
+    /// The peer closed the connection (or errored) mid-handshake. On
+    /// the client side this is the signature of a daemon that predates
+    /// the handshake: our preamble looks like an oversized frame to
+    /// its bincode decoder, so it drops the connection without
+    /// replying.
+    #[error(
+        "connection closed during the protocol handshake ({0}) — the daemon \
+         predates the protocol handshake or is not a lazybox daemon; restart \
+         the daemon from this build"
+    )]
+    Io(#[from] std::io::Error),
+    /// The peer's first 8 bytes don't start with [`PROTOCOL_MAGIC`].
+    #[error(
+        "peer sent an invalid protocol preamble {0:02x?} — not a lazybox \
+         endpoint, or it predates the protocol handshake; restart the daemon \
+         from this build"
+    )]
+    BadMagic([u8; 4]),
+    /// Both sides speak the lazybox protocol but at different versions
+    /// — daemon and client come from different builds.
+    #[error(
+        "protocol version mismatch: the peer is protocol v{peer}, this side \
+         is v{ours} — daemon and client are from different builds; restart \
+         the daemon so both sides match"
+    )]
+    VersionMismatch { peer: u32, ours: u32 },
+}
+
+/// Write this side's 8-byte preamble: magic + version (u32 LE).
+async fn write_preamble<W>(w: &mut W) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut preamble = [0u8; 8];
+    preamble[..4].copy_from_slice(&PROTOCOL_MAGIC);
+    preamble[4..].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+    w.write_all(&preamble).await?;
+    w.flush().await
+}
+
+/// Read and validate the peer's 8-byte preamble, returning its
+/// protocol version.
+async fn read_preamble<R>(r: &mut R) -> Result<u32, HandshakeError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut preamble = [0u8; 8];
+    r.read_exact(&mut preamble).await?;
+    let mut magic = [0u8; 4];
+    magic.copy_from_slice(&preamble[..4]);
+    if magic != PROTOCOL_MAGIC {
+        return Err(HandshakeError::BadMagic(magic));
+    }
+    let mut version = [0u8; 4];
+    version.copy_from_slice(&preamble[4..]);
+    Ok(u32::from_le_bytes(version))
+}
+
+/// Client side of the connection handshake: send our preamble, then
+/// require a matching one back before any frames flow. Run this
+/// immediately after the transport connects — the server won't accept
+/// frames until it has seen our preamble.
+pub async fn client_handshake<R, W>(rd: &mut R, wr: &mut W) -> Result<(), HandshakeError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    write_preamble(wr).await?;
+    let peer = read_preamble(rd).await?;
+    if peer != PROTOCOL_VERSION {
+        return Err(HandshakeError::VersionMismatch {
+            peer,
+            ours: PROTOCOL_VERSION,
+        });
+    }
+    Ok(())
+}
+
+/// Server side of the connection handshake: read the client's
+/// preamble before entering the frame loop. A garbage preamble gets
+/// no reply (the peer isn't speaking lazybox); a well-formed preamble
+/// is always answered with our own — even on version mismatch — so
+/// the client can render the clear "restart the daemon" error instead
+/// of a bincode decode failure.
+pub async fn server_handshake<R, W>(rd: &mut R, wr: &mut W) -> Result<(), HandshakeError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let peer = read_preamble(rd).await?;
+    write_preamble(wr).await?;
+    if peer != PROTOCOL_VERSION {
+        return Err(HandshakeError::VersionMismatch {
+            peer,
+            ours: PROTOCOL_VERSION,
+        });
+    }
+    Ok(())
 }
 
 pub async fn write_frame<W, T>(w: &mut W, msg: &T) -> Result<(), FrameError>
@@ -63,12 +167,17 @@ where
 }
 
 /// Connect to a daemon listening at `path` (possibly tunneled by SSH
-/// when the path is forwarded through `ssh -L`). Returns a `Client`
-/// whose send/recv map to frames on the wire. Transport is delegated
-/// to `transport::connect` — Unix domain socket today, named pipe /
-/// TCP later.
+/// when the path is forwarded through `ssh -L`). Runs the protocol
+/// handshake before returning, so a version-skewed or pre-handshake
+/// daemon surfaces here as a clear error instead of garbage frames.
+/// Returns a `Client` whose send/recv map to frames on the wire.
+/// Transport is delegated to `transport::connect` — Unix domain
+/// socket today, named pipe / TCP later.
 pub async fn connect(path: &Path) -> std::io::Result<Client> {
-    let (rd, wr) = transport::connect(path)
+    let (mut rd, mut wr) = transport::connect(path)
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    client_handshake(&mut rd, &mut wr)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();

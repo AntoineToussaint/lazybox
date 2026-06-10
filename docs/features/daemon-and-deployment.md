@@ -117,7 +117,7 @@ trust boundary — there's no TCP/TLS in v2.0.
 
 **Status:** experimental
 **Crate(s):** `server` (`api_gateway.rs`)
-**Config / flags:** `LAZYBOX_API_ADDR` (default `127.0.0.1:8787`), `LAZYBOX_API_TOKEN` (optional bearer)
+**Config / flags:** `LAZYBOX_API_ADDR` (default `127.0.0.1:8787`), `LAZYBOX_API_TOKEN` (required bearer unless `--insecure-no-auth`)
 **Key bindings:** —
 
 ### What it does
@@ -127,10 +127,13 @@ without the terminal protocol.
 
 ### How to use it
 ```sh
-lazybox server api               # bind 127.0.0.1:8787
-lazybox server api 0.0.0.0:9000  # explicit addr
-LAZYBOX_API_TOKEN=secret lazybox server api
+LAZYBOX_API_TOKEN=secret lazybox server api   # bind 127.0.0.1:8787
+LAZYBOX_API_TOKEN=secret lazybox server api 0.0.0.0:9000  # explicit addr
+lazybox server api --insecure-no-auth         # explicitly unauthenticated
 ```
+
+Without `LAZYBOX_API_TOKEN` the gateway refuses to start unless
+`--insecure-no-auth` is passed.
 
 Endpoints: `GET /v1/health`, `GET /v1/workspaces`, `GET /v1/events` (NDJSON
 stream), `POST /v1/commands` (single command), `POST /v1/stream` (duplex
@@ -138,7 +141,8 @@ commands ↔ events).
 
 ### How it works (brief)
 `server_api` (`crates/tui/src/main.rs`) parses the addr (arg → `LAZYBOX_API_ADDR`
-→ default) and optional `LAZYBOX_API_TOKEN`. The gateway (`api_gateway.rs`)
+→ default) and `LAZYBOX_API_TOKEN`, refusing to start without a token unless
+`--insecure-no-auth` is passed. The gateway (`api_gateway.rs`)
 serves the endpoints; streaming uses NDJSON frames (`JsonClientFrame::Command`
 / `JsonServerFrame::Event`). When a token is set, requests need
 `Authorization: Bearer <token>`.
@@ -150,9 +154,11 @@ serves the endpoints; streaming uses NDJSON frames (`JsonClientFrame::Command`
 - [ ] `POST /v1/commands` accepts a single command frame.
 - [ ] `POST /v1/stream` round-trips commands → events.
 - [ ] With `LAZYBOX_API_TOKEN` set, unauthenticated requests are rejected.
+- [ ] Without `LAZYBOX_API_TOKEN` and without `--insecure-no-auth`, the
+      command refuses to start.
 
 ### Known sharp edges
-- Localhost-only by default and no CORS (ROADMAP §5); bearer auth should be required before any non-loopback bind.
+- Localhost-only by default and no CORS (ROADMAP §5); bearer auth is required at the CLI unless `--insecure-no-auth` is passed.
 - No OpenAPI schema yet; the wire shapes are defined in `crates/ipc`.
 
 ---

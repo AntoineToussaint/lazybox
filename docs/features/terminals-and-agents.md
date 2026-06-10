@@ -32,10 +32,9 @@ appears in the right-hand stack. Multiple terminals coexist per workspace.
 `TermSession` (`crates/tui-term/src/lib.rs`) wraps `portable-pty` + a
 libghostty-vt parser behind a `Mutex`, read on a `std::thread`. The daemon keeps
 a per-terminal **64 KB ring buffer**; on `Subscribe` it replays the ring then
-streams live `TerminalOutput` bytes. The default session wrapper is tmux
-(`TmuxWrapper`, `crates/agents/src/session_wrapper.rs`): it wraps the inner
-argv as `tmux new-session -A -s <sanitized-key> <cmd>`, swappable via the
-`SessionWrapper` trait.
+streams live `TerminalOutput` bytes. The default session backend is tmux
+(`TmuxBackend`, `crates/server/src/backend/tmux.rs`), swappable via the
+`SessionBackend` trait (`crates/server/src/backend/mod.rs`).
 
 ### Test checklist
 - [ ] A spawned shell renders a working prompt and echoes input.

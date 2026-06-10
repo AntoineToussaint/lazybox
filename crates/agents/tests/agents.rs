@@ -4,7 +4,7 @@
 //! users will drive from YAML.
 
 use lazybox_agents::agent::builtins::{Claude, Codex, Cursor, GenericCli};
-use lazybox_agents::{Agent, AgentState, Registry, SessionWrapper, SpawnCtx};
+use lazybox_agents::{Agent, AgentState, Registry, SpawnCtx};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -472,54 +472,6 @@ fn generic_cli_empty_patterns_returns_none() {
         asking_patterns: vec![],
     };
     assert_eq!(agent.detect_state(b"anything"), None);
-}
-
-// ── SessionWrapper tests ───────────────────────────────────────────────
-
-#[test]
-fn tmux_wrap_shape() {
-    use lazybox_agents::TmuxWrapper;
-    let w = TmuxWrapper::new();
-    let argv = w.wrap(
-        "github:o/r#1",
-        &["claude".to_string(), "--continue".to_string()],
-        std::path::Path::new("/tmp/wt"),
-    );
-    assert_eq!(argv[0], "tmux");
-    assert_eq!(argv[1], "new-session");
-    assert_eq!(argv[2], "-A", "-A makes tmux attach if session exists");
-    assert_eq!(argv[3], "-s");
-    assert_eq!(
-        argv[4], "github_o_r#1",
-        "session id must be sanitized — colons and slashes become underscores"
-    );
-    assert_eq!(
-        argv[5], "claude --continue",
-        "inner command is joined into one string for tmux"
-    );
-}
-
-#[test]
-fn tmux_sanitize_id_replaces_reserved_chars() {
-    use lazybox_agents::TmuxWrapper;
-    let w = TmuxWrapper::new();
-    assert_eq!(w.sanitize_id("a:b/c"), "a_b_c");
-    assert_eq!(w.sanitize_id("simple"), "simple");
-    assert_eq!(w.sanitize_id("deep/nested:key#1"), "deep_nested_key#1");
-}
-
-#[test]
-fn raw_wrapper_returns_inner_unchanged() {
-    use lazybox_agents::session_wrapper::RawWrapper;
-    let w = RawWrapper;
-    let inner = vec!["bash".to_string(), "-c".to_string(), "echo x".to_string()];
-    assert_eq!(
-        w.wrap("any-key", &inner, std::path::Path::new("/")),
-        inner,
-        "RawWrapper must not modify the argv"
-    );
-    assert!(w.list_sessions().is_empty(), "raw has no session registry");
-    assert!(w.kill("anything").is_ok(), "raw kill is always Ok");
 }
 
 // ── Shared detect helpers ─────────────────────────────────────────────

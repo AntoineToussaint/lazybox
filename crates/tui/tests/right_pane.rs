@@ -214,7 +214,9 @@ fn w_on_author_healthy_pr_no_unread_spawns_default_agent() {
     let Some(Command::Spawn { initial_prompt, .. }) = cmds.first() else {
         panic!("w on a healthy authored PR must spawn the default agent, got {cmds:?}");
     };
-    let prompt = initial_prompt.as_deref().expect("work spawn carries a prompt");
+    let prompt = initial_prompt
+        .as_deref()
+        .expect("work spawn carries a prompt");
     assert!(prompt.contains("Continue work on"), "{prompt}");
 }
 

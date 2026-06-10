@@ -29,6 +29,20 @@ pub struct SpawnCtx {
     pub hook_settings_path: Option<PathBuf>,
 }
 
+/// Shape of the prompt behind an `InputNeeded` reading: whether a bare
+/// chooser keystroke (`1`-`9`, `y`, `n`, Esc) is a complete answer. The
+/// daemon records this alongside the cached state so the optimistic
+/// "user answered the prompt" flip only fires on prompts a single
+/// keystroke can actually answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptShape {
+    /// Permission gate / chooser / Y-N dialog — one keystroke answers.
+    Chooser,
+    /// Free-text elicitation — the answer is composed text plus Enter;
+    /// a bare digit is just typing into the field.
+    FreeText,
+}
+
 pub trait Agent: Send + Sync {
     /// Stable id used in config and IPC (`"claude"`, `"codex"`, etc.).
     fn id(&self) -> &'static str;
@@ -66,6 +80,35 @@ pub trait Agent: Send + Sync {
     fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
         let _ = recent_output;
         None
+    }
+
+    /// Chunk-aware variant of [`Agent::detect_state`]. `last_chunk_start`
+    /// is the byte offset within `recent_output` where the most recent
+    /// PTY chunk begins. Agents whose detector reasons about marker
+    /// recency (Claude) use it to recognize a full-screen repaint, where
+    /// a live dialog and the bottom status bar arrive in ONE chunk and
+    /// positional ordering alone misreads the dialog as stale. The
+    /// default ignores the hint and delegates to `detect_state`.
+    fn detect_state_chunked(
+        &self,
+        recent_output: &[u8],
+        last_chunk_start: usize,
+    ) -> Option<AgentState> {
+        let _ = last_chunk_start;
+        self.detect_state(recent_output)
+    }
+
+    /// Whether a `Working` PTY reading carries enough on-screen evidence
+    /// to demote a hook-set `InputNeeded` once the hook stream has gone
+    /// stale. A dialog on screen blocks Claude's hook stream (no tool
+    /// calls fire while it waits), so "hooks stale + cached `?`" is the
+    /// normal shape of a real unanswered dialog — demotion needs proof
+    /// the dialog was answered (activity painted after its markers), not
+    /// just a Working classification. Default `true`: agents without
+    /// dialog-shaped prompts keep the plain stale-hook fallback.
+    fn working_reading_supersedes_dialog(&self, recent_output: &[u8]) -> bool {
+        let _ = recent_output;
+        true
     }
 
     /// Tight "ready to receive a pasted prompt" check. Returns true
@@ -287,6 +330,23 @@ pub mod builtins {
         /// against captured real PTY bytes, not just synthetic strings.
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
             detect::claude_state(recent_output)
+        }
+
+        /// Chunk-aware detection — threads the daemon's chunk-boundary
+        /// hint into the recency model so a full-screen repaint
+        /// (dialog + status bar in one chunk) keeps the dialog live.
+        fn detect_state_chunked(
+            &self,
+            recent_output: &[u8],
+            last_chunk_start: usize,
+        ) -> Option<AgentState> {
+            detect::claude_state_chunked(recent_output, last_chunk_start)
+        }
+
+        /// Stale-hook demotion evidence — see
+        /// [`crate::detect::claude_working_supersedes_dialog`].
+        fn working_reading_supersedes_dialog(&self, recent_output: &[u8]) -> bool {
+            detect::claude_working_supersedes_dialog(recent_output)
         }
 
         /// Whether Claude is ready to receive a pasted prompt — input

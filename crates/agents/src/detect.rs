@@ -65,6 +65,11 @@ pub const CLAUDE_STANDALONE_PROMPT_PHRASES: &[&str] = &[
     "do you want to edit its own settings",
 ];
 
+/// Yes/no choice markers for the paired question + choice branch and
+/// the dialog-marker scan — the option labels a Claude approval dialog
+/// renders (`1. Yes`) plus the bare `(y/n)` family.
+const CLAUDE_CHOICE_MARKERS: &[&str] = &["1. Yes", "1) Yes", "(y/n)", "[y/n]"];
+
 /// Substring "any-of" match. Plain text in; bytes should be passed
 /// through [`strip_ansi_lossy`] first so escape sequences don't split
 /// the markers.
@@ -112,7 +117,27 @@ pub fn claude_state(recent_output: &[u8]) -> Option<AgentState> {
     // classifier; every path classifies, so the caller can diff against
     // the cached state to notice transitions.
     let s = strip_ansi_lossy(recent_output);
-    Some(claude_state_of(&s, &compact_lower(&s)))
+    Some(claude_state_of(&s, &compact_lower(&s), None))
+}
+
+/// Chunk-aware variant of [`claude_state`]. `last_chunk_start` is the
+/// byte offset within `recent_output` where the most recent PTY chunk
+/// begins (the daemon's rolling detect buffer is older chunks followed
+/// by the chunk that just arrived).
+///
+/// Why the hint matters: the classifier suppresses a dialog marker that
+/// sits ABOVE a live working status anchor — positionally "the agent
+/// already moved past the prompt." But a full-screen repaint (tmux
+/// redraws top-to-bottom) delivers a live dialog AND the bottom status
+/// bar in ONE chunk, with the status bar last. Position alone then
+/// misreads the live dialog as stale. When both the prompt marker and
+/// the work anchor land inside the most recent chunk, the work anchor
+/// is not allowed to suppress the dialog.
+pub fn claude_state_chunked(recent_output: &[u8], last_chunk_start: usize) -> Option<AgentState> {
+    let mark = last_chunk_start.min(recent_output.len());
+    let (s, s_mark) = strip_ansi_lossy_marked(recent_output, mark);
+    let (compact, compact_mark) = compact_lower_marked(&s, s_mark);
+    Some(claude_state_of(&s, &compact, Some(compact_mark)))
 }
 
 /// Classify Claude's state from an already-stripped buffer `s` and its
@@ -136,8 +161,12 @@ pub fn claude_state(recent_output: &[u8]) -> Option<AgentState> {
 ///   computed in `compact` so they're directly comparable.
 /// - raw `s` is kept only for the arrow scan, whose ASCII form (`> 1.`)
 ///   depends on the space `compact` strips.
-fn claude_state_of(s: &str, compact: &str) -> AgentState {
-    let decision = classify(s, compact);
+///
+/// `last_chunk_start` is the chunk-boundary hint in `compact`'s offset
+/// space (see [`claude_state_chunked`]); `None` keeps the pure
+/// positional rules.
+fn claude_state_of(s: &str, compact: &str, last_chunk_start: Option<usize>) -> AgentState {
+    let decision = classify(s, compact, last_chunk_start);
     decision.log(compact);
     decision.state
 }
@@ -226,11 +255,25 @@ impl Decision {
 ///   `Do you want to proceed?` prompt as stale and dropped the `?`
 ///   entirely. Bash approvals always carry a consent phrase, so the
 ///   strong tier catches them regardless of that ambiguous footer.
-fn classify(s: &str, compact: &str) -> Decision {
+fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision {
     let idle_pos = idle_box_pos(compact);
     let resting_pos = resting_composer_pos(compact);
     let chooser_pos = chooser_pos(compact);
     let work_pos = working_status_pos(compact);
+
+    // Same-chunk rule. tmux full repaints paint the screen top-to-
+    // bottom, so a live dialog and the bottom status bar land in ONE
+    // chunk with the work anchor LAST — position alone would read the
+    // dialog as already answered. When both the prompt marker and the
+    // work anchor arrived inside the most recent chunk, the work anchor
+    // must not suppress the dialog. `None` (no chunk hint) keeps the
+    // pure positional ordering rule.
+    let work_anchor_against = |marker: Option<usize>| -> Option<usize> {
+        match (marker, work_pos, last_chunk_start) {
+            (Some(m), Some(w), Some(cs)) if m >= cs && w >= cs => None,
+            _ => work_pos,
+        }
+    };
 
     // A live chooser / permission dialog REPLACES the input box, so its
     // markers are the bottom-most thing on screen. When the composer
@@ -245,8 +288,10 @@ fn classify(s: &str, compact: &str) -> Decision {
     // re-sent. A prompt marker ABOVE the working anchor is therefore an
     // already-answered prompt the agent has moved past, not a live gate
     // — without this, the stale marker pins InputNeeded for as long as
-    // it stays in the detect window.
-    let chooser_live = marker_at_least_as_recent(chooser_pos, idle_pos.max(work_pos));
+    // it stays in the detect window. (Subject to the same-chunk rule
+    // above: a full repaint delivers both in one chunk.)
+    let chooser_live =
+        marker_at_least_as_recent(chooser_pos, idle_pos.max(work_anchor_against(chooser_pos)));
 
     // tmux paints the screen by absolute cursor position, so the bytes
     // lazybox sees arrive in TEMPORAL order: a single visual line
@@ -267,7 +312,7 @@ fn classify(s: &str, compact: &str) -> Decision {
             Some((pos, phrase)) => (Some(pos), Some(phrase)),
             None => (None, None),
         };
-    let choice_pos = last_compact_match_pos(compact, &["1. Yes", "1) Yes", "(y/n)", "[y/n]"]);
+    let choice_pos = last_compact_match_pos(compact, CLAUDE_CHOICE_MARKERS);
     let question_pos = last_compact_match_pos(
         compact,
         &[
@@ -318,7 +363,7 @@ fn classify(s: &str, compact: &str) -> Decision {
     // it, which proves the agent already moved past the prompt. It must
     // NOT be gated by `Tab to amend`, which the live command-approval
     // dialog itself renders.
-    if marker_at_least_as_recent(phrase_pos, resting_pos.max(work_pos)) {
+    if marker_at_least_as_recent(phrase_pos, resting_pos.max(work_anchor_against(phrase_pos))) {
         d.state = AgentState::InputNeeded;
         d.trigger = Some(Trigger::StandalonePhrase);
         return d;
@@ -328,9 +373,10 @@ fn classify(s: &str, compact: &str) -> Decision {
     // arrow-less bash/approval shape whose options are `1. Yes` / `(y/n)`.
     // Both must be present, and the more-recent of the two at least as
     // recent as the reliable resting footer.
+    let paired_pos = choice_pos.max(question_pos);
     if choice_pos.is_some()
         && question_pos.is_some()
-        && marker_at_least_as_recent(choice_pos.max(question_pos), resting_pos.max(work_pos))
+        && marker_at_least_as_recent(paired_pos, resting_pos.max(work_anchor_against(paired_pos)))
     {
         d.state = AgentState::InputNeeded;
         d.trigger = Some(Trigger::PairedYesNo);
@@ -385,7 +431,7 @@ pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
     // recognises every one of those shapes. Use `classify` directly (not
     // `claude_state_of`) so the spawn-time injector's readiness polling
     // doesn't double-emit the decision trace on every chunk.
-    if classify(&s, &compact).state == AgentState::InputNeeded {
+    if classify(&s, &compact, None).state == AgentState::InputNeeded {
         return false;
     }
     // Folder-trust prompts don't always render as a numbered chooser
@@ -400,6 +446,44 @@ pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
     // `Idle`, so requiring a composer footer marker excludes it — we
     // don't want to paste into the banner before the input box exists.
     input_box_visible(&compact)
+}
+
+/// Whether a `Working` reading carries on-screen proof the agent moved
+/// PAST a dialog: an affirmative live status anchor (see
+/// [`working_status_pos`]) strictly more recent than the most recent
+/// dialog marker still in the buffer.
+///
+/// `false` when there's no working anchor — or when the buffer holds no
+/// dialog marker at all. The caller is the daemon's stale-hook
+/// fallback: a dialog on screen BLOCKS Claude's hook stream (no tool
+/// calls fire while it waits), so "hooks stale + cached `InputNeeded`"
+/// is the normal shape of a real unanswered dialog, not a broken
+/// pipeline. Demoting that `?` needs evidence the dialog was answered —
+/// activity painted after its markers — not just a Working
+/// classification over a marker-free window.
+pub fn claude_working_supersedes_dialog(recent_output: &[u8]) -> bool {
+    let s = strip_ansi_lossy(recent_output);
+    let compact = compact_lower(&s);
+    let Some(work) = working_status_pos(&compact) else {
+        return false;
+    };
+    dialog_marker_pos(&compact).is_some_and(|marker| work > marker)
+}
+
+/// Most recent dialog-shaped marker in the compacted buffer: chooser
+/// markers, a standalone consent phrase, a yes/no choice marker, or the
+/// `Esc to cancel` dialog footer. `None` when nothing dialog-shaped is
+/// in the window.
+fn dialog_marker_pos(compact: &str) -> Option<usize> {
+    [
+        chooser_pos(compact),
+        last_compact_match_pos(compact, CLAUDE_STANDALONE_PROMPT_PHRASES),
+        last_compact_match_pos(compact, CLAUDE_CHOICE_MARKERS),
+        compact.rfind("esctocancel"),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
 }
 
 /// Whether Claude's input box (composer) footer is on screen. Claude
@@ -429,10 +513,28 @@ fn input_box_visible(compact: &str) -> bool {
 /// preserved so the per-line working-counter scan still sees line
 /// boundaries.
 fn compact_lower(s: &str) -> String {
-    s.chars()
-        .filter(|c| *c != ' ')
-        .flat_map(char::to_lowercase)
-        .collect()
+    compact_lower_marked(s, s.len()).0
+}
+
+/// [`compact_lower`] that also translates one byte offset (`mark`, in
+/// `s`'s offset space) into the compacted output's offset space —
+/// returns `(compacted, compacted_mark)`. Used to carry the
+/// chunk-boundary hint through compaction in a single pass instead of
+/// compacting the prefix a second time on the per-chunk hot path.
+fn compact_lower_marked(s: &str, mark: usize) -> (String, usize) {
+    let mut out = String::with_capacity(s.len());
+    let mut out_mark = None;
+    for (i, c) in s.char_indices() {
+        if i >= mark && out_mark.is_none() {
+            out_mark = Some(out.len());
+        }
+        if c == ' ' {
+            continue;
+        }
+        out.extend(c.to_lowercase());
+    }
+    let out_mark = out_mark.unwrap_or(out.len());
+    (out, out_mark)
 }
 
 /// Byte offset of the most-recent occurrence of any pattern in `patterns`
@@ -586,14 +688,54 @@ fn last_option_marker_pos(s: &str, digit: u8) -> Option<usize> {
 /// `✻ Cogitating… (8s · ↑ 412 tokens · esc to interrupt)`. We anchor on
 /// its two stable shapes — the `esc to interrupt` interrupt hint (which
 /// arrives spaceless as `esctointerrupt` when Claude paints it in the
-/// status bar), and the `(<elapsed> · … tokens …)` live counter (a
-/// single line carrying both the `·` separator and the word `tokens`).
-/// Requiring `·` and `tokens` on the SAME line avoids a cross-line false
-/// match.
+/// status bar), and the live counter line in its full affirmative shape
+/// (see [`is_live_counter_line`]). A line that merely mentions `tokens`
+/// beside a `·` separator — a tool preview, a dialog's command echo —
+/// must NOT anchor "working": the work anchor suppresses live dialog
+/// markers, so a loose match here reads a real permission prompt as
+/// already answered on a full repaint.
 fn working_status_pos(compact: &str) -> Option<usize> {
     let interrupt = compact.rfind("esctointerrupt");
-    let counter = last_line_pos(compact, |l| l.contains('·') && l.contains("tokens"));
+    let counter = last_line_pos(compact, is_live_counter_line);
     [interrupt, counter].into_iter().flatten().max()
+}
+
+/// Spinner glyphs Claude cycles through at the head of its live status
+/// line (`✻ Cogitating…`, `✦ Gusting…`, `✽ Running…`, …). Matched as an
+/// any-of set since the glyph rotates per frame.
+const WORKING_SPINNER_GLYPHS: &[char] = &['✢', '✳', '✶', '✻', '✽', '✺', '✦', '✧', '*'];
+
+/// The affirmative live-counter shape (real fixture lines:
+/// `✻ Simmering… (10s · ↓ 137 tokens)`,
+/// `✦ Gusting… (2m 2s · ↓ 7.2k tokens · thinking some more)`):
+/// a spinner glyph plus the parenthesized elapsed timer plus the token
+/// counter, all on one line of the compacted buffer. `esc to interrupt`
+/// lines are matched separately in [`working_status_pos`].
+fn is_live_counter_line(line: &str) -> bool {
+    line.contains('·')
+        && line.contains("tokens")
+        && line.contains(WORKING_SPINNER_GLYPHS)
+        && has_elapsed_counter(line)
+}
+
+/// `(7s`, `(2m2s`, `(1h2m` — the opening of Claude's elapsed counter as
+/// it appears in the compacted (space-free) buffer: `(`, one or more
+/// digits, then a unit letter.
+fn has_elapsed_counter(line: &str) -> bool {
+    let b = line.as_bytes();
+    for i in 0..b.len().saturating_sub(2) {
+        if b[i] != b'(' || !b[i + 1].is_ascii_digit() {
+            continue;
+        }
+        let mut j = i + 2;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j < b.len() && matches!(b[j], b's' | b'm' | b'h') {
+            return true;
+        }
+    }
+    false
 }
 
 /// Byte offset of the most recent idle input-box footer in `compact`.
@@ -693,9 +835,24 @@ pub fn recent_tail(s: &str, max: usize) -> &str {
 /// rather than panicking — a half-arrived chunk is the common case on a
 /// live PTY.
 pub fn strip_ansi_lossy(bytes: &[u8]) -> String {
+    strip_ansi_lossy_marked(bytes, bytes.len()).0
+}
+
+/// [`strip_ansi_lossy`] that also translates one input byte offset
+/// (`mark`) into the stripped output's offset space — returns
+/// `(stripped, stripped_mark)`. Carries the chunk-boundary hint through
+/// stripping in the same single pass. The lossy-decode fallback can
+/// shift offsets slightly (replacement chars resize); the mark is
+/// clamped and snapped forward to a char boundary, which is fine for a
+/// recency heuristic.
+fn strip_ansi_lossy_marked(bytes: &[u8], mark: usize) -> (String, usize) {
     let mut filtered: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut out_mark = None;
     let mut i = 0;
     while i < bytes.len() {
+        if i >= mark && out_mark.is_none() {
+            out_mark = Some(filtered.len());
+        }
         if bytes[i] == 0x1b {
             i = skip_escape(bytes, i);
         } else {
@@ -703,12 +860,18 @@ pub fn strip_ansi_lossy(bytes: &[u8]) -> String {
             i += 1;
         }
     }
+    let out_mark = out_mark.unwrap_or(filtered.len());
     // Happy path (valid UTF-8, the norm) moves the buffer into the String
     // with no copy; only a malformed chunk pays for the lossy fallback.
-    match String::from_utf8(filtered) {
+    let text = match String::from_utf8(filtered) {
         Ok(text) => text,
         Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+    };
+    let mut out_mark = out_mark.min(text.len());
+    while out_mark < text.len() && !text.is_char_boundary(out_mark) {
+        out_mark += 1;
     }
+    (text, out_mark)
 }
 
 /// Advance past one escape sequence whose `ESC` (0x1b) is at `start`.
@@ -1092,7 +1255,7 @@ mod tests {
         // The instrumentation (issue #2): the trigger names the branch so
         // a misclassification is bisectable from the trace. Each shape
         // exercises a distinct tier.
-        let trigger = |s: &str| classify(s, &compact_lower(s)).trigger;
+        let trigger = |s: &str| classify(s, &compact_lower(s), None).trigger;
 
         // Weak structural chooser (arrow + options, no resting footer).
         assert_eq!(
@@ -1108,6 +1271,7 @@ mod tests {
         let d = classify(
             "Do you want to overwrite the file?",
             &compact_lower("Do you want to overwrite the file?"),
+            None,
         );
         assert_eq!(d.trigger, Some(Trigger::StandalonePhrase));
         assert_eq!(d.matched_phrase, Some("do you want to overwrite"));
@@ -1122,6 +1286,109 @@ mod tests {
             trigger("✻ Cogitating… (8s · ↑ 412 tokens · esc to interrupt)"),
             None,
         );
+    }
+
+    #[test]
+    fn working_counter_requires_affirmative_shape() {
+        // The full live shape — spinner + elapsed + token counter —
+        // anchors working.
+        let live = compact_lower("✻ Simmering… (10s · ↓ 137 tokens)");
+        assert!(working_status_pos(&live).is_some());
+        let live2 = compact_lower("✦ Gusting… (2m 2s · ↓ 7.2k tokens · thinking some more)");
+        assert!(working_status_pos(&live2).is_some());
+        // `esc to interrupt` alone is affirmative too.
+        assert!(working_status_pos(&compact_lower("✻ (esc to interrupt)")).is_some());
+
+        // A line that merely mentions `tokens` beside a `·` separator —
+        // a tool preview or a dialog's command echo — is NOT a working
+        // anchor. Pre-tightening it suppressed live dialog markers on a
+        // full repaint.
+        let echo = compact_lower("Bash(echo 'count · 137 tokens used')");
+        assert_eq!(working_status_pos(&echo), None);
+        // Spinner but no elapsed counter: still not affirmative.
+        let no_elapsed = compact_lower("✻ summary · 137 tokens total");
+        assert_eq!(working_status_pos(&no_elapsed), None);
+    }
+
+    #[test]
+    fn same_chunk_full_repaint_keeps_dialog_over_statusbar() {
+        // A tmux full repaint delivers the live dialog AND the bottom
+        // status bar in ONE chunk, status bar last. Position alone reads
+        // the dialog as already answered; the chunk hint must keep it
+        // live.
+        let repaint = concat!(
+            "Do you want to proceed?\n",
+            "❯ 1. Yes\n",
+            "  2. No\n",
+            "Esc to cancel\n",
+            "✻ Simmering… (10s · ↓ 137 tokens · esc to interrupt)",
+        );
+        // Whole buffer arrived as one chunk → InputNeeded.
+        assert_eq!(
+            claude_state_chunked(repaint.as_bytes(), 0),
+            Some(AgentState::InputNeeded)
+        );
+        // The ordering rule is intact when the work anchor arrives in a
+        // LATER chunk than the dialog: the agent moved past the prompt.
+        let boundary = repaint.rfind('✻').unwrap();
+        assert_eq!(
+            claude_state_chunked(repaint.as_bytes(), boundary),
+            Some(AgentState::Working)
+        );
+        // No chunk hint at all keeps the pure positional rule.
+        assert_eq!(claude_state(repaint.as_bytes()), Some(AgentState::Working));
+    }
+
+    #[test]
+    fn working_supersedes_dialog_requires_activity_after_markers() {
+        // Working anchor painted AFTER the dialog markers → the dialog
+        // was answered, demotion is evidenced.
+        let answered = concat!(
+            "Do you want to proceed?\n",
+            "❯ 1. Yes\n",
+            "  2. No\n",
+            "Esc to cancel\n",
+            "user picked yes\n",
+            "✻ Simmering… (10s · ↓ 137 tokens · esc to interrupt)",
+        );
+        assert!(claude_working_supersedes_dialog(answered.as_bytes()));
+
+        // A bare working line with NO dialog markers in the window
+        // proves nothing about the dialog the hook reported → false.
+        assert!(!claude_working_supersedes_dialog(
+            "✻ Cogitating… (8s · ↑ 412 tokens · esc to interrupt)".as_bytes()
+        ));
+        // No working anchor at all → false.
+        assert!(!claude_working_supersedes_dialog(
+            "Do you want to proceed?\n❯ 1. Yes\n2. No".as_bytes()
+        ));
+        // Dialog markers more recent than the working anchor → the
+        // dialog is the live thing on screen → false.
+        let dialog_last = concat!(
+            "✻ Simmering… (10s · ↓ 137 tokens)\n",
+            "Do you want to proceed?\n",
+            "❯ 1. Yes\n",
+            "  2. No\n",
+            "Esc to cancel",
+        );
+        assert!(!claude_working_supersedes_dialog(dialog_last.as_bytes()));
+    }
+
+    #[test]
+    fn marked_strip_and_compact_translate_offsets() {
+        // The mark lands after the escape-laden prefix; both passes must
+        // map it into their output offset spaces.
+        let bytes = b"\x1b[31mAB CD\x1b[0mEF";
+        let mark = bytes.iter().position(|b| *b == b'E').unwrap();
+        let (s, s_mark) = strip_ansi_lossy_marked(bytes, mark);
+        assert_eq!(s, "AB CDEF");
+        assert_eq!(&s[s_mark..], "EF");
+        let (compact, c_mark) = compact_lower_marked(&s, s_mark);
+        assert_eq!(compact, "abcdef");
+        assert_eq!(&compact[c_mark..], "ef");
+        // Mark at / past the end clamps to the end.
+        assert_eq!(strip_ansi_lossy_marked(b"xy", 99).1, 2);
+        assert_eq!(compact_lower_marked("xy", 99).1, 2);
     }
 
     #[test]

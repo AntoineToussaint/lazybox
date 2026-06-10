@@ -281,6 +281,24 @@ pub async fn handle_spawn(
         skip_permissions,
         "handle_spawn: entry"
     );
+    // In-flight guard — claim the singleton identity BEFORE the
+    // duplicate check below. That check reads maps populated only after
+    // worktree provisioning + `backend.spawn` (minutes on a cold
+    // clone); two `w` presses in that window each passed it and
+    // launched two skip-permissions agents into one worktree — the same
+    // race hits autofix dispatch and startup restore. The loser
+    // collapses onto the winner exactly like the existing-singleton
+    // path: wait for the winner's terminal, deliver the prompt, focus.
+    // Held in a drop guard so every exit path — including the failure
+    // returns below — releases the claim.
+    let _inflight = match InflightSpawnGuard::try_claim(config, &session_key, &kind) {
+        Ok(guard) => guard,
+        Err(()) => {
+            collapse_onto_inflight_spawn(config, &session_key, &kind, initial_prompt.as_deref())
+                .await;
+            return;
+        }
+    };
     // Singleton enforcement at the daemon (the source of truth for
     // who's running what). The TUI also intercepts duplicates
     // client-side for snappy focus-not-spawn behavior, but that
@@ -481,6 +499,7 @@ pub async fn handle_spawn(
     let agent_detect_resets_map = config.agent_detect_resets.clone();
     let hook_driven_map = config.hook_driven_terminals.clone();
     let prompt_submit_map = config.prompt_submit_signals.clone();
+    let input_shapes_map = config.input_needed_shapes.clone();
     let terminal_meta_map = config.terminal_meta.clone();
     let no_permission_map = config.no_permission_terminals.clone();
     let store_for_pump = config.store.clone();
@@ -583,6 +602,11 @@ pub async fn handle_spawn(
             hook_driven: &std::sync::Arc<
                 tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
             >,
+            input_shapes: &std::sync::Arc<
+                tokio::sync::Mutex<
+                    std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>,
+                >,
+            >,
         ) {
             const STATE_BUF_CAP: usize = 32 * 1024;
             let Some(agent) = agent else {
@@ -616,7 +640,15 @@ pub async fn handle_spawn(
             const DETECT_WINDOW: usize = 16 * 1024;
             let tail_start = buf.len().saturating_sub(DETECT_WINDOW);
             let detect_window = &buf[tail_start..];
-            let Some(new_state) = agent.detect_state(detect_window) else {
+            // Chunk-boundary hint: the chunk just appended occupies the
+            // LAST `bytes.len()` bytes of the window. A full-screen
+            // repaint delivers a live dialog and the bottom status bar
+            // in one chunk (status bar last); the chunk-aware detector
+            // keeps the dialog live instead of reading it as already
+            // answered by the "more recent" work anchor.
+            let last_chunk_start = detect_window.len().saturating_sub(bytes.len());
+            let Some(new_state) = agent.detect_state_chunked(detect_window, last_chunk_start)
+            else {
                 return;
             };
             // Hooks-primary, PTY-fallback. Once a terminal has reported
@@ -643,15 +675,22 @@ pub async fn handle_spawn(
             // A terminal that never reported a hook isn't in the map and
             // keeps full PTY detection unchanged.
             let last_hook_at = hook_driven.lock().await.get(&id).copied();
-            if let Some(last_hook_at) = last_hook_at
-                && !pty_reading_allowed(
+            if let Some(last_hook_at) = last_hook_at {
+                let current = states.lock().await.get(&id).copied();
+                if !pty_reading_allowed(
+                    current,
                     new_state,
                     agent.detect_ready_for_prompt(detect_window),
+                    // Lazy: the dialog-supersession scan re-strips the
+                    // window, so only the one reading that needs it
+                    // (stale hooks + Working demoting a cached `?`)
+                    // pays for it.
+                    || agent.working_reading_supersedes_dialog(detect_window),
                     last_hook_at.elapsed(),
                     HOOK_STALENESS,
-                )
-            {
-                return;
+                ) {
+                    return;
+                }
             }
             // Trace-level on steady-state runs (claude emits 100+
             // chunks/sec during streaming and we don't want to drown
@@ -675,6 +714,17 @@ pub async fn handle_spawn(
                     "detect_state → InputNeeded",
                 );
                 *last_input_needed_at = Some(std::time::Instant::now());
+                // Every InputNeeded the PTY detector raises is
+                // structurally a chooser / permission / consent dialog
+                // (freeform asks are deliberately not flagged), so a
+                // bare chooser keystroke is a complete answer. Hook-
+                // raised elicitations overwrite this with `FreeText` in
+                // `handle_ingest_hook`. Recorded before the dedupe
+                // below so a re-rendered prompt refreshes the shape.
+                input_shapes
+                    .lock()
+                    .await
+                    .insert(id, lazybox_agents::PromptShape::Chooser);
             }
             // Hysteresis. Claude's status-bar updates make the
             // detector miss the prompt for one chunk, then catch
@@ -785,6 +835,7 @@ pub async fn handle_spawn(
                 &mut last_input_needed_at,
                 INPUT_NEEDED_HYSTERESIS,
                 &hook_driven_map,
+                &input_shapes_map,
             )
             .await;
             let _ = bus.send(Event::TerminalOutput {
@@ -839,6 +890,7 @@ pub async fn handle_spawn(
                 &mut last_input_needed_at,
                 INPUT_NEEDED_HYSTERESIS,
                 &hook_driven_map,
+                &input_shapes_map,
             )
             .await;
             if !signaled_first_output {
@@ -875,6 +927,7 @@ pub async fn handle_spawn(
         agent_detect_resets_map.lock().await.remove(&id_for_pump);
         hook_driven_map.lock().await.remove(&id_for_pump);
         prompt_submit_map.lock().await.remove(&id_for_pump);
+        input_shapes_map.lock().await.remove(&id_for_pump);
         terminal_meta_map.lock().await.remove(&id_for_pump);
         no_permission_map.lock().await.remove(&id_for_pump);
         let _ = store_for_pump.delete_kv(&format!("terminal:{key_for_pump}"));
@@ -1118,9 +1171,30 @@ async fn resolve_or_create_session(
     // exist on disk. Just root the spawn in the user's cwd. Use a
     // fresh ephemeral session id so terminal_sessions still gets a
     // mapping for the migration freeze.
+    //
+    // EXCEPT when the row is missing because the workspace was DELETED
+    // while this spawn was in flight (Kill racing a slow provision):
+    // that case must abort — the fallback would silently launch a
+    // skip-permissions agent in the daemon's own cwd. The tombstone set
+    // distinguishes "deleted in this process" from "never existed".
     let mut workspace = match load_workspace(config, &workspace_key) {
         Ok(w) => w,
         Err(_) => {
+            if config
+                .deleted_workspaces
+                .lock()
+                .expect("deleted_workspaces poisoned")
+                .contains(workspace_key.as_str())
+            {
+                tracing::warn!(
+                    workspace = workspace_key.as_str(),
+                    "spawn: workspace was deleted while the spawn was in flight — aborting",
+                );
+                return Err(crate::ServerError::Workspace(format!(
+                    "workspace {} was deleted — spawn aborted",
+                    workspace_key.as_str()
+                )));
+            }
             return Ok((
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                 SessionId::new(),
@@ -1423,16 +1497,27 @@ const HOOK_STALENESS: Duration = Duration::from_secs(30);
 /// terminal. Fresh hooks own Working↔Idle, so only two corrections
 /// pass: an on-screen permission dialog (`InputNeeded`) and an
 /// affirmatively-recognized idle composer. Once the last hook is older
-/// than `staleness`, every reading passes — the terminal degrades to
-/// plain PTY detection instead of freezing on the last hook state.
+/// than `staleness`, readings pass — the terminal degrades to plain PTY
+/// detection instead of freezing on the last hook state — with ONE
+/// exception: a `Working` reading demoting a hook-set `InputNeeded`. A
+/// live dialog BLOCKS the hook stream (no tool calls fire while Claude
+/// waits), so "stale hooks + cached `?`" is the normal shape of a real
+/// unanswered dialog, not a broken pipeline; the demotion needs the
+/// agent's affirmative evidence (`working_supersedes_dialog`: a tight
+/// working anchor painted AFTER the dialog markers), or a full-repaint
+/// status bar would clear a real `?`.
 fn pty_reading_allowed(
+    current: Option<lazybox_ipc::AgentState>,
     new_state: lazybox_ipc::AgentState,
     ready_for_prompt: bool,
+    working_supersedes_dialog: impl FnOnce() -> bool,
     since_last_hook: Duration,
     staleness: Duration,
 ) -> bool {
     if since_last_hook >= staleness {
-        return true;
+        let demotes_input_needed = current == Some(lazybox_ipc::AgentState::InputNeeded)
+            && new_state == lazybox_ipc::AgentState::Working;
+        return !demotes_input_needed || working_supersedes_dialog();
     }
     new_state == lazybox_ipc::AgentState::InputNeeded
         || (new_state == lazybox_ipc::AgentState::Idle && ready_for_prompt)
@@ -1538,6 +1623,202 @@ pub(crate) async fn find_existing_singleton(
             t.session_key == *session_key && t.kind.singleton_key().as_deref() == Some(&target)
         })
         .map(|t| t.terminal_id)
+}
+
+/// Releases a claimed in-flight singleton identity when dropped — on
+/// EVERY `handle_spawn` exit path (success, session-resolution failure,
+/// backend failure, panic) — and pings waiters so collapsing duplicates
+/// and `Kill` re-check promptly.
+struct InflightSpawnGuard {
+    set: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<(String, String)>>>,
+    changed: std::sync::Arc<tokio::sync::Notify>,
+    key: (String, String),
+}
+
+impl InflightSpawnGuard {
+    /// Claim `(workspace key, singleton kind key)` if free. `Ok(None)`
+    /// for non-singleton kinds (shells spawn freely, no guard);
+    /// `Err(())` when another spawn already holds the identity.
+    fn try_claim(
+        config: &ServerConfig,
+        session_key: &SessionKey,
+        kind: &TerminalKind,
+    ) -> Result<Option<Self>, ()> {
+        let Some(target) = kind.singleton_key() else {
+            return Ok(None);
+        };
+        let key = (session_key.as_str().to_string(), target);
+        let mut set = config
+            .inflight_spawns
+            .lock()
+            .expect("inflight_spawns poisoned");
+        if !set.insert(key.clone()) {
+            return Err(());
+        }
+        Ok(Some(Self {
+            set: config.inflight_spawns.clone(),
+            changed: config.inflight_spawn_changed.clone(),
+            key,
+        }))
+    }
+}
+
+impl Drop for InflightSpawnGuard {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .expect("inflight_spawns poisoned")
+            .remove(&self.key);
+        self.changed.notify_waiters();
+    }
+}
+
+/// How long a duplicate spawn waits for the in-flight winner's terminal
+/// before giving up. Worktree provisioning on a cold cache runs a full
+/// `git clone --bare`, so this is generous; the wait also ends the
+/// moment the winner releases its claim (success or failure).
+const INFLIGHT_COLLAPSE_DEADLINE: Duration = Duration::from_secs(600);
+
+/// A duplicate `handle_spawn` lost the in-flight claim. Wait for the
+/// winner's terminal, then behave exactly like the existing-singleton
+/// path: deliver the prompt (if any) into it and request focus. When
+/// the winner fails (claim released, no terminal), drop the duplicate —
+/// loudly when a prompt was lost with it.
+async fn collapse_onto_inflight_spawn(
+    config: &ServerConfig,
+    session_key: &SessionKey,
+    kind: &TerminalKind,
+    prompt: Option<&str>,
+) {
+    tracing::info!(
+        %session_key,
+        ?kind,
+        has_prompt = prompt.is_some(),
+        "handle_spawn: a spawn for this singleton is already in flight — collapsing onto it",
+    );
+    let Some(existing) = await_inflight_singleton(config, session_key, kind).await else {
+        tracing::warn!(
+            %session_key,
+            ?kind,
+            "handle_spawn: in-flight spawn released without producing a terminal — dropping duplicate",
+        );
+        if prompt.is_some() {
+            let _ = config.bus.send(Event::provider_error_retryable(
+                "spawn",
+                "an agent spawn was already in flight but failed — press the key again",
+            ));
+        }
+        return;
+    };
+    if let Some(prompt) = prompt {
+        // Boxed for the same reason as the existing-singleton path in
+        // `handle_spawn`: `handle_inject_prompt`'s fallback arm can
+        // recurse into `handle_spawn`. (No fallback passed here, so it
+        // can't actually recurse.)
+        Box::pin(handle_inject_prompt(config, existing, prompt, None)).await;
+    }
+    let _ = config.bus.send(Event::TerminalFocusRequested {
+        terminal_id: existing,
+    });
+}
+
+/// Wait for the in-flight winner's terminal to land in the live maps,
+/// or for the winner to release its claim without one. Wakes on the
+/// guard's `Notify` (with a periodic re-check so a missed ping can't
+/// park the waiter), bounded by [`INFLIGHT_COLLAPSE_DEADLINE`].
+async fn await_inflight_singleton(
+    config: &ServerConfig,
+    session_key: &SessionKey,
+    kind: &TerminalKind,
+) -> Option<TerminalId> {
+    let target = kind.singleton_key()?;
+    let claim = (session_key.as_str().to_string(), target.clone());
+    let deadline = tokio::time::Instant::now() + INFLIGHT_COLLAPSE_DEADLINE;
+    loop {
+        if let Some(id) = live_singleton(config, session_key, &target).await {
+            return Some(id);
+        }
+        let claimed = config
+            .inflight_spawns
+            .lock()
+            .expect("inflight_spawns poisoned")
+            .contains(&claim);
+        if !claimed || tokio::time::Instant::now() >= deadline {
+            // Winner released (or we timed out). One final scan closes
+            // the insert→release window — the maps are populated before
+            // the winner's guard drops, so a miss here means the spawn
+            // genuinely failed.
+            return live_singleton(config, session_key, &target).await;
+        }
+        let _ = tokio::time::timeout(
+            Duration::from_millis(100),
+            config.inflight_spawn_changed.notified(),
+        )
+        .await;
+    }
+}
+
+/// Lightweight live-singleton scan: the same identity match as
+/// [`find_existing_singleton`], but reading the maps directly (no
+/// backend ring snapshots — this is called from a wait loop) and
+/// requiring the `terminals` entry too, so a returned id is immediately
+/// injectable (`handle_inject_prompt` resolves the backend key through
+/// `terminals`; `terminal_meta` is inserted first during spawn).
+async fn live_singleton(
+    config: &ServerConfig,
+    session_key: &SessionKey,
+    target: &str,
+) -> Option<TerminalId> {
+    let candidates: Vec<TerminalId> = {
+        let meta = config.terminal_meta.lock().await;
+        meta.iter()
+            .filter(|(_, (sk, k))| sk == session_key && k.singleton_key().as_deref() == Some(target))
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    if candidates.is_empty() {
+        return None;
+    }
+    let terminals = config.terminals.lock().await;
+    candidates.into_iter().find(|id| terminals.contains_key(id))
+}
+
+/// How long `Kill` waits for an in-flight spawn on the same workspace
+/// before tearing down anyway. Bounded so a wedged provision can't make
+/// the user's explicit Kill hang forever; past the cap the teardown
+/// proceeds and the tombstone in `deleted_workspaces` stops the late
+/// spawn from re-materializing in the daemon's cwd.
+const KILL_INFLIGHT_WAIT: Duration = Duration::from_secs(30);
+
+/// Serialize a workspace teardown against any spawn currently
+/// provisioning into it. Without this, Kill could delete the worktree
+/// mid-provision and the spawn would re-create it (plus a terminal)
+/// right after teardown.
+pub(crate) async fn await_inflight_spawns(config: &ServerConfig, workspace_key: &str) {
+    let deadline = tokio::time::Instant::now() + KILL_INFLIGHT_WAIT;
+    loop {
+        let busy = config
+            .inflight_spawns
+            .lock()
+            .expect("inflight_spawns poisoned")
+            .iter()
+            .any(|(ws, _)| ws == workspace_key);
+        if !busy {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(
+                workspace = workspace_key,
+                "kill: a spawn is still provisioning after {KILL_INFLIGHT_WAIT:?} — tearing down anyway",
+            );
+            return;
+        }
+        let _ = tokio::time::timeout(
+            Duration::from_millis(100),
+            config.inflight_spawn_changed.notified(),
+        )
+        .await;
+    }
 }
 
 /// Freeze every backend session belonging to `session_id`. Returns
@@ -1836,6 +2117,30 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     if config.agent_state_for(terminal_id).await != Some(lazybox_ipc::AgentState::InputNeeded) {
         return;
     }
+    // A bare chooser keystroke only ANSWERS chooser/permission-shaped
+    // prompts. For a free-text elicitation, a lone digit / y / n is
+    // just typing into the field — flipping the pill on it cleared a
+    // real "agent is waiting on you". Enter is exempt: it submits the
+    // elicitation answer, so the flip is correct. The shape is recorded
+    // at detection time (PTY triggers are all chooser-shaped) and by
+    // `handle_ingest_hook` (permission → chooser, elicit → free text);
+    // with no recorded shape we conservatively don't flip on a bare key.
+    if !pressed_enter {
+        let shape = config
+            .input_needed_shapes
+            .lock()
+            .await
+            .get(&terminal_id)
+            .copied();
+        if shape != Some(lazybox_agents::PromptShape::Chooser) {
+            tracing::debug!(
+                ?terminal_id,
+                ?shape,
+                "bare chooser keystroke on a non-chooser prompt — keeping InputNeeded",
+            );
+            return;
+        }
+    }
     let session_key = config
         .terminal_meta
         .lock()
@@ -1951,11 +2256,20 @@ async fn confirm_prompt_submission(
         deadline,
     )
     .await;
-    confirm
-        .signals_map
-        .lock()
-        .await
-        .remove(&confirm.terminal_id);
+    // Remove the registration only if it's still OURS. A second
+    // injection on the same terminal replaces the map entry with its
+    // own `Notify`; removing blindly here would delete THAT signal,
+    // orphan its waiter, and trigger a spurious Enter resend into the
+    // agent.
+    {
+        let mut signals = confirm.signals_map.lock().await;
+        if signals
+            .get(&confirm.terminal_id)
+            .is_some_and(|s| std::sync::Arc::ptr_eq(s, &confirm.signal))
+        {
+            signals.remove(&confirm.terminal_id);
+        }
+    }
     if confirmed {
         return;
     }
@@ -2326,18 +2640,32 @@ pub async fn handle_ingest_hook(
     // state mapping consults the current state (an unrecognized
     // `Notification` is a no-change while `InputNeeded`), so it runs
     // under the same guard.
-    let (prev, new_state) = {
+    let (prev, new_state, changed) = {
         let mut states = config.agent_states.lock().await;
         let prev = states.get(&terminal_id).copied();
         let Some(new_state) = lazybox_agents::hook::hook_to_state(&hook, prev) else {
             return;
         };
-        if prev == Some(new_state) {
-            return;
+        let changed = prev != Some(new_state);
+        if changed {
+            states.insert(terminal_id, new_state);
         }
-        states.insert(terminal_id, new_state);
-        (prev, new_state)
+        (prev, new_state, changed)
     };
+    // Record the prompt's shape — whether a bare chooser keystroke is a
+    // complete answer — for `handle_write`'s optimistic flip. Done even
+    // on a no-change re-assert (a chooser following an elicitation, or
+    // vice versa, must update the gate), and OUTSIDE the states guard so
+    // the two maps are never co-held.
+    if new_state == lazybox_ipc::AgentState::InputNeeded {
+        config.input_needed_shapes.lock().await.insert(
+            terminal_id,
+            lazybox_agents::hook::notification_prompt_shape(hook.notification.as_deref()),
+        );
+    }
+    if !changed {
+        return;
+    }
     tracing::info!(
         ?terminal_id,
         %session_key,
@@ -2854,26 +3182,234 @@ mod tests {
 
     /// PTY readings on a hook-driven terminal: fresh hooks own
     /// Working↔Idle, only the two corrections pass; stale hooks open
-    /// the gate entirely so the terminal degrades to scraping instead
-    /// of freezing on the last hook state.
+    /// the gate so the terminal degrades to scraping instead of
+    /// freezing on the last hook state — except that demoting a
+    /// hook-set `?` with a Working reading needs dialog-supersession
+    /// evidence (a dialog blocks the hook stream, so stale + `?` is
+    /// the normal shape of a REAL unanswered dialog).
     #[test]
     fn pty_reading_allowed_gates_on_hook_freshness() {
         use lazybox_ipc::AgentState::{Idle, InputNeeded, Working};
         let staleness = Duration::from_secs(30);
         let fresh = Duration::from_secs(1);
         let stale = Duration::from_secs(31);
+        let supersedes = || true;
+        let no_evidence = || false;
 
-        // Fresh hooks: only the corrections pass.
-        assert!(pty_reading_allowed(InputNeeded, false, fresh, staleness));
-        assert!(pty_reading_allowed(Idle, true, fresh, staleness));
-        assert!(!pty_reading_allowed(Idle, false, fresh, staleness));
-        assert!(!pty_reading_allowed(Working, false, fresh, staleness));
-        assert!(!pty_reading_allowed(Working, true, fresh, staleness));
+        // Fresh hooks: only the corrections pass, whatever the cache.
+        assert!(pty_reading_allowed(
+            None, InputNeeded, false, supersedes, fresh, staleness
+        ));
+        assert!(pty_reading_allowed(
+            None, Idle, true, supersedes, fresh, staleness
+        ));
+        assert!(!pty_reading_allowed(
+            None, Idle, false, supersedes, fresh, staleness
+        ));
+        assert!(!pty_reading_allowed(
+            None, Working, false, supersedes, fresh, staleness
+        ));
+        assert!(!pty_reading_allowed(
+            None, Working, true, supersedes, fresh, staleness
+        ));
 
-        // Stale hooks: everything passes — full PTY fallback.
-        assert!(pty_reading_allowed(Working, false, stale, staleness));
-        assert!(pty_reading_allowed(Idle, false, stale, staleness));
-        assert!(pty_reading_allowed(InputNeeded, false, stale, staleness));
+        // Stale hooks: full PTY fallback for everything…
+        assert!(pty_reading_allowed(
+            None, Working, false, no_evidence, stale, staleness
+        ));
+        assert!(pty_reading_allowed(
+            Some(Working),
+            Idle,
+            false,
+            no_evidence,
+            stale,
+            staleness
+        ));
+        assert!(pty_reading_allowed(
+            None,
+            InputNeeded,
+            false,
+            no_evidence,
+            stale,
+            staleness
+        ));
+        // …except Working demoting a hook-set `?`, which needs the
+        // detector's affirmative "activity painted after the dialog
+        // markers" evidence.
+        assert!(!pty_reading_allowed(
+            Some(InputNeeded),
+            Working,
+            false,
+            no_evidence,
+            stale,
+            staleness
+        ));
+        assert!(pty_reading_allowed(
+            Some(InputNeeded),
+            Working,
+            false,
+            supersedes,
+            stale,
+            staleness
+        ));
+        // An InputNeeded re-assert and a ready-idle clear still pass.
+        assert!(pty_reading_allowed(
+            Some(InputNeeded),
+            InputNeeded,
+            false,
+            no_evidence,
+            stale,
+            staleness
+        ));
+        assert!(pty_reading_allowed(
+            Some(InputNeeded),
+            Idle,
+            true,
+            no_evidence,
+            stale,
+            staleness
+        ));
+    }
+
+    /// The in-flight spawn guard claims a singleton identity exactly
+    /// once, never guards multi-instance kinds (shells), and releases
+    /// on drop — including the early-return failure paths, which is the
+    /// whole point of it being a drop guard.
+    #[tokio::test]
+    async fn inflight_guard_claims_once_and_releases_on_drop() {
+        let config = ServerConfig::in_memory();
+        let key: SessionKey = "test:ws-guard".into();
+        let kind = TerminalKind::Agent("claude".into());
+
+        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind)
+            .expect("first claim wins")
+            .expect("agents are singletons");
+        // Second claim on the same identity loses.
+        assert!(InflightSpawnGuard::try_claim(&config, &key, &kind).is_err());
+        // A different kind on the same workspace is a separate identity.
+        assert!(
+            InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Agent("codex".into()))
+                .is_ok()
+        );
+        // Shells are never singletons — no guard, never blocked.
+        assert!(matches!(
+            InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Shell),
+            Ok(None)
+        ));
+        drop(guard);
+        // Released → claimable again.
+        assert!(InflightSpawnGuard::try_claim(&config, &key, &kind).is_ok());
+    }
+
+    /// Kill/Spawn serialization semantics: `await_inflight_spawns`
+    /// WAITS while any spawn holds a claim on the workspace and returns
+    /// as soon as the claim is released — so a teardown can't delete a
+    /// worktree out from under a mid-flight provision (which would then
+    /// re-create it). The wait is bounded (`KILL_INFLIGHT_WAIT`) so a
+    /// wedged provision can't hold the user's explicit Kill hostage;
+    /// past the cap the teardown proceeds and the `deleted_workspaces`
+    /// tombstone aborts the late spawn instead.
+    #[tokio::test]
+    async fn kill_waits_for_inflight_spawn_to_release() {
+        let config = ServerConfig::in_memory();
+        let key: SessionKey = "test:ws-kill".into();
+        let kind = TerminalKind::Agent("claude".into());
+        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind)
+            .unwrap()
+            .unwrap();
+
+        let cfg = config.clone();
+        let waiter = tokio::spawn(async move {
+            await_inflight_spawns(&cfg, "test:ws-kill").await;
+        });
+        // Still parked while the claim is held.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiter.is_finished(), "kill must wait out the spawn");
+
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("kill proceeds once the spawn releases")
+            .unwrap();
+
+        // No claim at all → returns immediately.
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            await_inflight_spawns(&config, "test:ws-other"),
+        )
+        .await
+        .expect("no in-flight spawn → no wait");
+    }
+
+    /// Concurrent injections must not clobber each other's submit
+    /// signal: the first confirmation's cleanup may only remove the map
+    /// entry if it is still ITS OWN `Notify` (`Arc::ptr_eq`). Pre-fix,
+    /// it removed whatever was registered — deleting the second
+    /// injection's signal, orphaning its waiter, and resending a
+    /// spurious Enter into the agent.
+    #[tokio::test]
+    async fn overlapping_submit_confirmations_do_not_clobber_each_other() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(4245);
+        config
+            .hook_driven_terminals
+            .lock()
+            .await
+            .insert(id, std::time::Instant::now());
+
+        let first = prepare_submit_confirmation(&config, id).await.unwrap();
+        // A second injection registers its own signal, replacing the
+        // first's map entry.
+        let second = prepare_submit_confirmation(&config, id).await.unwrap();
+
+        // The first times out (no evidence) → resends Enter once — but
+        // must NOT remove the second's registration.
+        confirm_prompt_submission(
+            first,
+            &*config.backend,
+            &key,
+            b"\r",
+            Duration::from_millis(50),
+        )
+        .await;
+        assert!(
+            config.prompt_submit_signals.lock().await.contains_key(&id),
+            "first confirmation must not remove the second's signal"
+        );
+        assert_eq!(mock.writes_for(&key).await, vec![b"\r".to_vec()]);
+
+        // The second's signal still works: a UserPromptSubmit-style
+        // notify suppresses its resend, and its cleanup removes its own
+        // registration.
+        config
+            .prompt_submit_signals
+            .lock()
+            .await
+            .get(&id)
+            .unwrap()
+            .notify_one();
+        confirm_prompt_submission(
+            second,
+            &*config.backend,
+            &key,
+            b"\r",
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(
+            mock.writes_for(&key).await.len(),
+            1,
+            "confirmed second submit must not resend"
+        );
+        assert!(
+            config.prompt_submit_signals.lock().await.is_empty(),
+            "second confirmation cleans up its own signal"
+        );
     }
 
     /// Terminal ids seed from the persisted high-water mark so a

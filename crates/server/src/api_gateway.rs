@@ -12,7 +12,7 @@ use hyper::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use lazybox_ipc::{Command, Connection, Event};
+use lazybox_ipc::{Command, Connection, EVENT_CHANNEL_CAPACITY, Event, EventForward};
 use lazybox_store::StoreError;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
@@ -86,7 +86,12 @@ pub enum JsonServerFrame {
 
 pub struct LocalIpcBridge {
     pub command_tx: mpsc::UnboundedSender<Command>,
-    pub event_rx: mpsc::UnboundedReceiver<Event>,
+    /// Bounded — fed by the same drop-and-resync forwarder
+    /// ([`crate::event_forward`]) the channel/socket transports use, so
+    /// a stalled `/v1/events` client can never buffer the event
+    /// firehose unboundedly: output is dropped and re-synced from the
+    /// ring, lifecycle events queue losslessly behind the cap.
+    pub event_rx: mpsc::Receiver<Event>,
 }
 
 pub fn check_bearer_token(
@@ -102,7 +107,18 @@ pub fn check_bearer_token(
     let Some(token) = value.strip_prefix("Bearer ") else {
         return false;
     };
-    token == expected_token
+    constant_time_eq(token.as_bytes(), expected_token.as_bytes())
+}
+
+/// Constant-time byte comparison for the bearer token: fold the XOR of
+/// every byte pair instead of short-circuiting on the first mismatch,
+/// so response timing doesn't leak how much of the token matched. The
+/// length check still exits early — length is not a secret.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 pub fn health_response() -> HealthResponse {
@@ -134,10 +150,22 @@ pub fn workspaces_response(config: &ServerConfig) -> Result<WorkspacesResponse, 
 /// connection model. API handlers feed decoded `JsonClientFrame`
 /// commands into `command_tx` and serialize `event_rx` values as
 /// `JsonServerFrame::Event`.
+///
+/// Wired like the channel/socket transports: the serve loop writes the
+/// raw unbounded stream, and `Server::serve` spawns the drop-and-resync
+/// forwarder ([`crate::event_forward::forward_events`]) that bridges it
+/// into the bounded `event_rx`. The resync semantics translate directly
+/// to ndjson — a slow consumer sees `TerminalResync` frames instead of
+/// every output chunk, and the daemon's memory stays bounded.
 pub fn spawn_local_bridge(config: ServerConfig) -> LocalIpcBridge {
     let (client_to_server_tx, client_to_server_rx) = mpsc::unbounded_channel();
-    let (server_to_client_tx, server_to_client_rx) = mpsc::unbounded_channel();
-    let conn = Connection::from_channels(server_to_client_tx, client_to_server_rx);
+    let (raw_tx, raw_rx) = mpsc::unbounded_channel();
+    let (client_tx, client_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+    let conn = Connection::with_forward(
+        raw_tx,
+        client_to_server_rx,
+        EventForward { raw_rx, client_tx },
+    );
     tokio::spawn(async move {
         if let Err(error) = Server::new(config).serve(conn).await {
             tracing::warn!("api gateway ipc bridge closed: {error}");
@@ -145,7 +173,7 @@ pub fn spawn_local_bridge(config: ServerConfig) -> LocalIpcBridge {
     });
     LocalIpcBridge {
         command_tx: client_to_server_tx,
-        event_rx: server_to_client_rx,
+        event_rx: client_rx,
     }
 }
 
@@ -282,7 +310,7 @@ where
 }
 
 fn ndjson_event_response(
-    mut event_rx: mpsc::UnboundedReceiver<Event>,
+    mut event_rx: mpsc::Receiver<Event>,
     keepalive_tx: Option<mpsc::UnboundedSender<Command>>,
 ) -> Response<Body> {
     let (mut tx, body) = Channel::<Bytes, Infallible>::new(32);
@@ -306,6 +334,11 @@ fn ndjson_event_response(
     response_with_body(StatusCode::OK, "application/x-ndjson", body.boxed_unsync())
 }
 
+/// Ceiling on one ndjson command line. A client that streams an
+/// unterminated line would otherwise grow `buffer` without bound; no
+/// legitimate `Command` comes anywhere near this.
+const MAX_COMMAND_LINE_BYTES: usize = 1024 * 1024;
+
 async fn pump_ndjson_commands<B>(mut body: B, command_tx: mpsc::UnboundedSender<Command>)
 where
     B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
@@ -327,6 +360,19 @@ where
         while let Some(pos) = buffer.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = buffer.drain(..=pos).collect();
             send_command_line(&line, &command_tx);
+        }
+        if buffer.len() > MAX_COMMAND_LINE_BYTES {
+            // Drop the whole connection, not just the line: a peer
+            // sending megabytes without a newline is broken or hostile,
+            // and resynchronizing mid-stream would misparse whatever
+            // follows. `Shutdown` ends this bridge's serve loop, which
+            // closes the event stream and tears the connection down.
+            tracing::warn!(
+                buffered = buffer.len(),
+                "api gateway: ndjson command line exceeded {MAX_COMMAND_LINE_BYTES} bytes — dropping connection",
+            );
+            let _ = command_tx.send(Command::Shutdown);
+            return;
         }
     }
     if !buffer.iter().all(u8::is_ascii_whitespace) {

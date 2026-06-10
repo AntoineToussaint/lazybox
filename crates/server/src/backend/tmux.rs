@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 
 /// Default socket name for the lazybox-owned tmux server. Isolating to
@@ -192,8 +192,11 @@ pub struct TmuxBackend {
     native_scrollback: bool,
     /// Whether `server_option_cmds` has been applied to the (possibly
     /// pre-existing) tmux server this process talks to. Once per
-    /// process, before the first attach.
-    options_applied: AtomicBool,
+    /// process, before the first attach. A `OnceCell` (not an
+    /// `AtomicBool` swap) so concurrent first spawns AWAIT the winner
+    /// finishing the option setup — with the swap, the loser raced
+    /// ahead and attached before the options had landed.
+    options_applied: tokio::sync::OnceCell<()>,
     sessions: Mutex<HashMap<String, Slot>>,
     next_key: AtomicU64,
 }
@@ -244,7 +247,7 @@ impl TmuxBackend {
             config_path,
             conf,
             native_scrollback,
-            options_applied: AtomicBool::new(false),
+            options_applied: tokio::sync::OnceCell::new(),
             sessions: Mutex::new(HashMap::new()),
             next_key: AtomicU64::new(1),
         })
@@ -334,14 +337,18 @@ impl TmuxBackend {
     /// spawned and recovered sessions behave the same. Best-effort:
     /// a failure degrades scrolling, it must not block the spawn.
     async fn ensure_server_options(&self) {
-        if self.options_applied.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        for cmd in server_option_cmds(self.native_scrollback) {
-            if let Err(e) = self.tmux(&cmd).await {
-                tracing::warn!("tmux server option setup failed: {e}");
-            }
-        }
+        // `get_or_init` makes concurrent callers WAIT for the first
+        // one to finish setting the options, instead of attaching
+        // against a half-configured server.
+        self.options_applied
+            .get_or_init(|| async {
+                for cmd in server_option_cmds(self.native_scrollback) {
+                    if let Err(e) = self.tmux(&cmd).await {
+                        tracing::warn!("tmux server option setup failed: {e}");
+                    }
+                }
+            })
+            .await;
     }
 
     /// Build the portable-pty argv for an attaching tmux client. We

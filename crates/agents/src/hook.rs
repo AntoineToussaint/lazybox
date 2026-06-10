@@ -132,6 +132,18 @@ fn blocks_on_user(notification: &str) -> bool {
     n.contains("permission") || n.contains("elicit")
 }
 
+/// Shape of the prompt a blocking `Notification` implies. Claude's
+/// permission payloads render chooser dialogs (a bare digit / y / n /
+/// Esc answers them); elicitation payloads collect free text, where a
+/// bare keystroke is just typing. Only meaningful for notifications
+/// [`hook_to_state`] mapped to `InputNeeded`.
+pub fn notification_prompt_shape(notification: Option<&str>) -> crate::agent::PromptShape {
+    match notification {
+        Some(n) if n.to_ascii_lowercase().contains("elicit") => crate::agent::PromptShape::FreeText,
+        _ => crate::agent::PromptShape::Chooser,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +241,25 @@ mod tests {
             r#"{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash"}"#,
         );
         assert_eq!(hook_to_state(&ev, None), Some(AgentState::InputNeeded));
+    }
+
+    #[test]
+    fn notification_prompt_shape_splits_chooser_from_free_text() {
+        use crate::agent::PromptShape;
+        // Permission dialogs are choosers — one keystroke answers.
+        assert_eq!(
+            notification_prompt_shape(Some("permission_prompt")),
+            PromptShape::Chooser
+        );
+        assert_eq!(
+            notification_prompt_shape(Some("Claude needs your permission to use Bash")),
+            PromptShape::Chooser
+        );
+        // Elicitation dialogs collect free text — a bare digit is typing.
+        assert_eq!(
+            notification_prompt_shape(Some("elicitation_dialog")),
+            PromptShape::FreeText
+        );
     }
 
     #[test]

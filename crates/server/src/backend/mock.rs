@@ -37,6 +37,10 @@ struct MockInner {
     /// Keys whose `snapshot()` should hang forever. Used by tests
     /// asserting the daemon's snapshot-timeout safety net works.
     wedged_snapshot_keys: Mutex<std::collections::HashSet<String>>,
+    /// Artificial delay applied at the start of every `spawn()`. Lets
+    /// tests hold a spawn "mid-provision" to exercise the in-flight
+    /// spawn races (duplicate collapse, Kill serialization).
+    spawn_delay: Mutex<Option<std::time::Duration>>,
 }
 
 struct MockSession {
@@ -165,6 +169,13 @@ impl MockBackend {
         map.get(key).map(|s| s.frozen).unwrap_or(false)
     }
 
+    /// Make every subsequent `spawn()` sleep for `delay` before
+    /// registering the session — a stand-in for slow worktree
+    /// provisioning / agent boot in race tests.
+    pub async fn set_spawn_delay(&self, delay: std::time::Duration) {
+        *self.inner.spawn_delay.lock().await = Some(delay);
+    }
+
     /// Make `snapshot(key)` hang forever — used to test that the
     /// daemon's per-session snapshot timeout keeps the IPC channel
     /// flowing even when a backend gets stuck.
@@ -190,6 +201,10 @@ impl SessionBackend for MockBackend {
         hint: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, BackendError>> + Send + 'a>> {
         Box::pin(async move {
+            let delay = *self.inner.spawn_delay.lock().await;
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
             let n = self.inner.counter.fetch_add(1, Ordering::SeqCst);
             // Safe-ish hint substring — keeps test output readable.
             let safe_hint: String = hint

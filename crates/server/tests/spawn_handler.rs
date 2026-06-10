@@ -440,11 +440,14 @@ async fn legacy_terminal_id_only_hook_is_dropped() {
 }
 
 /// Heartbeat staleness: a hook-driven terminal whose hooks stopped
-/// flowing (socket hiccup, helper failure) must degrade back to PTY
-/// scraping instead of freezing on the last hook state. A PTY
-/// `Working` reading is suppressed while hooks are fresh (pinned by
-/// `hook_driven_terminal_ignores_pty_working`) but honored once the
-/// last hook is older than the staleness window.
+/// flowing must degrade back to PTY scraping instead of freezing on
+/// the last hook state. A PTY `Working` reading is suppressed while
+/// hooks are fresh (pinned by `hook_driven_terminal_ignores_pty_working`)
+/// and honored once the last hook is stale — PROVIDED the screen shows
+/// the dialog was actually answered: dialog markers with the live
+/// working anchor painted after them. (A dialog blocks the hook stream,
+/// so "stale hooks + `?`" is the normal shape of a real prompt; see the
+/// companion test below for the no-evidence case.)
 #[tokio::test]
 async fn stale_hooks_degrade_to_pty_detection() {
     timeout(TEST_DEADLINE, async {
@@ -483,6 +486,20 @@ async fn stale_hooks_degrade_to_pty_detection() {
         .await
         .expect("permission hook must set InputNeeded");
 
+        // The PTY paints the dialog itself (so the detect buffer holds
+        // its markers), then the user answers out-of-band and Claude
+        // starts streaming — the working anchor lands AFTER the dialog.
+        mock.emit(
+            &key,
+            concat!(
+                "Do you want to proceed?\n",
+                "❯ 1. Yes\n",
+                "  2. No\n",
+                "Esc to cancel",
+            ),
+        )
+        .await;
+
         // Backdate the last-hook timestamp past the staleness window —
         // equivalent to 31s of hook silence without sleeping for it.
         let stale = std::time::Instant::now() - Duration::from_secs(31);
@@ -492,8 +509,9 @@ async fn stale_hooks_degrade_to_pty_detection() {
             .await
             .insert(terminal_id, stale);
 
-        // The PTY paints a live working status line. With stale hooks
-        // the reading must now pass the gate and flip the state.
+        // A later chunk paints the live working status line below the
+        // (answered) dialog. With stale hooks AND the on-screen
+        // evidence, the reading must pass the gate and flip the state.
         mock.emit(&key, "✻ Cogitating… (8s · ↑ 412 tokens · esc to interrupt)")
             .await;
         let degraded = wait_for(
@@ -513,6 +531,87 @@ async fn stale_hooks_degrade_to_pty_detection() {
         assert!(
             degraded.is_some(),
             "stale hooks must hand Working detection back to the PTY"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// The other half of the stale-hook rule: a dialog on screen BLOCKS the
+/// hook stream, so a hook-set `InputNeeded` going stale is the normal
+/// shape of a real unanswered prompt — a bare `Working` status line
+/// (e.g. a full repaint with no dialog markers in the detect buffer)
+/// must NOT clear the `?`.
+#[tokio::test]
+async fn stale_hooks_do_not_demote_input_needed_without_dialog_evidence() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config.clone()).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        client
+            .send(Command::IngestHook {
+                terminal_id,
+                hook: lazybox_ipc::HookEvent {
+                    kind: lazybox_ipc::HookEventKind::Notification,
+                    session_id: Some("claude-session".into()),
+                    cwd: None,
+                    tool_name: None,
+                    notification: Some("Claude needs your permission to use Bash".into()),
+                },
+                backend_key: Some(key.clone()),
+            })
+            .unwrap();
+        wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::InputNeeded,
+                        ..
+                    }
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("permission hook must set InputNeeded");
+
+        let stale = std::time::Instant::now() - Duration::from_secs(31);
+        config
+            .hook_driven_terminals
+            .lock()
+            .await
+            .insert(terminal_id, stale);
+
+        // Bare working line, no dialog markers anywhere in the buffer —
+        // no proof the dialog was answered.
+        mock.emit(&key, "✻ Cogitating… (8s · ↑ 412 tokens · esc to interrupt)")
+            .await;
+        let demoted = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::Working,
+                        ..
+                    }
+                )
+            },
+            Duration::from_millis(500),
+        )
+        .await;
+        assert!(
+            demoted.is_none(),
+            "a bare Working reading must not clear a hook-set `?` after staleness"
+        );
+        assert_eq!(
+            config.agent_state_for(terminal_id).await,
+            Some(lazybox_ipc::AgentState::InputNeeded),
+            "cached state must stay InputNeeded"
         );
     })
     .await
@@ -1387,6 +1486,250 @@ async fn answering_a_prompt_clears_input_needed_and_does_not_bounce_back() {
             ),
             _ => unreachable!(),
         }
+    })
+    .await
+    .expect("deadline");
+}
+
+/// Regression for the double-spawn race: `handle_spawn` is detached
+/// onto its own task, and its duplicate check reads maps populated only
+/// AFTER worktree provisioning + `backend.spawn` — with a slow backend,
+/// two concurrent spawns for the same (workspace, agent) both passed it
+/// and launched two skip-permissions agents into one worktree. The
+/// in-flight guard collapses the loser onto the winner: exactly one
+/// backend session, the loser requests focus, and its work prompt is
+/// injected into the winner's terminal instead of being dropped.
+#[tokio::test]
+async fn concurrent_spawns_collapse_onto_one_backend_session() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        // Hold the first spawn "mid-provision" long enough for the
+        // duplicate to land inside the window.
+        mock.set_spawn_delay(Duration::from_millis(300)).await;
+        let mut bus = config.bus.subscribe();
+        let cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        const WORK: &str = "Address the review comments on PR #5.";
+        let cfg_a = config.clone();
+        let cwd_a = cwd.clone();
+        let first = tokio::spawn(async move {
+            lazybox_server::spawn_handler::handle_spawn(
+                &cfg_a,
+                "test:ws-race".into(),
+                None,
+                TerminalKind::Agent("claude".into()),
+                Some(cwd_a),
+                None,
+                false,
+            )
+            .await;
+        });
+        // A beat so the first spawn claims the guard before the
+        // duplicate arrives (the claim is synchronous at entry; the
+        // backend spawn is still parked on the delay).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let cfg_b = config.clone();
+        let second = tokio::spawn(async move {
+            lazybox_server::spawn_handler::handle_spawn(
+                &cfg_b,
+                "test:ws-race".into(),
+                None,
+                TerminalKind::Agent("claude".into()),
+                Some(cwd),
+                Some(WORK.into()),
+                true,
+            )
+            .await;
+        });
+        first.await.unwrap();
+        second.await.unwrap();
+
+        // Exactly one backend session despite two concurrent spawns.
+        let keys = mock.list().await.unwrap();
+        assert_eq!(
+            keys.len(),
+            1,
+            "double-spawn race produced {} sessions",
+            keys.len()
+        );
+        let key = keys.into_iter().next().unwrap();
+
+        // The loser collapsed: focus requested on the winner's terminal.
+        let mut saw_focus = false;
+        while let Ok(ev) = bus.try_recv() {
+            if matches!(ev, Event::TerminalFocusRequested { .. }) {
+                saw_focus = true;
+            }
+        }
+        assert!(saw_focus, "the duplicate must request focus, not vanish");
+
+        // ...and its prompt reaches the one live terminal (paste +
+        // separate Enter, like every inject).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let joined = loop {
+            let joined = mock
+                .writes_for(&key)
+                .await
+                .into_iter()
+                .flatten()
+                .collect::<Vec<u8>>();
+            let done = String::from_utf8_lossy(&joined).contains(WORK) && joined.contains(&b'\r');
+            if done || tokio::time::Instant::now() >= deadline {
+                break joined;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let text = String::from_utf8_lossy(&joined);
+        assert!(
+            text.contains(WORK),
+            "the loser's work prompt was dropped; writes = {text:?}"
+        );
+        assert!(joined.contains(&b'\r'), "prompt pasted but never submitted");
+    })
+    .await
+    .expect("deadline");
+}
+
+/// A spawn whose workspace row vanished because the workspace was
+/// DELETED while the spawn was in flight (Kill racing a slow provision)
+/// must abort — the old fallback silently launched the agent in the
+/// daemon's own cwd. A key that never existed keeps the fallback
+/// (pinned by `spawn_shell_emits_terminal_spawned_event`, which spawns
+/// against an unpersisted workspace).
+#[tokio::test]
+async fn spawn_aborts_when_workspace_was_deleted_mid_flight() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        config
+            .deleted_workspaces
+            .lock()
+            .unwrap()
+            .insert("test:ws-deleted".to_string());
+        let mut bus = config.bus.subscribe();
+
+        lazybox_server::spawn_handler::handle_spawn(
+            &config,
+            "test:ws-deleted".into(),
+            None,
+            TerminalKind::Agent("claude".into()),
+            None, // no cwd override → goes through workspace resolution
+            None,
+            false,
+        )
+        .await;
+
+        assert!(
+            mock.list().await.unwrap().is_empty(),
+            "spawn must abort, not fall back to the daemon cwd"
+        );
+        let mut saw_error = false;
+        let mut saw_spawned = false;
+        while let Ok(ev) = bus.try_recv() {
+            match ev {
+                Event::ProviderError { .. } => saw_error = true,
+                Event::TerminalSpawned { .. } => saw_spawned = true,
+                _ => {}
+            }
+        }
+        assert!(saw_error, "aborted spawn must surface a provider error");
+        assert!(!saw_spawned, "no terminal may be announced");
+    })
+    .await
+    .expect("deadline");
+}
+
+/// Bare-key optimistic flip is restricted to chooser-shaped prompts: a
+/// free-text elicitation (hook-raised) collects typed text, so a lone
+/// digit is just typing — it must NOT clear the `?`. Enter still flips
+/// (it submits the elicitation answer). The chooser shape's bare-key
+/// flip is pinned by `bare_chooser_keystroke_clears_input_needed`.
+#[tokio::test]
+async fn bare_keystroke_does_not_clear_free_text_elicitation() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config.clone()).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        // Elicitation dialog → InputNeeded with a free-text shape.
+        client
+            .send(Command::IngestHook {
+                terminal_id,
+                hook: lazybox_ipc::HookEvent {
+                    kind: lazybox_ipc::HookEventKind::Notification,
+                    session_id: Some("claude-session".into()),
+                    cwd: None,
+                    tool_name: None,
+                    notification: Some("elicitation_dialog".into()),
+                },
+                backend_key: Some(key.clone()),
+            })
+            .unwrap();
+        wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::InputNeeded,
+                        ..
+                    }
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("elicitation hook must set InputNeeded");
+
+        // A bare digit is typing into the field — no flip.
+        client
+            .send(Command::Write {
+                terminal_id,
+                bytes: b"1".to_vec(),
+            })
+            .unwrap();
+        let flipped = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::Working,
+                        ..
+                    }
+                )
+            },
+            Duration::from_millis(400),
+        )
+        .await;
+        assert!(
+            flipped.is_none(),
+            "a bare digit typed into a free-text elicitation must not clear the `?`"
+        );
+
+        // Enter SUBMITS the elicitation answer — the flip is correct.
+        client
+            .send(Command::Write {
+                terminal_id,
+                bytes: b"\r".to_vec(),
+            })
+            .unwrap();
+        let submitted = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::AgentState {
+                        state: lazybox_ipc::AgentState::Working,
+                        ..
+                    }
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(submitted.is_some(), "Enter must still flip to Working");
     })
     .await
     .expect("deadline");

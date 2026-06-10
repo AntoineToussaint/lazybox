@@ -49,10 +49,15 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Stable id for a spawned terminal. Distinct from SessionKey because a
 /// single session may hold multiple terminals (agent + shell + logs).
 ///
-/// `Default = TerminalId(0)` is used by `#[serde(default)]` on optional
-/// terminal-id fields in bus events — `0` never corresponds to a real
-/// allocation (the daemon's id allocator starts at 1), so it's a safe
-/// sentinel meaning "field was absent from a pre-bump producer."
+/// `Default = TerminalId(0)` backs `#[serde(default)]` on optional
+/// terminal-id fields — `0` never corresponds to a real allocation (the
+/// daemon's id allocator starts at 1), so it's a safe sentinel for "the
+/// producer omitted the field." Note the default only ever applies on
+/// self-describing transports (the JSON gateway): bincode is not
+/// self-describing, so on the socket transport an absent field is a
+/// decode error, never a default — mixed-version peers are rejected by
+/// the protocol-version handshake instead, and adding even a trailing
+/// field requires a `PROTOCOL_VERSION` bump.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TerminalId(pub u64);
 
@@ -430,6 +435,11 @@ pub enum Command {
     /// detection). The field stays in this position — and
     /// `backend_key` is appended last — because the socket transport
     /// encodes commands with bincode, which is field-order sensitive.
+    /// The `#[serde(default)]` below only takes effect on the JSON
+    /// gateway; bincode is not self-describing and never applies
+    /// defaults, so appending this field was a wire-format change
+    /// protected by the protocol-version handshake (a
+    /// `PROTOCOL_VERSION` bump), not by the attribute.
     IngestHook {
         terminal_id: TerminalId,
         hook: HookEvent,
@@ -743,9 +753,13 @@ pub enum Event {
         terminals: Vec<TerminalSnapshot>,
         /// Top-level Projects the daemon knows about. Sidebar
         /// headers render from here so empty projects (no workspaces
-        /// yet) still appear. `#[serde(default)]` so older daemons
-        /// without the Project entity still wire-compat with newer
-        /// clients.
+        /// yet) still appear. The `#[serde(default)]` only matters on
+        /// self-describing transports (the JSON gateway); it does NOT
+        /// make older daemons wire-compatible over the socket —
+        /// bincode never applies defaults, so adding this field was a
+        /// wire-format change guarded by the protocol-version
+        /// handshake (`PROTOCOL_VERSION` bump). Any future trailing
+        /// field needs the same bump.
         #[serde(default)]
         projects: Vec<lazybox_core::Project>,
     },
@@ -941,9 +955,13 @@ pub enum Event {
         /// Which terminal flipped state. A workspace with two agents
         /// running (Claude + Codex) emits two distinct `AgentState`
         /// events; previously the wire carried only `session_key` and
-        /// consumers couldn't tell them apart. `#[serde(default)]` lets
-        /// pre-bump clients deserialize new events as `TerminalId(0)`
-        /// — TUIs ignore the field, only the chat dispatcher cares.
+        /// consumers couldn't tell them apart. The `#[serde(default)]`
+        /// (→ `TerminalId(0)`) only applies on the JSON gateway, where
+        /// an older producer can omit the field; over the socket,
+        /// bincode never applies defaults — adding this field was a
+        /// wire-format change guarded by the protocol-version
+        /// handshake (`PROTOCOL_VERSION` bump), and mixed-version
+        /// peers are rejected at connect, not papered over.
         #[serde(default)]
         terminal_id: TerminalId,
         state: AgentState,

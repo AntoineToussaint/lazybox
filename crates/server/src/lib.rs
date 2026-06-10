@@ -342,6 +342,39 @@ pub struct ServerConfig {
     /// - the lazy mergeable retry path (`Mergeable::Unknown` PRs
     ///   re-fired ~5s later so GitHub's lazy compute lands)
     pub poll_wake: Arc<tokio::sync::Notify>,
+    /// In-flight singleton-spawn claims: `(workspace key, singleton
+    /// kind key)` pairs a `handle_spawn` is currently provisioning.
+    /// The duplicate-spawn check reads maps that are only populated
+    /// AFTER worktree provisioning + `backend.spawn` — a minutes-long
+    /// window on a cold clone — so two `w` presses (or autofix racing
+    /// a user spawn, or startup restore racing both) each passed it
+    /// and launched two skip-permissions agents into one worktree.
+    /// Claimed synchronously at the top of `handle_spawn`, released by
+    /// a drop guard on EVERY exit path; `Kill` also serializes against
+    /// it. `std::sync::Mutex` — the data is tiny and no await ever
+    /// happens under the guard, which lets the drop guard release
+    /// synchronously.
+    pub inflight_spawns: Arc<std::sync::Mutex<HashSet<(String, String)>>>,
+    /// Pinged whenever an in-flight spawn claim is released, so
+    /// waiters (duplicate spawns collapsing onto the winner, `Kill`
+    /// waiting out a mid-flight provision) re-check promptly instead
+    /// of busy-polling.
+    pub inflight_spawn_changed: Arc<tokio::sync::Notify>,
+    /// Workspace keys deleted in this process (`Kill` /
+    /// `RemoveMergedWorkspace`). Consulted by the spawn path when a
+    /// workspace row is missing: deleted-mid-spawn ABORTS the spawn,
+    /// while a key that never existed keeps the test/--test-mode
+    /// fallback of rooting the spawn in the daemon's cwd.
+    pub deleted_workspaces: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Shape of the last `InputNeeded` decision per terminal — whether
+    /// a bare chooser keystroke (`1`-`9`, y/n, Esc) is a complete
+    /// answer. Written by the PTY detector (its structural triggers
+    /// are all chooser-shaped) and by `handle_ingest_hook` (permission
+    /// → chooser, elicitation → free text); read by `handle_write`'s
+    /// optimistic InputNeeded→Working flip so a digit typed into a
+    /// free-text elicitation can't clear a real `?`. Cleaned on
+    /// `TerminalExited`.
+    pub input_needed_shapes: Arc<Mutex<HashMap<TerminalId, lazybox_agents::PromptShape>>>,
 }
 
 impl ServerConfig {
@@ -419,6 +452,10 @@ impl ServerConfig {
             merge_prompts: Arc::new(Mutex::new(polling::MergePromptMemory::default())),
             viewer_identities: Arc::new(std::sync::Mutex::new(Vec::new())),
             poll_wake: Arc::new(tokio::sync::Notify::new()),
+            inflight_spawns: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            inflight_spawn_changed: Arc::new(tokio::sync::Notify::new()),
+            deleted_workspaces: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            input_needed_shapes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -516,7 +553,15 @@ impl Server {
             tokio::spawn(event_forward::forward_events(forward, self.config.clone()));
         }
         let mut bus_rx = self.config.bus.subscribe();
+        // Detached mutation handlers (Spawn, Kill, InjectPrompt, the
+        // GraphQL writers, worktree teardowns, …) land here instead of
+        // a bare `tokio::spawn` so shutdown can DRAIN them: `Shutdown =>
+        // break` used to abandon an in-flight Kill or Spawn mid-write.
+        // Completed entries are reaped at the top of each loop turn so
+        // the set doesn't accumulate results unboundedly.
+        let mut mutations = tokio::task::JoinSet::new();
         loop {
+            while mutations.try_join_next().is_some() {}
             tokio::select! {
                 cmd = conn.rx.recv() => {
                     let Some(cmd) = cmd else { break };
@@ -686,7 +731,7 @@ impl Server {
                             // and broadcasts on the bus, so ordering with
                             // the serve loop doesn't matter.
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 spawn_handler::handle_spawn(
                                     &cfg,
                                     session_key,
@@ -703,7 +748,7 @@ impl Server {
                             // Detach — provisions a fresh worktree folder
                             // (same clone exposure as Spawn).
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 spawn_handler::handle_create_session(
                                     &cfg,
                                     session_key,
@@ -721,13 +766,24 @@ impl Server {
                             prompt,
                             fallback_spawn,
                         } => {
-                            spawn_handler::handle_inject_prompt(
-                                &self.config,
-                                terminal_id,
-                                &prompt,
-                                fallback_spawn,
-                            )
-                            .await;
+                            // Detach — the stale-terminal fallback
+                            // rewrites this into a full Spawn, which on
+                            // a cold cache runs `git clone --bare`
+                            // (minutes). Awaiting it inline froze every
+                            // keystroke `Write` behind it — the exact
+                            // class of stall the Spawn detach fixed.
+                            // The handler only touches Arc'd config
+                            // state, so loop ordering doesn't matter.
+                            let cfg = self.config.clone();
+                            mutations.spawn(async move {
+                                spawn_handler::handle_inject_prompt(
+                                    &cfg,
+                                    terminal_id,
+                                    &prompt,
+                                    fallback_spawn,
+                                )
+                                .await;
+                            });
                         }
                         lazybox_ipc::Command::Resize { terminal_id, cols, rows } => {
                             spawn_handler::handle_resize(&self.config, terminal_id, cols, rows).await;
@@ -883,21 +939,41 @@ impl Server {
                             // filesystem removal) and backend sessions; a
                             // slow disk or wedged git must not freeze the
                             // serve loop.
+                            //
+                            // Serialized against any in-flight Spawn on
+                            // the same workspace: tearing down while a
+                            // spawn is mid-provision would let the spawn
+                            // re-create the worktree + a terminal right
+                            // after deletion. The tombstone makes a spawn
+                            // that hasn't loaded its workspace row yet
+                            // abort instead of falling back to spawning
+                            // in the daemon's own cwd.
                             let key = lazybox_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
+                                cfg.deleted_workspaces
+                                    .lock()
+                                    .expect("deleted_workspaces poisoned")
+                                    .insert(key.as_str().to_string());
+                                spawn_handler::await_inflight_spawns(&cfg, key.as_str()).await;
                                 polling::delete_workspace(&cfg, &key).await;
                             });
                         }
                         lazybox_ipc::Command::RemoveMergedWorkspace { session_key } => {
-                            // Detach — same worktree-teardown exposure as Kill.
+                            // Detach — same worktree-teardown (and same
+                            // spawn-race) exposure as Kill.
                             let key = lazybox_core::WorkspaceKey::new(
                                 session_key.as_str().to_string(),
                             );
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
+                                cfg.deleted_workspaces
+                                    .lock()
+                                    .expect("deleted_workspaces poisoned")
+                                    .insert(key.as_str().to_string());
+                                spawn_handler::await_inflight_spawns(&cfg, key.as_str()).await;
                                 polling::remove_merged_workspace(&cfg, &key).await;
                             });
                         }
@@ -905,7 +981,7 @@ impl Server {
                             // Detach — deletes every workspace in the
                             // project (N worktree teardowns).
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 polling::delete_project(&cfg, &project_key).await;
                             });
                         }
@@ -918,7 +994,7 @@ impl Server {
                                 issue_workspace_key.as_str().to_string(),
                             );
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 polling::handle_collapse_into_pr(&cfg, key).await;
                             });
                         }
@@ -957,7 +1033,7 @@ impl Server {
                             // loop responsive while the network call
                             // is in flight.
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 polling::post_reply(&cfg, session_key, body).await;
                             });
                         }
@@ -996,7 +1072,7 @@ impl Server {
                             // surfaced there but every GraphQL-touching
                             // handler has the same exposure.
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 polling::handle_confirm_merge(
                                     &cfg,
                                     issue_workspace_key,
@@ -1014,7 +1090,7 @@ impl Server {
                             // (git worktree move + freeze/resume), which
                             // can stall on a wedged git or tmux.
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 polling::handle_adopt_sessions(
                                     &cfg,
                                     source_workspace_key,
@@ -1028,7 +1104,7 @@ impl Server {
                             // `FetchPrDetails` — `gh pr merge` shells
                             // out and can stall for seconds.
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 polling::handle_merge_pr(&cfg, workspace_key).await;
                             });
                         }
@@ -1050,38 +1126,38 @@ impl Server {
                             // this handler — it just merges activity
                             // and broadcasts via the bus.
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 polling::handle_fetch_pr_details(&cfg, workspace_key).await;
                             });
                         }
                         lazybox_ipc::Command::RequestReviewers { workspace_key, logins } => {
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 polling::handle_request_reviewers(&cfg, workspace_key, logins)
                                     .await;
                             });
                         }
                         lazybox_ipc::Command::AddAssignees { workspace_key, logins } => {
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 polling::handle_add_assignees(&cfg, workspace_key, logins).await;
                             });
                         }
                         lazybox_ipc::Command::SetAssignees { workspace_key, logins } => {
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 polling::handle_set_assignees(&cfg, workspace_key, logins).await;
                             });
                         }
                         lazybox_ipc::Command::SetLabels { workspace_key, names } => {
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 polling::handle_set_labels(&cfg, workspace_key, names).await;
                             });
                         }
                         lazybox_ipc::Command::FetchRepoLabels { workspace_key } => {
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 polling::handle_fetch_repo_labels(&cfg, workspace_key).await;
                             });
                         }
@@ -1091,19 +1167,19 @@ impl Server {
                             // session) and the user shouldn't wait
                             // on the serve loop while it runs.
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 polling::handle_clean_worktrees(&cfg).await;
                             });
                         }
                         lazybox_ipc::Command::InspectWorktrees => {
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 polling::handle_inspect_worktrees(&cfg).await;
                             });
                         }
                         lazybox_ipc::Command::DeleteOrphanedWorktree { path, force } => {
                             let cfg = self.config.clone();
-                            tokio::spawn(async move {
+                            mutations.spawn(async move {
                                 polling::handle_delete_orphaned_worktree(&cfg, path, force).await;
                             });
                         }
@@ -1138,43 +1214,71 @@ impl Server {
                             // zombie tabs / stuck spinners forever. Push
                             // a synthetic full Snapshot (same payload the
                             // Subscribe handler builds) so the client
-                            // self-heals. Detached: the snapshot hits the
-                            // store + backend and must not stall the
-                            // serve loop. The loop continues from the
-                            // next still-buffered event so we don't
-                            // block the bus.
+                            // self-heals.
+                            //
+                            // Built INLINE (awaited here, store scans on
+                            // `spawn_blocking`), not on a detached task:
+                            // detaching let bus events forwarded between
+                            // the snapshot LOAD and its SEND be
+                            // overwritten by the older snapshot — zombie
+                            // state came back the moment the resync
+                            // landed. While this builds, no events are
+                            // forwarded for this connection, which is
+                            // exactly the sequencing the snapshot needs;
+                            // lag recovery is rare enough that the brief
+                            // serve-loop pause is acceptable.
                             tracing::warn!(
                                 "client lagged behind bus by {n} events — sending recovery snapshot"
                             );
-                            let cfg = self.config.clone();
-                            let tx = conn.tx.clone();
-                            tokio::spawn(async move {
-                                let store = cfg.store.clone();
-                                let (workspaces, projects) = match tokio::task::spawn_blocking(
-                                    move || (load_workspaces(&*store), load_projects(&*store)),
-                                )
-                                .await
-                                {
-                                    Ok(pair) => pair,
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "lag-recovery snapshot load failed: {e} — sending empty snapshot",
-                                        );
-                                        (Vec::new(), Vec::new())
-                                    }
-                                };
-                                let terminals =
-                                    spawn_handler::snapshot_terminals(&cfg).await;
-                                let _ = tx.send(Event::Snapshot {
-                                    workspaces,
-                                    terminals,
-                                    projects,
-                                });
-                            });
+                            let store = self.config.store.clone();
+                            match tokio::task::spawn_blocking(move || {
+                                (load_workspaces(&*store), load_projects(&*store))
+                            })
+                            .await
+                            {
+                                Ok((workspaces, projects)) => {
+                                    let terminals =
+                                        spawn_handler::snapshot_terminals(&self.config).await;
+                                    let _ = conn.tx.send(Event::Snapshot {
+                                        workspaces,
+                                        terminals,
+                                        projects,
+                                    });
+                                }
+                                Err(e) => {
+                                    // Send NOTHING: an empty snapshot
+                                    // would wipe the client's sidebar,
+                                    // which is strictly worse than
+                                    // staying lagged until the next
+                                    // recovery opportunity.
+                                    tracing::error!(
+                                        "lag-recovery snapshot load failed: {e} — \
+                                         continuing without a resync",
+                                    );
+                                }
+                            }
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
+            }
+        }
+        // Drain detached mutation tasks before returning — `Shutdown =>
+        // break` used to abandon an in-flight Kill / Spawn / inject
+        // mid-write. Bounded: a wedged clone or git op must not hold
+        // shutdown hostage, so anything still running after 5s is
+        // abandoned (with a breadcrumb).
+        if !mutations.is_empty() {
+            let drain = async {
+                while mutations.join_next().await.is_some() {}
+            };
+            if tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    "shutdown: detached mutation task(s) still running after 5s — abandoning them"
+                );
             }
         }
         Ok(())

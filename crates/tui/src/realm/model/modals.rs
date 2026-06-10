@@ -613,6 +613,7 @@ impl<T: TerminalAdapter> Model<T> {
     pub(super) fn mount_action_confirm(
         &mut self,
         action: lazybox_tui_core::action::Action,
+        target: super::ActionConfirmTarget,
         override_prompt: Option<String>,
     ) {
         use crate::realm::components::confirm::Confirm;
@@ -627,7 +628,7 @@ impl<T: TerminalAdapter> Model<T> {
                 .unwrap_or("Confirm action?")
                 .to_string()
         });
-        self.pending_action_confirm = Some(action);
+        self.pending_action_confirm = Some((action, target));
         let modal = Confirm::new(&prompt).default_no();
         self.mount_modal(Id::ActionConfirm, modal);
     }

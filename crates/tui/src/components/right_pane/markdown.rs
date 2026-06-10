@@ -85,6 +85,25 @@ pub(crate) fn parse_alt_then_paren_url(after_open: &str) -> Option<(String, &str
     Some((alt.to_string(), after))
 }
 
+/// Strip leading Markdown BLOCK markers from one (pre-trimmed) line
+/// so `### Title` reads as `Title` and `- item` as `item`. Thematic
+/// breaks (`---`, `***`, `___`) carry no content and strip to empty
+/// so the caller skips them. List markers are only stripped with
+/// their trailing space — a prose line like `-2 degrees` keeps its
+/// leading dash.
+fn strip_block_markers(line: &str) -> &str {
+    let s = line.trim_start_matches('#').trim_start_matches('>').trim();
+    // Thematic break / setext underline: nothing but marker chars.
+    if !s.is_empty() && s.chars().all(|c| matches!(c, '-' | '*' | '_' | '=')) {
+        return "";
+    }
+    s.strip_prefix("- ")
+        .or_else(|| s.strip_prefix("* "))
+        .or_else(|| s.strip_prefix("+ "))
+        .map(str::trim)
+        .unwrap_or(s)
+}
+
 /// collapsed activity card so the user gets the gist without reading
 /// six wrapped lines.
 pub(crate) fn teaser_text(body: &str, max_cells: usize) -> String {
@@ -95,18 +114,15 @@ pub(crate) fn teaser_text(body: &str, max_cells: usize) -> String {
     // link text before line-splitting so we don't pick an empty
     // first line just because it was all badges.
     let cleaned = strip_inline_markdown_noise(&cleaned);
-    // Take the first non-empty content line. Strip common Markdown
-    // block markers so e.g. `### Title` reads as `Title`.
-    let raw = cleaned
+    // Take the first line that still has CONTENT once block markers
+    // are stripped. A body that opens with a thematic break (`---`)
+    // or a bare heading marker would otherwise produce an empty
+    // teaser — skip such lines and keep looking.
+    let stripped = cleaned
         .lines()
-        .map(str::trim)
+        .map(|l| strip_block_markers(l.trim()))
         .find(|l| !l.is_empty())
         .unwrap_or("");
-    let stripped = raw
-        .trim_start_matches('#')
-        .trim_start_matches('>')
-        .trim_start_matches(['-', '*', '+'])
-        .trim();
     // Collapse runs of whitespace and drop simple inline emphasis
     // markers so the teaser stays plain text.
     let mut out = String::with_capacity(stripped.len());

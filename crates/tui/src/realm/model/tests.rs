@@ -1961,6 +1961,50 @@ mod daemon_event_fastpath_tests {
         });
         assert!(m.redraw, "the Working→InputNeeded edge must redraw");
     }
+
+    /// Tab badges are per-terminal: a second agent in the same
+    /// workspace can need a badge flip even when the sidebar's
+    /// session-level state is already correct. The redraw skip must
+    /// consult the terminal stack too.
+    #[test]
+    fn badge_flip_in_terminal_stack_forces_redraw() {
+        let mut m = build_model();
+        let key = seed_workspace(&mut m);
+        let session_key: lazybox_core::SessionKey = (&key).into();
+
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: session_key.clone(),
+            kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+        m.handle_daemon_event(IpcEvent::AgentState {
+            terminal_id: TerminalId(1),
+            session_key: session_key.clone(),
+            state: AgentState::Working,
+        });
+
+        // Second agent spawns Idle — sidebar already shows Working
+        // for the session, but THIS tab's badge is stale.
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(2),
+            session_key: session_key.clone(),
+            kind: lazybox_ipc::TerminalKind::Agent("codex".into()),
+            no_permission: false,
+        });
+
+        m.redraw = false;
+        m.handle_daemon_event(IpcEvent::AgentState {
+            terminal_id: TerminalId(2),
+            session_key,
+            state: AgentState::Working,
+        });
+        assert!(
+            m.redraw,
+            "terminal 2's badge flips Idle→Working — must redraw even though \
+             the sidebar's session-level state didn't change",
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2078,5 +2122,284 @@ mod wheel_routing_tests {
             }
             other => panic!("expected a Write with SGR wheel bytes, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod destructive_confirm_tests {
+    //! Regression coverage for the destructive-action confirm path:
+    //!
+    //! 1. The right-click context menu must route MergePr / Archive
+    //!    through the unified ActionConfirm modal — never hand-map
+    //!    them straight to `MergePr` / `Kill` IPC commands.
+    //! 2. The confirm must fire against the target resolved at MOUNT
+    //!    time. Daemon events can move the sidebar cursor while the
+    //!    modal is up; "Yes" must not act on whatever the cursor
+    //!    drifted onto.
+    use super::super::{ActionConfirmTarget, Id, Model};
+    use chrono::Utc;
+    use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
+    use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent, channel};
+    use lazybox_tui_core::action::Action;
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn seed(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, key: &str) -> WorkspaceKey {
+        let ws = Workspace::empty(WorkspaceKey::new(key), "main", Utc::now());
+        let k = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        k
+    }
+
+    #[test]
+    fn context_menu_archive_mounts_confirm_instead_of_killing() {
+        let mut m = build_model();
+        let wk = seed(&mut m, "github:o/r#1");
+        let sk = SessionKey::from(&wk);
+        m.pending_sidebar_context = Some((sk.clone(), vec![Action::MergePr, Action::Archive]));
+        m.modal_stack.push(Id::SidebarContext);
+
+        let cmds = m.handle_choice_picked(vec![1]);
+        assert!(
+            cmds.is_empty(),
+            "Archive picked from the context menu must not emit Kill directly: {cmds:?}",
+        );
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::ActionConfirm),
+            "the unified confirm modal must mount",
+        );
+
+        // Confirming actually fires the kill, aimed at the menu's row.
+        let cmds = m.handle_confirmed(true);
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::Kill { session_key } => assert_eq!(session_key, &sk),
+            other => panic!("expected Kill after Yes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn context_menu_merge_pr_mounts_confirm_instead_of_merging() {
+        let mut m = build_model();
+        let wk = seed(&mut m, "github:o/r#1");
+        let sk = SessionKey::from(&wk);
+        m.pending_sidebar_context = Some((sk.clone(), vec![Action::MergePr, Action::Archive]));
+        m.modal_stack.push(Id::SidebarContext);
+
+        let cmds = m.handle_choice_picked(vec![0]);
+        assert!(
+            cmds.is_empty(),
+            "MergePr picked from the context menu must not emit MergePr directly: {cmds:?}",
+        );
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+        match &m.pending_action_confirm {
+            Some((Action::MergePr, ActionConfirmTarget::Workspace(k))) => assert_eq!(k, &sk),
+            other => panic!("expected a stashed MergePr aimed at the menu's row, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirm_fires_against_the_mount_time_target_not_the_live_cursor() {
+        let mut m = build_model();
+        let a = seed(&mut m, "github:o/r#1");
+        let b = seed(&mut m, "github:o/r#2");
+        let sa = SessionKey::from(&a);
+        let sb = SessionKey::from(&b);
+
+        assert!(m.sidebar.focus_workspace_key(&sa), "workspace A focusable");
+        let cmds = m.dispatch_action(&Action::Archive);
+        assert!(cmds.is_empty(), "destructive action must gate on confirm");
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+
+        // A daemon event moves the cursor under the modal.
+        assert!(m.sidebar.focus_workspace_key(&sb), "workspace B focusable");
+
+        let cmds = m.handle_confirmed(true);
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::Kill { session_key } => assert_eq!(
+                session_key, &sa,
+                "Yes must kill the workspace the prompt named, not the drifted selection",
+            ),
+            other => panic!("expected Kill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirm_noops_with_notice_when_the_target_vanished() {
+        let mut m = build_model();
+        let a = seed(&mut m, "github:o/r#1");
+        let sa = SessionKey::from(&a);
+
+        assert!(m.sidebar.focus_workspace_key(&sa));
+        let _ = m.dispatch_action(&Action::Archive);
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+
+        // The workspace disappears while the modal is up.
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(a));
+
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            cmds.is_empty(),
+            "a vanished target must no-op, not fire at another row: {cmds:?}",
+        );
+        assert!(
+            m.status.notice.is_some(),
+            "the user should get a footer notice explaining the no-op",
+        );
+    }
+}
+
+#[cfg(test)]
+mod queued_prompt_drain_tests {
+    //! A daemon prompt (removal / merge) that arrives while another
+    //! modal is up gets queued. Re-emits are deduped, so EVERY
+    //! handler that pops the stack empty must drain the queue —
+    //! including the picker handlers, not just dismiss/confirm.
+    use super::super::{Id, Model};
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn queue_removal_prompt(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+        m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
+            workspace_key: WorkspaceKey::new("github:o/r#9"),
+            label: "o/r#9".into(),
+            title: None,
+            active_terminal_count: 1,
+        });
+    }
+
+    #[test]
+    fn removal_prompt_mounts_after_a_choice_picker_resolves() {
+        let mut m = build_model();
+        // A snooze picker is open when the daemon prompt arrives.
+        m.pending_snooze_workspace = Some(SessionKey::from("github:o/r#1"));
+        m.snooze_choices = vec![std::time::Duration::from_secs(3600)];
+        m.modal_stack.push(Id::SnoozeDuration);
+        queue_removal_prompt(&mut m);
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SnoozeDuration),
+            "the prompt must wait behind the open picker",
+        );
+
+        // Confirming the picker pops the stack — the queued prompt
+        // must surface right then, not wait for a dismissal that
+        // never comes.
+        let _ = m.handle_choice_picked(vec![0]);
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::RemoveOutOfScope),
+            "queued removal prompt must mount once the picker resolves",
+        );
+        assert!(m.active_removal_prompt.is_some());
+    }
+
+    #[test]
+    fn removal_prompt_mounts_after_an_input_submit() {
+        let mut m = build_model();
+        // The new-project input is open when the prompt arrives.
+        m.modal_stack.push(Id::NewProject);
+        queue_removal_prompt(&mut m);
+        assert_eq!(m.modal_stack.last(), Some(&Id::NewProject));
+
+        let _ = m.handle_input_submitted("scratch".into());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::RemoveOutOfScope),
+            "queued removal prompt must mount once the input submits",
+        );
+    }
+
+    #[test]
+    fn removal_prompt_mounts_after_a_textarea_submit() {
+        let mut m = build_model();
+        m.pending_reply = Some(SessionKey::from("github:o/r#1"));
+        m.modal_stack.push(Id::Reply);
+        queue_removal_prompt(&mut m);
+        assert_eq!(m.modal_stack.last(), Some(&Id::Reply));
+
+        let _ = m.handle_textarea_submitted("looks good".into());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::RemoveOutOfScope),
+            "queued removal prompt must mount once the reply submits",
+        );
+    }
+}
+
+#[cfg(test)]
+mod setup_finish_tests {
+    //! The wizard Finish handler must surface save failures (and not
+    //! cache state that never hit disk), and must mention the .bak
+    //! file when a malformed config was moved aside.
+    use super::super::Model;
+    use crate::setup::SetupReport;
+    use crate::setup_flow::{RunnerStep, SetupOutcome, SetupRunner};
+    use lazybox_ipc::channel;
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn report() -> SetupReport {
+        SetupReport { tools: vec![] }
+    }
+
+    fn finish(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+        let runner = SetupRunner::new(report(), Default::default());
+        let outcome = SetupOutcome::default_enabled(report());
+        m.handle_runner_step(runner, RunnerStep::Finish(outcome));
+    }
+
+    #[test]
+    fn failed_save_flashes_error_and_does_not_cache() {
+        let mut m = build_model();
+        m.setup.on_complete = Some(std::sync::Arc::new(|_| Err(anyhow::anyhow!("disk full"))));
+        finish(&mut m);
+        assert!(
+            m.setup.persisted.is_none(),
+            "a failed save must not cache the new persisted state",
+        );
+        let n = m.status.notice.as_ref().expect("an error notice is up");
+        assert!(
+            n.message.contains("NOT saved"),
+            "the notice must say the save failed: {:?}",
+            n.message,
+        );
+    }
+
+    #[test]
+    fn successful_save_caches_state_and_surfaces_the_backup() {
+        let mut m = build_model();
+        m.setup.on_complete = Some(std::sync::Arc::new(|_| {
+            Ok(Some(std::path::PathBuf::from(
+                "/tmp/config.yaml.bak-20260610",
+            )))
+        }));
+        finish(&mut m);
+        assert!(
+            m.setup.persisted.is_some(),
+            "a successful save caches the new persisted state",
+        );
+        let n = m.status.notice.as_ref().expect("a backup notice is up");
+        assert!(
+            n.message.contains("bak-20260610"),
+            "the notice must point at the backup file: {:?}",
+            n.message,
+        );
     }
 }

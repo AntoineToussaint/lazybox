@@ -186,6 +186,17 @@ impl Terminals {
         !self.inner.is_collapsed() && self.inner.visible_terminals().contains(&id)
     }
 
+    /// Forward `displays_agent_state` — true when every agent tab
+    /// badge for `session_key` already shows `state`, so the event
+    /// can't change pixels in the terminal stack.
+    pub fn displays_agent_state(
+        &self,
+        session_key: &SessionKey,
+        state: lazybox_ipc::AgentState,
+    ) -> bool {
+        self.inner.displays_agent_state(session_key, state)
+    }
+
     /// True when the focused terminal's inner program has enabled
     /// mouse tracking (CSI ?1000h / ?1002h / ?1003h / ?1006h SGR).
     /// Drives the "forward to PTY vs scroll the scrollback"

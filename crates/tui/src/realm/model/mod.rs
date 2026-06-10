@@ -188,6 +188,20 @@ pub(crate) enum RemovalReason {
     Merged,
 }
 
+/// Concrete target a destructive `ActionConfirm` modal was mounted
+/// against — resolved from the sidebar selection when the confirm
+/// mounts and stashed in `pending_action_confirm`. Dispatch on
+/// "Yes" fires against this stash, never the live selection, so a
+/// daemon event that moves the cursor under the modal can't redirect
+/// the action onto a different row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActionConfirmTarget {
+    /// A workspace row (PR / issue / pre-PR scratch workspace).
+    Workspace(lazybox_core::SessionKey),
+    /// A project header — `Archive` here deletes the whole project.
+    Project(lazybox_core::ProjectKey),
+}
+
 /// One queued workspace-removal prompt. Surfaced one at a time as a
 /// Confirm modal by `maybe_mount_next_removal_prompt`.
 #[derive(Debug, Clone)]
@@ -516,11 +530,18 @@ pub struct Model<T: TerminalAdapter> {
     /// are key-spec strings. Empty when the user hasn't configured
     /// `ui.action_keys` — catalog defaults apply.
     action_key_overrides: std::collections::BTreeMap<String, String>,
-    /// Action queued behind an `ActionConfirm` modal. Set by
+    /// Action queued behind an `ActionConfirm` modal, paired with the
+    /// concrete target it was aimed at when the modal mounted. Set by
     /// `mount_action_confirm`, taken (and dispatched if Yes) by
     /// the `Msg::Confirmed` handler. None when no destructive
     /// confirm is currently up.
-    pending_action_confirm: Option<lazybox_tui_core::action::Action>,
+    ///
+    /// The target is resolved at MOUNT time, not at confirm time —
+    /// daemon events (a workspace removal, a poll-driven re-sort) can
+    /// move the sidebar cursor while the modal is up, and re-reading
+    /// the selection on "Yes" would kill / merge a different row than
+    /// the prompt named.
+    pending_action_confirm: Option<(lazybox_tui_core::action::Action, ActionConfirmTarget)>,
     /// Latest inspector report driving the `InspectList` modal. The
     /// first slot in the Choice modal is the "delete all safe"
     /// shortcut, hence the wrapper enum on indices.
@@ -882,10 +903,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Install the on-setup-complete hook before the main loop
     /// starts. `main.rs::run_embedded_realm` uses this to kick off
     /// the polling loop with the user's persisted selections.
-    pub fn with_setup_complete_hook(
-        mut self,
-        hook: std::sync::Arc<dyn Fn(crate::setup_flow::SetupOutcome) + Send + Sync>,
-    ) -> Self {
+    pub fn with_setup_complete_hook(mut self, hook: crate::realm::SetupCompleteHook) -> Self {
         self.setup.on_complete = Some(hook);
         self
     }

@@ -20,6 +20,17 @@ use std::sync::Arc;
 /// re-running detection from scratch.
 pub(crate) type SetupInputs = (setup::SetupReport, Arc<Vec<Box<dyn ScopeSource>>>);
 
+/// Result of persisting a finished setup. `Ok(Some(path))` means a
+/// malformed pre-existing config.yaml was moved aside to `path`
+/// before the fresh write; `Err` means nothing was saved and the UI
+/// must say so instead of showing success.
+pub type SetupSaveResult = anyhow::Result<Option<std::path::PathBuf>>;
+
+/// Hook fired on every wizard / partial-flow Finish. Returns the
+/// save outcome so the Finish handler can surface failures and skip
+/// caching state that never hit disk.
+pub type SetupCompleteHook = Arc<dyn Fn(SetupOutcome) -> SetupSaveResult + Send + Sync>;
+
 /// One row in the Settings palette (`,` opens this).
 #[derive(Debug, Clone)]
 pub enum SettingsAction {
@@ -115,8 +126,9 @@ pub(crate) struct SetupCtx {
     /// installs this so each Finish persists the YAML and (re)spawns
     /// the polling loop. Held as `Arc<dyn Fn>` so it can fire many
     /// times — earlier we used `FnOnce` and partial flows silently
-    /// dropped their accumulator.
-    pub on_complete: Option<Arc<dyn Fn(SetupOutcome) + Send + Sync>>,
+    /// dropped their accumulator. The returned [`SetupSaveResult`]
+    /// tells the Finish handler whether the save actually landed.
+    pub on_complete: Option<SetupCompleteHook>,
 }
 
 impl SetupCtx {

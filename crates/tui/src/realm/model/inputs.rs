@@ -42,7 +42,18 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info("Reply submitted — fetching…");
             cmds.push(IpcCommand::Refresh);
         }
+        self.drain_queued_daemon_prompts();
         cmds
+    }
+
+    /// Surface the next queued daemon prompt (removal / merge) if the
+    /// modal stack just emptied. Every handler that pops a modal must
+    /// call this — the daemon dedupes its emits, so a prompt that
+    /// arrives while another modal is up and never gets re-surfaced
+    /// here is invisible forever.
+    fn drain_queued_daemon_prompts(&mut self) {
+        self.maybe_mount_next_removal_prompt();
+        self.maybe_mount_next_merge_prompt();
     }
 
     /// Input modal submit (single-line text). Dispatch by which
@@ -104,6 +115,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // above already cleared the modal.
             }
         }
+        self.drain_queued_daemon_prompts();
         cmds
     }
 
@@ -119,6 +131,16 @@ impl<T: TerminalAdapter> Model<T> {
     /// `dispatch_settings_action`, `handle_runner_step`); only
     /// the directly-visible IPC commands land in the Vec.
     pub fn handle_choice_picked(&mut self, picks: Vec<usize>) -> Vec<IpcCommand> {
+        let cmds = self.choice_picked_inner(picks);
+        // The inner handler has many early-return arms; drain queued
+        // daemon prompts HERE so every one of them gets the "modal
+        // stack may have just emptied" treatment. (No-op while any
+        // modal — including one the pick itself mounted — is up.)
+        self.drain_queued_daemon_prompts();
+        cmds
+    }
+
+    fn choice_picked_inner(&mut self, picks: Vec<usize>) -> Vec<IpcCommand> {
         let mut cmds = Vec::new();
         // Snippet picker — pick → write the snippet body to the
         // active terminal, encoded so the agent submits in one shot
@@ -159,63 +181,29 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info(format!("sent snippet ]{key}"));
             return cmds;
         }
-        // Sidebar right-click context menu. Pick → dispatch the
-        // same IpcCommand the matching keyboard shortcut would.
-        // Empty pick (Esc) clears the stash silently.
+        // Sidebar right-click context menu. Pick → route through
+        // `dispatch_action`, the same single fan-out the keyboard
+        // shortcut uses. That keeps the destructive gate intact:
+        // MergePr / Archive mount the unified ActionConfirm modal
+        // instead of firing straight at the daemon (a mis-click on
+        // "merge" must not merge a PR with no confirmation). Empty
+        // pick (Esc) clears the stash silently.
         if matches!(self.modal_stack.last(), Some(Id::SidebarContext)) {
-            use lazybox_tui_core::action::Action;
             let stash = self.pending_sidebar_context.take();
             self.pop_modal();
             if let (Some((session_key, actions)), Some(&idx)) = (stash.as_ref(), picks.first())
-                && let Some(action) = actions.get(idx)
+                && let Some(action) = actions.get(idx).cloned()
             {
-                let workspace_key =
-                    lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-                match action {
-                    Action::SpawnAgent(agent_id) => {
-                        cmds.push(IpcCommand::Spawn {
-                            session_key: session_key.clone(),
-                            session_id: None,
-                            kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
-                            cwd: None,
-                            initial_prompt: None,
-                        });
-                    }
-                    Action::SpawnShell => {
-                        cmds.push(IpcCommand::Spawn {
-                            session_key: session_key.clone(),
-                            session_id: None,
-                            kind: lazybox_ipc::TerminalKind::Shell,
-                            cwd: None,
-                            initial_prompt: None,
-                        });
-                    }
-                    Action::OpenEditor => {
-                        // Same path as the `e` keyboard shortcut.
-                        // Selection already moved on to this row
-                        // via the right-click hit-test; `open_editor`
-                        // operates on whatever's selected.
-                        self.open_editor();
-                    }
-                    Action::MarkAllRead => {
-                        cmds.push(IpcCommand::MarkRead {
-                            session_key: session_key.clone(),
-                        });
-                    }
-                    Action::MergePr => {
-                        cmds.push(IpcCommand::MergePr { workspace_key });
-                    }
-                    Action::Archive => {
-                        cmds.push(IpcCommand::Kill {
-                            session_key: session_key.clone(),
-                        });
-                    }
-                    // The menu only offers the six variants above
-                    // (see `mount_sidebar_context_menu`'s candidate
-                    // list). Anything else is a bug — fail loud so
-                    // it surfaces in tests rather than silently
-                    // doing nothing.
-                    other => tracing::warn!("sidebar context menu: unhandled action {other:?}",),
+                // Re-aim the sidebar at the row the menu was raised
+                // over. The right-click hit-test already moved the
+                // selection there, but a daemon event (re-sort,
+                // removal) could have shifted the cursor while the
+                // menu was up — `dispatch_action` reads the live
+                // selection, so pin it back to the menu's row first.
+                if self.sidebar.focus_workspace_key(session_key) {
+                    cmds.extend(self.dispatch_action(&action));
+                } else {
+                    self.flash_info("workspace is gone — action dropped");
                 }
                 self.redraw = true;
             }
@@ -523,8 +511,7 @@ impl<T: TerminalAdapter> Model<T> {
         // a prompt. Otherwise a user who has Help / Settings open
         // when the daemon emits a prompt would have it stuck in
         // the queue.
-        self.maybe_mount_next_removal_prompt();
-        self.maybe_mount_next_merge_prompt();
+        self.drain_queued_daemon_prompts();
         cmds
     }
 
@@ -564,12 +551,13 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Some(Id::ActionConfirm) => {
                 // Unified destructive-action confirm. Yes →
-                // dispatch the queued action via the unchecked
-                // path (the gate already fired). No / Esc → drop
-                // the stash silently.
+                // dispatch the queued action against the target
+                // stashed at mount time (the sidebar selection may
+                // have drifted while the modal was up). No / Esc →
+                // drop the stash silently.
                 let pending = self.pending_action_confirm.take();
-                if yes && let Some(action) = pending {
-                    cmds.extend(self.dispatch_action_unchecked(&action));
+                if yes && let Some((action, target)) = pending {
+                    cmds.extend(self.dispatch_action_confirmed(&action, &target));
                     self.redraw = true;
                 }
             }
@@ -597,8 +585,7 @@ impl<T: TerminalAdapter> Model<T> {
             }
             _ => {}
         }
-        self.maybe_mount_next_removal_prompt();
-        self.maybe_mount_next_merge_prompt();
+        self.drain_queued_daemon_prompts();
         cmds
     }
 
@@ -633,16 +620,16 @@ impl<T: TerminalAdapter> Model<T> {
             }
             RunnerStep::Finish(outcome) => {
                 let sources: Vec<String> = outcome.enabled_providers.iter().cloned().collect();
-                // Cache the new persisted state so subsequent partial
-                // flows (Settings → Add a repo) see the latest scopes.
-                self.setup.persisted = Some(crate::setup_flow::outcome_to_persisted(&outcome));
-                // Push the new repo subscriptions into the sidebar so
-                // the user sees a header for the freshly-added repo
-                // even before polling finds workspaces under it.
-                self.refresh_subscribed_projects();
-                if let Some(hook) = self.setup.on_complete.as_ref() {
-                    hook(outcome);
-                }
+                let persisted = crate::setup_flow::outcome_to_persisted(&outcome);
+                // Persist FIRST (via the installed hook) and only
+                // cache the new state when the save actually landed —
+                // otherwise the session would act on scopes that
+                // evaporate on the next launch while the user saw a
+                // success message.
+                let save_result = match self.setup.on_complete.as_ref() {
+                    Some(hook) => hook(outcome),
+                    None => Ok(None),
+                };
                 self.unmount_setup_modal();
                 self.send_cmd(IpcCommand::Subscribe);
                 // Kick off an immediate poll so a freshly added repo
@@ -650,8 +637,32 @@ impl<T: TerminalAdapter> Model<T> {
                 // of waiting for the long-lived 60s loop tick.
                 self.send_cmd(IpcCommand::Refresh);
                 self.set_focus_attr();
-                if !sources.is_empty() {
-                    self.show_polling(sources);
+                match save_result {
+                    Ok(backed_up) => {
+                        // Cache the new persisted state so subsequent
+                        // partial flows (Settings → Add a repo) see
+                        // the latest scopes, and push the new repo
+                        // subscriptions into the sidebar so a header
+                        // shows even before polling finds workspaces.
+                        self.setup.persisted = Some(persisted);
+                        self.refresh_subscribed_projects();
+                        if let Some(bak) = backed_up {
+                            self.flash_info(format!(
+                                "config.yaml was malformed — kept a backup at {}",
+                                bak.display(),
+                            ));
+                        }
+                        if !sources.is_empty() {
+                            self.show_polling(sources);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("setup save failed: {e:#}");
+                        self.flash(
+                            format!("settings NOT saved: {e}"),
+                            crate::realm::components::footer::NoticeSeverity::Permanent,
+                        );
+                    }
                 }
                 // First-run users land here after completing the
                 // wizard — surface the feature tour now (no-op when

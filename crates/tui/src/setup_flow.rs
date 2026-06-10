@@ -150,8 +150,12 @@ fn load_from_yaml(path: &std::path::Path) -> Option<PersistedSetup> {
     let s = cfg.setup;
     // The YAML schema keeps the same shape as PersistedSetup but
     // expressed as plain BTrees (no JSON parsing). Convert.
-    if s.providers.is_empty() && s.agents.is_empty() {
+    if s.providers.is_empty() && s.agents.is_empty() && !s.wizard_completed {
         // Treat fully-empty as "no persisted setup" — first-run.
+        // The `wizard_completed` marker (written on every wizard
+        // Finish) overrides this: a user who completed the wizard
+        // with everything un-ticked made a valid choice and must
+        // not be dragged through first-run forever.
         return None;
     }
     let provider_filters = s
@@ -174,12 +178,69 @@ fn load_from_yaml(path: &std::path::Path) -> Option<PersistedSetup> {
 /// Reads the existing file (if any), updates only the `setup:`
 /// section, writes back. Hand-edited sections (worktree mounts,
 /// hooks, custom editors, etc.) are preserved.
-pub fn save_persisted(store: &dyn Store, p: &PersistedSetup) {
-    let path = config_yaml_path();
-    let mut cfg: lazybox_config::Config = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_yaml::from_str(&raw).ok())
-        .unwrap_or_default();
+///
+/// When the existing file is present but does NOT parse (a hand-edit
+/// typo), the malformed file is renamed to `config.yaml.bak-<ts>`
+/// and a fresh config is written — never silently overwritten, so a
+/// typo plus a wizard run can't wipe slack tokens / keymaps / hooks.
+/// `Ok(Some(path))` reports that backup so the caller can surface it.
+///
+/// Errors (serialize / write / rename failures) bubble up so the UI
+/// can tell the user their settings did NOT stick.
+pub fn save_persisted(
+    store: &dyn Store,
+    p: &PersistedSetup,
+) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let backed_up = save_persisted_yaml(p, &config_yaml_path())?;
+    // Clean up the legacy kv blob so the YAML stays the only source
+    // of truth on subsequent loads.
+    let _ = store.set_kv(KV_KEY_SETUP, "");
+    Ok(backed_up)
+}
+
+/// File-level core of [`save_persisted`], path-injected for tests.
+/// Returns the backup path when a malformed pre-existing config was
+/// moved aside.
+fn save_persisted_yaml(
+    p: &PersistedSetup,
+    path: &std::path::Path,
+) -> anyhow::Result<Option<std::path::PathBuf>> {
+    use anyhow::Context;
+
+    let mut backed_up: Option<std::path::PathBuf> = None;
+    let mut cfg: lazybox_config::Config = match std::fs::read_to_string(path) {
+        Ok(raw) => match serde_yaml::from_str(&raw) {
+            Ok(cfg) => cfg,
+            Err(parse_err) => {
+                // The file exists but is malformed. Move it aside
+                // instead of clobbering it — the user's hand-edited
+                // sections are still recoverable from the .bak.
+                let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "config.yaml".to_string());
+                let bak = path.with_file_name(format!("{name}.bak-{ts}"));
+                std::fs::rename(path, &bak).with_context(|| {
+                    format!(
+                        "config.yaml is malformed ({parse_err}) and backing it up to {} failed — \
+                         refusing to overwrite it",
+                        bak.display(),
+                    )
+                })?;
+                tracing::warn!(
+                    "config.yaml was malformed ({parse_err}); moved to {} and writing fresh",
+                    bak.display(),
+                );
+                backed_up = Some(bak);
+                lazybox_config::Config::default()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => lazybox_config::Config::default(),
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context("config.yaml read failed"));
+        }
+    };
 
     cfg.setup.providers = p.enabled_providers.clone();
     cfg.setup.agents = p.enabled_agents.clone();
@@ -189,32 +250,21 @@ pub fn save_persisted(store: &dyn Store, p: &PersistedSetup) {
         .map(|(k, v)| (k.clone(), v.enabled_keys.clone()))
         .collect();
     cfg.setup.scopes = p.selected_scopes.clone();
+    // Completing the wizard is what writes this file — record the
+    // marker so an all-empty selection doesn't read as first-run on
+    // the next launch.
+    cfg.setup.wizard_completed = true;
 
-    let serialized = match serde_yaml::to_string(&cfg) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("config.yaml serialize failed: {e}");
-            return;
-        }
-    };
+    let serialized = serde_yaml::to_string(&cfg).context("config.yaml serialize failed")?;
 
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     // Atomic-ish write: tmp + rename.
     let tmp = path.with_extension("yaml.tmp");
-    if let Err(e) = std::fs::write(&tmp, serialized) {
-        tracing::warn!("config.yaml write tmp failed: {e}");
-        return;
-    }
-    if let Err(e) = std::fs::rename(&tmp, &path) {
-        tracing::warn!("config.yaml rename failed: {e}");
-        return;
-    }
-
-    // Clean up the legacy kv blob so the YAML stays the only source
-    // of truth on subsequent loads.
-    let _ = store.set_kv(KV_KEY_SETUP, "");
+    std::fs::write(&tmp, serialized).context("config.yaml write tmp failed")?;
+    std::fs::rename(&tmp, path).context("config.yaml rename failed")?;
+    Ok(backed_up)
 }
 
 // ── Choices ─────────────────────────────────────────────────────────────
@@ -777,19 +827,26 @@ impl SetupRunner {
                     .into_iter()
                     .filter_map(|i| items.get(i).cloned())
                     .collect();
-                if !picked.is_empty() {
-                    let entry = self
-                        .accumulator
-                        .selected_scopes
-                        .entry(provider_id)
-                        .or_default();
-                    // Replace this org's subscription with exactly the
-                    // picked repos: drop the whole-org entry AND any
-                    // previously-narrowed repo under it, then re-add the
-                    // current picks. Without clearing the old repos,
-                    // un-ticking one would leave its stale entry behind.
-                    let prefix = format!("{parent_id}/");
-                    entry.retain(|id| *id != parent_id && !id.starts_with(&prefix));
+                let entry = self
+                    .accumulator
+                    .selected_scopes
+                    .entry(provider_id)
+                    .or_default();
+                // Replace this org's subscription with exactly the
+                // picked repos: drop the whole-org entry AND any
+                // previously-narrowed repo under it, then re-add the
+                // current picks. Without clearing the old repos,
+                // un-ticking one would leave its stale entry behind.
+                let prefix = format!("{parent_id}/");
+                entry.retain(|id| *id != parent_id && !id.starts_with(&prefix));
+                if picked.is_empty() {
+                    // Un-ticking every repo is a real submission, not
+                    // a no-op: fall back to the org-level subscription
+                    // (the same entry the org picker would have left
+                    // when no narrowing exists). Ignoring it silently
+                    // kept the previous narrowing as-if-unchanged.
+                    entry.insert(parent_id);
+                } else {
                     for s in picked {
                         entry.insert(s.id);
                     }
@@ -1841,6 +1898,121 @@ mod tests {
         assert!(
             !after.contains("github:acme/drop"),
             "un-ticked repo should be removed: {after:?}"
+        );
+    }
+
+    /// Regression: confirming the repo picker with EVERY repo
+    /// un-ticked used to be silently ignored, keeping the previous
+    /// narrowing as if nothing happened. An empty pick is a real
+    /// submission — fall back to the org-level subscription.
+    #[tokio::test(flavor = "current_thread")]
+    async fn un_ticking_all_repos_falls_back_to_org_level() {
+        let mut prior: BTreeSet<String> = BTreeSet::new();
+        prior.insert("github:acme/keep".into());
+        prior.insert("github:acme/drop".into());
+        let mut outcome = SetupOutcome::default_enabled(report());
+        outcome.selected_scopes.insert("github".into(), prior);
+
+        let mut runner = SetupRunner {
+            accumulator: outcome,
+            scope_providers: BTreeSet::new(),
+            pending_filters: VecDeque::new(),
+            pending_scopes: VecDeque::new(),
+            pending_repo_pickers: VecDeque::new(),
+            expecting: ExpectingStep::RepoPickFor("github".into(), "github:acme".into()),
+            current_choice: None,
+            edit_scopes: false,
+        };
+        let items = vec![
+            Scope {
+                id: "github:acme/keep".into(),
+                label: "keep".into(),
+                parent: Some("acme".into()),
+                kind: lazybox_core::ScopeKind::Repo,
+            },
+            Scope {
+                id: "github:acme/drop".into(),
+                label: "drop".into(),
+                parent: Some("acme".into()),
+                kind: lazybox_core::ScopeKind::Repo,
+            },
+        ];
+        runner.current_choice = Some(CurrentChoice::RepoPick(items));
+
+        // Submit with nothing ticked.
+        let _step = runner.step_choice_picked(vec![]);
+
+        let after = runner
+            .accumulator
+            .selected_scopes
+            .get("github")
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            after.contains("github:acme"),
+            "empty pick must mean org-level subscription: {after:?}"
+        );
+        assert!(!after.contains("github:acme/keep"));
+        assert!(!after.contains("github:acme/drop"));
+    }
+
+    /// A malformed config.yaml (hand-edit typo) + a completed wizard
+    /// must NOT clobber the file: the original is moved to a
+    /// timestamped .bak byte-for-byte, then a fresh config is
+    /// written that parses and carries the saved setup.
+    #[test]
+    fn malformed_config_is_backed_up_not_clobbered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let malformed = "setup: [unterminated\nslack:\n  token: super-secret\n";
+        std::fs::write(&path, malformed).unwrap();
+
+        let p = PersistedSetup {
+            enabled_providers: ["github"].iter().map(|s| s.to_string()).collect(),
+            enabled_agents: ["claude"].iter().map(|s| s.to_string()).collect(),
+            provider_filters: BTreeMap::new(),
+            selected_scopes: BTreeMap::new(),
+        };
+        let backed_up = save_persisted_yaml(&p, &path)
+            .expect("save succeeds")
+            .expect("a backup path is reported");
+
+        assert_eq!(
+            std::fs::read_to_string(&backed_up).unwrap(),
+            malformed,
+            "the malformed original must be preserved byte-for-byte in the .bak"
+        );
+        assert!(
+            backed_up
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("config.yaml.bak-"),
+            "backup name carries the .bak-<timestamp> suffix: {backed_up:?}"
+        );
+        let loaded = load_from_yaml(&path).expect("the fresh file parses");
+        assert_eq!(loaded.enabled_providers, p.enabled_providers);
+        assert_eq!(loaded.enabled_agents, p.enabled_agents);
+    }
+
+    /// Completing the wizard with every provider/agent un-ticked
+    /// persists empty sets — the `wizard_completed` marker must keep
+    /// that from reading as first-run forever.
+    #[test]
+    fn completed_marker_prevents_first_run_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let p = PersistedSetup {
+            enabled_providers: BTreeSet::new(),
+            enabled_agents: BTreeSet::new(),
+            provider_filters: BTreeMap::new(),
+            selected_scopes: BTreeMap::new(),
+        };
+        let backed_up = save_persisted_yaml(&p, &path).expect("save succeeds");
+        assert!(backed_up.is_none(), "no pre-existing file → no backup");
+        assert!(
+            load_from_yaml(&path).is_some(),
+            "an all-empty but COMPLETED setup must not re-trigger the first-run wizard"
         );
     }
 }

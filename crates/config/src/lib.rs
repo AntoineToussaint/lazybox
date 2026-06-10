@@ -90,6 +90,12 @@ pub struct SetupSection {
     /// lazybox falls back to `"claude"`.
     #[serde(default)]
     pub default_agent: Option<String>,
+    /// Set once the setup wizard has been completed. Distinguishes
+    /// "finished setup with nothing ticked" (a valid choice) from a
+    /// true first run, so an all-empty `setup:` block doesn't
+    /// re-trigger the first-run wizard forever.
+    #[serde(default)]
+    pub wizard_completed: bool,
 }
 
 /// One entry under `editors:`. Args support `{path}` for the
@@ -901,6 +907,15 @@ pub struct SlackConfig {
     /// anchor channel with thread-per-workspace. Default true.
     #[serde(default = "default_per_workspace_channels")]
     pub per_workspace_channels: bool,
+    /// Slack user ids (`U...`) allowed to drive agents from chat —
+    /// anything written by anyone else in a routed channel is NOT
+    /// forwarded to the agent PTY (read-only `status` queries stay
+    /// open). Empty (the default) allows every user, but the
+    /// dispatcher logs a one-time warning at startup recommending
+    /// you set it: routed agents typically run with permission
+    /// prompts disabled.
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
 }
 
 fn default_anchor_channel() -> String {
@@ -1131,6 +1146,22 @@ repos:
         assert_eq!(m.placement, PlacementSpec::Above);
         let written = serde_yaml::to_string(&cfg).unwrap();
         assert!(written.contains("placement: above"));
+    }
+
+    /// `slack.allowed_users` defaults to empty (allow all, with a
+    /// startup warning logged by the dispatcher) and round-trips so
+    /// an operator can lock chat-driven agents to specific user ids.
+    #[test]
+    fn slack_allowed_users_defaults_empty_and_round_trips() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(cfg.slack.allowed_users.is_empty());
+
+        let yaml = "slack:\n  allowed_users: [U111, U222]\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.slack.allowed_users, vec!["U111", "U222"]);
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(reparsed.slack.allowed_users, vec!["U111", "U222"]);
     }
 
     #[test]

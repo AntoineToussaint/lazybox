@@ -5,7 +5,7 @@
 //! and future remap UI all funnel through `dispatch_action` so
 //! behavior stays consistent across surfaces.
 
-use super::{Model, PaneFocus};
+use super::{ActionConfirmTarget, Model, PaneFocus};
 use lazybox_ipc::Command as IpcCommand;
 use tuirealm::terminal::TerminalAdapter;
 
@@ -31,6 +31,16 @@ impl<T: TerminalAdapter> Model<T> {
         // destructive variants — there's no way to fire one
         // without the user confirming.
         if ActionDef::for_action(action).is_destructive() {
+            // Resolve the concrete target NOW, while the selection
+            // is the row the user acted on. The confirm fires
+            // against this stash — see `pending_action_confirm`.
+            let Some(target) = self.resolve_action_confirm_target() else {
+                // Nothing focused to act on. The catalog's
+                // availability gate keeps surfaces from offering the
+                // action here; drop silently like the unchecked path
+                // would have.
+                return Vec::new();
+            };
             // Project-header focused Archive deletes the whole
             // project (cascading to its workspaces) — the default
             // confirm prompt assumes a workspace target, which would
@@ -38,10 +48,80 @@ impl<T: TerminalAdapter> Model<T> {
             // case and let the rest fall through to the static
             // catalog prompt.
             let custom_prompt = self.action_confirm_override(action);
-            self.mount_action_confirm(action.clone(), custom_prompt);
+            self.mount_action_confirm(action.clone(), target, custom_prompt);
             return Vec::new();
         }
         self.dispatch_action_unchecked(action)
+    }
+
+    /// Resolve what a destructive action mounted right now would act
+    /// on: the selected workspace row, or (for project-header focus)
+    /// the focused project. None when neither is focused.
+    fn resolve_action_confirm_target(&self) -> Option<ActionConfirmTarget> {
+        if let Some(sk) = self.sidebar.selected_workspace_key() {
+            return Some(ActionConfirmTarget::Workspace(sk.clone()));
+        }
+        self.sidebar
+            .focused_project_key()
+            .map(ActionConfirmTarget::Project)
+    }
+
+    /// Carry out a destructive action the user just confirmed,
+    /// against the target stashed at mount time. The stash — not the
+    /// live sidebar selection — names the row the prompt described;
+    /// if it no longer exists (removed by a daemon event while the
+    /// modal was up) this no-ops with a footer notice instead of
+    /// firing at whatever the cursor drifted onto.
+    pub(crate) fn dispatch_action_confirmed(
+        &mut self,
+        action: &lazybox_tui_core::action::Action,
+        target: &ActionConfirmTarget,
+    ) -> Vec<IpcCommand> {
+        use lazybox_tui_core::action::Action;
+        match target {
+            ActionConfirmTarget::Workspace(session_key) => {
+                let workspace = self.sidebar.workspace_by_key(session_key).cloned();
+                if workspace.is_none() {
+                    self.flash_info("workspace is gone — nothing to do");
+                    return Vec::new();
+                }
+                match action {
+                    Action::Archive => vec![IpcCommand::Kill {
+                        session_key: session_key.clone(),
+                    }],
+                    Action::MergePr => {
+                        // Re-check merge preconditions against the
+                        // STASHED workspace — state may have moved
+                        // (new failing CI, fresh conflict) while the
+                        // modal was up.
+                        if let crate::intent::Intent::MergePr { workspace_key } =
+                            crate::intent::resolve_merge(workspace.as_ref())
+                        {
+                            vec![IpcCommand::MergePr { workspace_key }]
+                        } else {
+                            self.flash_info("PR is no longer merge-ready — nothing done");
+                            Vec::new()
+                        }
+                    }
+                    // A future destructive action that hasn't grown a
+                    // targeted arm yet falls back to the legacy
+                    // selection-based dispatch.
+                    other => self.dispatch_action_unchecked(other),
+                }
+            }
+            ActionConfirmTarget::Project(project_key) => {
+                if !self.projects.contains_key(project_key) {
+                    self.flash_info("project is gone — nothing to do");
+                    return Vec::new();
+                }
+                match action {
+                    Action::Archive => vec![IpcCommand::DeleteProject {
+                        project_key: project_key.clone(),
+                    }],
+                    other => self.dispatch_action_unchecked(other),
+                }
+            }
+        }
     }
 
     /// Internal: actually carry out an action without checking the
@@ -224,9 +304,9 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::Archive => {
-                // Destructive — only reachable from
-                // `dispatch_action_unchecked` after the user said
-                // Yes on the unified ActionConfirm modal.
+                // Destructive — normally routed through
+                // `dispatch_action_confirmed` with a mount-time
+                // target; this selection-based arm is the fallback.
                 //
                 // Polymorphic by focused row: cursor on a workspace /
                 // session row deletes that workspace; cursor on a
@@ -307,11 +387,11 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::MergePr => {
-                // Destructive — only reachable from
-                // `dispatch_action_unchecked` after the user said
-                // Yes on the unified ActionConfirm. Re-check the
-                // merge preconditions defensively, then fire the
-                // IPC. (Catalog availability gates the surface
+                // Destructive — normally routed through
+                // `dispatch_action_confirmed` with a mount-time
+                // target; this selection-based arm is the fallback.
+                // Re-check the merge preconditions defensively, then
+                // fire the IPC. (Catalog availability gates the surface
                 // from offering the action when CI / review /
                 // conflict state isn't ready, so this re-check
                 // mostly catches the rare race where state

@@ -567,13 +567,14 @@ async fn run_embedded_realm(
         // reads the YAML on every tick, so the next poll picks up
         // the change. Model also fires Command::Refresh on Finish
         // for an immediate tick + rescope. `Arc<dyn Fn>` because
-        // partial flows can fire many times.
+        // partial flows can fire many times. The save result flows
+        // back so the Finish handler can surface failures instead
+        // of pretending the settings stuck.
         let store_for_save = std::sync::Arc::new(store_for_save);
-        let hook: std::sync::Arc<dyn Fn(lazybox_tui::setup_flow::SetupOutcome) + Send + Sync> =
-            std::sync::Arc::new(move |outcome| {
-                let persisted = lazybox_tui::setup_flow::outcome_to_persisted(&outcome);
-                lazybox_tui::setup_flow::save_persisted(&**store_for_save, &persisted);
-            });
+        let hook: lazybox_tui::realm::SetupCompleteHook = std::sync::Arc::new(move |outcome| {
+            let persisted = lazybox_tui::setup_flow::outcome_to_persisted(&outcome);
+            lazybox_tui::setup_flow::save_persisted(&**store_for_save, &persisted)
+        });
         model = model.with_setup_complete_hook(hook);
         if let Some(p) = preselect {
             model = model.with_preselect(p);

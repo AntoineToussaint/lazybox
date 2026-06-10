@@ -99,7 +99,13 @@ impl<T: TerminalAdapter> Model<T> {
             session_key, state, ..
         } = &event
         {
-            let changed = !self.sidebar.displays_agent_state(session_key, *state);
+            // Two displays can go stale independently: the sidebar's
+            // session-level asking/working pill AND the terminal
+            // stack's per-terminal tab badges (a workspace can run
+            // two agents whose badges flip without the session-level
+            // state moving). Redraw when EITHER would change.
+            let changed = !self.sidebar.displays_agent_state(session_key, *state)
+                || !self.terminals.displays_agent_state(session_key, *state);
             self.sidebar.on_daemon_event(&event);
             if let Some(msg) = self.sidebar.drain_pending_asking_notices().pop() {
                 self.flash_hint(msg);

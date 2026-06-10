@@ -356,8 +356,10 @@ mod undo_auto_mark_tests {
             activity_with("n-C", "gamma"),
         ];
         pane.set_workspace(Some(ws_with(activities.clone())));
-        // Manually arm + fire on row index 1 (the "beta" row).
+        // Move to row index 1 (the "beta" row) and re-arm the way
+        // every production cursor move does, then fire.
         pane.feed.cursor = 1;
+        pane.rearm_mark_timer_for_new_row(true);
         let fired = pane.fire_auto_mark();
         assert_eq!(fired.map(|(_k, i)| i), Some(1));
 
@@ -491,5 +493,141 @@ mod scroll_does_not_rebuild_tests {
             base,
             RightPane::activity_buffer_key(&ws, &feed, &logins, "Light", 60, true)
         );
+    }
+}
+
+#[cfg(test)]
+mod auto_mark_fingerprint_tests {
+    //! The auto-mark timer fires on the row it was ARMED on, not on
+    //! the raw cursor index — new activities insert at the TOP of
+    //! the feed and shift every index, so a dwell started on row 0
+    //! must not mark whatever fresh comment shifted into slot 0.
+    use super::super::{PaneId, RightPane};
+    use chrono::{TimeZone, Utc};
+    use lazybox_core::{Activity, ActivityKind, Workspace, WorkspaceKey};
+    use lazybox_ipc::Command;
+
+    fn activity_with(node_id: &str, body: &str) -> Activity {
+        Activity {
+            author: "alice".into(),
+            body: body.into(),
+            created_at: Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap(),
+            kind: ActivityKind::Comment,
+            node_id: Some(node_id.into()),
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        }
+    }
+
+    fn ws_with(activities: Vec<Activity>) -> Workspace {
+        let mut w = Workspace::empty(WorkspaceKey::new("k"), "main", Utc::now());
+        w.activity = activities;
+        w
+    }
+
+    #[test]
+    fn fire_follows_the_armed_row_after_a_top_insert() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        let activities = vec![activity_with("n-A", "alpha"), activity_with("n-B", "beta")];
+        // set_workspace arms the timer on cursor 0 → fingerprint(A).
+        pane.set_workspace(Some(ws_with(activities.clone())));
+        assert!(pane.mark_timer.is_armed(), "unread cursor row arms");
+
+        // Poll inserts a fresh comment at the top; index 0 now points
+        // at a row the user never dwelt on.
+        let mut shifted = activities;
+        shifted.insert(0, activity_with("n-NEW", "fresh"));
+        pane.set_workspace(Some(ws_with(shifted)));
+
+        let fired = pane.fire_auto_mark();
+        assert_eq!(
+            fired.map(|(_k, i)| i),
+            Some(1),
+            "the armed row must be marked at its SHIFTED index",
+        );
+        let ws = pane.workspace.as_ref().expect("workspace");
+        assert!(
+            ws.is_activity_unread(0),
+            "the fresh top-of-feed comment must stay unread",
+        );
+        assert!(!ws.is_activity_unread(1), "the armed row flipped to read");
+    }
+
+    #[test]
+    fn fire_skips_when_the_armed_row_vanished() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws_with(vec![activity_with("n-A", "alpha")])));
+        assert!(pane.mark_timer.is_armed());
+
+        // The armed row is gone entirely (deleted upstream).
+        pane.set_workspace(Some(ws_with(vec![activity_with("n-X", "other")])));
+
+        assert!(pane.fire_auto_mark().is_none(), "no row matches — skip");
+        assert!(
+            !pane.mark_timer.is_armed(),
+            "a vanished target disarms instead of re-firing every tick",
+        );
+        let ws = pane.workspace.as_ref().expect("workspace");
+        assert!(ws.is_activity_unread(0), "the stranger row stays unread");
+    }
+
+    #[test]
+    fn mark_cursor_row_read_applies_the_local_echo() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws_with(vec![
+            activity_with("n-A", "alpha"),
+            activity_with("n-B", "beta"),
+        ])));
+
+        let mut cmds: Vec<Command> = Vec::new();
+        assert!(pane.mark_cursor_row_read(&mut cmds));
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            Command::MarkActivityRead { index, .. } => assert_eq!(*index, 0),
+            other => panic!("expected MarkActivityRead, got {other:?}"),
+        }
+        let ws = pane.workspace.as_ref().expect("workspace");
+        assert!(
+            !ws.is_activity_unread(0),
+            "`m` must flip the row locally on this frame, not wait for the daemon echo",
+        );
+        assert!(ws.is_activity_unread(1), "only the cursor row flips");
+    }
+}
+
+#[cfg(test)]
+mod teaser_tests {
+    //! Teaser extraction from activity / PR bodies. A body that opens
+    //! with a thematic break (`---`) must not yield a blank teaser,
+    //! and prose that happens to start with a dash keeps it — only
+    //! real list markers (`- `, `* `, `+ `) are stripped.
+    use super::super::markdown::teaser_text;
+
+    #[test]
+    fn leading_thematic_break_is_skipped() {
+        assert_eq!(
+            teaser_text("---\n\nRelease notes for v2", 80),
+            "Release notes for v2",
+        );
+    }
+
+    #[test]
+    fn list_marker_with_space_is_stripped() {
+        assert_eq!(teaser_text("- first item\n- second", 80), "first item");
+    }
+
+    #[test]
+    fn leading_dash_prose_keeps_its_dash() {
+        assert_eq!(
+            teaser_text("-2 degrees and falling", 80),
+            "-2 degrees and falling",
+        );
+    }
+
+    #[test]
+    fn heading_markers_still_strip() {
+        assert_eq!(teaser_text("### Title\nbody text", 80), "Title");
     }
 }

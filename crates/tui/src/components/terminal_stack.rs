@@ -784,6 +784,30 @@ impl TerminalStack {
         self.collapsed
     }
 
+    /// True when every agent slot keyed to `session_key` already
+    /// shows `state` in its tab badge — i.e. applying the matching
+    /// `Event::AgentState` again would change nothing on screen.
+    /// Mirrors the session-wide apply in the `AgentState` event arm.
+    ///
+    /// The orchestrator checks this ALONGSIDE the sidebar's
+    /// equivalent before skipping a redraw: badges are per-terminal,
+    /// so a freshly-spawned second agent in a workspace can need a
+    /// badge flip even when the sidebar's session-level state is
+    /// already correct. Vacuously true when the session has no agent
+    /// slots (nothing to repaint).
+    pub fn displays_agent_state(
+        &self,
+        session_key: &SessionKey,
+        state: lazybox_ipc::AgentState,
+    ) -> bool {
+        self.terminals
+            .values()
+            .filter(|s| {
+                &s.session_key == session_key && matches!(s.kind, TerminalKind::Agent(_))
+            })
+            .all(|s| s.agent_state == state)
+    }
+
     /// Toggle the collapse state. Marks the user-override flag so we
     /// stop auto-collapsing on emptiness.
     pub fn set_collapsed(&mut self, collapsed: bool) {
@@ -3538,6 +3562,64 @@ mod summarize_message_tests {
             summarize_message("just normal text here"),
             "just normal text here"
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_badge_tests {
+    //! `displays_agent_state` drives the orchestrator's redraw-skip
+    //! for `AgentState` pings. It must report "stale" whenever ANY
+    //! agent slot in the session would change badge — a second agent
+    //! spawned after the session went Working starts Idle and needs
+    //! its flip painted.
+    use super::*;
+
+    fn spawn_agent(stack: &mut TerminalStack, id: u64, sk: &SessionKey, agent: &str) {
+        stack.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(id),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent(agent.into()),
+            no_permission: false,
+        });
+    }
+
+    #[test]
+    fn predicate_reports_stale_when_a_second_agent_badge_lags() {
+        use lazybox_ipc::AgentState;
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+
+        spawn_agent(&mut stack, 1, &sk, "claude");
+        stack.on_event(&Event::AgentState {
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            state: AgentState::Working,
+        });
+        assert!(
+            stack.displays_agent_state(&sk, AgentState::Working),
+            "single up-to-date badge → displayed",
+        );
+
+        // Second agent spawns Idle: its badge would flip on the next
+        // Working ping, so the predicate must report "not displayed".
+        spawn_agent(&mut stack, 2, &sk, "codex");
+        assert!(
+            !stack.displays_agent_state(&sk, AgentState::Working),
+            "a lagging second badge means the event still changes pixels",
+        );
+
+        // Applying the event catches the badge up again.
+        stack.on_event(&Event::AgentState {
+            terminal_id: TerminalId(2),
+            session_key: sk.clone(),
+            state: AgentState::Working,
+        });
+        assert!(stack.displays_agent_state(&sk, AgentState::Working));
+
+        // Vacuously true for a session with no agent slots — nothing
+        // to repaint.
+        let other = SessionKey::new("github:o/r#2");
+        assert!(stack.displays_agent_state(&other, AgentState::Working));
     }
 }
 

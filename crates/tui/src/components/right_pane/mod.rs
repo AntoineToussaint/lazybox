@@ -86,6 +86,15 @@ pub struct RightPane {
     /// Backed by the generic `TimerLatch` so the
     /// "arm-on-event, fire-on-elapsed" contract is one place.
     mark_timer: crate::confirm_latch::TimerLatch,
+    /// Fingerprint of the row the auto-mark timer was ARMED on. New
+    /// activities insert at the top of the feed and shift every
+    /// index, so firing on the raw `feed.cursor` index can mark a
+    /// comment the user never dwelt on. At fire time the cursor row
+    /// is checked against this fingerprint; on mismatch the
+    /// fingerprint is re-resolved to its shifted index (or the fire
+    /// is skipped if the row vanished). Cleared whenever the timer
+    /// disarms.
+    mark_timer_target: Option<ActivityFingerprint>,
     /// Fingerprint of the most recently auto-marked activity, plus
     /// its last-known index. On `z` we resolve the fingerprint back
     /// to the CURRENT index — a poll that introduced a new comment
@@ -316,6 +325,7 @@ impl RightPane {
             activity_collapsed: true,
             activity_collapse_user_set: false,
             mark_timer: crate::confirm_latch::TimerLatch::new(),
+            mark_timer_target: None,
             last_marked_read: None,
             default_agent: "claude".to_string(),
             task_body_view: TaskBodyView::Collapsed,
@@ -398,9 +408,16 @@ impl RightPane {
     /// reset the countdown out from under a user reading a row.
     fn rearm_mark_timer(&mut self, focused: bool) {
         if should_arm_mark_timer(focused, self.workspace.as_ref(), self.feed.cursor) {
+            // Stash the row's fingerprint only on a FRESH arm — an
+            // idempotent re-arm keeps counting toward the row the
+            // timer started on, so the fingerprint must keep naming
+            // that original row even if the feed reshuffled since.
+            if !self.mark_timer.is_armed() {
+                self.mark_timer_target = self.cursor_fingerprint();
+            }
             self.mark_timer.arm();
         } else {
-            self.mark_timer.disarm();
+            self.disarm_mark_timer();
         }
     }
 
@@ -413,24 +430,78 @@ impl RightPane {
     fn rearm_mark_timer_for_new_row(&mut self, focused: bool) {
         if should_arm_mark_timer(focused, self.workspace.as_ref(), self.feed.cursor) {
             self.mark_timer.rearm_fresh();
+            self.mark_timer_target = self.cursor_fingerprint();
         } else {
-            self.mark_timer.disarm();
+            self.disarm_mark_timer();
         }
+    }
+
+    /// Disarm the auto-mark timer AND forget which row it was armed
+    /// on — the two always travel together.
+    fn disarm_mark_timer(&mut self) {
+        self.mark_timer.disarm();
+        self.mark_timer_target = None;
+    }
+
+    /// Fingerprint of the activity row currently under the cursor,
+    /// if any.
+    fn cursor_fingerprint(&self) -> Option<ActivityFingerprint> {
+        self.workspace
+            .as_ref()?
+            .activity
+            .get(self.feed.cursor)
+            .map(ActivityFingerprint::of)
     }
 
     /// Flip the cursor's activity to read and remember the index for
     /// undo. Returns `(session_key, index)` so the caller can persist
     /// via `Command::MarkActivityRead`.
     fn fire_auto_mark(&mut self) -> Option<(lazybox_core::SessionKey, usize)> {
+        let cursor = self.feed.cursor;
+        // Resolve the row the timer was ARMED on. New activities
+        // insert at the TOP of the feed and shift every index, so
+        // the raw cursor index may now point at a comment the user
+        // never dwelt on. The fingerprint stashed at arm time is the
+        // ground truth: if the cursor row no longer matches it, find
+        // the armed row's new index and mark THAT — or skip entirely
+        // when the row is gone.
+        let i = {
+            let workspace = self.workspace.as_ref()?;
+            match &self.mark_timer_target {
+                Some(fp) => {
+                    if workspace
+                        .activity
+                        .get(cursor)
+                        .is_some_and(|a| fp.matches(a))
+                    {
+                        cursor
+                    } else {
+                        match workspace.activity.iter().position(|a| fp.matches(a)) {
+                            Some(shifted) => shifted,
+                            None => {
+                                tracing::debug!(
+                                    cursor,
+                                    "auto-mark fire: armed row vanished — skipping",
+                                );
+                                self.disarm_mark_timer();
+                                return None;
+                            }
+                        }
+                    }
+                }
+                // Defensive: timer armed without a stashed target
+                // (shouldn't happen) — fall back to the cursor row.
+                None => cursor,
+            }
+        };
         let workspace = self.workspace.as_mut()?;
-        let i = self.feed.cursor;
         let total = workspace.activity.len();
         let was_unread = workspace.is_activity_unread(i);
         if !was_unread {
             tracing::debug!(
                 index = i,
                 total,
-                "auto-mark fire: cursor not on an unread row — skipping",
+                "auto-mark fire: armed row not unread — skipping",
             );
             return None;
         }
@@ -443,12 +514,13 @@ impl RightPane {
             unread_after,
             "auto-mark fire: flipped row to read",
         );
+        let session_key = lazybox_core::SessionKey::from(&workspace.key);
         self.last_marked_read = Some(AutoMarkRecord {
             last_index: i,
             fingerprint,
         });
-        self.mark_timer.disarm();
-        Some((lazybox_core::SessionKey::from(&workspace.key), i))
+        self.disarm_mark_timer();
+        Some((session_key, i))
     }
 
     /// Mark the activity row under the cursor read — the explicit
@@ -463,7 +535,7 @@ impl RightPane {
     /// act on — collapsed section, empty feed, or no workspace — so
     /// the caller can fall back to the workspace-wide mark.
     pub fn mark_cursor_row_read(&mut self, cmds: &mut Vec<Command>) -> bool {
-        let Some(workspace) = &self.workspace else {
+        let Some(workspace) = self.workspace.as_mut() else {
             return false;
         };
         if self.activity_collapsed || workspace.activity.is_empty() {
@@ -481,6 +553,11 @@ impl RightPane {
                     fingerprint: ActivityFingerprint::of(act),
                 });
             }
+            // Local echo, same as the auto-mark timer path: flip the
+            // row read immediately so `m` updates on this frame
+            // instead of waiting for the daemon's next
+            // `WorkspaceUpserted` round-trip.
+            workspace.mark_activity_read(cursor);
         }
         true
     }
@@ -505,6 +582,7 @@ impl RightPane {
                     "z undo: activity gone — refusing to unmark a stranger",
                 );
                 self.mark_timer.disarm();
+                self.mark_timer_target = None;
                 return None;
             }
         };
@@ -513,6 +591,7 @@ impl RightPane {
         // timer would re-fire on the next tick and undo the undo.
         // Simpler: just clear; user can re-arm by moving.
         self.mark_timer.disarm();
+        self.mark_timer_target = None;
         Some((lazybox_core::SessionKey::from(&workspace.key), index))
     }
 
@@ -546,7 +625,7 @@ impl RightPane {
         if focused {
             self.rearm_mark_timer(true);
         } else {
-            self.mark_timer.disarm();
+            self.disarm_mark_timer();
             self.last_marked_read = None;
         }
     }
@@ -596,7 +675,7 @@ impl RightPane {
             // displayed. A stale `last_marked_read` would point at an
             // index in workspace A; pressing `z` on workspace B would
             // un-read a different activity entirely. Disarm + forget.
-            self.mark_timer.disarm();
+            self.disarm_mark_timer();
             self.last_marked_read = None;
             // Indices are workspace-relative; an "expanded row 3" on
             // PR A points at a wholly different comment on PR B.

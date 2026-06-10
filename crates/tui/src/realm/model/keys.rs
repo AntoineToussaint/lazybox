@@ -898,19 +898,18 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                // Apply the inertia damper BEFORE checking which pane
-                // owns the event so the OS-driven "flick keeps
-                // scrolling for 500ms after the gesture" phase decays
-                // its STEP and a reverse-direction gesture cancels
-                // the queued inertia. `dampen_scroll_step` returns 0
-                // when the event should be dropped entirely (reverse
-                // mid-burst).
                 let raw_up = matches!(m.kind, MouseEventKind::ScrollUp);
-                let scaled = self.dampen_scroll_step(raw_up);
-                if scaled == 0 {
-                    return;
-                }
                 if rect_contains(right_top_rect, m.column, m.row) {
+                    // Inertia damper: the OS-driven "flick keeps
+                    // scrolling for 500ms after the gesture" phase
+                    // decays its STEP and a reverse-direction gesture
+                    // cancels the queued inertia. `dampen_scroll_step`
+                    // returns 0 when the event should be dropped
+                    // entirely (reverse mid-burst).
+                    let scaled = self.dampen_scroll_step(raw_up);
+                    if scaled == 0 {
+                        return;
+                    }
                     let delta = if raw_up { -scaled } else { scaled };
                     if self.right.scroll_activity(delta) {
                         self.redraw = true;
@@ -921,6 +920,13 @@ impl<T: TerminalAdapter> Model<T> {
                     return;
                 }
                 if self.terminals.focused_terminal_tracks_mouse() {
+                    // Damped: every wheel event on this path is a
+                    // daemon round trip + inner-program repaint, so
+                    // the momentum tail must decay and hard-stop.
+                    let scaled = self.dampen_scroll_step(raw_up);
+                    if scaled == 0 {
+                        return;
+                    }
                     let cell_col = m.column.saturating_sub(right_bottom_rect.x) as u32;
                     let cell_row = m.row.saturating_sub(right_bottom_rect.y) as u32;
                     let button = if raw_up {
@@ -949,8 +955,26 @@ impl<T: TerminalAdapter> Model<T> {
                         self.redraw = true;
                         return;
                     }
+                    // Mouse-tracking flag was up but the event encoded
+                    // to nothing — fall through to the local viewport
+                    // with the damped step.
+                    let delta = if raw_up { -scaled } else { scaled };
+                    let _ = self.terminals.scroll_active(delta);
+                    self.redraw = true;
+                    return;
                 }
-                let delta = if raw_up { -scaled } else { scaled };
+                // Local scrollback (inner program is NOT tracking the
+                // mouse): the viewport move is a pure in-process
+                // libghostty call, no daemon round trip — so no
+                // damper. Every OS wheel event moves a fixed small
+                // step and the view stops exactly when the events
+                // stop, like a native terminal.
+                const LOCAL_WHEEL_STEP: isize = 3;
+                let delta = if raw_up {
+                    -LOCAL_WHEEL_STEP
+                } else {
+                    LOCAL_WHEEL_STEP
+                };
                 let _ = self.terminals.scroll_active(delta);
                 self.redraw = true;
             }

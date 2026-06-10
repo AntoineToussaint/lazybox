@@ -594,6 +594,55 @@ fn render_hides_scrollbar_when_terminal_fits() {
     );
 }
 
+/// Keyboard scroll fallback over PRIMARY-screen scrollback (the
+/// native-scrollback tmux mode keeps relayed output there):
+/// Shift-PageUp moves the viewport up locally, Shift-End snaps back to
+/// the live tail, and neither writes a byte to the PTY.
+#[test]
+fn shift_pageup_scrolls_local_scrollback_without_pty_writes() {
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.set_active_session(Some(sk("o/r#1")));
+    render_to_string(&mut t, 60, 10, true);
+    let mut bytes = Vec::new();
+    for i in 0..100 {
+        bytes.extend_from_slice(format!("line {i}\r\n").as_bytes());
+    }
+    t.on_event(&Event::TerminalOutput {
+        terminal_id: TerminalId(1),
+        bytes,
+        seq: 1,
+    });
+    let at_bottom = t.scrollbar_summary().expect("scrollbar state");
+    assert!(
+        at_bottom.contains("screen=Some(Primary)"),
+        "plain output stays on the primary screen: {at_bottom}"
+    );
+
+    let mut cmds = Vec::new();
+    let _ = t.handle_key(
+        KeyEvent::new(KeyCode::PageUp, KeyModifiers::SHIFT),
+        &mut cmds,
+    );
+    assert!(cmds.is_empty(), "scroll keys never reach the PTY: {cmds:?}");
+    let scrolled = t.scrollbar_summary().expect("scrollbar state");
+    assert_ne!(
+        scrolled, at_bottom,
+        "Shift-PageUp must move the viewport into scrollback"
+    );
+
+    let _ = t.handle_key(
+        KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT),
+        &mut cmds,
+    );
+    assert!(cmds.is_empty(), "scroll keys never reach the PTY: {cmds:?}");
+    assert_eq!(
+        t.scrollbar_summary().expect("scrollbar state"),
+        at_bottom,
+        "Shift-End returns to the live tail"
+    );
+}
+
 #[test]
 fn render_shows_no_perms_badge_for_autonomous_session() {
     let mut t = TerminalStack::new(PaneId::new(1));

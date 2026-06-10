@@ -1766,3 +1766,121 @@ mod daemon_event_fastpath_tests {
         assert!(m.redraw, "the Working→InputNeeded edge must redraw");
     }
 }
+
+#[cfg(test)]
+mod wheel_routing_tests {
+    //! Wheel-event routing contract for the terminal pane
+    //! (`Model::handle_mouse`):
+    //!
+    //! - inner program NOT mouse-tracking → the wheel scrolls the
+    //!   LOCAL libghostty scrollback; nothing is written to the
+    //!   daemon (no round trip, no damper);
+    //! - inner program mouse-tracking (DECSET 1000/1002/1006) → the
+    //!   wheel is SGR-encoded and shipped to the PTY as a single
+    //!   damped `Write`.
+    //!
+    //! This is the client half of the native-scrollback feature: the
+    //! tmux backend no longer sets `mouse on`, so `is_mouse_tracking`
+    //! reflects the inner app instead of always reading true.
+    use super::super::*;
+    use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind, channel};
+    use tuirealm::ratatui::layout::{Rect, Size};
+
+    fn build_model_with_terminal() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+        Rect,
+    ) {
+        let (client, server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.layout.last_area = Rect::new(0, 0, 120, 40);
+
+        let key = lazybox_core::SessionKey::from("github:o/r#1");
+        m.terminals.set_active_session(Some(key.clone()));
+        m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(7),
+            session_key: key,
+            kind: TerminalKind::Shell,
+            no_permission: false,
+        });
+        m.focus = PaneFocus::Terminals;
+
+        let (_, _, bottom) = crate::realm::layout::pane_areas(
+            m.layout.last_area,
+            m.layout.sidebar_pct,
+            m.layout.right_top_pct,
+            m.layout.sidebar_user_resized,
+        );
+        (m, server, bottom)
+    }
+
+    fn wheel_up_at(col: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp,
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        }
+    }
+
+    /// Wheel over the terminal pane while the inner program has NOT
+    /// requested mouse tracking → pure local scroll, zero daemon
+    /// traffic. This is the path that makes scrolling instant.
+    #[test]
+    fn wheel_scrolls_locally_when_inner_app_is_not_mouse_tracking() {
+        let (mut m, mut server, bottom) = build_model_with_terminal();
+        assert!(
+            !m.terminals.focused_terminal_tracks_mouse(),
+            "fresh shell terminal must not report mouse tracking"
+        );
+
+        // Drain startup traffic (Subscribe) so the assertion below
+        // only sees what the wheel produced.
+        while server.rx.try_recv().is_ok() {}
+
+        m.redraw = false;
+        m.handle_mouse(wheel_up_at(bottom.x + 2, bottom.y + 2));
+
+        assert!(
+            server.rx.try_recv().is_err(),
+            "local scrollback path must not send any IPC command"
+        );
+        assert!(m.redraw, "local scroll repaints the viewport");
+    }
+
+    /// Wheel over the terminal pane while the inner program IS mouse
+    /// tracking (vim/htop/claude with mouse on) → the event is
+    /// SGR-encoded and written to the daemon for the inner app to
+    /// handle.
+    #[test]
+    fn wheel_forwards_sgr_when_inner_app_tracks_mouse() {
+        let (mut m, mut server, bottom) = build_model_with_terminal();
+
+        // The inner program enables button-event tracking + SGR
+        // encoding — exactly what vim / htop / claude emit.
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(7),
+            bytes: b"\x1b[?1002h\x1b[?1006h".to_vec(),
+            seq: 1,
+        });
+        assert!(
+            m.terminals.focused_terminal_tracks_mouse(),
+            "DECSET 1002 must flip the tracking flag"
+        );
+
+        while server.rx.try_recv().is_ok() {}
+
+        m.handle_mouse(wheel_up_at(bottom.x + 2, bottom.y + 2));
+
+        match server.rx.try_recv() {
+            Ok(lazybox_ipc::Command::Write { terminal_id, bytes }) => {
+                assert_eq!(terminal_id, TerminalId(7));
+                assert!(
+                    bytes.starts_with(b"\x1b[<"),
+                    "wheel must be SGR-encoded for the inner app, got {bytes:?}"
+                );
+            }
+            other => panic!("expected a Write with SGR wheel bytes, got {other:?}"),
+        }
+    }
+}

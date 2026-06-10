@@ -1213,8 +1213,13 @@ impl RightPane {
             .activity_buffer
             .as_ref()
             .expect("activity_buffer set above");
-        let visible: Vec<Line<'static>> =
-            buffer.cards.iter().skip(scroll).take(window).cloned().collect();
+        let visible: Vec<Line<'static>> = buffer
+            .cards
+            .iter()
+            .skip(scroll)
+            .take(window)
+            .cloned()
+            .collect();
         let mut hits: Vec<(usize, std::ops::RangeInclusive<u16>)> = Vec::new();
         for &(i, start, end) in &buffer.card_spans {
             let s = start as usize;

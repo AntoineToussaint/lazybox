@@ -32,7 +32,7 @@ use lazybox_core::{
 };
 use lazybox_ipc::{Event, TerminalId, TerminalKind, TerminalSnapshot};
 use lazybox_store::WorkspaceRecord;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -133,11 +133,8 @@ fn hook_settings_path(terminal_id: TerminalId) -> PathBuf {
 /// the daemon (tmux): after a restart the surviving session's hooks
 /// must still resolve, and the backend key is the identity that
 /// survives while terminal ids are reallocated.
-fn hook_command(backend_key: &str) -> String {
-    format!(
-        "\"{}\" hook-ingest --backend-key \"{backend_key}\"",
-        lazybox_exe()
-    )
+fn hook_command(exe: &Path, backend_key: &str) -> String {
+    guarded_hook_command(exe, &format!(" --backend-key \"{backend_key}\""))
 }
 
 /// Hook command with no correlation flag — what the pre-spawn
@@ -146,15 +143,30 @@ fn hook_command(backend_key: &str) -> String {
 /// exits 0, so if the agent ever races the post-spawn rewrite and
 /// reads the placeholder, its hooks are harmless no-ops and the
 /// session just keeps PTY detection.
-fn hook_command_placeholder() -> String {
-    format!("\"{}\" hook-ingest", lazybox_exe())
+fn hook_command_placeholder(exe: &Path) -> String {
+    guarded_hook_command(exe, "")
 }
 
-fn lazybox_exe() -> String {
-    std::env::current_exe()
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "lazybox".to_string())
+/// Absolute path of the running lazybox binary, verified to still exist
+/// on disk. The path can be dead even while the daemon is running: a
+/// `cargo run` daemon execs from `target/debug/lazybox`, and a later
+/// `cargo clean` unlinks that file while the process keeps running off
+/// the deleted inode. `None` → the caller skips hook settings and the
+/// spawn falls back to PTY state detection.
+fn hook_exe() -> Option<PathBuf> {
+    std::env::current_exe().ok().filter(|p| p.is_file())
+}
+
+/// The exec is guarded: the binary verified at spawn time can still be
+/// deleted mid-session (`cargo clean`), and without the guard every hook
+/// fails with a raw `/bin/sh: <path>: No such file or directory`. The
+/// guard names the problem on stderr instead, so Claude's hook-failure
+/// report points at the actual cause.
+fn guarded_hook_command(exe: &Path, args: &str) -> String {
+    let exe = exe.to_string_lossy();
+    format!(
+        "[ -x \"{exe}\" ] || {{ echo \"lazybox hook: binary missing at {exe} (removed by cargo clean or a rebuild?)\" >&2; exit 1; }}; \"{exe}\" hook-ingest{args}"
+    )
 }
 
 /// Read and parse the user's `~/.claude/settings.json`, if present, so
@@ -367,9 +379,23 @@ pub async fn handle_spawn(
     // Agents without hook support get `None` and keep PTY detection.
     // Phase 1 of 2: placeholder hook command — the real one needs the
     // backend key, which only exists after `backend.spawn` (see
-    // `write_hook_settings`).
-    let hook_settings =
-        write_hook_settings(config, &kind, terminal_id, &hook_command_placeholder());
+    // `write_hook_settings`). Skipped entirely when the running binary
+    // is no longer on disk (`cargo clean` under a `cargo run` daemon):
+    // hooks would be guaranteed to fail, so the session keeps PTY
+    // detection instead.
+    let hook_settings = match hook_exe() {
+        Some(exe) => {
+            write_hook_settings(config, &kind, terminal_id, &hook_command_placeholder(&exe))
+        }
+        None => {
+            tracing::warn!(
+                ?terminal_id,
+                "hook settings: lazybox binary path is unresolvable or no longer on disk — \
+                 skipping hooks; agent state falls back to PTY detection"
+            );
+            None
+        }
+    };
     let argv = match argv_for(
         config,
         &kind,
@@ -433,7 +459,14 @@ pub async fn handle_spawn(
     // Phase 2 of 2: now the backend key exists, atomically rewrite the
     // settings file with the real correlated hook command.
     if hook_settings.is_some() {
-        let _ = write_hook_settings(config, &kind, terminal_id, &hook_command(&backend_key));
+        if let Some(exe) = hook_exe() {
+            let _ = write_hook_settings(
+                config,
+                &kind,
+                terminal_id,
+                &hook_command(&exe, &backend_key),
+            );
+        }
     }
 
     // `terminal_id` was allocated above (before argv) so the hook
@@ -3662,6 +3695,75 @@ mod tests {
                 "--settings".to_string(),
                 "/run/hooks/settings-1.json".to_string(),
             ]
+        );
+    }
+
+    /// The running test binary exists on disk, so resolution succeeds;
+    /// the verified path is what gets baked into hook commands.
+    #[test]
+    fn hook_exe_resolves_to_existing_file() {
+        let exe = hook_exe().expect("running test binary must resolve");
+        assert!(exe.is_file());
+    }
+
+    #[test]
+    fn hook_command_quotes_exe_and_bakes_backend_key() {
+        let cmd = hook_command(Path::new("/opt/lazy box/lazybox"), "lzb-sess-7");
+        assert!(
+            cmd.contains("\"/opt/lazy box/lazybox\" hook-ingest --backend-key \"lzb-sess-7\""),
+            "exec missing or unquoted: {cmd}"
+        );
+        assert!(
+            cmd.starts_with("[ -x \"/opt/lazy box/lazybox\" ]"),
+            "missing existence guard: {cmd}"
+        );
+    }
+
+    #[test]
+    fn hook_command_placeholder_is_guarded_and_flagless() {
+        let cmd = hook_command_placeholder(Path::new("/opt/lazybox"));
+        assert!(cmd.starts_with("[ -x \"/opt/lazybox\" ]"), "{cmd}");
+        assert!(cmd.ends_with("\"/opt/lazybox\" hook-ingest"), "{cmd}");
+    }
+
+    /// Through a real `/bin/sh`: an existing executable passes the guard
+    /// and receives the hook-ingest argv (quoting survives the shell).
+    #[cfg(unix)]
+    #[test]
+    fn hook_command_execs_existing_binary_via_sh() {
+        let cmd = hook_command(Path::new("/bin/echo"), "lzb-sess-7");
+        let out = std::process::Command::new("/bin/sh")
+            .args(["-c", &cmd])
+            .output()
+            .expect("sh runs");
+        assert!(out.status.success(), "guard blocked an existing binary");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "hook-ingest --backend-key lzb-sess-7"
+        );
+    }
+
+    /// Through a real `/bin/sh`: a binary deleted after spawn produces a
+    /// named lazybox error on stderr, not the shell's raw
+    /// "No such file or directory".
+    #[cfg(unix)]
+    #[test]
+    fn hook_command_missing_binary_reports_named_error() {
+        let gone = "/nonexistent/target/debug/lazybox";
+        let cmd = hook_command(Path::new(gone), "lzb-sess-9");
+        let out = std::process::Command::new("/bin/sh")
+            .args(["-c", &cmd])
+            .output()
+            .expect("sh runs");
+        assert_eq!(out.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("lazybox hook: binary missing at /nonexistent/target/debug/lazybox"),
+            "stderr should name the cause: {stderr}"
+        );
+        assert!(
+            !stderr.contains("No such file or directory"),
+            "raw shell error leaked: {stderr}"
         );
     }
 

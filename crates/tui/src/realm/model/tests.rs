@@ -1061,7 +1061,11 @@ mod wake_tests {
         tokio::sync::mpsc::Receiver<crossterm::event::Event>,
     );
 
-    fn channels() -> (InputChannel, tokio::sync::mpsc::Sender<Event>, tokio::sync::mpsc::Receiver<Event>) {
+    fn channels() -> (
+        InputChannel,
+        tokio::sync::mpsc::Sender<Event>,
+        tokio::sync::mpsc::Receiver<Event>,
+    ) {
         let (itx, irx) = tokio::sync::mpsc::channel(8);
         let (dtx, drx) = tokio::sync::mpsc::channel(8);
         ((itx, irx), dtx, drx)

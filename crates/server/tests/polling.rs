@@ -2374,7 +2374,10 @@ async fn dead_session_records_do_not_block_silent_merge() {
             _ => {}
         }
     }
-    assert!(!saw_pending, "no modal for a workspace with no live terminal");
+    assert!(
+        !saw_pending,
+        "no modal for a workspace with no live terminal"
+    );
     assert!(saw_merged, "silent merge still emits the footer notice");
 }
 

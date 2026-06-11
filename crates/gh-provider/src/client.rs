@@ -3219,10 +3219,8 @@ mod tests {
     /// must now follow `pageInfo.endCursor` until exhaustion.
     #[tokio::test(flavor = "current_thread")]
     async fn single_query_follows_pagination_cursor() {
-        let page1: &'static str =
-            Box::leak(pr_search_page(1, true, "CUR1").into_boxed_str());
-        let page2: &'static str =
-            Box::leak(pr_search_page(2, false, "").into_boxed_str());
+        let page1: &'static str = Box::leak(pr_search_page(1, true, "CUR1").into_boxed_str());
+        let page2: &'static str = Box::leak(pr_search_page(2, false, "").into_boxed_str());
         let base_uri = spawn_sequenced_response_server(vec![page1, page2]).await;
         let client = make_client(&base_uri);
 

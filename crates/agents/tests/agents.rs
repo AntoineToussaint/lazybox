@@ -455,10 +455,7 @@ fn simple_pattern_agents_ignore_prompts_that_scrolled_past_the_tail() {
     let mut recent = b"some output\n".to_vec();
     recent.extend_from_slice(b"run rm -rf? [y/n]");
     assert_eq!(Codex.detect_state(&recent), Some(AgentState::InputNeeded));
-    assert_eq!(
-        generic.detect_state(&recent),
-        Some(AgentState::InputNeeded)
-    );
+    assert_eq!(generic.detect_state(&recent), Some(AgentState::InputNeeded));
 }
 
 #[test]

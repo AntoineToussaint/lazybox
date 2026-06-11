@@ -1432,7 +1432,8 @@ fn right_focus_z_undoes_mark_read_not_snooze_picker() {
         "z must emit UnmarkActivityRead for the just-marked row, got {cmds:#?}",
     );
     assert!(
-        !cmds.iter()
+        !cmds
+            .iter()
             .any(|c| matches!(c, Command::Snooze { .. } | Command::Unsnooze { .. })),
         "z must not touch snooze state from the activity pane",
     );

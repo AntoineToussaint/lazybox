@@ -222,7 +222,8 @@ impl DaemonPty {
         // thread, never a tokio worker. `blocking_recv` returns
         // `None` when every sender is dropped (the DaemonPty), which
         // is the thread's exit signal.
-        let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(WRITE_QUEUE_CAPACITY);
+        let (writer_tx, mut writer_rx) =
+            tokio::sync::mpsc::channel::<Vec<u8>>(WRITE_QUEUE_CAPACITY);
         std::thread::Builder::new()
             .name("lazybox-server-pty-writer".into())
             .spawn(move || {
@@ -396,8 +397,7 @@ impl DaemonPty {
         if self.finished.load(Ordering::Acquire) {
             return Err(PtyError::Closed);
         }
-        match tokio::time::timeout(WRITE_ENQUEUE_TIMEOUT, self.writer_tx.send(bytes.to_vec()))
-            .await
+        match tokio::time::timeout(WRITE_ENQUEUE_TIMEOUT, self.writer_tx.send(bytes.to_vec())).await
         {
             Ok(Ok(())) => Ok(()),
             // Writer thread gone (write error or PTY torn down).

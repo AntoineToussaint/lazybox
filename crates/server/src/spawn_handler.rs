@@ -1772,7 +1772,9 @@ async fn live_singleton(
     let candidates: Vec<TerminalId> = {
         let meta = config.terminal_meta.lock().await;
         meta.iter()
-            .filter(|(_, (sk, k))| sk == session_key && k.singleton_key().as_deref() == Some(target))
+            .filter(|(_, (sk, k))| {
+                sk == session_key && k.singleton_key().as_deref() == Some(target)
+            })
             .map(|(id, _)| *id)
             .collect()
     };
@@ -2109,8 +2111,7 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     // bare-key arm, answering a chooser with `1` left the stale
     // markers pinning `InputNeeded` until fresh output evicted them.
     let pressed_enter = bytes.contains(&b'\r') || bytes.contains(&b'\n');
-    let answered_chooser =
-        bytes.len() == 1 && matches!(bytes[0], b'1'..=b'9' | b'y' | b'n' | 0x1b);
+    let answered_chooser = bytes.len() == 1 && matches!(bytes[0], b'1'..=b'9' | b'y' | b'n' | 0x1b);
     if !pressed_enter && !answered_chooser {
         return;
     }
@@ -2490,8 +2491,8 @@ pub async fn handle_inject_prompt(
             // a transition racing the check isn't missed.
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             events = bus.subscribe();
-            blocked = states.lock().await.get(&id).copied()
-                == Some(lazybox_ipc::AgentState::InputNeeded);
+            blocked =
+                states.lock().await.get(&id).copied() == Some(lazybox_ipc::AgentState::InputNeeded);
         }
         if let Err(e) = backend.write(&backend_key, &paste).await {
             tracing::warn!("inject_prompt: backend.write(paste) failed: {e}");
@@ -3198,7 +3199,12 @@ mod tests {
 
         // Fresh hooks: only the corrections pass, whatever the cache.
         assert!(pty_reading_allowed(
-            None, InputNeeded, false, supersedes, fresh, staleness
+            None,
+            InputNeeded,
+            false,
+            supersedes,
+            fresh,
+            staleness
         ));
         assert!(pty_reading_allowed(
             None, Idle, true, supersedes, fresh, staleness
@@ -3215,7 +3221,12 @@ mod tests {
 
         // Stale hooks: full PTY fallback for everything…
         assert!(pty_reading_allowed(
-            None, Working, false, no_evidence, stale, staleness
+            None,
+            Working,
+            false,
+            no_evidence,
+            stale,
+            staleness
         ));
         assert!(pty_reading_allowed(
             Some(Working),

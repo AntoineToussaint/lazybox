@@ -118,7 +118,10 @@ fn init_tracing() -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         if let Err(e) = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600))
         {
-            eprintln!("warning: couldn't tighten {} to 0600: {e}", log_path.display());
+            eprintln!(
+                "warning: couldn't tighten {} to 0600: {e}",
+                log_path.display()
+            );
         }
     }
 
@@ -475,11 +478,10 @@ async fn run_embedded_realm(
         }
         ServerStatus::Stopped => {
             let factory_config = config.clone();
-            let service = SocketService::new(
-                lifecycle::socket_path(),
-                lifecycle::pid_path(),
-                move || factory_config.clone(),
-            );
+            let service =
+                SocketService::new(lifecycle::socket_path(), lifecycle::pid_path(), move || {
+                    factory_config.clone()
+                });
             let shutdown = service.shutdown_handle();
             let handle = tokio::spawn(async move {
                 if let Err(e) = service.run().await {

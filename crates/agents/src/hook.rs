@@ -63,7 +63,7 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 /// Map a hook event to the [`AgentState`] it implies, or `None` when
 /// the event carries no state change. `current` is the terminal's
 /// cached state at the moment the hook arrived — only the unrecognized-
-/// `Notification` case consults it (see [`notification_state`]).
+/// `Notification` case consults it (see `notification_state`).
 ///
 /// The mapping over the events Claude Code actually fires:
 ///   - a submitted prompt, tool use, compaction, and subagent

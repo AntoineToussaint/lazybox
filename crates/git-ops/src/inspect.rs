@@ -556,9 +556,11 @@ async fn uncommitted(worktree: &Path) -> bool {
 /// `git rev-list --count <range>` in `worktree`. `None` when the
 /// range doesn't resolve (missing ref, no upstream, not a repo).
 async fn rev_list_count(worktree: &Path, range: &str) -> Option<u64> {
-    let output = apply_git_env(Command::new("git").current_dir(worktree).args([
-        "rev-list", "--count", range,
-    ]))
+    let output = apply_git_env(
+        Command::new("git")
+            .current_dir(worktree)
+            .args(["rev-list", "--count", range]),
+    )
     .output()
     .await
     .ok()?;

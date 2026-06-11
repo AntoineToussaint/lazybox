@@ -631,10 +631,7 @@ fn shift_pageup_scrolls_local_scrollback_without_pty_writes() {
         "Shift-PageUp must move the viewport into scrollback"
     );
 
-    let _ = t.handle_key(
-        KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT),
-        &mut cmds,
-    );
+    let _ = t.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT), &mut cmds);
     assert!(cmds.is_empty(), "scroll keys never reach the PTY: {cmds:?}");
     assert_eq!(
         t.scrollbar_summary().expect("scrollbar state"),

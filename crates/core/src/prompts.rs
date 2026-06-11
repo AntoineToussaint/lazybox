@@ -35,7 +35,8 @@ fn neutralize_fence_close(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i..].len() >= NEEDLE.len() && bytes[i..i + NEEDLE.len()].eq_ignore_ascii_case(NEEDLE)
+        if bytes[i..].len() >= NEEDLE.len()
+            && bytes[i..i + NEEDLE.len()].eq_ignore_ascii_case(NEEDLE)
         {
             out.push_str("<\u{2215}untrusted-content");
             i += NEEDLE.len();

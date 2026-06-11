@@ -802,9 +802,7 @@ impl TerminalStack {
     ) -> bool {
         self.terminals
             .values()
-            .filter(|s| {
-                &s.session_key == session_key && matches!(s.kind, TerminalKind::Agent(_))
-            })
+            .filter(|s| &s.session_key == session_key && matches!(s.kind, TerminalKind::Agent(_)))
             .all(|s| s.agent_state == state)
     }
 

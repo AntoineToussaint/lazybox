@@ -381,7 +381,9 @@ mod tests {
     fn plan_skips_state_advance_when_no_full_sweep() {
         let mut state = RoundRobinState::default();
         let now = Instant::now();
-        state.cursor.insert("a/a".into(), now - Duration::from_secs(60));
+        state
+            .cursor
+            .insert("a/a".into(), now - Duration::from_secs(60));
         state.tick = 3;
 
         let pick = plan_round_robin_tick(&mut state, /*will_full_sweep=*/ false, 3, now);

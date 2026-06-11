@@ -2778,7 +2778,9 @@ impl UpsertContext {
                     continue;
                 };
                 for id in &pr.closes_issues {
-                    closes_index.entry(id.clone()).or_insert_with(|| ws.key.clone());
+                    closes_index
+                        .entry(id.clone())
+                        .or_insert_with(|| ws.key.clone());
                 }
             }
         }

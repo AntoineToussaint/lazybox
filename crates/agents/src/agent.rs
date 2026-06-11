@@ -554,7 +554,10 @@ mod tests {
     fn claude_build_hook_settings_wires_command() {
         let claude = Claude;
         let settings = claude
-            .build_hook_settings("lazybox hook-ingest --backend-key lazybox-ws-claude-1-7", None)
+            .build_hook_settings(
+                "lazybox hook-ingest --backend-key lazybox-ws-claude-1-7",
+                None,
+            )
             .expect("claude supports hooks");
         assert_eq!(
             settings["hooks"]["Stop"][0]["hooks"][0]["command"],

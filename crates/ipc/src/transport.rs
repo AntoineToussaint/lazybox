@@ -157,7 +157,10 @@ mod tests {
     use super::*;
 
     fn temp_sock(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("lazybox-transport-{tag}-{}.sock", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "lazybox-transport-{tag}-{}.sock",
+            std::process::id()
+        ))
     }
 
     #[tokio::test]

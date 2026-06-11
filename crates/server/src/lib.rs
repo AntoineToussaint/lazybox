@@ -1269,9 +1269,7 @@ impl Server {
         // shutdown hostage, so anything still running after 5s is
         // abandoned (with a breadcrumb).
         if !mutations.is_empty() {
-            let drain = async {
-                while mutations.join_next().await.is_some() {}
-            };
+            let drain = async { while mutations.join_next().await.is_some() {} };
             if tokio::time::timeout(std::time::Duration::from_secs(5), drain)
                 .await
                 .is_err()

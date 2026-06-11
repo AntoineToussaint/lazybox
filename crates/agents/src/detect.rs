@@ -450,7 +450,7 @@ pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
 
 /// Whether a `Working` reading carries on-screen proof the agent moved
 /// PAST a dialog: an affirmative live status anchor (see
-/// [`working_status_pos`]) strictly more recent than the most recent
+/// `working_status_pos`) strictly more recent than the most recent
 /// dialog marker still in the buffer.
 ///
 /// `false` when there's no working anchor — or when the buffer holds no
@@ -710,7 +710,7 @@ const WORKING_SPINNER_GLYPHS: &[char] = &['✢', '✳', '✶', '✻', '✽', '�
 /// `✦ Gusting… (2m 2s · ↓ 7.2k tokens · thinking some more)`):
 /// a spinner glyph plus the parenthesized elapsed timer plus the token
 /// counter, all on one line of the compacted buffer. `esc to interrupt`
-/// lines are matched separately in [`working_status_pos`].
+/// lines are matched separately in `working_status_pos`.
 fn is_live_counter_line(line: &str) -> bool {
     line.contains('·')
         && line.contains("tokens")

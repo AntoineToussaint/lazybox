@@ -453,7 +453,7 @@ impl Workspace {
         // seen tail (`activity.len() - seen_count`). Without this, an
         // undo immediately after a snapshot-driven seen bump would
         // not restore the unread state. Shrinking the tail to start
-        // below `index` also un-seens every newer item that shared
+        // below `index` also unmarks every newer item that shared
         // the tail, so those displaced indices get explicit read
         // marks — only the target index becomes unread.
         let auto_seen_threshold = self.activity.len().saturating_sub(self.seen_count);

@@ -572,10 +572,7 @@ mod handshake {
         client_handshake(&mut crd, &mut cwr)
             .await
             .expect("client handshake");
-        server_task
-            .await
-            .expect("join")
-            .expect("server handshake");
+        server_task.await.expect("join").expect("server handshake");
     }
 
     #[tokio::test]

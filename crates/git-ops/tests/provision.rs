@@ -191,10 +191,7 @@ async fn nonempty_invalid_worktree_dir_errors_loudly() {
         .checkout_at(&wt_path, "acme", "occupied", "main")
         .await
         .expect_err("a dir with foreign content must not be silently reused or deleted");
-    assert!(
-        err.to_string().contains("not a worktree"),
-        "got: {err}"
-    );
+    assert!(err.to_string().contains("not a worktree"), "got: {err}");
     assert!(
         wt_path.join("user-data.txt").exists(),
         "foreign content untouched"

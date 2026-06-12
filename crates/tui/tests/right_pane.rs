@@ -8,6 +8,9 @@
 //! - Comment navigation (j/k/g/G, bounds).
 //! - Event handling (WorkspaceUpserted refreshes the current row).
 //! - Render: header (state + branch only) and activity list.
+// Tests may block (sleeps to cross latch windows); the crate-wide
+// blocking-call ban in clippy.toml targets the run loop.
+#![allow(clippy::disallowed_methods)]
 
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

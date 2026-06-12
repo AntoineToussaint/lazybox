@@ -1227,6 +1227,9 @@ fn empty_repos_screen(parent_label: &str) -> Screen {
     }
 }
 
+// Tests may block (tokio::test bodies run via block_on); the
+// crate-wide blocking-call ban in clippy.toml targets the run loop.
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;

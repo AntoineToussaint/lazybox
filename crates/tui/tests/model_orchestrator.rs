@@ -6,6 +6,9 @@
 //! The tests use `Model::new_for_test` (a cfg(test)-only constructor
 //! that swaps `CrosstermTerminalAdapter` for `TestTerminalAdapter`)
 //! so they don't need a real terminal or raw mode.
+// Tests may block (sleeps to cross latch windows); the crate-wide
+// blocking-call ban in clippy.toml targets the run loop.
+#![allow(clippy::disallowed_methods)]
 
 use chrono::Utc;
 use crossterm::event::{KeyModifiers as CtKeyModifiers, MouseButton, MouseEvent, MouseEventKind};

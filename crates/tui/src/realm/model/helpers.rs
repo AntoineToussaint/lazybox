@@ -8,7 +8,17 @@
 //!   overrides).
 //! - **Clipboard**: `emit_clipboard_copy` (OSC 52).
 //! - **Run loop entry points**: `run_with_client`, `run_loop_with_model`.
+//! - **Loop-health guards**: `should_drop_stale_input` /
+//!   `StaleInputTally` (bounded input replay after a stall),
+//!   `LoopWatchdog` (frame-budget overrun logging),
+//!   `BacklogMonitor` (daemon-event backlog logging).
 //! - **Misc encoders**: `base64_encode` (OSC 52 payload).
+//!
+//! The run loop is single-threaded: dispatch, update, and render all
+//! happen here, so any blocking call freezes the whole UI. Blocking
+//! primitives are banned crate-wide via `crates/tui/clippy.toml`
+//! (`disallowed-methods`); the unified idle wait and the input reader
+//! thread are the only sanctioned exceptions.
 //!
 //! Most consumers are siblings (`keys.rs`, `events.rs`, the `view`
 //! and `update` methods on `Model`). Co-locating the helpers here
@@ -485,10 +495,133 @@ const POLL_IDLE: Duration = Duration::from_millis(16);
 /// did when the loop read crossterm directly.
 const INPUT_CHANNEL_CAP: usize = 1024;
 
+/// A host-terminal event stamped with when the reader thread pulled it
+/// off the tty. The run loop normally consumes input within a frame
+/// (~16ms), so `read_at.elapsed()` at dispatch time is effectively the
+/// time the event sat buffered behind a stalled loop — the signal the
+/// stale-input guard keys on.
+pub(super) struct TimedInput {
+    pub(super) read_at: std::time::Instant,
+    pub(super) event: crossterm::event::Event,
+}
+
+/// Age past which a buffered key or mouse event is dropped instead of
+/// dispatched. Under a healthy loop input is consumed within ~one
+/// frame, so an event this old means the loop thread was blocked the
+/// whole time the user was pressing keys and clicking at a frozen
+/// screen. Replaying that backlog fires every queued action in a
+/// burst against state the user never saw — including a buffered
+/// quit chord. Generous enough that ordinary type-ahead during a
+/// briefly busy loop is never touched.
+pub(super) const STALE_INPUT_MAX_AGE: Duration = Duration::from_millis(500);
+
+/// Whether a buffered input event should be discarded as stale.
+/// Keys and mouse events are positional/stateful — they targeted UI
+/// the user was looking at when they fired, and that UI is gone after
+/// a stall. Paste stays: it's deliberate content, not an action, and
+/// dropping it silently loses user data. Focus/resize stay: they
+/// describe *current* terminal state regardless of when they fired.
+pub(super) fn should_drop_stale_input(event: &crossterm::event::Event, age: Duration) -> bool {
+    if age < STALE_INPUT_MAX_AGE {
+        return false;
+    }
+    matches!(
+        event,
+        crossterm::event::Event::Key(_) | crossterm::event::Event::Mouse(_)
+    )
+}
+
+/// Accumulates stale-input drops across a recovery burst so the
+/// episode is reported once (one warn line, one footer notice) instead
+/// of once per dropped event. `note` during the burst; `flush` when a
+/// fresh event or idle tick shows the backlog has cleared.
+#[derive(Default)]
+pub(super) struct StaleInputTally {
+    dropped: usize,
+    oldest: Duration,
+}
+
+impl StaleInputTally {
+    pub(super) fn note(&mut self, age: Duration) {
+        self.dropped += 1;
+        self.oldest = self.oldest.max(age);
+    }
+
+    /// Take the accumulated (count, oldest age) if any events were
+    /// dropped since the last flush.
+    pub(super) fn flush(&mut self) -> Option<(usize, Duration)> {
+        if self.dropped == 0 {
+            return None;
+        }
+        let report = (self.dropped, self.oldest);
+        self.dropped = 0;
+        self.oldest = Duration::ZERO;
+        Some(report)
+    }
+}
+
+/// Budget for one run-loop iteration's work phase (drain + update +
+/// render + dispatch, everything except the idle wait). Anything that
+/// can wait must run as an async task and post back — an iteration
+/// past this bound means something blocked the loop thread, which is
+/// always a bug. The watchdog turns those from "the UI felt frozen"
+/// field reports into warn lines in `/tmp/lazybox.log`.
+pub(super) const FRAME_BUDGET: Duration = Duration::from_millis(50);
+
+/// Minimum spacing between watchdog warn lines. A pathological case
+/// (every iteration slow) logs a summary once a second instead of
+/// flooding the log at frame rate.
+const WATCHDOG_WARN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Flags run-loop iterations that blow [`FRAME_BUDGET`]. Logging
+/// only — it never throttles the loop, it makes a freeze observable
+/// with its duration instead of only by feel.
+#[derive(Default)]
+pub(super) struct LoopWatchdog {
+    last_warn_at: Option<std::time::Instant>,
+    /// Over-budget iterations swallowed since the last warn line.
+    suppressed: u32,
+    /// Worst over-budget iteration among the suppressed ones.
+    worst_suppressed: Duration,
+}
+
+impl LoopWatchdog {
+    /// Record one iteration's work-phase duration. Returns whether a
+    /// warning was emitted (the return value exists for tests).
+    pub(super) fn observe(&mut self, elapsed: Duration, now: std::time::Instant) -> bool {
+        if elapsed <= FRAME_BUDGET {
+            return false;
+        }
+        let due = self
+            .last_warn_at
+            .is_none_or(|at| now.duration_since(at) >= WATCHDOG_WARN_INTERVAL);
+        if !due {
+            self.suppressed = self.suppressed.saturating_add(1);
+            self.worst_suppressed = self.worst_suppressed.max(elapsed);
+            return false;
+        }
+        tracing::warn!(
+            iteration_ms = elapsed.as_millis() as u64,
+            budget_ms = FRAME_BUDGET.as_millis() as u64,
+            suppressed = self.suppressed,
+            worst_suppressed_ms = self.worst_suppressed.as_millis() as u64,
+            "run-loop iteration exceeded the frame budget — something \
+             blocked the UI thread (input, rendering, and daemon events \
+             were all frozen for this long)"
+        );
+        self.last_warn_at = Some(now);
+        self.suppressed = 0;
+        self.worst_suppressed = Duration::ZERO;
+        true
+    }
+}
+
 /// What woke the run loop's unified idle wait.
 pub(super) enum Wake {
-    /// Host-terminal event from the crossterm reader thread.
-    Input(crossterm::event::Event),
+    /// Host-terminal event from the crossterm reader thread, stamped
+    /// with its read time so the loop can drop it if it went stale
+    /// behind a stall.
+    Input(TimedInput),
     /// One daemon event pulled off `client.rx` by the wait itself.
     /// Carried into the next iteration's [`drain_daemon_events`] as
     /// the head of the batch so daemon-stream order is preserved.
@@ -522,6 +655,11 @@ impl LoopRuntime {
         }
     }
 
+    // The ONE sanctioned block_on in this crate: the unified idle
+    // wait parks here until input / a daemon event / the heartbeat.
+    // Everything else must stay off the loop thread — see
+    // crates/tui/clippy.toml.
+    #[allow(clippy::disallowed_methods)]
     fn block_on<F: std::future::Future>(&self, fut: F) -> F::Output {
         match self {
             Self::Handle(handle) => handle.block_on(fut),
@@ -543,15 +681,24 @@ impl LoopRuntime {
 /// (F8 / Alt-s), bracketed paste, and the shutdown restore sequence:
 /// those are all stdout writes / termios changes on the main thread,
 /// independent of the blocked stdin read.
-fn spawn_input_reader() -> anyhow::Result<tokio::sync::mpsc::Receiver<crossterm::event::Event>> {
+fn spawn_input_reader() -> anyhow::Result<tokio::sync::mpsc::Receiver<TimedInput>> {
     let (tx, rx) = tokio::sync::mpsc::channel(INPUT_CHANNEL_CAP);
     std::thread::Builder::new()
         .name("lazybox-input".into())
         .spawn(move || {
             loop {
-                match crossterm::event::read() {
+                // The dedicated reader thread is the one place the
+                // blocking crossterm read is allowed — see
+                // crates/tui/clippy.toml.
+                #[allow(clippy::disallowed_methods)]
+                let read = crossterm::event::read();
+                match read {
                     Ok(event) => {
-                        if tx.blocking_send(event).is_err() {
+                        let timed = TimedInput {
+                            read_at: std::time::Instant::now(),
+                            event,
+                        };
+                        if tx.blocking_send(timed).is_err() {
                             // Run loop is gone — nobody to deliver to.
                             break;
                         }
@@ -588,7 +735,7 @@ fn spawn_input_reader() -> anyhow::Result<tokio::sync::mpsc::Receiver<crossterm:
 /// not a busy spin.
 pub(super) fn wait_for_wake(
     rt: &LoopRuntime,
-    input_rx: &mut tokio::sync::mpsc::Receiver<crossterm::event::Event>,
+    input_rx: &mut tokio::sync::mpsc::Receiver<TimedInput>,
     input_open: &mut bool,
     daemon_rx: &mut tokio::sync::mpsc::Receiver<IpcEvent>,
     daemon_open: &mut bool,
@@ -624,6 +771,11 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
     // Daemon event the previous idle wait woke on — head of the next
     // drain batch (see `Wake::Daemon`).
     let mut carried: Option<IpcEvent> = None;
+    let mut stale_tally = StaleInputTally::default();
+    let mut watchdog = LoopWatchdog::default();
+    // Start of the current iteration's work phase — reset right after
+    // each wait so the watchdog never counts time spent idle.
+    let mut work_start = std::time::Instant::now();
     while !model.quit {
         // 1. Drain inbound daemon events — BOUNDED so heavy PTY output
         // can never starve keyboard input (see `drain_daemon_events`).
@@ -701,9 +853,15 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         // any pending key non-blocking and loop straight back to
         // drain the rest. That keeps output flowing at full speed
         // without ever blocking the keyboard behind it.
+        //
+        // The work phase ends here — everything past this line is the
+        // blocking wait. An over-budget reading means some handler or
+        // render above stalled the thread; it lands in the log with
+        // its duration instead of surfacing only as a frozen UI.
+        watchdog.observe(work_start.elapsed(), std::time::Instant::now());
         let wake = if had_backlog {
             match input_rx.try_recv() {
-                Ok(event) => Wake::Input(event),
+                Ok(timed) => Wake::Input(timed),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Wake::Tick,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     input_open = false;
@@ -720,13 +878,52 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                 POLL_IDLE,
             )
         };
+        work_start = std::time::Instant::now();
         match wake {
-            Wake::Input(event) => dispatch_event(model, event),
-            Wake::Daemon(event) => carried = Some(*event),
-            Wake::Tick => {}
+            Wake::Input(timed) => {
+                // Input that sat buffered while the loop was stalled
+                // is discarded instead of replayed — a recovered UI
+                // must never burst-fire seconds of queued clicks and
+                // keystrokes (least of all a buffered quit chord).
+                let age = timed.read_at.elapsed();
+                if should_drop_stale_input(&timed.event, age) {
+                    stale_tally.note(age);
+                } else {
+                    report_stale_drops(model, &mut stale_tally);
+                    dispatch_event(model, timed.event);
+                }
+            }
+            // Any non-input wake means the buffered-input burst is
+            // over (`biased` drains input first) — report the episode
+            // now rather than deferring it behind a busy agent stream.
+            Wake::Daemon(event) => {
+                report_stale_drops(model, &mut stale_tally);
+                carried = Some(*event);
+            }
+            Wake::Tick => report_stale_drops(model, &mut stale_tally),
         }
     }
     Ok(())
+}
+
+/// Surface a finished stale-drop episode: one warn line for the log,
+/// one footer notice so the user knows their queued input was
+/// deliberately discarded (and why nothing "happened" when the UI
+/// came back). No-op while the tally is empty.
+fn report_stale_drops<T: TerminalAdapter>(model: &mut Model<T>, tally: &mut StaleInputTally) {
+    if let Some((dropped, oldest)) = tally.flush() {
+        tracing::warn!(
+            dropped,
+            oldest_ms = oldest.as_millis() as u64,
+            "dropped input events buffered while the run loop was \
+             stalled — replaying them would burst-fire actions against \
+             state the user never saw"
+        );
+        model.flash_hint(format!(
+            "UI stalled — dropped {dropped} buffered input event{}",
+            if dropped == 1 { "" } else { "s" }
+        ));
+    }
 }
 
 /// Route one crossterm event to the right handler. Extracted from

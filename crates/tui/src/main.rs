@@ -195,6 +195,11 @@ fn wants_version(args: &[String]) -> bool {
 
 // `pub` so the `lb` alias bin (src/bin/lb.rs) can call this via a
 // `#[path]` include; harmless for the binary's own entrypoint.
+//
+// The disallowed-methods allow covers the `Runtime::block_on` that
+// `#[tokio::main]` expands to — the process entrypoint standing up
+// the runtime, not run-loop work (see clippy.toml).
+#[allow(clippy::disallowed_methods)]
 #[tokio::main]
 pub async fn main() -> anyhow::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();

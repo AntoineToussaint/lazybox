@@ -508,6 +508,9 @@ fn resolve_token(yaml: Option<&str>, env_key: &str) -> Option<String> {
     yaml.filter(|s| !s.trim().is_empty()).map(str::to_string)
 }
 
+// Tests may block (tokio::test bodies run via block_on); the
+// crate-wide blocking-call ban in clippy.toml targets the run loop.
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;

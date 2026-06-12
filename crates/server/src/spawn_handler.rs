@@ -1069,6 +1069,9 @@ pub async fn handle_spawn(
                 elapsed_ms = t0_for_inject.elapsed().as_millis(),
                 "initial_prompt: inject window cleared — writing paste to backend",
             );
+            // Subscribed before the paste write so the output chunks
+            // the paste triggers are observable by the settle gate.
+            let output_events = submit.is_some().then(|| config_for_inject.bus.subscribe());
             if let Err(e) = backend.write(&backend_key, &paste).await {
                 tracing::warn!(
                     terminal_id = ?id,
@@ -1078,13 +1081,14 @@ pub async fn handle_spawn(
             }
             // Paste/submit split. Agents like Claude Code batch rapid
             // byte arrival as a paste; Enter inside that batch is a
-            // soft line break, not a submit. Sending the submit
-            // keystroke after a beat lets the paste settle so Enter
-            // fires as its own keystroke. Agents that don't need a
-            // separate submit (the default trait impl) return None
-            // here and we skip the second write entirely.
-            if let Some(submit_bytes) = submit {
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // soft line break, not a submit. Gate the submit keystroke
+            // on the paste's repaint going quiet so Enter fires as its
+            // own keystroke. Agents that don't need a separate submit
+            // (the default trait impl) return None here and we skip
+            // the second write entirely.
+            if let (Some(submit_bytes), Some(mut output_events)) = (submit, output_events) {
+                await_paste_settled(&mut output_events, id, PASTE_QUIET_WINDOW, PASTE_SETTLE_CAP)
+                    .await;
                 let confirm = prepare_submit_confirmation(&config_for_inject, id).await;
                 if let Err(e) = backend.write(&backend_key, &submit_bytes).await {
                     tracing::warn!(
@@ -1093,16 +1097,14 @@ pub async fn handle_spawn(
                     );
                     return;
                 }
-                if let Some(confirm) = confirm {
-                    confirm_prompt_submission(
-                        confirm,
-                        &*backend,
-                        &backend_key,
-                        &submit_bytes,
-                        SUBMIT_CONFIRM_DEADLINE,
-                    )
-                    .await;
-                }
+                confirm_prompt_submission(
+                    confirm,
+                    &*backend,
+                    &backend_key,
+                    &submit_bytes,
+                    SUBMIT_CONFIRM_DEADLINE,
+                )
+                .await;
             }
         });
     }
@@ -2215,12 +2217,31 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
 /// prompt from leaking the waiter task indefinitely.
 const INJECT_INPUT_DEADLINE: Duration = Duration::from_secs(120);
 
-/// How long the inject paths wait for proof an injected prompt's
-/// submit actually registered — a `UserPromptSubmit` hook or a
-/// `Working` transition — before resending the Enter keystroke once.
+/// Base wait for proof an injected prompt's submit actually
+/// registered — a `UserPromptSubmit` hook or a `Working` transition.
 /// Claude fires `UserPromptSubmit` synchronously with the submit, so
-/// in the healthy case this resolves in well under a second.
+/// in the healthy case this resolves in well under a second. Each
+/// resend attempt in [`confirm_prompt_submission`] waits one more
+/// multiple of this, so a cold start where Claude is still painting
+/// gets progressively more slack instead of a hail of Enters.
 const SUBMIT_CONFIRM_DEADLINE: Duration = Duration::from_secs(3);
+
+/// Enter resends after the initial submit keystroke before the
+/// confirm loop gives up loudly.
+const SUBMIT_RESEND_LIMIT: u32 = 3;
+
+/// Quiet window the paste-settle gate requires between output chunks
+/// before the submit keystroke is written. While the agent is still
+/// repainting from the paste, an Enter can coalesce into the batch and
+/// become a soft line break; once output has been quiet this long, the
+/// paste has visibly settled and Enter lands as its own keystroke.
+const PASTE_QUIET_WINDOW: Duration = Duration::from_millis(250);
+
+/// Upper bound on the paste-settle wait. A busy agent (boot spinner,
+/// streaming ticker) may never go fully quiet; past this cap the
+/// submit is written anyway and the confirm loop's resends carry the
+/// recovery instead.
+const PASTE_SETTLE_CAP: Duration = Duration::from_secs(2);
 
 /// Wait plumbing for [`confirm_prompt_submission`], registered BEFORE
 /// the submit keystroke is written so a fast hook can't race the
@@ -2235,47 +2256,46 @@ struct SubmitConfirmation {
             std::collections::HashMap<TerminalId, std::sync::Arc<tokio::sync::Notify>>,
         >,
     >,
+    bus: tokio::sync::broadcast::Sender<Event>,
 }
 
-/// Register the proof-of-submission watchers for `terminal_id`.
-/// Returns `None` when the terminal isn't hook-driven: without hooks
-/// there's no submission evidence to wait for, so those terminals keep
-/// the existing fire-and-forget submit.
+/// Register the proof-of-submission watchers for `terminal_id`. Every
+/// agent terminal gets one: hook-driven terminals confirm via the
+/// `UserPromptSubmit` signal, and terminals without hooks still emit
+/// `Working` transitions on the bus from PTY screen-scraping
+/// (`maybe_emit_state_change`), so there is always evidence to wait
+/// for.
 async fn prepare_submit_confirmation(
     config: &ServerConfig,
     terminal_id: TerminalId,
-) -> Option<SubmitConfirmation> {
-    if !config
-        .hook_driven_terminals
-        .lock()
-        .await
-        .contains_key(&terminal_id)
-    {
-        return None;
-    }
+) -> SubmitConfirmation {
     let signal = std::sync::Arc::new(tokio::sync::Notify::new());
     config
         .prompt_submit_signals
         .lock()
         .await
         .insert(terminal_id, signal.clone());
-    Some(SubmitConfirmation {
+    SubmitConfirmation {
         terminal_id,
         signal,
         events: config.bus.subscribe(),
         signals_map: config.prompt_submit_signals.clone(),
-    })
+        bus: config.bus.clone(),
+    }
 }
 
-/// After the paste + Enter on a hook-driven terminal, wait up to
-/// `deadline` for evidence the prompt actually entered Claude's turn:
-/// the `UserPromptSubmit` hook (forwarded by `handle_ingest_hook`
-/// through the registered signal) or a `Working` transition on the
-/// bus. If neither arrives, the prompt is almost certainly parked in
-/// the composer — the paste landed but the Enter was swallowed as a
-/// soft line break (issue #122) — so the submit keystroke is resent
-/// exactly ONCE. Only the Enter, never the prompt body: the body did
-/// land, and resending it would duplicate the instruction.
+/// After the paste + Enter, wait for evidence the prompt actually
+/// entered the agent's turn: the `UserPromptSubmit` hook (forwarded by
+/// `handle_ingest_hook` through the registered signal) or a `Working`
+/// transition on the bus. If neither arrives, the prompt is almost
+/// certainly parked in the composer — the paste landed but the Enter
+/// was swallowed as a soft line break (issue #122) — so the submit
+/// keystroke is resent, up to [`SUBMIT_RESEND_LIMIT`] times with a
+/// linearly growing wait per attempt. Only the Enter, never the prompt
+/// body: the body did land, and resending it would duplicate the
+/// instruction. When every attempt goes unconfirmed the give-up is
+/// loud — a user-visible error on the bus, not just a log line — so a
+/// parked prompt can't silently strand the agent.
 async fn confirm_prompt_submission(
     mut confirm: SubmitConfirmation,
     backend: &dyn crate::backend::SessionBackend,
@@ -2283,13 +2303,40 @@ async fn confirm_prompt_submission(
     submit_bytes: &[u8],
     deadline: Duration,
 ) {
-    let confirmed = await_submit_evidence(
-        &confirm.signal,
-        &mut confirm.events,
-        confirm.terminal_id,
-        deadline,
-    )
-    .await;
+    let mut resends = 0u32;
+    let confirmed = loop {
+        let wait = deadline * (resends + 1);
+        if await_submit_evidence(
+            &confirm.signal,
+            &mut confirm.events,
+            confirm.terminal_id,
+            wait,
+        )
+        .await
+        {
+            break true;
+        }
+        if resends >= SUBMIT_RESEND_LIMIT {
+            break false;
+        }
+        resends += 1;
+        tracing::info!(
+            terminal_id = ?confirm.terminal_id,
+            "no UserPromptSubmit / Working within {wait:?} of the submit — \
+             prompt likely parked in the composer; resending Enter \
+             ({resends}/{SUBMIT_RESEND_LIMIT})",
+        );
+        if let Err(e) = backend.write(backend_key, submit_bytes).await {
+            // The terminal is gone (or going) — nothing left to
+            // confirm, and the loud give-up below would misreport a
+            // parked prompt.
+            tracing::warn!(
+                terminal_id = ?confirm.terminal_id,
+                "submit resend: backend.write failed: {e}"
+            );
+            break true;
+        }
+    };
     // Remove the registration only if it's still OURS. A second
     // injection on the same terminal replaces the map entry with its
     // own `Notify`; removing blindly here would delete THAT signal,
@@ -2307,16 +2354,50 @@ async fn confirm_prompt_submission(
     if confirmed {
         return;
     }
-    tracing::info!(
+    tracing::warn!(
         terminal_id = ?confirm.terminal_id,
-        "no UserPromptSubmit / Working within {deadline:?} of the submit — \
-         prompt likely parked in the composer; resending Enter once",
+        "prompt submit never confirmed after {SUBMIT_RESEND_LIMIT} Enter resends — \
+         giving up; the prompt is likely parked in the composer",
     );
-    if let Err(e) = backend.write(backend_key, submit_bytes).await {
-        tracing::warn!(
-            terminal_id = ?confirm.terminal_id,
-            "submit resend: backend.write failed: {e}"
-        );
+    let _ = confirm.bus.send(Event::provider_error_retryable(
+        "inject_prompt",
+        "the injected prompt looks parked unsubmitted in the agent's composer — \
+         open the terminal and press Enter to start it",
+    ));
+}
+
+/// Block until `terminal_id`'s output has been quiet for `quiet`, or
+/// `cap` elapses — whichever comes first. Called between the paste
+/// write and the submit keystroke so Enter is gated on evidence the
+/// paste batch settled (the repaint it triggers has finished) instead
+/// of a fixed sleep. `events` must be subscribed BEFORE the paste
+/// write so the chunks it produces are observable here.
+async fn await_paste_settled(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    terminal_id: TerminalId,
+    quiet: Duration,
+    cap: Duration,
+) {
+    let cap_at = tokio::time::Instant::now() + cap;
+    let mut quiet_at = tokio::time::Instant::now() + quiet;
+    loop {
+        match tokio::time::timeout_at(quiet_at.min(cap_at), events.recv()).await {
+            // Quiet window or the cap elapsed — settled either way.
+            Err(_) => return,
+            Ok(Ok(Event::TerminalOutput {
+                terminal_id: tid, ..
+            })) if tid == terminal_id => {
+                quiet_at = tokio::time::Instant::now() + quiet;
+            }
+            Ok(Ok(_)) => {}
+            // Chunks were dropped — can't tell when output stopped, so
+            // conservatively restart the quiet window (the cap still
+            // bounds the total wait).
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                quiet_at = tokio::time::Instant::now() + quiet;
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return,
+        }
     }
 }
 
@@ -2527,30 +2608,31 @@ pub async fn handle_inject_prompt(
             blocked =
                 states.lock().await.get(&id).copied() == Some(lazybox_ipc::AgentState::InputNeeded);
         }
+        // Subscribed before the paste write so the output chunks the
+        // paste triggers are observable by the settle gate.
+        let output_events = submit.is_some().then(|| bus.subscribe());
         if let Err(e) = backend.write(&backend_key, &paste).await {
             tracing::warn!("inject_prompt: backend.write(paste) failed: {e}");
             return;
         }
-        // 200ms gap so the paste batch settles before Enter fires
+        // Gate the submit keystroke on the paste's repaint going quiet
         // (Claude treats rapid bytes as a paste — Enter inside the
         // paste is a soft line break).
-        if let Some(submit_bytes) = submit {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        if let (Some(submit_bytes), Some(mut output_events)) = (submit, output_events) {
+            await_paste_settled(&mut output_events, id, PASTE_QUIET_WINDOW, PASTE_SETTLE_CAP).await;
             let confirm = prepare_submit_confirmation(&config_for_confirm, id).await;
             if let Err(e) = backend.write(&backend_key, &submit_bytes).await {
                 tracing::warn!("inject_prompt: backend.write(submit) failed: {e}");
                 return;
             }
-            if let Some(confirm) = confirm {
-                confirm_prompt_submission(
-                    confirm,
-                    &*backend,
-                    &backend_key,
-                    &submit_bytes,
-                    SUBMIT_CONFIRM_DEADLINE,
-                )
-                .await;
-            }
+            confirm_prompt_submission(
+                confirm,
+                &*backend,
+                &backend_key,
+                &submit_bytes,
+                SUBMIT_CONFIRM_DEADLINE,
+            )
+            .await;
         }
     });
 }
@@ -3400,32 +3482,28 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4245);
-        config
-            .hook_driven_terminals
-            .lock()
-            .await
-            .insert(id, std::time::Instant::now());
 
-        let first = prepare_submit_confirmation(&config, id).await.unwrap();
+        let first = prepare_submit_confirmation(&config, id).await;
         // A second injection registers its own signal, replacing the
         // first's map entry.
-        let second = prepare_submit_confirmation(&config, id).await.unwrap();
+        let second = prepare_submit_confirmation(&config, id).await;
 
-        // The first times out (no evidence) → resends Enter once — but
-        // must NOT remove the second's registration.
+        // The first exhausts its retries (no evidence) — but must NOT
+        // remove the second's registration.
         confirm_prompt_submission(
             first,
             &*config.backend,
             &key,
             b"\r",
-            Duration::from_millis(50),
+            Duration::from_millis(10),
         )
         .await;
         assert!(
             config.prompt_submit_signals.lock().await.contains_key(&id),
             "first confirmation must not remove the second's signal"
         );
-        assert_eq!(mock.writes_for(&key).await, vec![b"\r".to_vec()]);
+        let resends = mock.writes_for(&key).await.len();
+        assert_eq!(resends, SUBMIT_RESEND_LIMIT as usize);
 
         // The second's signal still works: a UserPromptSubmit-style
         // notify suppresses its resend, and its cleanup removes its own
@@ -3442,12 +3520,12 @@ mod tests {
             &*config.backend,
             &key,
             b"\r",
-            Duration::from_millis(50),
+            Duration::from_millis(10),
         )
         .await;
         assert_eq!(
             mock.writes_for(&key).await.len(),
-            1,
+            resends,
             "confirmed second submit must not resend"
         );
         assert!(
@@ -3483,24 +3561,12 @@ mod tests {
         assert!(next.0 > id.0);
     }
 
-    /// Without hooks there's nothing to confirm a submit against — the
-    /// inject paths must keep their fire-and-forget behavior.
-    #[tokio::test]
-    async fn prepare_submit_confirmation_skips_non_hook_driven_terminals() {
-        let (config, _mock) = ServerConfig::in_memory_with_mock();
-        assert!(
-            prepare_submit_confirmation(&config, TerminalId(7))
-                .await
-                .is_none()
-        );
-    }
-
-    /// The #122 fix: a hook-driven terminal that produces neither a
+    /// The #48 fix: a terminal that produces neither a
     /// `UserPromptSubmit` hook nor a `Working` transition after the
-    /// submit gets exactly one Enter resend — the prompt is parked in
-    /// the composer and only the keystroke is missing.
+    /// submit gets a bounded run of Enter resends, then a user-visible
+    /// give-up on the bus — never a silently parked prompt.
     #[tokio::test]
-    async fn silent_submit_on_hook_driven_terminal_resends_enter_once() {
+    async fn unconfirmed_submit_resends_enter_with_backoff_then_gives_up_loudly() {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let key = config
             .backend
@@ -3508,32 +3574,36 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4242);
-        config
-            .hook_driven_terminals
-            .lock()
-            .await
-            .insert(id, std::time::Instant::now());
 
-        let confirm = prepare_submit_confirmation(&config, id)
-            .await
-            .expect("hook-driven terminal must get a confirmation");
+        let confirm = prepare_submit_confirmation(&config, id).await;
+        let mut bus_rx = config.bus.subscribe();
         confirm_prompt_submission(
             confirm,
             &*config.backend,
             &key,
             b"\r",
-            Duration::from_millis(100),
+            Duration::from_millis(10),
         )
         .await;
 
         assert_eq!(
             mock.writes_for(&key).await,
-            vec![b"\r".to_vec()],
-            "exactly one Enter resend, never the prompt body"
+            vec![b"\r".to_vec(); SUBMIT_RESEND_LIMIT as usize],
+            "only Enter resends, never the prompt body, bounded by the limit"
         );
         assert!(
             config.prompt_submit_signals.lock().await.is_empty(),
             "signal registration cleaned up"
+        );
+        let mut gave_up_loudly = false;
+        while let Ok(ev) = bus_rx.try_recv() {
+            if matches!(ev, Event::ProviderError { .. }) {
+                gave_up_loudly = true;
+            }
+        }
+        assert!(
+            gave_up_loudly,
+            "exhausting the resends must surface a user-visible error"
         );
     }
 
@@ -3548,13 +3618,8 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4243);
-        config
-            .hook_driven_terminals
-            .lock()
-            .await
-            .insert(id, std::time::Instant::now());
 
-        let confirm = prepare_submit_confirmation(&config, id).await.unwrap();
+        let confirm = prepare_submit_confirmation(&config, id).await;
         // What handle_ingest_hook does when UserPromptSubmit lands.
         // notify_one stores a permit, so firing before the wait is the
         // hard case this pins.
@@ -3582,7 +3647,9 @@ mod tests {
 
     /// A `Working` transition on the bus is equally valid evidence —
     /// covers a hook path where `UserPromptSubmit` was missed but the
-    /// turn clearly started.
+    /// turn clearly started, and is the ONLY evidence channel for
+    /// terminals without hooks (PTY detection emits it too), which is
+    /// why every terminal now gets a confirmation.
     #[tokio::test]
     async fn working_transition_suppresses_the_resend() {
         let (config, mock) = ServerConfig::in_memory_with_mock();
@@ -3592,13 +3659,8 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(4244);
-        config
-            .hook_driven_terminals
-            .lock()
-            .await
-            .insert(id, std::time::Instant::now());
 
-        let confirm = prepare_submit_confirmation(&config, id).await.unwrap();
+        let confirm = prepare_submit_confirmation(&config, id).await;
         // The receiver was subscribed in prepare_submit_confirmation,
         // so this event is buffered for it.
         config
@@ -3622,6 +3684,236 @@ mod tests {
             mock.writes_for(&key).await.is_empty(),
             "a Working transition counts as submission evidence"
         );
+    }
+
+    /// Evidence arriving mid-loop — after a resend already went out —
+    /// stops the retries right there: no further Enters, no give-up
+    /// error.
+    #[tokio::test]
+    async fn evidence_after_a_resend_stops_the_retry_loop() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(4246);
+
+        let confirm = prepare_submit_confirmation(&config, id).await;
+        let mut bus_rx = config.bus.subscribe();
+        // Stand-in for Claude finally taking the resent Enter: once the
+        // first resend hits the backend, fire UserPromptSubmit.
+        let signals = config.prompt_submit_signals.clone();
+        let mock_for_watch = mock.clone();
+        let key_for_watch = key.clone();
+        tokio::spawn(async move {
+            while mock_for_watch.writes_for(&key_for_watch).await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            if let Some(signal) = signals.lock().await.get(&id) {
+                signal.notify_one();
+            }
+        });
+        confirm_prompt_submission(
+            confirm,
+            &*config.backend,
+            &key,
+            b"\r",
+            Duration::from_millis(50),
+        )
+        .await;
+
+        assert_eq!(
+            mock.writes_for(&key).await,
+            vec![b"\r".to_vec()],
+            "the loop stops at the resend that got confirmed"
+        );
+        while let Ok(ev) = bus_rx.try_recv() {
+            assert!(
+                !matches!(ev, Event::ProviderError { .. }),
+                "a confirmed submit must not give up loudly"
+            );
+        }
+    }
+
+    /// #48 regression against captured real PTY bytes: the failure
+    /// screen (prompt parked in the composer after the paste) must not
+    /// read `Working` — otherwise it would fake submission evidence —
+    /// so the confirm loop resends Enter; once the screen flips to the
+    /// captured working status bar, the detector's `Working` broadcast
+    /// confirms and the loop stops. The terminal is NOT hook-driven:
+    /// pre-#48 these spawns had no confirmation at all.
+    #[tokio::test]
+    async fn captured_pty_bytes_drive_parked_prompt_recovery() {
+        const PARKED: &[u8] =
+            include_bytes!("../../agents/tests/fixtures/finished_with_parked_prompt.bin");
+        const WORKING: &[u8] =
+            include_bytes!("../../agents/tests/fixtures/claude_real_working_statusbar.bin");
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let claude = config.agents.get("claude").unwrap();
+        assert_ne!(
+            claude.detect_state(PARKED),
+            Some(lazybox_ipc::AgentState::Working),
+            "the parked-composer screen must not fake submission evidence"
+        );
+        let working_state = claude
+            .detect_state(WORKING)
+            .expect("the captured working screen must detect");
+        assert_eq!(working_state, lazybox_ipc::AgentState::Working);
+
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(4247);
+        let confirm = prepare_submit_confirmation(&config, id).await;
+
+        // Pump stand-in: the resent Enter takes, the screen flips from
+        // the parked composer to the working status bar, and PTY
+        // detection broadcasts the transition.
+        let bus = config.bus.clone();
+        let mock_for_watch = mock.clone();
+        let key_for_watch = key.clone();
+        tokio::spawn(async move {
+            while mock_for_watch.writes_for(&key_for_watch).await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            bus.send(Event::AgentState {
+                session_key: "test:ws".into(),
+                terminal_id: id,
+                state: working_state,
+            })
+            .unwrap();
+        });
+        confirm_prompt_submission(
+            confirm,
+            &*config.backend,
+            &key,
+            b"\r",
+            Duration::from_millis(50),
+        )
+        .await;
+
+        assert_eq!(
+            mock.writes_for(&key).await,
+            vec![b"\r".to_vec()],
+            "one resend, then the Working transition confirms"
+        );
+    }
+
+    /// The settle gate with no output at all: returns once the quiet
+    /// window elapses, well before the cap.
+    #[tokio::test]
+    async fn paste_settle_returns_after_quiet_window() {
+        let config = ServerConfig::in_memory();
+        let mut events = config.bus.subscribe();
+        let t0 = std::time::Instant::now();
+        await_paste_settled(
+            &mut events,
+            TerminalId(1),
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+        )
+        .await;
+        let elapsed = t0.elapsed();
+        assert!(elapsed >= Duration::from_millis(50));
+        assert!(elapsed < Duration::from_secs(2), "must not ride the cap");
+    }
+
+    /// Output still flowing on the terminal extends the wait — the
+    /// submit must not fire mid-repaint.
+    #[tokio::test]
+    async fn paste_settle_waits_out_streaming_output() {
+        let config = ServerConfig::in_memory();
+        let id = TerminalId(2);
+        let mut events = config.bus.subscribe();
+        let bus = config.bus.clone();
+        tokio::spawn(async move {
+            for seq in 0..6u64 {
+                let _ = bus.send(Event::TerminalOutput {
+                    terminal_id: id,
+                    bytes: b"paint".to_vec(),
+                    seq,
+                });
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+        });
+        let t0 = std::time::Instant::now();
+        await_paste_settled(
+            &mut events,
+            id,
+            Duration::from_millis(100),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            t0.elapsed() >= Duration::from_millis(200),
+            "settle must outlast the output burst, not return at the first quiet check"
+        );
+    }
+
+    /// Other terminals' output is not evidence of an unsettled paste —
+    /// it must not extend the wait.
+    #[tokio::test]
+    async fn paste_settle_ignores_other_terminals_output() {
+        let config = ServerConfig::in_memory();
+        let mut events = config.bus.subscribe();
+        let bus = config.bus.clone();
+        tokio::spawn(async move {
+            for seq in 0..200u64 {
+                let _ = bus.send(Event::TerminalOutput {
+                    terminal_id: TerminalId(99),
+                    bytes: b"noise".to_vec(),
+                    seq,
+                });
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let t0 = std::time::Instant::now();
+        await_paste_settled(
+            &mut events,
+            TerminalId(3),
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            t0.elapsed() < Duration::from_millis(500),
+            "unrelated output must not hold the settle gate"
+        );
+    }
+
+    /// A terminal that never goes quiet (boot spinner) hits the cap —
+    /// the submit still fires; the confirm loop owns recovery from
+    /// there.
+    #[tokio::test]
+    async fn paste_settle_is_bounded_by_the_cap() {
+        let config = ServerConfig::in_memory();
+        let id = TerminalId(4);
+        let mut events = config.bus.subscribe();
+        let bus = config.bus.clone();
+        tokio::spawn(async move {
+            for seq in 0..200u64 {
+                let _ = bus.send(Event::TerminalOutput {
+                    terminal_id: id,
+                    bytes: b"spin".to_vec(),
+                    seq,
+                });
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let t0 = std::time::Instant::now();
+        await_paste_settled(
+            &mut events,
+            id,
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+        )
+        .await;
+        let elapsed = t0.elapsed();
+        assert!(elapsed >= Duration::from_millis(200));
+        assert!(elapsed < Duration::from_secs(1), "the cap bounds the wait");
     }
 
     #[test]

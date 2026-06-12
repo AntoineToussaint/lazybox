@@ -177,8 +177,8 @@ pub trait Agent: Send + Sync {
         bytes
     }
 
-    /// Bytes to write AFTER `inject_prompt`, separated by a brief
-    /// delay, to commit/submit the prompt. Returns `None` when
+    /// Bytes to write AFTER `inject_prompt`, once the terminal's
+    /// output has settled, to commit/submit the prompt. Returns `None` when
     /// `inject_prompt` already includes the submit keystroke — the
     /// default, which works for any CLI where Enter both terminates
     /// the line and submits it.
@@ -301,8 +301,9 @@ pub mod builtins {
         /// arrival timing, and a write that coalesces with the later
         /// `\r` can swallow the submit as a soft line break. No `\r`
         /// is included here: the trailing Enter is sent separately by
-        /// `inject_submit` after a brief delay, once the paste batch
-        /// has settled, so it's unambiguously a keystroke.
+        /// `inject_submit` once the terminal's output has quiesced —
+        /// evidence the paste batch settled — so it's unambiguously a
+        /// keystroke.
         ///
         /// Any literal `\n` inside the prompt stays a line break in
         /// Claude's input box, which is what we want for multi-

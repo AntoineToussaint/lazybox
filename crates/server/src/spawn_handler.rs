@@ -1314,7 +1314,22 @@ fn derive_branch_for_branchless(task: &Task) -> String {
         }
     }
 
-    let sanitized: String = raw_key
+    format!("lazybox/{source}-{}", sanitize_branch_component(raw_key))
+}
+
+/// Branch name for a blank workspace (no linked task at all).
+/// Deterministic on the workspace key for the same reason
+/// [`derive_branch_for_branchless`] is deterministic on the task id:
+/// repeated spawns on the same workspace reuse one branch.
+fn derive_branch_for_workspace(workspace: &Workspace) -> String {
+    format!(
+        "lazybox/{}",
+        sanitize_branch_component(workspace.key.as_str())
+    )
+}
+
+fn sanitize_branch_component(raw: &str) -> String {
+    let sanitized: String = raw
         .chars()
         .map(|c| match c {
             'A'..='Z' => c.to_ascii_lowercase(),
@@ -1322,8 +1337,23 @@ fn derive_branch_for_branchless(task: &Task) -> String {
             _ => '-',
         })
         .collect();
-    let trimmed = sanitized.trim_matches('-');
-    format!("lazybox/{source}-{trimmed}")
+    sanitized.trim_matches('-').to_string()
+}
+
+/// `owner/repo` for a workspace with no linked task, recovered from its
+/// project key. Only `github-` keys carry a clonable repo — `local-`
+/// projects legitimately have none, so they error and the caller's
+/// empty-dir fallback stays the right outcome for them.
+fn clonable_repo_from_project(workspace: &Workspace) -> Result<String, crate::ServerError> {
+    let key = lazybox_core::workspace_project_key(workspace).ok_or_else(|| {
+        crate::ServerError::Workspace("workspace has no primary task or project".into())
+    })?;
+    if key.source_prefix() != "github" {
+        return Err(crate::ServerError::Workspace(format!(
+            "project '{key}' has no repo to clone"
+        )));
+    }
+    Ok(key.display_name())
 }
 
 /// Try to set up a real git worktree at `target` for the workspace's
@@ -1334,32 +1364,42 @@ async fn provision_worktree(
     target: &std::path::Path,
 ) -> Result<(), crate::ServerError> {
     use crate::ServerError;
-    let task = workspace
-        .primary_task()
-        .ok_or_else(|| ServerError::Workspace("workspace has no primary task".into()))?;
-    let repo = task
-        .repo
-        .as_deref()
-        .ok_or_else(|| ServerError::Workspace("task has no repo".into()))?;
+    // A blank workspace (created via `n` under a project, no issue/PR
+    // linked) has no task to read a repo from — but its project key
+    // still encodes `owner/repo` for GitHub projects, so it gets a
+    // real clone instead of the caller's empty-dir fallback.
+    let task = workspace.primary_task();
+    let repo = match task {
+        Some(task) => task
+            .repo
+            .as_deref()
+            .ok_or_else(|| ServerError::Workspace("task has no repo".into()))?
+            .to_string(),
+        None => clonable_repo_from_project(workspace)?,
+    };
     let (owner, name) = repo
         .split_once('/')
         .ok_or_else(|| ServerError::Workspace(format!("repo '{repo}' is not owner/name")))?;
 
     let mgr = lazybox_git_ops::WorktreeManager::default_base();
-    let worktree = match task.branch.as_deref() {
+    let worktree = match task.and_then(|t| t.branch.as_deref()) {
         Some(branch) => mgr
             .checkout_at(target, owner, name, branch)
             .await
             .map_err(|e| ServerError::Worktree(format!("checkout_at: {e}")))?,
         None => {
-            // Issue (or other branchless task): cut a fresh branch
-            // off the repo default. Branch name encodes the task key
-            // so two spawns on the same issue land on the same branch
-            // and subsequent presses are idempotent — without that,
-            // pressing `c` twice on issue #42 would create
+            // Issue (or other branchless task, or blank workspace):
+            // cut a fresh branch off the repo default. Branch name
+            // encodes the task key (or the workspace key when there is
+            // no task) so two spawns on the same item land on the same
+            // branch and subsequent presses are idempotent — without
+            // that, pressing `c` twice on issue #42 would create
             // `lazybox/issue-42-…` and `lazybox/issue-42-…-2`, neither of
             // which corresponds to a PR the user can push.
-            let new_branch = derive_branch_for_branchless(task);
+            let new_branch = match task {
+                Some(task) => derive_branch_for_branchless(task),
+                None => derive_branch_for_workspace(workspace),
+            };
             let base = mgr
                 .default_branch(owner, name)
                 .await
@@ -3900,6 +3940,57 @@ mod tests {
             derive_branch_for_branchless(&t),
             "lazybox/github-acme-widget"
         );
+    }
+
+    /// Blank-workspace branches come from the workspace key, so two
+    /// spawns on the same workspace reuse one branch.
+    #[test]
+    fn derive_branch_for_workspace_uses_workspace_key() {
+        let ws = Workspace::empty(WorkspaceKey::new("my-experiment"), "main", Utc::now());
+        assert_eq!(derive_branch_for_workspace(&ws), "lazybox/my-experiment");
+    }
+
+    /// A blank workspace under a GitHub project recovers `owner/repo`
+    /// from the project key, so its Claude sessions get a real clone
+    /// instead of an empty directory.
+    #[test]
+    fn clonable_repo_from_project_recovers_github_owner_repo() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github(
+            "AntoineToussaint",
+            "lazybox",
+        ));
+        assert_eq!(
+            clonable_repo_from_project(&ws).unwrap(),
+            "AntoineToussaint/lazybox"
+        );
+    }
+
+    /// `local-` projects have no upstream repo — the lookup errors so
+    /// the caller's empty-dir fallback stays their outcome.
+    #[test]
+    fn clonable_repo_from_project_rejects_local_project() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::local("my-experiment"));
+        assert!(clonable_repo_from_project(&ws).is_err());
+    }
+
+    #[test]
+    fn clonable_repo_from_project_errs_without_project_or_task() {
+        let ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
+        assert!(clonable_repo_from_project(&ws).is_err());
+    }
+
+    /// End-to-end through `provision_worktree`: a blank workspace under
+    /// a local project must fail fast (no git invocation possible) so
+    /// `handle_spawn` falls back to a plain mkdir.
+    #[tokio::test]
+    async fn provision_worktree_blank_local_workspace_errors() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::local("notes"));
+        let dir = std::env::temp_dir().join("lazybox-test-blank-local");
+        assert!(provision_worktree(&ws, &dir).await.is_err());
+        assert!(!dir.exists(), "failed provisioning must not create the dir");
     }
 
     const HARD: std::time::Duration = std::time::Duration::from_secs(10);

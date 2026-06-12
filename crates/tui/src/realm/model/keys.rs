@@ -447,29 +447,34 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Test entry point: drive a key through the *modal* pipeline —
-    /// send into `modal_event_tx`, poll `app.tick` until the modal
+    /// send into `modal_event_tx`, tick `app` until the modal
     /// produces a Msg (or a short deadline elapses), then `update`
     /// each Msg. Exists because `dispatch_key` calls `handle_pane_key`,
     /// which is gated on an empty modal stack and therefore can't
     /// exercise key handling for a mounted Confirm, Input, etc.
+    ///
+    /// NOT for the run loop: it blocks until the listener thread
+    /// delivers the key (production forwards via
+    /// `forward_modal_event` and picks the Msg up on a later
+    /// iteration). The wait parks inside `tick`'s `recv_timeout` —
+    /// no sleep/poll spin.
     pub fn dispatch_modal_key(&mut self, key: RealmKey) {
         let _ = self.modal_event_tx.send(RealmEvent::Keyboard(key));
         let deadline = std::time::Instant::now() + Duration::from_millis(500);
         loop {
-            match self.app.tick(PollStrategy::Once(Duration::ZERO)) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.app.tick(PollStrategy::Once(remaining)) {
                 Ok(messages) if !messages.is_empty() => {
                     for msg in messages {
                         self.update(msg);
                     }
                     return;
                 }
-                Ok(_) => {}
-                Err(_) => return,
+                // A no-Msg event (listener Tick, state-only key) —
+                // keep waiting out the deadline for a real Msg.
+                Ok(_) if !remaining.is_zero() => {}
+                _ => return,
             }
-            if std::time::Instant::now() >= deadline {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(2));
         }
     }
 

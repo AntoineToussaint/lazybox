@@ -1,3 +1,7 @@
+// Tests may block (sleeps to cross latch windows, thread joins); the
+// crate-wide blocking-call ban in clippy.toml targets the run loop.
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(test)]
 mod effects_tests {
     //! Handler effect-contract tests.
@@ -1040,7 +1044,7 @@ mod wake_tests {
     //! idle must still tick on schedule, and a closed source must
     //! degrade to the heartbeat instead of busy-spinning. These tests
     //! freeze that contract.
-    use super::super::helpers::{LoopRuntime, Wake, wait_for_wake};
+    use super::super::helpers::{LoopRuntime, TimedInput, Wake, wait_for_wake};
     use lazybox_ipc::{Event, TerminalId};
     use std::time::{Duration, Instant};
 
@@ -1057,8 +1061,8 @@ mod wake_tests {
     }
 
     type InputChannel = (
-        tokio::sync::mpsc::Sender<crossterm::event::Event>,
-        tokio::sync::mpsc::Receiver<crossterm::event::Event>,
+        tokio::sync::mpsc::Sender<TimedInput>,
+        tokio::sync::mpsc::Receiver<TimedInput>,
     );
 
     fn channels() -> (
@@ -1134,8 +1138,11 @@ mod wake_tests {
         let rt = rt();
         let ((itx, mut irx), dtx, mut drx) = channels();
         dtx.try_send(daemon_event(1)).expect("room");
-        itx.try_send(crossterm::event::Event::FocusGained)
-            .expect("room");
+        itx.try_send(TimedInput {
+            read_at: Instant::now(),
+            event: crossterm::event::Event::FocusGained,
+        })
+        .expect("room");
 
         let (mut input_open, mut daemon_open) = (true, true);
         let wake = wait_for_wake(
@@ -1337,6 +1344,120 @@ mod backlog_monitor_tests {
             2,
             "still backlogged, no clear"
         );
+    }
+}
+
+#[cfg(test)]
+mod stale_input_tests {
+    //! The stale-input guard is what bounds input replay after a
+    //! stall: input the run loop couldn't service while it was
+    //! blocked must be dropped, not burst-replayed against UI state
+    //! the user never saw (issue #49 — "it did all the clicking and
+    //! quitting in succession").
+    use super::super::helpers::{STALE_INPUT_MAX_AGE, StaleInputTally, should_drop_stale_input};
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use std::time::Duration;
+
+    fn key_event() -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+    }
+
+    fn mouse_event() -> Event {
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 3,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    /// Fresh input always dispatches — the guard only engages when an
+    /// event sat buffered past the staleness bound.
+    #[test]
+    fn fresh_input_is_never_dropped() {
+        for ev in [key_event(), mouse_event(), Event::Paste("hi".into())] {
+            assert!(!should_drop_stale_input(&ev, Duration::ZERO));
+            assert!(!should_drop_stale_input(
+                &ev,
+                STALE_INPUT_MAX_AGE - Duration::from_millis(1)
+            ));
+        }
+    }
+
+    /// Keys and mouse events buffered past the bound are dropped —
+    /// this is what keeps a buffered quit chord (or a backlog of
+    /// clicks) from firing when a frozen loop recovers.
+    #[test]
+    fn stale_keys_and_mouse_are_dropped() {
+        let age = STALE_INPUT_MAX_AGE + Duration::from_secs(2);
+        assert!(should_drop_stale_input(&key_event(), age));
+        assert!(should_drop_stale_input(&mouse_event(), age));
+    }
+
+    /// Paste is deliberate content (dropping it loses user data) and
+    /// focus events describe current terminal state — both survive a
+    /// stall regardless of age.
+    #[test]
+    fn stale_paste_and_focus_are_kept() {
+        let age = STALE_INPUT_MAX_AGE + Duration::from_secs(2);
+        assert!(!should_drop_stale_input(&Event::Paste("body".into()), age));
+        assert!(!should_drop_stale_input(&Event::FocusGained, age));
+        assert!(!should_drop_stale_input(&Event::FocusLost, age));
+    }
+
+    /// The tally batches a whole recovery burst into one report:
+    /// count + oldest age out, then reset so the next episode starts
+    /// clean.
+    #[test]
+    fn tally_accumulates_and_flushes_once() {
+        let mut t = StaleInputTally::default();
+        assert!(t.flush().is_none(), "empty tally has nothing to report");
+        t.note(Duration::from_secs(3));
+        t.note(Duration::from_secs(1));
+        t.note(Duration::from_secs(2));
+        let (dropped, oldest) = t.flush().expect("a report");
+        assert_eq!(dropped, 3);
+        assert_eq!(oldest, Duration::from_secs(3), "oldest age wins");
+        assert!(t.flush().is_none(), "flush resets the episode");
+    }
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    //! The loop watchdog turns "the UI felt frozen" into warn lines
+    //! with durations in /tmp/lazybox.log. Iterations within the
+    //! frame budget are silent; over-budget ones warn, rate-limited
+    //! so a pathological loop doesn't flood the log at frame rate.
+    use super::super::helpers::{FRAME_BUDGET, LoopWatchdog};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn within_budget_is_silent() {
+        let mut w = LoopWatchdog::default();
+        let now = Instant::now();
+        assert!(!w.observe(Duration::ZERO, now));
+        assert!(!w.observe(FRAME_BUDGET, now));
+    }
+
+    #[test]
+    fn over_budget_warns() {
+        let mut w = LoopWatchdog::default();
+        assert!(w.observe(FRAME_BUDGET + Duration::from_millis(1), Instant::now()));
+    }
+
+    /// Back-to-back slow iterations inside the warn interval are
+    /// suppressed; once the interval passes the next one warns again.
+    #[test]
+    fn warnings_are_rate_limited() {
+        let mut w = LoopWatchdog::default();
+        let t0 = Instant::now();
+        let slow = FRAME_BUDGET + Duration::from_millis(100);
+        assert!(w.observe(slow, t0));
+        assert!(!w.observe(slow, t0 + Duration::from_millis(200)));
+        assert!(!w.observe(slow, t0 + Duration::from_millis(400)));
+        assert!(w.observe(slow, t0 + Duration::from_secs(2)));
     }
 }
 

@@ -1,0 +1,16 @@
+# The TUI run loop is single-threaded: dispatch, update, and render all
+# happen on one thread, so ANY blocking call on it freezes the entire
+# UI — input, rendering, daemon-event draining (issue #49). Blocking
+# primitives are banned crate-wide; the few sanctioned sites carry a
+# targeted #[allow(clippy::disallowed_methods)] with a comment:
+#   - LoopRuntime::block_on        (the unified idle wait)
+#   - spawn_input_reader           (the dedicated reader thread)
+#   - test code                    (tests may block freely)
+# Anything that can wait must run as an async task and post a Msg back.
+disallowed-methods = [
+    { path = "std::thread::sleep", reason = "blocks the single UI thread and freezes the whole TUI — run waiting work as an async task and post a Msg back (issue #49)" },
+    { path = "tokio::runtime::Runtime::block_on", reason = "blocks the single UI thread — the unified idle wait in LoopRuntime::block_on is the only sanctioned block_on (issue #49)" },
+    { path = "tokio::runtime::Handle::block_on", reason = "blocks the single UI thread — the unified idle wait in LoopRuntime::block_on is the only sanctioned block_on (issue #49)" },
+    { path = "crossterm::event::read", reason = "blocking tty read belongs on the dedicated lazybox-input reader thread, never on the run loop (issue #49)" },
+    { path = "crossterm::event::poll", reason = "the run loop selects on the input channel via wait_for_wake — polling the tty directly reintroduces the blocking read path (issue #49)" },
+]

@@ -43,6 +43,12 @@ use std::collections::HashMap;
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
 
+/// How long the `Ctrl-w` tile prefix stays live waiting for its second
+/// key. Generous enough for a deliberate `Ctrl-w <dir>` chord, short
+/// enough that a stray `Ctrl-w` doesn't capture an unrelated keystroke
+/// seconds later.
+const CTRL_W_PREFIX_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Cap for the per-terminal recent-output buffer.
 ///
 /// libghostty-vt holds the canonical cell grid for rendering, but
@@ -1205,7 +1211,12 @@ impl TerminalStack {
         // rows is what keeps an agent terminal's copy aligned with the
         // highlight instead of pulling the row below it.
         let inner_x = rect.x.saturating_add(1);
-        let body_height = rect.height.saturating_sub(3);
+        // Use the SAME body height the renderer feeds `recap_rows` — the
+        // pane minus 3 top-chrome rows AND the 1 held-back bottom margin
+        // (`render()` insets to `area.height - 4` before calling
+        // `render_one_terminal`). Using `- 3` here diverged from the
+        // renderer at exactly height 6, where `recap_rows` flips.
+        let body_height = rect.height.saturating_sub(4);
         let recap = Self::recap_rows(slot, body_height);
         let inner_y = rect.y.saturating_add(3).saturating_add(recap);
         // Normalize: anchor (anchor_x, anchor_y) is the row-then-
@@ -1325,7 +1336,12 @@ impl TerminalStack {
         let id = self.focused_terminal_id()?;
         let slot = self.terminals.get_mut(&id)?;
         let inner_x = rect.x.saturating_add(1);
-        let body_height = rect.height.saturating_sub(3);
+        // Use the SAME body height the renderer feeds `recap_rows` — the
+        // pane minus 3 top-chrome rows AND the 1 held-back bottom margin
+        // (`render()` insets to `area.height - 4` before calling
+        // `render_one_terminal`). Using `- 3` here diverged from the
+        // renderer at exactly height 6, where `recap_rows` flips.
+        let body_height = rect.height.saturating_sub(4);
         let recap = Self::recap_rows(slot, body_height);
         let inner_y = rect.y.saturating_add(3).saturating_add(recap);
         if col < inner_x || row < inner_y {
@@ -1409,7 +1425,12 @@ impl TerminalStack {
         let id = self.focused_terminal_id()?;
         let slot = self.terminals.get(&id)?;
         let inner_x = rect.x.saturating_add(1);
-        let body_height = rect.height.saturating_sub(3);
+        // Use the SAME body height the renderer feeds `recap_rows` — the
+        // pane minus 3 top-chrome rows AND the 1 held-back bottom margin
+        // (`render()` insets to `area.height - 4` before calling
+        // `render_one_terminal`). Using `- 3` here diverged from the
+        // renderer at exactly height 6, where `recap_rows` flips.
+        let body_height = rect.height.saturating_sub(4);
         let recap = Self::recap_rows(slot, body_height);
         let inner_y = rect.y.saturating_add(3).saturating_add(recap);
         // Reject points OUTSIDE the inner body — the left/right border
@@ -1709,7 +1730,11 @@ impl TerminalStack {
         let ctrl_w =
             key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL);
         let mut literal_ctrl_w = false;
-        if self.ctrl_w_latch.take() {
+        // `take_within` honors the prefix only if the follow-up key
+        // arrives within the window — a lone `Ctrl-w` the user never
+        // completed expires instead of eating an unrelated keystroke
+        // minutes later (symmetric with the `]]` leader's timeout).
+        if self.ctrl_w_latch.take_within(CTRL_W_PREFIX_WINDOW) {
             // Doubled prefix `Ctrl-w Ctrl-w` → send ONE literal Ctrl-w
             // to the inner program (readline word-erase, vim/emacs window
             // commands), the escape hatch for the tile prefix — same idea
@@ -3339,6 +3364,65 @@ mod detect_target_tests {
 }
 
 #[cfg(test)]
+mod ctrl_w_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use lazybox_ipc::Command;
+
+    fn shell_stack() -> TerminalStack {
+        let sk = SessionKey::new("session");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let slot = TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false);
+        stack.terminals.insert(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+        stack
+    }
+
+    fn ctrl_w() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)
+    }
+
+    fn write_bytes(cmds: &[Command]) -> Vec<u8> {
+        cmds.iter()
+            .flat_map(|c| match c {
+                Command::Write { bytes, .. } => bytes.clone(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn doubled_ctrl_w_sends_one_literal() {
+        let mut stack = shell_stack();
+        let mut cmds = Vec::new();
+        // First Ctrl-w arms the tile prefix, writes nothing.
+        stack.handle_key(ctrl_w(), &mut cmds);
+        assert!(write_bytes(&cmds).is_empty(), "first Ctrl-w writes nothing");
+        // Second Ctrl-w within the window → one literal Ctrl-w (0x17).
+        cmds.clear();
+        stack.handle_key(ctrl_w(), &mut cmds);
+        assert_eq!(write_bytes(&cmds), vec![0x17], "doubled Ctrl-w → 0x17");
+    }
+
+    #[test]
+    fn ctrl_w_then_tile_key_is_not_forwarded() {
+        let mut stack = shell_stack();
+        let mut cmds = Vec::new();
+        stack.handle_key(ctrl_w(), &mut cmds);
+        cmds.clear();
+        // `j` after the prefix is a tile action, not input to the PTY.
+        stack.handle_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut cmds,
+        );
+        assert!(
+            !write_bytes(&cmds).contains(&b'j'),
+            "the tile-direction key must not leak to the PTY"
+        );
+    }
+}
+
+#[cfg(test)]
 mod key_encoding_tests {
     use super::key_to_bytes;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -3638,6 +3722,39 @@ mod extract_text_offset_tests {
         slot.last_user_message = Some("hi".into());
         assert_eq!(TerminalStack::recap_rows(&slot, 2), 0);
         assert_eq!(TerminalStack::recap_rows(&slot, 3), 2);
+    }
+
+    #[test]
+    fn screen_to_cell_maps_grid_and_rejects_chrome_and_borders() {
+        let stack = stack_with(TerminalKind::Shell, None, &["line0"]);
+        let rect = Rect::new(0, 0, 80, 30);
+        // Grid origin: left border (+1 col), 3 top-chrome rows (shell has
+        // no recap). And a parity spot-check against target_at's geometry.
+        assert_eq!(stack.screen_to_cell(rect, 1, 3), Some((0, 0)));
+        assert_eq!(stack.screen_to_cell(rect, 6, 8), Some((5, 5)));
+        // Chrome above / left of the grid → None.
+        assert_eq!(stack.screen_to_cell(rect, 0, 3), None, "left border col");
+        assert_eq!(stack.screen_to_cell(rect, 1, 2), None, "tab-strip row");
+        // Right border column and bottom row → None (off-grid, must not
+        // forward a bogus near-edge cell to the inner program).
+        assert_eq!(stack.screen_to_cell(rect, 79, 5), None, "right border col");
+        assert_eq!(stack.screen_to_cell(rect, 5, 29), None, "bottom row");
+    }
+
+    #[test]
+    fn recap_geometry_matches_renderer_at_height_6() {
+        // At pane height 6 the renderer's body is `area.height - 4 = 2`
+        // rows, so `recap_rows` is REFUSED (needs ≥ 3) and the grid top
+        // sits at screen row 3. The readers must agree: computing recap on
+        // `height - 3 = 3` (the old basis) wrongly assumed 2 recap rows and
+        // pushed the grid top to row 5 — off-screen for this pane.
+        let stack = stack_with(
+            TerminalKind::Agent("claude".into()),
+            Some("do the thing"),
+            &["line0"],
+        );
+        let rect = Rect::new(0, 0, 80, 6);
+        assert_eq!(stack.screen_to_cell(rect, 1, 3), Some((0, 0)));
     }
 }
 

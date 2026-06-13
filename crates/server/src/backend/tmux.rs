@@ -109,6 +109,7 @@ fn transparent_conf(native_scrollback: bool) -> String {
         "set -g history-limit 10000\n\
          set -g default-terminal \"xterm-256color\"\n\
          set -g escape-time 0\n\
+         set -g window-size latest\n\
          set -g mode-style \"fg=default,bg=default\"\n\
          set -g message-style \"fg=default,bg=default\"\n",
     );
@@ -520,10 +521,11 @@ impl SessionBackend for TmuxBackend {
     ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
         Box::pin(async move {
             // Resizing the attached client's PTY makes tmux resize the
-            // pane automatically: with `window-size latest` (the server
-            // default) our refreshed client becomes the size authority,
-            // so a second client attached elsewhere at a different size
-            // no longer forces ours. (The previous `refresh-client -t
+            // pane automatically: with `window-size latest` (pinned in
+            // `transparent_conf`, not left to tmux's implicit default)
+            // our refreshed client becomes the size authority, so a
+            // second client attached elsewhere at a different size no
+            // longer forces ours. (The previous `refresh-client -t
             // <session> -C` nudge was a dead no-op — `-t` takes a target
             // CLIENT, not a session, and `-C` is control-mode only, so it
             // always errored and was swallowed.)
@@ -815,6 +817,9 @@ mod tests {
         assert!(conf.contains("set -g status off"));
         assert!(conf.contains("set -g history-limit 10000"));
         assert!(conf.contains("unbind-key -a"));
+        // Resize authority is pinned, not left to tmux's implicit default
+        // (the `resize` impl's multi-client behavior depends on it).
+        assert!(conf.contains("set -g window-size latest\n"));
     }
 
     /// Legacy mode (`terminal.native_scrollback: false`) reproduces the

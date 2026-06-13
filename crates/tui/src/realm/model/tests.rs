@@ -2282,6 +2282,64 @@ mod wheel_routing_tests {
             "a wheel over the tab strip must not Write a forwarded mouse event"
         );
     }
+
+    // ── `]` flush + Ctrl-w literal: assert the BYTES reaching the PTY ──
+
+    use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+
+    /// Collect every byte written to the daemon since the last drain.
+    fn drained_write_bytes(server: &mut lazybox_ipc::Connection) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Ok(cmd) = server.rx.try_recv() {
+            if let lazybox_ipc::Command::Write { bytes, .. } = cmd {
+                out.extend_from_slice(&bytes);
+            }
+        }
+        out
+    }
+
+    /// A lone `]` is HELD (not written) until the next key; a following
+    /// non-`]` key flushes the literal `]` to the PTY, then itself. This
+    /// is the headline behavior of the `]` fix — previously unverified at
+    /// the byte level.
+    #[test]
+    fn held_bracket_flushes_to_pty_before_next_key() {
+        let (mut m, mut server, _bottom) = build_model_with_terminal();
+        while server.rx.try_recv().is_ok() {} // drain Subscribe
+
+        m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        assert!(
+            drained_write_bytes(&mut server).is_empty(),
+            "a lone `]` is held pending the chord, not written yet"
+        );
+
+        m.dispatch_key(RealmKey::new(Key::Char('a'), RealmMods::NONE));
+        assert_eq!(
+            drained_write_bytes(&mut server),
+            b"]a",
+            "the held `]` must reach the PTY ahead of the next key"
+        );
+    }
+
+    /// `]]` completes the leader (here: leaves to the sidebar, no
+    /// snippets) and must NOT flush a literal `]` to the PTY.
+    #[test]
+    fn completed_leader_does_not_flush_a_bracket() {
+        let (mut m, mut server, _bottom) = build_model_with_terminal();
+        while server.rx.try_recv().is_ok() {}
+
+        m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
+        assert!(
+            !drained_write_bytes(&mut server).contains(&b']'),
+            "`]]` is a chord, not two literal brackets"
+        );
+    }
+
+    // (Ctrl-w escape-hatch byte behavior is unit-tested at the
+    // TerminalStack level in `components::terminal_stack::ctrl_w_tests`,
+    // which exercises `handle_key` directly without Model key routing.)
 }
 
 #[cfg(test)]

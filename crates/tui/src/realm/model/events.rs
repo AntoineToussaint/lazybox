@@ -572,6 +572,17 @@ impl<T: TerminalAdapter> Model<T> {
             self.set_focus_attr();
             self.redraw = true;
         }
+        // A lone `]` that armed the chord but never saw a second press
+        // (or any following key) would otherwise sit held indefinitely —
+        // a trailing `]` in a prompt never reaching the agent. Once the
+        // chord window lapses, release it as a literal `]`.
+        if self.focus == PaneFocus::Terminals
+            && self.escape_latch.armed_past(self.ui_defaults.escape_window)
+        {
+            self.escape_latch.disarm();
+            self.flush_held_escape_char();
+            self.redraw = true;
+        }
     }
 
     /// Advance the sidebar's "working" spinner. Called once per run-

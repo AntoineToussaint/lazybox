@@ -85,6 +85,25 @@ fn cursor_argv() {
 }
 
 #[test]
+fn codex_yn_only_fires_at_bottom_of_screen() {
+    let agent = Codex;
+    // A live prompt at the bottom → InputNeeded.
+    assert_eq!(
+        agent.detect_state(b"Running tests...\nOverwrite config.toml? [y/n] "),
+        Some(AgentState::InputNeeded),
+    );
+    // A `[y/n]` echoed earlier (a diff, a doc, a printed command) with
+    // several lines of fresh output below it must NOT fire — it's not a
+    // live prompt, just scrollback.
+    assert_eq!(
+        agent.detect_state(
+            b"README: answer [y/n] to confirm\nrunning step 1\nrunning step 2\nrunning step 3\nrunning step 4\nAll tests passed.\n"
+        ),
+        Some(AgentState::Idle),
+    );
+}
+
+#[test]
 fn claude_inject_prompt_is_a_bracketed_paste_without_submit() {
     // Claude Code batches rapid byte arrival as a paste. The body is
     // wrapped in explicit bracketed-paste markers so paste detection

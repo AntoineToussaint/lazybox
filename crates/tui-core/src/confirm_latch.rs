@@ -183,6 +183,13 @@ impl DoubleTapLatch {
     pub fn is_armed(&self) -> bool {
         self.armed_at.is_some()
     }
+
+    /// True when a single tap has been held (armed) for strictly longer
+    /// than `window` — the second tap never came, so the held key should
+    /// be released as a literal rather than kept waiting for a chord.
+    pub fn armed_past(&self, window: std::time::Duration) -> bool {
+        self.armed_at.map(|t| t.elapsed() > window).unwrap_or(false)
+    }
 }
 
 /// One-shot "consume the next key" prefix latch.

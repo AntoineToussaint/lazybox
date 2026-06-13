@@ -1686,10 +1686,21 @@ impl TerminalStack {
         // next key is a tile action (split, focus move, close);
         // anything unrecognised disarms cleanly. Same vocabulary as
         // tmux/vim windows so existing muscle memory transfers.
+        let ctrl_w = key.code == KeyCode::Char('w')
+            && key.modifiers.contains(KeyModifiers::CONTROL);
+        let mut literal_ctrl_w = false;
         if self.ctrl_w_latch.take() {
-            return self.handle_tile_action(key, cmds);
+            // Doubled prefix `Ctrl-w Ctrl-w` → send ONE literal Ctrl-w
+            // to the inner program (readline word-erase, vim/emacs window
+            // commands), the escape hatch for the tile prefix — same idea
+            // as the `]]`/`]` leader. Any other key is a tile action.
+            if ctrl_w {
+                literal_ctrl_w = true; // fall through to PTY forwarding
+            } else {
+                return self.handle_tile_action(key, cmds);
+            }
         }
-        if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if ctrl_w && !literal_ctrl_w {
             self.ctrl_w_latch.arm();
             return PaneOutcome::Consumed;
         }
@@ -2713,14 +2724,24 @@ pub fn strip_ansi(input: &[u8]) -> Vec<u8> {
 /// encoding path the live key dispatch uses.
 pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
     use KeyCode::*;
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
-        Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            // Ctrl-<letter>: low control byte.
-            Some(vec![(c as u8) & 0x1f])
-        }
         Char(c) => {
-            let mut buf = [0u8; 4];
-            Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
+            // Build ESC-prefixed (Meta) + optionally control-folded byte.
+            // Previously Alt was dropped entirely, so `Alt-b` (word-back
+            // in readline) reached the agent as a bare `b`.
+            let mut bytes = Vec::with_capacity(if alt { 2 } else { 1 });
+            if alt {
+                bytes.push(0x1b);
+            }
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                // Ctrl-<letter>: low control byte.
+                bytes.push((c as u8) & 0x1f);
+            } else {
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+            Some(bytes)
         }
         Enter => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -2731,19 +2752,78 @@ pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
                 Some(vec![b'\r'])
             }
         }
-        Backspace => Some(vec![0x7f]),
+        Backspace => Some(if alt { vec![0x1b, 0x7f] } else { vec![0x7f] }),
         Esc => Some(vec![0x1b]),
         Tab => Some(vec![b'\t']),
         BackTab => Some(b"\x1b[Z".to_vec()),
-        Up => Some(b"\x1b[A".to_vec()),
-        Down => Some(b"\x1b[B".to_vec()),
-        Right => Some(b"\x1b[C".to_vec()),
-        Left => Some(b"\x1b[D".to_vec()),
-        Home => Some(b"\x1b[H".to_vec()),
-        End => Some(b"\x1b[F".to_vec()),
+        // Cursor keys carry their xterm modifier encoding so Ctrl/Shift/
+        // Alt + arrow (word-motion, selection) reach the inner program
+        // instead of arriving unmodified. Bare keys keep the short form.
+        Up => Some(cursor_seq(b'A', key.modifiers)),
+        Down => Some(cursor_seq(b'B', key.modifiers)),
+        Right => Some(cursor_seq(b'C', key.modifiers)),
+        Left => Some(cursor_seq(b'D', key.modifiers)),
+        Home => Some(cursor_seq(b'H', key.modifiers)),
+        End => Some(cursor_seq(b'F', key.modifiers)),
+        Insert => Some(b"\x1b[2~".to_vec()),
         Delete => Some(b"\x1b[3~".to_vec()),
+        // Unmodified PageUp/PageDown reach the inner program (less, vim);
+        // the Shift-modified variants are intercepted earlier for local
+        // scrollback and never get here.
+        PageUp => Some(b"\x1b[5~".to_vec()),
+        PageDown => Some(b"\x1b[6~".to_vec()),
+        F(n) => function_key_seq(n),
         _ => None,
     }
+}
+
+/// xterm modifier parameter: `1 + bitmask(shift=1, alt=2, ctrl=4)`.
+/// Returns 1 (no modifier) when none are held.
+fn xterm_modifier_param(mods: KeyModifiers) -> u8 {
+    let mut m = 0u8;
+    if mods.contains(KeyModifiers::SHIFT) {
+        m |= 1;
+    }
+    if mods.contains(KeyModifiers::ALT) {
+        m |= 2;
+    }
+    if mods.contains(KeyModifiers::CONTROL) {
+        m |= 4;
+    }
+    m + 1
+}
+
+/// Encode a cursor / Home / End key (`final_byte` is `A`/`B`/`C`/`D`/
+/// `H`/`F`). Unmodified → `ESC [ <final>`; modified → the xterm
+/// `ESC [ 1 ; <mod> <final>` form.
+fn cursor_seq(final_byte: u8, mods: KeyModifiers) -> Vec<u8> {
+    let m = xterm_modifier_param(mods);
+    if m == 1 {
+        vec![0x1b, b'[', final_byte]
+    } else {
+        format!("\x1b[1;{m}{}", final_byte as char).into_bytes()
+    }
+}
+
+/// Encode F1–F12 to the conventional xterm sequences. F1–F4 use the
+/// `ESC O <P..S>` SS3 form; F5+ use `ESC [ <n> ~`.
+fn function_key_seq(n: u8) -> Option<Vec<u8>> {
+    let seq: &[u8] = match n {
+        1 => b"\x1bOP",
+        2 => b"\x1bOQ",
+        3 => b"\x1bOR",
+        4 => b"\x1bOS",
+        5 => b"\x1b[15~",
+        6 => b"\x1b[17~",
+        7 => b"\x1b[18~",
+        8 => b"\x1b[19~",
+        9 => b"\x1b[20~",
+        10 => b"\x1b[21~",
+        11 => b"\x1b[23~",
+        12 => b"\x1b[24~",
+        _ => return None,
+    };
+    Some(seq.to_vec())
 }
 
 /// Scan `row_text` for an `http(s)://…` token whose byte range
@@ -3235,6 +3315,59 @@ mod detect_target_tests {
         assert_eq!(split_line_col("/a/b.rs:7:3"), ("/a/b.rs", Some(7), Some(3)));
         // A non-numeric trailing segment is part of the path.
         assert_eq!(split_line_col("/a/b:c"), ("/a/b:c", None, None));
+    }
+}
+
+#[cfg(test)]
+mod key_encoding_tests {
+    use super::key_to_bytes;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn k(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn ctrl_w_folds_to_control_byte() {
+        // The literal-Ctrl-W escape hatch relies on this encoding.
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::Char('w'), KeyModifiers::CONTROL)),
+            Some(vec![0x17]),
+        );
+    }
+
+    #[test]
+    fn alt_char_is_esc_prefixed() {
+        // Alt-b (readline word-back) was dropped to a bare `b`.
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::Char('b'), KeyModifiers::ALT)),
+            Some(vec![0x1b, b'b']),
+        );
+    }
+
+    #[test]
+    fn modified_arrows_carry_xterm_modifier() {
+        // Bare arrow keeps the short form.
+        assert_eq!(key_to_bytes(&k(KeyCode::Right, KeyModifiers::NONE)), Some(b"\x1b[C".to_vec()));
+        // Ctrl-Right → word-right: ESC[1;5C (mod = 1 + ctrl(4)).
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::Right, KeyModifiers::CONTROL)),
+            Some(b"\x1b[1;5C".to_vec()),
+        );
+        // Shift-Up → selection: ESC[1;2A (mod = 1 + shift(1)).
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::Up, KeyModifiers::SHIFT)),
+            Some(b"\x1b[1;2A".to_vec()),
+        );
+    }
+
+    #[test]
+    fn function_keys_and_nav_are_encoded() {
+        assert_eq!(key_to_bytes(&k(KeyCode::F(1), KeyModifiers::NONE)), Some(b"\x1bOP".to_vec()));
+        assert_eq!(key_to_bytes(&k(KeyCode::F(5), KeyModifiers::NONE)), Some(b"\x1b[15~".to_vec()));
+        assert_eq!(key_to_bytes(&k(KeyCode::F(12), KeyModifiers::NONE)), Some(b"\x1b[24~".to_vec()));
+        assert_eq!(key_to_bytes(&k(KeyCode::PageUp, KeyModifiers::NONE)), Some(b"\x1b[5~".to_vec()));
+        assert_eq!(key_to_bytes(&k(KeyCode::Insert, KeyModifiers::NONE)), Some(b"\x1b[2~".to_vec()));
     }
 }
 

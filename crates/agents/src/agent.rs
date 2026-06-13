@@ -383,8 +383,11 @@ pub mod builtins {
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
             let s = detect::strip_ansi_lossy(recent_output);
             let tail = detect::recent_tail(&s, PROMPT_TAIL_WINDOW);
-            if detect::contains_any(tail, detect::YN_PROMPT_PATTERNS)
-                || detect::contains_any(tail, &["approve?"])
+            // Only the bottom of the screen — where a live prompt parks —
+            // so a `[y/n]` echoed earlier in output doesn't false-fire.
+            let prompt_zone = detect::last_nonempty_lines(tail, 3);
+            if detect::contains_any(&prompt_zone, detect::YN_PROMPT_PATTERNS)
+                || detect::contains_any(&prompt_zone, &["approve?"])
             {
                 return Some(AgentState::InputNeeded);
             }
@@ -414,7 +417,9 @@ pub mod builtins {
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
             let s = detect::strip_ansi_lossy(recent_output);
             let tail = detect::recent_tail(&s, PROMPT_TAIL_WINDOW);
-            if detect::contains_any(tail, detect::YN_PROMPT_PATTERNS) {
+            // Match only the bottom-of-screen prompt zone (see Codex).
+            let prompt_zone = detect::last_nonempty_lines(tail, 3);
+            if detect::contains_any(&prompt_zone, detect::YN_PROMPT_PATTERNS) {
                 return Some(AgentState::InputNeeded);
             }
             // No Cursor "working" pulser is recognised yet — fall back

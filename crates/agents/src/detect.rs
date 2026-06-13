@@ -853,6 +853,19 @@ pub fn recent_tail(s: &str, max: usize) -> &str {
     &s[start..]
 }
 
+/// The last `n` non-empty lines of `s`, joined with `\n`. An interactive
+/// CLI's prompt awaiting input sits at the BOTTOM of the screen (the
+/// cursor parks there), so the simple-pattern agents scan only this zone
+/// for their `[y/n]`-style markers — a `[y/n]` that merely appeared
+/// earlier in an echoed command, a diff, or a doc no longer fires a
+/// spurious InputNeeded. `n` > 1 tolerates a trailing helper line under
+/// the prompt.
+pub fn last_nonempty_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
 /// Filter out ANSI escape sequences, then UTF-8-decode the remainder.
 ///
 /// Earlier this function pushed `bytes[i] as char` — that mangled

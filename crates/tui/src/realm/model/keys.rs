@@ -242,6 +242,7 @@ impl<T: TerminalAdapter> Model<T> {
             && key.modifiers.is_empty()
             && matches!(key.code, Key::Char(c) if c == self.ui_defaults.terminal_escape_char)
         {
+            let was_armed = self.escape_latch.is_armed();
             if self.escape_latch.tap(self.ui_defaults.escape_window) {
                 // Second `]` within the window completes `]]`. With a
                 // snippet library present, arm the leader so the next
@@ -259,6 +260,14 @@ impl<T: TerminalAdapter> Model<T> {
                 self.redraw = true;
                 return;
             }
+            // `tap` returned false. If the latch was ALREADY armed, the
+            // chord window had lapsed and `tap` re-armed for THIS press —
+            // the previously-held `]` is stale and must be released as a
+            // literal, else the first `]` of a slowly-typed `] … ]` pair
+            // is silently dropped. (The new `]` is now the held one.)
+            if was_armed {
+                self.flush_held_escape_char();
+            }
             return;
         }
         if self.focus == PaneFocus::Terminals && self.escape_latch.is_armed() {
@@ -269,15 +278,7 @@ impl<T: TerminalAdapter> Model<T> {
             // dispatch below. Snippet invocation lives under the `]]`
             // leader now (issue #205), so a lone `]` is never
             // intercepted.
-            let mut held_cmds: Vec<IpcCommand> = Vec::new();
-            let held = crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char(self.ui_defaults.terminal_escape_char),
-                crossterm::event::KeyModifiers::NONE,
-            );
-            self.terminals.handle_key_direct(held, &mut held_cmds);
-            for cmd in held_cmds {
-                self.send_cmd(cmd);
-            }
+            self.flush_held_escape_char();
         }
 
         // We have a typed key already; skip the synthetic Event
@@ -400,6 +401,23 @@ impl<T: TerminalAdapter> Model<T> {
         // Sidebar j/k changes selection — propagate to right + terminals.
         self.sync_panes();
         self.redraw = true;
+    }
+
+    /// Send a single literal escape char (`]`) to the focused terminal —
+    /// the held first `]` that turned out NOT to start a `]]` chord.
+    /// Shared by the three release paths: a non-`]` key followed, the
+    /// chord window lapsed and re-armed on another `]`, or the idle tick
+    /// timed the chord out ([`Self::tick_terminal_leader`]).
+    pub(super) fn flush_held_escape_char(&mut self) {
+        let mut held_cmds: Vec<IpcCommand> = Vec::new();
+        let held = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(self.ui_defaults.terminal_escape_char),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        self.terminals.handle_key_direct(held, &mut held_cmds);
+        for cmd in held_cmds {
+            self.send_cmd(cmd);
+        }
     }
 
     /// Returns true when the q-q latch is armed (used by the bottom

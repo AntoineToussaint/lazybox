@@ -709,7 +709,14 @@ fn last_option_marker_pos(s: &str, digit: u8) -> Option<usize> {
 /// markers, so a loose match here reads a real permission prompt as
 /// already answered on a full repaint.
 fn working_status_pos(compact: &str) -> Option<usize> {
-    let interrupt = last_line_pos(compact, is_interrupt_status_line);
+    // Use the offset of the `esctointerrupt` MARKER itself (not the line
+    // start) so the recency anchor lands where the status text actually
+    // is — a status line that shares a wrapped/concatenated line with an
+    // earlier dialog footer (`Esc to cancel✻ …`) must anchor at the
+    // spinner text, not back at the dialog. The line-shape check just
+    // gates OUT prose that merely mentions "esc to interrupt".
+    let interrupt = last_line_pos(compact, is_interrupt_status_line)
+        .and(compact.rfind("esctointerrupt"));
     let counter = last_line_pos(compact, is_live_counter_line);
     [interrupt, counter].into_iter().flatten().max()
 }

@@ -1502,7 +1502,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Hand `url` to the platform browser launcher and surface the
     /// outcome in the footer.
     fn open_external_url(&mut self, url: &str) {
-        match crate::editors::open_url(url) {
+        match crate::editors::open_url(url, self.ui_defaults.browser.as_deref()) {
             Ok(()) => {
                 tracing::info!(%url, "opened url from terminal");
                 self.flash_hint(format!("opened {url}"));

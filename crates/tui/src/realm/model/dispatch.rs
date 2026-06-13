@@ -525,7 +525,8 @@ impl<T: TerminalAdapter> Model<T> {
                     self.flash_info("no task URL on this workspace");
                     return cmds;
                 };
-                match lazybox_tui_core::editors::open_url(&url) {
+                let browser = self.ui_defaults.browser.clone();
+                match lazybox_tui_core::editors::open_url(&url, browser.as_deref()) {
                     Ok(()) => {
                         tracing::info!(%url, "opened workspace URL in browser");
                         self.flash_info(format!("opened {url}"));

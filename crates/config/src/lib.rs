@@ -195,6 +195,12 @@ pub struct UiSection {
     /// catalog-driven approach.
     #[serde(default)]
     pub action_keys: std::collections::BTreeMap<String, String>,
+    /// Preferred web browser for opening task URLs (the `o` shortcut)
+    /// and links right-clicked in the terminal grid. On macOS this is
+    /// the application name handed to `open -a` (e.g. `"Google Chrome"`,
+    /// `"Firefox"`); on Linux it's the executable run with the URL as
+    /// its argument. None = the OS default browser.
+    pub browser: Option<String>,
     /// Whether the user has already seen the in-app feature tour.
     /// Set `true` the first time the tour is dismissed or finished
     /// so it doesn't re-launch on every boot; re-invocable on demand
@@ -223,6 +229,9 @@ pub struct UiDefaults {
     pub short_snooze: Duration,
     pub long_snooze: Duration,
     pub log_path: std::path::PathBuf,
+    /// Preferred browser app/executable, or None for the OS default.
+    /// See [`UiSection::browser`].
+    pub browser: Option<String>,
 }
 
 impl Default for UiDefaults {
@@ -237,6 +246,7 @@ impl Default for UiDefaults {
             short_snooze: Duration::from_secs(4 * 60 * 60),
             long_snooze: Duration::from_secs(365 * 24 * 60 * 60),
             log_path: std::path::PathBuf::from("/tmp/lazybox.log"),
+            browser: None,
         }
     }
 }
@@ -263,6 +273,7 @@ impl UiSection {
             short_snooze: self.short_snooze.unwrap_or(d.short_snooze),
             long_snooze: self.long_snooze.unwrap_or(d.long_snooze),
             log_path: self.log_path.clone().unwrap_or(d.log_path),
+            browser: self.browser.clone(),
         }
     }
 }

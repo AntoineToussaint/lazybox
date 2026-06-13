@@ -54,7 +54,7 @@ model (`crates/core/src/task.rs`): `TaskState`, `TaskRole`, `CiStatus`,
 
 **Status:** stable
 **Crate(s):** `gh-provider`
-**Config / flags:** `setup.scopes` (orgs/repos), `providers.github.poll_interval`; auth via `GH_TOKEN` / `GITHUB_TOKEN` / `gh auth token`
+**Config / flags:** `setup.scopes` (orgs/repos), `providers.github.poll_interval`; auth via `GH_TOKEN` / `GITHUB_TOKEN` / `gh auth token`; `ui.browser` picks the browser for `g o` / right-clicked links (`"Google Chrome"` → `open -a` on macOS, an executable on Linux; default = OS default browser)
 **Key bindings:** GitHub action group — `g m` merge, `g v` reviewers, `g a` assignees, `g l` labels, `g o` open in browser (and `Shift-{M,V,G,L,O}` aliases)
 
 ### What it does

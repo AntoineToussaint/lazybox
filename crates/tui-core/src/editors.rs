@@ -140,16 +140,57 @@ pub fn discover_at_startup(user: Vec<UserEditorEntry>) -> Vec<EditorTemplate> {
     detect_available(&merged)
 }
 
-/// Spawn `template` against `worktree`. Replaces `{path}`
-/// placeholders in args. Detached so the editor outlives lazybox.
-/// Returns Ok on successful spawn — the editor's own success is
-/// not waited on.
-/// Open `url` in the host's default web browser. Picks the right
-/// per-platform launcher (`open` on macOS, `xdg-open` on Linux,
-/// `cmd /c start` on Windows) and detaches so the browser outlives
-/// lazybox. Used by the `O` (Shift-O) shortcut on workspaces to jump
-/// to the PR / issue page on GitHub / Linear.
-pub fn open_url(url: &str) -> std::io::Result<()> {
+/// Build the launcher argv for opening `url`, honoring an optional
+/// `browser` override. Split out from [`open_url`] so the
+/// platform-specific command shape is unit-testable without spawning.
+/// Returns `(program, args)`.
+///
+/// With no override the OS launcher targets the default browser
+/// (`open` / `xdg-open` / `cmd /c start`). When `browser` is set it
+/// becomes `open -a <browser>` on macOS, or the named executable run
+/// directly on Linux.
+fn browser_argv(url: &str, browser: Option<&str>) -> (String, Vec<String>) {
+    if cfg!(target_os = "macos") {
+        let mut args = Vec::new();
+        if let Some(app) = browser {
+            args.push("-a".to_string());
+            args.push(app.to_string());
+        }
+        args.push(url.to_string());
+        ("open".to_string(), args)
+    } else if cfg!(target_os = "windows") {
+        // `start`'s first quoted token is the window title, so pass an
+        // empty "" before the (browser and) URL.
+        let mut args = vec!["/c".to_string(), "start".to_string(), String::new()];
+        if let Some(app) = browser {
+            args.push(app.to_string());
+        }
+        args.push(url.to_string());
+        ("cmd".to_string(), args)
+    } else {
+        match browser {
+            Some(app) => (app.to_string(), vec![url.to_string()]),
+            None => ("xdg-open".to_string(), vec![url.to_string()]),
+        }
+    }
+}
+
+/// Open `url` in a web browser. By default the URL is handed to the
+/// host launcher (`open` on macOS, `xdg-open` on Linux, `cmd /c start`
+/// on Windows), which targets the user's default browser. When
+/// `browser` is set it overrides that choice — `open -a <browser>` on
+/// macOS, the named executable on Linux. Used by the `o` shortcut on
+/// workspaces and right-clicked links in the terminal grid.
+///
+/// Unlike the editor launchers, this does **not** detach via
+/// `setsid()`. The launcher is a short-lived hand-off process — the
+/// real browser is re-parented by the OS (Launch Services on macOS,
+/// the desktop elsewhere) — so detaching buys nothing, and a fresh
+/// session severs the macOS GUI bootstrap the launcher needs to reach
+/// Launch Services. We wait for the launcher and surface a non-zero
+/// exit (with its stderr) instead of nulling it, so a failed open is a
+/// visible error rather than silence.
+pub fn open_url(url: &str, browser: Option<&str>) -> std::io::Result<()> {
     // Minimal allow-list: must be http(s) so a malformed task URL
     // can't be coerced into running an arbitrary shell command.
     if !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -158,26 +199,22 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
             format!("refusing to open non-http(s) URL: {url}"),
         ));
     }
-    let mut cmd = if cfg!(target_os = "macos") {
-        let mut c = std::process::Command::new("open");
-        c.arg(url);
-        c
-    } else if cfg!(target_os = "windows") {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/c", "start", "", url]);
-        c
+    let (program, args) = browser_argv(url, browser);
+    let output = std::process::Command::new(&program)
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr);
+    let detail = detail.trim();
+    let msg = if detail.is_empty() {
+        format!("`{program}` exited with {}", output.status)
     } else {
-        // Linux + the rest. `xdg-open` is the de facto standard;
-        // most desktop distros ship it.
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(url);
-        c
+        format!("`{program}` failed: {detail}")
     };
-    crate::platform::detach_child_process(&mut cmd);
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
-    cmd.spawn().map(|_| ())
+    Err(std::io::Error::other(msg))
 }
 
 /// Build the argv (everything after the command) for opening `file`
@@ -374,6 +411,41 @@ mod tests {
         assert_eq!(gram.display, "Gram");
         assert_eq!(gram.command, "gram");
         assert_eq!(gram.args, vec!["{path}"]);
+    }
+
+    #[test]
+    fn open_url_rejects_non_http() {
+        // Returns before spawning anything, so this is safe to run in CI.
+        let err = open_url("file:///etc/passwd", None).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn browser_argv_default_uses_open() {
+        let (prog, args) = browser_argv("https://x.test/pr/1", None);
+        assert_eq!(prog, "open");
+        assert_eq!(args, vec!["https://x.test/pr/1"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn browser_argv_named_browser_uses_open_dash_a() {
+        let (prog, args) = browser_argv("https://x.test/pr/1", Some("Google Chrome"));
+        assert_eq!(prog, "open");
+        assert_eq!(args, vec!["-a", "Google Chrome", "https://x.test/pr/1"]);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn browser_argv_named_browser_runs_executable_directly() {
+        let (prog, args) = browser_argv("https://x.test/pr/1", Some("firefox"));
+        assert_eq!(prog, "firefox");
+        assert_eq!(args, vec!["https://x.test/pr/1"]);
+
+        let (prog, args) = browser_argv("https://x.test/pr/1", None);
+        assert_eq!(prog, "xdg-open");
+        assert_eq!(args, vec!["https://x.test/pr/1"]);
     }
 
     #[test]

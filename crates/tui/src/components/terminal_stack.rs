@@ -1211,6 +1211,13 @@ impl TerminalStack {
                             break;
                         }
                         if x >= col_start {
+                            // The blank tail cell of a wide glyph carries
+                            // no graphemes; emitting it as a space turns
+                            // "日本語" into "日 本 語". Skip it.
+                            if matches!(cell.wide(), Ok(vt::screen::CellWide::SpacerTail)) {
+                                x += 1;
+                                continue;
+                            }
                             let graphemes = cell.graphemes().unwrap_or_default();
                             if graphemes.is_empty() {
                                 line.push(' ');
@@ -1279,6 +1286,18 @@ impl TerminalStack {
             if y == target_row {
                 if let Ok(mut cell_iter) = slot.vt.cell_iter.update(row) {
                     while let Some(cell) = cell_iter.next() {
+                        // The blank tail cell of a wide glyph emits no
+                        // text, but it still occupies a screen column, so
+                        // a click on it must resolve into the glyph. Map
+                        // its byte offset back to the wide base (the last
+                        // recorded start) and append nothing — otherwise
+                        // the column→byte map drifts past wide text and
+                        // right-click resolves the wrong token.
+                        if matches!(cell.wide(), Ok(vt::screen::CellWide::SpacerTail)) {
+                            cell_byte_starts
+                                .push(cell_byte_starts.last().copied().unwrap_or(0));
+                            continue;
+                        }
                         cell_byte_starts.push(row_text.len());
                         let graphemes = cell.graphemes().unwrap_or_default();
                         if graphemes.is_empty() {
@@ -3304,6 +3323,32 @@ mod extract_text_offset_tests {
         assert_eq!(
             target,
             Some(ClickTarget::Url("https://example.com/page".into())),
+        );
+    }
+
+    #[test]
+    fn wide_glyphs_copy_without_spurious_spaces() {
+        // Each CJK glyph occupies two cells (base + blank spacer tail).
+        // The spacer must be skipped on copy, or this comes back as
+        // "日 本 語  s p a c e d".
+        let mut stack = stack_with(TerminalKind::Shell, None, &["日本語"]);
+        let text = stack.extract_text(Rect::new(0, 0, 80, 30), (1, 3), (40, 3));
+        assert_eq!(text, "日本語");
+    }
+
+    #[test]
+    fn right_click_resolves_url_after_wide_text() {
+        // A wide-glyph prefix shifts every following screen column by
+        // one spacer cell. If target_at's column→byte map doesn't
+        // account for the spacer tails, the click lands on the wrong
+        // byte and the URL is mis-parsed (or missed). The URL starts at
+        // screen column 1(border) + 6 cells (3 wide glyphs) = column 7.
+        let mut stack =
+            stack_with(TerminalKind::Shell, None, &["日本語 https://example.com/x"]);
+        let target = stack.target_at(Rect::new(0, 0, 80, 30), 1 + 7, 3);
+        assert_eq!(
+            target,
+            Some(ClickTarget::Url("https://example.com/x".into())),
         );
     }
 

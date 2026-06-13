@@ -1350,8 +1350,7 @@ impl TerminalStack {
                         // the column→byte map drifts past wide text and
                         // right-click resolves the wrong token.
                         if matches!(cell.wide(), Ok(vt::screen::CellWide::SpacerTail)) {
-                            cell_byte_starts
-                                .push(cell_byte_starts.last().copied().unwrap_or(0));
+                            cell_byte_starts.push(cell_byte_starts.last().copied().unwrap_or(0));
                             continue;
                         }
                         cell_byte_starts.push(row_text.len());
@@ -1686,8 +1685,8 @@ impl TerminalStack {
         // next key is a tile action (split, focus move, close);
         // anything unrecognised disarms cleanly. Same vocabulary as
         // tmux/vim windows so existing muscle memory transfers.
-        let ctrl_w = key.code == KeyCode::Char('w')
-            && key.modifiers.contains(KeyModifiers::CONTROL);
+        let ctrl_w =
+            key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL);
         let mut literal_ctrl_w = false;
         if self.ctrl_w_latch.take() {
             // Doubled prefix `Ctrl-w Ctrl-w` → send ONE literal Ctrl-w
@@ -3348,7 +3347,10 @@ mod key_encoding_tests {
     #[test]
     fn modified_arrows_carry_xterm_modifier() {
         // Bare arrow keeps the short form.
-        assert_eq!(key_to_bytes(&k(KeyCode::Right, KeyModifiers::NONE)), Some(b"\x1b[C".to_vec()));
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::Right, KeyModifiers::NONE)),
+            Some(b"\x1b[C".to_vec())
+        );
         // Ctrl-Right → word-right: ESC[1;5C (mod = 1 + ctrl(4)).
         assert_eq!(
             key_to_bytes(&k(KeyCode::Right, KeyModifiers::CONTROL)),
@@ -3363,11 +3365,26 @@ mod key_encoding_tests {
 
     #[test]
     fn function_keys_and_nav_are_encoded() {
-        assert_eq!(key_to_bytes(&k(KeyCode::F(1), KeyModifiers::NONE)), Some(b"\x1bOP".to_vec()));
-        assert_eq!(key_to_bytes(&k(KeyCode::F(5), KeyModifiers::NONE)), Some(b"\x1b[15~".to_vec()));
-        assert_eq!(key_to_bytes(&k(KeyCode::F(12), KeyModifiers::NONE)), Some(b"\x1b[24~".to_vec()));
-        assert_eq!(key_to_bytes(&k(KeyCode::PageUp, KeyModifiers::NONE)), Some(b"\x1b[5~".to_vec()));
-        assert_eq!(key_to_bytes(&k(KeyCode::Insert, KeyModifiers::NONE)), Some(b"\x1b[2~".to_vec()));
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::F(1), KeyModifiers::NONE)),
+            Some(b"\x1bOP".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::F(5), KeyModifiers::NONE)),
+            Some(b"\x1b[15~".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::F(12), KeyModifiers::NONE)),
+            Some(b"\x1b[24~".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::PageUp, KeyModifiers::NONE)),
+            Some(b"\x1b[5~".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::Insert, KeyModifiers::NONE)),
+            Some(b"\x1b[2~".to_vec())
+        );
     }
 }
 
@@ -3446,7 +3463,10 @@ mod osc52_tests {
         let (ranges2, pending2) = osc52_scan(&combined);
         assert_eq!(ranges2.len(), 1);
         assert_eq!(pending2, None);
-        assert_eq!(&combined[ranges2[0].clone()], b"\x1b]52;c;aGVsbG8gd29ybGQ=\x07");
+        assert_eq!(
+            &combined[ranges2[0].clone()],
+            b"\x1b]52;c;aGVsbG8gd29ybGQ=\x07"
+        );
     }
 
     #[test]
@@ -3570,8 +3590,7 @@ mod extract_text_offset_tests {
         // account for the spacer tails, the click lands on the wrong
         // byte and the URL is mis-parsed (or missed). The URL starts at
         // screen column 1(border) + 6 cells (3 wide glyphs) = column 7.
-        let mut stack =
-            stack_with(TerminalKind::Shell, None, &["日本語 https://example.com/x"]);
+        let mut stack = stack_with(TerminalKind::Shell, None, &["日本語 https://example.com/x"]);
         let target = stack.target_at(Rect::new(0, 0, 80, 30), 1 + 7, 3);
         assert_eq!(
             target,

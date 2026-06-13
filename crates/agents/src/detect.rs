@@ -715,8 +715,8 @@ fn working_status_pos(compact: &str) -> Option<usize> {
     // earlier dialog footer (`Esc to cancel✻ …`) must anchor at the
     // spinner text, not back at the dialog. The line-shape check just
     // gates OUT prose that merely mentions "esc to interrupt".
-    let interrupt = last_line_pos(compact, is_interrupt_status_line)
-        .and(compact.rfind("esctointerrupt"));
+    let interrupt =
+        last_line_pos(compact, is_interrupt_status_line).and(compact.rfind("esctointerrupt"));
     let counter = last_line_pos(compact, is_live_counter_line);
     [interrupt, counter].into_iter().flatten().max()
 }
@@ -1410,9 +1410,7 @@ mod tests {
         );
         // A real dialog carrying a consent question is still detected.
         assert_eq!(
-            claude_state(
-                "Do you want to proceed?\n\u{276f} 1. Yes\n2. No\n".as_bytes()
-            ),
+            claude_state("Do you want to proceed?\n\u{276f} 1. Yes\n2. No\n".as_bytes()),
             Some(AgentState::InputNeeded),
         );
     }

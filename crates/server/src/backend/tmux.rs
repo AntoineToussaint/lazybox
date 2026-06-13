@@ -71,8 +71,7 @@ const SCROLLBACK_TERMINAL_OVERRIDES: &str = ",xterm*:smcup@:rmcup@";
 /// client; `allow-passthrough on` (off by default since tmux 3.3a) lets
 /// a DCS-wrapped escape through. Without these tmux eats the clipboard
 /// request before lazybox can relay it to the host terminal.
-const CLIPBOARD_PASSTHROUGH_OPTS: &str =
-    "set -g set-clipboard on\nset -g allow-passthrough on\n";
+const CLIPBOARD_PASSTHROUGH_OPTS: &str = "set -g set-clipboard on\nset -g allow-passthrough on\n";
 
 /// tmux client config: prefix off (so Ctrl-B reaches the agent), no
 /// key bindings (so nothing intercepts), no status bar (so output
@@ -835,7 +834,7 @@ mod tests {
     /// conf flavors, so recovered sessions behave like fresh ones.
     #[test]
     fn server_option_cmds_match_conf_flavors() {
-        let clipboard = vec![
+        let clipboard = [
             vec!["set-option", "-g", "set-clipboard", "on"],
             vec!["set-option", "-g", "allow-passthrough", "on"],
         ];
@@ -873,7 +872,10 @@ mod tests {
     fn both_conf_flavors_enable_clipboard_passthrough() {
         for native in [true, false] {
             let conf = transparent_conf(native);
-            assert!(conf.contains("set -g set-clipboard on\n"), "native={native}");
+            assert!(
+                conf.contains("set -g set-clipboard on\n"),
+                "native={native}"
+            );
             assert!(
                 conf.contains("set -g allow-passthrough on\n"),
                 "native={native}"

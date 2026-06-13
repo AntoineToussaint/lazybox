@@ -2235,18 +2235,52 @@ mod wheel_routing_tests {
 
         while server.rx.try_recv().is_ok() {}
 
-        m.handle_mouse(wheel_up_at(bottom.x + 2, bottom.y + 2));
+        // Fire INSIDE the grid: the body is inset by the left border
+        // (+1 col) and three rows of top chrome (+3 row) — a shell has
+        // no recap rows. A wheel 6 cols / 8 rows into the pane must
+        // encode to grid cell (5, 5), i.e. 1-based wire coords (6, 6).
+        m.handle_mouse(wheel_up_at(bottom.x + 6, bottom.y + 8));
 
         match server.rx.try_recv() {
             Ok(lazybox_ipc::Command::Write { terminal_id, bytes }) => {
                 assert_eq!(terminal_id, TerminalId(7));
+                // SGR wheel-up is button 64. The coordinates MUST undo
+                // the render inset — the bug forwarded raw pane coords
+                // (off by +1 col, +3 row). `64;6;6` proves the offset.
                 assert!(
-                    bytes.starts_with(b"\x1b[<"),
-                    "wheel must be SGR-encoded for the inner app, got {bytes:?}"
+                    bytes.starts_with(b"\x1b[<64;6;6"),
+                    "wheel must SGR-encode at grid cell (6,6), got {bytes:?}"
                 );
             }
             other => panic!("expected a Write with SGR wheel bytes, got {other:?}"),
         }
+    }
+
+    /// A wheel (or click) over the pane's top chrome — the tab strip /
+    /// divider / blank rows that sit ABOVE the grid — must never be
+    /// forwarded to the inner program as if it were a grid cell.
+    /// Regression for the off-by-3 forward bug: the old code subtracted
+    /// only the pane origin, so a wheel at `bottom.y + 1` (chrome)
+    /// encoded to a bogus near-origin cell instead of falling through
+    /// to local scrolling.
+    #[test]
+    fn wheel_over_pane_chrome_does_not_forward_to_inner_app() {
+        let (mut m, mut server, bottom) = build_model_with_terminal();
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(7),
+            bytes: b"\x1b[?1002h\x1b[?1006h".to_vec(),
+            seq: 1,
+        });
+        assert!(m.terminals.focused_terminal_tracks_mouse());
+        while server.rx.try_recv().is_ok() {}
+
+        // Row +1 is the tab strip — above the grid (which starts at +3).
+        m.handle_mouse(wheel_up_at(bottom.x + 2, bottom.y + 1));
+
+        assert!(
+            server.rx.try_recv().is_err(),
+            "a wheel over the tab strip must not Write a forwarded mouse event"
+        );
     }
 }
 

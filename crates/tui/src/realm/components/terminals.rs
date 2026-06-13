@@ -151,6 +151,19 @@ impl Terminals {
         self.inner.target_at(rect, col, row)
     }
 
+    /// Screen `(col, row)` → 0-based grid cell coords inside the focused
+    /// terminal body, or `None` when the point is in the pane chrome.
+    /// Used before forwarding a click/wheel to a mouse-tracking inner
+    /// program so the coordinate matches what the renderer drew.
+    pub fn screen_to_cell(
+        &self,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<(u32, u32)> {
+        self.inner.screen_to_cell(rect, col, row)
+    }
+
     /// Human-readable scrollbar diagnostic for the focused
     /// terminal. Used by the orchestrator's scroll-event handler
     /// to surface viewport state in the footer.

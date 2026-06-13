@@ -743,9 +743,10 @@ impl<T: TerminalAdapter> Model<T> {
                     && rect_contains(right_bottom_rect, m.column, m.row)
                     && self.focus == PaneFocus::Terminals
                     && self.terminals.focused_terminal_tracks_mouse()
+                    && let Some((cell_col, cell_row)) =
+                        self.terminals
+                            .screen_to_cell(right_bottom_rect, m.column, m.row)
                 {
-                    let cell_col = m.column.saturating_sub(right_bottom_rect.x) as u32;
-                    let cell_row = m.row.saturating_sub(right_bottom_rect.y) as u32;
                     let vt_button = match button {
                         crossterm::event::MouseButton::Left => libghostty_vt::mouse::Button::Left,
                         crossterm::event::MouseButton::Middle => {
@@ -878,9 +879,9 @@ impl<T: TerminalAdapter> Model<T> {
                     && rect_contains(right_bottom_rect, col, row)
                     && self.focus == PaneFocus::Terminals
                     && self.terminals.focused_terminal_tracks_mouse()
+                    && let Some((cell_col, cell_row)) =
+                        self.terminals.screen_to_cell(right_bottom_rect, col, row)
                 {
-                    let cell_col = col.saturating_sub(right_bottom_rect.x) as u32;
-                    let cell_row = row.saturating_sub(right_bottom_rect.y) as u32;
                     let vt_button = match button {
                         crossterm::event::MouseButton::Left => libghostty_vt::mouse::Button::Left,
                         crossterm::event::MouseButton::Middle => {
@@ -932,19 +933,23 @@ impl<T: TerminalAdapter> Model<T> {
                     if scaled == 0 {
                         return;
                     }
-                    let cell_col = m.column.saturating_sub(right_bottom_rect.x) as u32;
-                    let cell_row = m.row.saturating_sub(right_bottom_rect.y) as u32;
-                    let button = if raw_up {
-                        libghostty_vt::mouse::Button::Four
-                    } else {
-                        libghostty_vt::mouse::Button::Five
-                    };
-                    if let Some((terminal_id, bytes)) = self.terminals.encode_mouse(
-                        libghostty_vt::mouse::Action::Press,
-                        Some(button),
-                        cell_col,
-                        cell_row,
-                    ) {
+                    let cell = self
+                        .terminals
+                        .screen_to_cell(right_bottom_rect, m.column, m.row);
+                    let encoded = cell.and_then(|(cell_col, cell_row)| {
+                        let button = if raw_up {
+                            libghostty_vt::mouse::Button::Four
+                        } else {
+                            libghostty_vt::mouse::Button::Five
+                        };
+                        self.terminals.encode_mouse(
+                            libghostty_vt::mouse::Action::Press,
+                            Some(button),
+                            cell_col,
+                            cell_row,
+                        )
+                    });
+                    if let Some((terminal_id, bytes)) = encoded {
                         // One wheel notch encodes one line for the
                         // inner program, but the damper computed a
                         // multi-line step. Repeat the encoding
@@ -960,9 +965,9 @@ impl<T: TerminalAdapter> Model<T> {
                         self.redraw = true;
                         return;
                     }
-                    // Mouse-tracking flag was up but the event encoded
-                    // to nothing — fall through to the local viewport
-                    // with the damped step.
+                    // Mouse-tracking flag was up but the event mapped to
+                    // pane chrome or encoded to nothing — fall through to
+                    // the local viewport with the damped step.
                     let delta = if raw_up { -scaled } else { scaled };
                     let _ = self.terminals.scroll_active(delta);
                     self.redraw = true;

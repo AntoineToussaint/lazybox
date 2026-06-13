@@ -1302,6 +1302,36 @@ impl TerminalStack {
         detect_target(&row_text, byte_pos, hyperlink.as_deref())
     }
 
+    /// Translate a screen `(col, row)` into 0-based grid-cell
+    /// coordinates inside the focused terminal's body, undoing the same
+    /// inset the renderer applies: the left border (`+1` col), the
+    /// three rows of top chrome (tab strip + divider + blank), and any
+    /// recap rows. This is the coordinate space `encode_mouse_for_focused`
+    /// expects. Returns `None` when the point falls in the border / tab
+    /// strip / recap (left of or above the grid) so callers forwarding a
+    /// click or wheel to a mouse-tracking inner program never feed it a
+    /// cell the renderer never drew there. Mirrors `target_at` /
+    /// `extract_text`, which previously were the ONLY paths that undid
+    /// this offset — the forward path used the raw pane origin and so
+    /// landed every event 1 column right and 3+ rows high.
+    pub fn screen_to_cell(
+        &self,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<(u32, u32)> {
+        let id = self.focused_terminal_id()?;
+        let slot = self.terminals.get(&id)?;
+        let inner_x = rect.x.saturating_add(1);
+        let body_height = rect.height.saturating_sub(3);
+        let recap = Self::recap_rows(slot, body_height);
+        let inner_y = rect.y.saturating_add(3).saturating_add(recap);
+        if col < inner_x || row < inner_y {
+            return None;
+        }
+        Some(((col - inner_x) as u32, (row - inner_y) as u32))
+    }
+
     pub fn scroll_active(&mut self, delta: isize) -> ScrollOutcome {
         if delta == 0 {
             return ScrollOutcome::NoTerminal;

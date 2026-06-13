@@ -338,9 +338,23 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
         matched_phrase,
     };
 
+    // When the detect window carries NO recency anchor at all — no
+    // composer footer (idle or resting) and no live working line — a
+    // bare arrow + numbered list can't be positively placed as the
+    // bottom-most live dialog. `chooser_live` is vacuously true in that
+    // case (nothing to out-rank), so an agent merely PRINTING prose like
+    // "Here are the options:\n1. …\n2. …\n❯ pick one" would read as a
+    // live gate. Require a corroborating dialog signal — a consent /
+    // question phrase, a choice marker, or the Esc-to-cancel footer,
+    // all of which a real Claude chooser always renders — before
+    // trusting the weak arrow+list shape with no anchor to lean on.
+    let has_recency_anchor = idle_pos.is_some() || resting_pos.is_some() || work_pos.is_some();
+    let corroborated =
+        question_pos.is_some() || choice_pos.is_some() || compact.contains("esctocancel");
+
     // WEAK: arrow + numbered options, gated on the full composer footer
     // (incl. `Tab to amend`) so injected prose / parked prompts stay Idle.
-    if has_arrow && has_chooser && chooser_live {
+    if has_arrow && has_chooser && chooser_live && (has_recency_anchor || corroborated) {
         d.state = AgentState::InputNeeded;
         d.trigger = Some(Trigger::StructuralChooser);
         return d;
@@ -695,15 +709,36 @@ fn last_option_marker_pos(s: &str, digit: u8) -> Option<usize> {
 /// markers, so a loose match here reads a real permission prompt as
 /// already answered on a full repaint.
 fn working_status_pos(compact: &str) -> Option<usize> {
-    let interrupt = compact.rfind("esctointerrupt");
+    let interrupt = last_line_pos(compact, is_interrupt_status_line);
     let counter = last_line_pos(compact, is_live_counter_line);
     [interrupt, counter].into_iter().flatten().max()
+}
+
+/// The `esc to interrupt` hint, but only when it sits on a line that is
+/// actually shaped like Claude's live status bar — carrying at least one
+/// piece of status scaffolding: a spinner glyph (`✻ (esc to interrupt)`),
+/// the elapsed-timer opener, or a `·` separator
+/// (`✻ … (8s · ↑ 412 tokens · esc to interrupt)`). Plain prose that
+/// merely mentions "esc to interrupt" — a commit message, a help line the
+/// agent printed — has none of these, so it no longer pins the agent to
+/// Working forever.
+fn is_interrupt_status_line(line: &str) -> bool {
+    line.contains("esctointerrupt")
+        && (line.contains(WORKING_SPINNER_GLYPHS)
+            || has_elapsed_counter(line)
+            || line.contains('·'))
 }
 
 /// Spinner glyphs Claude cycles through at the head of its live status
 /// line (`✻ Cogitating…`, `✦ Gusting…`, `✽ Running…`, …). Matched as an
 /// any-of set since the glyph rotates per frame.
-const WORKING_SPINNER_GLYPHS: &[char] = &['✢', '✳', '✶', '✻', '✽', '✺', '✦', '✧', '*'];
+///
+/// `*` is deliberately NOT here: it's a plain ASCII bullet, so a markdown
+/// line the agent prints (`* Done in (2s · 5 tokens)`) would otherwise
+/// satisfy `is_live_counter_line` and read as Working. A genuinely-busy
+/// agent is still caught by the `esc to interrupt` hint, which its status
+/// bar always carries, so dropping `*` costs no real detection.
+const WORKING_SPINNER_GLYPHS: &[char] = &['✢', '✳', '✶', '✻', '✽', '✺', '✦', '✧'];
 
 /// The affirmative live-counter shape (real fixture lines:
 /// `✻ Simmering… (10s · ↓ 137 tokens)`,
@@ -1308,6 +1343,58 @@ mod tests {
         // Spinner but no elapsed counter: still not affirmative.
         let no_elapsed = compact_lower("✻ summary · 137 tokens total");
         assert_eq!(working_status_pos(&no_elapsed), None);
+    }
+
+    #[test]
+    fn prose_mentioning_esc_to_interrupt_is_not_working() {
+        // Regression: `working_status_pos` matched the bare substring
+        // `esctointerrupt` anywhere, so prose or a commit message that
+        // mentioned it pinned the agent to Working forever.
+        assert_eq!(
+            claude_state(b"? for shortcuts\nYou can press esc to interrupt me while I work.\n"),
+            Some(AgentState::Idle),
+        );
+        assert_eq!(
+            working_status_pos(&compact_lower("Add esc to interrupt handler to the runner")),
+            None,
+        );
+        // But the real status-bar shapes still anchor working.
+        assert!(working_status_pos(&compact_lower("✻ (esc to interrupt)")).is_some());
+    }
+
+    #[test]
+    fn markdown_bullet_with_timer_is_not_working() {
+        // Regression: `*` was in the spinner-glyph set, so a markdown
+        // bullet that happened to carry a parenthesized timer + "tokens"
+        // read as a live counter line.
+        assert_eq!(
+            working_status_pos(&compact_lower("* Done in (2s · 5 tokens)")),
+            None,
+        );
+        assert_eq!(
+            claude_state("? for shortcuts\n* Done in (2s · 5 tokens)\n".as_bytes()),
+            Some(AgentState::Idle),
+        );
+    }
+
+    #[test]
+    fn prose_numbered_list_without_anchor_is_not_input_needed() {
+        // Regression: with no composer footer and no working line in the
+        // window, a bare arrow + numbered list read as a live chooser and
+        // fired InputNeeded (+ a desktop notification). An agent merely
+        // printing options must stay Idle unless a real dialog signal
+        // (consent phrase / choice marker / Esc-to-cancel) corroborates.
+        assert_eq!(
+            claude_state(b"Here are the options:\n1. first\n2. second\n\xe2\x9d\xaf pick one\n"),
+            Some(AgentState::Idle),
+        );
+        // A real dialog carrying a consent question is still detected.
+        assert_eq!(
+            claude_state(
+                "Do you want to proceed?\n\u{276f} 1. Yes\n2. No\n".as_bytes()
+            ),
+            Some(AgentState::InputNeeded),
+        );
     }
 
     #[test]

@@ -359,11 +359,14 @@ pub enum PendingSplit {
 /// char picks the clipboard target (`c` = clipboard, `p` = primary,
 /// `s` = selection, etc.); we don't care which one, the host decides.
 ///
-/// Returned ranges are non-overlapping and in input order. An
-/// unterminated OSC 52 (sequence starts but no terminator before
-/// end-of-bytes) is dropped — the inner program is expected to
-/// terminate within a single write. Same chunk; we don't span.
-pub(crate) fn osc52_ranges(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
+/// Returned ranges are non-overlapping and in input order. The second
+/// element is the start index of a trailing OSC 52 that began but did
+/// NOT terminate before end-of-bytes — either a complete header whose
+/// base64 payload/terminator is still arriving, or a partial header
+/// (`\x1b]5…`) split mid-sequence. The caller carries those bytes into
+/// the next chunk so a clipboard copy split across PTY reads isn't
+/// dropped.
+pub(crate) fn osc52_scan(bytes: &[u8]) -> (Vec<std::ops::Range<usize>>, Option<usize>) {
     let mut out = Vec::new();
     let mut i = 0;
     while i + 5 <= bytes.len() {
@@ -377,8 +380,9 @@ pub(crate) fn osc52_ranges(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
             let mut j = i + 5;
             let end = loop {
                 if j >= bytes.len() {
-                    // Unterminated — drop this match, stop scanning.
-                    return out;
+                    // Unterminated — report so the caller carries the
+                    // tail into the next chunk instead of dropping it.
+                    return (out, Some(start));
                 }
                 if bytes[j] == 0x07 {
                     break j + 1;
@@ -394,8 +398,31 @@ pub(crate) fn osc52_ranges(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
         }
         i += 1;
     }
-    out
+    // The 5-byte header itself can straddle the tail (chunk ends with
+    // `\x1b`, `\x1b]`, `\x1b]5`, or `\x1b]52`). Carry a trailing proper
+    // prefix of the header so the next chunk can complete it.
+    const HEADER: &[u8] = b"\x1b]52;";
+    let tail_start = bytes.len().saturating_sub(HEADER.len() - 1);
+    for s in tail_start..bytes.len() {
+        let tail = &bytes[s..];
+        if tail.len() < HEADER.len() && HEADER.starts_with(tail) {
+            return (out, Some(s));
+        }
+    }
+    (out, None)
 }
+
+/// Convenience wrapper returning just the complete OSC 52 ranges.
+#[cfg(test)]
+pub(crate) fn osc52_ranges(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
+    osc52_scan(bytes).0
+}
+
+/// Upper bound on the OSC 52 carry buffer. A clipboard payload larger
+/// than this (after base64) is dropped rather than buffered without
+/// limit — protects against a stream that opens `\x1b]52;` and never
+/// terminates.
+const OSC52_CARRY_CAP: usize = 4 * 1024 * 1024;
 
 /// Forward any OSC 52 clipboard-set escape sequences in `bytes` to
 /// the host terminal's stdout, so the inner program's "copy this"
@@ -407,20 +434,44 @@ pub(crate) fn osc52_ranges(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
 /// `bytes` we leave alone — libghostty-vt handles rendering as
 /// usual. Multiple OSC 52 sequences in one chunk are all forwarded.
 ///
+/// `carry` buffers an OSC 52 that began in a previous chunk but hadn't
+/// terminated yet — a large base64 clipboard payload routinely spans
+/// PTY reads, and without carrying it the whole copy was silently
+/// dropped. The carried head is prepended before scanning; only fully
+/// terminated sequences are written to the host.
+///
 /// Best-effort: stdout write failures are ignored. Writing to the
 /// host while ratatui is mid-frame is safe in practice — terminals
 /// pop OSC out of the stream and don't paint it.
-fn forward_osc52(bytes: &[u8]) {
-    let ranges = osc52_ranges(bytes);
-    if ranges.is_empty() {
-        return;
+fn forward_osc52(carry: &mut Vec<u8>, bytes: &[u8]) {
+    let combined: Vec<u8>;
+    let scan: &[u8] = if carry.is_empty() {
+        bytes
+    } else {
+        let mut v = std::mem::take(carry);
+        v.extend_from_slice(bytes);
+        combined = v;
+        &combined
+    };
+
+    let (ranges, pending) = osc52_scan(scan);
+    if !ranges.is_empty() {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        for range in ranges {
+            let _ = out.write_all(&scan[range]);
+        }
+        let _ = out.flush();
     }
-    use std::io::Write;
-    let mut out = std::io::stdout().lock();
-    for range in ranges {
-        let _ = out.write_all(&bytes[range]);
+
+    // Carry any unterminated trailing sequence into the next chunk,
+    // bounded so a never-terminating stream can't grow it without limit.
+    if let Some(start) = pending {
+        let tail = &scan[start..];
+        if tail.len() <= OSC52_CARRY_CAP {
+            *carry = tail.to_vec();
+        }
     }
-    let _ = out.flush();
 }
 
 /// Read-only walk of a `TileTree` along a path. Returns None if the
@@ -462,6 +513,11 @@ struct TerminalSlot {
     /// Cap of recent raw bytes (post-feed). Pure debug aid; tests
     /// inspect it. Not used for rendering.
     recent: Vec<u8>,
+    /// Buffer for an OSC 52 clipboard sequence that began in one
+    /// `append_output` chunk but hasn't terminated yet — carried so a
+    /// large copy split across PTY reads isn't dropped. See
+    /// [`forward_osc52`].
+    osc52_carry: Vec<u8>,
     /// Agent state cached from the daemon's `Event::AgentState`
     /// broadcasts. Drives the "needs input" / "working" badge in the
     /// tab strip. Default `Idle` so non-agent terminals (shells) carry
@@ -1439,7 +1495,7 @@ impl TerminalStack {
         // user's system clipboard gets updated. Without this,
         // libghostty-vt consumes the sequence internally for its
         // own clipboard (which lazybox doesn't surface).
-        forward_osc52(bytes);
+        forward_osc52(&mut slot.osc52_carry, bytes);
         slot.vt.feed(bytes);
         slot.recent.extend_from_slice(bytes);
         if slot.recent.len() > RECENT_OUTPUT_CAP {
@@ -1467,6 +1523,9 @@ impl TerminalStack {
             return;
         }
         slot.vt.feed(replay);
+        // Drop any half-buffered clipboard sequence — the stream is being
+        // rebuilt from the ring and we don't re-forward OSC 52 here.
+        slot.osc52_carry.clear();
         slot.recent.clear();
         let tail_start = replay.len().saturating_sub(RECENT_OUTPUT_CAP);
         slot.recent.extend_from_slice(&replay[tail_start..]);
@@ -1486,6 +1545,7 @@ impl TerminalStack {
             last_seq,
             vt,
             recent: Vec::new(),
+            osc52_carry: Vec::new(),
             agent_state: lazybox_ipc::AgentState::Idle,
             last_rendered_size: None,
             composing: String::new(),
@@ -3180,7 +3240,7 @@ mod detect_target_tests {
 
 #[cfg(test)]
 mod osc52_tests {
-    use super::osc52_ranges;
+    use super::{osc52_ranges, osc52_scan};
 
     #[test]
     fn empty_input_returns_no_ranges() {
@@ -3224,12 +3284,46 @@ mod osc52_tests {
     }
 
     #[test]
-    fn unterminated_sequence_is_dropped() {
-        // Sequence starts but no BEL/ST in the chunk. Drop rather
-        // than write a half-sequence to the host that could leave
-        // it in OSC-parsing mode.
+    fn unterminated_sequence_emits_no_complete_range_but_is_pending() {
+        // Sequence starts but no BEL/ST in the chunk. No complete range
+        // is emitted (we never write a half-sequence to the host), but
+        // the start is reported so the caller carries it forward instead
+        // of dropping the copy.
         let bytes = b"\x1b]52;c;aGVsbG8=";
-        assert!(osc52_ranges(bytes).is_empty());
+        let (ranges, pending) = osc52_scan(bytes);
+        assert!(ranges.is_empty());
+        assert_eq!(pending, Some(0));
+    }
+
+    #[test]
+    fn split_payload_completes_when_carried_into_next_chunk() {
+        // A large base64 payload split across two PTY reads. The first
+        // chunk is pending from its OSC 52 start; concatenating the
+        // carried tail with the next chunk yields one complete range
+        // spanning the whole sequence — the contract `forward_osc52`
+        // relies on.
+        let chunk1 = b"out\x1b]52;c;aGVsbG8g".to_vec();
+        let chunk2 = b"d29ybGQ=\x07more".to_vec();
+        let (ranges1, pending1) = osc52_scan(&chunk1);
+        assert!(ranges1.is_empty());
+        let start = pending1.expect("first chunk leaves a pending OSC 52");
+
+        let mut combined = chunk1[start..].to_vec();
+        combined.extend_from_slice(&chunk2);
+        let (ranges2, pending2) = osc52_scan(&combined);
+        assert_eq!(ranges2.len(), 1);
+        assert_eq!(pending2, None);
+        assert_eq!(&combined[ranges2[0].clone()], b"\x1b]52;c;aGVsbG8gd29ybGQ=\x07");
+    }
+
+    #[test]
+    fn partial_header_at_tail_is_carried() {
+        // The 5-byte `\x1b]52;` header itself split across chunks. The
+        // trailing `\x1b]5` must be reported as pending so the next
+        // chunk can complete it.
+        let (ranges, pending) = osc52_scan(b"output\x1b]5");
+        assert!(ranges.is_empty());
+        assert_eq!(pending, Some(6));
     }
 
     #[test]

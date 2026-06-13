@@ -66,6 +66,14 @@ pub const TMUX_SOCKET: &str = "lazybox";
 /// OUTER terminal changes.
 const SCROLLBACK_TERMINAL_OVERRIDES: &str = ",xterm*:smcup@:rmcup@";
 
+/// Clipboard passthrough options, independent of the scrollback flavor.
+/// `set-clipboard on` forwards an inner program's OSC 52 to the attach
+/// client; `allow-passthrough on` (off by default since tmux 3.3a) lets
+/// a DCS-wrapped escape through. Without these tmux eats the clipboard
+/// request before lazybox can relay it to the host terminal.
+const CLIPBOARD_PASSTHROUGH_OPTS: &str =
+    "set -g set-clipboard on\nset -g allow-passthrough on\n";
+
 /// tmux client config: prefix off (so Ctrl-B reaches the agent), no
 /// key bindings (so nothing intercepts), no status bar (so output
 /// isn't framed). Built as a string and dropped to a temp file at
@@ -105,6 +113,13 @@ fn transparent_conf(native_scrollback: bool) -> String {
          set -g mode-style \"fg=default,bg=default\"\n\
          set -g message-style \"fg=default,bg=default\"\n",
     );
+    // Clipboard passthrough. `set-clipboard on` lets an inner program's
+    // OSC 52 reach the attach client (which relays it to the host), and
+    // `allow-passthrough on` lets a DCS-wrapped escape (some agents wrap
+    // OSC 52 / banners in tmux's passthrough envelope) through untouched.
+    // Without these tmux swallows the clipboard request and the lazybox
+    // forwarder never sees it.
+    conf.push_str(CLIPBOARD_PASSTHROUGH_OPTS);
     if native_scrollback {
         conf.push_str("set -g terminal-overrides '");
         conf.push_str(SCROLLBACK_TERMINAL_OVERRIDES);
@@ -138,7 +153,13 @@ fn transparent_conf(native_scrollback: bool) -> String {
 /// pick the overrides up (terminal-overrides is consulted at client
 /// attach time).
 fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
-    if native_scrollback {
+    // Clipboard passthrough is independent of the scrollback flavor, so
+    // an already-running server picks it up either way.
+    let clipboard = [
+        vec!["set-option", "-g", "set-clipboard", "on"],
+        vec!["set-option", "-g", "allow-passthrough", "on"],
+    ];
+    let mut cmds = if native_scrollback {
         vec![
             vec!["set-option", "-g", "mouse", "off"],
             vec![
@@ -153,7 +174,9 @@ fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
             vec!["set-option", "-g", "mouse", "on"],
             vec!["set-option", "-gu", "terminal-overrides"],
         ]
-    }
+    };
+    cmds.extend(clipboard);
+    cmds
 }
 
 const DEFAULT_COLS: u16 = 120;
@@ -804,6 +827,10 @@ mod tests {
     /// conf flavors, so recovered sessions behave like fresh ones.
     #[test]
     fn server_option_cmds_match_conf_flavors() {
+        let clipboard = vec![
+            vec!["set-option", "-g", "set-clipboard", "on"],
+            vec!["set-option", "-g", "allow-passthrough", "on"],
+        ];
         let native = server_option_cmds(true);
         assert_eq!(
             native,
@@ -815,6 +842,8 @@ mod tests {
                     "terminal-overrides",
                     ",xterm*:smcup@:rmcup@",
                 ],
+                clipboard[0].clone(),
+                clipboard[1].clone(),
             ]
         );
         let legacy = server_option_cmds(false);
@@ -823,8 +852,25 @@ mod tests {
             vec![
                 vec!["set-option", "-g", "mouse", "on"],
                 vec!["set-option", "-gu", "terminal-overrides"],
+                clipboard[0].clone(),
+                clipboard[1].clone(),
             ]
         );
+    }
+
+    /// Both conf flavors enable clipboard passthrough so an inner
+    /// program's OSC 52 reaches the host. Regression for "copy from the
+    /// agent silently fails under the tmux backend".
+    #[test]
+    fn both_conf_flavors_enable_clipboard_passthrough() {
+        for native in [true, false] {
+            let conf = transparent_conf(native);
+            assert!(conf.contains("set -g set-clipboard on\n"), "native={native}");
+            assert!(
+                conf.contains("set -g allow-passthrough on\n"),
+                "native={native}"
+            );
+        }
     }
 
     /// `with_socket` drops the native-flavor conf to disk and the

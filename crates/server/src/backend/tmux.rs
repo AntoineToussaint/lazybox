@@ -520,9 +520,14 @@ impl SessionBackend for TmuxBackend {
         rows: u16,
     ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
         Box::pin(async move {
-            // Resizing the attached client makes tmux resize the pane
-            // automatically. We also nudge the tmux session itself in
-            // case other clients are attached at different sizes.
+            // Resizing the attached client's PTY makes tmux resize the
+            // pane automatically: with `window-size latest` (the server
+            // default) our refreshed client becomes the size authority,
+            // so a second client attached elsewhere at a different size
+            // no longer forces ours. (The previous `refresh-client -t
+            // <session> -C` nudge was a dead no-op — `-t` takes a target
+            // CLIENT, not a session, and `-C` is control-mode only, so it
+            // always errored and was swallowed.)
             let pty = {
                 let map = self.sessions.lock().await;
                 map.get(key)
@@ -537,11 +542,6 @@ impl SessionBackend for TmuxBackend {
             })
             .await
             .map_err(|e| BackendError::Other(e.to_string()))?;
-            // Best-effort window resize. Failing this is fine — the
-            // PTY-level resize already triggered tmux internally.
-            let _ = self
-                .tmux(&["refresh-client", "-t", key, "-C", &format!("{cols},{rows}")])
-                .await;
             Ok(())
         })
     }
@@ -642,7 +642,15 @@ impl SessionBackend for TmuxBackend {
             self.ensure_server_options().await;
             let pty = {
                 let mut map = self.sessions.lock().await;
-                if let Some(slot) = map.get(key) {
+                // Reuse the cached client only if it's still ALIVE. A
+                // `freeze` (detach-client) or any attach-client EOF makes
+                // the DaemonPty finish while the inner tmux session keeps
+                // running, but the dead Slot lingers in the map. Cloning
+                // it would hand back a closed broadcast — stale replay,
+                // no live output, no recovery. Detect that and open a
+                // fresh attach client instead, replacing the dead Slot.
+                let alive = map.get(key).filter(|slot| !slot.client.is_finished());
+                if let Some(slot) = alive {
                     slot.client.clone()
                 } else {
                     let size = PtySize {

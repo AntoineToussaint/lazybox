@@ -344,13 +344,19 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
     // bottom-most live dialog. `chooser_live` is vacuously true in that
     // case (nothing to out-rank), so an agent merely PRINTING prose like
     // "Here are the options:\n1. …\n2. …\n❯ pick one" would read as a
-    // live gate. Require a corroborating dialog signal — a consent /
-    // question phrase, a choice marker, or the Esc-to-cancel footer,
-    // all of which a real Claude chooser always renders — before
-    // trusting the weak arrow+list shape with no anchor to lean on.
+    // live gate. Require a corroborating dialog signal before trusting
+    // the weak arrow+list shape with no anchor to lean on: a consent /
+    // question phrase, a Yes/no choice marker, the Esc-to-cancel footer,
+    // OR the structural tell that the selection arrow sits DIRECTLY on a
+    // numbered option (`❯ 1.` / `> 1.`) — a real chooser shape that prose
+    // ("❯ pick one") never produces. The last one rescues a chooser with
+    // custom option labels whose other chrome fragmented out of the
+    // window.
     let has_recency_anchor = idle_pos.is_some() || resting_pos.is_some() || work_pos.is_some();
-    let corroborated =
-        question_pos.is_some() || choice_pos.is_some() || compact.contains("esctocancel");
+    let corroborated = question_pos.is_some()
+        || choice_pos.is_some()
+        || compact.contains("esctocancel")
+        || arrow_on_numbered_option(s);
 
     // WEAK: arrow + numbered options, gated on the full composer footer
     // (incl. `Tab to amend`) so injected prose / parked prompts stay Idle.
@@ -628,6 +634,28 @@ fn has_ascii_chooser_arrow(s: &str) -> bool {
     })
 }
 
+/// True when a selection arrow sits DIRECTLY on a numbered option:
+/// `❯ 1.` / `❯1.` / `> 1.` (and `)` variants). This is the structural
+/// tell of a real chooser regardless of option labels — prose that
+/// merely contains an arrow ("❯ pick one") never matches because the
+/// arrow isn't followed by a `<digit><.|)>`. Used as a corroboration
+/// signal so a custom-label chooser whose other chrome scrolled out of
+/// the window is still recognised. Scanned on the RAW buffer (the arrow's
+/// trailing space survives) like [`has_ascii_chooser_arrow`].
+fn arrow_on_numbered_option(s: &str) -> bool {
+    if has_ascii_chooser_arrow(s) {
+        return true;
+    }
+    s.match_indices('❯').any(|(i, _)| {
+        let rest = s[i + '❯'.len_utf8()..].trim_start();
+        let mut chars = rest.chars();
+        matches!(
+            (chars.next(), chars.next()),
+            (Some(d), Some(p)) if d.is_ascii_digit() && (p == '.' || p == ')')
+        )
+    })
+}
+
 /// Byte offset of the most recent chooser marker — the unicode selection
 /// arrow `❯` or a numbered option (`1.`/`1)`/`2.`/`2)`) — or `None` when
 /// no chooser shape is present. The MAX of the marker offsets is the
@@ -721,19 +749,25 @@ fn working_status_pos(compact: &str) -> Option<usize> {
     [interrupt, counter].into_iter().flatten().max()
 }
 
-/// The `esc to interrupt` hint, but only when it sits on a line that is
-/// actually shaped like Claude's live status bar — carrying at least one
-/// piece of status scaffolding: a spinner glyph (`✻ (esc to interrupt)`),
-/// the elapsed-timer opener, or a `·` separator
-/// (`✻ … (8s · ↑ 412 tokens · esc to interrupt)`). Plain prose that
-/// merely mentions "esc to interrupt" — a commit message, a help line the
-/// agent printed — has none of these, so it no longer pins the agent to
-/// Working forever.
+/// The `esc to interrupt` hint, but only when it sits on a line shaped
+/// like Claude's live status bar rather than prose. The status bar
+/// renders the hint as a STANDALONE token — it ends the line, or is
+/// followed by a non-letter: a closing `)` (`(esc to interrupt)`), a
+/// thinking-level dot (`esc to interrupt●high`), or a `·` separator.
+/// Prose like "press esc to interrupt me while I work" continues with a
+/// letter (`…interruptme…` after compaction), so it no longer pins the
+/// agent to Working forever. (An earlier form required a spinner/timer/`·`
+/// ON the same line, which wrongly rejected the real captured wire shape
+/// where the interrupt hint lands on its own bottom line with no counter.)
 fn is_interrupt_status_line(line: &str) -> bool {
-    line.contains("esctointerrupt")
-        && (line.contains(WORKING_SPINNER_GLYPHS)
-            || has_elapsed_counter(line)
-            || line.contains('·'))
+    const HINT: &str = "esctointerrupt";
+    match line.find(HINT) {
+        Some(idx) => match line[idx + HINT.len()..].chars().next() {
+            None => true,                  // ends the line
+            Some(c) => !c.is_alphabetic(), // `)`, `·`, `●`, digit, …
+        },
+        None => false,
+    }
 }
 
 /// Spinner glyphs Claude cycles through at the head of its live status
@@ -865,8 +899,10 @@ pub fn recent_tail(s: &str, max: usize) -> &str {
 /// cursor parks there), so the simple-pattern agents scan only this zone
 /// for their `[y/n]`-style markers — a `[y/n]` that merely appeared
 /// earlier in an echoed command, a diff, or a doc no longer fires a
-/// spurious InputNeeded. `n` > 1 tolerates a trailing helper line under
-/// the prompt.
+/// spurious InputNeeded. `n` of a few lines tolerates several trailing
+/// helper / key-hint lines a CLI may print under the prompt, while a
+/// `[y/n]` buried deeper in scrollback (more output below it) is still
+/// excluded.
 pub fn last_nonempty_lines(s: &str, n: usize) -> String {
     let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = lines.len().saturating_sub(n);
@@ -1378,8 +1414,17 @@ mod tests {
             working_status_pos(&compact_lower("Add esc to interrupt handler to the runner")),
             None,
         );
-        // But the real status-bar shapes still anchor working.
+        // But the real status-bar shapes still anchor working — including
+        // the lone interrupt line with NO counter/spinner on it (the
+        // captured wire shape: a thinking-level dot follows the hint).
+        // The earlier "require scaffolding on the same line" form wrongly
+        // read these as Idle while the agent was busy.
         assert!(working_status_pos(&compact_lower("✻ (esc to interrupt)")).is_some());
+        assert!(working_status_pos(&compact_lower("esc to interrupt●high")).is_some());
+        assert_eq!(
+            claude_state("⏺ Compacting conversation…\nesc to interrupt●high".as_bytes()),
+            Some(AgentState::Working),
+        );
     }
 
     #[test]
@@ -1411,6 +1456,14 @@ mod tests {
         // A real dialog carrying a consent question is still detected.
         assert_eq!(
             claude_state("Do you want to proceed?\n\u{276f} 1. Yes\n2. No\n".as_bytes()),
+            Some(AgentState::InputNeeded),
+        );
+        // A real chooser with CUSTOM labels (no "Yes", no question
+        // phrase, no Esc-to-cancel in window) is still detected: the
+        // arrow sits directly on a numbered option, which prose never
+        // produces. Without this corroboration it wrongly read Idle.
+        assert_eq!(
+            claude_state("Which approach?\n\u{276f} 1. Rewrite\n2. Patch\n3. Skip\n".as_bytes()),
             Some(AgentState::InputNeeded),
         );
     }

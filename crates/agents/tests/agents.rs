@@ -101,6 +101,15 @@ fn codex_yn_only_fires_at_bottom_of_screen() {
         ),
         Some(AgentState::Idle),
     );
+    // A live prompt with a few trailing helper/hint lines below the
+    // `[y/n]` still fires — the bottom-of-screen zone is several lines
+    // deep, not just the last line.
+    assert_eq!(
+        agent.detect_state(
+            b"Apply this patch? [y/n]\n  y = yes, apply\n  n = no, skip\n(press a key)"
+        ),
+        Some(AgentState::InputNeeded),
+    );
 }
 
 #[test]

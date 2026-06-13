@@ -171,8 +171,14 @@ pub trait Agent: Send + Sync {
     /// Encode a prompt as bytes the daemon should write to the PTY.
     /// Most agents accept plain text + a newline; some need bracketed
     /// paste or specific control sequences.
+    ///
+    /// ESC (0x1b) is stripped from the (untrusted, third-party-authored)
+    /// prompt text: an agent that enables bracketed paste on its input
+    /// could otherwise be driven by an embedded `ESC[201~` paste-breakout
+    /// or arbitrary escape injection. See `builtins::Claude::inject_prompt`
+    /// for the same guard on the paste-wrapped path.
     fn inject_prompt(&self, prompt: &str) -> Vec<u8> {
-        let mut bytes = prompt.as_bytes().to_vec();
+        let mut bytes: Vec<u8> = prompt.bytes().filter(|&b| b != 0x1b).collect();
         bytes.push(b'\n');
         bytes
     }
@@ -409,7 +415,7 @@ pub mod builtins {
             let tail = detect::recent_tail(&s, PROMPT_TAIL_WINDOW);
             // Only the bottom of the screen — where a live prompt parks —
             // so a `[y/n]` echoed earlier in output doesn't false-fire.
-            let prompt_zone = detect::last_nonempty_lines(tail, 3);
+            let prompt_zone = detect::last_nonempty_lines(tail, 5);
             if detect::contains_any(&prompt_zone, detect::YN_PROMPT_PATTERNS)
                 || detect::contains_any(&prompt_zone, &["approve?"])
             {
@@ -442,7 +448,7 @@ pub mod builtins {
             let s = detect::strip_ansi_lossy(recent_output);
             let tail = detect::recent_tail(&s, PROMPT_TAIL_WINDOW);
             // Match only the bottom-of-screen prompt zone (see Codex).
-            let prompt_zone = detect::last_nonempty_lines(tail, 3);
+            let prompt_zone = detect::last_nonempty_lines(tail, 5);
             if detect::contains_any(&prompt_zone, detect::YN_PROMPT_PATTERNS) {
                 return Some(AgentState::InputNeeded);
             }

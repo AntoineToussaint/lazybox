@@ -1267,10 +1267,17 @@ impl TerminalStack {
                             break;
                         }
                         if x >= col_start {
-                            // The blank tail cell of a wide glyph carries
+                            // The blank spacer cell of a wide glyph carries
                             // no graphemes; emitting it as a space turns
-                            // "日本語" into "日 本 語". Skip it.
-                            if matches!(cell.wide(), Ok(vt::screen::CellWide::SpacerTail)) {
+                            // "日本語" into "日 本 語". Skip it. `SpacerTail`
+                            // follows a wide glyph; `SpacerHead` pads the
+                            // end of a soft-wrapped row where a wide glyph
+                            // couldn't fit — both are non-text.
+                            if matches!(
+                                cell.wide(),
+                                Ok(vt::screen::CellWide::SpacerTail
+                                    | vt::screen::CellWide::SpacerHead)
+                            ) {
                                 x += 1;
                                 continue;
                             }
@@ -1342,14 +1349,19 @@ impl TerminalStack {
             if y == target_row {
                 if let Ok(mut cell_iter) = slot.vt.cell_iter.update(row) {
                     while let Some(cell) = cell_iter.next() {
-                        // The blank tail cell of a wide glyph emits no
+                        // A blank spacer cell of a wide glyph emits no
                         // text, but it still occupies a screen column, so
                         // a click on it must resolve into the glyph. Map
                         // its byte offset back to the wide base (the last
                         // recorded start) and append nothing — otherwise
                         // the column→byte map drifts past wide text and
-                        // right-click resolves the wrong token.
-                        if matches!(cell.wide(), Ok(vt::screen::CellWide::SpacerTail)) {
+                        // right-click resolves the wrong token. Covers both
+                        // the post-glyph `SpacerTail` and the soft-wrap
+                        // `SpacerHead`.
+                        if matches!(
+                            cell.wide(),
+                            Ok(vt::screen::CellWide::SpacerTail | vt::screen::CellWide::SpacerHead)
+                        ) {
                             cell_byte_starts.push(cell_byte_starts.last().copied().unwrap_or(0));
                             continue;
                         }
@@ -1400,7 +1412,16 @@ impl TerminalStack {
         let body_height = rect.height.saturating_sub(3);
         let recap = Self::recap_rows(slot, body_height);
         let inner_y = rect.y.saturating_add(3).saturating_add(recap);
-        if col < inner_x || row < inner_y {
+        // Reject points OUTSIDE the inner body — the left/right border
+        // columns and the bottom row are never grid cells, so a click
+        // there must not be forwarded to the inner program as a bogus
+        // near-edge cell. (Lower bounds guard the border/chrome above and
+        // left; these guard the border below and right.)
+        if col < inner_x
+            || row < inner_y
+            || col >= rect.x.saturating_add(rect.width).saturating_sub(1)
+            || row >= rect.y.saturating_add(rect.height).saturating_sub(1)
+        {
             return None;
         }
         Some(((col - inner_x) as u32, (row - inner_y) as u32))

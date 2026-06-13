@@ -253,6 +253,20 @@ pub mod builtins {
         }
     }
 
+    /// Remove ESC (0x1b) bytes from untrusted prompt text before it is
+    /// wrapped in a bracketed paste. Prompt bodies are markdown / plain
+    /// text where a raw ESC never legitimately appears, so dropping it
+    /// neutralizes any embedded escape sequence — most importantly the
+    /// bracketed-paste END marker `ESC[201~`, which would otherwise let
+    /// attacker-authored content break out of the paste into live input.
+    fn scrub_escape_bytes(prompt: &str) -> std::borrow::Cow<'_, str> {
+        if prompt.as_bytes().contains(&0x1b) {
+            std::borrow::Cow::Owned(prompt.replace('\u{1b}', ""))
+        } else {
+            std::borrow::Cow::Borrowed(prompt)
+        }
+    }
+
     #[derive(Default)]
     pub struct Claude;
 
@@ -309,9 +323,19 @@ pub mod builtins {
         /// Claude's input box, which is what we want for multi-
         /// paragraph instructions.
         fn inject_prompt(&self, prompt: &str) -> Vec<u8> {
-            let mut bytes = Vec::with_capacity(prompt.len() + 12);
+            // SECURITY: the prompt body embeds untrusted third-party text
+            // (a PR/issue title + body authored by anyone). A body
+            // containing the literal bracketed-paste END marker
+            // `ESC[201~` would terminate the paste early, and everything
+            // after it would reach Claude's terminal as LIVE keystrokes /
+            // escape sequences — escaping both the paste and the
+            // "untrusted content" fence. ESC (0x1b) never legitimately
+            // appears in prompt text, so strip it: the marker degrades to
+            // inert `[201~` characters inside the paste.
+            let safe = scrub_escape_bytes(prompt);
+            let mut bytes = Vec::with_capacity(safe.len() + 12);
             bytes.extend_from_slice(b"\x1b[200~");
-            bytes.extend_from_slice(prompt.as_bytes());
+            bytes.extend_from_slice(safe.as_bytes());
             bytes.extend_from_slice(b"\x1b[201~");
             bytes
         }

@@ -66,6 +66,14 @@ pub const TMUX_SOCKET: &str = "lazybox";
 /// OUTER terminal changes.
 const SCROLLBACK_TERMINAL_OVERRIDES: &str = ",xterm*:smcup@:rmcup@";
 
+/// `terminal-features` entry advertising OSC 8 hyperlink support for the
+/// attach client. `terminal-features` is a server option (`-s`) and a
+/// list (`-a` append); the `xterm*` pattern matches the forced
+/// `TERM=xterm-256color`. Without it tmux strips hyperlinks because that
+/// terminfo lacks the `Hls` capability — see `transparent_conf`.
+const HYPERLINK_TERMINAL_FEATURES_VALUE: &str = "xterm*:hyperlinks";
+const HYPERLINK_TERMINAL_FEATURES: &str = "set -as terminal-features 'xterm*:hyperlinks'\n";
+
 /// tmux client config: prefix off (so Ctrl-B reaches the agent), no
 /// key bindings (so nothing intercepts), no status bar (so output
 /// isn't framed). Built as a string and dropped to a temp file at
@@ -105,6 +113,15 @@ fn transparent_conf(native_scrollback: bool) -> String {
          set -g mode-style \"fg=default,bg=default\"\n\
          set -g message-style \"fg=default,bg=default\"\n",
     );
+    // Tell tmux the attach client understands OSC 8 hyperlinks so it
+    // RE-EMITS them instead of stripping. We force the client's
+    // `TERM=xterm-256color`, whose terminfo has no `Hls` capability,
+    // so without this tmux drops every hyperlink an inner program
+    // (claude, gh, `ls --hyperlink`) emits — and right-click-to-open
+    // never sees a URI because the payload is gone before it reaches
+    // libghostty's VT parser. The `xterm*` pattern matches the forced
+    // client TERM, same as `terminal-overrides` above.
+    conf.push_str(HYPERLINK_TERMINAL_FEATURES);
     if native_scrollback {
         conf.push_str("set -g terminal-overrides '");
         conf.push_str(SCROLLBACK_TERMINAL_OVERRIDES);
@@ -138,6 +155,15 @@ fn transparent_conf(native_scrollback: bool) -> String {
 /// pick the overrides up (terminal-overrides is consulted at client
 /// attach time).
 fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
+    // `terminal-features` is independent of the scrollback flavor — an
+    // already-running server must learn the client speaks OSC 8 either
+    // way, else surviving sessions keep stripping hyperlinks.
+    let hyperlinks = vec![
+        "set-option",
+        "-as",
+        "terminal-features",
+        HYPERLINK_TERMINAL_FEATURES_VALUE,
+    ];
     if native_scrollback {
         vec![
             vec!["set-option", "-g", "mouse", "off"],
@@ -147,11 +173,13 @@ fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
                 "terminal-overrides",
                 SCROLLBACK_TERMINAL_OVERRIDES,
             ],
+            hyperlinks,
         ]
     } else {
         vec![
             vec!["set-option", "-g", "mouse", "on"],
             vec!["set-option", "-gu", "terminal-overrides"],
+            hyperlinks,
         ]
     }
 }
@@ -804,6 +832,12 @@ mod tests {
     /// conf flavors, so recovered sessions behave like fresh ones.
     #[test]
     fn server_option_cmds_match_conf_flavors() {
+        let hyperlinks = vec![
+            "set-option",
+            "-as",
+            "terminal-features",
+            "xterm*:hyperlinks",
+        ];
         let native = server_option_cmds(true);
         assert_eq!(
             native,
@@ -815,6 +849,7 @@ mod tests {
                     "terminal-overrides",
                     ",xterm*:smcup@:rmcup@",
                 ],
+                hyperlinks.clone(),
             ]
         );
         let legacy = server_option_cmds(false);
@@ -823,7 +858,21 @@ mod tests {
             vec![
                 vec!["set-option", "-g", "mouse", "on"],
                 vec!["set-option", "-gu", "terminal-overrides"],
+                hyperlinks,
             ]
+        );
+    }
+
+    /// Both conf flavors advertise OSC 8 hyperlink support to the attach
+    /// client. Without this tmux strips hyperlinks (the forced
+    /// `TERM=xterm-256color` has no `Hls` capability), so right-click on
+    /// an agent's titled link finds no URI to open. Regression for the
+    /// "right-click never opens URLs under the tmux backend" report.
+    #[test]
+    fn both_conf_flavors_advertise_hyperlinks() {
+        assert!(transparent_conf(true).contains("set -as terminal-features 'xterm*:hyperlinks'\n"));
+        assert!(
+            transparent_conf(false).contains("set -as terminal-features 'xterm*:hyperlinks'\n")
         );
     }
 

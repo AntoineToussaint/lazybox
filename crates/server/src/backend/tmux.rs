@@ -72,8 +72,7 @@ const SCROLLBACK_TERMINAL_OVERRIDES: &str = ",xterm*:smcup@:rmcup@";
 /// `TERM=xterm-256color`. Without it tmux strips hyperlinks because that
 /// terminfo lacks the `Hls` capability — see `transparent_conf`.
 const HYPERLINK_TERMINAL_FEATURES_VALUE: &str = "xterm*:hyperlinks";
-const HYPERLINK_TERMINAL_FEATURES: &str =
-    "set -as terminal-features 'xterm*:hyperlinks'\n";
+const HYPERLINK_TERMINAL_FEATURES: &str = "set -as terminal-features 'xterm*:hyperlinks'\n";
 
 /// tmux client config: prefix off (so Ctrl-B reaches the agent), no
 /// key bindings (so nothing intercepts), no status bar (so output
@@ -872,7 +871,9 @@ mod tests {
     #[test]
     fn both_conf_flavors_advertise_hyperlinks() {
         assert!(transparent_conf(true).contains("set -as terminal-features 'xterm*:hyperlinks'\n"));
-        assert!(transparent_conf(false).contains("set -as terminal-features 'xterm*:hyperlinks'\n"));
+        assert!(
+            transparent_conf(false).contains("set -as terminal-features 'xterm*:hyperlinks'\n")
+        );
     }
 
     /// `with_socket` drops the native-flavor conf to disk and the

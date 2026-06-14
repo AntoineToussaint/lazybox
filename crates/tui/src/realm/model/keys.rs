@@ -242,6 +242,7 @@ impl<T: TerminalAdapter> Model<T> {
             && key.modifiers.is_empty()
             && matches!(key.code, Key::Char(c) if c == self.ui_defaults.terminal_escape_char)
         {
+            let was_armed = self.escape_latch.is_armed();
             if self.escape_latch.tap(self.ui_defaults.escape_window) {
                 // Second `]` within the window completes `]]`. With a
                 // snippet library present, arm the leader so the next
@@ -259,6 +260,14 @@ impl<T: TerminalAdapter> Model<T> {
                 self.redraw = true;
                 return;
             }
+            // `tap` returned false. If the latch was ALREADY armed, the
+            // chord window had lapsed and `tap` re-armed for THIS press —
+            // the previously-held `]` is stale and must be released as a
+            // literal, else the first `]` of a slowly-typed `] … ]` pair
+            // is silently dropped. (The new `]` is now the held one.)
+            if was_armed {
+                self.flush_held_escape_char();
+            }
             return;
         }
         if self.focus == PaneFocus::Terminals && self.escape_latch.is_armed() {
@@ -269,15 +278,7 @@ impl<T: TerminalAdapter> Model<T> {
             // dispatch below. Snippet invocation lives under the `]]`
             // leader now (issue #205), so a lone `]` is never
             // intercepted.
-            let mut held_cmds: Vec<IpcCommand> = Vec::new();
-            let held = crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char(self.ui_defaults.terminal_escape_char),
-                crossterm::event::KeyModifiers::NONE,
-            );
-            self.terminals.handle_key_direct(held, &mut held_cmds);
-            for cmd in held_cmds {
-                self.send_cmd(cmd);
-            }
+            self.flush_held_escape_char();
         }
 
         // We have a typed key already; skip the synthetic Event
@@ -400,6 +401,23 @@ impl<T: TerminalAdapter> Model<T> {
         // Sidebar j/k changes selection — propagate to right + terminals.
         self.sync_panes();
         self.redraw = true;
+    }
+
+    /// Send a single literal escape char (`]`) to the focused terminal —
+    /// the held first `]` that turned out NOT to start a `]]` chord.
+    /// Shared by the three release paths: a non-`]` key followed, the
+    /// chord window lapsed and re-armed on another `]`, or the idle tick
+    /// timed the chord out ([`Self::tick_terminal_leader`]).
+    pub(super) fn flush_held_escape_char(&mut self) {
+        let mut held_cmds: Vec<IpcCommand> = Vec::new();
+        let held = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(self.ui_defaults.terminal_escape_char),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        self.terminals.handle_key_direct(held, &mut held_cmds);
+        for cmd in held_cmds {
+            self.send_cmd(cmd);
+        }
     }
 
     /// Returns true when the q-q latch is armed (used by the bottom
@@ -743,9 +761,10 @@ impl<T: TerminalAdapter> Model<T> {
                     && rect_contains(right_bottom_rect, m.column, m.row)
                     && self.focus == PaneFocus::Terminals
                     && self.terminals.focused_terminal_tracks_mouse()
+                    && let Some((cell_col, cell_row)) =
+                        self.terminals
+                            .screen_to_cell(right_bottom_rect, m.column, m.row)
                 {
-                    let cell_col = m.column.saturating_sub(right_bottom_rect.x) as u32;
-                    let cell_row = m.row.saturating_sub(right_bottom_rect.y) as u32;
                     let vt_button = match button {
                         crossterm::event::MouseButton::Left => libghostty_vt::mouse::Button::Left,
                         crossterm::event::MouseButton::Middle => {
@@ -878,9 +897,9 @@ impl<T: TerminalAdapter> Model<T> {
                     && rect_contains(right_bottom_rect, col, row)
                     && self.focus == PaneFocus::Terminals
                     && self.terminals.focused_terminal_tracks_mouse()
+                    && let Some((cell_col, cell_row)) =
+                        self.terminals.screen_to_cell(right_bottom_rect, col, row)
                 {
-                    let cell_col = col.saturating_sub(right_bottom_rect.x) as u32;
-                    let cell_row = row.saturating_sub(right_bottom_rect.y) as u32;
                     let vt_button = match button {
                         crossterm::event::MouseButton::Left => libghostty_vt::mouse::Button::Left,
                         crossterm::event::MouseButton::Middle => {
@@ -932,19 +951,23 @@ impl<T: TerminalAdapter> Model<T> {
                     if scaled == 0 {
                         return;
                     }
-                    let cell_col = m.column.saturating_sub(right_bottom_rect.x) as u32;
-                    let cell_row = m.row.saturating_sub(right_bottom_rect.y) as u32;
-                    let button = if raw_up {
-                        libghostty_vt::mouse::Button::Four
-                    } else {
-                        libghostty_vt::mouse::Button::Five
-                    };
-                    if let Some((terminal_id, bytes)) = self.terminals.encode_mouse(
-                        libghostty_vt::mouse::Action::Press,
-                        Some(button),
-                        cell_col,
-                        cell_row,
-                    ) {
+                    let cell = self
+                        .terminals
+                        .screen_to_cell(right_bottom_rect, m.column, m.row);
+                    let encoded = cell.and_then(|(cell_col, cell_row)| {
+                        let button = if raw_up {
+                            libghostty_vt::mouse::Button::Four
+                        } else {
+                            libghostty_vt::mouse::Button::Five
+                        };
+                        self.terminals.encode_mouse(
+                            libghostty_vt::mouse::Action::Press,
+                            Some(button),
+                            cell_col,
+                            cell_row,
+                        )
+                    });
+                    if let Some((terminal_id, bytes)) = encoded {
                         // One wheel notch encodes one line for the
                         // inner program, but the damper computed a
                         // multi-line step. Repeat the encoding
@@ -960,9 +983,9 @@ impl<T: TerminalAdapter> Model<T> {
                         self.redraw = true;
                         return;
                     }
-                    // Mouse-tracking flag was up but the event encoded
-                    // to nothing — fall through to the local viewport
-                    // with the damped step.
+                    // Mouse-tracking flag was up but the event mapped to
+                    // pane chrome or encoded to nothing — fall through to
+                    // the local viewport with the damped step.
                     let delta = if raw_up { -scaled } else { scaled };
                     let _ = self.terminals.scroll_active(delta);
                     self.redraw = true;

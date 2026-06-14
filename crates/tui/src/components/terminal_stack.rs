@@ -43,6 +43,12 @@ use std::collections::HashMap;
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
 
+/// How long the `Ctrl-w` tile prefix stays live waiting for its second
+/// key. Generous enough for a deliberate `Ctrl-w <dir>` chord, short
+/// enough that a stray `Ctrl-w` doesn't capture an unrelated keystroke
+/// seconds later.
+const CTRL_W_PREFIX_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Cap for the per-terminal recent-output buffer.
 ///
 /// libghostty-vt holds the canonical cell grid for rendering, but
@@ -359,11 +365,14 @@ pub enum PendingSplit {
 /// char picks the clipboard target (`c` = clipboard, `p` = primary,
 /// `s` = selection, etc.); we don't care which one, the host decides.
 ///
-/// Returned ranges are non-overlapping and in input order. An
-/// unterminated OSC 52 (sequence starts but no terminator before
-/// end-of-bytes) is dropped — the inner program is expected to
-/// terminate within a single write. Same chunk; we don't span.
-pub(crate) fn osc52_ranges(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
+/// Returned ranges are non-overlapping and in input order. The second
+/// element is the start index of a trailing OSC 52 that began but did
+/// NOT terminate before end-of-bytes — either a complete header whose
+/// base64 payload/terminator is still arriving, or a partial header
+/// (`\x1b]5…`) split mid-sequence. The caller carries those bytes into
+/// the next chunk so a clipboard copy split across PTY reads isn't
+/// dropped.
+pub(crate) fn osc52_scan(bytes: &[u8]) -> (Vec<std::ops::Range<usize>>, Option<usize>) {
     let mut out = Vec::new();
     let mut i = 0;
     while i + 5 <= bytes.len() {
@@ -377,8 +386,9 @@ pub(crate) fn osc52_ranges(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
             let mut j = i + 5;
             let end = loop {
                 if j >= bytes.len() {
-                    // Unterminated — drop this match, stop scanning.
-                    return out;
+                    // Unterminated — report so the caller carries the
+                    // tail into the next chunk instead of dropping it.
+                    return (out, Some(start));
                 }
                 if bytes[j] == 0x07 {
                     break j + 1;
@@ -394,8 +404,31 @@ pub(crate) fn osc52_ranges(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
         }
         i += 1;
     }
-    out
+    // The 5-byte header itself can straddle the tail (chunk ends with
+    // `\x1b`, `\x1b]`, `\x1b]5`, or `\x1b]52`). Carry a trailing proper
+    // prefix of the header so the next chunk can complete it.
+    const HEADER: &[u8] = b"\x1b]52;";
+    let tail_start = bytes.len().saturating_sub(HEADER.len() - 1);
+    for s in tail_start..bytes.len() {
+        let tail = &bytes[s..];
+        if tail.len() < HEADER.len() && HEADER.starts_with(tail) {
+            return (out, Some(s));
+        }
+    }
+    (out, None)
 }
+
+/// Convenience wrapper returning just the complete OSC 52 ranges.
+#[cfg(test)]
+pub(crate) fn osc52_ranges(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
+    osc52_scan(bytes).0
+}
+
+/// Upper bound on the OSC 52 carry buffer. A clipboard payload larger
+/// than this (after base64) is dropped rather than buffered without
+/// limit — protects against a stream that opens `\x1b]52;` and never
+/// terminates.
+const OSC52_CARRY_CAP: usize = 4 * 1024 * 1024;
 
 /// Forward any OSC 52 clipboard-set escape sequences in `bytes` to
 /// the host terminal's stdout, so the inner program's "copy this"
@@ -407,20 +440,44 @@ pub(crate) fn osc52_ranges(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
 /// `bytes` we leave alone — libghostty-vt handles rendering as
 /// usual. Multiple OSC 52 sequences in one chunk are all forwarded.
 ///
+/// `carry` buffers an OSC 52 that began in a previous chunk but hadn't
+/// terminated yet — a large base64 clipboard payload routinely spans
+/// PTY reads, and without carrying it the whole copy was silently
+/// dropped. The carried head is prepended before scanning; only fully
+/// terminated sequences are written to the host.
+///
 /// Best-effort: stdout write failures are ignored. Writing to the
 /// host while ratatui is mid-frame is safe in practice — terminals
 /// pop OSC out of the stream and don't paint it.
-fn forward_osc52(bytes: &[u8]) {
-    let ranges = osc52_ranges(bytes);
-    if ranges.is_empty() {
-        return;
+fn forward_osc52(carry: &mut Vec<u8>, bytes: &[u8]) {
+    let combined: Vec<u8>;
+    let scan: &[u8] = if carry.is_empty() {
+        bytes
+    } else {
+        let mut v = std::mem::take(carry);
+        v.extend_from_slice(bytes);
+        combined = v;
+        &combined
+    };
+
+    let (ranges, pending) = osc52_scan(scan);
+    if !ranges.is_empty() {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        for range in ranges {
+            let _ = out.write_all(&scan[range]);
+        }
+        let _ = out.flush();
     }
-    use std::io::Write;
-    let mut out = std::io::stdout().lock();
-    for range in ranges {
-        let _ = out.write_all(&bytes[range]);
+
+    // Carry any unterminated trailing sequence into the next chunk,
+    // bounded so a never-terminating stream can't grow it without limit.
+    if let Some(start) = pending {
+        let tail = &scan[start..];
+        if tail.len() <= OSC52_CARRY_CAP {
+            *carry = tail.to_vec();
+        }
     }
-    let _ = out.flush();
 }
 
 /// Read-only walk of a `TileTree` along a path. Returns None if the
@@ -462,6 +519,11 @@ struct TerminalSlot {
     /// Cap of recent raw bytes (post-feed). Pure debug aid; tests
     /// inspect it. Not used for rendering.
     recent: Vec<u8>,
+    /// Buffer for an OSC 52 clipboard sequence that began in one
+    /// `append_output` chunk but hasn't terminated yet — carried so a
+    /// large copy split across PTY reads isn't dropped. See
+    /// [`forward_osc52`].
+    osc52_carry: Vec<u8>,
     /// Agent state cached from the daemon's `Event::AgentState`
     /// broadcasts. Drives the "needs input" / "working" badge in the
     /// tab strip. Default `Idle` so non-agent terminals (shells) carry
@@ -1149,7 +1211,12 @@ impl TerminalStack {
         // rows is what keeps an agent terminal's copy aligned with the
         // highlight instead of pulling the row below it.
         let inner_x = rect.x.saturating_add(1);
-        let body_height = rect.height.saturating_sub(3);
+        // Use the SAME body height the renderer feeds `recap_rows` — the
+        // pane minus 3 top-chrome rows AND the 1 held-back bottom margin
+        // (`render()` insets to `area.height - 4` before calling
+        // `render_one_terminal`). Using `- 3` here diverged from the
+        // renderer at exactly height 6, where `recap_rows` flips.
+        let body_height = rect.height.saturating_sub(4);
         let recap = Self::recap_rows(slot, body_height);
         let inner_y = rect.y.saturating_add(3).saturating_add(recap);
         // Normalize: anchor (anchor_x, anchor_y) is the row-then-
@@ -1211,6 +1278,20 @@ impl TerminalStack {
                             break;
                         }
                         if x >= col_start {
+                            // The blank spacer cell of a wide glyph carries
+                            // no graphemes; emitting it as a space turns
+                            // "日本語" into "日 本 語". Skip it. `SpacerTail`
+                            // follows a wide glyph; `SpacerHead` pads the
+                            // end of a soft-wrapped row where a wide glyph
+                            // couldn't fit — both are non-text.
+                            if matches!(
+                                cell.wide(),
+                                Ok(vt::screen::CellWide::SpacerTail
+                                    | vt::screen::CellWide::SpacerHead)
+                            ) {
+                                x += 1;
+                                continue;
+                            }
                             let graphemes = cell.graphemes().unwrap_or_default();
                             if graphemes.is_empty() {
                                 line.push(' ');
@@ -1255,7 +1336,12 @@ impl TerminalStack {
         let id = self.focused_terminal_id()?;
         let slot = self.terminals.get_mut(&id)?;
         let inner_x = rect.x.saturating_add(1);
-        let body_height = rect.height.saturating_sub(3);
+        // Use the SAME body height the renderer feeds `recap_rows` — the
+        // pane minus 3 top-chrome rows AND the 1 held-back bottom margin
+        // (`render()` insets to `area.height - 4` before calling
+        // `render_one_terminal`). Using `- 3` here diverged from the
+        // renderer at exactly height 6, where `recap_rows` flips.
+        let body_height = rect.height.saturating_sub(4);
         let recap = Self::recap_rows(slot, body_height);
         let inner_y = rect.y.saturating_add(3).saturating_add(recap);
         if col < inner_x || row < inner_y {
@@ -1279,6 +1365,22 @@ impl TerminalStack {
             if y == target_row {
                 if let Ok(mut cell_iter) = slot.vt.cell_iter.update(row) {
                     while let Some(cell) = cell_iter.next() {
+                        // A blank spacer cell of a wide glyph emits no
+                        // text, but it still occupies a screen column, so
+                        // a click on it must resolve into the glyph. Map
+                        // its byte offset back to the wide base (the last
+                        // recorded start) and append nothing — otherwise
+                        // the column→byte map drifts past wide text and
+                        // right-click resolves the wrong token. Covers both
+                        // the post-glyph `SpacerTail` and the soft-wrap
+                        // `SpacerHead`.
+                        if matches!(
+                            cell.wide(),
+                            Ok(vt::screen::CellWide::SpacerTail | vt::screen::CellWide::SpacerHead)
+                        ) {
+                            cell_byte_starts.push(cell_byte_starts.last().copied().unwrap_or(0));
+                            continue;
+                        }
                         cell_byte_starts.push(row_text.len());
                         let graphemes = cell.graphemes().unwrap_or_default();
                         if graphemes.is_empty() {
@@ -1300,6 +1402,50 @@ impl TerminalStack {
         }
         let byte_pos = *cell_byte_starts.get(cell_col as usize)?;
         detect_target(&row_text, byte_pos, hyperlink.as_deref())
+    }
+
+    /// Translate a screen `(col, row)` into 0-based grid-cell
+    /// coordinates inside the focused terminal's body, undoing the same
+    /// inset the renderer applies: the left border (`+1` col), the
+    /// three rows of top chrome (tab strip + divider + blank), and any
+    /// recap rows. This is the coordinate space `encode_mouse_for_focused`
+    /// expects. Returns `None` when the point falls in the border / tab
+    /// strip / recap (left of or above the grid) so callers forwarding a
+    /// click or wheel to a mouse-tracking inner program never feed it a
+    /// cell the renderer never drew there. Mirrors `target_at` /
+    /// `extract_text`, which previously were the ONLY paths that undid
+    /// this offset — the forward path used the raw pane origin and so
+    /// landed every event 1 column right and 3+ rows high.
+    pub fn screen_to_cell(
+        &self,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<(u32, u32)> {
+        let id = self.focused_terminal_id()?;
+        let slot = self.terminals.get(&id)?;
+        let inner_x = rect.x.saturating_add(1);
+        // Use the SAME body height the renderer feeds `recap_rows` — the
+        // pane minus 3 top-chrome rows AND the 1 held-back bottom margin
+        // (`render()` insets to `area.height - 4` before calling
+        // `render_one_terminal`). Using `- 3` here diverged from the
+        // renderer at exactly height 6, where `recap_rows` flips.
+        let body_height = rect.height.saturating_sub(4);
+        let recap = Self::recap_rows(slot, body_height);
+        let inner_y = rect.y.saturating_add(3).saturating_add(recap);
+        // Reject points OUTSIDE the inner body — the left/right border
+        // columns and the bottom row are never grid cells, so a click
+        // there must not be forwarded to the inner program as a bogus
+        // near-edge cell. (Lower bounds guard the border/chrome above and
+        // left; these guard the border below and right.)
+        if col < inner_x
+            || row < inner_y
+            || col >= rect.x.saturating_add(rect.width).saturating_sub(1)
+            || row >= rect.y.saturating_add(rect.height).saturating_sub(1)
+        {
+            return None;
+        }
+        Some(((col - inner_x) as u32, (row - inner_y) as u32))
     }
 
     pub fn scroll_active(&mut self, delta: isize) -> ScrollOutcome {
@@ -1390,7 +1536,7 @@ impl TerminalStack {
         // user's system clipboard gets updated. Without this,
         // libghostty-vt consumes the sequence internally for its
         // own clipboard (which lazybox doesn't surface).
-        forward_osc52(bytes);
+        forward_osc52(&mut slot.osc52_carry, bytes);
         slot.vt.feed(bytes);
         slot.recent.extend_from_slice(bytes);
         if slot.recent.len() > RECENT_OUTPUT_CAP {
@@ -1418,6 +1564,9 @@ impl TerminalStack {
             return;
         }
         slot.vt.feed(replay);
+        // Drop any half-buffered clipboard sequence — the stream is being
+        // rebuilt from the ring and we don't re-forward OSC 52 here.
+        slot.osc52_carry.clear();
         slot.recent.clear();
         let tail_start = replay.len().saturating_sub(RECENT_OUTPUT_CAP);
         slot.recent.extend_from_slice(&replay[tail_start..]);
@@ -1437,6 +1586,7 @@ impl TerminalStack {
             last_seq,
             vt,
             recent: Vec::new(),
+            osc52_carry: Vec::new(),
             agent_state: lazybox_ipc::AgentState::Idle,
             last_rendered_size: None,
             composing: String::new(),
@@ -1577,10 +1727,25 @@ impl TerminalStack {
         // next key is a tile action (split, focus move, close);
         // anything unrecognised disarms cleanly. Same vocabulary as
         // tmux/vim windows so existing muscle memory transfers.
-        if self.ctrl_w_latch.take() {
-            return self.handle_tile_action(key, cmds);
+        let ctrl_w =
+            key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL);
+        let mut literal_ctrl_w = false;
+        // `take_within` honors the prefix only if the follow-up key
+        // arrives within the window — a lone `Ctrl-w` the user never
+        // completed expires instead of eating an unrelated keystroke
+        // minutes later (symmetric with the `]]` leader's timeout).
+        if self.ctrl_w_latch.take_within(CTRL_W_PREFIX_WINDOW) {
+            // Doubled prefix `Ctrl-w Ctrl-w` → send ONE literal Ctrl-w
+            // to the inner program (readline word-erase, vim/emacs window
+            // commands), the escape hatch for the tile prefix — same idea
+            // as the `]]`/`]` leader. Any other key is a tile action.
+            if ctrl_w {
+                literal_ctrl_w = true; // fall through to PTY forwarding
+            } else {
+                return self.handle_tile_action(key, cmds);
+            }
         }
-        if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if ctrl_w && !literal_ctrl_w {
             self.ctrl_w_latch.arm();
             return PaneOutcome::Consumed;
         }
@@ -2604,14 +2769,24 @@ pub fn strip_ansi(input: &[u8]) -> Vec<u8> {
 /// encoding path the live key dispatch uses.
 pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
     use KeyCode::*;
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
-        Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            // Ctrl-<letter>: low control byte.
-            Some(vec![(c as u8) & 0x1f])
-        }
         Char(c) => {
-            let mut buf = [0u8; 4];
-            Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
+            // Build ESC-prefixed (Meta) + optionally control-folded byte.
+            // Previously Alt was dropped entirely, so `Alt-b` (word-back
+            // in readline) reached the agent as a bare `b`.
+            let mut bytes = Vec::with_capacity(if alt { 2 } else { 1 });
+            if alt {
+                bytes.push(0x1b);
+            }
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                // Ctrl-<letter>: low control byte.
+                bytes.push((c as u8) & 0x1f);
+            } else {
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+            Some(bytes)
         }
         Enter => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -2622,19 +2797,78 @@ pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
                 Some(vec![b'\r'])
             }
         }
-        Backspace => Some(vec![0x7f]),
+        Backspace => Some(if alt { vec![0x1b, 0x7f] } else { vec![0x7f] }),
         Esc => Some(vec![0x1b]),
         Tab => Some(vec![b'\t']),
         BackTab => Some(b"\x1b[Z".to_vec()),
-        Up => Some(b"\x1b[A".to_vec()),
-        Down => Some(b"\x1b[B".to_vec()),
-        Right => Some(b"\x1b[C".to_vec()),
-        Left => Some(b"\x1b[D".to_vec()),
-        Home => Some(b"\x1b[H".to_vec()),
-        End => Some(b"\x1b[F".to_vec()),
+        // Cursor keys carry their xterm modifier encoding so Ctrl/Shift/
+        // Alt + arrow (word-motion, selection) reach the inner program
+        // instead of arriving unmodified. Bare keys keep the short form.
+        Up => Some(cursor_seq(b'A', key.modifiers)),
+        Down => Some(cursor_seq(b'B', key.modifiers)),
+        Right => Some(cursor_seq(b'C', key.modifiers)),
+        Left => Some(cursor_seq(b'D', key.modifiers)),
+        Home => Some(cursor_seq(b'H', key.modifiers)),
+        End => Some(cursor_seq(b'F', key.modifiers)),
+        Insert => Some(b"\x1b[2~".to_vec()),
         Delete => Some(b"\x1b[3~".to_vec()),
+        // Unmodified PageUp/PageDown reach the inner program (less, vim);
+        // the Shift-modified variants are intercepted earlier for local
+        // scrollback and never get here.
+        PageUp => Some(b"\x1b[5~".to_vec()),
+        PageDown => Some(b"\x1b[6~".to_vec()),
+        F(n) => function_key_seq(n),
         _ => None,
     }
+}
+
+/// xterm modifier parameter: `1 + bitmask(shift=1, alt=2, ctrl=4)`.
+/// Returns 1 (no modifier) when none are held.
+fn xterm_modifier_param(mods: KeyModifiers) -> u8 {
+    let mut m = 0u8;
+    if mods.contains(KeyModifiers::SHIFT) {
+        m |= 1;
+    }
+    if mods.contains(KeyModifiers::ALT) {
+        m |= 2;
+    }
+    if mods.contains(KeyModifiers::CONTROL) {
+        m |= 4;
+    }
+    m + 1
+}
+
+/// Encode a cursor / Home / End key (`final_byte` is `A`/`B`/`C`/`D`/
+/// `H`/`F`). Unmodified → `ESC [ <final>`; modified → the xterm
+/// `ESC [ 1 ; <mod> <final>` form.
+fn cursor_seq(final_byte: u8, mods: KeyModifiers) -> Vec<u8> {
+    let m = xterm_modifier_param(mods);
+    if m == 1 {
+        vec![0x1b, b'[', final_byte]
+    } else {
+        format!("\x1b[1;{m}{}", final_byte as char).into_bytes()
+    }
+}
+
+/// Encode F1–F12 to the conventional xterm sequences. F1–F4 use the
+/// `ESC O <P..S>` SS3 form; F5+ use `ESC [ <n> ~`.
+fn function_key_seq(n: u8) -> Option<Vec<u8>> {
+    let seq: &[u8] = match n {
+        1 => b"\x1bOP",
+        2 => b"\x1bOQ",
+        3 => b"\x1bOR",
+        4 => b"\x1bOS",
+        5 => b"\x1b[15~",
+        6 => b"\x1b[17~",
+        7 => b"\x1b[18~",
+        8 => b"\x1b[19~",
+        9 => b"\x1b[20~",
+        10 => b"\x1b[21~",
+        11 => b"\x1b[23~",
+        12 => b"\x1b[24~",
+        _ => return None,
+    };
+    Some(seq.to_vec())
 }
 
 /// Scan `row_text` for an `http(s)://…` token whose byte range
@@ -3130,8 +3364,138 @@ mod detect_target_tests {
 }
 
 #[cfg(test)]
+mod ctrl_w_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use lazybox_ipc::Command;
+
+    fn shell_stack() -> TerminalStack {
+        let sk = SessionKey::new("session");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let slot = TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false);
+        stack.terminals.insert(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+        stack
+    }
+
+    fn ctrl_w() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)
+    }
+
+    fn write_bytes(cmds: &[Command]) -> Vec<u8> {
+        cmds.iter()
+            .flat_map(|c| match c {
+                Command::Write { bytes, .. } => bytes.clone(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn doubled_ctrl_w_sends_one_literal() {
+        let mut stack = shell_stack();
+        let mut cmds = Vec::new();
+        // First Ctrl-w arms the tile prefix, writes nothing.
+        stack.handle_key(ctrl_w(), &mut cmds);
+        assert!(write_bytes(&cmds).is_empty(), "first Ctrl-w writes nothing");
+        // Second Ctrl-w within the window → one literal Ctrl-w (0x17).
+        cmds.clear();
+        stack.handle_key(ctrl_w(), &mut cmds);
+        assert_eq!(write_bytes(&cmds), vec![0x17], "doubled Ctrl-w → 0x17");
+    }
+
+    #[test]
+    fn ctrl_w_then_tile_key_is_not_forwarded() {
+        let mut stack = shell_stack();
+        let mut cmds = Vec::new();
+        stack.handle_key(ctrl_w(), &mut cmds);
+        cmds.clear();
+        // `j` after the prefix is a tile action, not input to the PTY.
+        stack.handle_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut cmds,
+        );
+        assert!(
+            !write_bytes(&cmds).contains(&b'j'),
+            "the tile-direction key must not leak to the PTY"
+        );
+    }
+}
+
+#[cfg(test)]
+mod key_encoding_tests {
+    use super::key_to_bytes;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn k(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn ctrl_w_folds_to_control_byte() {
+        // The literal-Ctrl-W escape hatch relies on this encoding.
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::Char('w'), KeyModifiers::CONTROL)),
+            Some(vec![0x17]),
+        );
+    }
+
+    #[test]
+    fn alt_char_is_esc_prefixed() {
+        // Alt-b (readline word-back) was dropped to a bare `b`.
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::Char('b'), KeyModifiers::ALT)),
+            Some(vec![0x1b, b'b']),
+        );
+    }
+
+    #[test]
+    fn modified_arrows_carry_xterm_modifier() {
+        // Bare arrow keeps the short form.
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::Right, KeyModifiers::NONE)),
+            Some(b"\x1b[C".to_vec())
+        );
+        // Ctrl-Right → word-right: ESC[1;5C (mod = 1 + ctrl(4)).
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::Right, KeyModifiers::CONTROL)),
+            Some(b"\x1b[1;5C".to_vec()),
+        );
+        // Shift-Up → selection: ESC[1;2A (mod = 1 + shift(1)).
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::Up, KeyModifiers::SHIFT)),
+            Some(b"\x1b[1;2A".to_vec()),
+        );
+    }
+
+    #[test]
+    fn function_keys_and_nav_are_encoded() {
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::F(1), KeyModifiers::NONE)),
+            Some(b"\x1bOP".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::F(5), KeyModifiers::NONE)),
+            Some(b"\x1b[15~".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::F(12), KeyModifiers::NONE)),
+            Some(b"\x1b[24~".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::PageUp, KeyModifiers::NONE)),
+            Some(b"\x1b[5~".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&k(KeyCode::Insert, KeyModifiers::NONE)),
+            Some(b"\x1b[2~".to_vec())
+        );
+    }
+}
+
+#[cfg(test)]
 mod osc52_tests {
-    use super::osc52_ranges;
+    use super::{osc52_ranges, osc52_scan};
 
     #[test]
     fn empty_input_returns_no_ranges() {
@@ -3175,12 +3539,49 @@ mod osc52_tests {
     }
 
     #[test]
-    fn unterminated_sequence_is_dropped() {
-        // Sequence starts but no BEL/ST in the chunk. Drop rather
-        // than write a half-sequence to the host that could leave
-        // it in OSC-parsing mode.
+    fn unterminated_sequence_emits_no_complete_range_but_is_pending() {
+        // Sequence starts but no BEL/ST in the chunk. No complete range
+        // is emitted (we never write a half-sequence to the host), but
+        // the start is reported so the caller carries it forward instead
+        // of dropping the copy.
         let bytes = b"\x1b]52;c;aGVsbG8=";
-        assert!(osc52_ranges(bytes).is_empty());
+        let (ranges, pending) = osc52_scan(bytes);
+        assert!(ranges.is_empty());
+        assert_eq!(pending, Some(0));
+    }
+
+    #[test]
+    fn split_payload_completes_when_carried_into_next_chunk() {
+        // A large base64 payload split across two PTY reads. The first
+        // chunk is pending from its OSC 52 start; concatenating the
+        // carried tail with the next chunk yields one complete range
+        // spanning the whole sequence — the contract `forward_osc52`
+        // relies on.
+        let chunk1 = b"out\x1b]52;c;aGVsbG8g".to_vec();
+        let chunk2 = b"d29ybGQ=\x07more".to_vec();
+        let (ranges1, pending1) = osc52_scan(&chunk1);
+        assert!(ranges1.is_empty());
+        let start = pending1.expect("first chunk leaves a pending OSC 52");
+
+        let mut combined = chunk1[start..].to_vec();
+        combined.extend_from_slice(&chunk2);
+        let (ranges2, pending2) = osc52_scan(&combined);
+        assert_eq!(ranges2.len(), 1);
+        assert_eq!(pending2, None);
+        assert_eq!(
+            &combined[ranges2[0].clone()],
+            b"\x1b]52;c;aGVsbG8gd29ybGQ=\x07"
+        );
+    }
+
+    #[test]
+    fn partial_header_at_tail_is_carried() {
+        // The 5-byte `\x1b]52;` header itself split across chunks. The
+        // trailing `\x1b]5` must be reported as pending so the next
+        // chunk can complete it.
+        let (ranges, pending) = osc52_scan(b"output\x1b]5");
+        assert!(ranges.is_empty());
+        assert_eq!(pending, Some(6));
     }
 
     #[test]
@@ -3278,6 +3679,31 @@ mod extract_text_offset_tests {
     }
 
     #[test]
+    fn wide_glyphs_copy_without_spurious_spaces() {
+        // Each CJK glyph occupies two cells (base + blank spacer tail).
+        // The spacer must be skipped on copy, or this comes back as
+        // "日 本 語  s p a c e d".
+        let mut stack = stack_with(TerminalKind::Shell, None, &["日本語"]);
+        let text = stack.extract_text(Rect::new(0, 0, 80, 30), (1, 3), (40, 3));
+        assert_eq!(text, "日本語");
+    }
+
+    #[test]
+    fn right_click_resolves_url_after_wide_text() {
+        // A wide-glyph prefix shifts every following screen column by
+        // one spacer cell. If target_at's column→byte map doesn't
+        // account for the spacer tails, the click lands on the wrong
+        // byte and the URL is mis-parsed (or missed). The URL starts at
+        // screen column 1(border) + 6 cells (3 wide glyphs) = column 7.
+        let mut stack = stack_with(TerminalKind::Shell, None, &["日本語 https://example.com/x"]);
+        let target = stack.target_at(Rect::new(0, 0, 80, 30), 1 + 7, 3);
+        assert_eq!(
+            target,
+            Some(ClickTarget::Url("https://example.com/x".into())),
+        );
+    }
+
+    #[test]
     fn agent_without_remembered_message_has_no_recap_offset() {
         let mut stack = stack_with(
             TerminalKind::Agent("claude".into()),
@@ -3296,6 +3722,39 @@ mod extract_text_offset_tests {
         slot.last_user_message = Some("hi".into());
         assert_eq!(TerminalStack::recap_rows(&slot, 2), 0);
         assert_eq!(TerminalStack::recap_rows(&slot, 3), 2);
+    }
+
+    #[test]
+    fn screen_to_cell_maps_grid_and_rejects_chrome_and_borders() {
+        let stack = stack_with(TerminalKind::Shell, None, &["line0"]);
+        let rect = Rect::new(0, 0, 80, 30);
+        // Grid origin: left border (+1 col), 3 top-chrome rows (shell has
+        // no recap). And a parity spot-check against target_at's geometry.
+        assert_eq!(stack.screen_to_cell(rect, 1, 3), Some((0, 0)));
+        assert_eq!(stack.screen_to_cell(rect, 6, 8), Some((5, 5)));
+        // Chrome above / left of the grid → None.
+        assert_eq!(stack.screen_to_cell(rect, 0, 3), None, "left border col");
+        assert_eq!(stack.screen_to_cell(rect, 1, 2), None, "tab-strip row");
+        // Right border column and bottom row → None (off-grid, must not
+        // forward a bogus near-edge cell to the inner program).
+        assert_eq!(stack.screen_to_cell(rect, 79, 5), None, "right border col");
+        assert_eq!(stack.screen_to_cell(rect, 5, 29), None, "bottom row");
+    }
+
+    #[test]
+    fn recap_geometry_matches_renderer_at_height_6() {
+        // At pane height 6 the renderer's body is `area.height - 4 = 2`
+        // rows, so `recap_rows` is REFUSED (needs ≥ 3) and the grid top
+        // sits at screen row 3. The readers must agree: computing recap on
+        // `height - 3 = 3` (the old basis) wrongly assumed 2 recap rows and
+        // pushed the grid top to row 5 — off-screen for this pane.
+        let stack = stack_with(
+            TerminalKind::Agent("claude".into()),
+            Some("do the thing"),
+            &["line0"],
+        );
+        let rect = Rect::new(0, 0, 80, 6);
+        assert_eq!(stack.screen_to_cell(rect, 1, 3), Some((0, 0)));
     }
 }
 

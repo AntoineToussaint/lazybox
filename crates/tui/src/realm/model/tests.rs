@@ -2235,19 +2235,111 @@ mod wheel_routing_tests {
 
         while server.rx.try_recv().is_ok() {}
 
-        m.handle_mouse(wheel_up_at(bottom.x + 2, bottom.y + 2));
+        // Fire INSIDE the grid: the body is inset by the left border
+        // (+1 col) and three rows of top chrome (+3 row) — a shell has
+        // no recap rows. A wheel 6 cols / 8 rows into the pane must
+        // encode to grid cell (5, 5), i.e. 1-based wire coords (6, 6).
+        m.handle_mouse(wheel_up_at(bottom.x + 6, bottom.y + 8));
 
         match server.rx.try_recv() {
             Ok(lazybox_ipc::Command::Write { terminal_id, bytes }) => {
                 assert_eq!(terminal_id, TerminalId(7));
+                // SGR wheel-up is button 64. The coordinates MUST undo
+                // the render inset — the bug forwarded raw pane coords
+                // (off by +1 col, +3 row). `64;6;6` proves the offset.
                 assert!(
-                    bytes.starts_with(b"\x1b[<"),
-                    "wheel must be SGR-encoded for the inner app, got {bytes:?}"
+                    bytes.starts_with(b"\x1b[<64;6;6"),
+                    "wheel must SGR-encode at grid cell (6,6), got {bytes:?}"
                 );
             }
             other => panic!("expected a Write with SGR wheel bytes, got {other:?}"),
         }
     }
+
+    /// A wheel (or click) over the pane's top chrome — the tab strip /
+    /// divider / blank rows that sit ABOVE the grid — must never be
+    /// forwarded to the inner program as if it were a grid cell.
+    /// Regression for the off-by-3 forward bug: the old code subtracted
+    /// only the pane origin, so a wheel at `bottom.y + 1` (chrome)
+    /// encoded to a bogus near-origin cell instead of falling through
+    /// to local scrolling.
+    #[test]
+    fn wheel_over_pane_chrome_does_not_forward_to_inner_app() {
+        let (mut m, mut server, bottom) = build_model_with_terminal();
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(7),
+            bytes: b"\x1b[?1002h\x1b[?1006h".to_vec(),
+            seq: 1,
+        });
+        assert!(m.terminals.focused_terminal_tracks_mouse());
+        while server.rx.try_recv().is_ok() {}
+
+        // Row +1 is the tab strip — above the grid (which starts at +3).
+        m.handle_mouse(wheel_up_at(bottom.x + 2, bottom.y + 1));
+
+        assert!(
+            server.rx.try_recv().is_err(),
+            "a wheel over the tab strip must not Write a forwarded mouse event"
+        );
+    }
+
+    // ── `]` flush + Ctrl-w literal: assert the BYTES reaching the PTY ──
+
+    use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+
+    /// Collect every byte written to the daemon since the last drain.
+    fn drained_write_bytes(server: &mut lazybox_ipc::Connection) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Ok(cmd) = server.rx.try_recv() {
+            if let lazybox_ipc::Command::Write { bytes, .. } = cmd {
+                out.extend_from_slice(&bytes);
+            }
+        }
+        out
+    }
+
+    /// A lone `]` is HELD (not written) until the next key; a following
+    /// non-`]` key flushes the literal `]` to the PTY, then itself. This
+    /// is the headline behavior of the `]` fix — previously unverified at
+    /// the byte level.
+    #[test]
+    fn held_bracket_flushes_to_pty_before_next_key() {
+        let (mut m, mut server, _bottom) = build_model_with_terminal();
+        while server.rx.try_recv().is_ok() {} // drain Subscribe
+
+        m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        assert!(
+            drained_write_bytes(&mut server).is_empty(),
+            "a lone `]` is held pending the chord, not written yet"
+        );
+
+        m.dispatch_key(RealmKey::new(Key::Char('a'), RealmMods::NONE));
+        assert_eq!(
+            drained_write_bytes(&mut server),
+            b"]a",
+            "the held `]` must reach the PTY ahead of the next key"
+        );
+    }
+
+    /// `]]` completes the leader (here: leaves to the sidebar, no
+    /// snippets) and must NOT flush a literal `]` to the PTY.
+    #[test]
+    fn completed_leader_does_not_flush_a_bracket() {
+        let (mut m, mut server, _bottom) = build_model_with_terminal();
+        while server.rx.try_recv().is_ok() {}
+
+        m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
+        assert!(
+            !drained_write_bytes(&mut server).contains(&b']'),
+            "`]]` is a chord, not two literal brackets"
+        );
+    }
+
+    // (Ctrl-w escape-hatch byte behavior is unit-tested at the
+    // TerminalStack level in `components::terminal_stack::ctrl_w_tests`,
+    // which exercises `handle_key` directly without Model key routing.)
 }
 
 #[cfg(test)]

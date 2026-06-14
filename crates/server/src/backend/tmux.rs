@@ -66,6 +66,13 @@ pub const TMUX_SOCKET: &str = "lazybox";
 /// OUTER terminal changes.
 const SCROLLBACK_TERMINAL_OVERRIDES: &str = ",xterm*:smcup@:rmcup@";
 
+/// Clipboard passthrough options, independent of the scrollback flavor.
+/// `set-clipboard on` forwards an inner program's OSC 52 to the attach
+/// client; `allow-passthrough on` (off by default since tmux 3.3a) lets
+/// a DCS-wrapped escape through. Without these tmux eats the clipboard
+/// request before lazybox can relay it to the host terminal.
+const CLIPBOARD_PASSTHROUGH_OPTS: &str = "set -g set-clipboard on\nset -g allow-passthrough on\n";
+
 /// `terminal-features` entry advertising OSC 8 hyperlink support for the
 /// attach client. `terminal-features` is a server option (`-s`) and a
 /// list (`-a` append); the `xterm*` pattern matches the forced
@@ -110,9 +117,17 @@ fn transparent_conf(native_scrollback: bool) -> String {
         "set -g history-limit 10000\n\
          set -g default-terminal \"xterm-256color\"\n\
          set -g escape-time 0\n\
+         set -g window-size latest\n\
          set -g mode-style \"fg=default,bg=default\"\n\
          set -g message-style \"fg=default,bg=default\"\n",
     );
+    // Clipboard passthrough. `set-clipboard on` lets an inner program's
+    // OSC 52 reach the attach client (which relays it to the host), and
+    // `allow-passthrough on` lets a DCS-wrapped escape (some agents wrap
+    // OSC 52 / banners in tmux's passthrough envelope) through untouched.
+    // Without these tmux swallows the clipboard request and the lazybox
+    // forwarder never sees it.
+    conf.push_str(CLIPBOARD_PASSTHROUGH_OPTS);
     // Tell tmux the attach client understands OSC 8 hyperlinks so it
     // RE-EMITS them instead of stripping. We force the client's
     // `TERM=xterm-256color`, whose terminfo has no `Hls` capability,
@@ -155,6 +170,12 @@ fn transparent_conf(native_scrollback: bool) -> String {
 /// pick the overrides up (terminal-overrides is consulted at client
 /// attach time).
 fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
+    // Clipboard passthrough is independent of the scrollback flavor, so
+    // an already-running server picks it up either way.
+    let clipboard = [
+        vec!["set-option", "-g", "set-clipboard", "on"],
+        vec!["set-option", "-g", "allow-passthrough", "on"],
+    ];
     // `terminal-features` is independent of the scrollback flavor — an
     // already-running server must learn the client speaks OSC 8 either
     // way, else surviving sessions keep stripping hyperlinks.
@@ -164,7 +185,7 @@ fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
         "terminal-features",
         HYPERLINK_TERMINAL_FEATURES_VALUE,
     ];
-    if native_scrollback {
+    let mut cmds = if native_scrollback {
         vec![
             vec!["set-option", "-g", "mouse", "off"],
             vec![
@@ -181,7 +202,9 @@ fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
             vec!["set-option", "-gu", "terminal-overrides"],
             hyperlinks,
         ]
-    }
+    };
+    cmds.extend(clipboard);
+    cmds
 }
 
 const DEFAULT_COLS: u16 = 120;
@@ -525,9 +548,15 @@ impl SessionBackend for TmuxBackend {
         rows: u16,
     ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
         Box::pin(async move {
-            // Resizing the attached client makes tmux resize the pane
-            // automatically. We also nudge the tmux session itself in
-            // case other clients are attached at different sizes.
+            // Resizing the attached client's PTY makes tmux resize the
+            // pane automatically: with `window-size latest` (pinned in
+            // `transparent_conf`, not left to tmux's implicit default)
+            // our refreshed client becomes the size authority, so a
+            // second client attached elsewhere at a different size no
+            // longer forces ours. (The previous `refresh-client -t
+            // <session> -C` nudge was a dead no-op — `-t` takes a target
+            // CLIENT, not a session, and `-C` is control-mode only, so it
+            // always errored and was swallowed.)
             let pty = {
                 let map = self.sessions.lock().await;
                 map.get(key)
@@ -542,11 +571,6 @@ impl SessionBackend for TmuxBackend {
             })
             .await
             .map_err(|e| BackendError::Other(e.to_string()))?;
-            // Best-effort window resize. Failing this is fine — the
-            // PTY-level resize already triggered tmux internally.
-            let _ = self
-                .tmux(&["refresh-client", "-t", key, "-C", &format!("{cols},{rows}")])
-                .await;
             Ok(())
         })
     }
@@ -647,7 +671,15 @@ impl SessionBackend for TmuxBackend {
             self.ensure_server_options().await;
             let pty = {
                 let mut map = self.sessions.lock().await;
-                if let Some(slot) = map.get(key) {
+                // Reuse the cached client only if it's still ALIVE. A
+                // `freeze` (detach-client) or any attach-client EOF makes
+                // the DaemonPty finish while the inner tmux session keeps
+                // running, but the dead Slot lingers in the map. Cloning
+                // it would hand back a closed broadcast — stale replay,
+                // no live output, no recovery. Detect that and open a
+                // fresh attach client instead, replacing the dead Slot.
+                let alive = map.get(key).filter(|slot| !slot.client.is_finished());
+                if let Some(slot) = alive {
                     slot.client.clone()
                 } else {
                     let size = PtySize {
@@ -813,6 +845,9 @@ mod tests {
         assert!(conf.contains("set -g status off"));
         assert!(conf.contains("set -g history-limit 10000"));
         assert!(conf.contains("unbind-key -a"));
+        // Resize authority is pinned, not left to tmux's implicit default
+        // (the `resize` impl's multi-client behavior depends on it).
+        assert!(conf.contains("set -g window-size latest\n"));
     }
 
     /// Legacy mode (`terminal.native_scrollback: false`) reproduces the
@@ -832,6 +867,10 @@ mod tests {
     /// conf flavors, so recovered sessions behave like fresh ones.
     #[test]
     fn server_option_cmds_match_conf_flavors() {
+        let clipboard = [
+            vec!["set-option", "-g", "set-clipboard", "on"],
+            vec!["set-option", "-g", "allow-passthrough", "on"],
+        ];
         let hyperlinks = vec![
             "set-option",
             "-as",
@@ -850,6 +889,8 @@ mod tests {
                     ",xterm*:smcup@:rmcup@",
                 ],
                 hyperlinks.clone(),
+                clipboard[0].clone(),
+                clipboard[1].clone(),
             ]
         );
         let legacy = server_option_cmds(false);
@@ -859,8 +900,28 @@ mod tests {
                 vec!["set-option", "-g", "mouse", "on"],
                 vec!["set-option", "-gu", "terminal-overrides"],
                 hyperlinks,
+                clipboard[0].clone(),
+                clipboard[1].clone(),
             ]
         );
+    }
+
+    /// Both conf flavors enable clipboard passthrough so an inner
+    /// program's OSC 52 reaches the host. Regression for "copy from the
+    /// agent silently fails under the tmux backend".
+    #[test]
+    fn both_conf_flavors_enable_clipboard_passthrough() {
+        for native in [true, false] {
+            let conf = transparent_conf(native);
+            assert!(
+                conf.contains("set -g set-clipboard on\n"),
+                "native={native}"
+            );
+            assert!(
+                conf.contains("set -g allow-passthrough on\n"),
+                "native={native}"
+            );
+        }
     }
 
     /// Both conf flavors advertise OSC 8 hyperlink support to the attach

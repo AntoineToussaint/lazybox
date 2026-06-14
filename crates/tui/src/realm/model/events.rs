@@ -572,6 +572,25 @@ impl<T: TerminalAdapter> Model<T> {
             self.set_focus_attr();
             self.redraw = true;
         }
+        // A lone `]` that armed the chord but never saw a second press
+        // (or any following key) would otherwise sit held indefinitely.
+        // Once the chord window lapses, resolve it:
+        //   - focus still on the terminal → release it as a literal `]`
+        //     so a trailing `]` in a prompt reaches the agent;
+        //   - focus has since left the terminal (the user Tabbed/clicked
+        //     away while the `]` was held) → DROP it, never inject it
+        //     into whichever terminal is focused next. Without this drop
+        //     the held `]` would surface as a stray keystroke when focus
+        //     later returns.
+        if self.escape_latch.armed_past(self.ui_defaults.escape_window) {
+            if self.focus == PaneFocus::Terminals {
+                self.escape_latch.disarm();
+                self.flush_held_escape_char();
+                self.redraw = true;
+            } else {
+                self.escape_latch.disarm();
+            }
+        }
     }
 
     /// Advance the sidebar's "working" spinner. Called once per run-

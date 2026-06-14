@@ -6,7 +6,7 @@ use crate::{
     alloc::{Allocator, Object},
     error::{Error, Result, from_result},
     ffi,
-    screen::{Cell, Row},
+    screen::{Cell, CellWide, Row},
     style::{RgbColor, Style},
     terminal::Terminal,
 };
@@ -714,6 +714,18 @@ impl CellIteration<'_, '_> {
     /// Returns 0 if the cell has no text.
     pub fn graphemes_len(&self) -> Result<usize> {
         self.get(ffi::RenderStateRowCellsData::GRAPHEMES_LEN)
+    }
+
+    /// The wide property of the cell: narrow (width 1), wide (a
+    /// double-width base glyph), or a spacer tail/head. A wide glyph
+    /// occupies its base cell plus a [`CellWide::SpacerTail`] cell whose
+    /// `graphemes_len()` is 0 — callers reconstructing row text must
+    /// skip the spacer rather than emit it as a blank, or wide
+    /// characters (CJK / emoji) get a spurious space appended. The
+    /// render-cell iterator has no direct wide accessor, so this reads
+    /// it off the underlying raw cell.
+    pub fn wide(&self) -> Result<CellWide> {
+        self.raw_cell()?.wide()
     }
 
     /// Write grapheme codepoints into a caller-provided buffer.

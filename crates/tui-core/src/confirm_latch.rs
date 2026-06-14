@@ -183,6 +183,13 @@ impl DoubleTapLatch {
     pub fn is_armed(&self) -> bool {
         self.armed_at.is_some()
     }
+
+    /// True when a single tap has been held (armed) for strictly longer
+    /// than `window` — the second tap never came, so the held key should
+    /// be released as a literal rather than kept waiting for a chord.
+    pub fn armed_past(&self, window: std::time::Duration) -> bool {
+        self.armed_at.map(|t| t.elapsed() > window).unwrap_or(false)
+    }
 }
 
 /// One-shot "consume the next key" prefix latch.
@@ -211,24 +218,24 @@ impl DoubleTapLatch {
 ///   transitions where any in-flight prefix should evaporate).
 #[derive(Debug, Default, Clone)]
 pub struct PrefixLatch {
-    armed: bool,
+    armed_at: Option<std::time::Instant>,
 }
 
 impl PrefixLatch {
     pub fn new() -> Self {
-        Self { armed: false }
+        Self { armed_at: None }
     }
 
     pub fn arm(&mut self) {
-        self.armed = true;
+        self.armed_at = Some(std::time::Instant::now());
     }
 
     pub fn disarm(&mut self) {
-        self.armed = false;
+        self.armed_at = None;
     }
 
     pub fn is_armed(&self) -> bool {
-        self.armed
+        self.armed_at.is_some()
     }
 
     /// Read-and-disarm. Returns `true` iff the latch was armed; the
@@ -236,9 +243,20 @@ impl PrefixLatch {
     /// non-tile-action key reliably resets to "forward everything
     /// to the PTY").
     pub fn take(&mut self) -> bool {
-        let was = self.armed;
-        self.armed = false;
-        was
+        self.armed_at.take().is_some()
+    }
+
+    /// Read-and-disarm, but only HONOR the prefix when it was armed
+    /// within `window`. A prefix left armed longer than that — a lone
+    /// `Ctrl-w` the user never followed up — is treated as expired so
+    /// the next key reaches the PTY normally instead of being silently
+    /// eaten as a tile action much later. The latch is cleared either
+    /// way.
+    pub fn take_within(&mut self, window: std::time::Duration) -> bool {
+        match self.armed_at.take() {
+            Some(t) => t.elapsed() <= window,
+            None => false,
+        }
     }
 }
 
@@ -452,6 +470,25 @@ mod tests {
         let mut p = PrefixLatch::new();
         assert!(!p.take());
         assert!(!p.is_armed());
+    }
+
+    #[test]
+    fn prefix_take_within_honors_window_and_always_clears() {
+        // A generous window honors a freshly-armed prefix.
+        let mut p = PrefixLatch::new();
+        p.arm();
+        assert!(p.take_within(std::time::Duration::from_secs(60)));
+        assert!(!p.is_armed(), "honored take clears the latch");
+
+        // A zero window is already exceeded by any elapsed time, so a
+        // prefix reads as expired — and is cleared either way so it can't
+        // eat a later key.
+        p.arm();
+        assert!(!p.take_within(std::time::Duration::ZERO));
+        assert!(!p.is_armed(), "expired take still clears the latch");
+
+        // Disarmed → false.
+        assert!(!p.take_within(std::time::Duration::from_secs(60)));
     }
 
     #[test]

@@ -103,8 +103,10 @@ pub fn detach_child_process(cmd: &mut std::process::Command) {
 /// Script Editor, so clicking it opens an empty AppleScript window.
 /// A banner that appears (and is read at a glance) beats no banner at
 /// all, so we accept the worse click target rather than stay silent
-/// on a stock Mac. (When lazybox ships as a `.app` with its own bundle
-/// id this whole fallback goes away.)
+/// on a stock Mac — but we log a one-time hint (grep
+/// `/tmp/lazybox.log`) pointing at `terminal-notifier`, which fixes
+/// the click target. (When lazybox ships as a `.app` with its own
+/// bundle id this whole fallback goes away.)
 ///
 /// **Linux**: `notify-send` (libnotify), present on every desktop we
 /// realistically support. Skipped with a one-time log if it's
@@ -159,14 +161,16 @@ pub fn notify_user(title: &str, body: &str) {
                 .stderr(e)
                 .spawn();
         } else {
-            // Zero-dependency fallback. The strings are interpolated
-            // into an AppleScript literal, so escape `\` and `"` to
-            // keep a title/body with quotes from breaking the script.
-            let script = format!(
-                "display notification \"{}\" with title \"{}\"",
-                applescript_escape(body),
-                applescript_escape(title),
-            );
+            // Zero-dependency fallback, but newer macOS attributes its
+            // banner to Script Editor (clicking opens an empty
+            // AppleScript window). Log a one-time hint so users who
+            // wonder why their notifications "look broken" can grep
+            // /tmp/lazybox.log and find the fix.
+            static WARNED: OnceLock<()> = OnceLock::new();
+            WARNED.get_or_init(|| {
+                tracing::info!("{}", TERMINAL_NOTIFIER_HINT);
+            });
+            let script = osascript_notification_script(title, body);
             let (i, o, e) = stdio();
             let _ = std::process::Command::new("osascript")
                 .arg("-e")
@@ -213,6 +217,29 @@ pub fn notify_user(title: &str, body: &str) {
     }
 }
 
+/// One-time hint logged when the osascript fallback fires because
+/// `terminal-notifier` isn't installed. The osascript banner is
+/// attributed to Script Editor on current macOS; `terminal-notifier`
+/// ships its own bundle and restores a real click target.
+#[cfg(target_os = "macos")]
+const TERMINAL_NOTIFIER_HINT: &str =
+    "notify_user: terminal-notifier not found on PATH; using the osascript fallback, \
+     whose banner macOS attributes to Script Editor (clicking it opens an empty \
+     AppleScript window). Install terminal-notifier (e.g. `brew install \
+     terminal-notifier`) for a Notification Center banner with a proper click target.";
+
+/// Build the `osascript -e` argument that fires a `display
+/// notification` banner. The strings are interpolated into an
+/// AppleScript literal, so they go through [`applescript_escape`].
+#[cfg(target_os = "macos")]
+fn osascript_notification_script(title: &str, body: &str) -> String {
+    format!(
+        "display notification \"{}\" with title \"{}\"",
+        applescript_escape(body),
+        applescript_escape(title),
+    )
+}
+
 /// Escape a string for embedding inside an AppleScript double-quoted
 /// literal: backslash first (so we don't double-escape the escapes we
 /// add next), then the double-quote.
@@ -239,5 +266,44 @@ pub async fn wait_for_shutdown_signal() {
     {
         // TODO(windows): tokio::signal::windows::{ctrl_c, ctrl_break}
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn applescript_escape_neutralizes_quotes_and_backslashes() {
+        assert_eq!(applescript_escape("plain"), "plain");
+        // Backslash is escaped first so the quote-escape's own
+        // backslash isn't doubled.
+        assert_eq!(applescript_escape(r#"a"b"#), r#"a\"b"#);
+        assert_eq!(applescript_escape(r#"a\b"#), r#"a\\b"#);
+        assert_eq!(applescript_escape(r#"\""#), r#"\\\""#);
+    }
+
+    #[test]
+    fn osascript_script_embeds_escaped_title_and_body() {
+        let script = osascript_notification_script("Needs input", "PR #61");
+        assert_eq!(
+            script,
+            r#"display notification "PR #61" with title "Needs input""#
+        );
+        // A title/body carrying a quote can't break out of the literal.
+        let script = osascript_notification_script(r#"a"b"#, r#"c"d"#);
+        assert_eq!(
+            script,
+            r#"display notification "c\"d" with title "a\"b""#
+        );
+    }
+
+    #[test]
+    fn terminal_notifier_hint_points_at_the_fix() {
+        // The hint must name the helper to install and the symptom it
+        // cures, so a user grepping the log gets an actionable fix.
+        assert!(TERMINAL_NOTIFIER_HINT.contains("terminal-notifier"));
+        assert!(TERMINAL_NOTIFIER_HINT.contains("brew install terminal-notifier"));
+        assert!(TERMINAL_NOTIFIER_HINT.contains("Script Editor"));
     }
 }

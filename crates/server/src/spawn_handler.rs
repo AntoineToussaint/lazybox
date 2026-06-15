@@ -1407,12 +1407,9 @@ async fn provision_worktree(
                         Some(task) => derive_branch_for_branchless(task),
                         None => derive_branch_for_workspace(workspace),
                     };
-                    let base = mgr
-                        .default_branch(owner, name)
-                        .await
-                        .map_err(|e| {
-                            ServerError::Worktree(format!("default_branch lookup: {e}"))
-                        })?;
+                    let base = mgr.default_branch(owner, name).await.map_err(|e| {
+                        ServerError::Worktree(format!("default_branch lookup: {e}"))
+                    })?;
                     mgr.checkout_new_branch_at(target, owner, name, &new_branch, &base)
                         .await
                         .map_err(|e| {

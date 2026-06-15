@@ -1522,9 +1522,13 @@ fn agent_state_asking_makes_workspace_findable_by_bang() {
 
 #[test]
 fn agent_state_working_shows_spinner_and_is_not_asking() {
-    // Working renders the animated spinner in the shared state slot,
-    // is NOT treated as "needs input" (no `!` jump, no notification),
-    // and `tick_working` advances the frame the first time it's due.
+    // Working renders the animated spinner in the shared state slot and
+    // is NOT treated as "needs input" (no `!` jump, no notification).
+    // The clock-derived tick cadence is covered by the in-crate unit
+    // tests (`frame_is_derived_from_elapsed_time` et al.), which can
+    // drive `spinner_epoch` directly — an external test can't, and the
+    // first tick is only "due" once real wall-clock crosses a frame
+    // boundary, so asserting it here would be timing-dependent.
     let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     let w = agent_workspace("owner/repo", "o/r#1", now);
@@ -1559,13 +1563,6 @@ fn agent_state_working_shows_spinner_and_is_not_asking() {
     assert!(
         rendered.contains('⠋'),
         "working spinner glyph must render; got:\n{rendered}",
-    );
-
-    // tick_working advances on the first due tick, then rate-limits.
-    assert!(s.tick_working(), "first tick with a working agent is due");
-    assert!(
-        !s.tick_working(),
-        "back-to-back tick is within the cadence window — no advance",
     );
 }
 

@@ -1554,7 +1554,10 @@ mod working_spinner_tests {
     fn frame_is_derived_from_elapsed_time() {
         let mut sb = working_sidebar();
         sb.spinner_epoch = Instant::now() - Duration::from_millis(600);
-        assert!(sb.tick_working(), "crossing a frame boundary asks for a redraw");
+        assert!(
+            sb.tick_working(),
+            "crossing a frame boundary asks for a redraw"
+        );
         assert_eq!(sb.working_spinner_frame, 5);
     }
 
@@ -1616,9 +1619,6 @@ mod working_spinner_tests {
         let mut sb = working_sidebar();
         sb.spinner_epoch = Instant::now() - Duration::from_millis(600);
         assert!(sb.tick_working(), "first cross of the boundary redraws");
-        assert!(
-            !sb.tick_working(),
-            "still in frame 5 → no second redraw",
-        );
+        assert!(!sb.tick_working(), "still in frame 5 → no second redraw",);
     }
 }

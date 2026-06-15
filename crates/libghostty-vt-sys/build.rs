@@ -64,6 +64,15 @@ fn main() {
     build
         .arg("build")
         .arg("-Demit-lib-vt")
+        // Zig defaults to the Debug optimize mode, which leaves the VT
+        // stream parser ~1000x slower than an optimized build (~0.03 MB/s
+        // measured). The TUI feeds PTY output through `vt_write` on its UI
+        // thread, so a debug parser turns any agent output burst into a
+        // multi-second freeze. ReleaseSafe (not ReleaseFast) keeps Zig's
+        // runtime safety checks — this parser consumes untrusted terminal
+        // output, where bounds/overflow checks guard against UB on
+        // malformed escape sequences — while still optimizing.
+        .arg("-Doptimize=ReleaseSafe")
         .arg("--prefix")
         .arg(&install_prefix)
         .current_dir(&ghostty_dir);

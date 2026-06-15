@@ -464,6 +464,68 @@ impl WorktreeManager {
         })
     }
 
+    /// Initialize a *standalone* git repository at `wt_path`, checked
+    /// out on `branch`. Unlike [`Self::checkout_new_branch_at`] there is
+    /// no upstream to clone or fetch from — this is for workspaces with
+    /// no `owner/repo` to track: a blank workspace under a local
+    /// project, or a task from a repo-less source (Slack, some Linear
+    /// tickets). The session still lands in a real git worktree on its
+    /// own branch (`lazybox/<key>`) rather than a bare, non-git
+    /// directory.
+    ///
+    /// Idempotent: an existing git repo at `wt_path` is left untouched
+    /// and returned as-is, so repeated spawns on the same workspace
+    /// never wipe the user's work.
+    pub async fn init_standalone_at(
+        &self,
+        wt_path: &Path,
+        branch: &str,
+    ) -> Result<Worktree, GitError> {
+        // handle_spawn's singleton guard already keeps two spawns from
+        // racing one workspace, but the per-path lock keeps this method
+        // correct on its own.
+        let lock = repo_lock(wt_path);
+        let _guard = lock.lock().await;
+
+        let name = wt_path
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| branch.to_string());
+
+        // Already a git repo (a prior standalone init) — reuse it.
+        // Reading HEAD keeps the returned branch honest if the user
+        // renamed it inside the worktree.
+        if is_git_repo(wt_path).await {
+            let current = run_git_in(wt_path, &["symbolic-ref", "--short", "HEAD"])
+                .await
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| branch.to_string());
+            return Ok(Worktree {
+                name,
+                path: wt_path.to_path_buf(),
+                branch: current,
+            });
+        }
+
+        tokio::fs::create_dir_all(wt_path).await?;
+        run_git_in(wt_path, &["init", "-q"]).await?;
+        // Point HEAD at lazybox's branch as an unborn ref. `symbolic-ref`
+        // works on every git version (no `git init -b` dependency) and
+        // needs no commit — `git status` reads "On branch <branch>, no
+        // commits yet" and the user's first commit lands there.
+        run_git_in(
+            wt_path,
+            &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
+        )
+        .await?;
+
+        Ok(Worktree {
+            name,
+            path: wt_path.to_path_buf(),
+            branch: branch.to_string(),
+        })
+    }
+
     /// Resolve the repo's default branch (e.g. `main`, `master`,
     /// `develop`) by consulting the bare clone's `origin/HEAD`
     /// symbolic ref. Falls back to fetching once if the ref isn't
@@ -912,6 +974,13 @@ async fn fetch_origin_ref(
             "could not fetch branch from origin; falling back to local ref"
         );
     })
+}
+
+/// Whether `path` is the root of a git repository. Cheap: probes for
+/// the `.git` entry, which a standalone repo has as a directory and a
+/// linked worktree as a file.
+async fn is_git_repo(path: &Path) -> bool {
+    tokio::fs::metadata(path.join(".git")).await.is_ok()
 }
 
 /// Cheap existence check for a git ref. Uses `show-ref --verify --quiet`;

@@ -20,7 +20,7 @@ workspace — built for developers juggling many PRs and AI coding agents at onc
 
 </div>
 
-![lazybox: the inbox on the left listing live PRs and issues across repos, an opened workspace with description, activity, and embedded agent terminals on the right](demo/lazybox.gif)
+![lazybox: the inbox on the left listing live PRs and issues across repos, an opened workspace with description, activity, and embedded agent terminals on the right](demo/lazybox.gif?v=2)
 
 <sub>Prefer not to autoplay? Here's a [static screenshot](demo/lazybox.png) and a [seekable MP4](demo/lazybox.mp4). There's also a fully reproducible `--test` demo — code, not a recording — driven by [`demo/lazybox.tape`](demo/lazybox.tape).</sub>
 

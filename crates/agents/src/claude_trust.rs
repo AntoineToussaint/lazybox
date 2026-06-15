@@ -46,29 +46,42 @@ fn seed_trust_in(config_path: &Path, worktree: &Path) -> io::Result<()> {
         Err(e) => return Err(e),
     };
 
-    let obj = root
-        .as_object_mut()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "claude.json root is not an object"))?;
+    let obj = root.as_object_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "claude.json root is not an object",
+        )
+    })?;
     let projects = obj
         .entry("projects")
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "claude.json `projects` is not an object"))?;
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "claude.json `projects` is not an object",
+            )
+        })?;
 
     let key = worktree.to_string_lossy().into_owned();
     let entry = projects
         .entry(key)
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "claude.json project entry is not an object"))?;
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "claude.json project entry is not an object",
+            )
+        })?;
 
     if entry.get("hasTrustDialogAccepted") == Some(&Value::Bool(true)) {
         return Ok(());
     }
     entry.insert("hasTrustDialogAccepted".into(), Value::Bool(true));
 
-    let serialized =
-        serde_json::to_vec_pretty(&root).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let serialized = serde_json::to_vec_pretty(&root)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let tmp = tmp_sibling(config_path)?;
     std::fs::write(&tmp, serialized)?;
     std::fs::rename(&tmp, config_path)
@@ -76,9 +89,9 @@ fn seed_trust_in(config_path: &Path, worktree: &Path) -> io::Result<()> {
 
 /// `<config>.lazybox-tmp` next to `config_path`, for the atomic write.
 fn tmp_sibling(config_path: &Path) -> io::Result<PathBuf> {
-    let name = config_path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "config path has no file name"))?;
+    let name = config_path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "config path has no file name")
+    })?;
     let mut tmp_name = name.to_os_string();
     tmp_name.push(".lazybox-tmp");
     Ok(config_path.with_file_name(tmp_name))
@@ -91,10 +104,8 @@ mod tests {
     /// Unique scratch dir under the OS temp dir. Process-id keyed so
     /// parallel test binaries don't collide; no randomness needed.
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "lazybox-claude-trust-{}-{tag}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-claude-trust-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         dir
     }
@@ -131,7 +142,10 @@ mod tests {
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
         // Unrelated top-level + sibling project survive untouched.
         assert_eq!(v["numStartups"], Value::from(7));
-        assert_eq!(v["projects"]["/tmp/other"]["allowedTools"][0], Value::from("Bash"));
+        assert_eq!(
+            v["projects"]["/tmp/other"]["allowedTools"][0],
+            Value::from("Bash")
+        );
         assert!(trusted(&config, "/tmp/other"));
         assert!(trusted(&config, "/tmp/wt-b"));
     }

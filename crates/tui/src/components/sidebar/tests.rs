@@ -1533,3 +1533,92 @@ mod search_tests {
         assert!(sb.search().is_none());
     }
 }
+
+#[cfg(test)]
+mod working_spinner_tests {
+    use super::super::*;
+    use lazybox_core::WorkspaceKey;
+    use std::time::{Duration, Instant};
+
+    fn working_sidebar() -> Sidebar {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.agents_working
+            .insert(SessionKey::from(&WorkspaceKey::new("owner/repo#1")));
+        sb
+    }
+
+    /// The displayed frame is a pure function of elapsed time, not a
+    /// per-tick counter — `epoch + 600ms` must read as frame 5
+    /// (600 / 120) regardless of how many times `tick_working` ran.
+    #[test]
+    fn frame_is_derived_from_elapsed_time() {
+        let mut sb = working_sidebar();
+        sb.spinner_epoch = Instant::now() - Duration::from_millis(600);
+        assert!(sb.tick_working(), "crossing a frame boundary asks for a redraw");
+        assert_eq!(sb.working_spinner_frame, 5);
+    }
+
+    /// Nothing working → no animation, no redraw churn.
+    #[test]
+    fn noop_when_no_agent_is_working() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        assert!(!sb.tick_working());
+    }
+
+    /// A single tick after a long gap jumps straight to the correct
+    /// frame instead of crawling forward one step — this is what keeps
+    /// the spinner from "freezing" then slowly catching up after the
+    /// run loop stalls.
+    #[test]
+    fn recovers_to_correct_frame_after_a_stall() {
+        let mut sb = working_sidebar();
+        // One frame in, then the loop stalls for ~1.2s.
+        sb.working_spinner_frame = 1;
+        sb.spinner_epoch = Instant::now() - Duration::from_millis(1200);
+        assert!(sb.tick_working());
+        assert_eq!(sb.working_spinner_frame, 10, "jumps to now, not +1");
+    }
+
+    /// A transient `Working → Idle → Working` flap (the daemon dedupes
+    /// `AgentState` and its detector can briefly misread a busy agent
+    /// as idle) must not snap the spinner back to frame 0 — the phase
+    /// belongs to the wall clock, so the glyph keeps spinning from
+    /// where the eye left it.
+    #[test]
+    fn holds_phase_across_a_working_idle_flap() {
+        let mut sb = working_sidebar();
+        sb.spinner_epoch = Instant::now() - Duration::from_millis(600);
+        sb.tick_working();
+        let before = sb.working_spinner_frame;
+        assert_eq!(before, 5);
+
+        // Flap to idle: the working-set empties for a beat.
+        sb.agents_working.clear();
+        assert!(!sb.tick_working(), "idle asks for no spinner redraw");
+        assert_eq!(
+            sb.working_spinner_frame, before,
+            "frame is not reset to 0 while idle",
+        );
+
+        // Working again a little later — the frame reflects the clock,
+        // strictly ahead of where it was, never restarting at 0.
+        sb.agents_working
+            .insert(SessionKey::from(&WorkspaceKey::new("owner/repo#1")));
+        sb.spinner_epoch = Instant::now() - Duration::from_millis(840);
+        assert!(sb.tick_working());
+        assert_eq!(sb.working_spinner_frame, 7);
+    }
+
+    /// Repeated calls inside the same frame window don't report a
+    /// change — the redraw only fires when the glyph actually advances.
+    #[test]
+    fn same_frame_window_is_a_noop() {
+        let mut sb = working_sidebar();
+        sb.spinner_epoch = Instant::now() - Duration::from_millis(600);
+        assert!(sb.tick_working(), "first cross of the boundary redraws");
+        assert!(
+            !sb.tick_working(),
+            "still in frame 5 → no second redraw",
+        );
+    }
+}

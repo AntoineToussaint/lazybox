@@ -71,9 +71,13 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 ///     [`AgentState::Working`] (`UserPromptSubmit` matters: a turn
 ///     that streams text with no tool calls fires no other
 ///     working-shaped hook at all);
-///   - a `Notification` whose text asks for permission or elicitation
-///     means Claude is **waiting on the user** →
-///     [`AgentState::InputNeeded`];
+///   - a `Notification` means Claude is **waiting on the user** →
+///     [`AgentState::InputNeeded`]: either a permission / elicitation
+///     dialog, or — the only variant that fires under lazybox's
+///     `--dangerously-skip-permissions` spawns — the idle nudge it emits
+///     after sitting ~60s at a ready composer ("Claude is waiting for
+///     your input"), which is exactly the "this workspace needs me"
+///     signal the `?` indicator and `!` jump surface (#62);
 ///   - `Stop` and `SessionStart`/`SessionEnd` mean the composer is
 ///     **quiet** → [`AgentState::Idle`].
 ///
@@ -102,46 +106,55 @@ pub fn hook_to_state(event: &HookEvent, current: Option<AgentState>) -> Option<A
     Some(state)
 }
 
-/// Classify a `Notification` payload. A notification only blocks the
-/// user when it asks for permission or surfaces an elicitation dialog;
-/// the idle nudge ("Claude is waiting for your input") and anything
-/// else mean the composer is sitting ready, not blocked → `Idle`.
+/// Classify a `Notification` payload. Claude fires this hook when it is
+/// waiting on the user — a permission / elicitation dialog, or the idle
+/// nudge ("Claude is waiting for your input") it emits after ~60s at a
+/// ready composer. lazybox runs every agent with
+/// `--dangerously-skip-permissions`, so the permission/elicitation
+/// variants never fire in practice and the idle nudge is the only
+/// `Notification` an agent emits; all of them mean the workspace is
+/// blocked on me → `InputNeeded` (#62).
 ///
-/// We match the blocking case affirmatively: Claude's permission/
-/// elicitation payloads carry a stable keyword, while its idle wording
-/// does not, so an unrecognized notification is far more likely the
-/// idle nudge than a real prompt. One exception keeps a wrong guess
-/// from destroying real signal: when the terminal is already
-/// `InputNeeded`, an unrecognized notification is a NO-CHANGE (`None`)
-/// rather than a force-clear to `Idle` — an unrecognized *blocking*
-/// notification must not kill the `?` pill. The pill still clears via
-/// `Stop` or the PTY detector's affirmative idle reading.
+/// We match the waiting case affirmatively against the known wording. An
+/// unrecognized notification is treated as the composer sitting ready →
+/// `Idle`, with one exception: when the terminal is already
+/// `InputNeeded`, an unrecognized payload is a NO-CHANGE (`None`) rather
+/// than a force-clear, so it can't kill a live `?`. The pill still
+/// clears via `Stop`, a resumed turn, or the PTY detector going stale.
 fn notification_state(
     notification: Option<&str>,
     current: Option<AgentState>,
 ) -> Option<AgentState> {
     match notification {
-        Some(n) if blocks_on_user(n) => Some(AgentState::InputNeeded),
+        Some(n) if waits_on_user(n) => Some(AgentState::InputNeeded),
         _ if current == Some(AgentState::InputNeeded) => None,
         _ => Some(AgentState::Idle),
     }
 }
 
-fn blocks_on_user(notification: &str) -> bool {
+/// Wording in a `Notification` payload that means Claude is blocked
+/// waiting on the user: a permission / elicitation dialog, or the idle
+/// nudge it fires after sitting ~60s at a ready composer with no input.
+fn waits_on_user(notification: &str) -> bool {
     let n = notification.to_ascii_lowercase();
-    n.contains("permission") || n.contains("elicit")
+    n.contains("permission") || n.contains("elicit") || n.contains("waiting for your input")
 }
 
-/// Shape of the prompt a blocking `Notification` implies. Claude's
+/// Shape of the prompt a waiting `Notification` implies. Claude's
 /// permission payloads render chooser dialogs (a bare digit / y / n /
-/// Esc answers them); elicitation payloads collect free text, where a
-/// bare keystroke is just typing. Only meaningful for notifications
-/// [`hook_to_state`] mapped to `InputNeeded`.
+/// Esc answers them); elicitation payloads and the idle nudge collect
+/// free text, where a bare keystroke is just typing. Only meaningful for
+/// notifications [`hook_to_state`] mapped to `InputNeeded`.
 pub fn notification_prompt_shape(notification: Option<&str>) -> crate::agent::PromptShape {
     match notification {
-        Some(n) if n.to_ascii_lowercase().contains("elicit") => crate::agent::PromptShape::FreeText,
+        Some(n) if expects_free_text(n) => crate::agent::PromptShape::FreeText,
         _ => crate::agent::PromptShape::Chooser,
     }
+}
+
+fn expects_free_text(notification: &str) -> bool {
+    let n = notification.to_ascii_lowercase();
+    n.contains("elicit") || n.contains("waiting for your input")
 }
 
 #[cfg(test)]
@@ -260,6 +273,12 @@ mod tests {
             notification_prompt_shape(Some("elicitation_dialog")),
             PromptShape::FreeText
         );
+        // The idle nudge also collects free text: the user types their
+        // next prompt, not a one-keystroke chooser answer.
+        assert_eq!(
+            notification_prompt_shape(Some("Claude is waiting for your input")),
+            PromptShape::FreeText
+        );
     }
 
     #[test]
@@ -270,14 +289,16 @@ mod tests {
     }
 
     #[test]
-    fn notification_idle_waiting_for_input_is_idle() {
-        // Claude's real idle nudge after ~60s of inactivity — the
-        // composer is ready, not blocked. This carries no "idle"
-        // substring, which is exactly the misclassification #190 fixed.
+    fn notification_idle_waiting_for_input_is_input_needed() {
+        // Claude's idle nudge after ~60s of inactivity. lazybox spawns
+        // every agent with `--dangerously-skip-permissions`, so the
+        // permission/elicitation notifications never fire — this nudge is
+        // the only "agent is waiting on you" signal available, and #62
+        // wants it to drive the `?` indicator on the row.
         let ev = parse(
             r#"{"hook_event_name":"Notification","message":"Claude is waiting for your input"}"#,
         );
-        assert_eq!(hook_to_state(&ev, None), Some(AgentState::Idle));
+        assert_eq!(hook_to_state(&ev, None), Some(AgentState::InputNeeded));
     }
 
     #[test]

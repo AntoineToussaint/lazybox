@@ -1879,22 +1879,31 @@ impl TerminalStack {
                     && Some(session_key) == self.active_session.as_ref()
                 {
                     self.commit_pending_split(*terminal_id, direction);
-                } else if Some(session_key) == self.active_session.as_ref()
-                    && matches!(self.layout, lazybox_core::SessionLayout::Tabs { .. })
-                    && self
+                } else if Some(session_key) == self.active_session.as_ref() {
+                    let session_count = self
                         .terminals
                         .iter()
                         .filter(|(_, slot)| Some(&slot.session_key) == self.active_session.as_ref())
-                        .count()
-                        >= 2
-                {
-                    // Two-or-more terminals on the same session: the
-                    // user wants to see both. The Tabs default hides
-                    // everything but the active tab; auto-promote to
-                    // a vertical split so the new arrival lands beside
-                    // the previous one. Single-terminal sessions stay
-                    // in Tabs (cheaper render, no wasted dividers).
-                    self.commit_pending_split(*terminal_id, PendingSplit::Vertical);
+                        .count();
+                    if session_count >= 2 {
+                        // Two-or-more terminals on the same session: the
+                        // user wants to see both. Auto-promote (Tabs) or
+                        // extend (Splits) into a vertical split so the new
+                        // arrival lands beside the existing tiles AND
+                        // becomes the focused leaf — without this the spawn
+                        // would either hide behind the active tab or, in an
+                        // existing split, never enter the tile tree at all.
+                        self.commit_pending_split(*terminal_id, PendingSplit::Vertical);
+                    } else if let Some(idx) = self
+                        .visible_terminals()
+                        .iter()
+                        .position(|id| id == terminal_id)
+                    {
+                        // First terminal in this session — stay in Tabs
+                        // (cheaper render, no wasted dividers) but make the
+                        // fresh spawn the active tab so the user lands on it.
+                        self.active_tab_idx = idx;
+                    }
                 }
             }
             Event::TerminalOutput {
@@ -4211,5 +4220,93 @@ mod set_layout_tests {
             stack.pending_split.is_none(),
             "a layout change must clear the stale pending split",
         );
+    }
+}
+
+#[cfg(test)]
+mod spawn_focus_tests {
+    //! Regression coverage for #58: spawning a terminal into the active
+    //! session must make the new terminal the focused one, no matter how
+    //! many terminals (and which layout) the session already has.
+    use super::*;
+
+    fn spawn(stack: &mut TerminalStack, id: u64, sk: &SessionKey, kind: TerminalKind) {
+        stack.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(id),
+            session_key: sk.clone(),
+            kind,
+            no_permission: false,
+        });
+    }
+
+    #[test]
+    fn first_spawn_becomes_the_active_tab() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.set_active_session(Some(sk.clone()));
+
+        spawn(&mut stack, 1, &sk, TerminalKind::Shell);
+
+        assert_eq!(stack.focused_terminal_id(), Some(TerminalId(1)));
+        assert!(matches!(
+            stack.layout(),
+            lazybox_core::SessionLayout::Tabs { .. }
+        ));
+    }
+
+    #[test]
+    fn second_spawn_splits_and_focuses_the_new_terminal() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.set_active_session(Some(sk.clone()));
+
+        spawn(&mut stack, 1, &sk, TerminalKind::Agent("claude".into()));
+        spawn(&mut stack, 2, &sk, TerminalKind::Shell);
+
+        assert!(matches!(
+            stack.layout(),
+            lazybox_core::SessionLayout::Splits { .. }
+        ));
+        assert_eq!(stack.focused_terminal_id(), Some(TerminalId(2)));
+    }
+
+    #[test]
+    fn third_spawn_into_existing_split_joins_the_tree_and_takes_focus() {
+        // The original bug: with the session already in a Splits layout,
+        // the spawn handler ignored the new terminal — it never entered
+        // the tile tree and focus stayed on the previous leaf.
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.set_active_session(Some(sk.clone()));
+
+        spawn(&mut stack, 1, &sk, TerminalKind::Agent("claude".into()));
+        spawn(&mut stack, 2, &sk, TerminalKind::Shell);
+        spawn(&mut stack, 3, &sk, TerminalKind::Shell);
+
+        // All three are part of the visible set...
+        let leaves = match stack.layout() {
+            lazybox_core::SessionLayout::Splits { tree, .. } => tree.leaves(),
+            other => panic!("expected Splits layout, got {other:?}"),
+        };
+        assert!(
+            leaves.contains(&3),
+            "the third spawn must enter the tile tree: {leaves:?}",
+        );
+        // ...and the freshly-spawned shell is the one in focus.
+        assert_eq!(stack.focused_terminal_id(), Some(TerminalId(3)));
+    }
+
+    #[test]
+    fn spawn_into_background_session_does_not_steal_focus() {
+        let active = SessionKey::new("github:o/r#1");
+        let background = SessionKey::new("github:o/r#2");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.set_active_session(Some(active.clone()));
+
+        spawn(&mut stack, 1, &active, TerminalKind::Shell);
+        spawn(&mut stack, 2, &background, TerminalKind::Shell);
+
+        // The background spawn must not pull focus off the active session.
+        assert_eq!(stack.focused_terminal_id(), Some(TerminalId(1)));
     }
 }

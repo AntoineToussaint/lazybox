@@ -426,6 +426,20 @@ pub async fn handle_spawn(
         }
     };
     let hint = format!("{}-{kind_label}", session_key.as_str());
+    // Pre-trust the worktree for an unattended launch. Claude shows an
+    // interactive workspace-trust dialog for any directory it hasn't
+    // seen (skipped only in non-interactive `-p` mode, which we don't
+    // use), so an autonomous spawn in a freshly provisioned worktree
+    // would hang on it with no human to accept. Gated on
+    // `skip_permissions`: interactive spawns keep the user-facing prompt.
+    if skip_permissions
+        && let TerminalKind::Agent(agent_id) = &kind
+        && let Some(agent) = config.agents.get(agent_id)
+        && let Some(worktree) = cwd_path.as_deref()
+    {
+        agent.prepare_unattended(worktree);
+    }
+
     // Per-repo env injection: look up the workspace's primary task
     // repo, read `repos.<owner/name>.env` from YAML, fan it into
     // the spawn. Missing config or workspace = empty env, no error.

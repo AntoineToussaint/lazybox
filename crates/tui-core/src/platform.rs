@@ -222,8 +222,7 @@ pub fn notify_user(title: &str, body: &str) {
 /// attributed to Script Editor on current macOS; `terminal-notifier`
 /// ships its own bundle and restores a real click target.
 #[cfg(target_os = "macos")]
-const TERMINAL_NOTIFIER_HINT: &str =
-    "notify_user: terminal-notifier not found on PATH; using the osascript fallback, \
+const TERMINAL_NOTIFIER_HINT: &str = "notify_user: terminal-notifier not found on PATH; using the osascript fallback, \
      whose banner macOS attributes to Script Editor (clicking it opens an empty \
      AppleScript window). Install terminal-notifier (e.g. `brew install \
      terminal-notifier`) for a Notification Center banner with a proper click target.";
@@ -292,10 +291,7 @@ mod tests {
         );
         // A title/body carrying a quote can't break out of the literal.
         let script = osascript_notification_script(r#"a"b"#, r#"c"d"#);
-        assert_eq!(
-            script,
-            r#"display notification "c\"d" with title "a\"b""#
-        );
+        assert_eq!(script, r#"display notification "c\"d" with title "a\"b""#);
     }
 
     #[test]

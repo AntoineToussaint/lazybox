@@ -254,7 +254,11 @@ impl PrefixLatch {
     /// way.
     pub fn take_within(&mut self, window: std::time::Duration) -> bool {
         match self.armed_at.take() {
-            Some(t) => t.elapsed() <= window,
+            // Strict `<` so a zero (or instant-resolution) window reads as
+            // expired even when `elapsed()` rounds to exactly zero on a fast
+            // clock — matching the documented "any elapsed time exceeds a zero
+            // window" contract and keeping the behavior deterministic.
+            Some(t) => t.elapsed() < window,
             None => false,
         }
     }

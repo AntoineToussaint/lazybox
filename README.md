@@ -1,15 +1,37 @@
-# lazybox
+<div align="center">
+
+# 📥 lazybox
 
 **A reactive PR inbox in your terminal.** Instead of refreshing GitHub, events
 flow to you — new comments, CI failures, and review requests surface as they
 land. Each task opens a git worktree with an embedded terminal for Claude Code,
-Codex, Cursor, or a shell. It's for developers juggling many PRs and AI coding
-agents at once; think a TUI inbox (lazygit-style) where every row is also a
-ready-to-run workspace.
+Codex, Cursor, or a shell.
 
-![lazybox: the inbox on the left, an opened workspace with an embedded terminal running git in its own worktree on the right](demo/lazybox.gif)
+Think a TUI inbox (lazygit-style) where every row is also a ready-to-run
+workspace — built for developers juggling many PRs and AI coding agents at once.
 
-<sub>Prefer not to autoplay? Here's a [static screenshot](demo/lazybox.png) and a [seekable MP4](demo/lazybox.mp4). The demo is generated from [`demo/lazybox.tape`](demo/lazybox.tape) — it's code, not a recording.</sub>
+[![Latest release](https://img.shields.io/github/v/release/AntoineToussaint/lazybox?logo=github&label=release&color=6f42c1)](https://github.com/AntoineToussaint/lazybox/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/AntoineToussaint/lazybox/ci.yml?branch=main&logo=githubactions&logoColor=white&label=CI)](https://github.com/AntoineToussaint/lazybox/actions/workflows/ci.yml)
+[![Homebrew](https://img.shields.io/badge/brew-AntoineToussaint%2Flazybox-FBB040?logo=homebrew&logoColor=white)](https://github.com/AntoineToussaint/homebrew-lazybox)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-CE412B?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux-555?logo=apple&logoColor=white)](#install)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-lazybox.ai-0a7?logo=readthedocs&logoColor=white)](https://lazybox.ai/docs/)
+
+</div>
+
+![lazybox: the inbox on the left listing live PRs and issues across repos, an opened workspace with description, activity, and embedded agent terminals on the right](demo/lazybox.gif)
+
+<sub>Prefer not to autoplay? Here's a [static screenshot](demo/lazybox.png) and a [seekable MP4](demo/lazybox.mp4). There's also a fully reproducible `--test` demo — code, not a recording — driven by [`demo/lazybox.tape`](demo/lazybox.tape).</sub>
+
+## ✨ Highlights
+
+- **📨 Reactive inbox** — new comments, CI failures, and review requests surface automatically, with per-row read/unread tracking. No refreshing.
+- **🌳 A worktree per task** — every row opens an isolated git worktree, so PRs never step on each other's working trees.
+- **🤖 Agents built in** — spawn Claude Code, Codex, or Cursor in a row's worktree with one key; `w` picks the right prompt for the row's state (fix CI / address comments / implement issue).
+- **🖥️ Embedded terminals** — a live PTY per workspace (split & tile them), powered by a vendored ghostty VT parser.
+- **🔌 Source-agnostic** — GitHub today; Linear, Slack, and more plug in behind the same interface.
+- **🛰️ Remote-friendly** — a client/daemon split runs over an SSH-forwarded socket for working against a remote box.
 
 ## Install
 

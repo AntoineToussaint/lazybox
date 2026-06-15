@@ -1371,44 +1371,72 @@ async fn provision_worktree(
     // still encodes `owner/repo` for GitHub projects, so it gets a
     // real clone instead of the caller's empty-dir fallback.
     let task = workspace.primary_task();
-    let repo = match task {
-        Some(task) => task
-            .repo
-            .as_deref()
-            .ok_or_else(|| ServerError::Workspace("task has no repo".into()))?
-            .to_string(),
-        None => clonable_repo_from_project(workspace)?,
-    };
-    let (owner, name) = repo
-        .split_once('/')
-        .ok_or_else(|| ServerError::Workspace(format!("repo '{repo}' is not owner/name")))?;
-
     let mgr = lazybox_git_ops::WorktreeManager::default_base();
-    let worktree = match task.and_then(|t| t.branch.as_deref()) {
-        Some(branch) => mgr
-            .checkout_at(target, owner, name, branch)
-            .await
-            .map_err(|e| ServerError::Worktree(format!("checkout_at: {e}")))?,
+
+    // The upstream `owner/repo` to clone, when the workspace has one. A
+    // task carries it directly; a blank workspace recovers it from a
+    // GitHub project key. `None` covers the repo-less cases — a task
+    // from a source with no repo (Slack, some Linear tickets), or a
+    // blank workspace under a local project — which get a standalone
+    // `git init` worktree below instead of an empty, non-git directory.
+    let repo = match task {
+        Some(task) => task.repo.clone(),
+        None => clonable_repo_from_project(workspace).ok(),
+    };
+
+    let (worktree, repo_key) = match repo {
+        Some(repo) => {
+            let (owner, name) = repo.split_once('/').ok_or_else(|| {
+                ServerError::Workspace(format!("repo '{repo}' is not owner/name"))
+            })?;
+            let worktree = match task.and_then(|t| t.branch.as_deref()) {
+                Some(branch) => mgr
+                    .checkout_at(target, owner, name, branch)
+                    .await
+                    .map_err(|e| ServerError::Worktree(format!("checkout_at: {e}")))?,
+                None => {
+                    // Issue (or other branchless task, or blank workspace):
+                    // cut a fresh branch off the repo default. Branch name
+                    // encodes the task key (or the workspace key when there is
+                    // no task) so two spawns on the same item land on the same
+                    // branch and subsequent presses are idempotent — without
+                    // that, pressing `c` twice on issue #42 would create
+                    // `lazybox/issue-42-…` and `lazybox/issue-42-…-2`, neither of
+                    // which corresponds to a PR the user can push.
+                    let new_branch = match task {
+                        Some(task) => derive_branch_for_branchless(task),
+                        None => derive_branch_for_workspace(workspace),
+                    };
+                    let base = mgr
+                        .default_branch(owner, name)
+                        .await
+                        .map_err(|e| {
+                            ServerError::Worktree(format!("default_branch lookup: {e}"))
+                        })?;
+                    mgr.checkout_new_branch_at(target, owner, name, &new_branch, &base)
+                        .await
+                        .map_err(|e| {
+                            ServerError::Worktree(format!("checkout_new_branch_at: {e}"))
+                        })?
+                }
+            };
+            (worktree, Some(format!("{owner}/{name}")))
+        }
         None => {
-            // Issue (or other branchless task, or blank workspace):
-            // cut a fresh branch off the repo default. Branch name
-            // encodes the task key (or the workspace key when there is
-            // no task) so two spawns on the same item land on the same
-            // branch and subsequent presses are idempotent — without
-            // that, pressing `c` twice on issue #42 would create
-            // `lazybox/issue-42-…` and `lazybox/issue-42-…-2`, neither of
-            // which corresponds to a PR the user can push.
-            let new_branch = match task {
+            // No upstream repo to clone — initialize a standalone git
+            // repo on lazybox's branch so the session still lands in a
+            // real worktree rather than a bare directory. Branch name is
+            // deterministic (same key → same branch) so repeated spawns
+            // are idempotent.
+            let branch = match task {
                 Some(task) => derive_branch_for_branchless(task),
                 None => derive_branch_for_workspace(workspace),
             };
-            let base = mgr
-                .default_branch(owner, name)
+            let worktree = mgr
+                .init_standalone_at(target, &branch)
                 .await
-                .map_err(|e| ServerError::Worktree(format!("default_branch lookup: {e}")))?;
-            mgr.checkout_new_branch_at(target, owner, name, &new_branch, &base)
-                .await
-                .map_err(|e| ServerError::Worktree(format!("checkout_new_branch_at: {e}")))?
+                .map_err(|e| ServerError::Worktree(format!("init_standalone_at: {e}")))?;
+            (worktree, None)
         }
     };
 
@@ -1426,21 +1454,23 @@ async fn provision_worktree(
         Ok(c) => c,
         Err(e) => {
             tracing::error!(
-                repo = %format!("{owner}/{name}"),
+                repo = ?repo_key,
                 "Config::load failed (mounts will be skipped): {e}",
             );
             lazybox_config::Config::default()
         }
     };
     let mut mounts = config_mounts_to_git(&cfg.worktree.mounts);
-    let repo_key = format!("{owner}/{name}");
-    if let Some(repo_cfg) = cfg.repos.get(&repo_key) {
+    if let Some(repo_key) = &repo_key
+        && let Some(repo_cfg) = cfg.repos.get(repo_key)
+    {
         mounts.extend(config_mounts_to_git(&repo_cfg.mounts));
     }
+    let mount_label = repo_key.as_deref().unwrap_or("standalone");
     if !mounts.is_empty()
         && let Err(e) = mgr.apply_mounts(&worktree, &mounts).await
     {
-        tracing::warn!("apply_mounts for {repo_key} failed: {e}");
+        tracing::warn!("apply_mounts for {mount_label} failed: {e}");
     }
 
     // Scripts: same stacking as mounts (global + per-repo). Best-
@@ -1449,13 +1479,15 @@ async fn provision_worktree(
     // The script that DID validate gets materialized; the one that
     // failed surfaces in /tmp/lazybox.log.
     let mut scripts = config_scripts_to_git(&cfg.worktree.scripts);
-    if let Some(repo_cfg) = cfg.repos.get(&repo_key) {
+    if let Some(repo_key) = &repo_key
+        && let Some(repo_cfg) = cfg.repos.get(repo_key)
+    {
         scripts.extend(config_scripts_to_git(&repo_cfg.scripts));
     }
     if !scripts.is_empty()
         && let Err(e) = mgr.apply_scripts(&worktree, &scripts).await
     {
-        tracing::warn!("apply_scripts for {repo_key} failed: {e}");
+        tracing::warn!("apply_scripts for {mount_label} failed: {e}");
     }
     let _ = worktree; // silence dead-binding warning from the
     // signature change; the worktree value is what
@@ -4274,15 +4306,27 @@ mod tests {
     }
 
     /// End-to-end through `provision_worktree`: a blank workspace under
-    /// a local project must fail fast (no git invocation possible) so
-    /// `handle_spawn` falls back to a plain mkdir.
+    /// a local project has no repo to clone, so it gets a standalone
+    /// `git init` worktree on `lazybox/<key>` rather than a bare,
+    /// non-git directory (#57).
     #[tokio::test]
-    async fn provision_worktree_blank_local_workspace_errors() {
+    async fn provision_worktree_blank_local_workspace_inits_standalone() {
         let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
         ws.project_key = Some(lazybox_core::ProjectKey::local("notes"));
-        let dir = std::env::temp_dir().join("lazybox-test-blank-local");
-        assert!(provision_worktree(&ws, &dir).await.is_err());
-        assert!(!dir.exists(), "failed provisioning must not create the dir");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("worktree");
+        provision_worktree(&ws, &dir).await.unwrap();
+        assert!(dir.join(".git").exists(), "a real git repo was created");
+        let head = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "lazybox/scratch",
+            "standalone worktree is on the workspace branch",
+        );
     }
 
     const HARD: std::time::Duration = std::time::Duration::from_secs(10);

@@ -1821,3 +1821,207 @@ async fn bare_chooser_keystroke_clears_input_needed() {
     .await
     .expect("deadline");
 }
+
+/// Minimal GitHub `Task` for the collapse test.
+fn collapse_task(key: &str, url: &str, closes: Vec<lazybox_core::TaskId>) -> lazybox_core::Task {
+    lazybox_core::Task {
+        id: lazybox_core::TaskId {
+            source: "github".into(),
+            key: key.into(),
+        },
+        title: "t".into(),
+        body: None,
+        state: lazybox_core::TaskState::Open,
+        role: lazybox_core::TaskRole::Author,
+        ci: lazybox_core::CiStatus::None,
+        review: lazybox_core::ReviewStatus::None,
+        checks: vec![],
+        unread_count: 0,
+        url: url.into(),
+        repo: Some("o/r".into()),
+        branch: Some("feat".into()),
+        base_branch: None,
+        updated_at: chrono::Utc::now(),
+        closed_at: None,
+        labels: vec![],
+        reviewers: vec![],
+        assignees: vec![],
+        auto_merge_enabled: false,
+        is_in_merge_queue: false,
+        mergeable: lazybox_core::Mergeable::Mergeable,
+        is_behind_base: false,
+        node_id: None,
+        needs_reply: false,
+        last_commenter: None,
+        recent_activity: vec![],
+        additions: 0,
+        deletions: 0,
+        closes_issues: closes,
+    }
+}
+
+/// Issue #78 regression: the manual `Shift-J` collapse (`Command::
+/// CollapseIntoPr`) must carry a live Claude terminal across to the PR
+/// workspace, not tear it down. Drives the FULL serve loop: seed an
+/// issue + claiming PR, spawn a real (mock-backed) agent on the issue,
+/// collapse, then assert the terminal is rebadged onto the PR and the
+/// backend session is never killed.
+#[tokio::test]
+async fn collapse_into_pr_carries_live_terminal_to_the_pr() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+
+        // Issue #50 and PR #51 (which closes #50). Seed both before
+        // serving so the collapse handler can resolve the claiming PR.
+        let issue = lazybox_core::Workspace::from_task(
+            collapse_task("o/r#50", "https://github.com/o/r/issues/50", vec![]),
+            chrono::Utc::now(),
+        );
+        let issue_task_id = issue.primary_task().unwrap().id.clone();
+        let issue_key = issue.key.clone();
+        let pr = lazybox_core::Workspace::from_task(
+            collapse_task(
+                "o/r#51",
+                "https://github.com/o/r/pull/51",
+                vec![issue_task_id],
+            ),
+            chrono::Utc::now(),
+        );
+        let pr_key = pr.key.clone();
+        for ws in [&issue, &pr] {
+            config
+                .store
+                .save_workspace(&lazybox_store::WorkspaceRecord {
+                    key: ws.key.as_str().to_string(),
+                    created_at: ws.created_at,
+                    workspace_json: Some(serde_json::to_string(ws).unwrap()),
+                })
+                .unwrap();
+        }
+
+        let mut client = subscribed(config.clone()).await;
+
+        // Spawn a Claude agent on the ISSUE workspace.
+        client
+            .send(Command::Spawn {
+                session_key: issue_key.as_str().into(),
+                session_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                initial_prompt: None,
+            })
+            .unwrap();
+        let terminal_id = match wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("TerminalSpawned arrived")
+        {
+            Event::TerminalSpawned { terminal_id, .. } => terminal_id,
+            _ => unreachable!(),
+        };
+        let backend_key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        // Sanity: the spawn persisted a session record onto the issue
+        // workspace before we collapse.
+        let issue_before: lazybox_core::Workspace = serde_json::from_str(
+            &config
+                .store
+                .get_workspace(&issue_key)
+                .unwrap()
+                .unwrap()
+                .workspace_json
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            issue_before.sessions.len(),
+            1,
+            "spawn must persist the session on the issue workspace",
+        );
+
+        // Join the issue into the PR.
+        client
+            .send(Command::CollapseIntoPr {
+                issue_workspace_key: issue_key.as_str().into(),
+            })
+            .unwrap();
+
+        // The terminal must be rebadged onto the PR, and that rebadge
+        // must arrive before (or without) any exit for our terminal.
+        let pr_session_key: lazybox_core::SessionKey = (&pr_key).into();
+        let issue_session_key: lazybox_core::SessionKey = (&issue_key).into();
+        let rebadged = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::TerminalsRebadged { from, to }
+                        if *from == issue_session_key && *to == pr_session_key
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            rebadged.is_some(),
+            "collapse must broadcast TerminalsRebadged issue→PR",
+        );
+
+        // Wait for the collapse to fully settle. `WorkspaceMerged` is the
+        // last event the handler emits — after the PR (carrying the moved
+        // session) is committed and the issue row is dropped.
+        let merged = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::WorkspaceMerged { pr_workspace_key, .. }
+                        if pr_workspace_key.as_str() == pr_key.as_str()
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(merged.is_some(), "collapse must broadcast WorkspaceMerged");
+
+        // The live backend session must NOT have been killed.
+        assert!(
+            mock.list().await.unwrap().contains(&backend_key),
+            "the agent's backend session must survive the collapse",
+        );
+
+        // And the daemon's terminal_meta must now key the terminal to
+        // the PR workspace so wire-side traffic + restart recovery
+        // follow it.
+        let meta = config.terminal_meta.lock().await;
+        let (sk, _) = meta.get(&terminal_id).expect("terminal still tracked");
+        assert_eq!(
+            sk, &pr_session_key,
+            "terminal_meta must rebadge the live terminal onto the PR",
+        );
+        drop(meta);
+
+        // The session record moved to the PR workspace (not deleted).
+        let pr_after: lazybox_core::Workspace = serde_json::from_str(
+            &config
+                .store
+                .get_workspace(&pr_key)
+                .unwrap()
+                .unwrap()
+                .workspace_json
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            pr_after.sessions.len(),
+            1,
+            "the issue's session must live on the PR workspace after the join",
+        );
+    })
+    .await
+    .expect("deadline");
+}

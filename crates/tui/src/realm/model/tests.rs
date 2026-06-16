@@ -2620,3 +2620,105 @@ mod setup_finish_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod collapse_into_pr_tests {
+    //! Issue #78: joining an Issue into a PR (`Shift-J`) must not drop
+    //! the running Claude terminal. The daemon rebadges the live
+    //! terminal onto the PR and emits, in order:
+    //!   `TerminalsRebadged` → `WorkspaceUpserted(pr)` →
+    //!   `WorkspaceRemoved(issue)` → `WorkspaceMerged`.
+    //! This drives that exact sequence through the orchestrator and
+    //! asserts the user ends up viewing the PR with the SAME terminal
+    //! still on screen — not an empty pane where the session used to be.
+    use super::super::*;
+    use chrono::Utc;
+    use lazybox_core::{SessionKind, Workspace, WorkspaceKey, WorkspaceSession};
+    use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    #[test]
+    fn shift_j_keeps_the_live_terminal_visible_on_the_pr() {
+        let mut m = build_model();
+
+        let issue_key = WorkspaceKey::new("github:o/r#50");
+        let pr_key = WorkspaceKey::new("github:o/r#51");
+        let issue_sk: lazybox_core::SessionKey = (&issue_key).into();
+        let pr_sk: lazybox_core::SessionKey = (&pr_key).into();
+
+        // Issue workspace carries a Claude session; PR is a separate row.
+        let mut issue_ws = Workspace::empty(issue_key.clone(), "lazybox/issue-50", Utc::now());
+        issue_ws.add_session(WorkspaceSession::new(
+            issue_key.clone(),
+            SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            std::path::PathBuf::from("/tmp/wt-50"),
+            Utc::now(),
+        ));
+        let pr_ws = Workspace::empty(pr_key.clone(), "feature", Utc::now());
+        // A third, unrelated row so the post-removal cursor has somewhere
+        // to land that ISN'T the PR — this keeps the "view follows onto
+        // the PR" assertion load-bearing rather than satisfied by the PR
+        // being the only survivor.
+        let other_ws = Workspace::empty(WorkspaceKey::new("github:o/r#9"), "other", Utc::now());
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![issue_ws.clone(), pr_ws.clone(), other_ws],
+            terminals: vec![],
+            projects: vec![],
+        });
+
+        // User is on the issue, with Claude running and on screen.
+        assert!(m.sidebar.focus_workspace_key(&issue_sk), "focus issue row");
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(7),
+            session_key: issue_sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+        assert!(
+            m.terminals.active_terminal_id() == Some(TerminalId(7)),
+            "the Claude terminal is on screen before the join",
+        );
+
+        // The daemon's collapse broadcast, in wire order.
+        m.handle_daemon_event(IpcEvent::TerminalsRebadged {
+            from: issue_sk.clone(),
+            to: pr_sk.clone(),
+        });
+        let mut pr_with_session = pr_ws.clone();
+        let mut moved = issue_ws.sessions[0].clone();
+        moved.workspace_key = pr_key.clone();
+        pr_with_session.add_session(moved);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr_with_session)));
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(issue_key.clone()));
+        m.handle_daemon_event(IpcEvent::WorkspaceMerged {
+            issue_workspace_key: issue_key.clone(),
+            pr_workspace_key: pr_key.clone(),
+            issue_label: "#50".into(),
+            pr_label: "#51".into(),
+        });
+
+        // The view followed onto the PR, and the SAME terminal is still
+        // on screen there — the session was carried over, not lost.
+        assert_eq!(
+            m.sidebar.selected_workspace_key().map(|k| k.as_str()),
+            Some(pr_key.as_str()),
+            "the view must follow the moved session onto the PR",
+        );
+        assert_eq!(
+            m.terminals.active_session().map(|k| k.as_str()),
+            Some(pr_sk.as_str()),
+            "the terminal stack's active session must be the PR",
+        );
+        assert!(
+            m.terminals.active_terminal_id() == Some(TerminalId(7)),
+            "the live Claude terminal must remain visible on the PR",
+        );
+    }
+}

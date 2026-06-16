@@ -107,6 +107,13 @@ pub struct Workspace {
     /// `primary_task().repo`" everywhere else.
     #[serde(default)]
     pub project_key: Option<crate::ProjectKey>,
+    /// `true` when the user created this workspace by hand (the `n`
+    /// flow), not from a provider task. Locally-authored workspaces
+    /// never appear in a provider poll, so the reconcile sweep must
+    /// never prune them — even after they gain a PR/issue. Provider-
+    /// derived workspaces leave this `false`.
+    #[serde(default)]
+    pub local: bool,
     /// Display name. Defaults to the PR title or the first issue's
     /// title when first created; user can rename.
     pub name: String,
@@ -143,6 +150,7 @@ impl Workspace {
             name: key.as_str().to_string(),
             key,
             project_key: None,
+            local: false,
             branch,
             sessions: Vec::new(),
             pr: None,

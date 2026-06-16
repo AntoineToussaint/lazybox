@@ -2184,16 +2184,20 @@ pub async fn rescope_with_state(
         if stored_ws.as_ref().is_some_and(|w| w.is_snoozed(now)) {
             continue;
         }
-        // Preserve locally-created pre-PR workspaces. They have a
-        // `project_key` (the user explicitly created them under a
-        // project) but no upstream task — so they never appear in
-        // the polled set. Without this guard, every poll deletes
-        // the just-created sandbox workspace.
+        // Preserve locally-authored workspaces. The user created
+        // these by hand (the `n` flow), not from a provider task, so
+        // they never appear in the polled set — pruning them on a
+        // poll that doesn't list them destroys work the user
+        // explicitly created (issue #87). The `local` flag is
+        // authoritative; the task-shape fallback covers records
+        // written before the flag existed (pre-PR sandbox workspaces
+        // carry a `project_key` but no upstream task).
         if stored_ws.as_ref().is_some_and(|w| {
-            w.pr.is_none()
-                && w.gh_issues.is_empty()
-                && w.linear_issues.is_empty()
-                && w.project_key.is_some()
+            w.local
+                || (w.pr.is_none()
+                    && w.gh_issues.is_empty()
+                    && w.linear_issues.is_empty()
+                    && w.project_key.is_some())
         }) {
             continue;
         }
@@ -3892,6 +3896,7 @@ pub fn create_empty_workspace(
         workspace.name = name.trim().to_string();
     }
     workspace.project_key = Some(project_key);
+    workspace.local = true;
     commit_upsert(config, &key, workspace);
     key
 }

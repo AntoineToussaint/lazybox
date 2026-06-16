@@ -1,3 +1,4 @@
+pub use lazybox_server::metrics;
 pub use lazybox_server::{Server, ServerConfig};
 
 #[allow(dead_code)]
@@ -154,6 +155,30 @@ async fn health_route_returns_json() {
     assert_eq!(payload.service, "lazybox-api-gateway");
     assert!(payload.ok);
 }
+#[tokio::test]
+async fn metrics_route_returns_event_counters() {
+    let config = ServerConfig::in_memory();
+    // Drive the counters off zero so the route reflects live state.
+    config.event_metrics.record_output_dropped();
+    config.event_metrics.record_resync();
+    config.event_metrics.record_bus_lagged(7);
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/metrics")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+
+    let response = api_gateway::handle_request(config, GatewayOptions::default(), request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: metrics::EventMetricsSnapshot = read_json(response).await;
+    assert_eq!(payload.terminal_output_dropped, 1);
+    assert_eq!(payload.terminal_resyncs, 1);
+    assert_eq!(payload.bus_lagged_events, 7);
+    assert_eq!(payload.bus_lag_recoveries, 0);
+}
+
 #[tokio::test]
 async fn health_route_enforces_bearer_token_when_configured() {
     let request = Request::builder()

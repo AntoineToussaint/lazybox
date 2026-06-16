@@ -135,9 +135,9 @@ lazybox server api --insecure-no-auth         # explicitly unauthenticated
 Without `LAZYBOX_API_TOKEN` the gateway refuses to start unless
 `--insecure-no-auth` is passed.
 
-Endpoints: `GET /v1/health`, `GET /v1/workspaces`, `GET /v1/events` (NDJSON
-stream), `POST /v1/commands` (single command), `POST /v1/stream` (duplex
-commands ↔ events).
+Endpoints: `GET /v1/health`, `GET /v1/metrics` (event-pipeline drop/lag
+counters), `GET /v1/workspaces`, `GET /v1/events` (NDJSON stream), `POST
+/v1/commands` (single command), `POST /v1/stream` (duplex commands ↔ events).
 
 ### How it works (brief)
 `server_api` (`crates/tui/src/main.rs`) parses the addr (arg → `LAZYBOX_API_ADDR`
@@ -149,6 +149,7 @@ serves the endpoints; streaming uses NDJSON frames (`JsonClientFrame::Command`
 
 ### Test checklist
 - [ ] `GET /v1/health` returns OK.
+- [ ] `GET /v1/metrics` returns the event-pipeline drop/lag counters as JSON.
 - [ ] `GET /v1/workspaces` lists current workspaces as JSON.
 - [ ] `GET /v1/events` streams NDJSON events.
 - [ ] `POST /v1/commands` accepts a single command frame.

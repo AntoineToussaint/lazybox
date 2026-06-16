@@ -34,8 +34,10 @@
 //! low-volume lossless queue.
 
 use crate::ServerConfig;
+use crate::metrics::EventMetrics;
 use lazybox_ipc::{Event, EventForward, TerminalId};
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
 
@@ -52,7 +54,7 @@ pub async fn forward_events(forward: EventForward, config: ServerConfig) {
         mut raw_rx,
         client_tx,
     } = forward;
-    let mut state = ForwardState::default();
+    let mut state = ForwardState::new(config.event_metrics.clone());
     // The raw stream can close while lossless events / a pending resync
     // are still buffered behind a full channel. We must flush those
     // before exiting — otherwise the client loses a lifecycle event or
@@ -104,7 +106,6 @@ pub async fn forward_events(forward: EventForward, config: ServerConfig) {
 
 /// Bookkeeping for the in-order lossless queue and the set of terminals
 /// owing a resync.
-#[derive(Default)]
 struct ForwardState {
     /// Lossless events that couldn't be sent immediately (channel was
     /// full), awaiting capacity. Low-volume by construction — only
@@ -115,11 +116,22 @@ struct ForwardState {
     /// for O(1) dedupe.
     resync_queue: VecDeque<TerminalId>,
     resync_set: HashSet<TerminalId>,
+    /// Process-wide drop/resync counters (issue #91).
+    metrics: Arc<EventMetrics>,
 }
 
 use std::ops::ControlFlow;
 
 impl ForwardState {
+    fn new(metrics: Arc<EventMetrics>) -> Self {
+        Self {
+            pending: VecDeque::new(),
+            resync_queue: VecDeque::new(),
+            resync_set: HashSet::new(),
+            metrics,
+        }
+    }
+
     fn is_idle(&self) -> bool {
         self.pending.is_empty() && self.resync_queue.is_empty()
     }
@@ -129,10 +141,16 @@ impl ForwardState {
     }
 
     fn schedule_resync(&mut self, terminal_id: TerminalId) {
+        // Every call here corresponds to one dropped output chunk; the
+        // resync itself is coalesced (one per terminal per episode).
+        let dropped_total = self.metrics.record_output_dropped();
         if self.resync_set.insert(terminal_id) {
             self.resync_queue.push_back(terminal_id);
+            let resync_total = self.metrics.record_resync();
             tracing::warn!(
                 ?terminal_id,
+                output_dropped_total = dropped_total,
+                resyncs_total = resync_total,
                 "event channel full — dropping TerminalOutput, scheduled resync from ring"
             );
         }
@@ -341,6 +359,14 @@ mod tests {
             .filter(|e| matches!(e, Event::TerminalOutput { .. }))
             .count();
         assert!(outputs < 20, "nothing was dropped ({outputs} forwarded)");
+        // The drop and the resync episode are counted (issue #91).
+        let snap = config.event_metrics.snapshot();
+        assert_eq!(
+            snap.terminal_output_dropped as usize,
+            20 - outputs,
+            "every dropped chunk is counted"
+        );
+        assert_eq!(snap.terminal_resyncs, 1, "one resync episode counted");
     }
 
     /// With a roomy channel and a consumer that keeps up, nothing is
@@ -387,5 +413,8 @@ mod tests {
         task.await.unwrap();
         assert_eq!(outputs, 10, "all output should pass through");
         assert_eq!(resyncs, 0, "no resync without overflow");
+        let snap = config.event_metrics.snapshot();
+        assert_eq!(snap.terminal_output_dropped, 0, "nothing dropped");
+        assert_eq!(snap.terminal_resyncs, 0, "no resync counted");
     }
 }

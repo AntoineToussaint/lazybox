@@ -1463,8 +1463,12 @@ mod scroll_classification_tests {
     /// into the coalesced-scroll path.
     #[test]
     fn discrete_input_is_not_scroll() {
-        assert!(!is_scroll_event(&mouse(MouseEventKind::Down(MouseButton::Left))));
-        assert!(!is_scroll_event(&mouse(MouseEventKind::Drag(MouseButton::Left))));
+        assert!(!is_scroll_event(&mouse(MouseEventKind::Down(
+            MouseButton::Left
+        ))));
+        assert!(!is_scroll_event(&mouse(MouseEventKind::Drag(
+            MouseButton::Left
+        ))));
         assert!(!is_scroll_event(&mouse(MouseEventKind::Moved)));
         assert!(!is_scroll_event(&Event::Key(KeyEvent::new(
             KeyCode::Char('j'),

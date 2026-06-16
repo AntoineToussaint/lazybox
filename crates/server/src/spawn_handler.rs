@@ -1600,16 +1600,23 @@ const HOOK_STALENESS: Duration = Duration::from_secs(30);
 /// Whether a PTY-detector reading may be emitted for a hook-driven
 /// terminal. Fresh hooks own Working↔Idle, so only two corrections
 /// pass: an on-screen permission dialog (`InputNeeded`) and an
-/// affirmatively-recognized idle composer. Once the last hook is older
-/// than `staleness`, readings pass — the terminal degrades to plain PTY
-/// detection instead of freezing on the last hook state — with ONE
-/// exception: a `Working` reading demoting a hook-set `InputNeeded`. A
-/// live dialog BLOCKS the hook stream (no tool calls fire while Claude
-/// waits), so "stale hooks + cached `?`" is the normal shape of a real
-/// unanswered dialog, not a broken pipeline; the demotion needs the
-/// agent's affirmative evidence (`working_supersedes_dialog`: a tight
-/// working anchor painted AFTER the dialog markers), or a full-repaint
-/// status bar would clear a real `?`.
+/// affirmatively-recognized idle composer demoting a stale `Working`.
+/// The idle-composer reading must NOT clear a fresh hook-set
+/// `InputNeeded`: the idle nudge (`Claude is waiting for your input`,
+/// #62) raises `InputNeeded` precisely WHEN the composer is sitting
+/// ready, so a ready-composer reading is corroborating, not contradicting
+/// — clearing on it would flicker the `?` off the moment a cursor-blink
+/// repaint arrived. A fresh `?` clears instead via a newer hook (a
+/// resumed turn → `Working`, `Stop` → `Idle`) or once hooks go stale.
+/// Once the last hook is older than `staleness`, readings pass — the
+/// terminal degrades to plain PTY detection instead of freezing on the
+/// last hook state — with ONE exception: a `Working` reading demoting a
+/// hook-set `InputNeeded`. A live dialog BLOCKS the hook stream (no tool
+/// calls fire while Claude waits), so "stale hooks + cached `?`" is the
+/// normal shape of a real unanswered dialog, not a broken pipeline; the
+/// demotion needs the agent's affirmative evidence
+/// (`working_supersedes_dialog`: a tight working anchor painted AFTER the
+/// dialog markers), or a full-repaint status bar would clear a real `?`.
 fn pty_reading_allowed(
     current: Option<lazybox_ipc::AgentState>,
     new_state: lazybox_ipc::AgentState,
@@ -1624,7 +1631,9 @@ fn pty_reading_allowed(
         return !demotes_input_needed || working_supersedes_dialog();
     }
     new_state == lazybox_ipc::AgentState::InputNeeded
-        || (new_state == lazybox_ipc::AgentState::Idle && ready_for_prompt)
+        || (new_state == lazybox_ipc::AgentState::Idle
+            && ready_for_prompt
+            && current != Some(lazybox_ipc::AgentState::InputNeeded))
 }
 
 /// Hysteresis decision for the edge that LEAVES `InputNeeded`.
@@ -3401,6 +3410,19 @@ mod tests {
         ));
         assert!(!pty_reading_allowed(
             None, Working, true, supersedes, fresh, staleness
+        ));
+        // …but a fresh hook-set `?` (e.g. the idle nudge, whose on-screen
+        // state IS a ready composer) must NOT be cleared by the
+        // idle-composer reading — that would flicker the `?` off on the
+        // first cursor-blink repaint. It clears via a newer hook or once
+        // hooks go stale (asserted below).
+        assert!(!pty_reading_allowed(
+            Some(InputNeeded),
+            Idle,
+            true,
+            supersedes,
+            fresh,
+            staleness
         ));
 
         // Stale hooks: full PTY fallback for everything…

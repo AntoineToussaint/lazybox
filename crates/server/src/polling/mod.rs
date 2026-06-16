@@ -2857,6 +2857,25 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
     //    and not on every subsequent tick of an already-merged PR.
     let merged_pr_to_clean = if task.is_pr() && task.state == lazybox_core::TaskState::Merged {
         let prev = load_workspace(config, key);
+        // A merged PR we have no workspace for is a recently-merged
+        // sweep result (`is:merged` last 7d) for a PR the user never
+        // tracked or already dismissed. The sweep exists only to
+        // back-fill the final MERGED state onto workspaces we already
+        // have — creating a fresh row here re-surfaces stale merged PRs
+        // into the inbox on every full sweep, and the issue-collapse
+        // pass in `prepare_upsert` would then fold the user's active
+        // issue workspaces (`Closes #N`) into that brand-new row,
+        // wiping in-progress work from the sidebar on a manual Shift-R
+        // sync (#64). First-discovery of an already-merged PR has no
+        // sessions to reap either, which is why
+        // `merged_transition_pr_number` already declines to act on it.
+        if prev.is_none() {
+            tracing::debug!(
+                workspace_key = %key.as_str(),
+                "upsert: skipping merged PR with no existing workspace (recently-merged sweep back-fill only)"
+            );
+            return;
+        }
         merged_transition_pr_number(prev.as_ref(), &task)
     } else {
         None
@@ -4502,6 +4521,134 @@ mod rescope_collapse_tests {
         assert!(
             load_workspace(&config, &issue_key).is_none(),
             "without a claiming PR the out-of-scope issue follows the normal reaper path"
+        );
+    }
+
+    /// Regression for #64: the recently-merged sweep (`is:merged` last
+    /// 7d) returns PRs the user may never have tracked. Upserting such a
+    /// merged PR must NOT create a fresh workspace — doing so re-surfaces
+    /// already-merged PRs into the inbox on every manual Shift-R sync.
+    #[tokio::test]
+    async fn merged_pr_sweep_does_not_create_new_workspace() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let pr_task = gh_task(
+            "o/r#51",
+            "https://github.com/o/r/pull/51",
+            TaskState::Merged,
+            vec![],
+        );
+        let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&pr_task));
+
+        upsert(&config, pr_task).await;
+
+        assert!(
+            load_workspace(&config, &pr_key).is_none(),
+            "a merged PR with no existing workspace must not be re-surfaced into the inbox"
+        );
+    }
+
+    /// Regression for #64: when the merged sweep returns a PR that
+    /// `Closes #N`, the issue-collapse pass must not fire if the PR has
+    /// no existing workspace. Otherwise it folds the user's active issue
+    /// workspace (sessions and all) into a brand-new merged-PR row —
+    /// wiping in-progress work from the sidebar on a manual sync.
+    #[tokio::test]
+    async fn merged_pr_sweep_does_not_collapse_active_issue() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let issue_task = gh_task(
+            "o/r#50",
+            "https://github.com/o/r/issues/50",
+            TaskState::Open,
+            vec![],
+        );
+        let mut issue_ws = Workspace::from_task(issue_task.clone(), Utc::now());
+        let session = WorkspaceSession::new(
+            issue_ws.key.clone(),
+            SessionKind::Shell,
+            std::path::PathBuf::from("/nonexistent/worktree"),
+            Utc::now(),
+        );
+        let session_id = session.id;
+        issue_ws.add_session(session);
+        let issue_key = issue_ws.key.clone();
+        seed(&store, &issue_ws);
+
+        // Merged sweep returns the closing PR, which the user never
+        // tracked as its own workspace.
+        let pr_task = gh_task(
+            "o/r#51",
+            "https://github.com/o/r/pull/51",
+            TaskState::Merged,
+            vec![issue_task.id.clone()],
+        );
+        let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&pr_task));
+
+        upsert(&config, pr_task).await;
+
+        let issue_after =
+            load_workspace(&config, &issue_key).expect("active issue workspace must survive");
+        assert!(
+            issue_after.sessions.iter().any(|s| s.id == session_id),
+            "the issue's session must not be folded into a non-existent merged PR"
+        );
+        assert!(
+            load_workspace(&config, &pr_key).is_none(),
+            "the merged PR must not be re-surfaced"
+        );
+    }
+
+    /// Counterpart: a merged PR the user IS tracking (its workspace
+    /// already exists) still back-fills MERGED state and collapses its
+    /// closing issue — the normal open→merged flow must keep working.
+    #[tokio::test]
+    async fn merged_pr_with_existing_workspace_still_collapses_issue() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let issue_task = gh_task(
+            "o/r#50",
+            "https://github.com/o/r/issues/50",
+            TaskState::Open,
+            vec![],
+        );
+        let issue_ws = Workspace::from_task(issue_task.clone(), Utc::now());
+        let issue_key = issue_ws.key.clone();
+        seed(&store, &issue_ws);
+
+        // The PR was tracked while open, so its workspace already exists.
+        let open_pr = gh_task(
+            "o/r#51",
+            "https://github.com/o/r/pull/51",
+            TaskState::Open,
+            vec![issue_task.id.clone()],
+        );
+        let pr_ws = Workspace::from_task(open_pr, Utc::now());
+        let pr_key = pr_ws.key.clone();
+        seed(&store, &pr_ws);
+
+        // Now it merges — back-fill the MERGED state onto the existing
+        // workspace and fold the closing issue in.
+        let merged_pr = gh_task(
+            "o/r#51",
+            "https://github.com/o/r/pull/51",
+            TaskState::Merged,
+            vec![issue_task.id.clone()],
+        );
+        upsert(&config, merged_pr).await;
+
+        let pr_after = load_workspace(&config, &pr_key).expect("tracked PR workspace survives");
+        assert_eq!(
+            pr_after.pr.map(|p| p.state),
+            Some(TaskState::Merged),
+            "the existing PR workspace must back-fill the final MERGED state"
+        );
+        assert!(
+            load_workspace(&config, &issue_key).is_none(),
+            "the closing issue must collapse into the tracked PR workspace"
         );
     }
 }

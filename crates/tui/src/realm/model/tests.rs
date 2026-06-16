@@ -1430,21 +1430,25 @@ mod watchdog_tests {
     //! with durations in /tmp/lazybox.log. Iterations within the
     //! frame budget are silent; over-budget ones warn, rate-limited
     //! so a pathological loop doesn't flood the log at frame rate.
-    use super::super::helpers::{FRAME_BUDGET, LoopWatchdog};
+    use super::super::helpers::{FRAME_BUDGET, LoopWatchdog, PhaseTimings};
     use std::time::{Duration, Instant};
 
     #[test]
     fn within_budget_is_silent() {
         let mut w = LoopWatchdog::default();
         let now = Instant::now();
-        assert!(!w.observe(Duration::ZERO, now));
-        assert!(!w.observe(FRAME_BUDGET, now));
+        assert!(!w.observe(Duration::ZERO, PhaseTimings::default(), now));
+        assert!(!w.observe(FRAME_BUDGET, PhaseTimings::default(), now));
     }
 
     #[test]
     fn over_budget_warns() {
         let mut w = LoopWatchdog::default();
-        assert!(w.observe(FRAME_BUDGET + Duration::from_millis(1), Instant::now()));
+        assert!(w.observe(
+            FRAME_BUDGET + Duration::from_millis(1),
+            PhaseTimings::default(),
+            Instant::now()
+        ));
     }
 
     /// Back-to-back slow iterations inside the warn interval are
@@ -1454,10 +1458,36 @@ mod watchdog_tests {
         let mut w = LoopWatchdog::default();
         let t0 = Instant::now();
         let slow = FRAME_BUDGET + Duration::from_millis(100);
-        assert!(w.observe(slow, t0));
-        assert!(!w.observe(slow, t0 + Duration::from_millis(200)));
-        assert!(!w.observe(slow, t0 + Duration::from_millis(400)));
-        assert!(w.observe(slow, t0 + Duration::from_secs(2)));
+        let t = PhaseTimings::default();
+        assert!(w.observe(slow, t, t0));
+        assert!(!w.observe(slow, t, t0 + Duration::from_millis(200)));
+        assert!(!w.observe(slow, t, t0 + Duration::from_millis(400)));
+        assert!(w.observe(slow, t, t0 + Duration::from_secs(2)));
+    }
+
+    /// `worst` names the longest segment so the warn line points at the
+    /// prime suspect — the whole reason the phase is broken down.
+    #[test]
+    fn worst_phase_picks_the_longest_segment() {
+        let timings = PhaseTimings {
+            dispatch: Duration::from_millis(1),
+            drain: Duration::from_millis(80),
+            ticks: Duration::from_millis(2),
+            messages: Duration::from_millis(3),
+            render: Duration::from_millis(40),
+        };
+        let (name, dur) = timings.worst();
+        assert_eq!(name, "drain");
+        assert_eq!(dur, Duration::from_millis(80));
+    }
+
+    /// An all-zero phase still resolves to a named segment, never a
+    /// panic on the empty-iterator path.
+    #[test]
+    fn worst_phase_of_idle_iteration_is_defined() {
+        let (name, dur) = PhaseTimings::default().worst();
+        assert_eq!(dur, Duration::ZERO);
+        assert!(!name.is_empty());
     }
 }
 

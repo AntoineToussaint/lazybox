@@ -412,15 +412,21 @@ pub struct Sidebar {
     /// `Event::AgentState`, sidebar-local for the same reason as
     /// `agents_asking`.
     agents_working: std::collections::HashSet<SessionKey>,
-    /// Current frame of the shared "working" spinner. Advanced by
-    /// [`Sidebar::tick_working`] at a low fixed cadence (NOT per
-    /// render) so the animation is cheap; every working row reads the
-    /// same frame, so one `usize` drives them all.
+    /// Current frame of the shared "working" spinner, mirrored from
+    /// the free-running wall clock by [`Sidebar::tick_working`] so the
+    /// render path stays a cheap field read and every working row shows
+    /// the same frame. One `usize` drives them all.
     working_spinner_frame: usize,
-    /// Wall-clock of the last spinner advance. `tick_working` only
-    /// bumps the frame once `WORKING_SPIN_INTERVAL` has elapsed, so a
-    /// busy event loop doesn't spin the glyph faster than ~8 fps.
-    last_working_spin: Option<std::time::Instant>,
+    /// Fixed anchor the "working" spinner counts frames from. The
+    /// displayed frame is `spinner_epoch.elapsed() / WORKING_SPIN_INTERVAL`
+    /// — a pure function of elapsed time, so the glyph can never stick
+    /// on a stale frame when ticks arrive irregularly, self-corrects to
+    /// the right frame after a loop stall instead of crawling back one
+    /// step per tick, and keeps its phase across a transient
+    /// `Working → Idle → Working` flap (the daemon dedupes `AgentState`
+    /// and its detector can momentarily misread an in-progress agent as
+    /// idle) rather than snapping back to frame 0 mid-spin.
+    spinner_epoch: std::time::Instant,
     /// Screen rect of the role-filter chip in row 1 of the header,
     /// stashed by `render` so mouse clicks can cycle it without
     /// re-deriving the layout. `None` before the first render.
@@ -491,7 +497,7 @@ impl Sidebar {
             agents_asking: std::collections::HashSet::new(),
             agents_working: std::collections::HashSet::new(),
             working_spinner_frame: 0,
-            last_working_spin: None,
+            spinner_epoch: std::time::Instant::now(),
             filter_chip_rect: None,
             sort_chip_rect: None,
             now_override: None,
@@ -519,34 +525,34 @@ impl Sidebar {
         self.now_override = Some(now);
     }
 
-    /// Advance the "working" spinner if any agent is working and the
-    /// fixed cadence has elapsed. Returns `true` when the frame
-    /// changed, so the caller knows a re-render is warranted.
+    /// Sync the "working" spinner to the wall clock. Returns `true`
+    /// when the displayed frame changed, so the caller knows a
+    /// re-render is warranted.
     ///
-    /// Cheap by construction: when no agent is working it does nothing
-    /// (and resets so the spinner always restarts at frame 0). When
-    /// one is, it advances at most once per `WORKING_SPIN_INTERVAL`
-    /// regardless of how often the run loop calls it — the animation
-    /// never forces a redraw faster than ~8 fps, and a single shared
-    /// frame index means no per-row work on each tick.
+    /// The frame is derived from elapsed time, not accumulated per
+    /// tick: `spinner_epoch.elapsed() / WORKING_SPIN_INTERVAL`. That is
+    /// what makes the indicator resilient — it advances purely with the
+    /// clock no matter how irregularly the run loop calls this, jumps
+    /// straight to the correct frame after a stall (instead of crawling
+    /// back one step at a time), and holds its phase across a transient
+    /// `Working → Idle → Working` flap rather than snapping to frame 0
+    /// mid-spin. The working-set only gates whether the spinner is
+    /// shown; its phase is owned by the clock.
+    ///
+    /// Cheap by construction: a no-op when nothing is working, and at
+    /// most one frame change per `WORKING_SPIN_INTERVAL` (~8 fps) the
+    /// rest of the time, so it never forces a faster redraw and a single
+    /// shared frame index means no per-row work on each tick.
     pub fn tick_working(&mut self) -> bool {
         if self.agents_working.is_empty() {
-            // Reset so the next working session starts its spinner from
-            // the first frame rather than wherever the last one stopped.
-            let was_running = self.last_working_spin.is_some();
-            self.last_working_spin = None;
-            self.working_spinner_frame = 0;
-            return was_running;
-        }
-        let now = std::time::Instant::now();
-        let due = self
-            .last_working_spin
-            .is_none_or(|t| now.duration_since(t) >= WORKING_SPIN_INTERVAL);
-        if !due {
             return false;
         }
-        self.last_working_spin = Some(now);
-        self.working_spinner_frame = self.working_spinner_frame.wrapping_add(1);
+        let frame =
+            (self.spinner_epoch.elapsed().as_millis() / WORKING_SPIN_INTERVAL.as_millis()) as usize;
+        if frame == self.working_spinner_frame {
+            return false;
+        }
+        self.working_spinner_frame = frame;
         true
     }
 

@@ -1121,9 +1121,29 @@ pub struct LinearSource {
     pub client: LinearClient,
     pub filter: ProviderConfig,
     pub bus: tokio::sync::broadcast::Sender<Event>,
+    /// Set by `fetch` when pagination stopped before consuming every
+    /// page (a later page errored or the safety cap truncated the
+    /// tail). A workspace absent from a partial result may simply live
+    /// on a page we never got, so `polled_scope` downgrades to
+    /// non-authoritative and rescope preserves the rest. Read by
+    /// [`TaskSource::polled_scope`] AFTER `fetch` resolves (mirrors
+    /// `GhSource::last_coverage_partial`).
+    last_coverage_partial: std::sync::Mutex<bool>,
 }
 
 impl LinearSource {
+    pub fn new(
+        client: LinearClient,
+        filter: ProviderConfig,
+        bus: tokio::sync::broadcast::Sender<Event>,
+    ) -> Self {
+        Self {
+            client,
+            filter,
+            bus,
+            last_coverage_partial: std::sync::Mutex::new(false),
+        }
+    }
     fn emit_progress(&self, message: impl Into<String>) {
         let message = message.into();
         tracing::info!(source = "linear", %message, "poll progress");
@@ -1138,12 +1158,25 @@ impl TaskSource for LinearSource {
     fn name(&self) -> &str {
         "linear"
     }
-    /// Linear's `fetch_all` paginates through every issue the user
-    /// has access to with no per-team round-robin — one successful
-    /// fetch covers everything Linear owns this tick, so a workspace
-    /// not in `polled` genuinely fell out of upstream scope.
+    /// Linear's fetch paginates through every issue the user has
+    /// access to with no per-team round-robin, so a COMPLETE fetch
+    /// covers everything Linear owns this tick and a workspace not in
+    /// `polled` genuinely fell out of upstream scope. A PARTIAL fetch
+    /// (a page failed mid-pagination, or the safety cap truncated the
+    /// tail) is non-authoritative: a missing workspace may just live
+    /// on a page we never got, so we downgrade to `Repos(vec![])` —
+    /// "covered no repos authoritatively" — and rescope preserves the
+    /// stored Linear workspaces instead of deleting them.
     fn polled_scope(&self) -> PolledScope {
-        PolledScope::Exhaustive
+        let partial = *self
+            .last_coverage_partial
+            .lock()
+            .expect("LinearSource.last_coverage_partial mutex poisoned");
+        if partial {
+            PolledScope::Repos(Vec::new())
+        } else {
+            PolledScope::Exhaustive
+        }
     }
     fn fetch<'a>(
         &'a self,
@@ -1151,13 +1184,20 @@ impl TaskSource for LinearSource {
     {
         Box::pin(async move {
             self.emit_progress("Querying Linear for issues…");
-            let raw = self
+            let outcome = self
                 .client
-                .fetch_all()
+                .fetch_all_with_coverage()
                 .await
                 .map_err(lazybox_core::ProviderError::from)?;
-            self.emit_progress(format!("Got {} issues, applying filters…", raw.len()));
-            let kept = filter_linear_tasks(raw, &self.filter);
+            *self
+                .last_coverage_partial
+                .lock()
+                .expect("LinearSource.last_coverage_partial mutex poisoned") = outcome.is_partial();
+            self.emit_progress(format!(
+                "Got {} issues, applying filters…",
+                outcome.tasks.len()
+            ));
+            let kept = filter_linear_tasks(outcome.tasks, &self.filter);
             self.emit_progress(format!("{} issues kept after filter", kept.len()));
             Ok(kept)
         })
@@ -1577,11 +1617,11 @@ pub async fn sources_for(
 
     if setup.enabled_providers.contains("linear") {
         match LinearClient::from_env() {
-            Ok(client) => sources.push(Box::new(LinearSource {
+            Ok(client) => sources.push(Box::new(LinearSource::new(
                 client,
-                filter: setup.provider_config("linear"),
-                bus: bus.clone(),
-            })),
+                setup.provider_config("linear"),
+                bus.clone(),
+            ))),
             Err(e) => tracing::info!("linear not configured: {e}"),
         }
     }

@@ -4385,7 +4385,10 @@ mod tests {
     fn clonable_repo_from_project_falls_back_to_key_without_record() {
         let config = ServerConfig::in_memory();
         let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
-        ws.project_key = Some(lazybox_core::ProjectKey::github("AntoineToussaint", "lazybox"));
+        ws.project_key = Some(lazybox_core::ProjectKey::github(
+            "AntoineToussaint",
+            "lazybox",
+        ));
         assert_eq!(
             clonable_repo_from_project(&config, &ws).unwrap(),
             "AntoineToussaint/lazybox"

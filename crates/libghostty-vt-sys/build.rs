@@ -134,8 +134,28 @@ fn main() {
         println!("cargo:rustc-link-lib=c++");
         println!("cargo:rustc-link-lib=c++abi");
         println!("cargo:rustc-link-lib=c");
+        // The optimized archive inlines libc++'s `__throw_*` paths into a
+        // `__libcpp_verbose_abort` call (the Debug build didn't), a symbol
+        // ubuntu-22.04's LLVM 14 libc++ predates. ghostty doesn't bundle
+        // libc++, so supply a weak fallback. Emitted AFTER the ghostty
+        // link-lib so single-pass linkers still see the pending undefined
+        // symbol when this archive is processed.
+        link_libcpp_verbose_abort_shim();
     }
     println!("cargo:include={}", include_dir.display());
+}
+
+/// Compile and link the weak `__libcpp_verbose_abort` fallback (see
+/// `libcpp_shim.c`). `cc::Build::compile` emits the `rustc-link-lib=static`
+/// + search-path directives, which propagate to the final binary link —
+/// unlike `rustc-link-arg`, which wouldn't from a library crate. Linux
+/// only; the caller gates on target.
+fn link_libcpp_verbose_abort_shim() {
+    let shim =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set"))
+            .join("libcpp_shim.c");
+    println!("cargo:rerun-if-changed={}", shim.display());
+    cc::Build::new().file(&shim).compile("ghostty_libcpp_shim");
 }
 
 /// Pick the right `zig` binary to invoke. See the call site for the

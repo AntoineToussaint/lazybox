@@ -29,6 +29,7 @@ pub mod components;
 pub mod latch_set;
 pub mod lazybox_theme;
 pub mod pane;
+pub mod perf;
 pub mod realm;
 pub mod setup;
 pub mod setup_flow;

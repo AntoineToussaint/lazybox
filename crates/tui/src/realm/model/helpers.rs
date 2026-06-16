@@ -466,14 +466,12 @@ impl BacklogMonitor {
         self.consecutive_backlog_ticks
     }
 
-    /// Test/diagnostic accessor: highest residual depth seen.
-    #[cfg(test)]
+    /// Highest residual depth seen. Read by the perf sampler and tests.
     pub(super) fn hwm(&self) -> usize {
         self.hwm
     }
 
-    /// Test/diagnostic accessor: total resyncs observed.
-    #[cfg(test)]
+    /// Total resyncs observed. Read by the perf sampler and tests.
     pub(super) fn resyncs(&self) -> u64 {
         self.resyncs
     }
@@ -691,6 +689,109 @@ impl LoopWatchdog {
     }
 }
 
+/// Minimum work-phase duration that earns a perf-log sample. Idle
+/// heartbeat iterations (no drain, no render, no input) finish in a
+/// few microseconds; sampling them would bury the signal under a
+/// 60Hz stream of near-zero rows. A render (~1-2ms) or any dispatch
+/// clears this floor, and over-budget or backlogged iterations sample
+/// unconditionally.
+const PERF_SAMPLE_FLOOR: Duration = Duration::from_micros(500);
+
+/// Whether a run-loop iteration warrants a perf sample, given the
+/// `LAZYBOX_PERF` flag and what the iteration did. Pulled out as a
+/// pure predicate so the gating is unit-testable without the env var.
+pub(super) fn sample_due(
+    enabled: bool,
+    elapsed: Duration,
+    depth: usize,
+    over_budget: bool,
+) -> bool {
+    enabled && (over_budget || depth > 0 || elapsed >= PERF_SAMPLE_FLOOR)
+}
+
+/// Opt-in (`LAZYBOX_PERF=1`) run-loop perf sampler. Routes the
+/// watchdog's per-phase timings, channel depth, and drop/resync
+/// counters to the dedicated [`crate::perf::TARGET`] tracing target
+/// that `init_tracing` pipes to its own perf log. A no-op when the
+/// flag is unset — it short-circuits before formatting any field.
+pub(super) struct PerfMonitor {
+    enabled: bool,
+    /// Cumulative buffered-input events dropped as stale. The headline
+    /// "must stay 0" health signal — a nonzero value means the loop
+    /// stalled long enough to discard the user's keystrokes.
+    dropped_input: u64,
+}
+
+impl PerfMonitor {
+    pub(super) fn new() -> Self {
+        Self {
+            enabled: crate::perf::enabled(),
+            dropped_input: 0,
+        }
+    }
+
+    pub(super) fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Fold a stale-input drop episode into the running total and mark
+    /// it in the perf log. Drops are the one counter that must stay 0,
+    /// so they get their own greppable line, not just a sample field.
+    pub(super) fn note_dropped_input(&mut self, dropped: usize, oldest: Duration) {
+        self.dropped_input = self.dropped_input.saturating_add(dropped as u64);
+        if self.enabled {
+            tracing::info!(
+                target: crate::perf::TARGET,
+                phase = "input_dropped",
+                dropped,
+                dropped_input_total = self.dropped_input,
+                oldest_ms = oldest.as_millis() as u64,
+                "buffered input dropped after a run-loop stall"
+            );
+        }
+    }
+
+    /// Emit one per-iteration perf sample. Skipped for idle heartbeat
+    /// iterations (see [`sample_due`]) so the perf log stays signal.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn sample(
+        &self,
+        elapsed: Duration,
+        timings: PhaseTimings,
+        depth: usize,
+        resyncs: u64,
+        backlog_hwm: usize,
+        over_budget: bool,
+    ) {
+        if !sample_due(self.enabled, elapsed, depth, over_budget) {
+            return;
+        }
+        tracing::info!(
+            target: crate::perf::TARGET,
+            phase = "iteration",
+            iteration_ms = elapsed.as_micros() as f64 / 1000.0,
+            budget_ms = FRAME_BUDGET.as_millis() as u64,
+            over_budget,
+            dispatch_ms = timings.dispatch.as_micros() as f64 / 1000.0,
+            drain_ms = timings.drain.as_micros() as f64 / 1000.0,
+            ticks_ms = timings.ticks.as_micros() as f64 / 1000.0,
+            messages_ms = timings.messages.as_micros() as f64 / 1000.0,
+            render_ms = timings.render.as_micros() as f64 / 1000.0,
+            chan_depth = depth,
+            resyncs_total = resyncs,
+            backlog_hwm,
+            dropped_input_total = self.dropped_input,
+            "run-loop iteration"
+        );
+    }
+
+    /// Cumulative stale-input drops folded in so far.
+    #[cfg(test)]
+    pub(super) fn dropped_input(&self) -> u64 {
+        self.dropped_input
+    }
+}
+
 /// Minimum spacing between *background*-driven renders. A daemon
 /// output flood drives `drain_daemon_events` at the drain-batch rate
 /// (a fresh batch every ~8ms once a cap is hit), and the old loop
@@ -895,6 +996,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
     let mut carried: Option<IpcEvent> = None;
     let mut stale_tally = StaleInputTally::default();
     let mut watchdog = LoopWatchdog::default();
+    let mut perf = PerfMonitor::new();
     let mut render_throttle = RenderThrottle::default();
     // Set when the redraw pending at the top of the loop was produced
     // by user input (a dispatched key/mouse, or a modal interaction) —
@@ -1011,7 +1113,23 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         // blocking wait. An over-budget reading means some handler or
         // render above stalled the thread; it lands in the log with
         // its duration instead of surfacing only as a frozen UI.
-        watchdog.observe(work_start.elapsed(), timings, std::time::Instant::now());
+        let work_elapsed = work_start.elapsed();
+        let over_budget = work_elapsed > FRAME_BUDGET;
+        if watchdog.observe(work_elapsed, timings, std::time::Instant::now()) && perf.enabled() {
+            // The watchdog rate-limits to ≤1 warn/s, so this footer
+            // flash never floods. Gated behind LAZYBOX_PERF so a normal
+            // session's UX is untouched — it's a debug-time signal.
+            let (worst_phase, worst_dur) = timings.worst();
+            model.flash_perf_stall(work_elapsed, worst_phase, worst_dur);
+        }
+        perf.sample(
+            work_elapsed,
+            timings,
+            model.client.rx.len(),
+            model.event_backlog.resyncs(),
+            model.event_backlog.hwm(),
+            over_budget,
+        );
         let wake = if had_backlog {
             match input_rx.try_recv() {
                 Ok(timed) => Wake::Input(timed),
@@ -1043,7 +1161,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                 if should_drop_stale_input(&timed.event, age) {
                     stale_tally.note(age);
                 } else {
-                    report_stale_drops(model, &mut stale_tally);
+                    report_stale_drops(model, &mut stale_tally, &mut perf);
                     let is_scroll = is_scroll_event(&timed.event);
                     let dispatch_start = std::time::Instant::now();
                     dispatch_event(model, timed.event);
@@ -1065,10 +1183,10 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             // over (`biased` drains input first) — report the episode
             // now rather than deferring it behind a busy agent stream.
             Wake::Daemon(event) => {
-                report_stale_drops(model, &mut stale_tally);
+                report_stale_drops(model, &mut stale_tally, &mut perf);
                 carried = Some(*event);
             }
-            Wake::Tick => report_stale_drops(model, &mut stale_tally),
+            Wake::Tick => report_stale_drops(model, &mut stale_tally, &mut perf),
         }
     }
     Ok(())
@@ -1078,7 +1196,11 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
 /// one footer notice so the user knows their queued input was
 /// deliberately discarded (and why nothing "happened" when the UI
 /// came back). No-op while the tally is empty.
-fn report_stale_drops<T: TerminalAdapter>(model: &mut Model<T>, tally: &mut StaleInputTally) {
+fn report_stale_drops<T: TerminalAdapter>(
+    model: &mut Model<T>,
+    tally: &mut StaleInputTally,
+    perf: &mut PerfMonitor,
+) {
     if let Some((dropped, oldest)) = tally.flush() {
         tracing::warn!(
             dropped,
@@ -1087,6 +1209,7 @@ fn report_stale_drops<T: TerminalAdapter>(model: &mut Model<T>, tally: &mut Stal
              stalled — replaying them would burst-fire actions against \
              state the user never saw"
         );
+        perf.note_dropped_input(dropped, oldest);
         model.flash_hint(format!(
             "UI stalled — dropped {dropped} buffered input event{}",
             if dropped == 1 { "" } else { "s" }

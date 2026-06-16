@@ -1276,6 +1276,21 @@ impl<T: TerminalAdapter> Model<T> {
         self.flash(msg, crate::realm::components::footer::NoticeSeverity::Hint);
     }
 
+    /// Footer indicator for an over-budget run-loop iteration. Surfaces
+    /// a stall live (warn-colored, auto-fading) so it's obvious without
+    /// tailing the perf log. The caller gates this behind
+    /// `LAZYBOX_PERF=1`; the watchdog rate-limits it to ≤1/s.
+    pub fn flash_perf_stall(&mut self, elapsed: Duration, worst_phase: &str, worst: Duration) {
+        self.flash(
+            format!(
+                "⚠ UI stall {}ms · {worst_phase} {}ms",
+                elapsed.as_millis(),
+                worst.as_millis()
+            ),
+            crate::realm::components::footer::NoticeSeverity::Retryable,
+        );
+    }
+
     pub fn flash_error(&mut self, msg: impl Into<String>) {
         self.flash(
             msg,

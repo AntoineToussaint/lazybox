@@ -92,38 +92,53 @@ fn resolve_log_path() -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from(LOG_PATH_FALLBACK))
 }
 
-/// Initialize tracing to write to the configured log file instead of
-/// stderr.
-fn init_tracing() -> anyhow::Result<()> {
+/// Open a log file for append, locked down to owner-only. The log
+/// lives in world-writable `/tmp` by default and captures daemon
+/// traces, so `mode` covers the create path and `set_permissions`
+/// covers a pre-existing looser file. A chmod failure is logged
+/// (eprintln — the subscriber isn't up yet) but never blocks launch.
+fn open_log_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::fs::OpenOptions;
-
-    let log_path = resolve_log_path();
     let mut options = OpenOptions::new();
     options.create(true).append(true);
-    // The log lives in world-writable /tmp by default and captures
-    // daemon traces — owner-only. `mode` covers the create path...
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let file = options
-        .open(&log_path)
-        .map_err(|e| anyhow::anyhow!("open {}: {e}", log_path.display()))?;
-    // ...and set_permissions covers a pre-existing looser file.
-    // eprintln (not tracing — the subscriber isn't up yet) and keep
-    // going: a log we can't chmod shouldn't block launch.
+    let file = options.open(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600))
-        {
-            eprintln!(
-                "warning: couldn't tighten {} to 0600: {e}",
-                log_path.display()
-            );
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            eprintln!("warning: couldn't tighten {} to 0600: {e}", path.display());
         }
     }
+    Ok(file)
+}
+
+/// Sibling perf-log path for `main`: `/tmp/lazybox.log` →
+/// `/tmp/lazybox-perf.log`. Keeps the dedicated perf stream next to
+/// the main log wherever the operator pointed it.
+fn perf_log_path(main: &std::path::Path) -> std::path::PathBuf {
+    let stem = main
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("lazybox");
+    let ext = main.extension().and_then(|s| s.to_str()).unwrap_or("log");
+    main.with_file_name(format!("{stem}-perf.{ext}"))
+}
+
+/// Initialize tracing to write to the configured log file instead of
+/// stderr. With `LAZYBOX_PERF=1`, a second layer pipes the dedicated
+/// perf target ([`lazybox_tui::perf::TARGET`]) to a sibling
+/// `*-perf.log`, kept out of the main log by its own target filter.
+fn init_tracing() -> anyhow::Result<()> {
+    use tracing_subscriber::prelude::*;
+
+    let log_path = resolve_log_path();
+    let file = open_log_file(&log_path)
+        .map_err(|e| anyhow::anyhow!("open {}: {e}", log_path.display()))?;
 
     // Route the OS stderr into the same log file so native logs from
     // below the Rust layer (libghostty-vt Zig log, libgit2 stderr,
@@ -133,10 +148,36 @@ fn init_tracing() -> anyhow::Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "lazybox=info,lazybox_gh=info,lazybox_server=info".into());
 
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
+    let main_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::sync::Mutex::new(file))
         .with_ansi(false)
+        .with_filter(env_filter);
+
+    // Dedicated, greppable perf stream — only when LAZYBOX_PERF=1. Its
+    // `Targets` filter admits exactly the perf target, and that target
+    // sits outside the `lazybox` prefix so the main layer's env filter
+    // never echoes perf samples into the main log.
+    let perf_layer = lazybox_tui::perf::enabled()
+        .then(|| perf_log_path(&log_path))
+        .and_then(|path| match open_log_file(&path) {
+            Ok(perf_file) => Some(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::sync::Mutex::new(perf_file))
+                    .with_ansi(false)
+                    .with_filter(
+                        tracing_subscriber::filter::Targets::new()
+                            .with_target(lazybox_tui::perf::TARGET, tracing::Level::TRACE),
+                    ),
+            ),
+            Err(e) => {
+                eprintln!("warning: couldn't open perf log {}: {e}", path.display());
+                None
+            }
+        });
+
+    tracing_subscriber::registry()
+        .with(main_layer)
+        .with(perf_layer)
         .init();
 
     Ok(())
@@ -918,6 +959,20 @@ mod argv_tests {
         assert!(wants_version(&args(&["--version"])));
         assert!(wants_version(&args(&["-V"])));
         assert!(!wants_version(&args(&["-v"]))); // lowercase -v is not the version flag
+    }
+
+    #[test]
+    fn perf_log_path_is_a_sibling_of_the_main_log() {
+        use std::path::Path;
+        assert_eq!(
+            perf_log_path(Path::new("/tmp/lazybox.log")),
+            Path::new("/tmp/lazybox-perf.log")
+        );
+        // Honors a custom directory + extension from `ui.log_path`.
+        assert_eq!(
+            perf_log_path(Path::new("/var/log/lb.txt")),
+            Path::new("/var/log/lb-perf.txt")
+        );
     }
 
     #[test]

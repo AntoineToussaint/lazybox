@@ -1498,7 +1498,10 @@ mod render_throttle_tests {
         let t0 = Instant::now();
         t.record(t0);
         // Within the interval → deferred.
-        assert!(!t.should_render(t0 + MIN_BACKGROUND_RENDER_INTERVAL - Duration::from_millis(1), false));
+        assert!(!t.should_render(
+            t0 + MIN_BACKGROUND_RENDER_INTERVAL - Duration::from_millis(1),
+            false
+        ));
         // At the interval → paints.
         assert!(t.should_render(t0 + MIN_BACKGROUND_RENDER_INTERVAL, false));
     }

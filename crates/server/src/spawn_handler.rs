@@ -1747,8 +1747,7 @@ fn done_is_sticky(
     current: Option<lazybox_ipc::AgentState>,
     new_state: lazybox_ipc::AgentState,
 ) -> bool {
-    current == Some(lazybox_ipc::AgentState::Done)
-        && new_state == lazybox_ipc::AgentState::Idle
+    current == Some(lazybox_ipc::AgentState::Done) && new_state == lazybox_ipc::AgentState::Idle
 }
 
 /// Hysteresis decision for the edge that LEAVES `Working`.

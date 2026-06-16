@@ -1425,26 +1425,84 @@ mod stale_input_tests {
 }
 
 #[cfg(test)]
+mod scroll_classification_tests {
+    //! Mouse-wheel scroll is the one high-rate input: a flick fires
+    //! faster than a full repaint, so its redraw is routed through the
+    //! render throttle (coalesced to the display refresh) while discrete
+    //! input keeps painting per event. The classifier is what splits the
+    //! two — misclassifying a keystroke as scroll would make typing feel
+    //! laggy; misclassifying scroll as discrete brings back the stall.
+    use super::super::helpers::is_scroll_event;
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+
+    fn mouse(kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn wheel_in_every_direction_is_scroll() {
+        for kind in [
+            MouseEventKind::ScrollUp,
+            MouseEventKind::ScrollDown,
+            MouseEventKind::ScrollLeft,
+            MouseEventKind::ScrollRight,
+        ] {
+            assert!(is_scroll_event(&mouse(kind)), "{kind:?} should be scroll");
+        }
+    }
+
+    /// Clicks, drags, keys, and paste are discrete input — they must
+    /// keep painting immediately, so the classifier must NOT fold them
+    /// into the coalesced-scroll path.
+    #[test]
+    fn discrete_input_is_not_scroll() {
+        assert!(!is_scroll_event(&mouse(MouseEventKind::Down(
+            MouseButton::Left
+        ))));
+        assert!(!is_scroll_event(&mouse(MouseEventKind::Drag(
+            MouseButton::Left
+        ))));
+        assert!(!is_scroll_event(&mouse(MouseEventKind::Moved)));
+        assert!(!is_scroll_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE
+        ))));
+        assert!(!is_scroll_event(&Event::Paste("text".into())));
+    }
+}
+
+#[cfg(test)]
 mod watchdog_tests {
     //! The loop watchdog turns "the UI felt frozen" into warn lines
     //! with durations in /tmp/lazybox.log. Iterations within the
     //! frame budget are silent; over-budget ones warn, rate-limited
     //! so a pathological loop doesn't flood the log at frame rate.
-    use super::super::helpers::{FRAME_BUDGET, LoopWatchdog};
+    use super::super::helpers::{FRAME_BUDGET, LoopWatchdog, PhaseTimings};
     use std::time::{Duration, Instant};
 
     #[test]
     fn within_budget_is_silent() {
         let mut w = LoopWatchdog::default();
         let now = Instant::now();
-        assert!(!w.observe(Duration::ZERO, now));
-        assert!(!w.observe(FRAME_BUDGET, now));
+        assert!(!w.observe(Duration::ZERO, PhaseTimings::default(), now));
+        assert!(!w.observe(FRAME_BUDGET, PhaseTimings::default(), now));
     }
 
     #[test]
     fn over_budget_warns() {
         let mut w = LoopWatchdog::default();
-        assert!(w.observe(FRAME_BUDGET + Duration::from_millis(1), Instant::now()));
+        assert!(w.observe(
+            FRAME_BUDGET + Duration::from_millis(1),
+            PhaseTimings::default(),
+            Instant::now()
+        ));
     }
 
     /// Back-to-back slow iterations inside the warn interval are
@@ -1454,10 +1512,36 @@ mod watchdog_tests {
         let mut w = LoopWatchdog::default();
         let t0 = Instant::now();
         let slow = FRAME_BUDGET + Duration::from_millis(100);
-        assert!(w.observe(slow, t0));
-        assert!(!w.observe(slow, t0 + Duration::from_millis(200)));
-        assert!(!w.observe(slow, t0 + Duration::from_millis(400)));
-        assert!(w.observe(slow, t0 + Duration::from_secs(2)));
+        let t = PhaseTimings::default();
+        assert!(w.observe(slow, t, t0));
+        assert!(!w.observe(slow, t, t0 + Duration::from_millis(200)));
+        assert!(!w.observe(slow, t, t0 + Duration::from_millis(400)));
+        assert!(w.observe(slow, t, t0 + Duration::from_secs(2)));
+    }
+
+    /// `worst` names the longest segment so the warn line points at the
+    /// prime suspect — the whole reason the phase is broken down.
+    #[test]
+    fn worst_phase_picks_the_longest_segment() {
+        let timings = PhaseTimings {
+            dispatch: Duration::from_millis(1),
+            drain: Duration::from_millis(80),
+            ticks: Duration::from_millis(2),
+            messages: Duration::from_millis(3),
+            render: Duration::from_millis(40),
+        };
+        let (name, dur) = timings.worst();
+        assert_eq!(name, "drain");
+        assert_eq!(dur, Duration::from_millis(80));
+    }
+
+    /// An all-zero phase still resolves to a named segment, never a
+    /// panic on the empty-iterator path.
+    #[test]
+    fn worst_phase_of_idle_iteration_is_defined() {
+        let (name, dur) = PhaseTimings::default().worst();
+        assert_eq!(dur, Duration::ZERO);
+        assert!(!name.is_empty());
     }
 }
 

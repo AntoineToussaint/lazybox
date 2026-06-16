@@ -531,6 +531,27 @@ pub(super) fn should_drop_stale_input(event: &crossterm::event::Event, age: Dura
     )
 }
 
+/// Whether a host-terminal event is a mouse-wheel scroll. Scroll is the
+/// one input that fires faster than a full repaint can keep up — a
+/// trackpad flick emits dozens of notches a second — so its redraw is
+/// routed through the background render throttle rather than painting
+/// once per notch (see the run loop's render step). Dispatch of the
+/// scroll itself stays per-event and cheap (it only moves a viewport
+/// offset); it's the repaint that coalesces to the display refresh.
+pub(super) fn is_scroll_event(event: &crossterm::event::Event) -> bool {
+    use crossterm::event::MouseEventKind;
+    matches!(
+        event,
+        crossterm::event::Event::Mouse(m) if matches!(
+            m.kind,
+            MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        )
+    )
+}
+
 /// Accumulates stale-input drops across a recovery burst so the
 /// episode is reported once (one warn line, one footer notice) instead
 /// of once per dropped event. `note` during the burst; `flush` when a
@@ -560,6 +581,45 @@ impl StaleInputTally {
     }
 }
 
+/// Per-segment durations within a single run-loop work phase. The
+/// watchdog records the whole phase as one number; this breaks that
+/// number down so an over-budget warning names the segment that
+/// blocked — render vs. daemon drain vs. a key handler — instead of
+/// just "the UI thread froze for 80ms". That's the difference between
+/// instrumentation you can act on and a number you have to guess from.
+/// Filled in by the run loop with `Instant::now()` brackets (~10ns
+/// each, negligible) and read only when the watchdog fires.
+#[derive(Clone, Copy, Default)]
+pub(super) struct PhaseTimings {
+    /// Dispatching the event that woke the loop (key/mouse handling).
+    pub(super) dispatch: Duration,
+    /// Draining queued daemon events into the model.
+    pub(super) drain: Duration,
+    /// Per-frame heartbeat ticks (spinner, notice fade, right pane).
+    pub(super) ticks: Duration,
+    /// The tuirealm message pump plus the updates it produces.
+    pub(super) messages: Duration,
+    /// Rendering the frame.
+    pub(super) render: Duration,
+}
+
+impl PhaseTimings {
+    /// The longest segment and its duration — the prime suspect the
+    /// watchdog names when the phase blows its budget.
+    pub(super) fn worst(&self) -> (&'static str, Duration) {
+        [
+            ("dispatch", self.dispatch),
+            ("drain", self.drain),
+            ("ticks", self.ticks),
+            ("messages", self.messages),
+            ("render", self.render),
+        ]
+        .into_iter()
+        .max_by_key(|&(_, d)| d)
+        .unwrap_or(("none", Duration::ZERO))
+    }
+}
+
 /// Budget for one run-loop iteration's work phase (drain + update +
 /// render + dispatch, everything except the idle wait). Anything that
 /// can wait must run as an async task and post back — an iteration
@@ -586,9 +646,16 @@ pub(super) struct LoopWatchdog {
 }
 
 impl LoopWatchdog {
-    /// Record one iteration's work-phase duration. Returns whether a
-    /// warning was emitted (the return value exists for tests).
-    pub(super) fn observe(&mut self, elapsed: Duration, now: std::time::Instant) -> bool {
+    /// Record one iteration's work-phase duration, broken down into the
+    /// per-segment `timings` so an over-budget warning names the culprit.
+    /// Returns whether a warning was emitted (the return value exists for
+    /// tests).
+    pub(super) fn observe(
+        &mut self,
+        elapsed: Duration,
+        timings: PhaseTimings,
+        now: std::time::Instant,
+    ) -> bool {
         if elapsed <= FRAME_BUDGET {
             return false;
         }
@@ -600,9 +667,17 @@ impl LoopWatchdog {
             self.worst_suppressed = self.worst_suppressed.max(elapsed);
             return false;
         }
+        let (worst_phase, worst_phase_dur) = timings.worst();
         tracing::warn!(
             iteration_ms = elapsed.as_millis() as u64,
             budget_ms = FRAME_BUDGET.as_millis() as u64,
+            worst_phase,
+            worst_phase_ms = worst_phase_dur.as_millis() as u64,
+            dispatch_ms = timings.dispatch.as_millis() as u64,
+            drain_ms = timings.drain.as_millis() as u64,
+            ticks_ms = timings.ticks.as_millis() as u64,
+            messages_ms = timings.messages.as_millis() as u64,
+            render_ms = timings.render.as_millis() as u64,
             suppressed = self.suppressed,
             worst_suppressed_ms = self.worst_suppressed.as_millis() as u64,
             "run-loop iteration exceeded the frame budget — something \
@@ -829,12 +904,20 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
     // Start of the current iteration's work phase — reset right after
     // each wait so the watchdog never counts time spent idle.
     let mut work_start = std::time::Instant::now();
+    // Per-segment latency of the current work phase. Reset alongside
+    // `work_start`; the dispatch of the wake event lands here first
+    // (bottom of the loop), then the top-of-loop segments, then the
+    // watchdog reads it.
+    let mut timings = PhaseTimings::default();
     while !model.quit {
         // 1. Drain inbound daemon events — BOUNDED so heavy PTY output
         // can never starve keyboard input (see `drain_daemon_events`).
+        let drain_start = std::time::Instant::now();
         let had_backlog = drain_daemon_events(model, carried.take());
+        timings.drain = drain_start.elapsed();
 
         // 2. Polling-modal spinner heartbeat + retryable notice fade.
+        let ticks_start = std::time::Instant::now();
         if let Some(msg) = model.polling_tick() {
             model.dismiss_polling();
             model.update(msg);
@@ -843,10 +926,12 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         model.tick_right();
         model.tick_working();
         model.tick_terminal_leader();
+        timings.ticks = ticks_start.elapsed();
 
         // 3. Process tuirealm-side messages (timer ticks for Loading,
         // injected modal keys). Non-blocking — listener thread already
         // queued any work it had.
+        let messages_start = std::time::Instant::now();
         if let Ok(messages) = model.app.tick(PollStrategy::Once(Duration::ZERO)) {
             if !messages.is_empty() {
                 model.redraw = true;
@@ -855,6 +940,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                 }
             }
         }
+        timings.messages = messages_start.elapsed();
 
         // A modal key just forwarded to the listener is delivered
         // asynchronously and may mutate the modal without producing a
@@ -870,11 +956,12 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
 
         // 4. Render if dirty — before the blocking input read so the
         // user sees their last action immediately. Background-driven
-        // frames (daemon output, spinner ticks) are coalesced to one
-        // display refresh so an output flood can't saturate the render
-        // path; input-driven frames bypass the cap and paint at once.
-        // A frame the throttle defers keeps `model.redraw` set, so it
-        // paints on the next eligible iteration (≤ one refresh away).
+        // frames (daemon output, spinner ticks) and high-rate mouse-wheel
+        // scroll are coalesced to one display refresh so neither an output
+        // flood nor a trackpad flick can saturate the render path;
+        // discrete input (keystrokes, clicks) bypasses the cap and paints
+        // at once. A frame the throttle defers keeps `model.redraw` set,
+        // so it paints on the next eligible iteration (≤ one refresh away).
         if model.redraw {
             let now = std::time::Instant::now();
             if render_throttle.should_render(now, redraw_is_input) {
@@ -885,7 +972,8 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                 // renders. Cheap — `Instant::now` is ~10ns and
                 // `tracing::debug!` is a no-op when the level isn't on.
                 model.view();
-                let elapsed_ms = now.elapsed().as_micros() as f32 / 1000.0;
+                timings.render = now.elapsed();
+                let elapsed_ms = timings.render.as_micros() as f32 / 1000.0;
                 tracing::debug!(frame_ms = elapsed_ms, "render");
                 model.redraw = false;
                 render_throttle.record(now);
@@ -923,7 +1011,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         // blocking wait. An over-budget reading means some handler or
         // render above stalled the thread; it lands in the log with
         // its duration instead of surfacing only as a frozen UI.
-        watchdog.observe(work_start.elapsed(), std::time::Instant::now());
+        watchdog.observe(work_start.elapsed(), timings, std::time::Instant::now());
         let wake = if had_backlog {
             match input_rx.try_recv() {
                 Ok(timed) => Wake::Input(timed),
@@ -944,6 +1032,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             )
         };
         work_start = std::time::Instant::now();
+        timings = PhaseTimings::default();
         match wake {
             Wake::Input(timed) => {
                 // Input that sat buffered while the loop was stalled
@@ -955,10 +1044,21 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                     stale_tally.note(age);
                 } else {
                     report_stale_drops(model, &mut stale_tally);
+                    let is_scroll = is_scroll_event(&timed.event);
+                    let dispatch_start = std::time::Instant::now();
                     dispatch_event(model, timed.event);
-                    // Any redraw this produced is the user's own action —
-                    // paint it next iteration without the background cap.
-                    redraw_is_input = true;
+                    timings.dispatch = dispatch_start.elapsed();
+                    // Keystrokes and clicks are low-rate and paint at once
+                    // so the UI feels instant. Mouse-wheel scroll is the
+                    // exception: a flick outpaces a full repaint, so
+                    // painting per notch makes the loop fall behind, queued
+                    // wheel events age past the stale bound, and they get
+                    // dropped — surfacing as the "UI stalled" flash on an
+                    // otherwise-idle screen. Routing scroll redraws through
+                    // the background throttle coalesces them to the display
+                    // refresh: every notch still updates the offset, but
+                    // the screen repaints at ~60fps instead of per event.
+                    redraw_is_input = !is_scroll;
                 }
             }
             // Any non-input wake means the buffered-input burst is

@@ -3857,3 +3857,116 @@ mod linear_coverage {
         mock.shutdown();
     }
 }
+
+/// Build a full-sweep outcome that polled only `polled_key` with
+/// github reported as exhaustive — the shape of a `Shift-R` refresh.
+fn refresh_outcome(polled_key: &str) -> polling::TickOutcome {
+    use lazybox_core::WorkspaceKey;
+    let mut scopes = std::collections::HashMap::new();
+    scopes.insert("github".to_string(), polling::PolledScope::Exhaustive);
+    polling::TickOutcome {
+        polled: vec![WorkspaceKey::new(lazybox_core::workspace_key_for(
+            &make_task(polled_key),
+        ))],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: scopes,
+        all_full: true,
+    }
+}
+
+#[tokio::test]
+async fn create_empty_workspace_marks_local() {
+    let config = ServerConfig::in_memory();
+    let key = polling::create_empty_workspace(
+        &config,
+        "my sandbox",
+        lazybox_core::ProjectKey::local("test"),
+    );
+    let ws: lazybox_core::Workspace = serde_json::from_str(
+        &config
+            .store
+            .get_workspace(&key)
+            .unwrap()
+            .unwrap()
+            .workspace_json
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(ws.local, "hand-created workspace must be flagged local");
+}
+
+#[tokio::test]
+async fn rescope_preserves_manual_workspace(/* issue #87 */) {
+    let config = ServerConfig::in_memory();
+    // A provider workspace that the poll DOES return.
+    polling::upsert(&config, make_task("o/r#current")).await;
+    // A hand-created workspace (`n` key) — no PR/issue, never polled.
+    let manual = polling::create_empty_workspace(
+        &config,
+        "my sandbox",
+        lazybox_core::ProjectKey::local("test"),
+    );
+
+    polling::rescope(&config, &refresh_outcome("o/r#current")).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(
+        after.iter().any(|k| k == manual.as_str()),
+        "manual workspace must survive refresh; got: {after:?}"
+    );
+}
+
+#[tokio::test]
+async fn rescope_preserves_manual_workspace_that_gained_a_pr(/* issue #87 */) {
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_task("o/r#current")).await;
+    // Hand-created workspace that later gained a PR (e.g. an agent
+    // opened one). The fragile task-shape heuristic would no longer
+    // recognise it as local; the explicit `local` flag still does.
+    let manual = polling::create_empty_workspace(
+        &config,
+        "my sandbox",
+        lazybox_core::ProjectKey::local("test"),
+    );
+    let mut ws: lazybox_core::Workspace = serde_json::from_str(
+        &config
+            .store
+            .get_workspace(&manual)
+            .unwrap()
+            .unwrap()
+            .workspace_json
+            .unwrap(),
+    )
+    .unwrap();
+    ws.pr = Some(make_task("o/r#999"));
+    config
+        .store
+        .save_workspace(&lazybox_store::WorkspaceRecord {
+            key: manual.as_str().to_string(),
+            created_at: ws.created_at,
+            workspace_json: serde_json::to_string(&ws).ok(),
+        })
+        .unwrap();
+
+    polling::rescope(&config, &refresh_outcome("o/r#current")).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(
+        after.iter().any(|k| k == manual.as_str()),
+        "manual workspace (with PR) must survive refresh; got: {after:?}"
+    );
+}

@@ -4,6 +4,7 @@
 //! Hyper 1 for HTTP and exposes newline-delimited JSON frames so API
 //! clients can drive the same server-owned IPC model as the TUI.
 
+use crate::metrics::EventMetricsSnapshot;
 use crate::{Server, ServerConfig};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, channel::Channel, combinators::UnsyncBoxBody};
@@ -128,6 +129,10 @@ pub fn health_response() -> HealthResponse {
     }
 }
 
+pub fn metrics_response(config: &ServerConfig) -> EventMetricsSnapshot {
+    config.event_metrics.snapshot()
+}
+
 pub fn workspaces_response(config: &ServerConfig) -> Result<WorkspacesResponse, GatewayError> {
     let records = config.store.list_workspaces()?;
     let workspaces = records
@@ -239,6 +244,7 @@ where
 
     match (request.method(), request.uri().path()) {
         (&Method::GET, "/v1/health") => json_response(StatusCode::OK, &health_response()),
+        (&Method::GET, "/v1/metrics") => json_response(StatusCode::OK, &metrics_response(&config)),
         (&Method::GET, "/v1/workspaces") => match workspaces_response(&config) {
             Ok(payload) => json_response(StatusCode::OK, &payload),
             Err(error) => json_response(

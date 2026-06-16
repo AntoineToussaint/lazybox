@@ -35,6 +35,7 @@ pub mod backend;
 pub mod chat;
 pub mod event_forward;
 pub mod lifecycle;
+pub mod metrics;
 pub mod polling;
 pub mod pty;
 pub mod slack;
@@ -375,6 +376,10 @@ pub struct ServerConfig {
     /// free-text elicitation can't clear a real `?`. Cleaned on
     /// `TerminalExited`.
     pub input_needed_shapes: Arc<Mutex<HashMap<TerminalId, lazybox_agents::PromptShape>>>,
+    /// Cumulative counters for the event pipeline's two lossy paths
+    /// (forwarder output drops + bus lag). Surfaced at `/v1/metrics` and
+    /// stamped into the drop/lag warn lines (issue #91).
+    pub event_metrics: Arc<metrics::EventMetrics>,
 }
 
 impl ServerConfig {
@@ -456,6 +461,7 @@ impl ServerConfig {
             inflight_spawn_changed: Arc::new(tokio::sync::Notify::new()),
             deleted_workspaces: Arc::new(std::sync::Mutex::new(HashSet::new())),
             input_needed_shapes: Arc::new(Mutex::new(HashMap::new())),
+            event_metrics: Arc::new(metrics::EventMetrics::default()),
         }
     }
 
@@ -1227,8 +1233,12 @@ impl Server {
                             // exactly the sequencing the snapshot needs;
                             // lag recovery is rare enough that the brief
                             // serve-loop pause is acceptable.
+                            self.config.event_metrics.record_bus_lagged(n);
                             tracing::warn!(
-                                "client lagged behind bus by {n} events — sending recovery snapshot"
+                                lagged = n,
+                                bus_lagged_total =
+                                    self.config.event_metrics.snapshot().bus_lagged_events,
+                                "client lagged behind bus — sending recovery snapshot"
                             );
                             let store = self.config.store.clone();
                             match tokio::task::spawn_blocking(move || {
@@ -1244,6 +1254,7 @@ impl Server {
                                         terminals,
                                         projects,
                                     });
+                                    self.config.event_metrics.record_bus_lag_recovery();
                                 }
                                 Err(e) => {
                                     // Send NOTHING: an empty snapshot

@@ -1462,6 +1462,61 @@ mod watchdog_tests {
 }
 
 #[cfg(test)]
+mod render_throttle_tests {
+    //! Background-driven frames (daemon output, spinner ticks) are
+    //! coalesced to one display refresh so an output flood can't
+    //! saturate the render path; input-driven frames bypass the cap so
+    //! scrolling stays per-event progressive and keystrokes never wait
+    //! behind redundant repaints.
+    use super::super::helpers::{MIN_BACKGROUND_RENDER_INTERVAL, RenderThrottle};
+    use std::time::{Duration, Instant};
+
+    /// Input-driven redraws always paint, no matter how recently a
+    /// frame rendered — that's what keeps a scroll gesture progressive.
+    #[test]
+    fn input_driven_always_renders() {
+        let mut t = RenderThrottle::default();
+        let now = Instant::now();
+        t.record(now);
+        // Zero elapsed since the last paint, but it's input → renders.
+        assert!(t.should_render(now, true));
+    }
+
+    /// The first frame paints even with no prior render recorded, so
+    /// startup isn't held back by the cap.
+    #[test]
+    fn first_background_frame_renders() {
+        let t = RenderThrottle::default();
+        assert!(t.should_render(Instant::now(), false));
+    }
+
+    /// Back-to-back background frames inside one refresh are coalesced;
+    /// once a refresh has elapsed the next background frame paints.
+    #[test]
+    fn background_frames_coalesce_to_one_refresh() {
+        let mut t = RenderThrottle::default();
+        let t0 = Instant::now();
+        t.record(t0);
+        // Within the interval → deferred.
+        assert!(!t.should_render(t0 + MIN_BACKGROUND_RENDER_INTERVAL - Duration::from_millis(1), false));
+        // At the interval → paints.
+        assert!(t.should_render(t0 + MIN_BACKGROUND_RENDER_INTERVAL, false));
+    }
+
+    /// A background frame deferred during a burst still paints the
+    /// moment input arrives — the deferred update is never stranded.
+    #[test]
+    fn deferred_background_frame_flushes_on_input() {
+        let mut t = RenderThrottle::default();
+        let t0 = Instant::now();
+        t.record(t0);
+        let mid = t0 + Duration::from_millis(1);
+        assert!(!t.should_render(mid, false), "background frame waits");
+        assert!(t.should_render(mid, true), "input flushes it immediately");
+    }
+}
+
+#[cfg(test)]
 mod subscribed_projects_tests {
     //! `refresh_subscribed_projects` add/remove contract — the
     //! placeholder headers lazybox synthesizes for narrowed repo

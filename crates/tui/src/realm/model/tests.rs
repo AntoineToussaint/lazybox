@@ -1546,6 +1546,50 @@ mod watchdog_tests {
 }
 
 #[cfg(test)]
+mod perf_tests {
+    //! The opt-in perf sampler (`LAZYBOX_PERF=1`) routes run-loop
+    //! counters to a dedicated target. The sampling decision is a pure
+    //! predicate so it's testable without the env var; the dropped-input
+    //! tally is the headline "must stay 0" counter.
+    use super::super::helpers::{PerfMonitor, sample_due};
+    use std::time::Duration;
+
+    /// Disabled is always a no-op, regardless of how slow the iteration
+    /// was — no perf file, no overhead, when the flag is unset.
+    #[test]
+    fn disabled_never_samples() {
+        assert!(!sample_due(false, Duration::from_secs(1), 4096, true));
+    }
+
+    /// Idle heartbeat iterations (under the floor, empty channel, within
+    /// budget) are skipped so the perf log stays signal, not 60Hz noise.
+    #[test]
+    fn enabled_skips_idle_iterations() {
+        assert!(!sample_due(true, Duration::from_micros(50), 0, false));
+    }
+
+    /// Real work clears the bar: an over-budget stall, a non-empty
+    /// channel, or a work phase past the floor each earns a sample.
+    #[test]
+    fn enabled_samples_real_work() {
+        assert!(sample_due(true, Duration::from_micros(50), 0, true)); // over budget
+        assert!(sample_due(true, Duration::from_micros(50), 1, false)); // backlog
+        assert!(sample_due(true, Duration::from_millis(2), 0, false)); // render-sized
+    }
+
+    /// Stale-input drops accumulate across episodes — the running total
+    /// is the signal that the loop discarded keystrokes.
+    #[test]
+    fn dropped_input_accumulates() {
+        let mut perf = PerfMonitor::new();
+        assert_eq!(perf.dropped_input(), 0);
+        perf.note_dropped_input(3, Duration::from_millis(600));
+        perf.note_dropped_input(2, Duration::from_millis(700));
+        assert_eq!(perf.dropped_input(), 5);
+    }
+}
+
+#[cfg(test)]
 mod render_throttle_tests {
     //! Background-driven frames (daemon output, spinner ticks) are
     //! coalesced to one display refresh so an output flood can't

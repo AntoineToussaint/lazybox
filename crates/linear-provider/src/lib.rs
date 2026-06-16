@@ -217,15 +217,10 @@ impl LinearClient {
     /// or the safety cap truncated the tail). Partial results keep
     /// the inbox alive but are NOT authoritative: a workspace absent
     /// from a partial result may simply live on a page we never got,
-    /// so rescope must not delete based on it.
-    ///
-    /// TODO(linear-partial-rescope): wire `FetchCoverage::Partial`
-    /// through `LinearSource` in `crates/server/src/polling/mod.rs` —
-    /// on a partial fetch `polled_scope()` must downgrade from
-    /// `PolledScope::Exhaustive` to `PolledScope::Repos(vec![])`
-    /// (mirroring `GhSource::last_coverage_partial`). That file is
-    /// owned elsewhere right now; this return shape is ready for the
-    /// one-line wiring.
+    /// so rescope must not delete based on it. `LinearSource` in
+    /// `crates/server/src/polling/mod.rs` records this coverage and
+    /// downgrades `polled_scope()` to `PolledScope::Repos(vec![])` on
+    /// a partial fetch (mirroring `GhSource::last_coverage_partial`).
     pub async fn fetch_all_with_coverage(&self) -> Result<FetchOutcome, LinearError> {
         // 1. Identify the viewer so we can assign TaskRole correctly.
         let viewer_body = serde_json::json!({

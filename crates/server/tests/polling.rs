@@ -3690,3 +3690,170 @@ async fn empty_workspace_registers_project_with_pretty_name() {
         serde_json::from_str(&record.project_json.unwrap()).unwrap();
     assert_eq!(project.name, "AntoineToussaint/lazybox");
 }
+
+/// `LinearSource` coverage wiring: a Linear fetch that loses a page
+/// mid-pagination is non-authoritative, so `polled_scope` must report
+/// `Repos([])` ("covered no repos this tick") rather than
+/// `Exhaustive`. Without this, the next rescope treats every Linear
+/// workspace on the un-fetched pages as "gone upstream" and deletes
+/// it — the same wipe-on-partial-sync class as issue #64.
+mod linear_coverage {
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response, StatusCode};
+    use hyper_util::rt::TokioIo;
+    use lazybox_core::ProviderConfig;
+    use lazybox_ipc::Event;
+    use lazybox_linear::LinearClient;
+    use lazybox_server::polling::{LinearSource, PolledScope, TaskSource};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    struct Mock {
+        addr: SocketAddr,
+        shutdown: Option<oneshot::Sender<()>>,
+    }
+
+    impl Mock {
+        fn url(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+        fn shutdown(mut self) {
+            if let Some(tx) = self.shutdown.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    /// Serve `responses[i]` for the i-th request in order; exhausted
+    /// indices fall back to `{}` (which deserializes to no-data and
+    /// surfaces as an error if the client ever asks for more).
+    async fn spawn_mock(responses: Vec<String>) -> Mock {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let responses = Arc::new(responses);
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => return,
+                    accept = listener.accept() => {
+                        let Ok((stream, _)) = accept else { continue };
+                        let responses = responses.clone();
+                        let counter = counter.clone();
+                        tokio::spawn(async move {
+                            let io = TokioIo::new(stream);
+                            let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
+                                let responses = responses.clone();
+                                let counter = counter.clone();
+                                async move {
+                                    let _ = req.into_body().collect().await;
+                                    let idx = counter
+                                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    let body = responses
+                                        .get(idx)
+                                        .cloned()
+                                        .unwrap_or_else(|| "{}".to_string());
+                                    Ok::<_, std::convert::Infallible>(
+                                        Response::builder()
+                                            .status(StatusCode::OK)
+                                            .header("content-type", "application/json")
+                                            .body(Full::new(Bytes::from(body)))
+                                            .unwrap(),
+                                    )
+                                }
+                            });
+                            let _ = http1::Builder::new().serve_connection(io, svc).await;
+                        });
+                    }
+                }
+            }
+        });
+
+        Mock {
+            addr,
+            shutdown: Some(shutdown_tx),
+        }
+    }
+
+    fn viewer() -> String {
+        serde_json::json!({ "data": { "viewer": { "id": "me", "name": "Me" } } }).to_string()
+    }
+
+    fn issues_page(has_next: bool, cursor: Option<&str>) -> String {
+        serde_json::json!({
+            "data": {
+                "issues": {
+                    "pageInfo": { "hasNextPage": has_next, "endCursor": cursor },
+                    "nodes": [{
+                        "id": "a", "identifier": "ENG-1", "title": "one",
+                        "description": null, "url": "https://l.app/1",
+                        "updatedAt": "2026-01-01T00:00:00Z", "priority": null,
+                        "state": { "name": "", "type": "unstarted" },
+                        "assignee": null, "creator": null,
+                        "team": { "key": "ENG" }, "labels": { "nodes": [] }
+                    }]
+                }
+            }
+        })
+        .to_string()
+    }
+
+    fn source(url: String) -> LinearSource {
+        let bus = tokio::sync::broadcast::channel::<Event>(16).0;
+        LinearSource::new(
+            LinearClient::with_key("k").with_endpoint(url),
+            ProviderConfig::default(),
+            bus,
+        )
+    }
+
+    #[tokio::test]
+    async fn partial_fetch_downgrades_polled_scope_to_non_authoritative() {
+        // viewer + page1 (has_next) + page2 errors → partial.
+        let page2_error =
+            serde_json::json!({ "errors": [{ "message": "boom on page 2" }] }).to_string();
+        let mock = spawn_mock(vec![viewer(), issues_page(true, Some("cur")), page2_error]).await;
+        let source = source(mock.url());
+
+        tokio::time::timeout(Duration::from_secs(5), source.fetch())
+            .await
+            .expect("fetch timeout")
+            .expect("partial fetch still returns the prefix as Ok");
+
+        assert_eq!(
+            source.polled_scope(),
+            PolledScope::Repos(Vec::new()),
+            "a truncated Linear pagination must not authorize rescope deletions"
+        );
+
+        mock.shutdown();
+    }
+
+    #[tokio::test]
+    async fn complete_fetch_keeps_polled_scope_exhaustive() {
+        let mock = spawn_mock(vec![viewer(), issues_page(false, None)]).await;
+        let source = source(mock.url());
+
+        tokio::time::timeout(Duration::from_secs(5), source.fetch())
+            .await
+            .expect("fetch timeout")
+            .expect("complete fetch returns Ok");
+
+        assert_eq!(
+            source.polled_scope(),
+            PolledScope::Exhaustive,
+            "a fully-paginated Linear fetch stays authoritative"
+        );
+
+        mock.shutdown();
+    }
+}

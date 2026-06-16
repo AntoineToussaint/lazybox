@@ -23,16 +23,19 @@
 //!
 //! - [`apply_agent_state`] adds/removes a workspace key from the
 //!   asking-set and reports the [`AttentionTransition`].
-//! - [`apply_working_state`] is the companion for the third state —
+//! - [`apply_working_state`] is the companion for the working state —
 //!   it tracks the disjoint working-set that drives the side panel's
 //!   animated "working" spinner.
+//! - [`apply_done_state`] is the companion for the `Done` state —
+//!   it tracks the disjoint done-set that drives the `✓` indicator and,
+//!   like asking, alerts the user on the rising edge (#80).
 //! - [`next_asking_workspace`] picks the next asking workspace —
 //!   used by the `!` jump-to-asking key.
 //!
-//! The three [`AgentState`]s (`Working` / `InputNeeded` / `Idle`)
-//! share a single per-session UI slot, so the asking-set and
-//! working-set are kept mutually exclusive: every event applies to
-//! both, landing the key in at most one.
+//! The four [`AgentState`]s (`Working` / `InputNeeded` / `Idle` /
+//! `Done`) share a single per-session UI slot, so the asking-, working-
+//! and done-sets are kept mutually exclusive: every event applies to
+//! all three, landing the key in at most one.
 
 use lazybox_core::{SessionKey, Workspace};
 use lazybox_ipc::AgentState;
@@ -116,11 +119,49 @@ pub fn apply_working_state(
     }
 }
 
+/// Apply an `Event::AgentState` to the sidebar's done-set — the
+/// companion to [`apply_agent_state`] for the `Done` state (#80).
+///
+/// Kept disjoint from the asking- and working-sets by construction: a
+/// `Done` event lands the key here and clears it from the other two,
+/// and any non-`Done` event removes it. Returns `true` when membership
+/// changed (caller should re-render). Like asking — and unlike working
+/// — entering `Done` warrants a one-shot alert, but the rising edge is
+/// just `changed && incoming == Done`, so the caller reads it off the
+/// bool rather than threading the asking-named [`AttentionTransition`]
+/// through a second meaning.
+pub fn apply_done_state(
+    done_set: &mut HashSet<SessionKey>,
+    workspace_key: &SessionKey,
+    incoming: AgentState,
+) -> bool {
+    let was_done = done_set.contains(workspace_key);
+    let is_done = matches!(incoming, AgentState::Done);
+    match (was_done, is_done) {
+        (false, true) => {
+            done_set.insert(workspace_key.clone());
+            true
+        }
+        (true, false) => {
+            done_set.remove(workspace_key);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// True iff the workspace's key is in the working-set. Mirror of
 /// [`workspace_is_asking`] for the "actively working" signal.
 pub fn workspace_is_working(workspace: &Workspace, working_set: &HashSet<SessionKey>) -> bool {
     let key = SessionKey::from(&workspace.key);
     working_set.contains(&key)
+}
+
+/// True iff the workspace's key is in the done-set. Mirror of
+/// [`workspace_is_asking`] for the "finished its turn" signal (#80).
+pub fn workspace_is_done(workspace: &Workspace, done_set: &HashSet<SessionKey>) -> bool {
+    let key = SessionKey::from(&workspace.key);
+    done_set.contains(&key)
 }
 
 /// True iff the workspace's key is in the asking-set. Single
@@ -338,6 +379,75 @@ mod tests {
         assert!(!workspace_is_working(&ws, &set));
         set.insert(SessionKey::from(&ws.key));
         assert!(workspace_is_working(&ws, &set));
+    }
+
+    // ── apply_done_state / workspace_is_done ──────────────────────
+
+    #[test]
+    fn first_done_for_a_key_changes_set() {
+        let mut set = HashSet::new();
+        assert!(apply_done_state(&mut set, &ws_key(1), AgentState::Done));
+        assert!(set.contains(&ws_key(1)));
+    }
+
+    #[test]
+    fn done_to_working_clears_set() {
+        let mut set = HashSet::new();
+        set.insert(ws_key(1));
+        assert!(apply_done_state(&mut set, &ws_key(1), AgentState::Working));
+        assert!(!set.contains(&ws_key(1)));
+    }
+
+    #[test]
+    fn repeat_done_broadcast_is_no_change() {
+        // The rising edge (changed && Done) is what alerts; a repeat
+        // Done must report no change so the user isn't re-notified.
+        let mut set = HashSet::new();
+        apply_done_state(&mut set, &ws_key(1), AgentState::Done);
+        assert!(!apply_done_state(&mut set, &ws_key(1), AgentState::Done));
+        assert!(set.contains(&ws_key(1)));
+    }
+
+    #[test]
+    fn done_set_is_disjoint_from_asking_and_working() {
+        // Drive an Idle → Working → InputNeeded → Done cycle through
+        // all three appliers and assert the key lands in at most one.
+        let mut asking = HashSet::new();
+        let mut working = HashSet::new();
+        let mut done = HashSet::new();
+        let k = ws_key(1);
+        for state in [
+            AgentState::Working,
+            AgentState::InputNeeded,
+            AgentState::Done,
+            AgentState::Idle,
+            AgentState::Done,
+        ] {
+            apply_agent_state(&mut asking, &k, state);
+            apply_working_state(&mut working, &k, state);
+            apply_done_state(&mut done, &k, state);
+            let in_count = [&asking, &working, &done]
+                .iter()
+                .filter(|s| s.contains(&k))
+                .count();
+            assert!(
+                in_count <= 1,
+                "key must be in at most one set (state {state:?}, in {in_count})",
+            );
+        }
+        // The terminal Done state lands in exactly the done-set.
+        assert!(done.contains(&k));
+        assert!(!asking.contains(&k));
+        assert!(!working.contains(&k));
+    }
+
+    #[test]
+    fn workspace_is_done_reads_set() {
+        let mut set = HashSet::new();
+        let ws = sample_workspace(1);
+        assert!(!workspace_is_done(&ws, &set));
+        set.insert(SessionKey::from(&ws.key));
+        assert!(workspace_is_done(&ws, &set));
     }
 
     // ── next_asking_workspace ─────────────────────────────────────

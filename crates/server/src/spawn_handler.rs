@@ -839,6 +839,9 @@ pub async fn handle_spawn(
                     );
                     return;
                 }
+                if done_is_sticky(current, new_state) {
+                    return;
+                }
                 // Symmetric damping for the Working→Idle edge: a single
                 // frame where Claude's spinner is absent reads as an
                 // ambiguous Idle (no working anchor, composer not yet
@@ -1749,6 +1752,24 @@ fn should_suppress_input_needed_exit(
         && new_state != lazybox_ipc::AgentState::InputNeeded
         && !clear_exit_signal
         && since_last_input_needed.is_some_and(|e| e < hysteresis)
+}
+
+/// `Done` is sticky against a bare idle reading.
+///
+/// `Done` is set by the `Stop` hook when the agent finishes its turn
+/// (#80). The PTY detector keeps running in hook mode and contributes a
+/// "confident idle" correction (composer drawn) — and `SessionStart`/
+/// `SessionEnd` hooks also map to `Idle` — either of which would
+/// immediately demote a freshly-set `Done` back to `Idle`, losing the
+/// "completed" alert the moment it fired. So an `Idle` reading does NOT
+/// overwrite a cached `Done`: the agent stays `Done` until it works
+/// again (`Working`) or asks for input (`InputNeeded`). Returns true to
+/// suppress the transition.
+fn done_is_sticky(
+    current: Option<lazybox_ipc::AgentState>,
+    new_state: lazybox_ipc::AgentState,
+) -> bool {
+    current == Some(lazybox_ipc::AgentState::Done) && new_state == lazybox_ipc::AgentState::Idle
 }
 
 /// Hysteresis decision for the edge that LEAVES `Working`.
@@ -2963,6 +2984,11 @@ pub async fn handle_ingest_hook(
         let Some(new_state) = lazybox_agents::hook::hook_to_state(&hook, prev) else {
             return;
         };
+        // A `SessionStart`/`SessionEnd` idle hook must not clear a
+        // `Done` the preceding `Stop` just set (#80).
+        if done_is_sticky(prev, new_state) {
+            return;
+        }
         let changed = prev != Some(new_state);
         if changed {
             states.insert(terminal_id, new_state);
@@ -3495,6 +3521,24 @@ mod tests {
             None,
             hyst,
         ));
+    }
+
+    #[test]
+    fn done_is_sticky_only_against_idle() {
+        use lazybox_ipc::AgentState::{Done, Idle, InputNeeded, Working};
+        // An idle reading must not clear a freshly-set Done (the
+        // `Stop`-driven "finished its turn" state) — the PTY's
+        // confident-idle correction and SessionStart/End would
+        // otherwise demote it instantly (#80).
+        assert!(done_is_sticky(Some(Done), Idle));
+        // Done yields to real progress / a fresh prompt.
+        assert!(!done_is_sticky(Some(Done), Working));
+        assert!(!done_is_sticky(Some(Done), InputNeeded));
+        // Sticky only applies when already Done — a normal Working →
+        // Idle transition is honored (the agent really went quiet).
+        assert!(!done_is_sticky(Some(Working), Idle));
+        assert!(!done_is_sticky(Some(InputNeeded), Idle));
+        assert!(!done_is_sticky(None, Idle));
     }
 
     #[test]

@@ -1622,3 +1622,88 @@ mod working_spinner_tests {
         assert!(!sb.tick_working(), "still in frame 5 → no second redraw",);
     }
 }
+
+#[cfg(test)]
+mod done_alert_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+    use lazybox_core::Workspace;
+    use lazybox_ipc::{AgentState, Event};
+
+    fn agent_state(key: &SessionKey, state: AgentState) -> Event {
+        Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: lazybox_ipc::TerminalId(1),
+            state,
+        }
+    }
+
+    fn sidebar_with_one_workspace() -> (Sidebar, SessionKey) {
+        let mut t = base_task();
+        t.title = "Ship it".into();
+        let mut w = Workspace::from_task(t, chrono::Utc::now());
+        w.name = "Ship it".into();
+        let key = SessionKey::from(&w.key);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(key.clone(), w);
+        sb.recompute_visible();
+        (sb, key)
+    }
+
+    /// Reaching `Done` (agent finished its turn) alerts the user: it
+    /// flags the done-set, queues an OS notification, and a footer
+    /// notice — the #80 "tell me when it's done" requirement.
+    #[test]
+    fn reaching_done_flags_set_and_alerts() {
+        let (mut sb, key) = sidebar_with_one_workspace();
+        sb.on_event(&agent_state(&key, AgentState::Working));
+        // Working alone is silent — nothing to act on.
+        assert!(sb.drain_pending_notifications().is_empty());
+        assert!(sb.drain_pending_asking_notices().is_empty());
+
+        sb.on_event(&agent_state(&key, AgentState::Done));
+        assert!(sb.agents_done.contains(&key), "done-set holds the key");
+        assert!(
+            !sb.agents_working.contains(&key),
+            "done is disjoint from working",
+        );
+        let notifs = sb.drain_pending_notifications();
+        assert_eq!(notifs.len(), 1);
+        assert!(notifs[0].title.contains("finished"), "OS banner on done");
+        assert!(
+            sb.drain_pending_asking_notices()
+                .iter()
+                .any(|n| n.contains("finished")),
+            "footer notice on done",
+        );
+    }
+
+    /// The daemon re-emits `Done` on follow-up chunks; the alert must
+    /// fire once (rising edge only), not on every repeat.
+    #[test]
+    fn repeated_done_does_not_re_alert() {
+        let (mut sb, key) = sidebar_with_one_workspace();
+        sb.on_event(&agent_state(&key, AgentState::Done));
+        sb.drain_pending_notifications();
+        sb.drain_pending_asking_notices();
+
+        sb.on_event(&agent_state(&key, AgentState::Done));
+        assert!(
+            sb.drain_pending_notifications().is_empty(),
+            "no re-notify on a repeat Done broadcast",
+        );
+        assert!(sb.drain_pending_asking_notices().is_empty());
+    }
+
+    /// Working again after Done clears the done flag so the row stops
+    /// showing `✓` once the agent resumes.
+    #[test]
+    fn working_after_done_clears_the_flag() {
+        let (mut sb, key) = sidebar_with_one_workspace();
+        sb.on_event(&agent_state(&key, AgentState::Done));
+        assert!(sb.agents_done.contains(&key));
+        sb.on_event(&agent_state(&key, AgentState::Working));
+        assert!(!sb.agents_done.contains(&key));
+        assert!(sb.agents_working.contains(&key));
+    }
+}

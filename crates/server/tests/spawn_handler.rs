@@ -191,7 +191,8 @@ async fn ingest_hook_drives_agent_state_transitions() {
             }
         ));
 
-        // Stop → Idle (the turn finished).
+        // Stop → Done (the turn finished — the "completed, take a
+        // look" alert, distinct from a fresh composer that never ran).
         client
             .send(Command::IngestHook {
                 terminal_id,
@@ -209,7 +210,7 @@ async fn ingest_hook_drives_agent_state_transitions() {
         assert!(matches!(
             ev,
             Event::AgentState {
-                state: lazybox_ipc::AgentState::Idle,
+                state: lazybox_ipc::AgentState::Done,
                 ..
             }
         ));

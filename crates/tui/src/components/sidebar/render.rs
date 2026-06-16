@@ -528,6 +528,9 @@ impl Sidebar {
                 working: workspace.is_some_and(|w| {
                     crate::agent_attention::workspace_is_working(w, &self.agents_working)
                 }),
+                done: workspace.is_some_and(|w| {
+                    crate::agent_attention::workspace_is_done(w, &self.agents_done)
+                }),
                 working_glyph: crate::components::workspace_row::working_glyph(
                     self.working_spinner_frame,
                 ),

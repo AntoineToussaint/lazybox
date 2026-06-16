@@ -1274,7 +1274,7 @@ async fn resolve_or_create_session(
     let path = worktree_path_for_session(&workspace, 0);
 
     let prov_start = std::time::Instant::now();
-    let provisioned = provision_worktree(&workspace, &path).await;
+    let provisioned = provision_worktree(config, &workspace, &path).await;
     tracing::info!(
         elapsed_ms = prov_start.elapsed().as_millis(),
         ok = provisioned.is_ok(),
@@ -1357,10 +1357,23 @@ fn sanitize_branch_component(raw: &str) -> String {
 }
 
 /// `owner/repo` for a workspace with no linked task, recovered from its
-/// project key. Only `github-` keys carry a clonable repo — `local-`
+/// project. Only `github-` keys carry a clonable repo — `local-`
 /// projects legitimately have none, so they error and the caller's
 /// empty-dir fallback stays the right outcome for them.
-fn clonable_repo_from_project(workspace: &Workspace) -> Result<String, crate::ServerError> {
+///
+/// The canonical `owner/repo` lives in the project *record* (populated
+/// from the upstream task's repo string when the project was
+/// registered). We must read it from there rather than reconstruct it
+/// from the key: `github-{owner}-{repo}` joins on `-`, so a key like
+/// `github-mind-build-mind` can't be split back into `mind-build/mind`
+/// — the naive first-hyphen split yields `mind/build-mind`, cloning the
+/// wrong repo. Falling back to the lossy key-derived name only when no
+/// record exists keeps non-hyphenated repos working in the rare
+/// no-record case.
+fn clonable_repo_from_project(
+    config: &ServerConfig,
+    workspace: &Workspace,
+) -> Result<String, crate::ServerError> {
     let key = lazybox_core::workspace_project_key(workspace).ok_or_else(|| {
         crate::ServerError::Workspace("workspace has no primary task or project".into())
     })?;
@@ -1369,13 +1382,22 @@ fn clonable_repo_from_project(workspace: &Workspace) -> Result<String, crate::Se
             "project '{key}' has no repo to clone"
         )));
     }
-    Ok(key.display_name())
+    let canonical = config
+        .store
+        .get_project(&key)
+        .ok()
+        .flatten()
+        .and_then(|r| r.project_json)
+        .and_then(|j| serde_json::from_str::<lazybox_core::Project>(&j).ok())
+        .map(|p| p.display_name());
+    Ok(canonical.unwrap_or_else(|| key.display_name()))
 }
 
 /// Try to set up a real git worktree at `target` for the workspace's
 /// primary task. Returns Ok(()) when a checkout succeeded, Err when
 /// we couldn't (caller falls back to a plain mkdir).
 async fn provision_worktree(
+    config: &ServerConfig,
     workspace: &Workspace,
     target: &std::path::Path,
 ) -> Result<(), crate::ServerError> {
@@ -1395,7 +1417,7 @@ async fn provision_worktree(
     // `git init` worktree below instead of an empty, non-git directory.
     let repo = match task {
         Some(task) => task.repo.clone(),
-        None => clonable_repo_from_project(workspace).ok(),
+        None => clonable_repo_from_project(config, workspace).ok(),
     };
 
     let (worktree, repo_key) = match repo {
@@ -1718,7 +1740,7 @@ async fn ensure_worktree_present(
         return;
     }
     tracing::info!("worktree {} missing — re-provisioning", path.display());
-    if let Err(e) = provision_worktree(workspace, path).await {
+    if let Err(e) = provision_worktree(config, workspace, path).await {
         tracing::warn!("re-provision failed: {e}");
         let _ = config.bus.send(Event::provider_error_retryable(
             "worktree",
@@ -4307,18 +4329,65 @@ mod tests {
         assert_eq!(derive_branch_for_workspace(&ws), "lazybox/my-experiment");
     }
 
+    /// Persist a project record so `clonable_repo_from_project` can read
+    /// its canonical `owner/repo` name, mirroring what the polling loop's
+    /// `ensure_project_for_workspace` writes.
+    fn save_project(config: &ServerConfig, key: &lazybox_core::ProjectKey, name: &str) {
+        let project = lazybox_core::Project::new(key.clone(), name, Utc::now());
+        let record = lazybox_store::ProjectRecord {
+            key: key.as_str().to_string(),
+            created_at: project.created_at,
+            project_json: Some(serde_json::to_string(&project).unwrap()),
+        };
+        config.store.save_project(&record).unwrap();
+    }
+
     /// A blank workspace under a GitHub project recovers `owner/repo`
-    /// from the project key, so its Claude sessions get a real clone
+    /// from the project record, so its Claude sessions get a real clone
     /// instead of an empty directory.
     #[test]
     fn clonable_repo_from_project_recovers_github_owner_repo() {
+        let config = ServerConfig::in_memory();
+        let key = lazybox_core::ProjectKey::github("AntoineToussaint", "lazybox");
+        save_project(&config, &key, "AntoineToussaint/lazybox");
         let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
-        ws.project_key = Some(lazybox_core::ProjectKey::github(
-            "AntoineToussaint",
-            "lazybox",
-        ));
+        ws.project_key = Some(key);
         assert_eq!(
-            clonable_repo_from_project(&ws).unwrap(),
+            clonable_repo_from_project(&config, &ws).unwrap(),
+            "AntoineToussaint/lazybox"
+        );
+    }
+
+    /// Regression for #83: an owner *or* repo with a hyphen
+    /// (`mind-build/mind`) can't be recovered from the `github-{owner}-
+    /// {repo}` key — the lossy first-hyphen split gives `mind/build-mind`.
+    /// Reading the canonical name from the project record fixes it, so a
+    /// new workspace clones the repo the user is actually in.
+    #[test]
+    fn clonable_repo_from_project_handles_hyphenated_owner() {
+        let config = ServerConfig::in_memory();
+        let key = lazybox_core::ProjectKey::github("mind-build", "mind");
+        // Sanity: the lossy key path would mangle this.
+        assert_eq!(key.display_name(), "mind/build-mind");
+        save_project(&config, &key, "mind-build/mind");
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
+        ws.project_key = Some(key);
+        assert_eq!(
+            clonable_repo_from_project(&config, &ws).unwrap(),
+            "mind-build/mind"
+        );
+    }
+
+    /// No project record (never registered) falls back to the
+    /// key-derived name — correct for non-hyphenated repos, the best we
+    /// can do without the record.
+    #[test]
+    fn clonable_repo_from_project_falls_back_to_key_without_record() {
+        let config = ServerConfig::in_memory();
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github("AntoineToussaint", "lazybox"));
+        assert_eq!(
+            clonable_repo_from_project(&config, &ws).unwrap(),
             "AntoineToussaint/lazybox"
         );
     }
@@ -4327,15 +4396,17 @@ mod tests {
     /// the caller's empty-dir fallback stays their outcome.
     #[test]
     fn clonable_repo_from_project_rejects_local_project() {
+        let config = ServerConfig::in_memory();
         let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
         ws.project_key = Some(lazybox_core::ProjectKey::local("my-experiment"));
-        assert!(clonable_repo_from_project(&ws).is_err());
+        assert!(clonable_repo_from_project(&config, &ws).is_err());
     }
 
     #[test]
     fn clonable_repo_from_project_errs_without_project_or_task() {
+        let config = ServerConfig::in_memory();
         let ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
-        assert!(clonable_repo_from_project(&ws).is_err());
+        assert!(clonable_repo_from_project(&config, &ws).is_err());
     }
 
     /// End-to-end through `provision_worktree`: a blank workspace under
@@ -4344,11 +4415,12 @@ mod tests {
     /// non-git directory (#57).
     #[tokio::test]
     async fn provision_worktree_blank_local_workspace_inits_standalone() {
+        let config = ServerConfig::in_memory();
         let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
         ws.project_key = Some(lazybox_core::ProjectKey::local("notes"));
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("worktree");
-        provision_worktree(&ws, &dir).await.unwrap();
+        provision_worktree(&config, &ws, &dir).await.unwrap();
         assert!(dir.join(".git").exists(), "a real git repo was created");
         let head = std::process::Command::new("git")
             .current_dir(&dir)

@@ -531,6 +531,27 @@ pub(super) fn should_drop_stale_input(event: &crossterm::event::Event, age: Dura
     )
 }
 
+/// Whether a host-terminal event is a mouse-wheel scroll. Scroll is the
+/// one input that fires faster than a full repaint can keep up — a
+/// trackpad flick emits dozens of notches a second — so its redraw is
+/// routed through the background render throttle rather than painting
+/// once per notch (see the run loop's render step). Dispatch of the
+/// scroll itself stays per-event and cheap (it only moves a viewport
+/// offset); it's the repaint that coalesces to the display refresh.
+pub(super) fn is_scroll_event(event: &crossterm::event::Event) -> bool {
+    use crossterm::event::MouseEventKind;
+    matches!(
+        event,
+        crossterm::event::Event::Mouse(m) if matches!(
+            m.kind,
+            MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        )
+    )
+}
+
 /// Accumulates stale-input drops across a recovery burst so the
 /// episode is reported once (one warn line, one footer notice) instead
 /// of once per dropped event. `note` during the burst; `flush` when a
@@ -935,11 +956,12 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
 
         // 4. Render if dirty — before the blocking input read so the
         // user sees their last action immediately. Background-driven
-        // frames (daemon output, spinner ticks) are coalesced to one
-        // display refresh so an output flood can't saturate the render
-        // path; input-driven frames bypass the cap and paint at once.
-        // A frame the throttle defers keeps `model.redraw` set, so it
-        // paints on the next eligible iteration (≤ one refresh away).
+        // frames (daemon output, spinner ticks) and high-rate mouse-wheel
+        // scroll are coalesced to one display refresh so neither an output
+        // flood nor a trackpad flick can saturate the render path;
+        // discrete input (keystrokes, clicks) bypasses the cap and paints
+        // at once. A frame the throttle defers keeps `model.redraw` set,
+        // so it paints on the next eligible iteration (≤ one refresh away).
         if model.redraw {
             let now = std::time::Instant::now();
             if render_throttle.should_render(now, redraw_is_input) {
@@ -1022,12 +1044,21 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                     stale_tally.note(age);
                 } else {
                     report_stale_drops(model, &mut stale_tally);
+                    let is_scroll = is_scroll_event(&timed.event);
                     let dispatch_start = std::time::Instant::now();
                     dispatch_event(model, timed.event);
                     timings.dispatch = dispatch_start.elapsed();
-                    // Any redraw this produced is the user's own action —
-                    // paint it next iteration without the background cap.
-                    redraw_is_input = true;
+                    // Keystrokes and clicks are low-rate and paint at once
+                    // so the UI feels instant. Mouse-wheel scroll is the
+                    // exception: a flick outpaces a full repaint, so
+                    // painting per notch makes the loop fall behind, queued
+                    // wheel events age past the stale bound, and they get
+                    // dropped — surfacing as the "UI stalled" flash on an
+                    // otherwise-idle screen. Routing scroll redraws through
+                    // the background throttle coalesces them to the display
+                    // refresh: every notch still updates the offset, but
+                    // the screen repaints at ~60fps instead of per event.
+                    redraw_is_input = !is_scroll;
                 }
             }
             // Any non-input wake means the buffered-input burst is

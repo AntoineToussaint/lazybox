@@ -1425,6 +1425,56 @@ mod stale_input_tests {
 }
 
 #[cfg(test)]
+mod scroll_classification_tests {
+    //! Mouse-wheel scroll is the one high-rate input: a flick fires
+    //! faster than a full repaint, so its redraw is routed through the
+    //! render throttle (coalesced to the display refresh) while discrete
+    //! input keeps painting per event. The classifier is what splits the
+    //! two — misclassifying a keystroke as scroll would make typing feel
+    //! laggy; misclassifying scroll as discrete brings back the stall.
+    use super::super::helpers::is_scroll_event;
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+
+    fn mouse(kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn wheel_in_every_direction_is_scroll() {
+        for kind in [
+            MouseEventKind::ScrollUp,
+            MouseEventKind::ScrollDown,
+            MouseEventKind::ScrollLeft,
+            MouseEventKind::ScrollRight,
+        ] {
+            assert!(is_scroll_event(&mouse(kind)), "{kind:?} should be scroll");
+        }
+    }
+
+    /// Clicks, drags, keys, and paste are discrete input — they must
+    /// keep painting immediately, so the classifier must NOT fold them
+    /// into the coalesced-scroll path.
+    #[test]
+    fn discrete_input_is_not_scroll() {
+        assert!(!is_scroll_event(&mouse(MouseEventKind::Down(MouseButton::Left))));
+        assert!(!is_scroll_event(&mouse(MouseEventKind::Drag(MouseButton::Left))));
+        assert!(!is_scroll_event(&mouse(MouseEventKind::Moved)));
+        assert!(!is_scroll_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE
+        ))));
+        assert!(!is_scroll_event(&Event::Paste("text".into())));
+    }
+}
+
+#[cfg(test)]
 mod watchdog_tests {
     //! The loop watchdog turns "the UI felt frozen" into warn lines
     //! with durations in /tmp/lazybox.log. Iterations within the

@@ -426,6 +426,14 @@ impl Sidebar {
                     session_key,
                     *state,
                 );
+                // The `Done` slot shares the same UI cell. Keep its
+                // disjoint set in sync; the rising edge (membership
+                // changed *into* Done) alerts the user just like asking.
+                let done_changed = crate::agent_attention::apply_done_state(
+                    &mut self.agents_done,
+                    session_key,
+                    *state,
+                );
                 if matches!(
                     transition,
                     crate::agent_attention::AttentionTransition::NowAsking
@@ -451,6 +459,31 @@ impl Sidebar {
                             .push(format!("{} needs input — press ! to jump", workspace.name));
                     }
                 }
+                // Rising edge into Done — the agent finished its turn
+                // (#80). Alert with the same banner + footer-notice path
+                // as asking, so a completed run is noticed even when
+                // lazybox isn't the focused window.
+                if done_changed
+                    && matches!(*state, lazybox_ipc::AgentState::Done)
+                    && let Some(workspace) = self.workspaces.get(session_key)
+                {
+                    if self.attention.desktop_notify {
+                        let title = format!("lazybox — {} finished", workspace.name);
+                        let body = workspace
+                            .primary_task()
+                            .map(|t| t.title.clone())
+                            .unwrap_or_else(|| workspace.name.clone());
+                        self.pending_notifications
+                            .push(PendingNotification { title, body });
+                    }
+                    self.pending_asking_notices
+                        .push(format!("{} finished", workspace.name));
+                }
+                // Only the asking transition can change the visible set
+                // (it feeds the per-repo attention counter); a done- or
+                // working-only change reads fresh at render time, and the
+                // daemon-event path forces the redraw via
+                // `displays_agent_state`.
                 if !matches!(
                     transition,
                     crate::agent_attention::AttentionTransition::NoChange

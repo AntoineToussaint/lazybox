@@ -121,16 +121,23 @@ impl TerminalKind {
 }
 
 /// What the agent's PTY is doing right now. Drives the side-panel
-/// state slot (working spinner / "needs input" pill / idle) and the
-/// TerminalStack tab badge.
+/// state slot (working spinner / "needs input" pill / done / idle) and
+/// the TerminalStack tab badge.
 ///
-/// The three states are mutually exclusive and share a single UI
+/// The four states are mutually exclusive and share a single UI
 /// slot per session. They're produced per-agent-kind by
-/// [`Agent::detect_state`](../lazybox_agents/trait.Agent.html) — each
-/// agent decides how to recognise "working" / "input needed" from
-/// its own PTY output. An agent with no opinion returns `None`,
-/// which consumers treat as `Idle` (so an unknown agent never
-/// falsely reports `Working`).
+/// [`Agent::detect_state`](../lazybox_agents/trait.Agent.html) and the
+/// agent's lifecycle hooks — each agent decides how to recognise
+/// "working" / "input needed" from its own PTY output. An agent with
+/// no opinion returns `None`, which consumers treat as `Idle` (so an
+/// unknown agent never falsely reports `Working`).
+///
+/// `InputNeeded` and `Done` are the two states where the user must
+/// act, so they raise an alert (desktop notification + footer notice);
+/// `Working` and `Idle` are silent.
+///
+/// Variants are appended, never reordered: the socket transport
+/// encodes this enum by bincode ordinal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentState {
     /// Actively producing output / running a tool right now — the
@@ -138,11 +145,17 @@ pub enum AgentState {
     Working,
     /// Paused waiting on the user at a structural prompt: a permission
     /// gate, chooser, or Y/N prompt (see issues #26 / #122). Freeform
-    /// conversational asks are deliberately not flagged.
+    /// conversational asks are deliberately not flagged. → alert.
     InputNeeded,
-    /// Neither working nor waiting — done, idle, or no signal. The
-    /// safe default for any agent that can't tell.
+    /// Idle with no active work: freshly launched, or sitting at a
+    /// ready composer having never run a task. The safe default for
+    /// any agent that can't tell. Silent — nothing to act on.
     Idle,
+    /// Finished its turn — the agent ran work and has now come to rest
+    /// (Claude's `Stop` hook). Distinct from `Idle`, which never
+    /// worked. → alert. Sticky: a subsequent idle reading keeps `Done`
+    /// until the agent works again or asks for input.
+    Done,
 }
 
 /// A normalized lifecycle hook fired by an agent, decoupled from the

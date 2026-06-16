@@ -2106,6 +2106,12 @@ impl TerminalStack {
                 Some(lazybox_ipc::AgentState::Working) => {
                     (" · working", Style::default().fg(theme.accent))
                 }
+                Some(lazybox_ipc::AgentState::Done) => (
+                    " ✓ done",
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 _ => ("", Style::default()),
             };
             if !hint.is_empty() {

@@ -1062,6 +1062,7 @@ fn format_terminal_status(
     let state_label = match agent_states.get(&tid).copied() {
         Some(AgentState::InputNeeded) => "⏸ needs input",
         Some(AgentState::Working) => "▶ working",
+        Some(AgentState::Done) => "✓ done",
         Some(AgentState::Idle) => "· idle",
         None => "—",
     };
@@ -1075,11 +1076,12 @@ fn format_terminal_status(
 }
 
 /// Status icon for an agent terminal. `⏸` if it needs input, `▶` if
-/// working, `·` if idle or untracked.
+/// working, `✓` if done, `·` if idle or untracked.
 fn agent_icon(tid: TerminalId, agent_states: &HashMap<TerminalId, AgentState>) -> &'static str {
     match agent_states.get(&tid).copied() {
         Some(AgentState::InputNeeded) => "⏸",
         Some(AgentState::Working) => "▶",
+        Some(AgentState::Done) => "✓",
         Some(AgentState::Idle) | None => "·",
     }
 }

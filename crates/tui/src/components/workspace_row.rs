@@ -49,6 +49,11 @@ pub struct WorkspaceRowCtx<'a> {
     /// (streaming / running a tool). Renders the animated spinner in
     /// the same slot the `?` pill uses.
     pub working: bool,
+    /// Any agent in this workspace is in `AgentState::Done` — finished
+    /// its turn, waiting to be looked at (#80). Renders `✓` in the same
+    /// slot. Mutually exclusive with `asking`/`working` upstream;
+    /// asking and working take precedence defensively if both were set.
+    pub done: bool,
     /// Current spinner glyph for the `working` slot. Shared across all
     /// rows in a render pass — the sidebar advances a single frame
     /// counter on a low-rate tick (see `Sidebar::tick_working`), so
@@ -272,15 +277,19 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///     agent is paused waiting on me.
 ///   - `Working`     → ` <spinner> ` (accent, bold) — an animated
 ///     glyph: the agent is making progress right now.
+///   - `Done`        → ` ✓ ` (success, bold) — a static glyph: the
+///     agent finished its turn and is waiting to be looked at (#80).
 ///   - `Idle`        → blank.
 /// Reserved width either way so the kind/title to the right don't
-/// jitter as a row moves between states. InputNeeded takes precedence
-/// over Working defensively, though the two are disjoint upstream.
+/// jitter as a row moves between states. Precedence asking > working >
+/// done, applied defensively though the states are disjoint upstream.
 fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let (glyph, fg) = if ctx.asking {
         ("?", ctx.theme.warn)
     } else if ctx.working {
         (ctx.working_glyph, ctx.theme.accent)
+    } else if ctx.done {
+        ("✓", ctx.theme.success)
     } else {
         return Cell::empty();
     };
@@ -571,6 +580,7 @@ mod tests {
             long_snooze_armed: false,
             asking: false,
             working: false,
+            done: false,
             working_glyph: working_glyph(0),
             badges: vec![],
             ascii_glyphs: false,
@@ -682,6 +692,35 @@ mod tests {
         assert_eq!(cell_text(&cell), " ? ");
     }
 
+    /// State slot: done → 3 cells with a `✓`, same reserved width as
+    /// the asking pill and working spinner (#80).
+    #[test]
+    fn cell_state_three_cells_with_check_when_done() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.done = true;
+        let cell = cell_state(&ctx);
+        assert_eq!(cell.width(), 3);
+        assert_eq!(cell_text(&cell), " ✓ ");
+    }
+
+    /// State slot precedence: working wins over done if both flags are
+    /// somehow set (disjoint upstream, but the slot renders one thing).
+    #[test]
+    fn cell_state_working_wins_over_done() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.working = true;
+        ctx.working_glyph = working_glyph(2);
+        ctx.done = true;
+        let cell = cell_state(&ctx);
+        assert_eq!(cell_text(&cell), format!(" {} ", working_glyph(2)));
+    }
+
     /// The spinner frame index wraps so an unbounded counter is safe.
     #[test]
     fn working_glyph_wraps_frame_index() {
@@ -769,6 +808,7 @@ mod tests {
             long_snooze_armed: false,
             asking: false,
             working: false,
+            done: false,
             working_glyph: working_glyph(0),
             badges: vec![],
             ascii_glyphs: false,
@@ -893,6 +933,7 @@ mod tests {
             long_snooze_armed: false,
             asking: false,
             working: false,
+            done: false,
             working_glyph: working_glyph(0),
             badges: vec![],
             ascii_glyphs: false,
@@ -1269,6 +1310,7 @@ mod tests {
             long_snooze_armed: false,
             asking: false,
             working: false,
+            done: false,
             working_glyph: working_glyph(0),
             badges: vec![],
             ascii_glyphs: false,

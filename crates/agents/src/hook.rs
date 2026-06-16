@@ -78,8 +78,11 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 ///     after sitting ~60s at a ready composer ("Claude is waiting for
 ///     your input"), which is exactly the "this workspace needs me"
 ///     signal the `?` indicator and `!` jump surface (#62);
-///   - `Stop` and `SessionStart`/`SessionEnd` mean the composer is
-///     **quiet** → [`AgentState::Idle`].
+///   - `Stop` means the agent **finished its turn** →
+///     [`AgentState::Done`]: it ran work and has come to rest, the
+///     "completed, take a look" signal the user wants alerting on (#80);
+///   - `SessionStart`/`SessionEnd` mean the composer is **quiet with no
+///     work behind it** → [`AgentState::Idle`].
 ///
 /// `PermissionRequest` / `SubagentStart` / `PostCompact` are wire
 /// variants Claude Code never fires — they map to no transition, like
@@ -95,9 +98,8 @@ pub fn hook_to_state(event: &HookEvent, current: Option<AgentState>) -> Option<A
         HookEventKind::Notification => {
             return notification_state(event.notification.as_deref(), current);
         }
-        HookEventKind::Stop | HookEventKind::SessionStart | HookEventKind::SessionEnd => {
-            AgentState::Idle
-        }
+        HookEventKind::Stop => AgentState::Done,
+        HookEventKind::SessionStart | HookEventKind::SessionEnd => AgentState::Idle,
         HookEventKind::PermissionRequest
         | HookEventKind::SubagentStart
         | HookEventKind::PostCompact
@@ -228,8 +230,21 @@ mod tests {
     }
 
     #[test]
-    fn stop_and_session_lifecycle_are_idle() {
-        for name in ["Stop", "SessionStart", "SessionEnd"] {
+    fn stop_is_done() {
+        // `Stop` fires when the agent finishes its turn — the
+        // "completed, take a look" signal (#80), distinct from a fresh
+        // composer that never ran work.
+        let ev = parse(r#"{"hook_event_name":"Stop","session_id":"abc"}"#);
+        assert_eq!(hook_to_state(&ev, None), Some(AgentState::Done));
+        assert_eq!(
+            hook_to_state(&ev, Some(AgentState::Working)),
+            Some(AgentState::Done),
+        );
+    }
+
+    #[test]
+    fn session_lifecycle_is_idle() {
+        for name in ["SessionStart", "SessionEnd"] {
             let ev = parse(&format!(r#"{{"hook_event_name":"{name}"}}"#));
             assert_eq!(
                 hook_to_state(&ev, None),

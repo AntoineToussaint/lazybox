@@ -394,9 +394,10 @@ pub struct Sidebar {
     /// The outer wrapper (`realm::components::sidebar`) drains this
     /// after each event delivery and routes to `platform::notify_user`.
     pending_notifications: Vec<PendingNotification>,
-    /// One short string per Active→Asking transition since the last
-    /// drain. Surfaces in lazybox's footer alongside the OS notification
-    /// so users with notifications muted still see the prompt.
+    /// One short string per agent-attention transition since the last
+    /// drain — an agent newly Asking ("needs input") or newly Done
+    /// ("finished") (#80). Surfaces in lazybox's footer alongside the OS
+    /// notification so users with notifications muted still see it.
     pending_asking_notices: Vec<String>,
     /// Workspace keys whose agent is currently in `AgentState::InputNeeded`.
     /// Single source of truth for the `?` row pill, the `? N input`
@@ -412,6 +413,13 @@ pub struct Sidebar {
     /// `Event::AgentState`, sidebar-local for the same reason as
     /// `agents_asking`.
     agents_working: std::collections::HashSet<SessionKey>,
+    /// Workspace keys whose agent is in `AgentState::Done` — it
+    /// finished its turn and is waiting to be looked at (#80). Drives
+    /// the `✓` indicator in the same per-session slot as the `?` pill
+    /// and the working spinner (all three mutually exclusive), and
+    /// alerts the user on the rising edge. Source: `Event::AgentState`,
+    /// sidebar-local for the same reason as `agents_asking`.
+    agents_done: std::collections::HashSet<SessionKey>,
     /// Current frame of the shared "working" spinner, mirrored from
     /// the free-running wall clock by [`Sidebar::tick_working`] so the
     /// render path stays a cheap field read and every working row shows
@@ -496,6 +504,7 @@ impl Sidebar {
             pending_asking_notices: Vec::new(),
             agents_asking: std::collections::HashSet::new(),
             agents_working: std::collections::HashSet::new(),
+            agents_done: std::collections::HashSet::new(),
             working_spinner_frame: 0,
             spinner_epoch: std::time::Instant::now(),
             filter_chip_rect: None,
@@ -569,8 +578,10 @@ impl Sidebar {
     ) -> bool {
         let asking = self.agents_asking.contains(session_key);
         let working = self.agents_working.contains(session_key);
+        let done = self.agents_done.contains(session_key);
         asking == matches!(state, lazybox_ipc::AgentState::InputNeeded)
             && working == matches!(state, lazybox_ipc::AgentState::Working)
+            && done == matches!(state, lazybox_ipc::AgentState::Done)
     }
 
     /// Take any pending desktop notifications queued by event

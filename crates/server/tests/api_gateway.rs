@@ -169,8 +169,7 @@ async fn metrics_route_returns_event_counters() {
         .body(Full::new(Bytes::new()))
         .unwrap();
 
-    let response =
-        api_gateway::handle_request(config, GatewayOptions::default(), request).await;
+    let response = api_gateway::handle_request(config, GatewayOptions::default(), request).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: metrics::EventMetricsSnapshot = read_json(response).await;

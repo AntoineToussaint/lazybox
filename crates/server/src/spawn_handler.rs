@@ -633,6 +633,20 @@ pub async fn handle_spawn(
         // "needs input" state is.
         let mut last_input_needed_at: Option<std::time::Instant> = None;
         const INPUT_NEEDED_HYSTERESIS: std::time::Duration = std::time::Duration::from_secs(8);
+        // Hysteresis for the other transient edge: leaving `Working`.
+        // Claude paints its live status line (the spinner / token
+        // counter) ONLY while busy, but it vanishes for a chunk whenever
+        // the agent prints output between spinner frames or the terminal
+        // does a full repaint — momentarily leaving the PTY detector with
+        // no working anchor and no idle composer either, an ambiguous
+        // Idle. Without damping, that single frame flips a genuinely-busy
+        // agent to Idle and back, breaking the sidebar working indicator
+        // and `!` jump. Only the AMBIGUOUS exit is damped — a real
+        // end-of-turn draws the composer footer, which reads as an
+        // affirmative idle and is honored immediately. Shorter than the
+        // InputNeeded window: the spinner reappears within a frame or two.
+        let mut last_working_at: Option<std::time::Instant> = None;
+        const WORKING_HYSTERESIS: std::time::Duration = std::time::Duration::from_secs(5);
 
         async fn maybe_emit_state_change(
             agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
@@ -646,6 +660,8 @@ pub async fn handle_spawn(
             session_key: &SessionKey,
             last_input_needed_at: &mut Option<std::time::Instant>,
             hysteresis: std::time::Duration,
+            last_working_at: &mut Option<std::time::Instant>,
+            working_hysteresis: std::time::Duration,
             hook_driven: &std::sync::Arc<
                 tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
             >,
@@ -773,6 +789,13 @@ pub async fn handle_spawn(
                     .await
                     .insert(id, lazybox_agents::PromptShape::Chooser);
             }
+            // Refresh the working anchor on every busy reading, even the
+            // ones deduped below, so the Working-exit hysteresis measures
+            // time since the spinner was LAST seen — a transient frame
+            // that drops it then reads as a recent-enough anchor to damp.
+            if new_state == lazybox_ipc::AgentState::Working {
+                *last_working_at = Some(std::time::Instant::now());
+            }
             // Hysteresis. Claude's status-bar updates make the
             // detector miss the prompt for one chunk, then catch
             // it on the next. Without this guard the pill flickers
@@ -784,9 +807,15 @@ pub async fn handle_spawn(
             // readiness probe affirmatively recognizes — is honored
             // immediately, so a wrong InputNeeded can't stick for the
             // full window once Claude is visibly streaming or idle.
-            let clear_exit_signal = new_state == lazybox_ipc::AgentState::Working
-                || (new_state == lazybox_ipc::AgentState::Idle
-                    && agent.detect_ready_for_prompt(detect_window));
+            // Computed once: an affirmatively-recognized idle composer is
+            // a clear end-of-turn for BOTH the InputNeeded and Working
+            // exits below. Only probed for an Idle reading — a Working
+            // reading is itself the clear signal — so streaming chunks
+            // don't pay to re-strip the window.
+            let ready_for_prompt = new_state == lazybox_ipc::AgentState::Idle
+                && agent.detect_ready_for_prompt(detect_window);
+            let clear_exit_signal =
+                new_state == lazybox_ipc::AgentState::Working || ready_for_prompt;
             // Read + decide + insert under ONE lock acquisition. A
             // separate read-then-insert let a concurrent writer (hook
             // ingest, the optimistic Enter flip) land between the two
@@ -811,6 +840,28 @@ pub async fn handle_spawn(
                     return;
                 }
                 if done_is_sticky(current, new_state) {
+                    return;
+                }
+                // Symmetric damping for the Working→Idle edge: a single
+                // frame where Claude's spinner is absent reads as an
+                // ambiguous Idle (no working anchor, composer not yet
+                // drawn). Suppress it within the window so a busy agent
+                // doesn't flicker to Idle between spinner frames; an
+                // affirmative idle composer (`ready_for_prompt`) is the
+                // real end-of-turn and is honored immediately.
+                if should_suppress_working_exit(
+                    current,
+                    new_state,
+                    ready_for_prompt,
+                    last_working_at.map(|t| t.elapsed()),
+                    working_hysteresis,
+                ) {
+                    drop(map);
+                    tracing::debug!(
+                        terminal_id = ?id,
+                        ?new_state,
+                        "state hysteresis: suppressing Working → Idle",
+                    );
                     return;
                 }
                 if current == Some(new_state) {
@@ -884,6 +935,8 @@ pub async fn handle_spawn(
                 &session_key_for_pump,
                 &mut last_input_needed_at,
                 INPUT_NEEDED_HYSTERESIS,
+                &mut last_working_at,
+                WORKING_HYSTERESIS,
                 &hook_driven_map,
                 &input_shapes_map,
             )
@@ -939,6 +992,8 @@ pub async fn handle_spawn(
                 &session_key_for_pump,
                 &mut last_input_needed_at,
                 INPUT_NEEDED_HYSTERESIS,
+                &mut last_working_at,
+                WORKING_HYSTERESIS,
                 &hook_driven_map,
                 &input_shapes_map,
             )
@@ -1694,6 +1749,38 @@ fn done_is_sticky(
 ) -> bool {
     current == Some(lazybox_ipc::AgentState::Done)
         && new_state == lazybox_ipc::AgentState::Idle
+}
+
+/// Hysteresis decision for the edge that LEAVES `Working`.
+///
+/// Claude paints its live status line (spinner glyph + token counter +
+/// `esc to interrupt`) ONLY while busy. That line vanishes for a chunk
+/// whenever the agent prints output between spinner frames or the
+/// terminal does a full repaint, leaving the PTY detector with no
+/// working anchor — and, mid-turn, no idle composer either. The result
+/// is an AMBIGUOUS Idle that would flip a genuinely-busy agent to Idle
+/// and back, breaking the sidebar working indicator and `!` jump. Damp
+/// that transient: suppress `Working → Idle` within the window UNLESS the
+/// Idle is affirmative (`ready_for_prompt` — the composer footer is
+/// drawn, the real end-of-turn), which is honored immediately. Returns
+/// true to suppress.
+///
+/// Only the PTY fallback reaches here: on a hook-driven terminal with
+/// fresh hooks, ambiguous PTY Idle readings are already filtered by
+/// `pty_reading_allowed`, and `Stop` provides the authoritative idle.
+/// This covers the no-hook and stale-hook windows, where the spinner is
+/// the only working signal.
+fn should_suppress_working_exit(
+    current: Option<lazybox_ipc::AgentState>,
+    new_state: lazybox_ipc::AgentState,
+    ready_for_prompt: bool,
+    since_last_working: Option<std::time::Duration>,
+    hysteresis: std::time::Duration,
+) -> bool {
+    current == Some(lazybox_ipc::AgentState::Working)
+        && new_state == lazybox_ipc::AgentState::Idle
+        && !ready_for_prompt
+        && since_last_working.is_some_and(|e| e < hysteresis)
 }
 
 /// Pure-data lookup so tests don't need a real YAML on disk.
@@ -3431,6 +3518,70 @@ mod tests {
         assert!(!done_is_sticky(Some(Working), Idle));
         assert!(!done_is_sticky(Some(InputNeeded), Idle));
         assert!(!done_is_sticky(None, Idle));
+    }
+
+    #[test]
+    fn hysteresis_damps_only_ambiguous_working_exit() {
+        use lazybox_ipc::AgentState::{Idle, InputNeeded, Working};
+        let hyst = std::time::Duration::from_secs(5);
+        let recent = Some(std::time::Duration::from_secs(1));
+        let stale = Some(std::time::Duration::from_secs(6));
+
+        // Spinner dropped for one frame: ambiguous Idle (composer not
+        // drawn) within the window → damp, so a busy agent doesn't
+        // flicker to Idle between frames.
+        assert!(should_suppress_working_exit(
+            Some(Working),
+            Idle,
+            false,
+            recent,
+            hyst,
+        ));
+        // A real end-of-turn draws the composer footer → affirmative
+        // idle, honored immediately even within the window.
+        assert!(!should_suppress_working_exit(
+            Some(Working),
+            Idle,
+            true,
+            recent,
+            hyst,
+        ));
+        // Past the window → the spinner has been gone long enough that
+        // the agent really is idle; let it through.
+        assert!(!should_suppress_working_exit(
+            Some(Working),
+            Idle,
+            false,
+            stale,
+            hyst,
+        ));
+        // Never damp a transition INTO a live dialog — a permission
+        // prompt mid-work must surface immediately.
+        assert!(!should_suppress_working_exit(
+            Some(Working),
+            InputNeeded,
+            false,
+            recent,
+            hyst,
+        ));
+        // Only the Working→Idle edge is damped; an Idle→Idle re-read or a
+        // non-Working prior state is untouched.
+        assert!(!should_suppress_working_exit(
+            Some(Idle),
+            Idle,
+            false,
+            recent,
+            hyst,
+        ));
+        // No prior Working timestamp (e.g. first frame after stale hooks
+        // open the gate) → nothing to anchor on, let it through.
+        assert!(!should_suppress_working_exit(
+            Some(Working),
+            Idle,
+            false,
+            None,
+            hyst,
+        ));
     }
 
     /// PTY readings on a hook-driven terminal: fresh hooks own

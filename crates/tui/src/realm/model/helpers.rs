@@ -616,6 +616,53 @@ impl LoopWatchdog {
     }
 }
 
+/// Minimum spacing between *background*-driven renders. A daemon
+/// output flood drives `drain_daemon_events` at the drain-batch rate
+/// (a fresh batch every ~8ms once a cap is hit), and the old loop
+/// re-rendered the whole UI on every one of those batches — burning
+/// the single loop thread on frames the user can't even read while
+/// input dispatch waited its turn behind them. Coalescing background
+/// frames to one display refresh caps that at ~60fps; input-driven
+/// redraws bypass it entirely (see [`RenderThrottle::should_render`]),
+/// so a scroll gesture still renders progressively per event — the
+/// property the run loop's render comment is careful to preserve.
+pub(super) const MIN_BACKGROUND_RENDER_INTERVAL: Duration = POLL_IDLE;
+
+/// Rate-caps renders that aren't driven by user input. Input redraws
+/// (a key, a scroll wheel tick) always render immediately so the UI
+/// stays as responsive as the loop thread allows; renders driven by
+/// daemon output or spinner ticks are coalesced to
+/// [`MIN_BACKGROUND_RENDER_INTERVAL`] so an output burst degrades into
+/// dropped *redundant frames*, never dropped keystrokes. A deferred
+/// frame isn't lost — `model.redraw` stays set, so the next eligible
+/// iteration (the `POLL_IDLE` heartbeat at worst) paints it within one
+/// refresh.
+#[derive(Default)]
+pub(super) struct RenderThrottle {
+    last_render: Option<std::time::Instant>,
+}
+
+impl RenderThrottle {
+    /// Whether a pending redraw should paint now. Input-driven redraws
+    /// always do. Background redraws wait until a refresh interval has
+    /// elapsed since the last paint; the very first frame (no prior
+    /// paint) always renders so startup isn't delayed.
+    pub(super) fn should_render(&self, now: std::time::Instant, input_driven: bool) -> bool {
+        if input_driven {
+            return true;
+        }
+        match self.last_render {
+            None => true,
+            Some(last) => now.duration_since(last) >= MIN_BACKGROUND_RENDER_INTERVAL,
+        }
+    }
+
+    /// Record that a frame painted at `now`.
+    pub(super) fn record(&mut self, now: std::time::Instant) {
+        self.last_render = Some(now);
+    }
+}
+
 /// What woke the run loop's unified idle wait.
 pub(super) enum Wake {
     /// Host-terminal event from the crossterm reader thread, stamped
@@ -773,6 +820,12 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
     let mut carried: Option<IpcEvent> = None;
     let mut stale_tally = StaleInputTally::default();
     let mut watchdog = LoopWatchdog::default();
+    let mut render_throttle = RenderThrottle::default();
+    // Set when the redraw pending at the top of the loop was produced
+    // by user input (a dispatched key/mouse, or a modal interaction) —
+    // those paint immediately; everything else is rate-capped. One-shot:
+    // consumed and cleared by the render step each iteration.
+    let mut redraw_is_input = false;
     // Start of the current iteration's work phase — reset right after
     // each wait so the watchdog never counts time spent idle.
     let mut work_start = std::time::Instant::now();
@@ -810,23 +863,35 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         // shows up without blocking on it above.
         if model.modal_redraw_pending() {
             model.redraw = true;
+            // A modal key the user just pressed — paint it without
+            // waiting on the background frame cap.
+            redraw_is_input = true;
         }
 
         // 4. Render if dirty — before the blocking input read so the
-        // user sees their last action immediately.
+        // user sees their last action immediately. Background-driven
+        // frames (daemon output, spinner ticks) are coalesced to one
+        // display refresh so an output flood can't saturate the render
+        // path; input-driven frames bypass the cap and paint at once.
+        // A frame the throttle defers keeps `model.redraw` set, so it
+        // paints on the next eligible iteration (≤ one refresh away).
         if model.redraw {
-            // Per-frame timing log behind the `lazybox=debug` filter.
-            // Lets us see in `/tmp/lazybox.log` whether a slow scroll
-            // is the render itself (would show large `frame_ms`)
-            // versus daemon round-trips between renders. Cheap —
-            // `Instant::now` is ~10ns and `tracing::debug!` is a
-            // no-op when the level isn't enabled.
-            let t = std::time::Instant::now();
-            model.view();
-            let elapsed_ms = t.elapsed().as_micros() as f32 / 1000.0;
-            tracing::debug!(frame_ms = elapsed_ms, "render");
-            model.redraw = false;
+            let now = std::time::Instant::now();
+            if render_throttle.should_render(now, redraw_is_input) {
+                // Per-frame timing log behind the `lazybox=debug`
+                // filter. Lets us see in `/tmp/lazybox.log` whether a
+                // slow scroll is the render itself (would show large
+                // `frame_ms`) versus daemon round-trips between
+                // renders. Cheap — `Instant::now` is ~10ns and
+                // `tracing::debug!` is a no-op when the level isn't on.
+                model.view();
+                let elapsed_ms = now.elapsed().as_micros() as f32 / 1000.0;
+                tracing::debug!(frame_ms = elapsed_ms, "render");
+                model.redraw = false;
+                render_throttle.record(now);
+            }
         }
+        redraw_is_input = false;
 
         // 5. Block on the unified wait. One input event per
         // iteration, render between events — the "drain all then
@@ -891,6 +956,9 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                 } else {
                     report_stale_drops(model, &mut stale_tally);
                     dispatch_event(model, timed.event);
+                    // Any redraw this produced is the user's own action —
+                    // paint it next iteration without the background cap.
+                    redraw_is_input = true;
                 }
             }
             // Any non-input wake means the buffered-input burst is

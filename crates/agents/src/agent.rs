@@ -2,7 +2,7 @@
 
 use lazybox_ipc::AgentState;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Context passed to `Agent::spawn` / `resume`.
@@ -58,6 +58,21 @@ pub trait Agent: Send + Sync {
     /// a `--continue`-style flag.
     fn resume(&self, ctx: &SpawnCtx) -> Vec<String> {
         self.spawn(ctx)
+    }
+
+    /// Prepare the environment so an UNATTENDED launch in `worktree`
+    /// can't stall on a one-time interactive consent dialog. Called
+    /// before spawning an autonomous session (the `w` / address-comments
+    /// flows), where no human is present to answer such a dialog.
+    ///
+    /// Default no-op. Claude overrides it: Claude Code shows a
+    /// workspace-trust dialog ("Do you trust the files in this folder?")
+    /// for any directory it hasn't seen before — skipped only in
+    /// non-interactive `-p` mode, which lazybox doesn't use — so an
+    /// autonomous spawn in a freshly provisioned worktree would hang on
+    /// it. Best-effort: failures leave the spawn to proceed unchanged.
+    fn prepare_unattended(&self, worktree: &Path) {
+        let _ = worktree;
     }
 
     /// Per-agent state detector. Inspect recent PTY output and return
@@ -298,6 +313,15 @@ pub mod builtins {
             }
             push_settings_flag(&mut argv, ctx);
             argv
+        }
+
+        fn prepare_unattended(&self, worktree: &Path) {
+            if let Err(e) = crate::claude_trust::seed_workspace_trust(worktree) {
+                tracing::warn!(
+                    worktree = %worktree.display(),
+                    "claude: failed to pre-trust worktree for unattended launch: {e}",
+                );
+            }
         }
 
         /// Wire lazybox's hook command into a settings file Claude

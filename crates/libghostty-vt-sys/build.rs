@@ -64,6 +64,12 @@ fn main() {
     build
         .arg("build")
         .arg("-Demit-lib-vt")
+        // ghostty's `build.zig` defaults `-Doptimize` to `.Debug`. The
+        // VT parser runs on the TUI's UI thread for every byte of agent
+        // output; a Debug build is ~570× slower and wedges the run loop
+        // (buffered keystrokes age out, forward buffers overflow). Always
+        // build the vendored parser ReleaseFast — we never debug it here.
+        .arg("-Doptimize=ReleaseFast")
         .arg("--prefix")
         .arg(&install_prefix)
         .current_dir(&ghostty_dir);

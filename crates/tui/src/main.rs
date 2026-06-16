@@ -137,8 +137,8 @@ fn init_tracing() -> anyhow::Result<()> {
     use tracing_subscriber::prelude::*;
 
     let log_path = resolve_log_path();
-    let file =
-        open_log_file(&log_path).map_err(|e| anyhow::anyhow!("open {}: {e}", log_path.display()))?;
+    let file = open_log_file(&log_path)
+        .map_err(|e| anyhow::anyhow!("open {}: {e}", log_path.display()))?;
 
     // Route the OS stderr into the same log file so native logs from
     // below the Rust layer (libghostty-vt Zig log, libgit2 stderr,

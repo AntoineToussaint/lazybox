@@ -68,6 +68,9 @@ pub enum Action {
     MarkAllRead,
     /// Toggle snooze on the focused workspace (short snooze, ~4h).
     ToggleSnooze,
+    /// Long-snooze the focused workspace (~1 year — effectively "hide").
+    /// Confirm-guarded because it has no obvious undo.
+    LongSnooze,
     /// Archive the workspace + kill any of its sessions. Destructive.
     Archive,
     /// Merge the workspace's PR if it's in a merge-ready state. Only
@@ -209,6 +212,7 @@ pub enum ActionKind {
     NewProject,
     MarkAllRead,
     ToggleSnooze,
+    LongSnooze,
     Archive,
     MergePr,
     AdoptSessions,
@@ -298,6 +302,7 @@ impl Action {
             Action::NewProject => ActionKind::NewProject,
             Action::MarkAllRead => ActionKind::MarkAllRead,
             Action::ToggleSnooze => ActionKind::ToggleSnooze,
+            Action::LongSnooze => ActionKind::LongSnooze,
             Action::Archive => ActionKind::Archive,
             Action::MergePr => ActionKind::MergePr,
             Action::AdoptSessions => ActionKind::AdoptSessions,
@@ -487,6 +492,13 @@ impl ActionDef {
                 default_keys: "z",
                 label: "snooze",
                 describe: "Snooze the workspace for ~4h (toggle).",
+                section: Section::Workspace,
+            },
+            ActionKind::LongSnooze => &Self {
+                kind: ActionKind::LongSnooze,
+                default_keys: "Shift-Z",
+                label: "long snooze",
+                describe: "Snooze the workspace for ~1 year (effectively hide). Confirmed first.",
                 section: Section::Workspace,
             },
             ActionKind::Archive => &Self {
@@ -683,6 +695,7 @@ impl ActionDef {
             ActionKind::OpenEditor,
             ActionKind::MarkAllRead,
             ActionKind::ToggleSnooze,
+            ActionKind::LongSnooze,
             // Project comes before Workspace — projects are
             // containers; the user reads "create a project, then
             // create workspaces inside it." Help modal + any other
@@ -984,36 +997,50 @@ impl ActionDef {
         self.default_chords().into_iter().next()
     }
 
-    /// True when this action is *destructive* — invoking it commits
-    /// state the user can't trivially undo (merging a PR, archiving
-    /// a workspace, killing a session). The dispatch path
-    /// (`Model::dispatch_action`) routes destructive actions
-    /// through a unified Confirm modal BEFORE firing; non-
-    /// destructive actions fire immediately.
+    /// The guard standing between a keypress and this action firing —
+    /// the third gap the catalog closed (#102 P3). Moves the
+    /// double-press / confirm machinery that used to live in per-pane
+    /// latches onto the catalog row:
     ///
-    /// Adding a new destructive action: mark it here AND add the
-    /// matching `confirm_prompt` arm. Forgetting one half is a
-    /// catalog bug — the type system can't catch it directly, but
-    /// the test `destructive_actions_have_prompts` does.
-    pub fn is_destructive(&self) -> bool {
-        matches!(self.kind, ActionKind::Archive | ActionKind::MergePr,)
-    }
-
-    /// Confirm-modal prompt text for a destructive action. Returns
-    /// `None` for non-destructive actions — those shouldn't be
-    /// routed through the confirm path. The catalog default is
-    /// static; specific surfaces (e.g. the merge-PR flow knows the
-    /// PR number) can override at mount time.
-    pub fn confirm_prompt(&self) -> Option<&'static str> {
+    /// - `None` — fires immediately.
+    /// - `DoublePress` — needs a timed two-press (quit's `q q`).
+    /// - `Confirm(prompt)` — mounts a Confirm modal first (archive,
+    ///   merge, long-snooze). The prompt is the static default; a
+    ///   surface that knows specifics (the PR number) can override at
+    ///   mount time.
+    pub fn guard(&self) -> Guard {
         match self.kind {
-            ActionKind::Archive => Some(
+            ActionKind::Quit => Guard::DoublePress,
+            ActionKind::Archive => Guard::Confirm(
                 "Archive the focused workspace? Active sessions \
                  are killed and the row drops from the inbox.",
             ),
-            ActionKind::MergePr => Some(
+            ActionKind::MergePr => Guard::Confirm(
                 "Merge the focused PR? Mainline branch updates \
                  immediately and the PR closes.",
             ),
+            ActionKind::LongSnooze => Guard::Confirm(
+                "Long-snooze this workspace (~1 year)? It drops from \
+                 the inbox until then — effectively hidden.",
+            ),
+            _ => Guard::None,
+        }
+    }
+
+    /// True when this action is gated behind a Confirm modal — the
+    /// dispatch path (`Model::dispatch_action`) routes these through a
+    /// unified Confirm before firing. (Named for history; really
+    /// "guard is `Confirm`".)
+    pub fn is_destructive(&self) -> bool {
+        matches!(self.guard(), Guard::Confirm(_))
+    }
+
+    /// Confirm-modal prompt text, for a `Confirm`-guarded action;
+    /// `None` otherwise — those shouldn't be routed through the
+    /// confirm path.
+    pub fn confirm_prompt(&self) -> Option<&'static str> {
+        match self.guard() {
+            Guard::Confirm(prompt) => Some(prompt),
             _ => None,
         }
     }
@@ -1086,6 +1113,7 @@ impl ActionKind {
             ActionKind::NewProject => "new_project",
             ActionKind::MarkAllRead => "mark_all_read",
             ActionKind::ToggleSnooze => "toggle_snooze",
+            ActionKind::LongSnooze => "long_snooze",
             ActionKind::Archive => "archive",
             ActionKind::MergePr => "merge_pr",
             ActionKind::AdoptSessions => "adopt_sessions",
@@ -1133,6 +1161,18 @@ impl ActionKind {
 pub enum Param {
     /// Agent id for a generated `SpawnAgent` row (`claude`, `codex`, …).
     Agent(String),
+}
+
+/// The guard between a keypress and an action firing — the per-row
+/// replacement for the scattered double-press / confirm latches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Guard {
+    /// Fires immediately.
+    None,
+    /// Needs a timed two-press of the chord (e.g. quit's `q q`).
+    DoublePress,
+    /// Mounts a Confirm modal carrying this prompt before firing.
+    Confirm(&'static str),
 }
 
 /// A resolved catalog row: a static action plus any runtime
@@ -1341,6 +1381,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::SpawnAgent
         | ActionKind::MarkAllRead
         | ActionKind::ToggleSnooze
+        | ActionKind::LongSnooze
         | ActionKind::RequestReviewers
         | ActionKind::AddAssignees
         | ActionKind::ManageLabels

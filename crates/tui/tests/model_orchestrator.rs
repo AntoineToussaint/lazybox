@@ -1407,6 +1407,53 @@ fn spawn_agent_key_is_remappable() {
     assert_eq!(first_spawned_agent(&after_remap).as_deref(), Some("claude"));
 }
 
+// ── Long-snooze is a Confirm-guarded catalog row (#102 P3) ───────────
+
+/// `Shift-Z` long-snooze is `Confirm`-guarded: it mounts the unified
+/// ActionConfirm modal instead of the old sidebar two-press latch, and
+/// only snoozes (~1 year) once the user confirms with `y`.
+#[test]
+fn long_snooze_confirms_then_snoozes_a_year_out() {
+    use lazybox_ipc::Command;
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let pr_ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    let pr_key: SessionKey = (&pr_ws.key).into();
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![pr_ws],
+        terminals: vec![],
+        projects: vec![],
+    });
+    assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
+    while server.rx.try_recv().is_ok() {}
+
+    // First press mounts the confirm — no snooze yet.
+    m.dispatch_key(key(Key::Char('Z')));
+    assert_eq!(
+        m.top_modal(),
+        Some(&Id::ActionConfirm),
+        "Shift-Z must mount the Confirm modal, not snooze immediately",
+    );
+    let before_confirm: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+    assert!(
+        !before_confirm
+            .iter()
+            .any(|c| matches!(c, Command::Snooze { .. })),
+        "no snooze before confirming",
+    );
+
+    // Confirming fires the ~1-year snooze.
+    m.dispatch_modal_key(key(Key::Char('y')));
+    let after: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+    let snooze = after.iter().find_map(|c| match c {
+        Command::Snooze { until, .. } => Some(*until),
+        _ => None,
+    });
+    let until = snooze.expect("confirming Shift-Z snoozes");
+    let days = (until - Utc::now()).num_days();
+    assert!((360..=370).contains(&days), "expected ~1 year, got {days} days");
+}
+
 /// Flatten the current frame buffer into a newline-joined string of
 /// cell symbols, so a render test can assert on what's actually on
 /// screen.

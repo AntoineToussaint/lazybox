@@ -1011,6 +1011,7 @@ fn action_from_kind(
         ActionKind::MergePr => Action::MergePr,
         ActionKind::Archive => Action::Archive,
         ActionKind::ToggleSnooze => Action::ToggleSnooze,
+        ActionKind::LongSnooze => Action::LongSnooze,
         ActionKind::Refresh => Action::Refresh,
         ActionKind::AdoptSessions => Action::AdoptSessions,
         ActionKind::CollapseIntoPr => Action::CollapseIntoPr,

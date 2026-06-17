@@ -214,10 +214,9 @@ impl Sidebar {
         collapsed_repos: std::collections::BTreeSet<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
-        ui: &lazybox_config::UiDefaults,
     ) {
         self.inner
-            .apply_config(attention, collapsed_repos, default_agent, display, ui);
+            .apply_config(attention, collapsed_repos, default_agent, display);
     }
 
     /// Replace the set of subscribed-repo names that should show up

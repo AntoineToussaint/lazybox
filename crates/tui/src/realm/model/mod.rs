@@ -996,7 +996,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.right.set_default_agent(agent);
         }
         self.sidebar
-            .apply_inner_config(attention, collapsed_repos, default_agent, display, ui);
+            .apply_inner_config(attention, collapsed_repos, default_agent, display);
         // Stash resolved defaults for model-level knobs (`q-q`
         // window, terminal-escape char, split step) that used to be
         // hardcoded consts.

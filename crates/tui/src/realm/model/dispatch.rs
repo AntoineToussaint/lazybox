@@ -89,6 +89,25 @@ impl<T: TerminalAdapter> Model<T> {
                     Action::Archive => vec![IpcCommand::Kill {
                         session_key: session_key.clone(),
                     }],
+                    Action::LongSnooze => {
+                        // Re-resolve against the stashed workspace so a
+                        // state change while the modal was up can't
+                        // snooze the wrong row.
+                        if let crate::intent::Intent::Snooze {
+                            session_key,
+                            duration,
+                        } = crate::intent::resolve_long_snooze(
+                            workspace.as_ref(),
+                            self.ui_defaults.long_snooze,
+                        ) {
+                            let until = chrono::Utc::now()
+                                + chrono::Duration::from_std(duration)
+                                    .unwrap_or_else(|_| chrono::Duration::days(365));
+                            vec![IpcCommand::Snooze { session_key, until }]
+                        } else {
+                            Vec::new()
+                        }
+                    }
                     Action::MergePr => {
                         // Re-check merge preconditions against the
                         // STASHED workspace — state may have moved

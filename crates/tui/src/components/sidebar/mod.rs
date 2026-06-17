@@ -25,17 +25,9 @@
 //!   across refreshes — the same row stays under the cursor even
 //!   when another workspace gets inserted above it.
 //! - `mailbox`: which view we're showing (Inbox vs Snoozed).
-//! - `latches`: two-press confirm guards for `Shift-X` (kill) and
-//!   `Shift-Z` (long snooze). Held as a `LatchSet<SessionKey>` so
-//!   "any non-matching key disarms" is one call. See
-//!   [`crate::latch_set::LatchSet`].
 
 use crate::{PaneId, PaneOutcome};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-/// Trigger for the long-snooze confirm latch (`Shift-Z`).
-const TRIGGER_LONG_SNOOZE: crate::latch_set::KeyTrigger =
-    crate::latch_set::KeyTrigger::new(KeyCode::Char('Z'), KeyModifiers::SHIFT);
 
 /// Minimum wall-clock between "working" spinner frame advances.
 /// ~8 fps — fast enough to read as motion, slow enough that the
@@ -342,18 +334,6 @@ pub struct Sidebar {
     /// Sort order within each repo group. Default is recency; `o`
     /// cycles to `ByRole` and `ByRoleSplit`. See [`SortMode`].
     sort_mode: SortMode,
-    /// Two-press confirm latches keyed by trigger. Registers
-    /// entries for `Shift-X` (kill) + `Shift-Z` (long snooze).
-    /// Disarms every non-matching entry on each keypress, so
-    /// pressing `j` between `Shift-X` arm and re-press cancels.
-    /// See [`crate::latch_set::LatchSet`].
-    latches: crate::latch_set::LatchSet<SessionKey>,
-    /// `z` snooze duration. Configurable via
-    /// `~/.lazybox/config.yaml::ui.short_snooze` (default 4h).
-    short_snooze: std::time::Duration,
-    /// `Shift-Z` long-snooze duration. Configurable via
-    /// `ui.long_snooze` (default 1 year).
-    long_snooze: std::time::Duration,
     /// Mirror of the daemon's live-terminals set, scoped to what we
     /// need for the workspace-row runner badges (e.g. ` C  S 2` for
     /// one Claude + two shells running). Populated from `Event::Snapshot`
@@ -473,14 +453,6 @@ impl Sidebar {
             mailbox: Mailbox::Inbox,
             role_filter: RoleFilter::default(),
             sort_mode: SortMode::default(),
-            latches: {
-                let mut s: crate::latch_set::LatchSet<SessionKey> =
-                    crate::latch_set::LatchSet::new();
-                s.register(TRIGGER_LONG_SNOOZE);
-                s
-            },
-            short_snooze: lazybox_config::UiDefaults::default().short_snooze,
-            long_snooze: lazybox_config::UiDefaults::default().long_snooze,
             running_terminals: HashMap::new(),
             attention: lazybox_config::AttentionConfig::default(),
             projects: BTreeMap::new(),
@@ -688,15 +660,12 @@ impl Sidebar {
         collapsed_repos: BTreeSet<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
-        ui: &lazybox_config::UiDefaults,
     ) {
         self.attention = attention;
         self.collapsed_repos = collapsed_repos;
         if let Some(agent) = default_agent.filter(|s| !s.is_empty()) {
             self.default_agent = agent;
         }
-        self.short_snooze = ui.short_snooze;
-        self.long_snooze = ui.long_snooze;
         self.set_show_inactive_in_inbox(display.show_inactive_in_inbox);
         self.ascii_glyphs = display.ascii_glyphs;
     }

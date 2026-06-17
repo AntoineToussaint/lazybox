@@ -15,14 +15,6 @@ use super::*;
 
 impl Sidebar {
     pub fn handle_key(&mut self, key: KeyEvent, cmds: &mut Vec<Command>) -> PaneOutcome {
-        // Each two-press latch disarms when its trigger key isn't
-        // the next press. Single source of truth for the "first
-        // press arms, second press fires, anything else disarms"
-        // contract is owned by `LatchSet`. One call disarms every
-        // registered latch whose trigger doesn't match this key —
-        // no per-action `if !is_shift_X { latch.disarm() }` line.
-        self.latches.disarm_others(key.code, key.modifiers);
-
         match (key.code, key.modifiers) {
             // ── Navigation ────────────────────────────────────────────
             // `FocusWorkspace` emission is centralized in
@@ -152,41 +144,11 @@ impl Sidebar {
             // help) and collided with the vim `g`/`G` "go to
             // top/bottom" convention the right pane already uses.
             // One refresh binding, accessible from every pane.
-            // `z` toggle-snooze is now handled by the catalog
-            // dispatch in `Model::dispatch_action(ToggleSnooze)` —
-            // same resolver, same effect, reads
-            // `ui_defaults.short_snooze` instead of the sidebar's
-            // local copy (one fewer place to keep in sync).
-            (KeyCode::Char('Z'), m) if m.contains(KeyModifiers::SHIFT) => {
-                // Two-press confirm — 1-year snooze is effectively
-                // "hide forever" with no obvious undo. The
-                // `ConfirmLatch::arm_or_fire` returns true on the
-                // SECOND consecutive press; otherwise it arms +
-                // returns false. The actual snooze duration lives
-                // in the Intent the resolver returns.
-                let Some(session_key) = self.selected_session_key().cloned() else {
-                    return PaneOutcome::Consumed;
-                };
-                if !self
-                    .latches
-                    .arm_or_fire(TRIGGER_LONG_SNOOZE, session_key.clone())
-                {
-                    return PaneOutcome::Consumed;
-                }
-                let workspace = self.selected_workspace();
-                let intent = crate::intent::resolve_long_snooze(workspace, self.long_snooze);
-                if let crate::intent::Intent::Snooze {
-                    session_key,
-                    duration,
-                } = intent
-                {
-                    let until = self.now()
-                        + chrono::Duration::from_std(duration)
-                            .unwrap_or(chrono::Duration::days(365));
-                    cmds.push(Command::Snooze { session_key, until });
-                }
-                PaneOutcome::Consumed
-            }
+            // `z` toggle-snooze and `Shift-Z` long-snooze are catalog
+            // actions now (#102): `Model::dispatch_action(ToggleSnooze)`
+            // and the `Confirm`-guarded `LongSnooze` row, which mounts
+            // the unified Confirm modal instead of the old two-press
+            // latch. That deleted the sidebar's `LatchSet`.
 
             // `f` role-filter, `o` sort, `/` search, and `Shift-S`
             // mailbox cycle moved into the action catalog

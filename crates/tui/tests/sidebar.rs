@@ -423,26 +423,8 @@ fn m_emits_mark_read() {
 // tests/model_orchestrator.rs. `Shift-Z` long-snooze is still inline
 // here pending its own catalog migration.)
 
-#[test]
-fn shift_z_archives_a_year_out() {
-    let mut s = populated_sidebar();
-    let mut cmds = Vec::new();
-    let before = Utc::now();
-    // Two presses now — first arms, second fires. The 1-year
-    // snooze is irreversible enough to deserve a confirmation,
-    // same as Shift-X / Shift-M.
-    s.handle_key(shift_char('Z'), &mut cmds);
-    assert!(cmds.is_empty(), "first Shift-Z arms, doesn't fire");
-    s.handle_key(shift_char('Z'), &mut cmds);
-    assert_eq!(cmds.len(), 1);
-    match &cmds[0] {
-        Command::Snooze { until, .. } => {
-            let min = before + Duration::days(364);
-            assert!(*until >= min, "archive snooze should be roughly a year");
-        }
-        other => panic!("expected Snooze, got {other:?}"),
-    }
-}
+// `Shift-Z` long-snooze is a `Confirm`-guarded catalog action now
+// (#102 P3) — covered at the model layer in `model_orchestrator.rs`.
 
 // ── Navigation bounds ─────────────────────────────────────────────────
 //
@@ -998,48 +980,11 @@ fn s_on_workspace_emits_shell_spawn() {
     }
 }
 
-#[test]
-fn shift_z_requires_two_presses_to_emit_long_snooze() {
-    // 1-year snooze is effectively "hide forever" — a single
-    // fat-fingered Shift-Z used to mute the row with no obvious
-    // undo. Two-press latch mirrors Shift-X / Shift-M.
-    let mut s = sidebar_with_pr(|_| {});
-    let mut cmds: Vec<Command> = Vec::new();
-    s.handle_key(shift_char('Z'), &mut cmds);
-    assert!(
-        cmds.is_empty(),
-        "first Shift-Z must arm the latch, not fire",
-    );
-    s.handle_key(shift_char('Z'), &mut cmds);
-    assert_eq!(cmds.len(), 1);
-    match &cmds[0] {
-        Command::Snooze { until, .. } => {
-            // ~365 days into the future is a long snooze.
-            let delta = (*until - chrono::Utc::now()).num_days();
-            assert!(
-                (360..=370).contains(&delta),
-                "Shift-Z must snooze ~1 year, got {delta} days",
-            );
-        }
-        other => panic!("expected Snooze, got {other:?}"),
-    }
-}
-
-#[test]
-fn unrelated_key_disarms_shift_z_latch() {
-    // Any key other than Shift-Z disarms the long-snooze prompt
-    // (same pattern as Shift-X / Shift-M).
-    let mut s = sidebar_with_pr(|_| {});
-    let mut cmds: Vec<Command> = Vec::new();
-    s.handle_key(shift_char('Z'), &mut cmds);
-    s.handle_key(key_code(KeyCode::Char('s')), &mut cmds); // disarms
-    cmds.clear();
-    s.handle_key(shift_char('Z'), &mut cmds);
-    assert!(
-        cmds.is_empty(),
-        "after disarming, single Shift-Z must NOT fire snooze",
-    );
-}
+// `Shift-Z` long-snooze moved out of the sidebar into the catalog as
+// a `Confirm`-guarded `LongSnooze` row (#102 P3): pressing it mounts
+// the unified Confirm modal instead of arming a sidebar two-press
+// latch, which let the per-pane `LatchSet` be deleted. The keyboard +
+// confirm flow is covered in `model_orchestrator.rs::long_snooze_*`.
 
 #[test]
 fn m_on_workspace_emits_mark_read() {
@@ -1311,7 +1256,6 @@ fn show_inactive_in_inbox_surfaces_merged_and_closed() {
         BTreeSet::new(),
         None,
         &display,
-        &lazybox_config::UiDefaults::default(),
     );
 
     let now = Utc::now();
@@ -1648,7 +1592,6 @@ fn desktop_notify_off_suppresses_os_banner_but_keeps_footer_notice() {
         BTreeSet::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
-        &lazybox_config::UiDefaults::default(),
     );
 
     let now = Utc::now();
@@ -1745,7 +1688,6 @@ fn ci_failure_transition_respects_desktop_notify_off() {
         BTreeSet::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
-        &lazybox_config::UiDefaults::default(),
     );
     s.on_event(&Event::WorkspaceUpserted(Box::new(workspace_with(
         "o/r#1",

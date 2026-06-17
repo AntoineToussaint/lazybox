@@ -26,7 +26,6 @@
 )]
 
 pub mod components;
-pub mod latch_set;
 pub mod lazybox_theme;
 pub mod pane;
 pub mod perf;

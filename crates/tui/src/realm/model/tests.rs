@@ -1873,6 +1873,53 @@ mod modal_input_responsiveness_tests {
     }
 }
 
+/// The `q q` quit chord (issue #100): the first `q` arms a hint
+/// instead of quitting silently; a second `q` quits; `Esc` cancels.
+mod quit_chord_tests {
+    use super::super::Model;
+    use lazybox_ipc::channel;
+    use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn q() -> KeyEvent {
+        KeyEvent::new(Key::Char('q'), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn first_q_arms_the_hint_without_quitting() {
+        let mut m = build_model();
+        m.dispatch_key(q());
+        assert!(!m.quit, "a single q must not quit");
+        assert!(
+            m.q_arm_pending(),
+            "the first q must arm the chord so the hint surfaces",
+        );
+    }
+
+    #[test]
+    fn second_q_quits() {
+        let mut m = build_model();
+        m.dispatch_key(q());
+        m.dispatch_key(q());
+        assert!(m.quit, "q q must quit");
+    }
+
+    #[test]
+    fn esc_cancels_the_armed_chord() {
+        let mut m = build_model();
+        m.dispatch_key(q());
+        assert!(m.q_arm_pending());
+        m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert!(!m.quit, "Esc after the first q must not quit");
+        assert!(!m.q_arm_pending(), "Esc must disarm the chord");
+    }
+}
+
 #[cfg(test)]
 mod merge_focus_follow_tests {
     //! Issue→PR collapse (#34): when the user is viewing the issue

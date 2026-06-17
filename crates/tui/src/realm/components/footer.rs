@@ -6,9 +6,11 @@
 //!   that are actually wired up *right now*. The list is built by
 //!   each pane from the action catalog (`lazybox_tui_core::action`),
 //!   so a binding shown here is — by construction — a binding the
-//!   pane will dispatch. Universal shortcuts (`?` help, `q q` quit,
-//!   etc.) live in the onboarding tour and the `?` help modal, not
-//!   here.
+//!   pane will dispatch. A short, pane-independent set of universal
+//!   hints (`?` help, `Shift-T` tour, `q q` quit) is appended after
+//!   it so a first-time user can always find the way out and the way
+//!   to orient (issue #100) — the rest of the keymap still lives in
+//!   the `?` help modal and the tour.
 //! - **Right**: background polling status — spinner + "Pulling
 //!   tasks from github · PR query: …" — OR the most recent notice /
 //!   error if one is set. Retryable hiccups auto-fade; permanent +
@@ -65,6 +67,7 @@ pub fn render(
     f: &mut Frame,
     area: Rect,
     keymap: &[Binding],
+    globals: &[Binding],
     polling_status: Option<(&str, &str)>, // (spinner, label)
     notice: Option<&Notice>,
 ) {
@@ -133,16 +136,14 @@ pub fn render(
         height: 1,
     };
 
-    // Left zone: focused-pane contextual bindings only. Universal
-    // shortcuts (`?` help, `q q` quit, `,` settings, `Tab` cycle,
-    // resize) used to be hardcoded into a separate "globals"
-    // block on the right side of the line — that's now in the
-    // onboarding tour + the `?` help modal, where it gets shown once
-    // instead of cluttering every screen. Keeping the footer to
-    // contextual actions only is the structural guarantee from
-    // issue #25: every hint here is, by construction, an action the
-    // pane will actually dispatch.
-    let mut spans: Vec<Span> = Vec::with_capacity(keymap.len() * 4 + 2);
+    // Left zone: focused-pane contextual bindings, then a short
+    // pane-independent tail of universal hints (`globals`). The
+    // contextual list is the state-aware "what's actionable right
+    // now" guarantee from issue #25; the globals tail (issue #100)
+    // re-adds the handful of shortcuts a lost first-time user needs
+    // to always see — chiefly how to quit. The rest of the keymap
+    // still lives in the `?` help modal + the tour.
+    let mut spans: Vec<Span> = Vec::with_capacity((keymap.len() + globals.len()) * 4 + 3);
     spans.push(Span::styled(" ", bg));
     let key_style = Style::default()
         .bg(theme.surface)
@@ -152,6 +153,18 @@ pub fn render(
     let sep_style = Style::default().bg(theme.surface).fg(theme.chrome);
     for (i, b) in keymap.iter().enumerate() {
         if i > 0 {
+            spans.push(Span::styled("  ·  ", sep_style));
+        }
+        spans.push(Span::styled(compact_key(&b.keys), key_style));
+        spans.push(Span::styled(" ", bg));
+        spans.push(Span::styled(b.label.clone(), label_style));
+    }
+    // Globals tail. A wider gap separates it from the contextual
+    // group so the two read as distinct clusters rather than one run.
+    for (i, b) in globals.iter().enumerate() {
+        if i == 0 && !keymap.is_empty() {
+            spans.push(Span::styled("     ", bg));
+        } else if i > 0 {
             spans.push(Span::styled("  ·  ", sep_style));
         }
         spans.push(Span::styled(compact_key(&b.keys), key_style));
@@ -199,7 +212,56 @@ fn compact_key(keys: &str) -> std::borrow::Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-    use super::compact_key;
+    use super::*;
+    use crate::pane::Binding;
+    use std::borrow::Cow;
+    use tuirealm::ratatui::Terminal;
+    use tuirealm::ratatui::backend::TestBackend;
+
+    /// Render the footer to a flat string of its single row so tests
+    /// can assert which hints surfaced.
+    fn render_row(keymap: &[Binding], globals: &[Binding]) -> String {
+        let w = 120u16;
+        let backend = TestBackend::new(w, 1);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            render(f, Rect::new(0, 0, w, 1), keymap, globals, None, None);
+        })
+        .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..w).map(|x| buf[(x, 0)].symbol()).collect()
+    }
+
+    fn binding(keys: &'static str, label: &'static str) -> Binding {
+        Binding {
+            keys: Cow::Borrowed(keys),
+            label: Cow::Borrowed(label),
+        }
+    }
+
+    #[test]
+    fn globals_tail_renders_after_contextual() {
+        // The universal hints (issue #100) must show even when the
+        // pane offers contextual ones — chiefly so quit is findable.
+        let keymap = [binding("w", "work on this")];
+        let globals = [binding("?", "help"), binding("q q", "quit")];
+        let row = render_row(&keymap, &globals);
+        assert!(row.contains("work on this"), "contextual hint missing");
+        assert!(row.contains("help"), "global help hint missing");
+        assert!(row.contains("q q"), "quit chord missing from footer");
+        assert!(row.contains("quit"), "quit label missing from footer");
+        // Globals come after the contextual group.
+        assert!(row.find("work on this") < row.find("quit"));
+    }
+
+    #[test]
+    fn globals_render_with_no_contextual_hints() {
+        // Empty-inbox / first-run case: no workspace selected means a
+        // near-empty contextual list, but quit must still be visible.
+        let globals = [binding("q q", "quit")];
+        let row = render_row(&[], &globals);
+        assert!(row.contains("quit"));
+    }
 
     #[test]
     fn shift_letter_collapses_to_uppercase() {

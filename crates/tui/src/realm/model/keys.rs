@@ -223,7 +223,12 @@ impl<T: TerminalAdapter> Model<T> {
             // Refresh, AdoptSessions all flow through the catalog
             // dispatch below — see the whitelist further down.
             _ => {
-                // Any other key disarms.
+                // Any other key disarms. If the quit hint was showing,
+                // force a redraw so it clears even when the key itself
+                // (e.g. Esc) doesn't otherwise repaint.
+                if self.q_latch.is_armed() {
+                    self.redraw = true;
+                }
                 self.q_latch.disarm();
             }
         }

@@ -1707,3 +1707,60 @@ mod done_alert_tests {
         assert!(sb.agents_working.contains(&key));
     }
 }
+
+mod getting_started_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+
+    fn one_workspace_sidebar() -> Sidebar {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut t = base_task();
+        t.id.key = "1".into();
+        t.url = "https://github.com/o/r/pull/1".into();
+        let w = Workspace::from_task(t, chrono::Utc::now());
+        sb.workspaces.insert(SessionKey::from(&w.key), w);
+        sb.recompute_visible();
+        sb
+    }
+
+    #[test]
+    fn fresh_empty_inbox_is_getting_started() {
+        // Default construction: Inbox mailbox, All filter, no rows.
+        let sb = Sidebar::new(PaneId::new(1));
+        assert!(sb.is_getting_started());
+    }
+
+    #[test]
+    fn populated_inbox_is_not_getting_started() {
+        let sb = one_workspace_sidebar();
+        assert_eq!(sb.workspace_count(), 1);
+        assert!(!sb.is_getting_started());
+    }
+
+    #[test]
+    fn role_filtered_empty_view_is_not_getting_started() {
+        // An empty list because a role filter hid everything is a
+        // user-driven narrowing, not first-run — no panel.
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.role_filter = RoleFilter::Author;
+        assert!(!sb.is_getting_started());
+    }
+
+    #[test]
+    fn non_inbox_mailbox_is_not_getting_started() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.mailbox = Mailbox::Snoozed;
+        assert!(!sb.is_getting_started());
+    }
+
+    #[test]
+    fn active_search_query_suppresses_getting_started() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.search = Some(SearchState {
+            scope: String::new(),
+            query: "foo".into(),
+            editing: true,
+        });
+        assert!(!sb.is_getting_started());
+    }
+}

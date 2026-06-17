@@ -213,6 +213,17 @@ fn sidebar_golden_render_empty() {
     insta::assert_snapshot!("sidebar_empty", rendered);
 }
 
+/// Issue #100: a genuinely empty inbox swaps the blank content area
+/// for a getting-started panel that names the next actions, leading
+/// with the worktree-session flow. Rendered tall enough to fit the
+/// panel (the 5-row `sidebar_empty` case has no room and stays blank).
+#[test]
+fn sidebar_golden_render_empty_getting_started() {
+    let mut s = sidebar();
+    let rendered = render_to_string(&mut s, 40, 24, true);
+    insta::assert_snapshot!("sidebar_empty_getting_started", rendered);
+}
+
 /// Which-key popup for the github leader group (#126). Locks the
 /// `g · github` panel layout — title row plus one `key  label` row
 /// per group member, anchored bottom-left above the footer.

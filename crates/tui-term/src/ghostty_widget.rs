@@ -519,16 +519,17 @@ mod tests {
 
         let first = h.render(area);
 
-        let underlined = |buf: &Buffer, x: u16, y: u16| {
-            buf[(x, y)].modifier.contains(Modifier::UNDERLINED)
-        };
-        let struck = |buf: &Buffer, x: u16, y: u16| {
-            buf[(x, y)].modifier.contains(Modifier::CROSSED_OUT)
-        };
+        let underlined =
+            |buf: &Buffer, x: u16, y: u16| buf[(x, y)].modifier.contains(Modifier::UNDERLINED);
+        let struck =
+            |buf: &Buffer, x: u16, y: u16| buf[(x, y)].modifier.contains(Modifier::CROSSED_OUT);
 
         // Header glyphs keep their underline...
         for x in 0..4 {
-            assert!(underlined(&first, x, 0), "HEAD cell {x} should be underlined");
+            assert!(
+                underlined(&first, x, 0),
+                "HEAD cell {x} should be underlined"
+            );
         }
         // ...but the reset + blank tail must not.
         for x in 4..12 {
@@ -539,7 +540,10 @@ mod tests {
         }
         // The box-drawing glyph keeps its strikethrough; the plain tail
         // after the reset does not.
-        assert!(struck(&first, 0, 1), "box-drawing glyph should be struck out");
+        assert!(
+            struck(&first, 0, 1),
+            "box-drawing glyph should be struck out"
+        );
         for x in 1..12 {
             assert!(
                 !struck(&first, x, 1),
@@ -550,7 +554,10 @@ mod tests {
         // Redraw from the shadow (terminal unchanged) is byte-identical —
         // no flicker between a clean and a corrupted frame.
         let second = h.render(area);
-        assert_eq!(first, second, "redraw must reproduce the frame from the shadow");
+        assert_eq!(
+            first, second,
+            "redraw must reproduce the frame from the shadow"
+        );
     }
 
     /// Empty + ASCII-whitespace cases. The ORIGINAL `text == " "`

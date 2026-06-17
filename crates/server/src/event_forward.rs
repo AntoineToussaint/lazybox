@@ -201,9 +201,9 @@ impl ForwardState {
         evt: Event,
     ) -> ControlFlow<()> {
         match evt {
-            Event::TerminalOutput { terminal_id, seq, .. }
-                if self.is_superseded(terminal_id, seq) =>
-            {
+            Event::TerminalOutput {
+                terminal_id, seq, ..
+            } if self.is_superseded(terminal_id, seq) => {
                 // Already delivered inside a replay (resync/snapshot).
                 // Forwarding it again would double-feed the consumer's
                 // parser on top of the freshly rebuilt grid — #103's
@@ -439,7 +439,11 @@ mod tests {
     #[tokio::test]
     async fn resync_floor_drops_already_replayed_output() {
         let (config, mock) = ServerConfig::in_memory_with_mock();
-        let key = config.backend.spawn(&[], None, &[], "t").await.expect("spawn");
+        let key = config
+            .backend
+            .spawn(&[], None, &[], "t")
+            .await
+            .expect("spawn");
         mock.emit(&key, b"RING").await; // ring last_seq → 1
         let tid = TerminalId(1);
         config.terminals.lock().await.insert(tid, key.clone());
@@ -459,13 +463,21 @@ mod tests {
         // Chunk seq=1 is already in the replay → dropped.
         let cf = state.route(
             &tx,
-            Event::TerminalOutput { terminal_id: tid, bytes: vec![b'x'], seq: 1 },
+            Event::TerminalOutput {
+                terminal_id: tid,
+                bytes: vec![b'x'],
+                seq: 1,
+            },
         );
         assert!(matches!(cf, ControlFlow::Continue(())));
         // Chunk seq=2 is strictly newer → forwarded.
         let cf = state.route(
             &tx,
-            Event::TerminalOutput { terminal_id: tid, bytes: vec![b'y'], seq: 2 },
+            Event::TerminalOutput {
+                terminal_id: tid,
+                bytes: vec![b'y'],
+                seq: 2,
+            },
         );
         assert!(matches!(cf, ControlFlow::Continue(())));
 
@@ -510,7 +522,11 @@ mod tests {
         for seq in 3..=7 {
             let _ = state.route(
                 &tx,
-                Event::TerminalOutput { terminal_id: tid, bytes: vec![b'z'], seq },
+                Event::TerminalOutput {
+                    terminal_id: tid,
+                    bytes: vec![b'z'],
+                    seq,
+                },
             );
         }
 
@@ -521,7 +537,11 @@ mod tests {
                 seqs.push(seq);
             }
         }
-        assert_eq!(seqs, vec![6, 7], "only chunks past the snapshot floor survive");
+        assert_eq!(
+            seqs,
+            vec![6, 7],
+            "only chunks past the snapshot floor survive"
+        );
     }
 
     /// With a roomy channel and a consumer that keeps up, nothing is

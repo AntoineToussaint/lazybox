@@ -206,6 +206,12 @@ impl Sidebar {
         self.inner.workspace_iter()
     }
 
+    /// Every known Project as `(key, display name)`. Backs the global
+    /// "start agent" (`Shift-W`) project picker.
+    pub fn projects_for_picker(&self) -> Vec<(lazybox_core::ProjectKey, String)> {
+        self.inner.projects_for_picker()
+    }
+
     /// Apply `~/.lazybox/config.yaml` overrides to the inner pane in
     /// place. Used by `Model::apply_sidebar_config` once at startup.
     pub fn apply_inner_config(

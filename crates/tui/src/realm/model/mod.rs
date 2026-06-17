@@ -100,6 +100,12 @@ pub enum Id {
     /// the picked index out of `adopt_choices` and dispatches
     /// `Command::AdoptSessions`.
     AdoptTarget,
+    /// Project picker for the global "start agent" (`Shift-W`) flow.
+    /// Choices live in `start_agent_project_choices`; `Msg::ChoicePicked`
+    /// resolves the project, then funnels into the new-workspace name
+    /// input (which auto-spawns the default agent on submit). Skipped
+    /// when only one project exists.
+    StartAgentProject,
     /// Single-line input prompt for the reviewer-login(s) to add to
     /// the focused workspace's PR. Submit →
     /// `Command::RequestReviewers { workspace_key, logins }`. The
@@ -492,6 +498,10 @@ pub struct Model<T: TerminalAdapter> {
     /// in the same order as the picker's row indices. `Msg::ChoicePicked`
     /// indexes into this to recover the chosen `WorkspaceKey`.
     adopt_choices: Vec<lazybox_core::WorkspaceKey>,
+    /// Candidate projects for the active "start agent" (`Shift-W`)
+    /// picker, in row order. `Msg::ChoicePicked` indexes into this to
+    /// recover the chosen `ProjectKey`, then mounts the name input.
+    start_agent_project_choices: Vec<lazybox_core::ProjectKey>,
     /// Transient UI status (polling spinner + footer notice). See
     /// `StatusCtx`.
     status: StatusCtx,
@@ -741,6 +751,7 @@ impl<T: TerminalAdapter> Model<T> {
             active_merge_prompt: None,
             pending_adopt_source: None,
             adopt_choices: Vec::new(),
+            start_agent_project_choices: Vec::new(),
             status: StatusCtx::new(),
             ui_defaults: lazybox_config::UiDefaults::default(),
             pr_details_fetched: std::collections::HashSet::new(),
@@ -1913,6 +1924,23 @@ impl<T: TerminalAdapter> Model<T> {
                 .terminals
                 .contextual_bindings(&self.action_key_overrides),
         };
+        // Universal hints appended to every pane's footer (issue #100):
+        // the orientation + escape shortcuts a lost first-time user
+        // always needs in view. `quit` last so it's the rightmost,
+        // most-findable hint.
+        let globals: Vec<crate::pane::Binding> = {
+            use lazybox_tui_core::action::{ActionDef, ActionKind};
+            [ActionKind::OpenHelp, ActionKind::OpenTour, ActionKind::Quit]
+                .into_iter()
+                .map(|k| {
+                    let def = ActionDef::for_kind(k);
+                    crate::pane::Binding {
+                        keys: def.effective_keys_display(&self.action_key_overrides),
+                        label: std::borrow::Cow::Borrowed(def.label),
+                    }
+                })
+                .collect()
+        };
         let notice = self.status.notice.clone();
         // Snippet rows for the `]]` leader popup — built only while the
         // leader is armed so the steady-state render pays nothing.
@@ -1947,11 +1975,12 @@ impl<T: TerminalAdapter> Model<T> {
                 paint_selection(f.buffer_mut(), right_bottom, start, end);
             }
 
-            // Footer: keymap + polling status + notice.
+            // Footer: keymap + globals + polling status + notice.
             crate::realm::components::footer::render(
                 f,
                 footer_area,
                 &keymap,
+                &globals,
                 polling_status.as_ref().map(|(s, l)| (*s, l.as_str())),
                 notice.as_ref(),
             );
@@ -1973,6 +2002,15 @@ impl<T: TerminalAdapter> Model<T> {
                     self.ui_defaults.terminal_escape_char,
                     &snippet_leader_rows,
                 );
+            }
+            // After the first press of the `q q` quit chord, surface a
+            // which-key style nudge so the chord is self-explanatory
+            // rather than silently swallowing the keystroke (#100).
+            if self.q_latch.is_armed() {
+                use lazybox_tui_core::action::{ActionDef, ActionKind};
+                let keys = ActionDef::for_kind(ActionKind::Quit)
+                    .effective_keys_display(&self.action_key_overrides);
+                crate::realm::components::which_key::render_quit_hint(f, area, &keys);
             }
 
             // Modal stack last (highest z-order).

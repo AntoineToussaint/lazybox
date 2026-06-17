@@ -91,6 +91,74 @@ pub fn render(frame: &mut Frame, area: Rect, group: ActionGroup) {
     }
 }
 
+/// Render the which-key nudge shown after the FIRST press of the
+/// `q q` quit chord (#100). Unlike the leader popups this isn't a
+/// binding set — the chord is a time-windowed double-tap — so it's a
+/// single instructional line: complete the chord, or cancel. Styled
+/// and anchored to match [`render`] so the affordance reads the same
+/// as the `g`-leader popup the issue points to.
+///
+/// `quit_keys` is the effective binding display (default `"q q"`);
+/// the first token is the key to press again.
+pub fn render_quit_hint(frame: &mut Frame, area: Rect, quit_keys: &str) {
+    let theme = crate::theme::current();
+    let press = quit_keys.split_whitespace().next().unwrap_or("q");
+
+    let panel_h = 4u16.min(area.height);
+    // Wider than PANEL_W: the instruction line is a full sentence.
+    let panel_w = 34u16.min(area.width);
+    let panel = Rect {
+        x: area.x,
+        y: area
+            .y
+            .saturating_add(area.height.saturating_sub(panel_h + 1)),
+        width: panel_w,
+        height: panel_h,
+    };
+
+    let bg = Style::default().bg(theme.surface);
+    frame.render_widget(Clear, panel);
+    frame.render_widget(Block::default().style(bg), panel);
+
+    let title = Line::from(Span::styled(
+        " quit ",
+        Style::default()
+            .bg(theme.surface)
+            .fg(theme.text_dim)
+            .add_modifier(Modifier::BOLD),
+    ));
+    frame.render_widget(
+        Paragraph::new(title),
+        Rect {
+            x: panel.x,
+            y: panel.y + 1,
+            width: panel.width,
+            height: 1,
+        },
+    );
+
+    let key_style = Style::default()
+        .bg(theme.surface)
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let label_style = Style::default().bg(theme.surface).fg(theme.text_strong);
+    let line = Line::from(vec![
+        Span::styled(format!("  {press}"), key_style),
+        Span::styled(" again to quit · ", label_style),
+        Span::styled("Esc", key_style),
+        Span::styled(" cancel", label_style),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line),
+        Rect {
+            x: panel.x,
+            y: panel.y + 2,
+            width: panel.width,
+            height: 1,
+        },
+    );
+}
+
 /// Largest snippet list the terminal-leader popup will enumerate
 /// before collapsing the tail into a "+N more" row. Keeps the popup
 /// from swallowing the screen on a big library.
@@ -201,4 +269,41 @@ pub fn render_terminal_leader(
             height: 1,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tuirealm::ratatui::Terminal;
+    use tuirealm::ratatui::backend::TestBackend;
+
+    fn render_to_string(quit_keys: &str) -> String {
+        let (w, h) = (80u16, 24u16);
+        let backend = TestBackend::new(w, h);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            render_quit_hint(f, Rect::new(0, 0, w, h), quit_keys);
+        })
+        .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn quit_hint_names_the_press_key_and_cancel() {
+        let out = render_to_string("q q");
+        assert!(out.contains("quit"), "missing title");
+        assert!(out.contains("q again to quit"), "missing press-again nudge");
+        assert!(out.contains("Esc cancel"), "missing cancel affordance");
+    }
+
+    #[test]
+    fn quit_hint_uses_first_token_of_remapped_chord() {
+        // A user who remapped quit to `x x` should be told to press x.
+        let out = render_to_string("x x");
+        assert!(out.contains("x again to quit"));
+    }
 }

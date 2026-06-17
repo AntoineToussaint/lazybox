@@ -438,6 +438,15 @@ impl Sidebar {
         let para = Paragraph::new(lines).scroll((self.scroll as u16, 0));
         frame.render_widget(para, inner);
 
+        // First-run / empty-inbox guidance. When the list is genuinely
+        // empty (default Inbox, no filter, no search) the blank pane is
+        // a dead end — replace it with a panel that names the next
+        // actions, foregrounding the worktree-session flow that works
+        // with zero GitHub data (issue #100).
+        if self.is_getting_started() {
+            self.render_getting_started(inner, frame, theme);
+        }
+
         // Scroll-position indicator in the right padding strip —
         // auto-hides when the whole list fits.
         crate::components::scrollbar::render_vertical(
@@ -476,6 +485,55 @@ impl Sidebar {
             }
             frame.render_widget(Paragraph::new(Line::from(spans)), bar);
         }
+    }
+
+    /// Paint the empty-inbox getting-started panel into the content
+    /// area. Leads with the worktree-session flow (which needs no
+    /// GitHub data) and closes with the orientation shortcuts, so a
+    /// new user with an empty inbox has somewhere to go (issue #100).
+    fn render_getting_started(&self, inner: Rect, frame: &mut Frame, theme: &crate::theme::Theme) {
+        if inner.height < 4 {
+            return;
+        }
+        let heading = Style::default()
+            .fg(theme.text_strong)
+            .add_modifier(Modifier::BOLD);
+        let prose = Style::default().fg(theme.text_dim);
+        let key = Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let label = Style::default().fg(theme.text_dim);
+        // `key` (left-padded to a column) + label, one shortcut per row.
+        let hint = |k: &str, text: &str| {
+            Line::from(vec![
+                Span::styled(format!("  {k:<5}"), key),
+                Span::styled(text.to_string(), label),
+            ])
+        };
+
+        let lines: Vec<Line<'static>> = vec![
+            Line::raw(""),
+            Line::from(Span::styled(" No PRs or issues yet", heading)),
+            Line::raw(""),
+            Line::from(Span::styled(" lazybox also manages your", prose)),
+            Line::from(Span::styled(" git worktrees — spin up an", prose)),
+            Line::from(Span::styled(" agent session per task:", prose)),
+            Line::raw(""),
+            hint("⇧W", "start agent"),
+            hint("n", "new workspace"),
+            hint("⇧N", "new project"),
+            Line::raw(""),
+            Line::from(Span::styled(" or open a tool yourself:", prose)),
+            hint("c", "claude"),
+            hint("s", "shell"),
+            hint("e", "editor"),
+            Line::raw(""),
+            Line::from(Span::styled(" new here?", prose)),
+            hint("?", "help"),
+            hint("⇧T", "tour"),
+            hint("⇧R", "refresh inbox"),
+        ];
+        frame.render_widget(Paragraph::new(lines), inner);
     }
 
     /// Build & lay out every visible workspace row in one

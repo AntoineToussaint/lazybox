@@ -1,0 +1,29 @@
+---
+source: crates/tui/tests/snapshots.rs
+expression: rendered
+---
+ LAZYBOX  0  [7d]
+ f [all]  o [split]
+
+ ────────────────────────────────────
+
+
+  No PRs or issues yet
+
+  lazybox also manages your
+  git worktrees — spin up an
+  agent session per task:
+
+   ⇧W   start agent
+   n    new workspace
+   ⇧N   new project
+
+  or open a tool yourself:
+   c    claude
+   s    shell
+   e    editor
+
+  new here?
+   ?    help
+   ⇧T   tour
+   ⇧R   refresh inbox

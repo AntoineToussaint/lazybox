@@ -15,7 +15,7 @@
 //! prompt, conversational question, and finished.
 
 use lazybox_agents::AgentState;
-use lazybox_agents::detect::{claude_ready_for_prompt, claude_state};
+use lazybox_agents::detect::{claude_ready_for_prompt, claude_state, claude_state_chunked};
 
 struct ByteFixture {
     name: &'static str,
@@ -140,6 +140,32 @@ const FIXTURES: &[ByteFixture] = &[
         expected: AgentState::InputNeeded,
         ready: false,
     },
+    // #96: the live working frame from the issue — a git-log scrollback
+    // whose `(#91)`/`(#92)`/`(#93)` refs compact to `1)`/`2)`/`3)` option
+    // markers, the composer `❯`, and the bottom status line
+    // `✳ Clauding… (52s · ↑ 2.0k tokens)` (spinner + ticking timer + token
+    // counter, NO `esc to interrupt`). The weak chooser matched the
+    // scrollback; under the same-chunk repaint rule it out-ranked the
+    // ticking status line and fired a spurious `?`. A live counter line is
+    // never painted beneath a live gate → must read Working, never ready.
+    ByteFixture {
+        name: "claude_real_working_no_interrupt",
+        bytes: include_bytes!("fixtures/claude_real_working_no_interrupt.bin"),
+        expected: AgentState::Working,
+        ready: false,
+    },
+    // #96: the first repaint after spawning a fresh agent — version
+    // banner, a `(y/n)`-ish command echo, a numbered git-log scrollback,
+    // the parked composer `❯`, and the live counter line, all in one chunk
+    // before the resting footer stabilises. No boot transient may promote
+    // the workspace to InputNeeded while the status line is ticking. Must
+    // read Working, never ready.
+    ByteFixture {
+        name: "claude_startup_repaint",
+        bytes: include_bytes!("fixtures/claude_startup_repaint.bin"),
+        expected: AgentState::Working,
+        ready: false,
+    },
 ];
 
 #[test]
@@ -178,6 +204,35 @@ fn readiness_matches_real_byte_corpus() {
     assert!(
         failures.is_empty(),
         "{} of {} real-byte readiness checks failed:\n{}",
+        failures.len(),
+        FIXTURES.len(),
+        failures.join("\n"),
+    );
+}
+
+/// The same corpus, but fed to the chunk-aware detector as if the WHOLE
+/// transcript arrived in a single PTY chunk (`last_chunk_start = 0`) — the
+/// tmux full-screen repaint the live daemon path (`detect_state_chunked`)
+/// sees right after spawn. The same-chunk rule relaxes work-anchor
+/// suppression so a real dialog repainted with the bottom status bar still
+/// fires, but that relaxation must NOT let chooser-shaped scrollback
+/// out-rank a live ticking counter line (#96). Every fixture must classify
+/// identically whether or not it's treated as one repaint chunk.
+#[test]
+fn detector_matches_real_byte_corpus_as_full_repaint() {
+    let mut failures: Vec<String> = Vec::new();
+    for f in FIXTURES {
+        let actual = claude_state_chunked(f.bytes, 0);
+        if actual != Some(f.expected) {
+            failures.push(format!(
+                "fixture `{}` expected {:?} but got {:?}",
+                f.name, f.expected, actual,
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} real-byte fixtures failed as a single repaint chunk:\n{}",
         failures.len(),
         FIXTURES.len(),
         failures.join("\n"),

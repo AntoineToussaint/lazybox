@@ -14,8 +14,8 @@
 //! modules can see their parent's private items.
 
 use super::{
-    Id, Model, PaneFocus, emit_clipboard_copy, find_action_for_chord, key_event_to_chord,
-    rect_contains,
+    Id, Model, PaneFocus, emit_clipboard_copy, find_action_for_seq, find_action_for_stroke,
+    key_event_to_stroke, rect_contains, seq_continuations,
 };
 use crate::realm::keymap::realm_key_to_crossterm;
 use crate::realm::layout::pane_areas;
@@ -45,18 +45,21 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
-        // ── Grouped two-step (leader-key) chord, issue #126 ─────────
-        // When a group leader is armed, THIS key is the action
-        // selector — resolved before anything else so the second
-        // press never leaks to a pane or PTY. A matching in-group key
-        // fires its action through the unified `dispatch_action`;
-        // anything else (Esc, an unmapped key) just cancels, which is
-        // the which-key convention.
-        if let Some(group) = self.leader.take() {
+        // ── Leader-chord completion (issues #126, #102) ─────────────
+        // When a leader prefix is armed, THIS key completes the
+        // sequence — resolved before anything else so the second press
+        // never leaks to a pane or PTY. The matching catalog entry
+        // (`Chord::Seq([prefix, this])`) fires through the unified
+        // `dispatch_action`; anything else (Esc, an unmapped key) just
+        // cancels, which is the which-key convention. Which entry a
+        // key completes is read straight from the catalog — no
+        // hardcoded group table.
+        if let Some(prefix) = self.leader.take() {
             self.redraw = true;
-            if let Key::Char(c) = key.code
-                && key.modifiers.is_empty()
-                && let Some(action) = leader_action(group, c)
+            if let Some(stroke) = key_event_to_stroke(realm_key_to_crossterm(&key))
+                && let Some(def) =
+                    find_action_for_seq(&prefix, &stroke, self.focus, &self.action_key_overrides)
+                && let Some(action) = action_from_kind(def.kind)
             {
                 self.q_latch.disarm();
                 let mut cmds = self.dispatch_action(&action);
@@ -90,24 +93,6 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
-        // Arm a group leader. Sidebar-only for this first cut: the
-        // github group's leader (`g`) is unbound there, and its
-        // actions all target the focused workspace, so a workspace
-        // must be selected — otherwise `g` falls through to its
-        // normal (no-op) handling. The original `Shift-*` aliases for
-        // these actions stay live everywhere; this is purely additive.
-        if self.focus == PaneFocus::Sidebar
-            && key.modifiers.is_empty()
-            && let Key::Char(c) = key.code
-            && let Some(group) = lazybox_tui_core::action::ActionGroup::from_leader(c)
-            && self.sidebar.selected_workspace_key().is_some()
-        {
-            self.q_latch.disarm();
-            self.leader.arm(group);
-            self.redraw = true;
-            return;
-        }
-
         match key.code {
             // Tab cycles panes — but ONLY when the active pane has
             // no PTY swallowing keys. Inside a terminal with a live
@@ -134,11 +119,12 @@ impl<T: TerminalAdapter> Model<T> {
             }
             _ if self.focus != PaneFocus::Terminals && self.matches_quit_chord(&key) => {
                 // Quit chord (catalog `ActionKind::Quit`, default `q q`,
-                // overridable via `ui.action_keys.quit`). `Double(inner)`
-                // is the two-press latch; `Single` fires on first press.
+                // overridable via `ui.action_keys.quit`). A `Seq` is the
+                // two-press latch; a single-keystroke `Key` remap fires
+                // on first press.
                 let chord = self.resolve_quit_chord();
-                use lazybox_tui_core::action::KeyChord;
-                if matches!(chord, Some(KeyChord::Single { .. })) {
+                use lazybox_tui_core::action::Chord;
+                if matches!(chord, Some(Chord::Key(_))) {
                     self.quit = true;
                     return;
                 }
@@ -286,65 +272,20 @@ impl<T: TerminalAdapter> Model<T> {
         let ct = realm_key_to_crossterm(&key);
         let mut cmds: Vec<IpcCommand> = Vec::new();
 
-        // Catalog lookup first. If the keystroke matches a catalog
-        // `Action` AND `dispatch_action` knows how to handle it
-        // (returns a non-empty Vec or mutates state), the pane's
-        // direct handler is skipped. Per-key match arms in the
-        // panes still cover what `dispatch_action` doesn't yet —
-        // see that function's coverage comment.
+        // Catalog lookup first. A single keystroke that matches a
+        // catalog `Action` (and that `dispatch_action` knows how to
+        // handle) is fired here and the pane's direct handler is
+        // skipped. If the keystroke instead *starts* a leader sequence
+        // (`g` → the github actions), arm the leader so the next key
+        // completes it. Per-key match arms in the panes still cover
+        // what the catalog doesn't yet — see `dispatch_action`.
         if self.focus != PaneFocus::Terminals
-            && let Some(chord) = key_event_to_chord(ct)
-            && let Some(def) = find_action_for_chord(&chord, self.focus, &self.action_key_overrides)
+            && let Some(stroke) = key_event_to_stroke(ct)
         {
-            use lazybox_tui_core::action::Action;
-            // Reconstruct a runtime Action from the static ActionDef.
-            // `SpawnAgent` is the only variant with runtime data
-            // (the agent id) — we don't yet have per-agent catalog
-            // entries (`c` → claude, `x` → codex, …), so we let
-            // those keys fall through to the pane handler. Once
-            // the catalog grows per-agent entries (driven by the
-            // user's enabled agents list), this map widens.
-            let action: Option<Action> = match def.kind {
-                lazybox_tui_core::action::ActionKind::SpawnShell => Some(Action::SpawnShell),
-                lazybox_tui_core::action::ActionKind::MarkAllRead => Some(Action::MarkAllRead),
-                lazybox_tui_core::action::ActionKind::Work => Some(Action::Work),
-                lazybox_tui_core::action::ActionKind::OpenEditor => Some(Action::OpenEditor),
-                lazybox_tui_core::action::ActionKind::NewWorkspace => Some(Action::NewWorkspace),
-                lazybox_tui_core::action::ActionKind::NewProject => Some(Action::NewProject),
-                lazybox_tui_core::action::ActionKind::MergePr => Some(Action::MergePr),
-                lazybox_tui_core::action::ActionKind::Archive => Some(Action::Archive),
-                lazybox_tui_core::action::ActionKind::ToggleSnooze => Some(Action::ToggleSnooze),
-                lazybox_tui_core::action::ActionKind::Refresh => Some(Action::Refresh),
-                lazybox_tui_core::action::ActionKind::AdoptSessions => Some(Action::AdoptSessions),
-                lazybox_tui_core::action::ActionKind::CollapseIntoPr => {
-                    Some(Action::CollapseIntoPr)
-                }
-                lazybox_tui_core::action::ActionKind::Reply => Some(Action::Reply),
-                lazybox_tui_core::action::ActionKind::RequestReviewers => {
-                    Some(Action::RequestReviewers)
-                }
-                lazybox_tui_core::action::ActionKind::AddAssignees => Some(Action::AddAssignees),
-                lazybox_tui_core::action::ActionKind::ManageLabels => Some(Action::ManageLabels),
-                lazybox_tui_core::action::ActionKind::OpenInBrowser => Some(Action::OpenInBrowser),
-                lazybox_tui_core::action::ActionKind::CycleRoleFilter => {
-                    Some(Action::CycleRoleFilter)
-                }
-                lazybox_tui_core::action::ActionKind::CycleSort => Some(Action::CycleSort),
-                lazybox_tui_core::action::ActionKind::CycleMailbox => Some(Action::CycleMailbox),
-                lazybox_tui_core::action::ActionKind::OpenSearch => Some(Action::OpenSearch),
-                lazybox_tui_core::action::ActionKind::OpenHelp => Some(Action::OpenHelp),
-                lazybox_tui_core::action::ActionKind::OpenTour => Some(Action::OpenTour),
-                lazybox_tui_core::action::ActionKind::OpenSyncStatus => {
-                    Some(Action::OpenSyncStatus)
-                }
-                lazybox_tui_core::action::ActionKind::OpenSettings => Some(Action::OpenSettings),
-                lazybox_tui_core::action::ActionKind::JumpToAsking => Some(Action::JumpToAsking),
-                lazybox_tui_core::action::ActionKind::JumpToFailingCi => {
-                    Some(Action::JumpToFailingCi)
-                }
-                _ => None,
-            };
-            if let Some(action) = action {
+            if let Some(def) =
+                find_action_for_stroke(&stroke, self.focus, &self.action_key_overrides)
+                && let Some(action) = action_from_kind(def.kind)
+            {
                 // Any catalog dispatch counts as "non-quit key" so
                 // the q q chord resets.
                 self.q_latch.disarm();
@@ -356,6 +297,17 @@ impl<T: TerminalAdapter> Model<T> {
                     let rewritten = self.rewrite_spawn_to_inject(cmd);
                     self.send_cmd(rewritten);
                 }
+                self.redraw = true;
+                return;
+            }
+            // No single-key action — does this keystroke open a leader
+            // group? If any catalog entry has a `Seq` starting with it
+            // (reachable from this focus), arm the leader and show the
+            // which-key popup. Purely catalog-driven: new leader groups
+            // are data, not a `keys.rs` edit.
+            if !seq_continuations(&stroke, self.focus, &self.action_key_overrides).is_empty() {
+                self.q_latch.disarm();
+                self.leader.arm(stroke);
                 self.redraw = true;
                 return;
             }
@@ -432,10 +384,10 @@ impl<T: TerminalAdapter> Model<T> {
         self.q_latch.is_armed()
     }
 
-    /// The armed leader-chord group, if any. Drives the which-key
-    /// popup in `view`; also a test/inspection hook for the #126
-    /// grouped chords.
-    pub fn leader_pending(&self) -> Option<lazybox_tui_core::action::ActionGroup> {
+    /// The armed leader prefix keystroke, if any. Drives the which-key
+    /// popup in `view`; also a test/inspection hook for the leader
+    /// chords (#126, #102).
+    pub fn leader_pending(&self) -> Option<lazybox_tui_core::action::KeyStroke> {
         self.leader.pending().copied()
     }
 
@@ -585,32 +537,25 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Look up the Quit chord — catalog default OR
-    /// `ui.action_keys.quit` override. Returns the parsed `KeyChord`
-    /// (`Double` for `q q`, `Single` for a single-letter remap).
-    fn resolve_quit_chord(&self) -> Option<lazybox_tui_core::action::KeyChord> {
-        use lazybox_tui_core::action::{ActionDef, ActionKind, KeyChord};
+    /// `ui.action_keys.quit` override. Returns the parsed `Chord`
+    /// (`Seq` for `q q`, `Key` for a single-letter remap).
+    fn resolve_quit_chord(&self) -> Option<lazybox_tui_core::action::Chord> {
+        use lazybox_tui_core::action::{ActionDef, ActionKind};
         let def = ActionDef::for_kind(ActionKind::Quit);
         def.effective_chord(&self.action_key_overrides)
-            .or_else(|| KeyChord::parse(def.default_keys))
     }
 
-    /// Matches the FIRST key of the Quit chord (the entry-point for
-    /// the latch). For `Double` chords this is the inner single
-    /// chord's first press; for `Single` chords this is the chord
-    /// itself.
+    /// Matches the FIRST keystroke of the Quit chord (the entry-point
+    /// for the latch). For a `Seq` (`q q`) this is its first stroke;
+    /// for a `Key` it is the stroke itself.
     fn matches_quit_chord(&self, key: &RealmKey) -> bool {
-        use lazybox_tui_core::action::KeyChord;
         let Some(chord) = self.resolve_quit_chord() else {
             return false;
         };
-        let first = match &chord {
-            KeyChord::Single { .. } => chord,
-            KeyChord::Double(inner) => (**inner).clone(),
-        };
-        let Some(input) = key_event_to_chord(realm_key_to_crossterm(key)) else {
+        let Some(input) = key_event_to_stroke(realm_key_to_crossterm(key)) else {
             return false;
         };
-        input == first
+        &input == chord.head()
     }
 
     /// Handle a bracketed-paste event from the host terminal. The
@@ -1017,21 +962,45 @@ impl<T: TerminalAdapter> Model<T> {
     }
 }
 
-/// Resolve the runtime `Action` for the in-group key `c` within
-/// `group` (issue #126). The github group's actions all carry no
-/// payload, so this is a direct `ActionKind` → `Action` translation;
-/// returns `None` when the key isn't bound in the group.
-fn leader_action(
-    group: lazybox_tui_core::action::ActionGroup,
-    c: char,
+/// Reconstruct a runtime `Action` from a catalog `ActionKind`, for the
+/// no-payload kinds the keyboard path dispatches (single keys AND
+/// leader sequences resolve through here so both agree on semantics).
+///
+/// `SpawnAgent` is the one variant carrying runtime data (the agent
+/// id); per-agent catalog rows aren't generated yet (that's P2), so it
+/// returns `None` and those keys fall through to the pane handler.
+fn action_from_kind(
+    kind: lazybox_tui_core::action::ActionKind,
 ) -> Option<lazybox_tui_core::action::Action> {
     use lazybox_tui_core::action::{Action, ActionKind};
-    match group.action_for_key(c)? {
-        ActionKind::MergePr => Some(Action::MergePr),
-        ActionKind::RequestReviewers => Some(Action::RequestReviewers),
-        ActionKind::AddAssignees => Some(Action::AddAssignees),
-        ActionKind::ManageLabels => Some(Action::ManageLabels),
-        ActionKind::OpenInBrowser => Some(Action::OpenInBrowser),
-        _ => None,
-    }
+    Some(match kind {
+        ActionKind::SpawnShell => Action::SpawnShell,
+        ActionKind::MarkAllRead => Action::MarkAllRead,
+        ActionKind::Work => Action::Work,
+        ActionKind::OpenEditor => Action::OpenEditor,
+        ActionKind::NewWorkspace => Action::NewWorkspace,
+        ActionKind::NewProject => Action::NewProject,
+        ActionKind::MergePr => Action::MergePr,
+        ActionKind::Archive => Action::Archive,
+        ActionKind::ToggleSnooze => Action::ToggleSnooze,
+        ActionKind::Refresh => Action::Refresh,
+        ActionKind::AdoptSessions => Action::AdoptSessions,
+        ActionKind::CollapseIntoPr => Action::CollapseIntoPr,
+        ActionKind::Reply => Action::Reply,
+        ActionKind::RequestReviewers => Action::RequestReviewers,
+        ActionKind::AddAssignees => Action::AddAssignees,
+        ActionKind::ManageLabels => Action::ManageLabels,
+        ActionKind::OpenInBrowser => Action::OpenInBrowser,
+        ActionKind::CycleRoleFilter => Action::CycleRoleFilter,
+        ActionKind::CycleSort => Action::CycleSort,
+        ActionKind::CycleMailbox => Action::CycleMailbox,
+        ActionKind::OpenSearch => Action::OpenSearch,
+        ActionKind::OpenHelp => Action::OpenHelp,
+        ActionKind::OpenTour => Action::OpenTour,
+        ActionKind::OpenSyncStatus => Action::OpenSyncStatus,
+        ActionKind::OpenSettings => Action::OpenSettings,
+        ActionKind::JumpToAsking => Action::JumpToAsking,
+        ActionKind::JumpToFailingCi => Action::JumpToFailingCi,
+        _ => return None,
+    })
 }

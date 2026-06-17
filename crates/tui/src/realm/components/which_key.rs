@@ -11,7 +11,7 @@
 //! Styled to match the yazi-style `help` panel: a `surface`-filled
 //! box anchored bottom-left, just above the footer.
 
-use lazybox_tui_core::action::{ActionDef, ActionGroup};
+use lazybox_tui_core::action::KeyStroke;
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::prelude::*;
@@ -21,15 +21,17 @@ use tuirealm::ratatui::widgets::{Block, Clear, Paragraph};
 /// wrapping; clamped to the frame width on a narrow terminal.
 const PANEL_W: u16 = 28;
 
-/// Render the which-key popup for `group`. `area` is the full frame;
-/// the popup floats in the bottom-left corner, one row above the
-/// footer so it doesn't cover the hint bar.
-pub fn render(frame: &mut Frame, area: Rect, group: ActionGroup) {
+/// Render the which-key popup for an armed leader `prefix`. `rows` are
+/// the `(next-key-display, label)` continuations of that prefix — a
+/// pure function of the catalog supplied by the caller, no longer a
+/// hardcoded group table (#102). `area` is the full frame; the popup
+/// floats in the bottom-left corner, one row above the footer so it
+/// doesn't cover the hint bar.
+pub fn render(frame: &mut Frame, area: Rect, prefix: KeyStroke, rows: &[(String, String)]) {
     let theme = crate::theme::current();
-    let members = group.members();
-    // One title row + one row per member, plus a blank row top and
-    // bottom for breathing room.
-    let panel_h = (members.len() as u16 + 3).min(area.height);
+    // One title row + one row per continuation, plus a blank row top
+    // and bottom for breathing room.
+    let panel_h = (rows.len() as u16 + 3).min(area.height);
     let panel_w = PANEL_W.min(area.width);
     let panel = Rect {
         x: area.x,
@@ -44,10 +46,10 @@ pub fn render(frame: &mut Frame, area: Rect, group: ActionGroup) {
     frame.render_widget(Clear, panel);
     frame.render_widget(Block::default().style(bg), panel);
 
-    // Title: "<leader> · <group>" so the user sees which chord is in
-    // flight (e.g. "g · github").
+    // Title: the armed prefix so the user sees which chord is in
+    // flight (e.g. "g …").
     let title = Line::from(Span::styled(
-        format!(" {} · {} ", group.leader(), group.title()),
+        format!(" {} … ", prefix.display()),
         Style::default()
             .bg(theme.surface)
             .fg(theme.text_dim)
@@ -68,16 +70,15 @@ pub fn render(frame: &mut Frame, area: Rect, group: ActionGroup) {
         .fg(theme.accent)
         .add_modifier(Modifier::BOLD);
     let label_style = Style::default().bg(theme.surface).fg(theme.text_strong);
-    for (i, (k, kind)) in members.iter().enumerate() {
+    for (i, (k, label)) in rows.iter().enumerate() {
         let y = panel.y + 2 + i as u16;
         if y >= panel.y + panel.height {
             break;
         }
-        let label = ActionDef::for_kind(*kind).label;
         let line = Line::from(vec![
             Span::styled(format!("  {k}"), key_style),
             Span::styled("  ", bg),
-            Span::styled(label, label_style),
+            Span::styled(label.clone(), label_style),
         ]);
         frame.render_widget(
             Paragraph::new(line),

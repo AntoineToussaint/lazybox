@@ -105,20 +105,18 @@ pub(crate) fn paint_selection(
     }
 }
 
-/// Convert a crossterm `KeyEvent` to a typed `KeyChord` for catalog
+/// Convert a crossterm `KeyEvent` to a typed `KeyStroke` for catalog
 /// lookup. Uppercase letters auto-shift so `KeyEvent { Char('M'),
-/// no_mods }` produces the same chord as `KeyEvent { Char('m'),
+/// no_mods }` produces the same stroke as `KeyEvent { Char('m'),
 /// SHIFT }` — matches the catalog's parser convention. Returns
 /// `None` for codes the catalog doesn't model (function keys,
 /// release events).
-pub(crate) fn key_event_to_chord(
+pub(crate) fn key_event_to_stroke(
     key: crossterm::event::KeyEvent,
-) -> Option<lazybox_tui_core::action::KeyChord> {
+) -> Option<lazybox_tui_core::action::KeyStroke> {
     use crossterm::event::{KeyCode, KeyModifiers};
-    use lazybox_tui_core::action::{ChordCode, KeyChord, NamedKey};
+    use lazybox_tui_core::action::{ChordCode, KeyStroke, NamedKey};
 
-    let mut ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let _ = &mut ctrl;
     let mut shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let code = match key.code {
@@ -147,8 +145,7 @@ pub(crate) fn key_event_to_chord(
         // through to None.
         _ => return None,
     };
-    let _ = ctrl;
-    Some(KeyChord::Single {
+    Some(KeyStroke {
         ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
         shift,
         alt,
@@ -156,30 +153,88 @@ pub(crate) fn key_event_to_chord(
     })
 }
 
-/// Look up the catalog `Action` matching `chord` in the sections
-/// the focused pane should resolve. Globals always match; pane-
-/// scoped sections only match when their pane is focused.
+/// Look up the catalog `Action` whose effective chords contain the
+/// single keystroke `stroke`, in the sections the focused pane should
+/// resolve. Globals always match; pane-scoped sections only match when
+/// their pane is focused; lower `section_rank` wins a tie.
 ///
 /// Honors user keybinding overrides from `~/.lazybox/config.yaml::ui
-/// .action_keys`: each catalog entry's effective chord falls back
-/// to its default only when the user hasn't set an override for
-/// that `ActionKind::name()`.
+/// .action_keys`: each catalog entry's effective chords fall back to
+/// its defaults only when the user hasn't set an override for that
+/// `ActionKind::name()`. Multi-keystroke (`Seq`) bindings are ignored
+/// here — they resolve through [`find_action_for_seq`] after a leader
+/// arms.
 ///
-/// Returns `None` when no catalog entry has a matching chord —
-/// the caller falls back to the legacy match arms (used today for
-/// navigation keys, latches, and any action whose `default_keys`
-/// is a presentation form like `g/G`).
-pub(crate) fn find_action_for_chord(
-    chord: &lazybox_tui_core::action::KeyChord,
+/// Returns `None` when no catalog entry matches — the caller falls
+/// back to leader-arming or the legacy pane match arms.
+pub(crate) fn find_action_for_stroke(
+    stroke: &lazybox_tui_core::action::KeyStroke,
     focus: PaneFocus,
     overrides: &std::collections::BTreeMap<String, String>,
 ) -> Option<&'static lazybox_tui_core::action::ActionDef> {
-    use lazybox_tui_core::action::ActionDef;
+    use lazybox_tui_core::action::{ActionDef, Chord};
     ActionDef::all()
         .filter_map(|d| section_rank(d.section, focus).map(|rank| (rank, d)))
-        .filter(|(_, d)| d.effective_chord(overrides).as_ref() == Some(chord))
+        .filter(|(_, d)| {
+            d.effective_chords(overrides)
+                .iter()
+                .any(|c| matches!(c, Chord::Key(k) if k == stroke))
+        })
         .min_by_key(|(rank, _)| *rank)
         .map(|(_, d)| d)
+}
+
+/// Resolve the catalog `Action` for a completed two-keystroke leader
+/// sequence (`prefix` then `second`) — e.g. `g m` → merge. Mirrors
+/// [`find_action_for_stroke`]'s focus/rank rules but matches
+/// `Chord::Seq([prefix, second])`.
+pub(crate) fn find_action_for_seq(
+    prefix: &lazybox_tui_core::action::KeyStroke,
+    second: &lazybox_tui_core::action::KeyStroke,
+    focus: PaneFocus,
+    overrides: &std::collections::BTreeMap<String, String>,
+) -> Option<&'static lazybox_tui_core::action::ActionDef> {
+    use lazybox_tui_core::action::{ActionDef, Chord};
+    ActionDef::all()
+        .filter_map(|d| section_rank(d.section, focus).map(|rank| (rank, d)))
+        .filter(|(_, d)| {
+            d.effective_chords(overrides).iter().any(|c| {
+                matches!(c, Chord::Seq(s) if s.len() == 2 && &s[0] == prefix && &s[1] == second)
+            })
+        })
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, d)| d)
+}
+
+/// Every `(second-keystroke, action)` reachable as a leader chord
+/// starting with `prefix` under `focus`. Drives both the which-key
+/// popup and the decision to arm a leader: a non-empty result means
+/// `prefix` is a live leader. Pure function of the catalog + the
+/// pressed prefix — the data-driven replacement for `ActionGroup`.
+pub(crate) fn seq_continuations(
+    prefix: &lazybox_tui_core::action::KeyStroke,
+    focus: PaneFocus,
+    overrides: &std::collections::BTreeMap<String, String>,
+) -> Vec<(
+    lazybox_tui_core::action::KeyStroke,
+    &'static lazybox_tui_core::action::ActionDef,
+)> {
+    use lazybox_tui_core::action::{ActionDef, Chord};
+    let mut out = Vec::new();
+    for d in ActionDef::all() {
+        if section_rank(d.section, focus).is_none() {
+            continue;
+        }
+        for c in d.effective_chords(overrides) {
+            if let Chord::Seq(s) = c
+                && s.len() == 2
+                && &s[0] == prefix
+            {
+                out.push((s[1], d));
+            }
+        }
+    }
+    out
 }
 
 /// Resolution priority of a catalog section under the given focus.
@@ -1406,7 +1461,7 @@ pub(super) fn base64_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod collision_tests {
     use super::{PaneFocus, section_rank};
-    use lazybox_tui_core::action::{ActionDef, ActionKind, KeyChord};
+    use lazybox_tui_core::action::{ActionDef, ActionKind, Chord};
     use std::collections::HashMap;
 
     /// Collision detector across the *real* resolution model (issue
@@ -1421,20 +1476,22 @@ mod collision_tests {
     #[test]
     fn no_same_rank_chord_collisions_per_focus() {
         for focus in [PaneFocus::Sidebar, PaneFocus::Right, PaneFocus::Terminals] {
-            let mut seen: HashMap<(u8, KeyChord), ActionKind> = HashMap::new();
+            let mut seen: HashMap<(u8, Chord), ActionKind> = HashMap::new();
             for def in ActionDef::all() {
                 let Some(rank) = section_rank(def.section, focus) else {
                     continue;
                 };
-                let Some(chord) = def.default_chord() else {
-                    continue;
-                };
-                if let Some(prev) = seen.insert((rank, chord.clone()), def.kind) {
-                    panic!(
-                        "under {focus:?}, chord {chord:?} resolves to two actions \
-                         at rank {rank}: {prev:?} and {:?}",
-                        def.kind,
-                    );
+                // Every alternative (leader sequence AND legacy alias)
+                // is a distinct binding — a collision on any one is a
+                // genuine ambiguity.
+                for chord in def.default_chords() {
+                    if let Some(prev) = seen.insert((rank, chord.clone()), def.kind) {
+                        panic!(
+                            "under {focus:?}, chord {chord:?} resolves to two actions \
+                             at rank {rank}: {prev:?} and {:?}",
+                            def.kind,
+                        );
+                    }
                 }
             }
         }

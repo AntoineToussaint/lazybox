@@ -2034,16 +2034,16 @@ mod chord_resolution_tests {
     //! Workspace section's AddAssignees / ToggleSnooze / MarkAllRead
     //! before the activity pane's own bindings ever saw the key.
     use super::super::PaneFocus;
-    use super::super::helpers::{find_action_for_chord, section_rank};
-    use lazybox_tui_core::action::{ActionDef, ActionKind, KeyChord};
+    use super::super::helpers::{find_action_for_stroke, section_rank};
+    use lazybox_tui_core::action::{ActionDef, ActionKind, Chord, KeyStroke};
     use std::collections::BTreeMap;
 
-    fn chord(s: &str) -> KeyChord {
-        KeyChord::parse(s).unwrap_or_else(|| panic!("{s:?} must parse"))
+    fn stroke(s: &str) -> KeyStroke {
+        KeyStroke::parse(s).unwrap_or_else(|| panic!("{s:?} must parse"))
     }
 
     fn resolve(s: &str, focus: PaneFocus) -> Option<ActionKind> {
-        find_action_for_chord(&chord(s), focus, &BTreeMap::new()).map(|d| d.kind)
+        find_action_for_stroke(&stroke(s), focus, &BTreeMap::new()).map(|d| d.kind)
     }
 
     /// Chord collisions that exist on purpose: the same key binds an
@@ -2051,18 +2051,18 @@ mod chord_resolution_tests {
     /// action (wins under Sidebar focus, still reachable from Right
     /// when no Activity entry claims the chord). Anything NOT listed
     /// here that collides is a shipped ambiguity.
-    fn known_aliases() -> Vec<(KeyChord, Vec<ActionKind>)> {
+    fn known_aliases() -> Vec<(Chord, Vec<ActionKind>)> {
         vec![
             (
-                chord("Enter"),
+                Chord::Key(stroke("Enter")),
                 vec![ActionKind::OpenWorkspace, ActionKind::ToggleActivity],
             ),
             (
-                chord("z"),
+                Chord::Key(stroke("z")),
                 vec![ActionKind::ToggleSnooze, ActionKind::UndoMarkRead],
             ),
             (
-                chord("Shift-G"),
+                Chord::Key(stroke("Shift-G")),
                 vec![ActionKind::AddAssignees, ActionKind::ActivityBottom],
             ),
         ]
@@ -2129,16 +2129,17 @@ mod chord_resolution_tests {
     fn no_ambiguous_chords_per_focus() {
         let overrides = BTreeMap::new();
         for focus in [PaneFocus::Sidebar, PaneFocus::Right] {
-            let mut by_chord: std::collections::HashMap<KeyChord, Vec<(u8, ActionKind)>> =
+            let mut by_chord: std::collections::HashMap<Chord, Vec<(u8, ActionKind)>> =
                 std::collections::HashMap::new();
             for def in ActionDef::all() {
                 let Some(rank) = section_rank(def.section, focus) else {
                     continue;
                 };
-                let Some(chord) = def.effective_chord(&overrides) else {
-                    continue;
-                };
-                by_chord.entry(chord).or_default().push((rank, def.kind));
+                // Every alternative (leader sequence AND legacy alias)
+                // is a binding the matcher can resolve — check each.
+                for chord in def.effective_chords(&overrides) {
+                    by_chord.entry(chord).or_default().push((rank, def.kind));
+                }
             }
             let aliases = known_aliases();
             for (chord, entries) in by_chord {

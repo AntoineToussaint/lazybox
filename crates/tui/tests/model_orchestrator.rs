@@ -1210,12 +1210,13 @@ fn tick_right_drives_auto_mark_and_emits_command() {
 
 // ── Grouped two-step (leader-key) chords — issue #126 ────────────────
 
-/// `g` in the sidebar with a workspace selected arms the github
-/// leader group — the which-key popup's pending state — without
-/// firing anything or mounting a modal.
+/// `g` in the sidebar arms the leader (the `g …` prefix) — the
+/// which-key popup's pending state — without firing anything or
+/// mounting a modal. Which entries continue the prefix is a pure
+/// function of the catalog (`seq_continuations`).
 #[test]
 fn leader_g_arms_github_group_when_workspace_selected() {
-    use lazybox_tui_core::action::ActionGroup;
+    use lazybox_tui_core::action::{ChordCode, KeyStroke};
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     m.handle_daemon_event(IpcEvent::Snapshot {
@@ -1225,7 +1226,10 @@ fn leader_g_arms_github_group_when_workspace_selected() {
     });
 
     m.dispatch_key(key(Key::Char('g')));
-    assert_eq!(m.leader_pending(), Some(ActionGroup::Github));
+    assert_eq!(
+        m.leader_pending(),
+        Some(KeyStroke::new(false, false, false, ChordCode::Char('g'))),
+    );
     assert_eq!(m.top_modal(), None, "arming must not mount a modal");
 }
 
@@ -1301,14 +1305,21 @@ fn leader_g_then_unmapped_key_cancels_without_firing() {
     );
 }
 
-/// Without a selected workspace the leader never arms — `g` falls
-/// through to its normal (no-op) sidebar handling.
+/// Arming is purely catalog-driven: `g` arms the leader from sidebar
+/// focus even with no workspace selected (just like the single-key
+/// `Shift-M` resolves at the keyboard layer regardless of target). The
+/// completed chord then no-ops in `dispatch_action` if nothing is
+/// actionable — same contract as every other workspace action.
 #[test]
-fn leader_g_does_not_arm_without_workspace() {
+fn leader_g_arms_from_sidebar_without_workspace() {
+    use lazybox_tui_core::action::{ChordCode, KeyStroke};
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     m.dispatch_key(key(Key::Char('g')));
-    assert_eq!(m.leader_pending(), None);
+    assert_eq!(
+        m.leader_pending(),
+        Some(KeyStroke::new(false, false, false, ChordCode::Char('g'))),
+    );
 }
 
 /// Flatten the current frame buffer into a newline-joined string of

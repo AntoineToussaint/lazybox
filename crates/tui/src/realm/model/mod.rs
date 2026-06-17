@@ -37,8 +37,8 @@ pub use helpers::{run_loop_with_model, run_with_client};
 // (`keys.rs`, etc.) can keep their `super::foo` import shape after
 // the helpers moved out of mod.rs.
 pub(crate) use helpers::{
-    emit_clipboard_copy, find_action_for_chord, key_event_to_chord, paint_selection, rect_contains,
-    split_for_footer,
+    emit_clipboard_copy, find_action_for_seq, find_action_for_stroke, key_event_to_stroke,
+    paint_selection, rect_contains, seq_continuations, split_for_footer,
 };
 
 use crate::PaneId;
@@ -347,12 +347,15 @@ pub struct Model<T: TerminalAdapter> {
     /// second `q` within `ui_defaults.quit_double_tap_window` quits.
     /// Any other key disarms via `q_latch.disarm()`.
     q_latch: crate::confirm_latch::DoubleTapLatch,
-    /// Grouped two-step (leader-key) chord state, issue #126. A group
-    /// leader key (`g` for the github group) arms it; the next key
-    /// picks an action within the group and fires it through the
-    /// unified `dispatch_action`. Drives the which-key popup in
-    /// `view`. Operator-pending, not timed — see `LeaderLatch`.
-    leader: crate::confirm_latch::LeaderLatch<lazybox_tui_core::action::ActionGroup>,
+    /// Leader-chord state (issues #126, #102). The first keystroke of a
+    /// `Chord::Seq` (e.g. `g` for the github actions) arms it with that
+    /// keystroke; the next key completes the sequence and fires its
+    /// action through the unified `dispatch_action`. Which catalog
+    /// entries continue a given prefix is a pure function of the
+    /// catalog (`seq_continuations`) — no hardcoded group table.
+    /// Drives the which-key popup in `view`. Operator-pending, not
+    /// timed — see `LeaderLatch`.
+    leader: crate::confirm_latch::LeaderLatch<lazybox_tui_core::action::KeyStroke>,
     /// Last left-click position + timestamp. A second left-click on
     /// the same row within `DOUBLE_CLICK_WINDOW` is treated as a
     /// double-click; the right pane's double-click handler then
@@ -1914,6 +1917,17 @@ impl<T: TerminalAdapter> Model<T> {
                 .contextual_bindings(&self.action_key_overrides),
         };
         let notice = self.status.notice.clone();
+        // Which-key rows for an armed catalog leader — the
+        // `(next-key, label)` continuations of the armed prefix, a pure
+        // function of the catalog. Built only while a leader is armed.
+        let leader_rows: Vec<(String, String)> = if let Some(prefix) = self.leader.pending() {
+            seq_continuations(prefix, self.focus, &self.action_key_overrides)
+                .into_iter()
+                .map(|(stroke, def)| (stroke.display(), def.label.to_string()))
+                .collect()
+        } else {
+            Vec::new()
+        };
         // Snippet rows for the `]]` leader popup — built only while the
         // leader is armed so the steady-state render pays nothing.
         let snippet_leader_rows: Vec<(String, String)> = if self.terminal_leader_at.is_some() {
@@ -1956,13 +1970,20 @@ impl<T: TerminalAdapter> Model<T> {
                 notice.as_ref(),
             );
 
-            // Which-key popup for an armed leader chord (#126). Drawn
-            // above the footer but below any modal — in practice the
-            // two never co-occur (arming doesn't mount a modal, and
+            // Which-key popup for an armed leader chord (#126, #102).
+            // Drawn above the footer but below any modal — in practice
+            // the two never co-occur (arming doesn't mount a modal, and
             // the leader is consumed before a modal-mounting action
-            // fires), so z-order is moot.
-            if let Some(group) = self.leader.pending().copied() {
-                crate::realm::components::which_key::render(f, area, group);
+            // fires), so z-order is moot. The rows are a pure function
+            // of the armed prefix + the catalog (`seq_continuations`),
+            // not a hardcoded group table.
+            if let Some(prefix) = self.leader.pending().copied() {
+                crate::realm::components::which_key::render(
+                    f,
+                    area,
+                    prefix,
+                    &leader_rows,
+                );
             }
             // Which-key popup for the armed terminal `]]` leader
             // (#205): lists the snippet keys reachable as `]]<key>`.

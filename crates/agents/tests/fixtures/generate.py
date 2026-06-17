@@ -203,6 +203,62 @@ write("claude_real_working_statusbar.bin", [
     cup(40, 90), "●".encode("utf-8"), cup(40, 92), b"high",
 ])
 
+# ── REAL working frame, NO interrupt hint (#96) ──────────────────────────
+# Right after `w`, Claude is running git commands. tmux paints the whole
+# screen in ONE chunk: a git-log scrollback whose `(#91)`/`(#92)`/`(#93)`
+# refs compact to `1)`/`2)`/`3)` option markers, the composer `❯` glyph,
+# and — at the bottom — the live status line `✳ Clauding… (52s · ↑ 2.0k
+# tokens)`. The status line carries the spinner + a ticking elapsed timer +
+# a token counter but NO `esc to interrupt` hint. The weak chooser shapes
+# matched the scrollback and, under the same-chunk repaint rule, out-ranked
+# the ticking status line → a spurious `?`. A live counter line is never
+# painted beneath a live gate, so this must read Working.
+write("claude_real_working_no_interrupt.bin", [
+    cup(4, 1), "⏺".encode("utf-8"), b" Bash(git log --oneline -3)\r\n",
+    cup(5, 3), b"04c758e Cache-bust README hero image\r\n",
+    cup(6, 3), b"0704b78 Refresh README (#91)\r\n",
+    cup(7, 3), b"f1a0773 Instrument event-pipeline counters (#92) (#93)\r\n",
+    cup(8, 3), "  … +19 lines (ctrl+o to expand)".encode("utf-8"), b"\r\n",
+    cup(10, 1), "❯ ".encode("utf-8"), b"\r\n",
+    # live status line — spinner + ticking timer + token counter, repainted
+    # in place via absolute CUP (the stale first render stays in the stream)
+    cup(24, 1), CLEAR_LINE,
+    sgr(35), "✳".encode("utf-8"), RESET, b" ",
+    sgr(1), b"Clauding", RESET,
+    "… ".encode("utf-8"),
+    sgr(2), "(41s · ↑ 1.6k tokens)".encode("utf-8"), RESET,
+    cup(24, 1), CLEAR_LINE,
+    sgr(35), "✳".encode("utf-8"), RESET, b" ",
+    sgr(1), b"Clauding", RESET,
+    "… ".encode("utf-8"),
+    sgr(2), "(52s · ↑ 2.0k tokens)".encode("utf-8"), RESET,
+])
+
+# ── REAL startup repaint (#96): boot transients must NOT misfire ──────────
+# The first repaint after spawning a fresh agent: the version banner, a
+# command echo carrying a `(y/n)`-ish substring, a numbered git-log
+# scrollback, the composer `❯`, and the live counter line at the bottom —
+# all delivered in one chunk before the resting composer footer has
+# stabilised. None of the boot transients (the `(y/n)` echo, the numbered
+# refs, the parked `❯`) may promote the workspace to InputNeeded while the
+# status line is ticking. Must read Working, never asking.
+write("claude_startup_repaint.bin", [
+    ESC + b"[2J", cup(1, 1),
+    sgr(1, 34), b"Claude Code v2.1.159", RESET, b"\r\n",
+    cup(4, 1), "⏺".encode("utf-8"),
+    b" Bash(grep -n 'confirm (y/n)' src/*.rs | head -2)\r\n",
+    cup(5, 3), b"04c758e Cache-bust README hero image\r\n",
+    cup(6, 3), b"0704b78 Refresh README (#91)\r\n",
+    cup(7, 3), b"f1a0773 Instrument counters (#92) (#93)\r\n",
+    cup(8, 3), "  … +16 lines (ctrl+o to expand)".encode("utf-8"), b"\r\n",
+    cup(10, 1), "❯ ".encode("utf-8"), b"\r\n",
+    cup(24, 1), CLEAR_LINE,
+    sgr(35), "✳".encode("utf-8"), RESET, b" ",
+    sgr(1), b"Clauding", RESET,
+    "… ".encode("utf-8"),
+    sgr(2), "(3s · ↑ 412 tokens)".encode("utf-8"), RESET,
+])
+
 # ── numbered list above an idle composer: must NOT be read as a chooser ──
 # Long idle footer carries BOTH `Esc to cancel` and `Tab to amend`; the
 # scrollback has a `1.`/`2.` list. The permission-footer branch must stay

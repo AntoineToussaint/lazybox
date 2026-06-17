@@ -290,8 +290,26 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
     // — without this, the stale marker pins InputNeeded for as long as
     // it stays in the detect window. (Subject to the same-chunk rule
     // above: a full repaint delivers both in one chunk.)
-    let chooser_live =
-        marker_at_least_as_recent(chooser_pos, idle_pos.max(work_anchor_against(chooser_pos)));
+    // A live counter line — spinner glyph + a ticking elapsed timer +
+    // token counter (see `is_live_counter_line`) — is painted ONLY while
+    // the agent is actively working; a blocking dialog freezes that timer,
+    // so Claude never renders one beneath a live prompt. When such a line
+    // is MORE RECENT than the chooser markers, the agent has moved past
+    // any numbered shape above it: the "chooser" is scrollback (a git log,
+    // a numbered prose list), not a live gate. Unlike the generic work
+    // anchor this is NOT relaxed by the same-chunk rule — a startup full
+    // repaint delivers the scrollback and the ticking status line together
+    // (#96), and the ticking line must still win over the weak shapes. The
+    // STRONG consent-phrase / paired-yes-no tiers keep the same-chunk rule,
+    // so a real dialog repainted alongside a frozen status preview is
+    // unaffected.
+    let live_counter_pos = last_line_pos(compact, is_live_counter_line);
+    let chooser_live = marker_at_least_as_recent(
+        chooser_pos,
+        idle_pos
+            .max(work_anchor_against(chooser_pos))
+            .max(live_counter_pos),
+    );
 
     // tmux paints the screen by absolute cursor position, so the bytes
     // lazybox sees arrive in TEMPORAL order: a single visual line
@@ -1495,6 +1513,50 @@ mod tests {
         );
         // No chunk hint at all keeps the pure positional rule.
         assert_eq!(claude_state(repaint.as_bytes()), Some(AgentState::Working));
+    }
+
+    #[test]
+    fn same_chunk_live_counter_beats_scrollback_chooser() {
+        // #96: right after `w`, a tmux full repaint delivers scrollback
+        // that LOOKS chooser-shaped (a git log whose `(#91)`/`(#92)`/`(#93)`
+        // refs compact to `1)`/`2)`/`3)` option markers, plus the composer
+        // `❯`) AND the live ticking status line — all in ONE chunk. The
+        // same-chunk rule lets a dialog out-rank the status bar, so the
+        // weak chooser wrongly fired InputNeeded while Claude was just
+        // running commands. A live counter line (spinner + elapsed timer +
+        // token counter) is never painted beneath a live gate, so its
+        // presence below the markers proves the agent is working.
+        let repaint = concat!(
+            "  04c758e Cache-bust README hero image\n",
+            "  0704b78 Refresh README (#91)\n",
+            "  f1a0773 Instrument event-pipeline counters (#92) (#93)\n",
+            "  … +19 lines (ctrl+o to expand)\n",
+            "❯\n",
+            "✳ Clauding… (52s · ↑ 2.0k tokens)",
+        );
+        // Whole buffer arrived as one chunk → must read Working, not the
+        // weak chooser's InputNeeded.
+        assert_eq!(
+            claude_state_chunked(repaint.as_bytes(), 0),
+            Some(AgentState::Working)
+        );
+        // The pure positional path agrees (the counter is most recent).
+        assert_eq!(claude_state(repaint.as_bytes()), Some(AgentState::Working));
+
+        // The guard the same-chunk rule still keeps: a STRONG consent
+        // phrase in the same repaint is a real dialog and stays
+        // InputNeeded even with a (frozen) status preview below it.
+        let real_dialog = concat!(
+            "Do you want to proceed?\n",
+            "❯ 1. Yes\n",
+            "  2. No\n",
+            "Esc to cancel\n",
+            "✳ Clauding… (52s · ↑ 2.0k tokens)",
+        );
+        assert_eq!(
+            claude_state_chunked(real_dialog.as_bytes(), 0),
+            Some(AgentState::InputNeeded)
+        );
     }
 
     #[test]

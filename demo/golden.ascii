@@ -7,7 +7,8 @@
   n               new workspace     Shift+M         merge PR           Shift+V         reviewers
   Shift+G         assignees         Shift+L         labels             Shift+O         open in browser
   r               reply             Shift+A         adopt sessions     Shift+J         join into PR
-  Shift+X         archive           Enter           toggle section     →/←             expand/collapse
-  g               top               Shift+G         bottom             d               description
-  Space           select row        z               undo mark-read     Shift+PgUp/Dn   scroll
-  ]]              exit to sidebar   ]]<key>         snippets
+  Shift+X         archive           f               filter             o               sort
+  Shift+S         mailbox           /               search             Enter           toggle section
+  →/←             expand/collapse   g               top                Shift+G         bottom
+  d               description       Space           select row         z               undo mark-read
+  Shift+PgUp/Dn   scroll            ]]              exit to sidebar    ]]<key>         snippets

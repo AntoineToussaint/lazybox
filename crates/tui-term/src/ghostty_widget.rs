@@ -500,6 +500,59 @@ mod tests {
         );
     }
 
+    /// #103 regression: a replayed buffer carrying underline /
+    /// strikethrough / box-drawing SGR must render those attributes on
+    /// the glyphs that own them and NOWHERE else — not leaked full-width
+    /// across the blank tail of the row or onto unrelated rows — and a
+    /// redraw (shadow replay) must reproduce the same frame, so the pane
+    /// can't blink between a clean and a struck-through version.
+    #[test]
+    fn replayed_sgr_does_not_leak_across_cells_on_redraw() {
+        let mut h = Harness::new(12, 3);
+        // Row 0: underlined header, then SGR reset, then plain padding —
+        // the reset must stop the underline from running to end-of-row.
+        // Row 1: a struck-out box-drawing glyph followed by plain text —
+        // the strikethrough must stay on the glyph, not the neighbours.
+        h.terminal
+            .vt_write(b"\x1b[4mHEAD\x1b[0m ok\r\n\x1b[9m\xe2\x94\x80\x1b[0mtail");
+        let area = Rect::new(0, 0, 12, 3);
+
+        let first = h.render(area);
+
+        let underlined = |buf: &Buffer, x: u16, y: u16| {
+            buf[(x, y)].modifier.contains(Modifier::UNDERLINED)
+        };
+        let struck = |buf: &Buffer, x: u16, y: u16| {
+            buf[(x, y)].modifier.contains(Modifier::CROSSED_OUT)
+        };
+
+        // Header glyphs keep their underline...
+        for x in 0..4 {
+            assert!(underlined(&first, x, 0), "HEAD cell {x} should be underlined");
+        }
+        // ...but the reset + blank tail must not.
+        for x in 4..12 {
+            assert!(
+                !underlined(&first, x, 0),
+                "underline leaked to cell {x} past the SGR reset",
+            );
+        }
+        // The box-drawing glyph keeps its strikethrough; the plain tail
+        // after the reset does not.
+        assert!(struck(&first, 0, 1), "box-drawing glyph should be struck out");
+        for x in 1..12 {
+            assert!(
+                !struck(&first, x, 1),
+                "strikethrough leaked to cell {x} on row 1",
+            );
+        }
+
+        // Redraw from the shadow (terminal unchanged) is byte-identical —
+        // no flicker between a clean and a corrupted frame.
+        let second = h.render(area);
+        assert_eq!(first, second, "redraw must reproduce the frame from the shadow");
+    }
+
     /// Empty + ASCII-whitespace cases. The ORIGINAL `text == " "`
     /// check covered these; the test pins them so a future tighten
     /// doesn't regress.

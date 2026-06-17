@@ -672,7 +672,17 @@ async fn run_embedded_realm(
             }
         }
         model.set_agents(agents);
-        model.apply_action_key_overrides(user_config.ui.action_keys.clone());
+        // Keymap = the selected in-tree preset (#102 P4) as a base
+        // layer, with the user's explicit `ui.action_keys` on top so
+        // individual tweaks win over the preset.
+        let mut overrides = user_config
+            .ui
+            .keymap_preset
+            .as_deref()
+            .and_then(lazybox_tui_core::action::keymap_preset)
+            .unwrap_or_default();
+        overrides.extend(user_config.ui.action_keys.clone());
+        model.apply_action_key_overrides(overrides);
         // Arm the feature tour for anyone who hasn't seen it. It
         // launches on wizard Finish for first-run users, or at startup
         // (just below) for returning ones.

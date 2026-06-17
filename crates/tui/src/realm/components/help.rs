@@ -229,7 +229,58 @@ fn format_keys_for_display(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_keys_for_display;
+    use super::{Help, format_keys_for_display};
+
+    /// The generated Keys screen (#102 P4) is the catalog made visible:
+    /// it must list the per-agent spawn rows and the long-snooze guard
+    /// row — the bindings that only exist in the runtime catalog — with
+    /// their effective keys, grouped by scope.
+    #[test]
+    fn from_catalog_lists_generated_rows() {
+        use lazybox_tui_core::action::ActionDef;
+        let catalog = ActionDef::catalog(
+            &["claude".to_string(), "codex".to_string()],
+            &std::collections::BTreeMap::new(),
+        );
+        let help = Help::from_catalog(&catalog);
+        let rows: Vec<(String, String)> = help
+            .sections
+            .iter()
+            .flat_map(|s| s.bindings.iter())
+            .map(|b| (b.keys.to_string(), b.label.to_string()))
+            .collect();
+        assert!(
+            rows.iter().any(|(k, l)| k == "c" && l == "spawn claude"),
+            "per-agent claude row missing from Keys screen: {rows:?}",
+        );
+        assert!(
+            rows.iter().any(|(k, l)| k == "x" && l == "spawn codex"),
+            "per-agent codex row missing",
+        );
+        assert!(
+            rows.iter().any(|(_, l)| l == "long snooze"),
+            "long-snooze guard row missing",
+        );
+        // No bare generic "spawn agent" placeholder survives.
+        assert!(!rows.iter().any(|(_, l)| l == "spawn agent"));
+    }
+
+    /// A keymap preset's remaps surface in the Keys screen — the vim
+    /// preset shows merge as `g m`, not `Shift-M`.
+    #[test]
+    fn from_catalog_reflects_preset_overrides() {
+        use lazybox_tui_core::action::{ActionDef, keymap_preset};
+        let overrides = keymap_preset("vim").unwrap();
+        let catalog = ActionDef::catalog(&[], &overrides);
+        let help = Help::from_catalog(&catalog);
+        let merge_keys = help
+            .sections
+            .iter()
+            .flat_map(|s| s.bindings.iter())
+            .find(|b| b.label == "merge PR")
+            .map(|b| b.keys.to_string());
+        assert_eq!(merge_keys.as_deref(), Some("g m"));
+    }
 
     #[test]
     fn modifier_letter_normalized() {

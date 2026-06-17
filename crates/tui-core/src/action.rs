@@ -1201,6 +1201,39 @@ pub struct CatalogEntry {
     pub config_key: String,
 }
 
+/// Built-in keymap preset names (#102 P4, #98 possibility F). A
+/// preset is just an `action_keys` map shipped in-tree; the user
+/// selects one with `ui.keymap_preset` and their own `ui.action_keys`
+/// still layers on top.
+pub const KEYMAP_PRESETS: &[&str] = &["default", "vim"];
+
+/// Resolve a named keymap preset to its `action_keys` overrides, or
+/// `None` for an unknown name. `default` is the bare catalog (no
+/// overrides). `vim` goes leaders-primary — the github actions bind to
+/// their `g …` chord only, dropping the legacy `Shift-*` aliases — and
+/// moves pane-cycling onto `Ctrl-w` (vim's window key). Every preset is
+/// collision-checked by the `preset_*_has_no_collisions` tests so a
+/// bad entry can't ship.
+pub fn keymap_preset(name: &str) -> Option<std::collections::BTreeMap<String, String>> {
+    let mut m = std::collections::BTreeMap::new();
+    match name {
+        "default" => {}
+        "vim" => {
+            // Leaders-primary: keep only the `g …` chord for the github
+            // actions (the `Shift-*` aliases drop away).
+            m.insert("merge_pr".into(), "g m".into());
+            m.insert("request_reviewers".into(), "g v".into());
+            m.insert("add_assignees".into(), "g a".into());
+            m.insert("manage_labels".into(), "g l".into());
+            m.insert("open_in_browser".into(), "g o".into());
+            // Vim's window key cycles panes.
+            m.insert("cycle_pane".into(), "Ctrl-w".into());
+        }
+        _ => return None,
+    }
+    Some(m)
+}
+
 /// The default single-letter key a known agent binds to. `None` for
 /// agents lazybox doesn't ship a convention for — they still get a
 /// catalog row (in help, remappable), just no default chord.
@@ -1820,6 +1853,57 @@ mod tests {
         assert_eq!(
             claude.chords,
             vec![Chord::Key(KeyStroke::new(true, false, false, ChordCode::Char('j')))],
+        );
+    }
+
+    #[test]
+    fn every_preset_resolves_and_is_collision_free() {
+        // Each shipped preset must (a) resolve, and (b) produce a
+        // catalog with no two bindings sharing a chord within a
+        // section — the same invariant the default catalog holds, now
+        // guarded for presets so a bad in-tree keymap can't ship.
+        use std::collections::HashMap;
+        let agents: Vec<String> = ["claude", "codex", "cursor"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for name in KEYMAP_PRESETS {
+            let overrides = keymap_preset(name).unwrap_or_else(|| panic!("{name} must resolve"));
+            let catalog = ActionDef::catalog(&agents, &overrides);
+            let mut seen: HashMap<(Section, Chord), String> = HashMap::new();
+            for entry in &catalog {
+                for chord in &entry.chords {
+                    let id = format!("{:?}/{:?}", entry.kind, entry.param);
+                    if let Some(prev) = seen.insert((entry.section, chord.clone()), id.clone()) {
+                        panic!(
+                            "preset `{name}`: chord {chord:?} bound twice in \
+                             {:?}: {prev} and {id}",
+                            entry.section,
+                        );
+                    }
+                }
+            }
+        }
+        assert!(keymap_preset("nope").is_none());
+    }
+
+    #[test]
+    fn vim_preset_is_leaders_primary() {
+        // The vim preset drops the legacy `Shift-M` alias for merge —
+        // only the `g m` leader survives.
+        let overrides = keymap_preset("vim").unwrap();
+        let catalog = ActionDef::catalog(&[], &overrides);
+        let merge = catalog
+            .iter()
+            .find(|e| e.kind == ActionKind::MergePr)
+            .unwrap();
+        assert_eq!(
+            merge.chords,
+            vec![Chord::Seq(vec![
+                KeyStroke::new(false, false, false, ChordCode::Char('g')),
+                KeyStroke::new(false, false, false, ChordCode::Char('m')),
+            ])],
+            "vim merge keeps only the g-leader, no Shift-M",
         );
     }
 

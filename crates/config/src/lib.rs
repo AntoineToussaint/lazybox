@@ -190,6 +190,13 @@ pub struct UiSection {
     /// catalog-driven approach.
     #[serde(default)]
     pub action_keys: std::collections::BTreeMap<String, String>,
+    /// Named keymap preset shipped in-tree (`"default"`, `"vim"`).
+    /// Applied as a base layer of `action_keys`; the explicit
+    /// `action_keys` map above still layers on top, so a user can pick
+    /// `vim` and tweak individual binds. Unknown / unset → no preset.
+    /// See `lazybox_tui_core::action::keymap_preset`.
+    #[serde(default)]
+    pub keymap_preset: Option<String>,
     /// Preferred web browser for opening task URLs (the `o` shortcut)
     /// and links right-clicked in the terminal grid. On macOS this is
     /// the application name handed to `open -a` (e.g. `"Google Chrome"`,

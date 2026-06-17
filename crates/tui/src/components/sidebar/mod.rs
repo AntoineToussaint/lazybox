@@ -1061,10 +1061,7 @@ impl Sidebar {
         self.visible.is_empty()
             && self.mailbox == Mailbox::Inbox
             && self.role_filter == RoleFilter::All
-            && self
-                .search
-                .as_ref()
-                .is_none_or(|s| s.query.is_empty())
+            && self.search.as_ref().is_none_or(|s| s.query.is_empty())
     }
 
     /// How many *workspace* rows are visible (excluding repo headers).

@@ -499,7 +499,9 @@ impl Sidebar {
             .fg(theme.text_strong)
             .add_modifier(Modifier::BOLD);
         let prose = Style::default().fg(theme.text_dim);
-        let key = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+        let key = Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD);
         let label = Style::default().fg(theme.text_dim);
         // `key` (left-padded to a column) + label, one shortcut per row.
         let hint = |k: &str, text: &str| {

@@ -43,7 +43,7 @@ LOCAL_ZIG_DIR := vendor/zig/$(ZIG_SLUG)
 ZIG_DIR := $(if $(wildcard $(LOCAL_ZIG_DIR)/zig),$(LOCAL_ZIG_DIR),$(CACHE_ZIG_DIR))
 PINNED_PATH := $(abspath $(ZIG_DIR)):$(PATH)
 
-.PHONY: all setup build release run run-fresh run-test run-connect dev dev-fresh test lint clean distclean install help
+.PHONY: all setup build release run run-perf run-fresh run-test run-connect dev dev-fresh test lint clean distclean install help
 
 # Side-by-side dev profile root. Picked up by `lazybox_core::paths`
 # everywhere — independent state.db, worktrees, daemon socket, tmux
@@ -73,11 +73,21 @@ release: ## Build lazybox (optimized). Uses pinned zig.
 # Convenience targets below shorten the common cases.
 ARGS ?=
 
-run: ## Build and run lazybox. Pass extra args via ARGS=, e.g. ARGS="--fresh".
-	@PATH="$(PINNED_PATH)" cargo run -p lazybox-tui -- $(ARGS)
+# Set PERF=1 to enable the opt-in perf observability (run-loop watchdog,
+# dropped-keystroke counter, on-screen stall indicator) and a dedicated
+# perf log at /tmp/lazybox-perf.log. Off by default — see
+# crates/tui/src/perf.rs. Use `make run PERF=1` or the `run-perf` target.
+PERF ?=
+PERF_ENV := $(if $(filter 1,$(PERF)),LAZYBOX_PERF=1,)
+
+run: ## Build and run lazybox. Pass extra args via ARGS=, perf via PERF=1.
+	@PATH="$(PINNED_PATH)" $(PERF_ENV) cargo run -p lazybox-tui -- $(ARGS)
+
+run-perf: ## Run with LAZYBOX_PERF=1 (writes /tmp/lazybox-perf.log; surfaces UI stalls + dropped keystrokes).
+	@$(MAKE) run PERF=1 ARGS="$(ARGS)"
 
 run-release: ## Same as `run` but optimized build. Use when debug feels sluggish (terminal scroll, large workspace lists). Build is ~10x slower but the binary is fast.
-	@PATH="$(PINNED_PATH)" cargo run -p lazybox-tui --release -- $(ARGS)
+	@PATH="$(PINNED_PATH)" $(PERF_ENV) cargo run -p lazybox-tui --release -- $(ARGS)
 
 run-fresh: ## Run lazybox with --fresh (wipe state.db + force the setup wizard).
 	@$(MAKE) run ARGS="--fresh"
@@ -90,7 +100,7 @@ run-connect: ## Connect to a running daemon socket. Usage: make run-connect SOCK
 
 dev: ## Run the dev build against $(LAZYBOX_DEV_HOME) — independent state from `make run`.
 	@echo "▶ dev profile: LAZYBOX_HOME=$(LAZYBOX_DEV_HOME)"
-	@PATH="$(PINNED_PATH)" LAZYBOX_HOME="$(LAZYBOX_DEV_HOME)" cargo run -p lazybox-tui -- $(ARGS)
+	@PATH="$(PINNED_PATH)" $(PERF_ENV) LAZYBOX_HOME="$(LAZYBOX_DEV_HOME)" cargo run -p lazybox-tui -- $(ARGS)
 
 dev-fresh: ## Same as `dev` but wipes the dev state.db first.
 	@$(MAKE) dev ARGS="--fresh"

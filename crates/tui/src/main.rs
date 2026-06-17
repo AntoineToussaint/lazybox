@@ -658,19 +658,22 @@ async fn run_embedded_realm(
             &user_config.display,
             &ui_defaults,
         );
-        // Generate the per-agent SpawnAgent catalog rows (#102 P2): the
-        // built-in `claude` / `codex` / `cursor` (with their `c` / `x` /
-        // `u` keys) plus any extra agents the wizard enabled. Per-agent
-        // key remaps live in `ui.action_keys` under `spawn_agent.<id>`.
-        let mut agents: Vec<String> = ["claude", "codex", "cursor"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        for id in &user_config.setup.agents {
-            if !agents.contains(id) {
-                agents.push(id.clone());
-            }
-        }
+        // Generate the per-agent SpawnAgent catalog rows (#102 P2):
+        // exactly the agents the wizard enabled. An unconfigured user
+        // (empty `setup.agents`) falls back to the built-in trio so the
+        // zero-config `c` / `x` / `u` keys still work out of the box.
+        // Using the enabled set (rather than unioning it with the
+        // built-ins) avoids binding both `cursor` and `cursor-agent` to
+        // `u`. Per-agent key remaps live in `ui.action_keys` under
+        // `spawn_agent.<id>`.
+        let agents: Vec<String> = if user_config.setup.agents.is_empty() {
+            ["claude", "codex", "cursor"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            user_config.setup.agents.iter().cloned().collect()
+        };
         model.set_agents(agents);
         // Keymap = the selected in-tree preset (#102 P4) as a base
         // layer, with the user's explicit `ui.action_keys` on top so

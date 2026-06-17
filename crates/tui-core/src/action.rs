@@ -950,6 +950,12 @@ impl Chord {
         match strokes.as_slice() {
             [] => None,
             [one] => KeyStroke::parse(one).map(Chord::Key),
+            // A `/` token inside a multi-key string is the "this key OR
+            // that key" presentation separator (`c / x / u`), not a
+            // real sequence — a lone `/` only ever binds as a single
+            // chord (sidebar search). Reject so presentation strings
+            // don't fabricate a bogus sequence.
+            many if many.iter().any(|t| t.contains('/')) => None,
             many => {
                 let parsed: Option<Vec<KeyStroke>> =
                     many.iter().map(|t| KeyStroke::parse(t)).collect();
@@ -1282,12 +1288,19 @@ impl ActionDef {
             });
         }
         let spawn = ActionDef::for_kind(ActionKind::SpawnAgent);
+        // Chords already claimed by an earlier agent row's BUILT-IN
+        // default. Two agents sharing a default key (`cursor` and
+        // `cursor-agent` both want `u`) would otherwise resolve
+        // ambiguously; the second keeps its row (in help, remappable)
+        // but loses the colliding default binding. An explicit
+        // override is always honored — the user asked for it.
+        let mut claimed_defaults: Vec<Chord> = Vec::new();
         for id in agents {
             let config_key = format!("spawn_agent.{id}");
             // Override wins when it has at least one parseable
             // alternative; otherwise the built-in single-letter default
             // (which may be empty for an agent with no convention).
-            let (chords, keys_display): (Vec<Chord>, std::borrow::Cow<'static, str>) =
+            let (mut chords, mut keys_display): (Vec<Chord>, std::borrow::Cow<'static, str>) =
                 match overrides.get(&config_key) {
                     Some(raw) => {
                         let parsed: Vec<Chord> = raw.split('|').filter_map(Chord::parse).collect();
@@ -1299,6 +1312,16 @@ impl ActionDef {
                     }
                     None => default_agent_chords(id),
                 };
+            // Drop a built-in default chord already taken by an earlier
+            // agent (only when it's the default, never an override).
+            if !overrides.contains_key(&config_key)
+                && chords.iter().any(|c| claimed_defaults.contains(c))
+            {
+                chords.clear();
+                keys_display = std::borrow::Cow::Borrowed("");
+            } else {
+                claimed_defaults.extend(chords.iter().cloned());
+            }
             out.push(CatalogEntry {
                 kind: ActionKind::SpawnAgent,
                 param: Some(Param::Agent(id.clone())),
@@ -1686,6 +1709,9 @@ mod tests {
         assert!(Chord::parse("↑/↓").is_none());
         assert!(Chord::parse("Shift-PgUp/Dn").is_none());
         assert!(Chord::parse("all keys").is_none());
+        // Space-separated presentation form with `/` separators — the
+        // static SpawnAgent placeholder — must not fabricate a Seq.
+        assert!(Chord::parse("c / x / u").is_none());
     }
 
     #[test]
@@ -1850,6 +1876,31 @@ mod tests {
             .find(|e| e.param == Some(Param::Agent("aider".into())))
             .expect("aider row");
         assert!(aider.chords.is_empty(), "aider has no default key");
+    }
+
+    #[test]
+    fn catalog_dedupes_shared_agent_default_key() {
+        // `cursor` and `cursor-agent` both default to `u`; only the
+        // first keeps the binding, the second still gets a (remappable)
+        // row but no colliding default chord.
+        use std::collections::BTreeMap;
+        let agents: Vec<String> = ["cursor", "cursor-agent"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let catalog = ActionDef::catalog(&agents, &BTreeMap::new());
+        let u = Chord::Key(KeyStroke::new(false, false, false, ChordCode::Char('u')));
+        let bound_to_u: Vec<&CatalogEntry> =
+            catalog.iter().filter(|e| e.chords.contains(&u)).collect();
+        assert_eq!(bound_to_u.len(), 1, "only one agent keeps `u`");
+        // Both agents still have a row.
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|e| e.kind == ActionKind::SpawnAgent)
+                .count(),
+            2,
+        );
     }
 
     #[test]

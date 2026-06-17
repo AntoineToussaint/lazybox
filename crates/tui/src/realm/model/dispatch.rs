@@ -41,6 +41,17 @@ impl<T: TerminalAdapter> Model<T> {
                 // would have.
                 return Vec::new();
             };
+            // Archive is the only destructive action that applies to a
+            // project header (it deletes the project + cascades). Any
+            // other — e.g. `Shift-Z` long-snooze pressed while the
+            // cursor sits on a project header with no workspace
+            // selected — has nothing to act on, so drop it silently
+            // rather than mount a confirm that would no-op on Yes.
+            if matches!(target, ActionConfirmTarget::Project(_))
+                && !matches!(action, lazybox_tui_core::action::Action::Archive)
+            {
+                return Vec::new();
+            }
             // Project-header focused Archive deletes the whole
             // project (cascading to its workspaces) — the default
             // confirm prompt assumes a workspace target, which would

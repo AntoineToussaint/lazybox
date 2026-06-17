@@ -857,6 +857,48 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::AdoptTarget, modal);
     }
 
+    /// Drive the global "start agent" (`Shift-W`) flow. Resolve the
+    /// project set up front:
+    ///
+    /// - **No projects** → footer nudge pointing at `Shift-N`; there's
+    ///   nothing to create a workspace under yet.
+    /// - **One project** → skip the picker and go straight to the
+    ///   name input (the project is unambiguous).
+    /// - **Several** → mount the project picker; the pick funnels into
+    ///   the same name input.
+    ///
+    /// The name input's submit auto-spawns the configured default
+    /// agent (see `handle_input_submitted`), so this whole flow is
+    /// "create workspace + start agent" in one keystroke chain.
+    pub(crate) fn start_agent_flow(&mut self) {
+        let projects = self.sidebar.projects_for_picker();
+        match projects.len() {
+            0 => {
+                self.flash_info("no projects yet — create one with Shift-N");
+            }
+            1 => {
+                let (key, _) = projects.into_iter().next().expect("len checked == 1");
+                self.mount_new_workspace_input(key);
+            }
+            _ => self.mount_start_agent_picker(projects),
+        }
+    }
+
+    /// Mount the project picker for the `Shift-W` start-agent flow.
+    /// Mirrors `mount_adopt_picker`: stash the keys in row order so
+    /// `Msg::ChoicePicked` can recover the chosen `ProjectKey`.
+    fn mount_start_agent_picker(&mut self, projects: Vec<(lazybox_core::ProjectKey, String)>) {
+        use crate::realm::components::choice::Choice;
+
+        let labels: Vec<String> = projects.iter().map(|(_, name)| name.clone()).collect();
+        self.start_agent_project_choices = projects.into_iter().map(|(k, _)| k).collect();
+
+        let modal = Choice::single("Start agent in which project?", labels)
+            .title("Start agent")
+            .label(|s: &String| s.clone());
+        self.mount_modal(Id::StartAgentProject, modal);
+    }
+
     /// Surface the next queued issue→PR merge prompt when no modal
     /// is currently up. The user's answer drives `Msg::Confirmed` /
     /// `Msg::ModalDismissed`, which dispatch a `Command::ConfirmMerge`

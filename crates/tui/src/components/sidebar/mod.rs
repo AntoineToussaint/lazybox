@@ -1083,6 +1083,17 @@ impl Sidebar {
         self.workspaces.iter()
     }
 
+    /// Every known Project as `(key, display name)`, in the sidebar's
+    /// stable `BTreeMap` order. Drives the global "start agent"
+    /// (`Shift-W`) picker, which — unlike `n` — can't lean on the
+    /// cursor to resolve a project, so it offers the full list.
+    pub fn projects_for_picker(&self) -> Vec<(lazybox_core::ProjectKey, String)> {
+        self.projects
+            .values()
+            .map(|p| (p.key.clone(), p.name.clone()))
+            .collect()
+    }
+
     /// The Project the cursor is currently "in" — drives the `n` (new
     /// workspace) flow. Resolution:
     ///

@@ -188,9 +188,11 @@ mod effects_tests {
 
     /// NewWorkspace input with a non-empty trimmed name AND a
     /// pre-stashed project_key produces `CreateWorkspace { name,
-    /// project_key }`. Without a stashed project_key the submit
-    /// drops (see `mount_new_workspace_input` — the catalog `n`
-    /// flow only mounts when a project is focused).
+    /// project_key, spawn_agent }`. `spawn_agent` carries the
+    /// configured default agent so creating a workspace lands the
+    /// user straight in a live session. Without a stashed project_key
+    /// the submit drops (see `mount_new_workspace_input` — the catalog
+    /// `n` flow only mounts when a project is focused).
     #[test]
     fn input_submitted_for_new_workspace_returns_create_workspace() {
         let mut m = build_model();
@@ -200,12 +202,50 @@ mod effects_tests {
         let cmds = m.handle_input_submitted("  my-feature  ".into());
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            IpcCommand::CreateWorkspace { name, project_key } => {
+            IpcCommand::CreateWorkspace {
+                name,
+                project_key,
+                spawn_agent,
+            } => {
                 assert_eq!(name, "my-feature");
                 assert_eq!(project_key, &pk);
+                // Default agent is "claude" unless YAML overrides it.
+                assert_eq!(spawn_agent.as_deref(), Some("claude"));
             }
             other => panic!("expected CreateWorkspace, got {other:?}"),
         }
+    }
+
+    /// `Shift-W` with no projects yet can't resolve a container, so
+    /// it surfaces a nudge instead of mounting a picker.
+    #[test]
+    fn start_agent_flow_without_projects_mounts_no_modal() {
+        let mut m = build_model();
+        m.start_agent_flow();
+        assert!(
+            m.modal_stack.is_empty(),
+            "no project → footer nudge, no modal"
+        );
+    }
+
+    /// Picking a project in the `Shift-W` start-agent picker funnels
+    /// into the new-workspace name input (which then auto-spawns the
+    /// default agent on submit). The pick itself sends no IPC and
+    /// drains the stashed choices.
+    #[test]
+    fn start_agent_project_pick_funnels_into_new_workspace_input() {
+        let mut m = build_model();
+        let pk = lazybox_core::ProjectKey::local("proj");
+        m.start_agent_project_choices = vec![pk.clone()];
+        m.modal_stack.push(Id::StartAgentProject);
+        let cmds = m.handle_choice_picked(vec![0]);
+        assert!(cmds.is_empty(), "picking a project sends no IPC yet");
+        assert_eq!(m.modal_stack.last(), Some(&Id::NewWorkspace));
+        assert_eq!(m.pending_new_workspace_project.as_ref(), Some(&pk));
+        assert!(
+            m.start_agent_project_choices.is_empty(),
+            "choices drained after pick"
+        );
     }
 
     /// Empty / whitespace-only input is dropped silently.

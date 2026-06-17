@@ -538,6 +538,13 @@ pub enum Command {
         /// `n` flow can't fire without a focused project, and a
         /// stale key just produces an orphan workspace).
         project_key: lazybox_core::ProjectKey,
+        /// When `Some(agent_id)`, the daemon immediately spawns that
+        /// agent (claude / codex / cursor / …) into the freshly
+        /// created workspace, so the user lands in a live session
+        /// instead of an empty row. `None` leaves the workspace bare.
+        /// The TUI sets this to the configured default agent for both
+        /// the `n` key and the global "start agent" shortcut.
+        spawn_agent: Option<String>,
     },
     /// Create a brand-new local Project — a top-level container the
     /// sidebar groups workspaces under, like a github repo but with

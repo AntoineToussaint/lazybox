@@ -130,6 +130,12 @@ pub enum Action {
     /// Jump the sidebar cursor to the next workspace whose PR has
     /// failing / mixed CI (`Shift-F`). Wraps around.
     JumpToFailingCi,
+    /// Start a fresh agent session from anywhere (`Shift-W`): pick a
+    /// project, name the workspace, and the daemon creates it and
+    /// spawns the default agent in one step. The zero-friction entry
+    /// point for "I just want to start working" — no need to first
+    /// navigate the sidebar to a project header.
+    StartAgent,
     /// Begin the two-press quit chord. Single-press from a remap
     /// just fires.
     Quit,
@@ -220,6 +226,7 @@ pub enum ActionKind {
     OpenSettings,
     JumpToAsking,
     JumpToFailingCi,
+    StartAgent,
     Quit,
     ResizeSplitter,
     // Terminal
@@ -339,6 +346,7 @@ impl Action {
             Action::OpenSettings => ActionKind::OpenSettings,
             Action::JumpToAsking => ActionKind::JumpToAsking,
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
+            Action::StartAgent => ActionKind::StartAgent,
             Action::Quit => ActionKind::Quit,
             Action::ResizeSplitter(_) => ActionKind::ResizeSplitter,
             Action::TerminalScroll(_) => ActionKind::TerminalScroll,
@@ -420,6 +428,13 @@ impl ActionDef {
                 default_keys: "Shift-F",
                 label: "next failing",
                 describe: "Jump the sidebar cursor to the next PR whose CI is failing.",
+                section: Section::Global,
+            },
+            ActionKind::StartAgent => &Self {
+                kind: ActionKind::StartAgent,
+                default_keys: "Shift-W",
+                label: "start agent",
+                describe: "Pick a project, name a workspace, and start the default agent in it — all in one step, from any pane.",
                 section: Section::Global,
             },
             ActionKind::Quit => &Self {
@@ -659,6 +674,7 @@ impl ActionDef {
             ActionKind::OpenSyncStatus,
             ActionKind::JumpToAsking,
             ActionKind::JumpToFailingCi,
+            ActionKind::StartAgent,
             ActionKind::ResizeSplitter,
             ActionKind::Quit,
             // Workspace
@@ -961,6 +977,7 @@ impl ActionKind {
             ActionKind::OpenSettings => "open_settings",
             ActionKind::JumpToAsking => "jump_to_asking",
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
+            ActionKind::StartAgent => "start_agent",
             ActionKind::Quit => "quit",
             ActionKind::ResizeSplitter => "resize_splitter",
             ActionKind::TerminalScroll => "terminal_scroll",
@@ -1077,6 +1094,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // Global / no-workspace-needed actions.
         ActionKind::NewWorkspace
         | ActionKind::NewProject
+        | ActionKind::StartAgent
         | ActionKind::CyclePane
         | ActionKind::Refresh
         | ActionKind::OpenHelp

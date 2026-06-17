@@ -100,6 +100,12 @@ pub enum Id {
     /// the picked index out of `adopt_choices` and dispatches
     /// `Command::AdoptSessions`.
     AdoptTarget,
+    /// Project picker for the global "start agent" (`Shift-W`) flow.
+    /// Choices live in `start_agent_project_choices`; `Msg::ChoicePicked`
+    /// resolves the project, then funnels into the new-workspace name
+    /// input (which auto-spawns the default agent on submit). Skipped
+    /// when only one project exists.
+    StartAgentProject,
     /// Single-line input prompt for the reviewer-login(s) to add to
     /// the focused workspace's PR. Submit →
     /// `Command::RequestReviewers { workspace_key, logins }`. The
@@ -492,6 +498,10 @@ pub struct Model<T: TerminalAdapter> {
     /// in the same order as the picker's row indices. `Msg::ChoicePicked`
     /// indexes into this to recover the chosen `WorkspaceKey`.
     adopt_choices: Vec<lazybox_core::WorkspaceKey>,
+    /// Candidate projects for the active "start agent" (`Shift-W`)
+    /// picker, in row order. `Msg::ChoicePicked` indexes into this to
+    /// recover the chosen `ProjectKey`, then mounts the name input.
+    start_agent_project_choices: Vec<lazybox_core::ProjectKey>,
     /// Transient UI status (polling spinner + footer notice). See
     /// `StatusCtx`.
     status: StatusCtx,
@@ -741,6 +751,7 @@ impl<T: TerminalAdapter> Model<T> {
             active_merge_prompt: None,
             pending_adopt_source: None,
             adopt_choices: Vec::new(),
+            start_agent_project_choices: Vec::new(),
             status: StatusCtx::new(),
             ui_defaults: lazybox_config::UiDefaults::default(),
             pr_details_fetched: std::collections::HashSet::new(),

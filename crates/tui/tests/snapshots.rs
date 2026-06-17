@@ -220,7 +220,7 @@ fn sidebar_golden_render_empty() {
 #[test]
 fn sidebar_golden_render_empty_getting_started() {
     let mut s = sidebar();
-    let rendered = render_to_string(&mut s, 40, 24, true);
+    let rendered = render_to_string(&mut s, 40, 26, true);
     insta::assert_snapshot!("sidebar_empty_getting_started", rendered);
 }
 

@@ -922,8 +922,41 @@ impl Server {
                             );
                             polling::unmark_activity_read(&self.config, &key, index);
                         }
-                        lazybox_ipc::Command::CreateWorkspace { name, project_key } => {
-                            polling::create_empty_workspace(&self.config, &name, project_key);
+                        lazybox_ipc::Command::CreateWorkspace {
+                            name,
+                            project_key,
+                            spawn_agent,
+                        } => {
+                            // create_empty_workspace runs inline (cheap
+                            // store write) and returns the final key —
+                            // which may carry a `-2` collision suffix, so
+                            // the client can't predict it. When the caller
+                            // asked to land in a live session, chain the
+                            // spawn here off that returned key rather than
+                            // round-tripping through the client.
+                            let key =
+                                polling::create_empty_workspace(&self.config, &name, project_key);
+                            if let Some(agent_id) = spawn_agent {
+                                // Detach — same worktree-provision (cold
+                                // `git clone --bare`) exposure as a bare
+                                // Spawn; never block the serve loop on it.
+                                // Bare interactive spawn (no prompt) keeps
+                                // the human-in-the-loop approval gate.
+                                let cfg = self.config.clone();
+                                let session_key: lazybox_core::SessionKey = (&key).into();
+                                mutations.spawn(async move {
+                                    spawn_handler::handle_spawn(
+                                        &cfg,
+                                        session_key,
+                                        None,
+                                        lazybox_ipc::TerminalKind::Agent(agent_id),
+                                        None,
+                                        None,
+                                        false,
+                                    )
+                                    .await;
+                                });
+                            }
                         }
                         lazybox_ipc::Command::CreateProject { name } => {
                             polling::create_local_project(&self.config, &name);

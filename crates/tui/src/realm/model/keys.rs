@@ -341,6 +341,7 @@ impl<T: TerminalAdapter> Model<T> {
                 lazybox_tui_core::action::ActionKind::JumpToFailingCi => {
                     Some(Action::JumpToFailingCi)
                 }
+                lazybox_tui_core::action::ActionKind::StartAgent => Some(Action::StartAgent),
                 _ => None,
             };
             if let Some(action) = action {

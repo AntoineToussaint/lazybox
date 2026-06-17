@@ -1,6 +1,5 @@
 ---
 source: crates/tui/tests/snapshots.rs
-assertion_line: 224
 expression: rendered
 ---
  LAZYBOX  0  [7d]
@@ -12,13 +11,14 @@ expression: rendered
   No PRs or issues yet
 
   lazybox also manages your
-  git worktrees — start an
-  isolated session per task:
+  git worktrees — spin up an
+  agent session per task:
 
+   ⇧W   start agent
    n    new workspace
    ⇧N   new project
 
-  then, inside it:
+  or open a tool yourself:
    c    claude
    s    shell
    e    editor

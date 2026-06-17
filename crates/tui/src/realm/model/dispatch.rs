@@ -446,6 +446,15 @@ impl<T: TerminalAdapter> Model<T> {
                     self.flash_hint("no failing PRs");
                 }
             }
+            Action::StartAgent => {
+                // Global "just start working" entry point. Unlike `n`
+                // (which needs the sidebar cursor on a project), this
+                // works from any pane: mount a project picker, then
+                // the name input, then create+spawn. With a single
+                // project the picker is skipped and we jump straight
+                // to naming.
+                self.start_agent_flow();
+            }
             Action::Reply => {
                 // Reply targets the focused workspace. Resolver
                 // returns `Intent::MountReply` when a workspace is

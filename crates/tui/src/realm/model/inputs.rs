@@ -74,12 +74,25 @@ impl<T: TerminalAdapter> Model<T> {
                 let project_key = self.pending_new_workspace_project.take();
                 match (name.is_empty(), project_key) {
                     (false, Some(project_key)) => {
+                        // Land the user in a live session immediately:
+                        // creating a workspace and then having to know to
+                        // press `c` was the main first-run friction. The
+                        // daemon spawns the configured default agent into
+                        // the new workspace (see `CreateWorkspace`
+                        // server handler). Same behavior for the global
+                        // "start agent" shortcut, which funnels here.
+                        let spawn_agent = Some(self.sidebar.default_agent().to_string());
                         tracing::info!(
                             workspace_name = %name,
                             project_key = %project_key,
+                            ?spawn_agent,
                             "creating new pre-PR workspace under project",
                         );
-                        cmds.push(IpcCommand::CreateWorkspace { name, project_key });
+                        cmds.push(IpcCommand::CreateWorkspace {
+                            name,
+                            project_key,
+                            spawn_agent,
+                        });
                     }
                     (false, None) => {
                         tracing::warn!(
@@ -226,6 +239,22 @@ impl<T: TerminalAdapter> Model<T> {
                     target_workspace_key: target_key.clone(),
                 });
                 self.flash_info(format!("adopted sessions: {source_key} → {target_key}"));
+            }
+            return cmds;
+        }
+        // Start-agent project picker (Id::StartAgentProject) — pick a
+        // project, then funnel into the new-workspace name input. That
+        // input's submit auto-spawns the default agent, so this is the
+        // first leg of "create workspace + start agent". Empty / Esc
+        // pick drops the stash without advancing.
+        if matches!(self.modal_stack.last(), Some(Id::StartAgentProject)) {
+            let project = picks
+                .first()
+                .and_then(|i| self.start_agent_project_choices.get(*i).cloned());
+            self.start_agent_project_choices.clear();
+            self.pop_modal();
+            if let Some(project_key) = project {
+                self.mount_new_workspace_input(project_key);
             }
             return cmds;
         }

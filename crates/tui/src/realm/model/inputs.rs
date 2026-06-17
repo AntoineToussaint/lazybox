@@ -189,8 +189,14 @@ impl<T: TerminalAdapter> Model<T> {
             // command submitted in one shot, so without this the
             // pinned "you ▸ …" line would keep showing the previous
             // message.
-            self.terminals.record_pty_write(terminal_id, &bytes);
+            let committed = self.terminals.record_pty_write(terminal_id, &bytes);
             cmds.push(IpcCommand::Write { terminal_id, bytes });
+            if let Some(message) = committed {
+                cmds.push(IpcCommand::RecordUserMessage {
+                    terminal_id,
+                    message,
+                });
+            }
             self.flash_info(format!("sent snippet ]{key}"));
             return cmds;
         }

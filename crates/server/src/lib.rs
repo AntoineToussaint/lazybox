@@ -586,6 +586,7 @@ impl Server {
                         lazybox_ipc::Command::Subscribe => "Subscribe",
                         lazybox_ipc::Command::Refresh => "Refresh",
                         lazybox_ipc::Command::Write { .. } => "Write",
+                        lazybox_ipc::Command::RecordUserMessage { .. } => "RecordUserMessage",
                         lazybox_ipc::Command::Resize { .. } => "Resize",
                         lazybox_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
                         lazybox_ipc::Command::MarkRead { .. } => "MarkRead",
@@ -766,6 +767,14 @@ impl Server {
                         }
                         lazybox_ipc::Command::Write { terminal_id, bytes } => {
                             spawn_handler::handle_write(&self.config, terminal_id, &bytes).await;
+                        }
+                        lazybox_ipc::Command::RecordUserMessage { terminal_id, message } => {
+                            spawn_handler::handle_record_user_message(
+                                &self.config,
+                                terminal_id,
+                                &message,
+                            )
+                            .await;
                         }
                         lazybox_ipc::Command::InjectPrompt {
                             terminal_id,

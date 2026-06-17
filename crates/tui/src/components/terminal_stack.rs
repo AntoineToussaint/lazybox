@@ -568,13 +568,17 @@ impl TerminalSlot {
     /// Commit the trimmed composing buffer as the latest user message
     /// and reset it for the next prompt. An all-whitespace buffer is
     /// ignored, so mashing Enter on an empty prompt (e.g. dismissing
-    /// an agent approval) doesn't blank out the recap.
-    fn commit_composing(&mut self) {
+    /// an agent approval) doesn't blank out the recap. Returns the
+    /// committed message when one was recorded, so the caller can ship
+    /// it to the daemon for persistence (`Command::RecordUserMessage`).
+    fn commit_composing(&mut self) -> Option<String> {
         let trimmed = self.composing.trim();
-        if !trimmed.is_empty() {
-            self.last_user_message = Some(trimmed.to_string());
+        let committed = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        if let Some(msg) = &committed {
+            self.last_user_message = Some(msg.clone());
         }
         self.composing.clear();
+        committed
     }
 
     /// Feed the *exact bytes* that are about to be written to this
@@ -609,7 +613,14 @@ impl TerminalSlot {
     /// never sees an `ESC[200~ … ESC[201~` body. Decoding is lossy
     /// UTF-8: the recap is display-only, so a stray invalid byte
     /// degrades to U+FFFD rather than dropping the write.
-    fn record_pty_bytes(&mut self, bytes: &[u8]) {
+    ///
+    /// Returns the message committed by a trailing submit (CR) in this
+    /// write, if any — the caller forwards it to the daemon so the
+    /// recap can be restored after a restart. A write that only edits
+    /// the in-flight line returns `None`. When a single write carries
+    /// multiple submits (rare: a scripted multi-command paste), the
+    /// last committed message wins, matching what the recap shows.
+    fn record_pty_bytes(&mut self, bytes: &[u8]) -> Option<String> {
         // ECMA-48: a CSI sequence runs until its final byte, which
         // lies in 0x40..=0x7e. Intermediate / parameter bytes are all
         // below that range, so the first byte in it terminates.
@@ -617,6 +628,7 @@ impl TerminalSlot {
 
         let text = String::from_utf8_lossy(bytes);
         let mut chars = text.chars().peekable();
+        let mut committed = None;
         while let Some(c) = chars.next() {
             match c {
                 '\x1b' => match chars.peek() {
@@ -657,7 +669,11 @@ impl TerminalSlot {
                 // here (Enter maps to CR, never LF), so a multi-line
                 // snippet body commits once, on its trailing CR, not
                 // at each embedded newline.
-                '\r' => self.commit_composing(),
+                '\r' => {
+                    if let Some(msg) = self.commit_composing() {
+                        committed = Some(msg);
+                    }
+                }
                 '\n' => self.push_composing('\n'),
                 // DEL / Backspace.
                 '\x7f' | '\x08' => {
@@ -671,6 +687,7 @@ impl TerminalSlot {
                 c => self.push_composing(c),
             }
         }
+        committed
     }
 
     /// Append `text` to the composing buffer, truncated to stay
@@ -1578,6 +1595,7 @@ impl TerminalStack {
         kind: TerminalKind,
         last_seq: u64,
         no_permission: bool,
+        last_user_message: Option<String>,
     ) -> TerminalSlot {
         let vt = TerminalVt::new().expect("libghostty-vt init");
         TerminalSlot {
@@ -1590,7 +1608,7 @@ impl TerminalStack {
             agent_state: lazybox_ipc::AgentState::Idle,
             last_rendered_size: None,
             composing: String::new(),
-            last_user_message: None,
+            last_user_message,
             no_permission,
         }
     }
@@ -1638,13 +1656,15 @@ impl TerminalStack {
     /// Used by callers that synthesise a full command and submit it in
     /// one shot (snippet expansion writes the body + a trailing `\r`),
     /// which would otherwise leave the "you ▸ …" recap showing the
-    /// previous message. No-op for non-Agent terminals.
-    pub fn record_pty_write(&mut self, id: TerminalId, bytes: &[u8]) {
-        if let Some(slot) = self.terminals.get_mut(&id)
-            && matches!(slot.kind, TerminalKind::Agent(_))
-        {
-            slot.record_pty_bytes(bytes);
+    /// previous message. No-op for non-Agent terminals. Returns the
+    /// committed message (if this write ended in a submit) so the
+    /// caller can persist it via `Command::RecordUserMessage`.
+    pub fn record_pty_write(&mut self, id: TerminalId, bytes: &[u8]) -> Option<String> {
+        let slot = self.terminals.get_mut(&id)?;
+        if !matches!(slot.kind, TerminalKind::Agent(_)) {
+            return None;
         }
+        slot.record_pty_bytes(bytes)
     }
 
     fn tab_label(kind: &TerminalKind) -> String {
@@ -1820,15 +1840,26 @@ impl TerminalStack {
         // the agent receives. Scoped to Agent terminals — shells don't
         // have a single semantic "user prompt", so the recap would be
         // noisy (every cd, every grep) and surprising.
-        if let Some(slot) = self.terminals.get_mut(&id)
+        let committed = if let Some(slot) = self.terminals.get_mut(&id)
             && matches!(slot.kind, TerminalKind::Agent(_))
         {
-            slot.record_pty_bytes(&bytes);
-        }
+            slot.record_pty_bytes(&bytes)
+        } else {
+            None
+        };
         cmds.push(Command::Write {
             terminal_id: id,
             bytes,
         });
+        // Persist the submitted prompt daemon-side so the recap survives
+        // a restart — the replay ring only carries PTY output, not the
+        // input we composed here.
+        if let Some(message) = committed {
+            cmds.push(Command::RecordUserMessage {
+                terminal_id: id,
+                message,
+            });
+        }
         PaneOutcome::Consumed
     }
 
@@ -1842,6 +1873,7 @@ impl TerminalStack {
                         snap.kind.clone(),
                         snap.last_seq,
                         snap.no_permission,
+                        snap.last_user_message.clone(),
                     );
                     // Replay the daemon-side ring through the VT so
                     // the cell grid reflects what was on screen
@@ -1858,7 +1890,7 @@ impl TerminalStack {
                 kind,
                 no_permission,
             } => {
-                let slot = Self::make_slot(session_key.clone(), kind.clone(), 0, *no_permission);
+                let slot = Self::make_slot(session_key.clone(), kind.clone(), 0, *no_permission, None);
                 self.terminals.insert(*terminal_id, slot);
                 // A fresh terminal arrived for the active session —
                 // expand so the user actually sees it. We bypass the
@@ -3387,7 +3419,7 @@ mod ctrl_w_tests {
     fn shell_stack() -> TerminalStack {
         let sk = SessionKey::new("session");
         let mut stack = TerminalStack::new(PaneId::new(0));
-        let slot = TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false);
+        let slot = TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false, None);
         stack.terminals.insert(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
         stack
@@ -3633,14 +3665,19 @@ mod extract_text_offset_tests {
     ) -> TerminalStack {
         let sk = SessionKey::new("session");
         let mut stack = TerminalStack::new(PaneId::new(0));
-        let mut slot = TerminalStack::make_slot(sk.clone(), kind, 0, false);
+        let mut slot = TerminalStack::make_slot(
+            sk.clone(),
+            kind,
+            0,
+            false,
+            last_user_message.map(str::to_string),
+        );
         let mut payload = String::new();
         for line in lines {
             payload.push_str(line);
             payload.push_str("\r\n");
         }
         slot.vt.feed(payload.as_bytes());
-        slot.last_user_message = last_user_message.map(str::to_string);
         stack.terminals.insert(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
         stack
@@ -3732,8 +3769,8 @@ mod extract_text_offset_tests {
     #[test]
     fn recap_rows_refused_when_body_too_short() {
         let sk = SessionKey::new("session");
-        let slot = TerminalStack::make_slot(sk, TerminalKind::Agent("claude".into()), 0, false);
-        let mut slot = slot;
+        let mut slot =
+            TerminalStack::make_slot(sk, TerminalKind::Agent("claude".into()), 0, false, None);
         slot.last_user_message = Some("hi".into());
         assert_eq!(TerminalStack::recap_rows(&slot, 2), 0);
         assert_eq!(TerminalStack::recap_rows(&slot, 3), 2);
@@ -3904,7 +3941,7 @@ mod footer_scroll_independence {
         let sk = SessionKey::new("s");
         let mut stack = TerminalStack::new(PaneId::new(0));
         let mut slot =
-            TerminalStack::make_slot(sk.clone(), TerminalKind::Agent("claude".into()), 0, false);
+            TerminalStack::make_slot(sk.clone(), TerminalKind::Agent("claude".into()), 0, false, None);
         slot.vt.ensure_size(W - 3, H - 4);
         let mut payload = String::new();
         for i in 0..40 {

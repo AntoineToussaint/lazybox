@@ -540,6 +540,18 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                 }
             }
+            Action::CycleRoleFilter => {
+                self.sidebar.cycle_role_filter();
+            }
+            Action::CycleSort => {
+                self.sidebar.cycle_sort();
+            }
+            Action::CycleMailbox => {
+                self.sidebar.cycle_mailbox();
+            }
+            Action::OpenSearch => {
+                self.sidebar.open_search();
+            }
             // Actions not yet handled here stay in the existing
             // handlers. As we migrate, the per-key match arms in
             // `handle_pane_key` and the pane wrappers get deleted

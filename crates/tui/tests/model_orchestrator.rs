@@ -525,6 +525,54 @@ fn r_mounts_reply_modal_from_right_pane() {
 }
 
 #[test]
+fn slash_opens_sidebar_search_through_the_catalog() {
+    // `/` migrated into the action catalog (Section::Sidebar, issue
+    // #98). Pressing it from sidebar focus must dispatch through
+    // `dispatch_action` → `Sidebar::open_search`, not the deleted
+    // per-pane match arm. Proves the catalog absorbed the key without
+    // regressing dispatch.
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let workspace = Workspace::empty(WorkspaceKey("github:o/r#1".into()), "main", Utc::now());
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![workspace],
+        terminals: Vec::new(),
+        projects: vec![],
+    });
+    assert_eq!(m.focus(), PaneFocus::Sidebar);
+    assert!(!m.sidebar().search_editing());
+    m.dispatch_key(key(Key::Char('/')));
+    assert!(
+        m.sidebar().search_editing(),
+        "`/` must open the sidebar search bar via the catalog",
+    );
+}
+
+#[test]
+fn remapped_search_binding_opens_search() {
+    // The migration's payoff: a sidebar list key is now remappable
+    // via `ui.action_keys`. Rebind `open_search` to Ctrl-f and assert
+    // the chord opens search — impossible while `/` was hard-coded in
+    // the pane handler.
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let workspace = Workspace::empty(WorkspaceKey("github:o/r#1".into()), "main", Utc::now());
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![workspace],
+        terminals: Vec::new(),
+        projects: vec![],
+    });
+    let mut overrides = std::collections::BTreeMap::new();
+    overrides.insert("open_search".to_string(), "Ctrl-f".to_string());
+    m.apply_action_key_overrides(overrides);
+    m.dispatch_key(key_with(Key::Char('f'), KeyModifiers::CONTROL));
+    assert!(
+        m.sidebar().search_editing(),
+        "remapped Ctrl-f must open search",
+    );
+}
+
+#[test]
 fn out_of_scope_with_active_session_queues_a_prompt() {
     // Phase 2 of the rescope flow: when the daemon sends a
     // `WorkspaceOutOfScope` event (a workspace fell out of the

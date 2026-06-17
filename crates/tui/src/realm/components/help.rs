@@ -38,39 +38,33 @@ impl Help {
     /// surfaces; the user sees a complete reference instead of the
     /// pane-stitched subset the legacy constructor produced.
     pub fn from_catalog(overrides: &std::collections::BTreeMap<String, String>) -> Self {
-        let mut by_section: std::collections::BTreeMap<u8, Vec<Binding>> =
+        let mut by_section: std::collections::BTreeMap<u8, (&'static str, Vec<Binding>)> =
             std::collections::BTreeMap::new();
         for def in ActionDef::all() {
-            let order = match def.section {
-                Section::Global => 0,
-                Section::Workspace => 1,
-                Section::Activity => 2,
-                Section::Terminal => 3,
-            };
-            by_section.entry(order).or_default().push(Binding {
-                keys: def.effective_keys_display(overrides),
-                label: std::borrow::Cow::Borrowed(def.label),
-            });
+            by_section
+                .entry(def.section.order())
+                .or_insert_with(|| (def.section.title(), Vec::new()))
+                .1
+                .push(Binding {
+                    keys: def.effective_keys_display(overrides),
+                    label: std::borrow::Cow::Borrowed(def.label),
+                });
         }
         // The snippet leader (`]]<key>`) isn't a catalog `Action` —
         // it's a terminal-pane chord whose binding set is the user's
         // snippet library — so it's hand-added to the Terminal section
         // here, the same way the hint bar curates it (issue #205).
-        by_section.entry(3).or_default().push(Binding {
-            keys: std::borrow::Cow::Borrowed("]]<key>"),
-            label: std::borrow::Cow::Borrowed("snippets"),
-        });
+        by_section
+            .entry(Section::Terminal.order())
+            .or_insert_with(|| (Section::Terminal.title(), Vec::new()))
+            .1
+            .push(Binding {
+                keys: std::borrow::Cow::Borrowed("]]<key>"),
+                label: std::borrow::Cow::Borrowed("snippets"),
+            });
         let sections: Vec<HelpSection> = by_section
             .into_iter()
-            .map(|(order, bindings)| {
-                let title = match order {
-                    0 => "Global",
-                    1 => "Workspace",
-                    2 => "Activity",
-                    _ => "Terminal",
-                };
-                HelpSection { title, bindings }
-            })
+            .map(|(_, (title, bindings))| HelpSection { title, bindings })
             .collect();
         Self { sections }
     }

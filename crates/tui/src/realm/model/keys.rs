@@ -326,6 +326,12 @@ impl<T: TerminalAdapter> Model<T> {
                 lazybox_tui_core::action::ActionKind::AddAssignees => Some(Action::AddAssignees),
                 lazybox_tui_core::action::ActionKind::ManageLabels => Some(Action::ManageLabels),
                 lazybox_tui_core::action::ActionKind::OpenInBrowser => Some(Action::OpenInBrowser),
+                lazybox_tui_core::action::ActionKind::CycleRoleFilter => {
+                    Some(Action::CycleRoleFilter)
+                }
+                lazybox_tui_core::action::ActionKind::CycleSort => Some(Action::CycleSort),
+                lazybox_tui_core::action::ActionKind::CycleMailbox => Some(Action::CycleMailbox),
+                lazybox_tui_core::action::ActionKind::OpenSearch => Some(Action::OpenSearch),
                 lazybox_tui_core::action::ActionKind::OpenHelp => Some(Action::OpenHelp),
                 lazybox_tui_core::action::ActionKind::OpenTour => Some(Action::OpenTour),
                 lazybox_tui_core::action::ActionKind::OpenSyncStatus => {

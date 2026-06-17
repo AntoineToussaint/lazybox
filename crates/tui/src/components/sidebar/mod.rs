@@ -1042,6 +1042,19 @@ impl Sidebar {
         self.mailbox
     }
 
+    /// Cycle the mailbox view (`Inbox → Inactive → Snoozed → Inbox`)
+    /// and rebuild. Cursor resets — the row the user was on almost
+    /// certainly isn't visible in the next mailbox.
+    pub fn cycle_mailbox(&mut self) -> Mailbox {
+        self.mailbox = match self.mailbox {
+            Mailbox::Inbox => Mailbox::Inactive,
+            Mailbox::Inactive => Mailbox::Snoozed,
+            Mailbox::Snoozed => Mailbox::Inbox,
+        };
+        self.reset_cursor_and_recompute();
+        self.mailbox
+    }
+
     pub fn cursor(&self) -> usize {
         self.cursor
     }

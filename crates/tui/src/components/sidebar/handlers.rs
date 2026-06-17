@@ -229,48 +229,15 @@ impl Sidebar {
                 PaneOutcome::Consumed
             }
 
-            // ── Role filter cycle ─────────────────────────────────────
-            // `f` cycles the role filter (All → Author → Reviewer →
-            // Assignee → Mentioned → All). Renders as a chip on row 1
-            // of the sidebar header. Cursor resets — the row the user
-            // was on may have been filtered out, and landing at the
-            // new top is less surprising than vanishing off-screen.
-            (KeyCode::Char('f'), KeyModifiers::NONE) => {
-                self.cycle_role_filter();
-                PaneOutcome::Consumed
-            }
-
-            // `o` cycles sort order (Default → ByRole → ByRoleSplit →
-            // Default). Default is recency; ByRole groups Author /
-            // Reviewer / Assignee / Mentioned within each repo;
-            // ByRoleSplit adds role section headers between groups.
-            (KeyCode::Char('o'), KeyModifiers::NONE) => {
-                self.cycle_sort_mode();
-                PaneOutcome::Consumed
-            }
-
-            // `/` opens the incremental search bar scoped to the
-            // focused project. Once open, the orchestrator routes
-            // keystrokes straight to `handle_search_key` (see
-            // `Model::handle_pane_key`) so the query captures keys
-            // that would otherwise fire shortcuts.
-            (KeyCode::Char('/'), KeyModifiers::NONE) => {
-                self.open_search();
-                PaneOutcome::Consumed
-            }
-
-            // ── Mailbox cycle (Inbox → Inactive → Snoozed → Inbox)
-            (KeyCode::Char('S'), m) if m.contains(KeyModifiers::SHIFT) => {
-                self.mailbox = match self.mailbox {
-                    Mailbox::Inbox => Mailbox::Inactive,
-                    Mailbox::Inactive => Mailbox::Snoozed,
-                    Mailbox::Snoozed => Mailbox::Inbox,
-                };
-                // New mailbox → reset cursor to top; old cursor key is
-                // almost certainly not visible in the other mailbox.
-                self.reset_cursor_and_recompute();
-                PaneOutcome::Consumed
-            }
+            // `f` role-filter, `o` sort, `/` search, and `Shift-S`
+            // mailbox cycle moved into the action catalog
+            // (Section::Sidebar, issue #98). They dispatch through
+            // `Model::dispatch_action` like every other catalog key,
+            // so they're now remappable via `ui.action_keys`, show in
+            // the `?` help panel, and live in one collision-audited
+            // place. The cursor-reset / recompute behaviour is
+            // unchanged — it lives in the `Sidebar` methods these
+            // actions call.
 
             // Shift+X Archive is now handled by the catalog
             // dispatch path in `Model::dispatch_action` — it calls

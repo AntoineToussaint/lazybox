@@ -327,6 +327,26 @@ impl Sidebar {
     pub fn toggle_repo_at_cursor(&mut self) -> bool {
         self.inner.toggle_repo_at_cursor()
     }
+
+    /// Cycle the role filter (catalog `CycleRoleFilter`, default `f`).
+    pub fn cycle_role_filter(&mut self) {
+        self.inner.cycle_role_filter();
+    }
+
+    /// Cycle the sort order (catalog `CycleSort`, default `o`).
+    pub fn cycle_sort(&mut self) {
+        self.inner.cycle_sort_mode();
+    }
+
+    /// Cycle the mailbox view (catalog `CycleMailbox`, default `Shift-S`).
+    pub fn cycle_mailbox(&mut self) {
+        self.inner.cycle_mailbox();
+    }
+
+    /// Open the incremental search bar (catalog `OpenSearch`, default `/`).
+    pub fn open_search(&mut self) {
+        self.inner.open_search();
+    }
 }
 
 impl Component for Sidebar {

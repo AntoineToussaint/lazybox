@@ -97,6 +97,21 @@ pub enum Action {
     /// review thread, full diff view, etc.).
     OpenInBrowser,
 
+    // ── Sidebar list management ────────────────────────────────────
+    // These act on the sidebar's list/view rather than a single
+    // workspace: filtering, sorting, switching mailbox, searching.
+    // They only resolve when the sidebar has focus (Section::Sidebar)
+    // so they never bleed into the activity pane the way the
+    // workspace-scoped actions deliberately do.
+    /// Cycle the role filter (All → Author → Reviewer → …).
+    CycleRoleFilter,
+    /// Cycle the sort order (Default → ByRole → ByRoleSplit).
+    CycleSort,
+    /// Cycle the mailbox view (Inbox → Inactive → Snoozed).
+    CycleMailbox,
+    /// Open the incremental search bar scoped to the focused project.
+    OpenSearch,
+
     // ── Activity pane (right) ──────────────────────────────────────
     /// Toggle the activity-section collapse on the focused workspace.
     ToggleActivity,
@@ -202,6 +217,11 @@ pub enum ActionKind {
     AddAssignees,
     ManageLabels,
     OpenInBrowser,
+    // Sidebar list management
+    CycleRoleFilter,
+    CycleSort,
+    CycleMailbox,
+    OpenSearch,
     // Activity
     ToggleActivity,
     ToggleRow,
@@ -227,12 +247,43 @@ pub enum ActionKind {
     LeaveTerminal,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
     Global,
     Workspace,
+    /// Sidebar list/view management (filter, sort, mailbox, search).
+    /// Distinct from `Workspace` because these resolve ONLY under
+    /// sidebar focus — they manage the list, not the selected row, so
+    /// they must not shadow activity-pane keys the way workspace
+    /// actions intentionally do.
+    Sidebar,
     Activity,
     Terminal,
+}
+
+impl Section {
+    /// Display / sort rank — also the order `ActionDef::all()` emits
+    /// sections in, and the order the help panel renders them.
+    pub fn order(self) -> u8 {
+        match self {
+            Section::Global => 0,
+            Section::Workspace => 1,
+            Section::Sidebar => 2,
+            Section::Activity => 3,
+            Section::Terminal => 4,
+        }
+    }
+
+    /// Human-facing section title for the help panel.
+    pub fn title(self) -> &'static str {
+        match self {
+            Section::Global => "Global",
+            Section::Workspace => "Workspace",
+            Section::Sidebar => "Sidebar",
+            Section::Activity => "Activity",
+            Section::Terminal => "Terminal",
+        }
+    }
 }
 
 /// A *leader group* for the grouped two-step (leader-key) chords from
@@ -325,6 +376,10 @@ impl Action {
             Action::AddAssignees => ActionKind::AddAssignees,
             Action::ManageLabels => ActionKind::ManageLabels,
             Action::OpenInBrowser => ActionKind::OpenInBrowser,
+            Action::CycleRoleFilter => ActionKind::CycleRoleFilter,
+            Action::CycleSort => ActionKind::CycleSort,
+            Action::CycleMailbox => ActionKind::CycleMailbox,
+            Action::OpenSearch => ActionKind::OpenSearch,
             Action::ToggleActivity => ActionKind::ToggleActivity,
             Action::ToggleRow => ActionKind::ToggleRow,
             Action::Reply => ActionKind::Reply,
@@ -560,6 +615,35 @@ impl ActionDef {
                 describe: "Open the focused workspace's PR / issue page in your default web browser.",
                 section: Section::Workspace,
             },
+            // ── Sidebar list management ─────────────────────────────
+            ActionKind::CycleRoleFilter => &Self {
+                kind: ActionKind::CycleRoleFilter,
+                default_keys: "f",
+                label: "filter",
+                describe: "Cycle the role filter (All → Author → Reviewer → Assignee → Mentioned).",
+                section: Section::Sidebar,
+            },
+            ActionKind::CycleSort => &Self {
+                kind: ActionKind::CycleSort,
+                default_keys: "o",
+                label: "sort",
+                describe: "Cycle the sort order (recency → by-role → by-role with section headers).",
+                section: Section::Sidebar,
+            },
+            ActionKind::CycleMailbox => &Self {
+                kind: ActionKind::CycleMailbox,
+                default_keys: "Shift-S",
+                label: "mailbox",
+                describe: "Cycle the mailbox view (Inbox → Inactive → Snoozed).",
+                section: Section::Sidebar,
+            },
+            ActionKind::OpenSearch => &Self {
+                kind: ActionKind::OpenSearch,
+                default_keys: "/",
+                label: "search",
+                describe: "Open the incremental search bar scoped to the focused project.",
+                section: Section::Sidebar,
+            },
             // ── Activity ────────────────────────────────────────────
             ActionKind::ToggleActivity => &Self {
                 kind: ActionKind::ToggleActivity,
@@ -684,6 +768,11 @@ impl ActionDef {
             ActionKind::AdoptSessions,
             ActionKind::CollapseIntoPr,
             ActionKind::Archive,
+            // Sidebar list management
+            ActionKind::CycleRoleFilter,
+            ActionKind::CycleSort,
+            ActionKind::CycleMailbox,
+            ActionKind::OpenSearch,
             // Activity
             ActionKind::ToggleActivity,
             ActionKind::ToggleRow,
@@ -778,8 +867,11 @@ impl KeyChord {
     }
 
     fn parse_single(s: &str) -> Option<Self> {
-        // Presentation strings — explicitly not single chords.
-        if s.contains('/') || s == "all keys" || s.is_empty() {
+        // Presentation strings — explicitly not single chords. A
+        // multi-glyph string with a `/` is a "this key OR that key"
+        // display form (`g/G`, `→/←`); a lone `/` is the literal
+        // slash key (sidebar search) and parses normally below.
+        if (s.chars().count() > 1 && s.contains('/')) || s == "all keys" || s.is_empty() {
             return None;
         }
         // Strip modifier prefixes one at a time. Order matters:
@@ -945,6 +1037,10 @@ impl ActionKind {
             ActionKind::AddAssignees => "add_assignees",
             ActionKind::ManageLabels => "manage_labels",
             ActionKind::OpenInBrowser => "open_in_browser",
+            ActionKind::CycleRoleFilter => "cycle_role_filter",
+            ActionKind::CycleSort => "cycle_sort",
+            ActionKind::CycleMailbox => "cycle_mailbox",
+            ActionKind::OpenSearch => "open_search",
             ActionKind::ToggleActivity => "toggle_activity",
             ActionKind::ToggleRow => "toggle_row",
             ActionKind::ActivityTop => "activity_top",
@@ -1074,6 +1170,13 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::SelectRow
         | ActionKind::ToggleDescription
         | ActionKind::UndoMarkRead => has_ws,
+        // Sidebar list-management actions act on the list / view,
+        // not a selected workspace — always usable while the sidebar
+        // has focus (which `section_rank` already gates).
+        ActionKind::CycleRoleFilter
+        | ActionKind::CycleSort
+        | ActionKind::CycleMailbox
+        | ActionKind::OpenSearch => true,
         // Global / no-workspace-needed actions.
         ActionKind::NewWorkspace
         | ActionKind::NewProject
@@ -1307,6 +1410,50 @@ mod tests {
     }
 
     #[test]
+    fn lone_slash_parses_as_a_chord() {
+        // A bare `/` is the literal slash key (sidebar search), not a
+        // "this OR that" presentation form — it must parse so the key
+        // resolves through the catalog like any other.
+        assert_eq!(
+            KeyChord::parse("/").unwrap(),
+            KeyChord::Single {
+                ctrl: false,
+                shift: false,
+                alt: false,
+                code: ChordCode::Char('/'),
+            }
+        );
+    }
+
+    #[test]
+    fn no_chord_collisions_within_a_section() {
+        // Collision detector (issue #98): within a single section
+        // every parseable default chord must be unique. Two actions
+        // in the same section sharing a chord is a genuine ambiguity —
+        // dispatch (`find_action_for_chord`) breaks the tie by
+        // iteration order, so the second action is silently
+        // unreachable. Cross-section shadowing (e.g. `Shift-G` =
+        // assignees in Workspace vs jump-to-bottom in Activity) is a
+        // DELIBERATE, focus-ranked override and intentionally not
+        // flagged here. This is the single audit surface the catalog
+        // gained so collisions surface at build time instead of as
+        // tribal knowledge in CLAUDE.md.
+        use std::collections::HashMap;
+        let mut seen: HashMap<(Section, KeyChord), ActionKind> = HashMap::new();
+        for def in ActionDef::all() {
+            let Some(chord) = def.default_chord() else {
+                continue;
+            };
+            if let Some(prev) = seen.insert((def.section, chord.clone()), def.kind) {
+                panic!(
+                    "chord {:?} bound twice in {:?}: {:?} and {:?}",
+                    chord, def.section, prev, def.kind,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_parseable_default_round_trips_to_chord() {
         // Smoke: every catalog entry whose default_keys is a
         // single chord (not a presentation form) must parse. Catches
@@ -1405,16 +1552,12 @@ mod tests {
     #[test]
     fn all_is_sorted_by_section() {
         // The `all()` iterator emits Global first, then Workspace,
-        // then Activity, then Terminal. Help relies on this for its
-        // section dividers — assert here so a reorder surfaces.
+        // then Sidebar, then Activity, then Terminal. Help relies on
+        // this for its section dividers — assert here so a reorder
+        // surfaces.
         let order: Vec<Section> = ActionDef::all().map(|d| d.section).collect();
         let mut last_idx = 0;
-        let order_of = |s: Section| match s {
-            Section::Global => 0,
-            Section::Workspace => 1,
-            Section::Activity => 2,
-            Section::Terminal => 3,
-        };
+        let order_of = Section::order;
         for s in order {
             let idx = order_of(s);
             assert!(idx >= last_idx, "section {s:?} appeared out of order");

@@ -314,15 +314,15 @@ fn toggle_mailbox_cycles_inbox_inactive_snoozed() {
     });
     // Cycle: Inbox → Inactive → Snoozed → Inbox.
     assert_eq!(s.mailbox(), Mailbox::Inbox);
-    s.handle_key(shift_char('S'), &mut Vec::new());
+    s.cycle_mailbox();
     assert_eq!(s.mailbox(), Mailbox::Inactive);
-    s.handle_key(shift_char('S'), &mut Vec::new());
+    s.cycle_mailbox();
     assert_eq!(s.mailbox(), Mailbox::Snoozed);
     assert_eq!(
         s.selected_session_key().map(|k| k.to_string()),
         Some(expected_session_key("o/r#1"))
     );
-    s.handle_key(shift_char('S'), &mut Vec::new());
+    s.cycle_mailbox();
     assert_eq!(s.mailbox(), Mailbox::Inbox);
     assert_eq!(
         s.selected_session_key().map(|k| k.to_string()),
@@ -359,7 +359,7 @@ fn inactive_mailbox_shows_merged_and_closed_workspaces() {
     assert_eq!(s.workspace_count(), 1);
 
     // Inactive surfaces both the merged and the closed.
-    s.handle_key(shift_char('S'), &mut Vec::new());
+    s.cycle_mailbox();
     assert_eq!(s.mailbox(), Mailbox::Inactive);
     assert_eq!(s.workspace_count(), 2);
 }
@@ -676,10 +676,10 @@ fn render_hides_scrollbar_when_list_fits() {
 fn render_mailbox_toggles_title() {
     let mut s = populated_sidebar();
     // LAZYBOX → INACTIVE → SNOOZED; uppercase brand label per V1.
-    s.handle_key(shift_char('S'), &mut Vec::new());
+    s.cycle_mailbox();
     let rendered = render_to_string(&mut s, 40, 12, true);
     assert!(rendered.contains("INACTIVE"));
-    s.handle_key(shift_char('S'), &mut Vec::new());
+    s.cycle_mailbox();
     let rendered = render_to_string(&mut s, 40, 12, true);
     assert!(rendered.contains("SNOOZED"));
 }

@@ -135,8 +135,16 @@ via YAML config without recompilation.
 
 Most keys live in the action catalog (`crates/tui-core/src/action.rs`,
 remappable via `ui.action_keys`) and dispatch through
-`Model::handle_pane_key` → `dispatch_action`; navigation/latch keys are
-per-pane match arms in `components/{sidebar,right_pane,terminal_stack}`.
+`Model::handle_pane_key` → `dispatch_action`; the remaining
+navigation/latch keys are per-pane match arms in
+`components/{sidebar,right_pane,terminal_stack}`. Each catalog entry
+carries a `Section` (`Global` / `Workspace` / `Sidebar` / `Activity` /
+`Terminal`) that doubles as its resolution scope — `section_rank`
+(`realm/model/helpers.rs`) maps `(Section, focus)` to a priority, and a
+collision-detector test fails the build on two entries colliding within
+a section or at the same rank under a focus. The sidebar's list-view
+keys (`f` filter, `o` sort, `Shift-S` mailbox, `/` search) are in the
+catalog under `Section::Sidebar` — remappable and listed in `?` help.
 The footer hint bar reads each pane's `contextual_bindings()`.
 
 **Global**: `Tab` cycle panes, `?` help, `q q` quit, `,` settings,

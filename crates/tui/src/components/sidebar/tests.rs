@@ -1462,12 +1462,14 @@ mod search_tests {
         }
     }
 
-    /// `/` opens the bar scoped to the focused project, in editing mode.
+    /// Opening search scopes the bar to the focused project, in
+    /// editing mode. The `/` key→action binding lives in the catalog
+    /// now (issue #98); this covers the `open_search` behaviour it
+    /// dispatches to.
     #[test]
-    fn slash_opens_search_scoped_to_focused_project() {
+    fn open_search_scoped_to_focused_project() {
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
-        let mut cmds = Vec::new();
-        sb.handle_key(key('/'), &mut cmds);
+        sb.open_search();
         assert!(sb.search_editing());
         let s = sb.search().expect("search state present");
         assert_eq!(s.scope, "o/r");
@@ -1479,8 +1481,7 @@ mod search_tests {
     fn typing_filters_visible_rows() {
         let mut sb = sidebar_with_issues(&[("1", "Add search bar"), ("2", "Fix flaky test")]);
         assert_eq!(sb.workspace_count(), 2);
-        let mut cmds = Vec::new();
-        sb.handle_key(key('/'), &mut cmds);
+        sb.open_search();
         type_query(&mut sb, "search");
         assert_eq!(sb.workspace_count(), 1, "only the matching row survives");
     }
@@ -1489,8 +1490,7 @@ mod search_tests {
     #[test]
     fn enter_keeps_filter_and_exits_editing() {
         let mut sb = sidebar_with_issues(&[("1", "Add search bar"), ("2", "Fix flaky test")]);
-        let mut cmds = Vec::new();
-        sb.handle_key(key('/'), &mut cmds);
+        sb.open_search();
         type_query(&mut sb, "search");
         sb.handle_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(!sb.search_editing(), "Enter exits editing mode");
@@ -1502,8 +1502,7 @@ mod search_tests {
     #[test]
     fn esc_clears_search_and_restores_tree() {
         let mut sb = sidebar_with_issues(&[("1", "Add search bar"), ("2", "Fix flaky test")]);
-        let mut cmds = Vec::new();
-        sb.handle_key(key('/'), &mut cmds);
+        sb.open_search();
         type_query(&mut sb, "search");
         assert_eq!(sb.workspace_count(), 1);
         sb.handle_search_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -1515,8 +1514,7 @@ mod search_tests {
     #[test]
     fn backspace_widens_results() {
         let mut sb = sidebar_with_issues(&[("1", "Add search bar"), ("2", "Fix flaky test")]);
-        let mut cmds = Vec::new();
-        sb.handle_key(key('/'), &mut cmds);
+        sb.open_search();
         type_query(&mut sb, "searchx"); // matches nothing
         assert_eq!(sb.workspace_count(), 0);
         sb.handle_search_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
@@ -1527,8 +1525,7 @@ mod search_tests {
     #[test]
     fn enter_on_empty_query_closes_bar() {
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
-        let mut cmds = Vec::new();
-        sb.handle_key(key('/'), &mut cmds);
+        sb.open_search();
         sb.handle_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(sb.search().is_none());
     }

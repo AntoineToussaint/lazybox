@@ -206,6 +206,11 @@ pub(crate) fn section_rank(
     match (section, focus) {
         (Section::Global, _) => Some(0),
         (Section::Workspace, PaneFocus::Sidebar) => Some(1),
+        // Sidebar list-management keys resolve ONLY under sidebar
+        // focus — they manage the list, not the selected row, so
+        // (unlike Workspace) they must not be reachable while the
+        // activity pane has focus.
+        (Section::Sidebar, PaneFocus::Sidebar) => Some(1),
         (Section::Activity, PaneFocus::Right) => Some(1),
         (Section::Workspace, PaneFocus::Right) => Some(2),
         _ => None,
@@ -1396,4 +1401,42 @@ pub(super) fn base64_encode(bytes: &[u8]) -> String {
         out.push('=');
     }
     out
+}
+
+#[cfg(test)]
+mod collision_tests {
+    use super::{PaneFocus, section_rank};
+    use lazybox_tui_core::action::{ActionDef, ActionKind, KeyChord};
+    use std::collections::HashMap;
+
+    /// Collision detector across the *real* resolution model (issue
+    /// #98). `find_action_for_chord` resolves a chord by collecting
+    /// the catalog entries reachable from the focused pane, grouping
+    /// by `section_rank`, and picking the lowest rank. Two entries
+    /// that resolve at the SAME rank under the SAME focus are a true
+    /// ambiguity — `min_by_key`'s tie-break is iteration order, so one
+    /// is silently unreachable. The deliberate cross-rank shadowing
+    /// (Workspace rank 2 under Right focus vs Activity rank 1) is
+    /// fine and not flagged, because different ranks never tie.
+    #[test]
+    fn no_same_rank_chord_collisions_per_focus() {
+        for focus in [PaneFocus::Sidebar, PaneFocus::Right, PaneFocus::Terminals] {
+            let mut seen: HashMap<(u8, KeyChord), ActionKind> = HashMap::new();
+            for def in ActionDef::all() {
+                let Some(rank) = section_rank(def.section, focus) else {
+                    continue;
+                };
+                let Some(chord) = def.default_chord() else {
+                    continue;
+                };
+                if let Some(prev) = seen.insert((rank, chord.clone()), def.kind) {
+                    panic!(
+                        "under {focus:?}, chord {chord:?} resolves to two actions \
+                         at rank {rank}: {prev:?} and {:?}",
+                        def.kind,
+                    );
+                }
+            }
+        }
+    }
 }

@@ -36,7 +36,7 @@
 use crate::ServerConfig;
 use crate::metrics::EventMetrics;
 use lazybox_ipc::{Event, EventForward, TerminalId};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
@@ -116,6 +116,21 @@ struct ForwardState {
     /// for O(1) dedupe.
     resync_queue: VecDeque<TerminalId>,
     resync_set: HashSet<TerminalId>,
+    /// Highest per-terminal `seq` already delivered to the client inside
+    /// a replay — either a `TerminalResync` (channel-overflow recovery)
+    /// or a `Snapshot` (broadcast-lag recovery). The replay already
+    /// contains every chunk through this seq, so any later
+    /// `TerminalOutput` with `seq <= covered` is a duplicate. Re-feeding
+    /// it into the consumer's parser double-draws the screen on top of
+    /// the just-rebuilt grid — the "reload flicker / struck-through
+    /// rows" of #103. Dropping it here is what makes the documented
+    /// `TerminalResync` contract ("the resumed live stream — all seq
+    /// strictly greater — applies exactly once") actually hold: the
+    /// resync materializes from a ring that can be a few chunks ahead of
+    /// what the forwarder has consumed from its raw input, so those
+    /// in-flight chunks would otherwise arrive *after* the resync with a
+    /// seq it already covered.
+    covered_seq: HashMap<TerminalId, u64>,
     /// Process-wide drop/resync counters (issue #91).
     metrics: Arc<EventMetrics>,
 }
@@ -128,8 +143,24 @@ impl ForwardState {
             pending: VecDeque::new(),
             resync_queue: VecDeque::new(),
             resync_set: HashSet::new(),
+            covered_seq: HashMap::new(),
             metrics,
         }
+    }
+
+    /// Record that `seq` (and everything before it) for `terminal_id`
+    /// has been delivered inside a replay. Monotonic — a later, lower
+    /// resync/snapshot seq never lowers the floor.
+    fn mark_covered(&mut self, terminal_id: TerminalId, seq: u64) {
+        let entry = self.covered_seq.entry(terminal_id).or_insert(0);
+        *entry = (*entry).max(seq);
+    }
+
+    /// Has `seq` for `terminal_id` already been delivered via a replay?
+    fn is_superseded(&self, terminal_id: TerminalId, seq: u64) -> bool {
+        self.covered_seq
+            .get(&terminal_id)
+            .is_some_and(|&covered| seq <= covered)
     }
 
     fn is_idle(&self) -> bool {
@@ -170,6 +201,16 @@ impl ForwardState {
         evt: Event,
     ) -> ControlFlow<()> {
         match evt {
+            Event::TerminalOutput {
+                terminal_id, seq, ..
+            } if self.is_superseded(terminal_id, seq) => {
+                // Already delivered inside a replay (resync/snapshot).
+                // Forwarding it again would double-feed the consumer's
+                // parser on top of the freshly rebuilt grid — #103's
+                // reload flicker. The replay covers it, so drop silently
+                // (not a lossy drop: no resync owed).
+                ControlFlow::Continue(())
+            }
             Event::TerminalOutput { terminal_id, .. } => {
                 // Ordering rule: if anything is already buffered, or
                 // this terminal is mid-resync, we cannot forward live
@@ -190,9 +231,21 @@ impl ForwardState {
                 }
             }
             other => {
+                // A broadcast-lag recovery `Snapshot` re-feeds each
+                // terminal's full ring, so it covers everything through
+                // its `last_seq` exactly like a resync does — record the
+                // floor so the lagged backlog that follows on the bus
+                // (older chunks, `seq <= last_seq`) is dropped instead of
+                // double-fed.
+                if let Event::Snapshot { terminals, .. } = &other {
+                    for t in terminals {
+                        self.mark_covered(t.terminal_id, t.last_seq);
+                    }
+                }
                 // A terminal that exits no longer needs a resync.
                 if let Event::TerminalExited { terminal_id, .. } = &other {
                     self.drop_resync(terminal_id);
+                    self.covered_seq.remove(terminal_id);
                 }
                 // Lossless: send immediately when the channel has room
                 // and nothing is queued ahead of it; otherwise enqueue
@@ -229,6 +282,11 @@ impl ForwardState {
         if let Some(terminal_id) = self.resync_queue.pop_front() {
             self.resync_set.remove(&terminal_id);
             let (replay, seq) = resync_replay(config, terminal_id).await;
+            // The replay carries every chunk through `seq`; record the
+            // floor so in-flight chunks the forwarder hasn't consumed yet
+            // (the ring can run a few chunks ahead of raw input) are
+            // dropped as duplicates rather than re-fed after the resync.
+            self.mark_covered(terminal_id, seq);
             permit.send(Event::TerminalResync {
                 terminal_id,
                 replay,
@@ -265,7 +323,8 @@ mod tests {
     use super::*;
     use crate::ServerConfig;
     use lazybox_core::SessionKey;
-    use lazybox_ipc::TerminalKind;
+    use lazybox_ipc::{TerminalKind, TerminalSnapshot};
+    use std::ops::ControlFlow;
     use std::time::Duration;
     use tokio::sync::mpsc;
 
@@ -367,6 +426,122 @@ mod tests {
             "every dropped chunk is counted"
         );
         assert_eq!(snap.terminal_resyncs, 1, "one resync episode counted");
+    }
+
+    /// #103: after a resync re-feeds the ring up to `seq`, the resumed
+    /// live stream can still carry chunks the resync already covered —
+    /// the daemon ring runs a few chunks ahead of what the forwarder has
+    /// consumed from its raw input, so those in-flight chunks reach
+    /// `route` *after* the resync with a seq it already replayed.
+    /// Re-forwarding them double-feeds the consumer's parser (the reload
+    /// flicker). `deliver_one` records the resync floor; later duplicates
+    /// must be dropped and only strictly-newer chunks forwarded.
+    #[tokio::test]
+    async fn resync_floor_drops_already_replayed_output() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&[], None, &[], "t")
+            .await
+            .expect("spawn");
+        mock.emit(&key, b"RING").await; // ring last_seq → 1
+        let tid = TerminalId(1);
+        config.terminals.lock().await.insert(tid, key.clone());
+
+        let mut state = ForwardState::new(config.event_metrics.clone());
+        // A dropped chunk schedules the resync; materializing it records
+        // the floor (the ring's last_seq = 1).
+        state.schedule_resync(tid);
+        let (tx, mut rx) = mpsc::channel(8);
+        let permit = tx.reserve().await.unwrap();
+        state.deliver_one(permit, &config).await;
+        assert!(
+            matches!(rx.recv().await, Some(Event::TerminalResync { seq: 1, .. })),
+            "resync carries the ring's last seq",
+        );
+
+        // Chunk seq=1 is already in the replay → dropped.
+        let cf = state.route(
+            &tx,
+            Event::TerminalOutput {
+                terminal_id: tid,
+                bytes: vec![b'x'],
+                seq: 1,
+            },
+        );
+        assert!(matches!(cf, ControlFlow::Continue(())));
+        // Chunk seq=2 is strictly newer → forwarded.
+        let cf = state.route(
+            &tx,
+            Event::TerminalOutput {
+                terminal_id: tid,
+                bytes: vec![b'y'],
+                seq: 2,
+            },
+        );
+        assert!(matches!(cf, ControlFlow::Continue(())));
+
+        drop(tx);
+        let mut seqs = Vec::new();
+        while let Some(e) = rx.recv().await {
+            if let Event::TerminalOutput { seq, .. } = e {
+                seqs.push(seq);
+            }
+        }
+        assert_eq!(seqs, vec![2], "only the post-resync chunk survives");
+    }
+
+    /// A broadcast-lag recovery `Snapshot` covers each terminal through
+    /// its `last_seq` just like a resync. The lagged backlog that follows
+    /// on the bus (older chunks, `seq <= last_seq`) must be dropped, not
+    /// double-fed on top of the snapshot's replay.
+    #[tokio::test]
+    async fn snapshot_floor_drops_lagged_backlog() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let mut state = ForwardState::new(config.event_metrics.clone());
+        let tid = TerminalId(1);
+        let (tx, mut rx) = mpsc::channel(16);
+
+        // Recovery snapshot: terminal covered through seq 5.
+        let snap = Event::Snapshot {
+            workspaces: Vec::new(),
+            terminals: vec![TerminalSnapshot {
+                terminal_id: tid,
+                session_key: SessionKey::new("s"),
+                kind: TerminalKind::Shell,
+                replay: b"REPLAY".to_vec(),
+                last_seq: 5,
+                no_permission: false,
+            }],
+            projects: Vec::new(),
+        };
+        assert!(matches!(state.route(&tx, snap), ControlFlow::Continue(())));
+
+        // Backlog chunks 3..=5 are already in the replay → dropped; 6..=7
+        // are new → forwarded.
+        for seq in 3..=7 {
+            let _ = state.route(
+                &tx,
+                Event::TerminalOutput {
+                    terminal_id: tid,
+                    bytes: vec![b'z'],
+                    seq,
+                },
+            );
+        }
+
+        drop(tx);
+        let mut seqs = Vec::new();
+        while let Some(e) = rx.recv().await {
+            if let Event::TerminalOutput { seq, .. } = e {
+                seqs.push(seq);
+            }
+        }
+        assert_eq!(
+            seqs,
+            vec![6, 7],
+            "only chunks past the snapshot floor survive"
+        );
     }
 
     /// With a roomy channel and a consumer that keeps up, nothing is

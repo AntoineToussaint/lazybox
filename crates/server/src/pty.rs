@@ -278,13 +278,23 @@ impl DaemonPty {
                                 let _ = f.write_all(&buf[..n]);
                             }
                             let bytes: Arc<[u8]> = Arc::from(&buf[..n]);
-                            let seq = reader_seq.fetch_add(1, Ordering::SeqCst) + 1;
-                            // Ring write uses blocking lock; this thread is
-                            // dedicated so it's fine.
-                            {
+                            // Push to the ring and assign the seq under the
+                            // SAME lock, in that order, so any reader of the
+                            // (ring snapshot, last_seq) pair — `snapshot_only`,
+                            // feeding subscribe + the forwarder's resync — sees
+                            // the ring already containing every chunk through
+                            // last_seq. Bumping the seq before the push left a
+                            // window where last_seq led the ring by one chunk;
+                            // the forwarder's seq dedup would then mistake that
+                            // not-yet-replayed chunk for a duplicate and drop
+                            // it. Ring-ahead-of-seq is harmless (worst case a
+                            // duplicate that dedup catches); seq-ahead-of-ring
+                            // loses data.
+                            let seq = {
                                 let mut r = reader_ring.blocking_lock();
                                 r.push(&bytes);
-                            }
+                                reader_seq.fetch_add(1, Ordering::SeqCst) + 1
+                            };
                             // If no subscribers, broadcast returns error;
                             // we don't care — the ring holds the data.
                             let _ = reader_tx.send(OutputChunk { seq, bytes });

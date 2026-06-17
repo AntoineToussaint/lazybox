@@ -1,13 +1,13 @@
   Tab             cycle panes       Shift+R         refresh            ,               settings
   ?               help              Shift+T         tour               Shift+D         sync status
-  !               next asking       Shift+F         next failing       Shift+Arrows    resize splitters
-  q q             quit              Enter           open               w               work on this
-  c / x / u       spawn agent       s               shell              e               editor
-  m               mark read         z               snooze             Shift+N         new project
-  n               new workspace     Shift+M         merge PR           Shift+V         reviewers
-  Shift+G         assignees         Shift+L         labels             Shift+O         open in browser
-  r               reply             Shift+A         adopt sessions     Shift+J         join into PR
-  Shift+X         archive           Enter           toggle section     →/←             expand/collapse
-  g               top               Shift+G         bottom             d               description
-  Space           select row        z               undo mark-read     Shift+PgUp/Dn   scroll
-  ]]              exit to sidebar   ]]<key>         snippets
+  !               next asking       Shift+F         next failing       Shift+W         start agent
+  Shift+Arrows    resize splitters  q q             quit               Enter           open
+  w               work on this      c / x / u       spawn agent        s               shell
+  e               editor            m               mark read          z               snooze
+  Shift+N         new project       n               new workspace      Shift+M         merge PR
+  Shift+V         reviewers         Shift+G         assignees          Shift+L         labels
+  Shift+O         open in browser   r               reply              Shift+A         adopt sessions
+  Shift+J         join into PR      Shift+X         archive            Enter           toggle section
+  →/←             expand/collapse   g               top                Shift+G         bottom
+  d               description       Space           select row         z               undo mark-read
+  Shift+PgUp/Dn   scroll            ]]              exit to sidebar    ]]<key>         snippets

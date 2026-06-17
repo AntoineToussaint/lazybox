@@ -529,10 +529,21 @@ pub struct Model<T: TerminalAdapter> {
         Vec<lazybox_tui_core::action::Action>,
     )>,
     /// User-supplied key overrides for catalog actions. Keys are
-    /// snake_case `ActionKind` names (see `ActionKind::name`); values
-    /// are key-spec strings. Empty when the user hasn't configured
-    /// `ui.action_keys` — catalog defaults apply.
+    /// snake_case `ActionKind` names (see `ActionKind::name`), or
+    /// `spawn_agent.<id>` for a per-agent row; values are key-spec
+    /// strings. Empty when the user hasn't configured `ui.action_keys`
+    /// — catalog defaults apply.
     action_key_overrides: std::collections::BTreeMap<String, String>,
+    /// Enabled agent ids, in catalog-display order. Drives the
+    /// generated per-agent `SpawnAgent` rows in [`Self::catalog`].
+    /// Defaults to the built-in `claude` / `codex` / `cursor`.
+    agents: Vec<String>,
+    /// Runtime action catalog: the static rows plus one generated
+    /// `SpawnAgent` row per enabled agent, with `ui.action_keys`
+    /// overrides baked into each entry's chords. Rebuilt whenever the
+    /// agents list or overrides change; consulted by keyboard
+    /// dispatch, the which-key popup, and the help panel.
+    catalog: Vec<lazybox_tui_core::action::CatalogEntry>,
     /// Action queued behind an `ActionConfirm` modal, paired with the
     /// concrete target it was aimed at when the modal mounted. Set by
     /// `mount_action_confirm`, taken (and dispatched if Yes) by
@@ -750,6 +761,16 @@ impl<T: TerminalAdapter> Model<T> {
             last_focused_session_key: None,
             pending_sidebar_context: None,
             action_key_overrides: std::collections::BTreeMap::new(),
+            // Built-in agents + their `c` / `x` / `u` convention. The
+            // host overrides this from `setup.agents` via `set_agents`.
+            agents: ["claude", "codex", "cursor"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            catalog: lazybox_tui_core::action::ActionDef::catalog(
+                &["claude".to_string(), "codex".to_string(), "cursor".to_string()],
+                &std::collections::BTreeMap::new(),
+            ),
             pending_action_confirm: None,
             pending_inspect_rows: Vec::new(),
             pending_inspect_target: None,
@@ -957,15 +978,14 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Apply `~/.lazybox/config.yaml::attention` +
-    /// `ui.collapsed_repos` + `agent_shortcuts` to the sidebar at
-    /// startup. Must be called before the first daemon Subscribe
-    /// so the saved collapse state is in place when the Snapshot
-    /// arrives.
+    /// `ui.collapsed_repos` to the sidebar at startup. Must be called
+    /// before the first daemon Subscribe so the saved collapse state
+    /// is in place when the Snapshot arrives. Per-agent spawn keys are
+    /// no longer wired here — they're catalog rows; see `set_agents`.
     pub fn apply_sidebar_config(
         &mut self,
         attention: lazybox_config::AttentionConfig,
         collapsed_repos: std::collections::BTreeSet<String>,
-        agent_shortcuts: std::collections::HashMap<char, String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
         ui: &lazybox_config::UiDefaults,
@@ -975,14 +995,8 @@ impl<T: TerminalAdapter> Model<T> {
         if let Some(agent) = default_agent.clone().filter(|s| !s.is_empty()) {
             self.right.set_default_agent(agent);
         }
-        self.sidebar.apply_inner_config(
-            attention,
-            collapsed_repos,
-            agent_shortcuts,
-            default_agent,
-            display,
-            ui,
-        );
+        self.sidebar
+            .apply_inner_config(attention, collapsed_repos, default_agent, display, ui);
         // Stash resolved defaults for model-level knobs (`q-q`
         // window, terminal-escape char, split step) that used to be
         // hardcoded consts.
@@ -1077,6 +1091,29 @@ impl<T: TerminalAdapter> Model<T> {
         overrides: std::collections::BTreeMap<String, String>,
     ) {
         self.action_key_overrides = overrides;
+        self.rebuild_catalog();
+    }
+
+    /// Set the enabled agents (catalog-display order) and rebuild the
+    /// catalog so each gets its own `SpawnAgent` row. Called at startup
+    /// from `setup.agents`.
+    pub fn set_agents(&mut self, agents: Vec<String>) {
+        self.agents = agents;
+        self.rebuild_catalog();
+    }
+
+    /// Recompute the runtime catalog from the current agents +
+    /// overrides. Cheap (a few dozen rows); called whenever either
+    /// input changes.
+    fn rebuild_catalog(&mut self) {
+        self.catalog =
+            lazybox_tui_core::action::ActionDef::catalog(&self.agents, &self.action_key_overrides);
+    }
+
+    /// Read-only handle to the runtime catalog — used by tests and the
+    /// generated Keys screen.
+    pub fn catalog(&self) -> &[lazybox_tui_core::action::CatalogEntry] {
+        &self.catalog
     }
 
     /// Synthesize Project records for every scope the user is
@@ -1921,9 +1958,9 @@ impl<T: TerminalAdapter> Model<T> {
         // `(next-key, label)` continuations of the armed prefix, a pure
         // function of the catalog. Built only while a leader is armed.
         let leader_rows: Vec<(String, String)> = if let Some(prefix) = self.leader.pending() {
-            seq_continuations(prefix, self.focus, &self.action_key_overrides)
+            seq_continuations(prefix, self.focus, &self.catalog)
                 .into_iter()
-                .map(|(stroke, def)| (stroke.display(), def.label.to_string()))
+                .map(|(stroke, entry)| (stroke.display(), entry.label.to_string()))
                 .collect()
         } else {
             Vec::new()

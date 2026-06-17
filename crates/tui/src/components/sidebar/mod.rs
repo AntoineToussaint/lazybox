@@ -354,10 +354,6 @@ pub struct Sidebar {
     /// `Shift-Z` long-snooze duration. Configurable via
     /// `ui.long_snooze` (default 1 year).
     long_snooze: std::time::Duration,
-    /// Per-key agent id map. Defaults to `c => "claude", x => "codex",
-    /// u => "cursor"`. AppRoot can override via `with_agent_shortcuts`
-    /// for users with Aider / custom CLIs configured.
-    agent_shortcuts: HashMap<char, String>,
     /// Mirror of the daemon's live-terminals set, scoped to what we
     /// need for the workspace-row runner badges (e.g. ` C  S 2` for
     /// one Claude + two shells running). Populated from `Event::Snapshot`
@@ -466,14 +462,6 @@ pub struct PendingNotification {
 
 impl Sidebar {
     pub fn new(id: PaneId) -> Self {
-        // Lowercase, easy to type, and mirrors the hint-bar:
-        //   c → claude, x → codex, u → cursor (`s` is the shell, handled
-        //   separately because it isn't an agent registered in the
-        //   agent registry).
-        let mut agent_shortcuts = HashMap::new();
-        agent_shortcuts.insert('c', "claude".to_string());
-        agent_shortcuts.insert('x', "codex".to_string());
-        agent_shortcuts.insert('u', "cursor".to_string());
         Self {
             id,
             workspaces: HashMap::new(),
@@ -493,7 +481,6 @@ impl Sidebar {
             },
             short_snooze: lazybox_config::UiDefaults::default().short_snooze,
             long_snooze: lazybox_config::UiDefaults::default().long_snooze,
-            agent_shortcuts,
             running_terminals: HashMap::new(),
             attention: lazybox_config::AttentionConfig::default(),
             projects: BTreeMap::new(),
@@ -699,16 +686,12 @@ impl Sidebar {
         &mut self,
         attention: lazybox_config::AttentionConfig,
         collapsed_repos: BTreeSet<String>,
-        agent_shortcuts: HashMap<char, String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
         ui: &lazybox_config::UiDefaults,
     ) {
         self.attention = attention;
         self.collapsed_repos = collapsed_repos;
-        if !agent_shortcuts.is_empty() {
-            self.agent_shortcuts = agent_shortcuts;
-        }
         if let Some(agent) = default_agent.filter(|s| !s.is_empty()) {
             self.default_agent = agent;
         }
@@ -716,23 +699,6 @@ impl Sidebar {
         self.long_snooze = ui.long_snooze;
         self.set_show_inactive_in_inbox(display.show_inactive_in_inbox);
         self.ascii_glyphs = display.ascii_glyphs;
-    }
-
-    /// Override the default c→claude / C→codex mapping. Keys are
-    /// single characters; case matters (`c` and `C` are distinct).
-    /// AppRoot wires this from the user's config at startup.
-    pub fn with_agent_shortcuts(
-        mut self,
-        shortcuts: impl IntoIterator<Item = (char, String)>,
-    ) -> Self {
-        self.agent_shortcuts = shortcuts.into_iter().collect();
-        self
-    }
-
-    /// Which agents are currently keymapped. For overlays / help
-    /// rendering that want to show the user what's available.
-    pub fn agent_shortcuts(&self) -> &HashMap<char, String> {
-        &self.agent_shortcuts
     }
 
     // ── Observability helpers (for tests + for AppRoot / RightPane) ────

@@ -39,11 +39,6 @@ pub struct Config {
     /// in the sidebar header. Toggle individual signals off here.
     #[serde(default)]
     pub attention: AttentionConfig,
-    /// Single-char keybindings → agent ids. Defaults to
-    /// `c → claude, x → codex, u → cursor`. User can remap or add
-    /// custom CLIs (e.g. `a → aider`).
-    #[serde(default)]
-    pub agent_shortcuts: std::collections::BTreeMap<char, String>,
     /// View preferences lazybox writes back automatically: which
     /// repos are collapsed in the sidebar, last splitter widths.
     /// Edit by hand if you want to lock a layout.

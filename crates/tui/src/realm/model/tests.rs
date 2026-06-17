@@ -2042,8 +2042,18 @@ mod chord_resolution_tests {
         KeyStroke::parse(s).unwrap_or_else(|| panic!("{s:?} must parse"))
     }
 
+    /// Runtime catalog with the built-in agents, no overrides — the
+    /// resolution surface `find_action_for_stroke` consults.
+    fn catalog() -> Vec<lazybox_tui_core::action::CatalogEntry> {
+        let agents: Vec<String> = ["claude", "codex", "cursor"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        ActionDef::catalog(&agents, &BTreeMap::new())
+    }
+
     fn resolve(s: &str, focus: PaneFocus) -> Option<ActionKind> {
-        find_action_for_stroke(&stroke(s), focus, &BTreeMap::new()).map(|d| d.kind)
+        find_action_for_stroke(&stroke(s), focus, &catalog()).map(|e| e.kind)
     }
 
     /// Chord collisions that exist on purpose: the same key binds an

@@ -1322,6 +1322,91 @@ fn leader_g_arms_from_sidebar_without_workspace() {
     );
 }
 
+// ── Per-agent spawn keys are catalog rows (#102 P2) ──────────────────
+
+/// The agent id of the first `Spawn(Agent)` command in `cmds`.
+fn first_spawned_agent(cmds: &[lazybox_ipc::Command]) -> Option<String> {
+    use lazybox_ipc::{Command, TerminalKind};
+    cmds.iter().find_map(|c| match c {
+        Command::Spawn {
+            kind: TerminalKind::Agent(a),
+            ..
+        } => Some(a.clone()),
+        _ => None,
+    })
+}
+
+/// `c` on the selected workspace spawns the default `claude` agent —
+/// the generated `SpawnAgent` row dispatched by the Model, not a
+/// sidebar arm.
+#[test]
+fn spawn_agent_c_spawns_claude() {
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let pr_ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    let pr_key: SessionKey = (&pr_ws.key).into();
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![pr_ws],
+        terminals: vec![],
+        projects: vec![],
+    });
+    assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
+    while server.rx.try_recv().is_ok() {}
+    m.dispatch_key(key(Key::Char('c')));
+    let cmds: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+    assert_eq!(first_spawned_agent(&cmds).as_deref(), Some("claude"));
+}
+
+/// `x` spawns codex — the second generated agent row.
+#[test]
+fn spawn_agent_x_spawns_codex() {
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let pr_ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    let pr_key: SessionKey = (&pr_ws.key).into();
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![pr_ws],
+        terminals: vec![],
+        projects: vec![],
+    });
+    assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
+    while server.rx.try_recv().is_ok() {}
+    m.dispatch_key(key(Key::Char('x')));
+    let cmds: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+    assert_eq!(first_spawned_agent(&cmds).as_deref(), Some("codex"));
+}
+
+/// An agent row is remappable through `ui.action_keys` keyed by
+/// `spawn_agent.<id>`: after remapping claude to `Ctrl-j`, the default
+/// `c` no longer spawns it and `Ctrl-j` does.
+#[test]
+fn spawn_agent_key_is_remappable() {
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let mut overrides = std::collections::BTreeMap::new();
+    overrides.insert("spawn_agent.claude".to_string(), "Ctrl-j".to_string());
+    m.apply_action_key_overrides(overrides);
+    let pr_ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    let pr_key: SessionKey = (&pr_ws.key).into();
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![pr_ws],
+        terminals: vec![],
+        projects: vec![],
+    });
+    assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
+    while server.rx.try_recv().is_ok() {}
+
+    // `c` is no longer claude's key — nothing spawns.
+    m.dispatch_key(key(Key::Char('c')));
+    let after_c: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+    assert_eq!(first_spawned_agent(&after_c), None, "c was remapped away");
+
+    // The remapped chord spawns claude.
+    m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::CONTROL));
+    let after_remap: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+    assert_eq!(first_spawned_agent(&after_remap).as_deref(), Some("claude"));
+}
+
 /// Flatten the current frame buffer into a newline-joined string of
 /// cell symbols, so a render test can assert on what's actually on
 /// screen.

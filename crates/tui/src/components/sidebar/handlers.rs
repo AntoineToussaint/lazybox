@@ -56,55 +56,14 @@ impl Sidebar {
             }
 
             // ── Spawn / open ──────────────────────────────────────────
-            // Any Char key listed in `agent_shortcuts` spawns that
-            // agent for the selected session. Defaults: `c` → Claude,
-            // `x` → Codex, `u` → Cursor. AppRoot can remap at startup
-            // via `with_agent_shortcuts`. Keys NOT in the map bubble
-            // up, so overlays / other components get a fair shot.
+            // The per-agent spawn keys (`c` claude, `x` codex, `u`
+            // cursor) are catalog rows now (#102 P2) — generated per
+            // enabled agent in `ActionDef::catalog`, dispatched through
+            // `Model::dispatch_action(SpawnAgent(id))` before this
+            // handler ever runs. The old `agent_shortcuts` side map is
+            // gone; remap an agent's key via `ui.action_keys`
+            // (`spawn_agent.<id>`).
             //
-            // The (workspace_state, agent_id) → Intent decision lives
-            // in `intent::resolve_spawn_agent`; this handler is the
-            // execute side. Returning `Intent::NoOp` when nothing is
-            // selected is now testable in isolation instead of being
-            // a silent inline branch.
-            (KeyCode::Char(c), m)
-                if self.agent_shortcuts.contains_key(&c)
-                    && !m.contains(KeyModifiers::CONTROL)
-                    && !m.contains(KeyModifiers::ALT) =>
-            {
-                let agent_id = self.agent_shortcuts.get(&c).cloned().unwrap_or_default();
-                match crate::intent::resolve_spawn_agent(self.selected_workspace(), &agent_id) {
-                    crate::intent::Intent::SpawnAgent {
-                        workspace_key,
-                        agent_id,
-                        prompt,
-                    } => {
-                        tracing::info!(
-                            key = %c, %workspace_key, agent_id = %agent_id,
-                            "sidebar: emitting Spawn(Agent)"
-                        );
-                        cmds.push(Command::Spawn {
-                            session_key: workspace_key,
-                            // The selected session sub-row, if any,
-                            // scopes the spawn into a specific
-                            // worktree. None → daemon picks the
-                            // workspace's default session.
-                            session_id: self.selected_session_id(),
-                            kind: TerminalKind::Agent(agent_id),
-                            cwd: None,
-                            initial_prompt: prompt,
-                        });
-                    }
-                    _ => {
-                        tracing::warn!(
-                            key = %c,
-                            "sidebar: agent shortcut pressed but resolver returned NoOp \
-                             (no workspace selected or empty agent id)"
-                        );
-                    }
-                }
-                PaneOutcome::Consumed
-            }
             // `w` for "work on this" — single polymorphic key. Spawns
             // the default agent with a context-aware prompt:
             //  - on an issue row → implement the issue

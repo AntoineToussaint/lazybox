@@ -56,11 +56,12 @@ impl<T: TerminalAdapter> Model<T> {
         // hardcoded group table.
         if let Some(prefix) = self.leader.take() {
             self.redraw = true;
-            if let Some(stroke) = key_event_to_stroke(realm_key_to_crossterm(&key))
-                && let Some(def) =
-                    find_action_for_seq(&prefix, &stroke, self.focus, &self.action_key_overrides)
-                && let Some(action) = action_from_kind(def.kind)
-            {
+            let action = key_event_to_stroke(realm_key_to_crossterm(&key))
+                .and_then(|stroke| {
+                    find_action_for_seq(&prefix, &stroke, self.focus, &self.catalog)
+                })
+                .and_then(action_from_entry);
+            if let Some(action) = action {
                 self.q_latch.disarm();
                 let mut cmds = self.dispatch_action(&action);
                 self.sync_panes();
@@ -273,30 +274,36 @@ impl<T: TerminalAdapter> Model<T> {
         let mut cmds: Vec<IpcCommand> = Vec::new();
 
         // Catalog lookup first. A single keystroke that matches a
-        // catalog `Action` (and that `dispatch_action` knows how to
+        // catalog entry (and that `dispatch_action` knows how to
         // handle) is fired here and the pane's direct handler is
         // skipped. If the keystroke instead *starts* a leader sequence
         // (`g` → the github actions), arm the leader so the next key
         // completes it. Per-key match arms in the panes still cover
         // what the catalog doesn't yet — see `dispatch_action`.
-        if self.focus != PaneFocus::Terminals
+        //
+        // An empty terminal pane has no PTY to feed, so its keys
+        // resolve as if the sidebar were focused — that's what keeps
+        // the empty-state hint's `c` / `s` / `x` shortcuts live now
+        // that agent spawns are catalog rows rather than a sidebar arm.
+        let resolve_focus = match self.focus {
+            PaneFocus::Terminals if self.terminals.is_empty() => Some(PaneFocus::Sidebar),
+            PaneFocus::Terminals => None,
+            other => Some(other),
+        };
+        if let Some(rfocus) = resolve_focus
             && let Some(stroke) = key_event_to_stroke(ct)
         {
-            if let Some(def) =
-                find_action_for_stroke(&stroke, self.focus, &self.action_key_overrides)
-                && let Some(action) = action_from_kind(def.kind)
-            {
+            let action = find_action_for_stroke(&stroke, rfocus, &self.catalog)
+                .and_then(action_from_entry);
+            if let Some(action) = action {
                 // Any catalog dispatch counts as "non-quit key" so
                 // the q q chord resets.
                 self.q_latch.disarm();
-                cmds.extend(self.dispatch_action(&action));
+                let dispatched = self.dispatch_action(&action);
                 // Drain queued cmds + early return — the catalog
                 // handled the key, the pane shouldn't see it.
+                self.flush_dispatched_cmds(dispatched);
                 self.sync_panes();
-                for cmd in cmds {
-                    let rewritten = self.rewrite_spawn_to_inject(cmd);
-                    self.send_cmd(rewritten);
-                }
                 self.redraw = true;
                 return;
             }
@@ -304,8 +311,12 @@ impl<T: TerminalAdapter> Model<T> {
             // group? If any catalog entry has a `Seq` starting with it
             // (reachable from this focus), arm the leader and show the
             // which-key popup. Purely catalog-driven: new leader groups
-            // are data, not a `keys.rs` edit.
-            if !seq_continuations(&stroke, self.focus, &self.action_key_overrides).is_empty() {
+            // are data, not a `keys.rs` edit. Not armed from an empty
+            // terminal pane (the leader completion keys off the real
+            // focus, which is Terminals there).
+            if self.focus != PaneFocus::Terminals
+                && !seq_continuations(&stroke, rfocus, &self.catalog).is_empty()
+            {
                 self.q_latch.disarm();
                 self.leader.arm(stroke);
                 self.redraw = true;
@@ -332,10 +343,19 @@ impl<T: TerminalAdapter> Model<T> {
                 self.terminals.handle_key_direct(ct, &mut cmds);
             }
         }
-        // Surface spawn intent in the footer so the user sees that
-        // worktree creation / process startup is happening (can take
-        // 1-3s on first session). The notice clears when the matching
-        // `TerminalSpawned` arrives in `handle_daemon_event`.
+        self.flush_dispatched_cmds(cmds);
+        // Sidebar j/k changes selection — propagate to right + terminals.
+        self.sync_panes();
+        self.redraw = true;
+    }
+
+    /// Send the commands a key dispatch produced: arm the spawn
+    /// spinner for any `Spawn` (worktree provisioning can take seconds
+    /// on a cold clone, so the footer turns until `TerminalSpawned`),
+    /// then rewrite spawn-into-running-agent to `InjectPrompt` and
+    /// send. Shared by the catalog-dispatch path and the per-pane
+    /// fallback so both surface the same feedback.
+    fn flush_dispatched_cmds(&mut self, cmds: Vec<IpcCommand>) {
         for cmd in &cmds {
             if let IpcCommand::Spawn { kind, .. } = cmd {
                 let label = match kind {
@@ -343,12 +363,6 @@ impl<T: TerminalAdapter> Model<T> {
                     lazybox_ipc::TerminalKind::Agent(a) => a.to_string(),
                     other => format!("{other:?}").to_lowercase(),
                 };
-                // Animated footer spinner (not a static notice): worktree
-                // provisioning runs on the daemon before `TerminalSpawned`
-                // comes back, and on a cold clone that's a multi-second
-                // gap. The spinner turns the whole time so the user knows
-                // their `w`/`c`/`s` keypress registered. Cleared when the
-                // terminal lands (see `events.rs`).
                 self.status.note_spawning(label);
             }
         }
@@ -356,9 +370,6 @@ impl<T: TerminalAdapter> Model<T> {
             let rewritten = self.rewrite_spawn_to_inject(cmd);
             self.send_cmd(rewritten);
         }
-        // Sidebar j/k changes selection — propagate to right + terminals.
-        self.sync_panes();
-        self.redraw = true;
     }
 
     /// Send a single literal escape char (`]`) to the focused terminal —
@@ -962,13 +973,30 @@ impl<T: TerminalAdapter> Model<T> {
     }
 }
 
+/// Reconstruct a runtime `Action` from a resolved catalog entry,
+/// pulling the agent id out of a parameterized `SpawnAgent` row. This
+/// is the bridge from the data-model catalog back to the dispatchable
+/// `Action` enum — both single-key and leader-sequence resolution go
+/// through it.
+fn action_from_entry(
+    entry: &lazybox_tui_core::action::CatalogEntry,
+) -> Option<lazybox_tui_core::action::Action> {
+    use lazybox_tui_core::action::{Action, ActionKind, Param};
+    if entry.kind == ActionKind::SpawnAgent {
+        return entry
+            .param
+            .as_ref()
+            .map(|Param::Agent(id)| Action::SpawnAgent(id.clone()));
+    }
+    action_from_kind(entry.kind)
+}
+
 /// Reconstruct a runtime `Action` from a catalog `ActionKind`, for the
 /// no-payload kinds the keyboard path dispatches (single keys AND
 /// leader sequences resolve through here so both agree on semantics).
 ///
-/// `SpawnAgent` is the one variant carrying runtime data (the agent
-/// id); per-agent catalog rows aren't generated yet (that's P2), so it
-/// returns `None` and those keys fall through to the pane handler.
+/// `SpawnAgent` carries the agent id as a `Param`, handled by
+/// [`action_from_entry`]; reached here it has no payload, so `None`.
 fn action_from_kind(
     kind: lazybox_tui_core::action::ActionKind,
 ) -> Option<lazybox_tui_core::action::Action> {

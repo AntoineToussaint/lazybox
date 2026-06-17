@@ -643,24 +643,35 @@ async fn run_embedded_realm(
         let editors = lazybox_tui::editors::discover_at_startup(load_user_editors());
         tracing::info!("detected {} editor(s)", editors.len());
         model.cache_editors(editors);
-        // Apply ~/.lazybox/config.yaml::{attention, ui, agent_shortcuts}
-        // → sidebar + Model. Single load; subsequent reads happen
-        // on-demand via Config::save_with for the writable parts.
+        // Apply ~/.lazybox/config.yaml::{attention, ui, setup} → sidebar
+        // + Model. Single load; subsequent reads happen on-demand via
+        // Config::save_with for the writable parts.
         let user_config = lazybox_config::Config::load().unwrap_or_else(|e| {
             tracing::warn!("config.yaml load: {e}; using defaults");
             lazybox_config::Config::default()
         });
-        let agent_shortcuts: std::collections::HashMap<char, String> =
-            user_config.agent_shortcuts.clone().into_iter().collect();
         let ui_defaults = user_config.resolved_ui();
         model.apply_sidebar_config(
             user_config.attention.clone(),
             user_config.ui.collapsed_repos.clone(),
-            agent_shortcuts,
             user_config.setup.default_agent.clone(),
             &user_config.display,
             &ui_defaults,
         );
+        // Generate the per-agent SpawnAgent catalog rows (#102 P2): the
+        // built-in `claude` / `codex` / `cursor` (with their `c` / `x` /
+        // `u` keys) plus any extra agents the wizard enabled. Per-agent
+        // key remaps live in `ui.action_keys` under `spawn_agent.<id>`.
+        let mut agents: Vec<String> = ["claude", "codex", "cursor"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for id in &user_config.setup.agents {
+            if !agents.contains(id) {
+                agents.push(id.clone());
+            }
+        }
+        model.set_agents(agents);
         model.apply_action_key_overrides(user_config.ui.action_keys.clone());
         // Arm the feature tour for anyone who hasn't seen it. It
         // launches on wizard Finish for first-run users, or at startup

@@ -1122,6 +1122,136 @@ impl ActionKind {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────
+// Runtime catalog — static rows + generated parameterized rows
+// ──────────────────────────────────────────────────────────────────
+
+/// Runtime parameterization of a catalog row. The static `ActionKind`
+/// is the verb; `Param` carries the operand resolved at startup — today
+/// only the agent id for the per-agent `SpawnAgent` rows (#102 P2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Param {
+    /// Agent id for a generated `SpawnAgent` row (`claude`, `codex`, …).
+    Agent(String),
+}
+
+/// A resolved catalog row: a static action plus any runtime
+/// parameterization, with its effective chords (`ui.action_keys`
+/// overrides already applied). Built once at startup by
+/// [`ActionDef::catalog`] and consulted by keyboard dispatch, the help
+/// panel, and the collision detector — the single surface that knows
+/// about the generated per-agent rows the static table can't express.
+#[derive(Debug, Clone)]
+pub struct CatalogEntry {
+    pub kind: ActionKind,
+    /// Operand for a parameterized row (the agent id). `None` for the
+    /// fixed actions.
+    pub param: Option<Param>,
+    pub section: Section,
+    /// Footer / help label. Owned because generated rows carry a
+    /// per-agent label (`spawn claude`).
+    pub label: std::borrow::Cow<'static, str>,
+    pub describe: &'static str,
+    /// Effective chords — overrides already applied.
+    pub chords: Vec<Chord>,
+    /// Effective display string for the help panel / Keys screen.
+    pub keys_display: std::borrow::Cow<'static, str>,
+    /// The `ui.action_keys` map key that remaps this row
+    /// (`ActionKind::name`, or `spawn_agent.<id>` for an agent row).
+    pub config_key: String,
+}
+
+/// The default single-letter key a known agent binds to. `None` for
+/// agents lazybox doesn't ship a convention for — they still get a
+/// catalog row (in help, remappable), just no default chord.
+pub fn agent_default_key(id: &str) -> Option<char> {
+    match id {
+        "claude" => Some('c'),
+        "codex" => Some('x'),
+        "cursor" | "cursor-agent" => Some('u'),
+        _ => None,
+    }
+}
+
+impl ActionDef {
+    /// Build the runtime catalog: every static action EXCEPT the
+    /// generic `SpawnAgent` placeholder, plus one concrete `SpawnAgent`
+    /// row per enabled agent. The agent rows are what let `c` / `x` /
+    /// `u` live in the catalog — remappable via `ui.action_keys`
+    /// (`spawn_agent.<id>`), listed in help, and collision-checked —
+    /// instead of in a side map.
+    ///
+    /// `overrides` (`ui.action_keys`) are applied here so every
+    /// consumer reads resolved chords + display strings.
+    pub fn catalog(
+        agents: &[String],
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<CatalogEntry> {
+        let mut out: Vec<CatalogEntry> = Vec::new();
+        for def in ActionDef::all() {
+            // The static SpawnAgent row is a placeholder for the
+            // generated per-agent rows below — drop it.
+            if def.kind == ActionKind::SpawnAgent {
+                continue;
+            }
+            out.push(CatalogEntry {
+                kind: def.kind,
+                param: None,
+                section: def.section,
+                label: std::borrow::Cow::Borrowed(def.label),
+                describe: def.describe,
+                chords: def.effective_chords(overrides),
+                keys_display: def.effective_keys_display(overrides),
+                config_key: def.kind.name().to_string(),
+            });
+        }
+        let spawn = ActionDef::for_kind(ActionKind::SpawnAgent);
+        for id in agents {
+            let config_key = format!("spawn_agent.{id}");
+            // Override wins when it has at least one parseable
+            // alternative; otherwise the built-in single-letter default
+            // (which may be empty for an agent with no convention).
+            let (chords, keys_display): (Vec<Chord>, std::borrow::Cow<'static, str>) =
+                match overrides.get(&config_key) {
+                    Some(raw) => {
+                        let parsed: Vec<Chord> =
+                            raw.split('|').filter_map(Chord::parse).collect();
+                        if parsed.is_empty() {
+                            default_agent_chords(id)
+                        } else {
+                            (parsed, std::borrow::Cow::Owned(raw.clone()))
+                        }
+                    }
+                    None => default_agent_chords(id),
+                };
+            out.push(CatalogEntry {
+                kind: ActionKind::SpawnAgent,
+                param: Some(Param::Agent(id.clone())),
+                section: spawn.section,
+                label: std::borrow::Cow::Owned(format!("spawn {id}")),
+                describe: spawn.describe,
+                chords,
+                keys_display,
+                config_key,
+            });
+        }
+        out
+    }
+}
+
+/// Default chord(s) + display for an agent row from the built-in
+/// key convention. An agent lazybox has no convention for gets an
+/// empty chord list (no default binding) and a blank display.
+fn default_agent_chords(id: &str) -> (Vec<Chord>, std::borrow::Cow<'static, str>) {
+    match agent_default_key(id) {
+        Some(c) => (
+            vec![Chord::Key(KeyStroke::new(false, false, false, ChordCode::Char(c)))],
+            std::borrow::Cow::Owned(c.to_string()),
+        ),
+        None => (Vec::new(), std::borrow::Cow::Borrowed("")),
+    }
+}
+
 /// State-aware label for the footer / context menu, defaulting to
 /// the catalog's static `label` when no override applies. The
 /// override exists because a handful of actions want a workspace-
@@ -1598,6 +1728,58 @@ mod tests {
         seconds.sort_by_key(|k| format!("{k:?}"));
         seconds.dedup();
         assert_eq!(before, seconds.len(), "duplicate in-group keys");
+    }
+
+    #[test]
+    fn catalog_generates_one_row_per_agent() {
+        use std::collections::BTreeMap;
+        let agents: Vec<String> = ["claude", "codex", "aider"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let catalog = ActionDef::catalog(&agents, &BTreeMap::new());
+
+        // No generic SpawnAgent placeholder survives — only concrete
+        // per-agent rows.
+        let spawn_rows: Vec<&CatalogEntry> = catalog
+            .iter()
+            .filter(|e| e.kind == ActionKind::SpawnAgent)
+            .collect();
+        assert_eq!(spawn_rows.len(), 3, "one row per agent");
+
+        let claude = spawn_rows
+            .iter()
+            .find(|e| e.param == Some(Param::Agent("claude".into())))
+            .expect("claude row");
+        assert_eq!(claude.config_key, "spawn_agent.claude");
+        // Built-in convention: claude → `c`.
+        assert_eq!(
+            claude.chords,
+            vec![Chord::Key(KeyStroke::new(false, false, false, ChordCode::Char('c')))],
+        );
+
+        // An agent with no built-in convention gets a row but no chord.
+        let aider = spawn_rows
+            .iter()
+            .find(|e| e.param == Some(Param::Agent("aider".into())))
+            .expect("aider row");
+        assert!(aider.chords.is_empty(), "aider has no default key");
+    }
+
+    #[test]
+    fn catalog_agent_row_honors_override() {
+        use std::collections::BTreeMap;
+        let mut overrides = BTreeMap::new();
+        overrides.insert("spawn_agent.claude".to_string(), "Ctrl-j".to_string());
+        let catalog = ActionDef::catalog(&["claude".to_string()], &overrides);
+        let claude = catalog
+            .iter()
+            .find(|e| e.param == Some(Param::Agent("claude".into())))
+            .unwrap();
+        assert_eq!(
+            claude.chords,
+            vec![Chord::Key(KeyStroke::new(true, false, false, ChordCode::Char('j')))],
+        );
     }
 
     #[test]

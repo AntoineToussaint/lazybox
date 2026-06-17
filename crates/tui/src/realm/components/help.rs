@@ -6,7 +6,7 @@
 use crate::pane::Binding;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
-use lazybox_tui_core::action::{ActionDef, Section};
+use lazybox_tui_core::action::{CatalogEntry, Section};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::Event;
@@ -33,21 +33,28 @@ pub struct Help {
 }
 
 impl Help {
-    /// Build the help panel from `ActionDef::all()` — the canonical
-    /// catalog — honoring user keybinding overrides. Every action
-    /// surfaces; the user sees a complete reference instead of the
-    /// pane-stitched subset the legacy constructor produced.
-    pub fn from_catalog(overrides: &std::collections::BTreeMap<String, String>) -> Self {
+    /// Build the help panel from the runtime catalog — every action,
+    /// including the generated per-agent `SpawnAgent` rows, with
+    /// effective (post-override) chords. The user sees a complete
+    /// reference instead of the pane-stitched subset the legacy
+    /// constructor produced.
+    pub fn from_catalog(catalog: &[CatalogEntry]) -> Self {
         let mut by_section: std::collections::BTreeMap<u8, (&'static str, Vec<Binding>)> =
             std::collections::BTreeMap::new();
-        for def in ActionDef::all() {
+        for entry in catalog {
+            // An agent with no default binding and no remap has nothing
+            // to show in the keys column — skip it rather than render a
+            // blank row.
+            if entry.keys_display.is_empty() {
+                continue;
+            }
             by_section
-                .entry(def.section.order())
-                .or_insert_with(|| (def.section.title(), Vec::new()))
+                .entry(entry.section.order())
+                .or_insert_with(|| (entry.section.title(), Vec::new()))
                 .1
                 .push(Binding {
-                    keys: def.effective_keys_display(overrides),
-                    label: std::borrow::Cow::Borrowed(def.label),
+                    keys: entry.keys_display.clone(),
+                    label: entry.label.clone(),
                 });
         }
         // The snippet leader (`]]<key>`) isn't a catalog `Action` —

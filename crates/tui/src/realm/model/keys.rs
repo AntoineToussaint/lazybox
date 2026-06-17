@@ -57,9 +57,7 @@ impl<T: TerminalAdapter> Model<T> {
         if let Some(prefix) = self.leader.take() {
             self.redraw = true;
             let action = key_event_to_stroke(realm_key_to_crossterm(&key))
-                .and_then(|stroke| {
-                    find_action_for_seq(&prefix, &stroke, self.focus, &self.catalog)
-                })
+                .and_then(|stroke| find_action_for_seq(&prefix, &stroke, self.focus, &self.catalog))
                 .and_then(action_from_entry);
             if let Some(action) = action {
                 self.q_latch.disarm();
@@ -293,8 +291,8 @@ impl<T: TerminalAdapter> Model<T> {
         if let Some(rfocus) = resolve_focus
             && let Some(stroke) = key_event_to_stroke(ct)
         {
-            let action = find_action_for_stroke(&stroke, rfocus, &self.catalog)
-                .and_then(action_from_entry);
+            let action =
+                find_action_for_stroke(&stroke, rfocus, &self.catalog).and_then(action_from_entry);
             if let Some(action) = action {
                 // Any catalog dispatch counts as "non-quit key" so
                 // the q q chord resets.

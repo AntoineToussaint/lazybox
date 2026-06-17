@@ -987,7 +987,10 @@ impl ActionDef {
     /// alternatives are silently dropped, so an entry like `"g/G"`
     /// yields an empty list (no parseable chord).
     pub fn default_chords(&self) -> Vec<Chord> {
-        self.default_keys.split('|').filter_map(Chord::parse).collect()
+        self.default_keys
+            .split('|')
+            .filter_map(Chord::parse)
+            .collect()
     }
 
     /// First parseable default chord, or `None` for presentation-only
@@ -1287,8 +1290,7 @@ impl ActionDef {
             let (chords, keys_display): (Vec<Chord>, std::borrow::Cow<'static, str>) =
                 match overrides.get(&config_key) {
                     Some(raw) => {
-                        let parsed: Vec<Chord> =
-                            raw.split('|').filter_map(Chord::parse).collect();
+                        let parsed: Vec<Chord> = raw.split('|').filter_map(Chord::parse).collect();
                         if parsed.is_empty() {
                             default_agent_chords(id)
                         } else {
@@ -1318,7 +1320,12 @@ impl ActionDef {
 fn default_agent_chords(id: &str) -> (Vec<Chord>, std::borrow::Cow<'static, str>) {
     match agent_default_key(id) {
         Some(c) => (
-            vec![Chord::Key(KeyStroke::new(false, false, false, ChordCode::Char(c)))],
+            vec![Chord::Key(KeyStroke::new(
+                false,
+                false,
+                false,
+                ChordCode::Char(c),
+            ))],
             std::borrow::Cow::Owned(c.to_string()),
         ),
         None => (Vec::new(), std::borrow::Cow::Borrowed("")),
@@ -1829,7 +1836,12 @@ mod tests {
         // Built-in convention: claude → `c`.
         assert_eq!(
             claude.chords,
-            vec![Chord::Key(KeyStroke::new(false, false, false, ChordCode::Char('c')))],
+            vec![Chord::Key(KeyStroke::new(
+                false,
+                false,
+                false,
+                ChordCode::Char('c')
+            ))],
         );
 
         // An agent with no built-in convention gets a row but no chord.
@@ -1852,7 +1864,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             claude.chords,
-            vec![Chord::Key(KeyStroke::new(true, false, false, ChordCode::Char('j')))],
+            vec![Chord::Key(KeyStroke::new(
+                true,
+                false,
+                false,
+                ChordCode::Char('j')
+            ))],
         );
     }
 

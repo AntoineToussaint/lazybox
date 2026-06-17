@@ -1451,7 +1451,10 @@ fn long_snooze_confirms_then_snoozes_a_year_out() {
     });
     let until = snooze.expect("confirming Shift-Z snoozes");
     let days = (until - Utc::now()).num_days();
-    assert!((360..=370).contains(&days), "expected ~1 year, got {days} days");
+    assert!(
+        (360..=370).contains(&days),
+        "expected ~1 year, got {days} days"
+    );
 }
 
 /// Flatten the current frame buffer into a newline-joined string of

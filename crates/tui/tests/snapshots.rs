@@ -225,12 +225,14 @@ fn which_key_github_group_golden_render() {
     let g = KeyStroke::new(false, false, false, ChordCode::Char('g'));
     let rows: Vec<(String, String)> = ActionDef::all()
         .flat_map(|def| {
-            def.default_chords().into_iter().filter_map(move |c| match c {
-                Chord::Seq(s) if s.len() == 2 && s[0] == g => {
-                    Some((s[1].display(), def.label.to_string()))
-                }
-                _ => None,
-            })
+            def.default_chords()
+                .into_iter()
+                .filter_map(move |c| match c {
+                    Chord::Seq(s) if s.len() == 2 && s[0] == g => {
+                        Some((s[1].display(), def.label.to_string()))
+                    }
+                    _ => None,
+                })
         })
         .collect();
     let backend = TestBackend::new(40, 12);

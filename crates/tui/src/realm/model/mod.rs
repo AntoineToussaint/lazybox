@@ -768,7 +768,11 @@ impl<T: TerminalAdapter> Model<T> {
                 .map(|s| s.to_string())
                 .collect(),
             catalog: lazybox_tui_core::action::ActionDef::catalog(
-                &["claude".to_string(), "codex".to_string(), "cursor".to_string()],
+                &[
+                    "claude".to_string(),
+                    "codex".to_string(),
+                    "cursor".to_string(),
+                ],
                 &std::collections::BTreeMap::new(),
             ),
             pending_action_confirm: None,
@@ -2015,12 +2019,7 @@ impl<T: TerminalAdapter> Model<T> {
             // of the armed prefix + the catalog (`seq_continuations`),
             // not a hardcoded group table.
             if let Some(prefix) = self.leader.pending().copied() {
-                crate::realm::components::which_key::render(
-                    f,
-                    area,
-                    prefix,
-                    &leader_rows,
-                );
+                crate::realm::components::which_key::render(f, area, prefix, &leader_rows);
             }
             // Which-key popup for the armed terminal `]]` leader
             // (#205): lists the snippet keys reachable as `]]<key>`.

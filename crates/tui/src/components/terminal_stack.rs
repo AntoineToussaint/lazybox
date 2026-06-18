@@ -1890,7 +1890,8 @@ impl TerminalStack {
                 kind,
                 no_permission,
             } => {
-                let slot = Self::make_slot(session_key.clone(), kind.clone(), 0, *no_permission, None);
+                let slot =
+                    Self::make_slot(session_key.clone(), kind.clone(), 0, *no_permission, None);
                 self.terminals.insert(*terminal_id, slot);
                 // A fresh terminal arrived for the active session —
                 // expand so the user actually sees it. We bypass the
@@ -3940,8 +3941,13 @@ mod footer_scroll_independence {
     fn agent_stack_with_scrollback() -> TerminalStack {
         let sk = SessionKey::new("s");
         let mut stack = TerminalStack::new(PaneId::new(0));
-        let mut slot =
-            TerminalStack::make_slot(sk.clone(), TerminalKind::Agent("claude".into()), 0, false, None);
+        let mut slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Agent("claude".into()),
+            0,
+            false,
+            None,
+        );
         slot.vt.ensure_size(W - 3, H - 4);
         let mut payload = String::new();
         for i in 0..40 {

@@ -3943,7 +3943,11 @@ mod tests {
         // No prompt recorded yet → the snapshot carries None.
         let before = snapshot_terminals(&config).await;
         assert_eq!(
-            before.iter().find(|s| s.terminal_id == id).unwrap().last_user_message,
+            before
+                .iter()
+                .find(|s| s.terminal_id == id)
+                .unwrap()
+                .last_user_message,
             None,
         );
 

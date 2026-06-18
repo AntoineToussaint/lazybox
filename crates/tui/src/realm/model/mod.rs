@@ -1928,18 +1928,43 @@ impl<T: TerminalAdapter> Model<T> {
         // the orientation + escape shortcuts a lost first-time user
         // always needs in view. `quit` last so it's the rightmost,
         // most-findable hint.
+        //
+        // But in a focused terminal the PTY eats every key, so those
+        // globals don't fire — advertising `q q` / `?` there is a lie
+        // (issue #114). The catalog's `available_in_terminal` is the
+        // single source of truth for this; when nothing universal
+        // survives terminal focus we advertise the `]]` gateway that
+        // unlocks them instead, so the footer never claims a shortcut
+        // the focused pane won't dispatch.
         let globals: Vec<crate::pane::Binding> = {
             use lazybox_tui_core::action::{ActionDef, ActionKind};
-            [ActionKind::OpenHelp, ActionKind::OpenTour, ActionKind::Quit]
-                .into_iter()
-                .map(|k| {
-                    let def = ActionDef::for_kind(k);
-                    crate::pane::Binding {
+            // Footer's curated short tail of `universal_shortcuts()` —
+            // kept to three so a narrow line never truncates `quit`
+            // off the right edge.
+            let tail = [ActionKind::OpenHelp, ActionKind::OpenTour, ActionKind::Quit]
+                .map(ActionDef::for_kind);
+            if self.focus == PaneFocus::Terminals
+                && tail.iter().all(|def| !def.available_in_terminal())
+            {
+                let leave = ActionDef::for_kind(ActionKind::LeaveTerminal);
+                let help = ActionDef::for_kind(ActionKind::OpenHelp);
+                let quit = ActionDef::for_kind(ActionKind::Quit);
+                vec![crate::pane::Binding {
+                    keys: leave.effective_keys_display(&self.action_key_overrides),
+                    label: std::borrow::Cow::Owned(format!(
+                        "exit for {} · {}",
+                        help.effective_keys_display(&self.action_key_overrides),
+                        quit.effective_keys_display(&self.action_key_overrides),
+                    )),
+                }]
+            } else {
+                tail.iter()
+                    .map(|def| crate::pane::Binding {
                         keys: def.effective_keys_display(&self.action_key_overrides),
                         label: std::borrow::Cow::Borrowed(def.label),
-                    }
-                })
-                .collect()
+                    })
+                    .collect()
+            }
         };
         let notice = self.status.notice.clone();
         // Snippet rows for the `]]` leader popup — built only while the

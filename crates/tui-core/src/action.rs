@@ -865,6 +865,22 @@ impl ActionDef {
         KeyChord::parse(self.default_keys)
     }
 
+    /// Whether this action's keystroke actually fires while the
+    /// terminal pane holds focus.
+    ///
+    /// The terminal forwards every key to the PTY by design
+    /// (`TerminalStack::handle_key`) — only the Terminal-section
+    /// chords (`]]` to leave, scrollback) escape that. So every
+    /// "global" the splash / tour / footer advertise as universally
+    /// available — `?` help, `q q` quit, `Shift-T` tour, settings,
+    /// refresh, cycle-pane — does NOT fire here: the user has to press
+    /// `]]` to return to the sidebar first. Surfaces gate their
+    /// "always available" claims on this so the advertised set can't
+    /// drift from what the terminal really dispatches (issue #114).
+    pub fn available_in_terminal(&self) -> bool {
+        matches!(self.section, Section::Terminal)
+    }
+
     /// True when this action is *destructive* — invoking it commits
     /// state the user can't trivially undo (merging a PR, archiving
     /// a workspace, killing a session). The dispatch path
@@ -1108,6 +1124,31 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::TerminalScroll
         | ActionKind::LeaveTerminal => true,
     }
+}
+
+/// The orientation shortcuts lazybox advertises as universally
+/// reachable — help, tour, settings, refresh, cycle-pane, quit. The
+/// splash card, the footer's globals tail, and the `?` help all read
+/// this one list so "always available" can't quietly mean different
+/// things on different surfaces (issue #114). Order is advertise
+/// order, with `quit` last — it's the most important escape hatch, so
+/// it should survive footer truncation on a narrow line.
+///
+/// "Universal" holds from the sidebar / activity panes. From the
+/// terminal pane the PTY eats every key, so each of these needs the
+/// `]]` leave chord first — see [`ActionDef::available_in_terminal`].
+pub fn universal_shortcuts() -> Vec<&'static ActionDef> {
+    [
+        ActionKind::OpenHelp,
+        ActionKind::OpenTour,
+        ActionKind::OpenSettings,
+        ActionKind::Refresh,
+        ActionKind::CyclePane,
+        ActionKind::Quit,
+    ]
+    .into_iter()
+    .map(ActionDef::for_kind)
+    .collect()
 }
 
 #[cfg(test)]
@@ -1372,6 +1413,44 @@ mod tests {
         assert!(availability(ActionKind::Refresh, None));
         assert!(availability(ActionKind::OpenHelp, None));
         assert!(availability(ActionKind::NewWorkspace, None));
+    }
+
+    #[test]
+    fn available_in_terminal_tracks_section() {
+        // The terminal pane forwards every key to the PTY; only its
+        // own section's chords (`]]`, scrollback) survive that. The
+        // predicate must equal "is a Terminal-section action" for
+        // every catalog entry — that equivalence is the single source
+        // of truth every surface gates its terminal claims on (#114).
+        for def in ActionDef::all() {
+            assert_eq!(
+                def.available_in_terminal(),
+                def.section == Section::Terminal,
+                "{:?} availability disagrees with its section",
+                def.kind,
+            );
+        }
+    }
+
+    #[test]
+    fn universal_shortcuts_do_not_fire_in_terminal_focus() {
+        // The lie this issue guards against: the splash / tour / footer
+        // present these as "always available," but in a focused
+        // terminal the PTY eats them. None may report
+        // `available_in_terminal` — the honest contract is "press `]]`
+        // first." The `]]` leave chord is the one that genuinely works.
+        for def in universal_shortcuts() {
+            assert!(
+                !def.available_in_terminal(),
+                "{:?} is advertised as universal but does not fire in a \
+                 focused terminal — surfaces would mislead the user",
+                def.kind,
+            );
+        }
+        assert!(
+            ActionDef::for_kind(ActionKind::LeaveTerminal).available_in_terminal(),
+            "the `]]` leave chord is the gateway back to the globals",
+        );
     }
 
     #[test]

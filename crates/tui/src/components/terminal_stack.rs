@@ -4359,3 +4359,81 @@ mod spawn_focus_tests {
         assert_eq!(stack.focused_terminal_id(), Some(TerminalId(1)));
     }
 }
+
+#[cfg(test)]
+mod terminal_availability_tests {
+    //! Issue #114: the splash / tour / footer advertise a set of
+    //! "always available" globals (`?`, `q q`, `Shift-T`, …). In a
+    //! focused terminal the PTY eats every key, so those globals don't
+    //! fire — the advertised set must match what `TerminalStack`
+    //! actually dispatches. These tests pin that contract: the catalog
+    //! flag `available_in_terminal` is the single source of truth, and
+    //! the pane's real behavior agrees with it.
+    use super::*;
+    use lazybox_tui_core::action::{self, ActionDef, ActionKind};
+    use std::collections::BTreeMap;
+
+    fn stack_with_agent() -> TerminalStack {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+        stack.set_active_session(Some(sk));
+        stack
+    }
+
+    #[test]
+    fn universal_globals_forward_to_the_pty_instead_of_firing() {
+        // Every "universal" shortcut, pressed in a live terminal, must
+        // reach the PTY as a `Write` — proof the global action did NOT
+        // intercept it. This is the behavior the catalog encodes via
+        // `available_in_terminal == false`, asserted directly against
+        // the pane that owns the keys.
+        let probes = [
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), // quit chord
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE), // help
+            KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT), // tour
+            KeyEvent::new(KeyCode::Char(','), KeyModifiers::NONE), // settings
+        ];
+        for key in probes {
+            let mut stack = stack_with_agent();
+            let mut cmds = Vec::new();
+            let outcome = stack.handle_key(key, &mut cmds);
+            assert!(matches!(outcome, PaneOutcome::Consumed));
+            assert!(
+                cmds.iter()
+                    .any(|c| matches!(c, Command::Write { terminal_id, .. } if *terminal_id == TerminalId(1))),
+                "{key:?} must forward to the PTY, not fire a global action",
+            );
+        }
+    }
+
+    #[test]
+    fn advertised_terminal_bindings_are_what_the_catalog_allows() {
+        // The hint bar must only surface keys the pane will actually
+        // dispatch in terminal focus. The single catalog-backed binding
+        // is the `]]` leave chord — the gateway back to the globals —
+        // and none of the universal shortcuts may be advertised here.
+        let overrides = BTreeMap::new();
+        let bindings = TerminalStack::contextual_bindings(&overrides);
+
+        let leave = ActionDef::for_kind(ActionKind::LeaveTerminal);
+        assert!(
+            bindings.iter().any(|b| b.keys == leave.default_keys),
+            "the `]]` leave chord must be advertised as the way out",
+        );
+        for def in action::universal_shortcuts() {
+            assert!(
+                bindings.iter().all(|b| b.keys != def.default_keys),
+                "{:?} ({}) is advertised in the terminal hint bar but \
+                 the PTY would eat it",
+                def.kind,
+                def.default_keys,
+            );
+        }
+    }
+}

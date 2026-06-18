@@ -40,12 +40,13 @@ impl Component for Splash {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
         // The render body — copied from the original SplashModal so
         // lazybox's brand mark + bullets stay identical. The "Tour of
-        // commands" block (issue #25) lists the always-available
-        // global shortcuts here so the per-view footer doesn't need
-        // to repeat them on every screen. The list is built from the
-        // catalog (`ActionDef::all()`) so a rename/rebind here flows
-        // through automatically — same single source of truth that
-        // drives the footer + `?` help modal.
+        // commands" block (issue #25) lists the global shortcuts here
+        // so the per-view footer doesn't need to repeat them on every
+        // screen. The list comes from `action::universal_shortcuts()`
+        // so a rename/rebind flows through automatically — the same
+        // single source of truth that drives the footer + `?` help
+        // modal — and the trailing `]]` note keeps the card honest
+        // about the one focus where those globals don't fire (#114).
         let theme = crate::theme::current();
         let modal_w = 64u16.min(area.width.saturating_sub(4));
         let modal_h = 28u16.min(area.height.saturating_sub(2));
@@ -89,25 +90,34 @@ impl Component for Splash {
             )),
             Line::raw(""),
             Line::from(Span::styled(
-                "    Tour of commands — always available:",
+                "    Tour of commands:",
                 Style::default()
                     .fg(theme.text_strong)
                     .add_modifier(Modifier::BOLD),
             )),
         ];
-        for (keys, label) in universal_shortcuts() {
+        for def in lazybox_tui_core::action::universal_shortcuts() {
             lines.push(Line::from(vec![
                 Span::styled("      ", Style::default()),
                 Span::styled(
-                    format!("{keys:<14}"),
+                    format!("{:<14}", def.default_keys),
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("  ", Style::default()),
-                Span::styled(label, Style::default().fg(theme.text_dim)),
+                Span::styled(def.label, Style::default().fg(theme.text_dim)),
             ]));
         }
+        lines.push(Line::raw(""));
+        // Honesty about the one focus where the list above stops being
+        // "always available": inside an agent/shell terminal every key
+        // goes to the PTY, so the globals need the `]]` escape first
+        // (issue #114).
+        lines.push(Line::from(Span::styled(
+            "    In a terminal, press ]] to return here first.",
+            Style::default().fg(theme.text_dim),
+        )));
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
             "    Press Enter to begin · Esc to cancel",
@@ -131,32 +141,6 @@ impl Component for Splash {
     fn perform(&mut self, _cmd: Cmd) -> CmdResult {
         CmdResult::NoChange
     }
-}
-
-/// The "always available" shortcuts surfaced in the onboarding tour
-/// + `?` help modal. Reads from the catalog so footer / help / tour
-/// stay in lockstep — the single source of truth is `ActionDef`.
-///
-/// Returns `(default_keys, label)` pairs. We pick the globals
-/// that matter for first-run discoverability: help, quit, settings,
-/// refresh, cycle pane. The Resize splitter binding is
-/// available but not listed in the tour to keep the card scannable;
-/// the `?` help modal lists every global.
-pub fn universal_shortcuts() -> Vec<(&'static str, &'static str)> {
-    use lazybox_tui_core::action::{ActionDef, ActionKind};
-    [
-        ActionKind::OpenHelp,
-        ActionKind::Quit,
-        ActionKind::OpenSettings,
-        ActionKind::Refresh,
-        ActionKind::CyclePane,
-    ]
-    .into_iter()
-    .map(|k| {
-        let def = ActionDef::for_kind(k);
-        (def.default_keys, def.label)
-    })
-    .collect()
 }
 
 impl AppComponent<Msg, UserEvent> for Splash {

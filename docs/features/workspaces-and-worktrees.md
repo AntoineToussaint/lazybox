@@ -49,13 +49,22 @@ worktree layout on startup.
 
 **Status:** stable
 **Crate(s):** `git-ops` (`src/lib.rs`, `src/inspect.rs`)
-**Config / flags:** `worktree.mounts`, `worktree.scripts`, `worktree.auto_cleanup_merged`
+**Config / flags:** `worktree.mounts`, `worktree.scripts`, `worktree.auto_cleanup_merged`, `worktree.branch_prefix`, `repos.<owner/name>.branch_prefix`
 **Key bindings:** — (created implicitly when you spawn a session)
 
 ### What it does
 Owns the on-disk git layout: a **bare clone per repo** plus a **per-task
 worktree** checked out from the latest `main` (or the PR's branch). Applies
 configured mounts (symlinks) and materializes scripts into each worktree.
+
+For a branch-less task (an issue, a Linear ticket, a blank workspace) the
+manager cuts a fresh branch off the repo default. The name is derived from the
+work — `issue-42-standardize-log-output` for a GitHub issue, the workspace key
+for a blank workspace — and is deterministic, so a second spawn on the same
+item reuses the one branch. Set `worktree.branch_prefix` (empty by default) to
+namespace these branches — `lazybox` restores the historical
+`lazybox/issue-42` layout — or override it per-repo with
+`repos.<owner/name>.branch_prefix` to match a team's convention.
 
 ### How to use it
 It runs implicitly: spawning a shell/agent on a workspace creates its worktree

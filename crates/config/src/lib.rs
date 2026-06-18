@@ -298,6 +298,14 @@ pub struct WorktreeConfig {
     /// and no live terminal attached). Off by default: opt in once
     /// you trust lazybox not to pull a folder out from under you.
     pub auto_cleanup_merged: bool,
+    /// Prefix for branches lazybox cuts itself (issues, Linear
+    /// tickets, blank workspaces — anything without an upstream
+    /// branch). Empty by default, so an issue spawn reads naturally in
+    /// the target repo (`issue-42-fix-the-thing`). Set a value to
+    /// namespace them — `lazybox` restores the old `lazybox/issue-42`
+    /// behavior, `feature` yields `feature/issue-42` — and override
+    /// per-repo via `repos.<owner/name>.branch_prefix`.
+    pub branch_prefix: String,
 }
 
 /// Per-repo overrides keyed by `owner/name` (the same string GitHub's
@@ -337,6 +345,12 @@ pub struct RepoConfig {
     /// worktrees. Stacked on top of `worktree.scripts`. Each entry
     /// lands at `_lazybox/scripts/<name>` chmod +x.
     pub scripts: Vec<ScriptSpec>,
+    /// Override for `worktree.branch_prefix` on this repo's worktrees.
+    /// `Some("at")` → `at/issue-42`; `Some("")` drops the prefix
+    /// (`issue-42`); `None` (the default) falls back to the global
+    /// prefix.
+    #[serde(default)]
+    pub branch_prefix: Option<String>,
 }
 
 /// Serializable form of `lazybox_git_ops::Mount`. Kept separate so

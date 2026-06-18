@@ -1368,39 +1368,81 @@ async fn resolve_or_create_session(
 
 /// Build a deterministic branch name for a task that has no upstream
 /// branch (issues, Linear tickets, future provider-specific items).
-/// Deterministic on `task.id` so two spawns on the same issue map to
-/// the same local branch — otherwise pressing the spawn key twice
-/// would leave two orphan branches, neither push-ready.
+/// Deterministic on the task (id + title) so two spawns on the same
+/// issue map to the same local branch — otherwise pressing the spawn
+/// key twice would leave two orphan branches, neither push-ready.
 ///
-/// Examples:
-/// - `github:owner/repo#42` → `lazybox/issue-42`
-/// - `linear:ENG-456`       → `lazybox/linear-eng-456`
-/// - anything else          → `lazybox/<source>-<sanitized-key>`
-fn derive_branch_for_branchless(task: &Task) -> String {
+/// The name reads naturally in the target repo: an issue number plus a
+/// slug of its title, so a reviewer recognizes the branch at a glance.
+/// `prefix` is the resolved `worktree.branch_prefix` (per-repo override
+/// applied by the caller) — empty by default, so no tool branding
+/// leaks in.
+///
+/// Examples (empty default prefix):
+/// - `github:owner/repo#42` "Fix the thing" → `issue-42-fix-the-thing`
+/// - `linear:ENG-456` "Ship it"             → `linear-eng-456-ship-it`
+/// - title with no usable chars             → `issue-42`
+fn derive_branch_for_branchless(prefix: &str, task: &Task) -> String {
     let source = task.id.source.to_ascii_lowercase();
     let raw_key = &task.id.key;
 
-    if source == "github" {
-        if let Some(hash_idx) = raw_key.rfind('#') {
-            let number = &raw_key[hash_idx + 1..];
-            if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()) {
-                return format!("lazybox/issue-{number}");
-            }
-        }
-    }
+    let issue_number = (source == "github")
+        .then(|| raw_key.rsplit_once('#').map(|(_, n)| n))
+        .flatten()
+        .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+    let stem = match issue_number {
+        Some(number) => format!("issue-{number}"),
+        None => format!("{source}-{}", sanitize_branch_component(raw_key)),
+    };
 
-    format!("lazybox/{source}-{}", sanitize_branch_component(raw_key))
+    let title_slug = lazybox_core::slug::slugify(&task.title);
+    let stem = if title_slug.is_empty() {
+        stem
+    } else {
+        format!("{stem}-{title_slug}")
+    };
+
+    join_branch_prefix(prefix, &stem)
 }
 
 /// Branch name for a blank workspace (no linked task at all).
 /// Deterministic on the workspace key for the same reason
 /// [`derive_branch_for_branchless`] is deterministic on the task id:
 /// repeated spawns on the same workspace reuse one branch.
-fn derive_branch_for_workspace(workspace: &Workspace) -> String {
-    format!(
-        "lazybox/{}",
-        sanitize_branch_component(workspace.key.as_str())
-    )
+fn derive_branch_for_workspace(prefix: &str, workspace: &Workspace) -> String {
+    join_branch_prefix(prefix, &sanitize_branch_component(workspace.key.as_str()))
+}
+
+/// Resolve the branch prefix for a worktree: a per-repo
+/// `repos.<owner/name>.branch_prefix` override when set, otherwise the
+/// global `worktree.branch_prefix`. `repo_key` is `None` for
+/// standalone (repo-less) worktrees, which only see the global value.
+fn resolve_branch_prefix<'a>(cfg: &'a lazybox_config::Config, repo_key: Option<&str>) -> &'a str {
+    repo_key
+        .and_then(|key| cfg.repos.get(key))
+        .and_then(|repo| repo.branch_prefix.as_deref())
+        .unwrap_or(&cfg.worktree.branch_prefix)
+}
+
+/// Join a (possibly empty) prefix to a derived branch component with a
+/// `/` separator. The prefix is sanitized like any other component but
+/// keeps `/` so multi-segment prefixes (`team/feature`) survive; an
+/// empty prefix yields the bare component (`issue-42`).
+fn join_branch_prefix(prefix: &str, rest: &str) -> String {
+    let prefix: String = prefix
+        .chars()
+        .map(|c| match c {
+            'A'..='Z' => c.to_ascii_lowercase(),
+            'a'..='z' | '0'..='9' | '-' | '_' | '/' => c,
+            _ => '-',
+        })
+        .collect();
+    let prefix = prefix.trim_matches(|c| c == '-' || c == '/');
+    if prefix.is_empty() {
+        rest.to_string()
+    } else {
+        format!("{prefix}/{rest}")
+    }
 }
 
 fn sanitize_branch_component(raw: &str) -> String {
@@ -1467,6 +1509,7 @@ async fn provision_worktree(
     // real clone instead of the caller's empty-dir fallback.
     let task = workspace.primary_task();
     let mgr = lazybox_git_ops::WorktreeManager::default_base();
+    let cfg = lazybox_config::Config::load().unwrap_or_default();
 
     // The upstream `owner/repo` to clone, when the workspace has one. A
     // task carries it directly; a blank workspace recovers it from a
@@ -1492,15 +1535,16 @@ async fn provision_worktree(
                 None => {
                     // Issue (or other branchless task, or blank workspace):
                     // cut a fresh branch off the repo default. Branch name
-                    // encodes the task key (or the workspace key when there is
+                    // encodes the task (or the workspace key when there is
                     // no task) so two spawns on the same item land on the same
                     // branch and subsequent presses are idempotent — without
                     // that, pressing `c` twice on issue #42 would create
-                    // `lazybox/issue-42-…` and `lazybox/issue-42-…-2`, neither of
-                    // which corresponds to a PR the user can push.
+                    // `issue-42-…` and `issue-42-…-2`, neither of which
+                    // corresponds to a PR the user can push.
+                    let prefix = resolve_branch_prefix(&cfg, Some(&format!("{owner}/{name}")));
                     let new_branch = match task {
-                        Some(task) => derive_branch_for_branchless(task),
-                        None => derive_branch_for_workspace(workspace),
+                        Some(task) => derive_branch_for_branchless(prefix, task),
+                        None => derive_branch_for_workspace(prefix, workspace),
                     };
                     let base = mgr.default_branch(owner, name).await.map_err(|e| {
                         ServerError::Worktree(format!("default_branch lookup: {e}"))
@@ -1520,9 +1564,10 @@ async fn provision_worktree(
             // real worktree rather than a bare directory. Branch name is
             // deterministic (same key → same branch) so repeated spawns
             // are idempotent.
+            let prefix = resolve_branch_prefix(&cfg, None);
             let branch = match task {
-                Some(task) => derive_branch_for_branchless(task),
-                None => derive_branch_for_workspace(workspace),
+                Some(task) => derive_branch_for_branchless(prefix, task),
+                None => derive_branch_for_workspace(prefix, workspace),
             };
             let worktree = mgr
                 .init_standalone_at(target, &branch)
@@ -3416,6 +3461,7 @@ mod tests {
                 env,
                 mounts: vec![],
                 scripts: vec![],
+                branch_prefix: None,
             },
         );
 
@@ -4474,6 +4520,7 @@ mod tests {
                 env,
                 mounts: vec![],
                 scripts: vec![],
+                branch_prefix: None,
             },
         );
         // Different case should miss.
@@ -4569,32 +4616,54 @@ mod tests {
         }
     }
 
-    /// Issue spawns get a deterministic `lazybox/issue-<n>` branch so
-    /// pressing the spawn key twice on the same issue lands on the
-    /// same branch instead of accumulating orphans.
+    fn titled_task(source: &str, key: &str, title: &str) -> Task {
+        let mut t = task_for(source, key);
+        t.title = title.into();
+        t
+    }
+
+    /// By default (empty prefix) an issue spawn reads naturally in the
+    /// target repo: the issue number plus a slug of its title, no tool
+    /// branding. Deterministic on the task so two spawns on the same
+    /// issue land on the same branch instead of accumulating orphans.
     #[test]
     fn derive_branch_for_branchless_github_issue() {
-        let t = task_for("github", "acme/widget#42");
-        assert_eq!(derive_branch_for_branchless(&t), "lazybox/issue-42");
+        let t = titled_task("github", "acme/widget#42", "Standardize log output");
+        assert_eq!(
+            derive_branch_for_branchless("", &t),
+            "issue-42-standardize-log-output"
+        );
+    }
+
+    /// A title with no usable characters (emoji-only) falls back to the
+    /// bare `issue-<n>` stem rather than a dangling dash.
+    #[test]
+    fn derive_branch_for_branchless_github_issue_empty_title() {
+        let t = titled_task("github", "acme/widget#42", "🚀");
+        assert_eq!(derive_branch_for_branchless("", &t), "issue-42");
     }
 
     /// Linear / non-GitHub keys go through the sanitizer fallback so
     /// any odd characters become dashes and the source prefix keeps
-    /// branches namespaced per-provider.
+    /// branches namespaced per-provider, then the title slug is
+    /// appended.
     #[test]
     fn derive_branch_for_branchless_linear() {
-        let t = task_for("linear", "ENG-456");
-        assert_eq!(derive_branch_for_branchless(&t), "lazybox/linear-eng-456");
+        let t = titled_task("linear", "ENG-456", "Ship it");
+        assert_eq!(
+            derive_branch_for_branchless("", &t),
+            "linear-eng-456-ship-it"
+        );
     }
 
     /// A non-numeric GitHub key (no `#`) falls through to the
-    /// sanitizer instead of producing `lazybox/issue-`.
+    /// sanitizer instead of producing `issue-`.
     #[test]
     fn derive_branch_for_branchless_github_without_hash() {
-        let t = task_for("github", "acme/widget");
+        let t = titled_task("github", "acme/widget", "Some work");
         assert_eq!(
-            derive_branch_for_branchless(&t),
-            "lazybox/github-acme-widget"
+            derive_branch_for_branchless("", &t),
+            "github-acme-widget-some-work"
         );
     }
 
@@ -4603,7 +4672,62 @@ mod tests {
     #[test]
     fn derive_branch_for_workspace_uses_workspace_key() {
         let ws = Workspace::empty(WorkspaceKey::new("my-experiment"), "main", Utc::now());
-        assert_eq!(derive_branch_for_workspace(&ws), "lazybox/my-experiment");
+        assert_eq!(derive_branch_for_workspace("", &ws), "my-experiment");
+    }
+
+    /// A non-empty prefix namespaces the branch — `lazybox` restores
+    /// the historical `lazybox/issue-<n>` layout, and multi-segment
+    /// prefixes keep their `/` separators.
+    #[test]
+    fn derive_branch_for_branchless_custom_prefix() {
+        let t = titled_task("github", "acme/widget#42", "Fix the thing");
+        assert_eq!(
+            derive_branch_for_branchless("lazybox", &t),
+            "lazybox/issue-42-fix-the-thing"
+        );
+        assert_eq!(
+            derive_branch_for_branchless("team/feature", &t),
+            "team/feature/issue-42-fix-the-thing"
+        );
+        let ws = Workspace::empty(WorkspaceKey::new("my-experiment"), "main", Utc::now());
+        assert_eq!(
+            derive_branch_for_workspace("lazybox", &ws),
+            "lazybox/my-experiment"
+        );
+    }
+
+    /// A prefix with stray characters and surrounding separators is
+    /// sanitized to a valid branch fragment: spaces and `#` become
+    /// dashes, leading/trailing `/` and `-` are trimmed.
+    #[test]
+    fn derive_branch_for_branchless_sanitizes_prefix() {
+        let t = titled_task("github", "acme/widget#42", "Fix the thing");
+        assert_eq!(
+            derive_branch_for_branchless("/My Team#/", &t),
+            "my-team/issue-42-fix-the-thing"
+        );
+    }
+
+    /// Per-repo `branch_prefix` overrides the global one; an unmatched
+    /// repo (or `None` override) falls back to the global value, which
+    /// defaults to empty.
+    #[test]
+    fn resolve_branch_prefix_per_repo_override() {
+        let mut cfg = lazybox_config::Config::default();
+        assert_eq!(resolve_branch_prefix(&cfg, Some("acme/widget")), "");
+
+        cfg.worktree.branch_prefix = "lazybox".to_string();
+        cfg.repos.insert(
+            "acme/widget".to_string(),
+            lazybox_config::RepoConfig {
+                branch_prefix: Some("at".to_string()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(resolve_branch_prefix(&cfg, Some("acme/widget")), "at");
+        // Other repos and the repo-less path see the global value.
+        assert_eq!(resolve_branch_prefix(&cfg, Some("acme/other")), "lazybox");
+        assert_eq!(resolve_branch_prefix(&cfg, None), "lazybox");
     }
 
     /// Persist a project record so `clonable_repo_from_project` can read
@@ -4691,8 +4815,8 @@ mod tests {
 
     /// End-to-end through `provision_worktree`: a blank workspace under
     /// a local project has no repo to clone, so it gets a standalone
-    /// `git init` worktree on `lazybox/<key>` rather than a bare,
-    /// non-git directory (#57).
+    /// `git init` worktree on the workspace-key branch rather than a
+    /// bare, non-git directory (#57).
     #[tokio::test]
     async fn provision_worktree_blank_local_workspace_inits_standalone() {
         let config = ServerConfig::in_memory();
@@ -4709,7 +4833,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             String::from_utf8_lossy(&head.stdout).trim(),
-            "lazybox/scratch",
+            "scratch",
             "standalone worktree is on the workspace branch",
         );
     }

@@ -264,6 +264,29 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return cmds;
         }
+        // New-workspace repo picker (Id::NewWorkspaceRepo) — the
+        // `Shift-N` entry point. A pick that indexes into the repo
+        // list funnels into the new-workspace name input under that
+        // repo; the trailing escape-hatch row (index == list length)
+        // falls back to creating a new local project. Empty / Esc
+        // pick drops the stash without advancing.
+        if matches!(self.modal_stack.last(), Some(Id::NewWorkspaceRepo)) {
+            // `.get` is `None` exactly at the trailing escape-hatch row
+            // (index == list length), so a picked repo → name input and
+            // the escape hatch → new-project input. An empty pick (Esc)
+            // just closes the picker.
+            let picked = picks
+                .first()
+                .map(|i| self.new_workspace_repo_choices.get(*i).cloned());
+            self.new_workspace_repo_choices.clear();
+            self.pop_modal();
+            match picked {
+                Some(Some(project_key)) => self.mount_new_workspace_input(project_key),
+                Some(None) => self.mount_new_project_input(),
+                None => {}
+            }
+            return cmds;
+        }
         // Reviewer picker (Id::RequestReviewers) — picks index
         // into `review_choices`. Empty pick drops the slot.
         if matches!(self.modal_stack.last(), Some(Id::RequestReviewers)) {

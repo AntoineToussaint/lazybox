@@ -501,8 +501,8 @@ impl ActionDef {
             ActionKind::NewProject => &Self {
                 kind: ActionKind::NewProject,
                 default_keys: "Shift-N",
-                label: "new project",
-                describe: "Create a local project (a top-level container, asks for a name).",
+                label: "new workspace",
+                describe: "Pick a tracked repo to start a workspace on, or create a new local project.",
                 section: Section::Workspace,
             },
             ActionKind::MarkAllRead => &Self {

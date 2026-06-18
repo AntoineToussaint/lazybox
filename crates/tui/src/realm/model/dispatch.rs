@@ -268,7 +268,7 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::NewProject => {
-                self.mount_new_project_input();
+                self.mount_new_workspace_repo_picker();
             }
             Action::MarkAllRead => {
                 // Context-sensitive: when the user has activities

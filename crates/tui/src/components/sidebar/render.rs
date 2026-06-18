@@ -521,7 +521,7 @@ impl Sidebar {
             Line::raw(""),
             hint("⇧W", "start agent"),
             hint("n", "new workspace"),
-            hint("⇧N", "new project"),
+            hint("⇧N", "pick a repo"),
             Line::raw(""),
             Line::from(Span::styled(" or open a tool yourself:", prose)),
             hint("c", "claude"),

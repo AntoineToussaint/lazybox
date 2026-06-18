@@ -1333,6 +1333,21 @@ impl Sidebar {
         self.count_visible_with_signal(AttentionSignal::AgentAsking)
     }
 
+    /// Whether any visible workspace currently has an agent waiting on
+    /// input. Drives the agent-waiting feature tip (#115); reads the
+    /// same `AgentAsking` signal as the header counter and the `!`
+    /// jump so the tip only shows when that jump would do something.
+    pub fn has_asking_agent(&self) -> bool {
+        self.input_pending_count() > 0
+    }
+
+    /// Whether any visible workspace's PR has failing / mixed CI.
+    /// Drives the failing-CI feature tip (#115), keyed off the same
+    /// signal as `Shift-F`.
+    pub fn has_failing_ci(&self) -> bool {
+        self.ci_failing_count() > 0
+    }
+
     /// Drives the `N CI` summary — at-a-glance "how many of my PRs
     /// are broken right now."
     fn ci_failing_count(&self) -> usize {

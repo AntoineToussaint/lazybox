@@ -144,7 +144,12 @@ impl Default for AttentionConfig {
 
 /// `ui:` block — user-facing view state lazybox writes back so UI
 /// preferences survive restart.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+///
+/// `Default` is hand-written rather than derived because `show_tips`
+/// defaults to `true` (an opt-out, not opt-in) — a derived `bool`
+/// default would be `false` and silence tips for users with no
+/// config file yet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiSection {
     /// Repo names whose workspace rows should start collapsed.
@@ -209,6 +214,46 @@ pub struct UiSection {
     /// gets the walkthrough once.
     #[serde(default)]
     pub tour_seen: bool,
+    /// Whether the progressive feature-discovery tips are enabled.
+    /// Tips surface occasionally as a dim, auto-fading footer hint
+    /// keyed off current state (agent waiting, failing CI, in a
+    /// terminal). Opt-out: set `false` to silence them entirely.
+    /// Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub show_tips: bool,
+    /// Ids of tips already surfaced, so a given tip never repeats
+    /// across sessions (mirrors `tour_seen`, but per-tip). Appended
+    /// to the first time each tip is shown. Defaults to empty so a
+    /// fresh install starts with every tip available.
+    #[serde(default)]
+    pub tips_seen: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for UiSection {
+    fn default() -> Self {
+        Self {
+            collapsed_repos: std::collections::BTreeSet::new(),
+            sidebar_pct: None,
+            right_top_pct: None,
+            auto_mark_delay: None,
+            quit_double_tap_window: None,
+            terminal_escape_char: None,
+            split_step_percent: None,
+            task_body_max_rows: None,
+            short_snooze: None,
+            long_snooze: None,
+            log_path: None,
+            action_keys: std::collections::BTreeMap::new(),
+            browser: None,
+            tour_seen: false,
+            show_tips: true,
+            tips_seen: Vec::new(),
+        }
+    }
 }
 
 /// Concrete UI settings with every `Option<T>` from `UiSection`
@@ -1152,6 +1197,30 @@ repos:
         assert!(
             reparsed.ui.tour_seen,
             "marking the tour seen survives a save/load round-trip"
+        );
+    }
+
+    /// Tips are on by default (opt-out), and a fresh config starts
+    /// with no tips marked seen. Both survive a save/load round-trip.
+    #[test]
+    fn tips_default_on_and_round_trip() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(cfg.ui.show_tips, "tips are opt-out — on by default");
+        assert!(
+            cfg.ui.tips_seen.is_empty(),
+            "no tips marked seen on a fresh config"
+        );
+
+        let mut state = Config::default();
+        state.ui.show_tips = false;
+        state.ui.tips_seen.push("jump_to_asking".into());
+        let written = serde_yaml::to_string(&state).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert!(!reparsed.ui.show_tips, "opting out survives a round-trip");
+        assert_eq!(
+            reparsed.ui.tips_seen,
+            vec!["jump_to_asking".to_string()],
+            "shown-tip ids survive a round-trip",
         );
     }
 

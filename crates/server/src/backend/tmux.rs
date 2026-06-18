@@ -957,8 +957,12 @@ mod tests {
                 "native={native}"
             );
             assert!(
-                server_option_cmds(native)
-                    .contains(&vec!["set-option", "-g", "focus-events", "on"]),
+                server_option_cmds(native).contains(&vec![
+                    "set-option",
+                    "-g",
+                    "focus-events",
+                    "on"
+                ]),
                 "native={native}"
             );
         }

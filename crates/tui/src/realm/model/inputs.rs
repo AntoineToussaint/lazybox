@@ -275,7 +275,9 @@ impl<T: TerminalAdapter> Model<T> {
             // (index == list length), so a picked repo → name input and
             // the escape hatch → new-project input. An empty pick (Esc)
             // just closes the picker.
-            let picked = picks.first().map(|i| self.new_workspace_repo_choices.get(*i).cloned());
+            let picked = picks
+                .first()
+                .map(|i| self.new_workspace_repo_choices.get(*i).cloned());
             self.new_workspace_repo_choices.clear();
             self.pop_modal();
             match picked {

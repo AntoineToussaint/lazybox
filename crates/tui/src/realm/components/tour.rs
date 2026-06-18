@@ -1,8 +1,11 @@
-//! `Tour` — the in-app feature walkthrough (issue #146).
+//! `Tour` — the in-app onboarding walkthrough (issue #146, #112).
 //!
-//! A skippable, stepped overlay card that introduces lazybox's
-//! highlights: the inbox + attention signals, spawning work, the
-//! snippet system (`]<key>`), navigation, and where config lives.
+//! A skippable, stepped overlay card built around the workflows a
+//! first-time user actually runs: starting a worktree-backed session
+//! from scratch, triaging the inbox, putting an agent on a task,
+//! juggling several sessions, and shipping. Each card is a short
+//! user story rather than a feature dump, and the flow works even
+//! from an empty inbox (a fresh user has no row to act on yet).
 //!
 //! Launched automatically the first time lazybox boots into the panes
 //! (tracked by `~/.lazybox/config.yaml::ui.tour_seen`) and re-invocable
@@ -25,8 +28,10 @@ use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tuirealm::state::State;
 
 /// One tour card: a heading plus the body lines under it. Body keeps
-/// inline key hints (`]<key>`, `w`, `Tab`) as plain text — the
+/// inline key hints (`w`, `Tab`, `Shift-N`) as plain text — the
 /// default bindings are stable and a card reads cleaner than a table.
+/// Keys mirror the action catalog (`lazybox_tui_core::action`); when a
+/// binding moves there, update the matching hint here.
 struct TourStep {
     title: &'static str,
     body: &'static [&'static str],
@@ -36,80 +41,90 @@ const STEPS: &[TourStep] = &[
     TourStep {
         title: "Welcome to lazybox",
         body: &[
-            "A reactive PR inbox in your terminal. Instead of polling",
-            "GitHub, events flow to you — new comments, CI failures and",
-            "review requests surface automatically, with read/unread",
-            "tracking.",
+            "lazybox turns work into sessions: every task gets its own",
+            "git worktree with an agent (Claude Code) or a shell running",
+            "in it — and lazybox hides the worktree juggling for you.",
             "",
-            "This quick tour shows the highlights. Step through with",
-            "→ / Enter, go back with ←, or press Esc to skip — you can",
-            "re-open it any time with Shift-T.",
+            "Track GitHub repos and their PRs/issues flow into your",
+            "inbox, but you don't need any of that to start — a",
+            "worktree-backed session works from an empty inbox too.",
+            "",
+            "Step through with → / Enter, back with ←, Esc to skip.",
+            "Re-open this tour any time with Shift-T.",
         ],
     },
     TourStep {
-        title: "1 · The inbox",
+        title: "1 · Start from scratch",
         body: &[
-            "The sidebar is your inbox: PRs and Issues across every",
-            "scope you subscribed to, grouped by repo.",
+            "Empty inbox? Here's a first move that needs no PRs:",
             "",
-            "Rows carry attention signals so you can triage at a glance:",
+            "  Shift-N   new project (register a repo or local space)",
+            "  n         new workspace inside it",
+            "  c / s     start Claude Code, or a plain shell in it",
+            "",
+            "You land in a fresh git worktree + session, zero setup.",
+            "",
+            "In a hurry? Shift-W does project → workspace → agent in",
+            "one step, from any pane.",
+        ],
+    },
+    TourStep {
+        title: "2 · Your inbox",
+        body: &[
+            "Once you track GitHub repos, PRs and issues flow in,",
+            "grouped by repo and sorted by what needs you.",
+            "",
+            "Rows carry attention signals so you triage at a glance:",
             "  • CI failing            • review pending",
-            "  • input-needed (agent asking)   • unread activity",
+            "  • agent asking          • unread activity",
             "",
-            "j / k move the cursor; Enter opens a row; / searches.",
+            "j / k move    Enter opens    / searches",
+            "Shift-S cycles mailboxes: Inbox → Inactive → Snoozed.",
         ],
     },
     TourStep {
-        title: "2 · Spawn work on an item",
+        title: "3 · Put an agent on it",
         body: &[
-            "Press w on a row to start working on it. lazybox spins up a",
-            "git worktree and launches the default agent (Claude Code)",
-            "with a contextual prompt — fix the failing CI, address the",
-            "review, implement the issue.",
+            "Press w on any row and lazybox opens a worktree, then",
+            "launches Claude Code with a prompt fit to the task. A few",
+            "ways that plays out:",
             "",
-            "The agent runs in the embedded terminal pane on the right.",
-            "c / x / u spawn a specific agent; s opens a plain shell.",
+            "  • A PR you review has failing CI → Shift-F jumps to it,",
+            "    then w lets the agent fix the build.",
+            "  • An open issue → w starts an agent to implement it.",
+            "  • A scratch idea on a repo you track → n then c, done.",
+            "",
+            "c / x / u pick the agent (Claude / Codex / Cursor); s is a",
+            "plain shell; e opens the worktree in your editor.",
         ],
     },
     TourStep {
-        title: "3 · Snippets — ]<key>",
+        title: "4 · Juggle many sessions",
         body: &[
-            "Inside a terminal, press ] then a snippet key to expand a",
-            "pre-defined prompt and auto-send it to the agent. Type the",
-            "key to filter; a unique match fires instantly (so ]rev",
-            "sends your review prompt in three keystrokes).",
+            "Every task is its own worktree-backed session, so you can",
+            "run several at once without minding the git plumbing.",
             "",
-            "Starter snippets ship out of the box — rev (review the",
-            "diff) and pr (open a PR with summary + test plan).",
+            "  !          jump to the next agent waiting on your input",
+            "  Shift-A    adopt worktrees/agents you started elsewhere",
+            "  Tab        cycle the sidebar, activity and terminal panes",
             "",
-            "Add your own in ~/.lazybox/snippets.yaml (global) or a repo's",
-            ".lazybox/snippets.yaml (checked in, shared with the team).",
+            "The agent runs live in the terminal pane on the right while",
+            "new events keep flowing into the sidebar.",
         ],
     },
     TourStep {
-        title: "4 · Navigation & layout",
+        title: "5 · Ship it & make it yours",
         body: &[
-            "Tab cycles focus between the sidebar, activity and terminal",
-            "panes. Shift+arrows resize the splitters; mouse-drag works",
-            "too.",
+            "When a PR is ready, the g leader opens the GitHub chord:",
             "",
-            "! jumps to the next agent waiting on input; Shift-F jumps",
-            "to the next failing PR. ? opens the full keymap any time.",
-        ],
-    },
-    TourStep {
-        title: "5 · Where config lives",
-        body: &[
-            "Everything is plain YAML you can hand-edit:",
+            "  g m  merge     g v  reviewers     g a  assignees",
+            "  g l  labels    g o  open in browser",
             "",
-            "  ~/.lazybox/config.yaml    scopes, agents, UI, keybindings",
-            "  ~/.lazybox/snippets.yaml  your global snippet library",
-            "  <repo>/.lazybox/snippets.yaml   repo-local snippets",
+            "? shows the full keymap, , opens Settings, q q quits.",
+            "Everything is plain YAML in ~/.lazybox/config.yaml — scopes,",
+            "agents, keybindings.",
             "",
-            "Press , for the in-app Settings palette.",
-            "",
-            "That's the tour — press Enter to finish. Re-open with",
-            "Shift-T whenever you want a refresher.",
+            "That's the tour — Enter to finish, Shift-T to re-open it.",
         ],
     },
 ];
@@ -264,12 +279,117 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    /// Render the card at `cursor` into a throwaway backend and return
+    /// the visible text — the snapshot surface for the step content.
+    fn render_step(cursor: usize) -> String {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        let mut t = Tour::new();
+        t.cursor = cursor;
+        let (w, h) = (90u16, 30u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| t.view(f, Rect::new(0, 0, w, h))).unwrap();
+        let buf = term.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                let mut row = String::new();
+                for x in 0..buf.area.width {
+                    row.push_str(buf[(x, y)].symbol());
+                }
+                row.trim_end().to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The whole tour rendered top to bottom — one string to scan for
+    /// content invariants that span steps.
+    fn render_all() -> String {
+        (0..STEPS.len())
+            .map(render_step)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn steps_are_non_empty() {
         assert!(!STEPS.is_empty());
         for s in STEPS {
             assert!(!s.title.is_empty());
             assert!(!s.body.is_empty());
+        }
+    }
+
+    #[test]
+    fn body_lines_fit_the_modal_width() {
+        // The card is 68 cols wide with a 2-space gutter, so a body
+        // line over ~62 chars would clip. Guard the new copy.
+        for s in STEPS {
+            for l in s.body {
+                assert!(
+                    l.chars().count() <= 62,
+                    "step {:?} line too wide ({}): {l:?}",
+                    s.title,
+                    l.chars().count(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn covers_from_scratch_entry_points() {
+        // A fresh user with an empty inbox must see a first move that
+        // needs no pre-existing row: new project / new workspace.
+        let all = render_all();
+        assert!(all.contains("Shift-N"), "new-project key missing");
+        assert!(all.contains("new workspace"), "new-workspace step missing");
+        assert!(
+            all.contains("Start from scratch"),
+            "from-scratch step missing",
+        );
+    }
+
+    #[test]
+    fn mentions_adopt_sessions() {
+        assert!(
+            render_all().contains("Shift-A"),
+            "adopt-sessions key missing"
+        );
+    }
+
+    #[test]
+    fn snippets_step_is_gone() {
+        // Snippets are a power-user feature; onboarding shouldn't carry
+        // them. Guard against the step creeping back in.
+        let all = render_all().to_lowercase();
+        assert!(
+            !all.contains("snippet"),
+            "snippets leaked back into the tour"
+        );
+        assert!(!all.contains("]<key>"), "snippet leader hint still present");
+    }
+
+    #[test]
+    fn key_hints_match_the_action_catalog() {
+        use lazybox_tui_core::action::{ActionDef, ActionKind};
+        // Each hint shown in the tour must be the catalog's current
+        // default for that action — the catalog is the source of truth.
+        let all = render_all();
+        for (kind, hint) in [
+            (ActionKind::NewProject, "Shift-N"),
+            (ActionKind::NewWorkspace, "n"),
+            (ActionKind::AdoptSessions, "Shift-A"),
+            (ActionKind::JumpToAsking, "!"),
+            (ActionKind::JumpToFailingCi, "Shift-F"),
+            (ActionKind::StartAgent, "Shift-W"),
+            (ActionKind::CyclePane, "Tab"),
+        ] {
+            assert_eq!(
+                ActionDef::for_kind(kind).default_keys,
+                hint,
+                "catalog default for {kind:?} drifted from the tour hint",
+            );
+            assert!(all.contains(hint), "tour no longer shows {hint}");
         }
     }
 

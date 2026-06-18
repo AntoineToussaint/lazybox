@@ -3035,10 +3035,7 @@ mod tips_tests {
         let mut m = armed_model();
         m.tips_armed_at = Instant::now();
         m.focus = PaneFocus::Terminals;
-        assert!(
-            m.pick_tip().is_none(),
-            "a tip must wait out the idle delay",
-        );
+        assert!(m.pick_tip().is_none(), "a tip must wait out the idle delay",);
     }
 
     #[test]

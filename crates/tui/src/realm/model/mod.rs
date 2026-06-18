@@ -1082,11 +1082,11 @@ impl<T: TerminalAdapter> Model<T> {
     /// Deliberately conservative so tips never nag: at most one tip
     /// per session, only while no modal is up and no notice already
     /// occupies the footer, and only after the footer has been idle
-    /// for [`TIP_IDLE_DELAY`] (so a tip never races the first-run tour
+    /// for `TIP_IDLE_DELAY` (so a tip never races the first-run tour
     /// or the initial-poll spinner). The tip itself is a dim,
     /// auto-fading `Hint` — it never steals focus.
     ///
-    /// The gating decision lives in [`Self::pick_tip`] (pure, no side
+    /// The gating decision lives in `Self::pick_tip` (pure, no side
     /// effects); this wrapper records the tip as shown + persists it +
     /// flashes it.
     pub fn tick_tips(&mut self) {

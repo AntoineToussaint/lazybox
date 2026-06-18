@@ -2995,3 +2995,94 @@ mod collapse_into_pr_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tips_tests {
+    //! Issue #115: the progressive feature-tip gating. `pick_tip` is
+    //! the pure decision (no IO) behind `tick_tips`; these freeze the
+    //! "stay quiet" rules — off when opted out, before the idle delay,
+    //! while a modal / notice owns the footer — and the one positive
+    //! path (idle + in-terminal → the leave-terminal tip).
+    use super::super::*;
+    use lazybox_ipc::channel;
+    use std::time::{Duration, Instant};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    /// Enable tips and backdate the idle baseline so the delay gate is
+    /// satisfied — the common setup for "a tip should now be eligible."
+    fn armed_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let mut m = build_model();
+        m.set_tips(true, Vec::new());
+        m.tips_armed_at = Instant::now() - Duration::from_secs(60);
+        m
+    }
+
+    #[test]
+    fn no_tip_when_disabled() {
+        let mut m = armed_model();
+        m.set_tips(false, Vec::new());
+        m.focus = PaneFocus::Terminals;
+        assert!(m.pick_tip().is_none());
+    }
+
+    #[test]
+    fn no_tip_before_idle_delay() {
+        let mut m = armed_model();
+        m.tips_armed_at = Instant::now();
+        m.focus = PaneFocus::Terminals;
+        assert!(m.pick_tip().is_none(), "a tip must wait out the idle delay",);
+    }
+
+    #[test]
+    fn no_tip_while_a_notice_owns_the_footer() {
+        let mut m = armed_model();
+        m.focus = PaneFocus::Terminals;
+        m.flash_info("something else");
+        assert!(
+            m.pick_tip().is_none(),
+            "a tip must not clobber an existing notice",
+        );
+    }
+
+    #[test]
+    fn no_tip_while_a_modal_is_open() {
+        let mut m = armed_model();
+        m.focus = PaneFocus::Terminals;
+        m.modal_stack.push(Id::Help);
+        assert!(
+            m.pick_tip().is_none(),
+            "a tip must never compete with a modal",
+        );
+    }
+
+    #[test]
+    fn in_terminal_surfaces_the_leave_terminal_tip_once() {
+        let mut m = armed_model();
+        m.focus = PaneFocus::Terminals;
+        let tip = m.pick_tip().expect("the in-terminal tip is eligible");
+        assert_eq!(tip.id, "leave_terminal");
+        // Once it has been marked shown this session, the cap kicks in.
+        m.tip_shown_this_session = true;
+        assert!(
+            m.pick_tip().is_none(),
+            "at most one tip surfaces per session",
+        );
+    }
+
+    #[test]
+    fn already_seen_tip_does_not_resurface() {
+        let mut m = armed_model();
+        m.set_tips(true, vec!["leave_terminal".to_string()]);
+        m.tips_armed_at = Instant::now() - Duration::from_secs(60);
+        m.focus = PaneFocus::Terminals;
+        assert!(
+            m.pick_tip().is_none(),
+            "a tip already in tips_seen never repeats",
+        );
+    }
+}

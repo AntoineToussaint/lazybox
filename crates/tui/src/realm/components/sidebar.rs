@@ -100,6 +100,18 @@ impl Sidebar {
         self.inner.drain_pending_asking_notices()
     }
 
+    /// Whether any visible workspace has an agent waiting on input —
+    /// drives the agent-waiting feature tip (#115).
+    pub fn has_asking_agent(&self) -> bool {
+        self.inner.has_asking_agent()
+    }
+
+    /// Whether any visible workspace's PR has failing / mixed CI —
+    /// drives the failing-CI feature tip (#115).
+    pub fn has_failing_ci(&self) -> bool {
+        self.inner.has_failing_ci()
+    }
+
     /// Advance the "working" spinner on a low-rate tick. Returns
     /// `true` when the glyph changed so the run loop can mark the
     /// frame dirty. Delegates to the inner lazybox sidebar.

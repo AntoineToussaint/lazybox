@@ -596,6 +596,18 @@ pub struct Model<T: TerminalAdapter> {
     /// double-fires; manual `Shift-T` invocation ignores it. See
     /// `maybe_mount_tour` / `mount_tour`.
     auto_tour_pending: bool,
+    /// Progressive feature-discovery tips (#115). `tips_enabled`
+    /// mirrors `ui.show_tips` (opt-out); `tips_seen` mirrors
+    /// `ui.tour_seen` but per-tip (ids already surfaced, persisted so
+    /// a tip never repeats across sessions). `tip_shown_this_session`
+    /// caps it to one tip per run so they stay quiet, and
+    /// `tips_armed_at` is the idle baseline — a tip only fires once
+    /// the footer has sat free of any modal / notice for a beat. See
+    /// `tick_tips`.
+    tips_enabled: bool,
+    tips_seen: Vec<String>,
+    tip_shown_this_session: bool,
+    tips_armed_at: std::time::Instant,
     /// Inertia damper for trackpad scroll. macOS sends ~20-50 wheel
     /// events per flick (the OS inertia phase); each one moves the
     /// viewport `STEP` rows, so a single gesture scrolls hundreds of
@@ -673,6 +685,13 @@ use crate::realm::status_ctx::StatusCtx;
 /// delivered key is always reflected on screen even when it produces
 /// no `Msg`. See `Model::forward_modal_event`.
 const MODAL_REDRAW_WINDOW: Duration = Duration::from_millis(120);
+
+/// How long the footer must sit idle (no modal, no notice) after
+/// startup before a feature tip (#115) is allowed to surface. Long
+/// enough that the first-run tour and the initial-poll spinner clear
+/// first, short enough that a settled user sees a tip the same
+/// session. See `Model::tick_tips`.
+const TIP_IDLE_DELAY: Duration = Duration::from_secs(8);
 
 /// How long the first `q` stays armed waiting for the second tap.
 // `Q_DOUBLE_TAP_WINDOW` retired — value lives on `ui_defaults`
@@ -767,6 +786,10 @@ impl<T: TerminalAdapter> Model<T> {
             snippets: lazybox_config::Snippets::default(),
             snippet_choices: Vec::new(),
             auto_tour_pending: false,
+            tips_enabled: false,
+            tips_seen: Vec::new(),
+            tip_shown_this_session: false,
+            tips_armed_at: std::time::Instant::now(),
             scroll_inertia: None,
             modal_redraw_until: None,
         }
@@ -1042,6 +1065,74 @@ impl<T: TerminalAdapter> Model<T> {
     fn mark_tour_seen(&mut self) {
         if let Err(e) = lazybox_config::Config::save_with(|c| c.ui.tour_seen = true) {
             tracing::warn!("save tour_seen failed: {e}");
+        }
+    }
+
+    /// Seed the feature-tips state from `~/.lazybox/config.yaml` at
+    /// startup. `enabled` is `ui.show_tips`; `seen` is `ui.tips_seen`.
+    pub fn set_tips(&mut self, enabled: bool, seen: Vec<String>) {
+        self.tips_enabled = enabled;
+        self.tips_seen = seen;
+    }
+
+    /// Surface one progressive feature-discovery tip (#115) when the
+    /// moment is quiet. Called once per run-loop iteration alongside
+    /// the other tick helpers.
+    ///
+    /// Deliberately conservative so tips never nag: at most one tip
+    /// per session, only while no modal is up and no notice already
+    /// occupies the footer, and only after the footer has been idle
+    /// for `TIP_IDLE_DELAY` (so a tip never races the first-run tour
+    /// or the initial-poll spinner). The tip itself is a dim,
+    /// auto-fading `Hint` — it never steals focus.
+    ///
+    /// The gating decision lives in `Self::pick_tip` (pure, no side
+    /// effects); this wrapper records the tip as shown + persists it +
+    /// flashes it.
+    pub fn tick_tips(&mut self) {
+        let Some(tip) = self.pick_tip() else {
+            return;
+        };
+        self.tip_shown_this_session = true;
+        self.tips_seen.push(tip.id.clone());
+        self.persist_tip_seen(tip.id);
+        self.flash_hint(tip.message);
+    }
+
+    /// Decide which feature tip (if any) should surface right now —
+    /// all the "stay quiet" gating, with no side effects so it's
+    /// unit-testable. Returns the resolved tip to show, or `None` when
+    /// tips are off, one already showed this session, a modal / notice
+    /// holds the footer, the idle delay hasn't elapsed, or no tip
+    /// matches the current state.
+    fn pick_tip(&self) -> Option<lazybox_tui_core::tips::ResolvedTip> {
+        if !self.tips_enabled || self.tip_shown_this_session {
+            return None;
+        }
+        if !self.modal_stack.is_empty() || self.status.notice.is_some() {
+            return None;
+        }
+        if self.tips_armed_at.elapsed() < TIP_IDLE_DELAY {
+            return None;
+        }
+        let ctx = lazybox_tui_core::tips::TipContext {
+            agent_waiting: self.sidebar.has_asking_agent(),
+            failing_ci: self.sidebar.has_failing_ci(),
+            in_terminal: self.focus == PaneFocus::Terminals,
+        };
+        lazybox_tui_core::tips::next_tip(&ctx, &self.tips_seen, &self.action_key_overrides)
+    }
+
+    /// Append `id` to `ui.tips_seen` so the tip never resurfaces.
+    /// Best-effort, mirroring `mark_tour_seen`: a write failure just
+    /// means the tip may show once more next boot.
+    fn persist_tip_seen(&self, id: String) {
+        if let Err(e) = lazybox_config::Config::save_with(move |c| {
+            if !c.ui.tips_seen.contains(&id) {
+                c.ui.tips_seen.push(id.clone());
+            }
+        }) {
+            tracing::warn!("save tips_seen failed: {e}");
         }
     }
 

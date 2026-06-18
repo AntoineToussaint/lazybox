@@ -666,6 +666,9 @@ async fn run_embedded_realm(
         // launches on wizard Finish for first-run users, or at startup
         // (just below) for returning ones.
         model.set_auto_tour(!user_config.ui.tour_seen);
+        // Seed progressive feature tips (#115): the opt-out flag plus
+        // the ids already shown so they never repeat.
+        model.set_tips(user_config.ui.show_tips, user_config.ui.tips_seen.clone());
         // Snippets — global (`<lazybox_home>/snippets.yaml`) merged
         // with the cwd's `.lazybox/snippets.yaml` (repo wins on key
         // conflict). Cwd is "wherever the user launched lazybox from",

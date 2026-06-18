@@ -351,7 +351,10 @@ mod tests {
 
     #[test]
     fn mentions_adopt_sessions() {
-        assert!(render_all().contains("Shift-A"), "adopt-sessions key missing");
+        assert!(
+            render_all().contains("Shift-A"),
+            "adopt-sessions key missing"
+        );
     }
 
     #[test]
@@ -359,7 +362,10 @@ mod tests {
         // Snippets are a power-user feature; onboarding shouldn't carry
         // them. Guard against the step creeping back in.
         let all = render_all().to_lowercase();
-        assert!(!all.contains("snippet"), "snippets leaked back into the tour");
+        assert!(
+            !all.contains("snippet"),
+            "snippets leaked back into the tour"
+        );
         assert!(!all.contains("]<key>"), "snippet leader hint still present");
     }
 

@@ -175,6 +175,7 @@ fn snapshot_replaces_all_terminals() {
             replay: b"\x1b[0mhi\n".to_vec(),
             last_seq: 42,
             no_permission: false,
+            last_user_message: None,
         }],
         projects: vec![],
     });
@@ -960,6 +961,95 @@ fn enter_commits_typed_text_as_last_user_message() {
     assert_eq!(t.last_user_message_of(TerminalId(1)), Some("fix the bug"));
     // Composing buffer is wiped so the next message starts fresh.
     assert_eq!(t.composing_of(TerminalId(1)), Some(""));
+}
+
+#[test]
+fn enter_emits_record_user_message_command() {
+    // The recap lives only in the client slot, so on commit the client
+    // must ship the message to the daemon for persistence — otherwise it
+    // can't be restored after a restart (issue #105). Plain editing keys
+    // emit only a Write; the submit additionally emits RecordUserMessage.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let mut cmds = Vec::new();
+    for c in "ship it".chars() {
+        t.handle_key(ch(c), &mut cmds);
+    }
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| matches!(c, Command::RecordUserMessage { .. })),
+        "no persistence before submit; got: {cmds:?}"
+    );
+
+    cmds.clear();
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    let recorded = cmds.iter().find_map(|c| match c {
+        Command::RecordUserMessage {
+            terminal_id,
+            message,
+        } => Some((*terminal_id, message.clone())),
+        _ => None,
+    });
+    assert_eq!(recorded, Some((TerminalId(1), "ship it".to_string())));
+}
+
+#[test]
+fn shell_submit_does_not_emit_record_user_message() {
+    // Shells have no single "user prompt"; the recap is Agent-only, so a
+    // commit on a shell must not persist anything.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let mut cmds = Vec::new();
+    for c in "ls -la".chars() {
+        t.handle_key(ch(c), &mut cmds);
+    }
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| matches!(c, Command::RecordUserMessage { .. })),
+        "shells never persist a recap; got: {cmds:?}"
+    );
+}
+
+#[test]
+fn snapshot_restores_recap_for_agent_terminal() {
+    // Issue #105: the recap is client-side-only state, so on restart it
+    // must be seeded from the daemon-persisted value carried on the
+    // Snapshot — the replay ring only holds PTY output, never the input
+    // the recap is composed from.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&Event::Snapshot {
+        workspaces: vec![],
+        terminals: vec![TerminalSnapshot {
+            terminal_id: TerminalId(7),
+            session_key: sk("o/r#1"),
+            kind: TerminalKind::Agent("claude".into()),
+            replay: b"reconnected\n".to_vec(),
+            last_seq: 3,
+            no_permission: false,
+            last_user_message: Some("rebase onto main".into()),
+        }],
+        projects: vec![],
+    });
+    t.set_active_session(Some(sk("o/r#1")));
+
+    assert_eq!(
+        t.last_user_message_of(TerminalId(7)),
+        Some("rebase onto main"),
+    );
+
+    // And it renders the pinned recap immediately, before any new input.
+    let out = render_to_string(&mut t, 60, 12, true);
+    assert!(
+        out.contains("you ▸ rebase onto main"),
+        "restored recap should render; got:\n{out}"
+    );
 }
 
 #[test]

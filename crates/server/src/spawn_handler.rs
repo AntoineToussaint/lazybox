@@ -1037,6 +1037,7 @@ pub async fn handle_spawn(
         no_permission_map.lock().await.remove(&id_for_pump);
         let _ = store_for_pump.delete_kv(&format!("terminal:{key_for_pump}"));
         let _ = store_for_pump.delete_kv(&format!("terminal-noperm:{key_for_pump}"));
+        let _ = store_for_pump.delete_kv(&format!("terminal-msg:{key_for_pump}"));
         // Drop the per-session hook settings file we generated at spawn.
         // Best-effort — a leftover file is harmless (it's overwritten by
         // the next spawn that reuses the id, which can't happen anyway
@@ -3190,6 +3191,39 @@ async fn load_no_permission(config: &ServerConfig, backend_key: &str) -> bool {
         .is_some()
 }
 
+/// Persist the latest prompt the user submitted to an agent terminal,
+/// keyed by backend session key so it survives a daemon restart (which
+/// reassigns `TerminalId`s but keeps backend keys). Replayed to clients
+/// in `snapshot_terminals` so the pinned "you ▸ …" recap is present
+/// immediately after reconnect — the ring buffer only carries PTY
+/// output, never the input the recap is built from.
+pub async fn handle_record_user_message(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    message: &str,
+) {
+    let Some(backend_key) = config.backend_key_for(terminal_id).await else {
+        tracing::trace!("record user message for unknown terminal {terminal_id:?}");
+        return;
+    };
+    if let Err(e) = config
+        .store
+        .set_kv(&format!("terminal-msg:{backend_key}"), message)
+    {
+        tracing::warn!("persist terminal user message: store write failed: {e}");
+    }
+}
+
+/// Read back the value `handle_record_user_message` stored, or `None`
+/// when the terminal has no recorded prompt.
+fn load_user_message(config: &ServerConfig, backend_key: &str) -> Option<String> {
+    config
+        .store
+        .get_kv(&format!("terminal-msg:{backend_key}"))
+        .ok()
+        .flatten()
+}
+
 /// Used by `Subscribe` to seed a new client with what's already
 /// running. Reads the parallel `terminal_meta` map populated by
 /// `handle_spawn` so each snapshot carries the right session_key
@@ -3267,6 +3301,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
             };
         out.push(TerminalSnapshot {
             no_permission: no_permission.contains(&id),
+            last_user_message: load_user_message(config, &key),
             terminal_id: id,
             session_key,
             kind,
@@ -3881,6 +3916,53 @@ mod tests {
         let fresh = lazybox_store::MemoryStore::new();
         let next = alloc_terminal_id(&fresh);
         assert!(next.0 > id.0);
+    }
+
+    /// Issue #105: a submitted prompt recorded via
+    /// `handle_record_user_message` is persisted against the backend key
+    /// and round-trips back through `snapshot_terminals`, so a
+    /// reconnecting client can restore the pinned "you ▸ …" recap.
+    #[tokio::test]
+    async fn recorded_user_message_round_trips_through_snapshot() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let id = TerminalId(7);
+        let session_key: SessionKey = "acme/widget#1".into();
+        let kind = TerminalKind::Agent("claude".into());
+        config.terminals.lock().await.insert(id, key.clone());
+        config
+            .terminal_meta
+            .lock()
+            .await
+            .insert(id, (session_key.clone(), kind.clone()));
+
+        // No prompt recorded yet → the snapshot carries None.
+        let before = snapshot_terminals(&config).await;
+        assert_eq!(
+            before
+                .iter()
+                .find(|s| s.terminal_id == id)
+                .unwrap()
+                .last_user_message,
+            None,
+        );
+
+        handle_record_user_message(&config, id, "rebase onto main").await;
+
+        let after = snapshot_terminals(&config).await;
+        assert_eq!(
+            after
+                .iter()
+                .find(|s| s.terminal_id == id)
+                .unwrap()
+                .last_user_message
+                .as_deref(),
+            Some("rebase onto main"),
+        );
     }
 
     /// The #48 fix: a terminal that produces neither a

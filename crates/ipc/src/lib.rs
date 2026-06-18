@@ -44,7 +44,7 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Stable id for a spawned terminal. Distinct from SessionKey because a
 /// single session may hold multiple terminals (agent + shell + logs).
@@ -402,6 +402,17 @@ pub enum Command {
     Write {
         terminal_id: TerminalId,
         bytes: Vec<u8>,
+    },
+    /// Persist the latest prompt the user submitted to an agent
+    /// terminal so the pinned "you ▸ …" recap survives a restart. The
+    /// recap is composed client-side from the *outgoing* keystroke
+    /// stream (see `TerminalSlot::record_pty_bytes`), which the daemon
+    /// never reconstructs, so the client reports each committed message
+    /// here for the daemon to store against the terminal's backend key.
+    /// Replayed back to clients via `TerminalSnapshot::last_user_message`.
+    RecordUserMessage {
+        terminal_id: TerminalId,
+        message: String,
     },
     /// Inject a prompt into an EXISTING agent terminal — same flow
     /// the daemon uses for Spawn's `initial_prompt`, but targeting
@@ -1212,6 +1223,14 @@ pub struct TerminalSnapshot {
     /// a fresh `TerminalSpawned`.
     #[serde(default)]
     pub no_permission: bool,
+    /// Last prompt the user submitted to this terminal (Agent-only;
+    /// `None` for shells and for agents that haven't received a prompt
+    /// yet). Persisted daemon-side from `Command::RecordUserMessage` so
+    /// a reconnecting client can restore the pinned "you ▸ …" recap row
+    /// — the ring-buffer `replay` only carries PTY *output*, never the
+    /// input we composed, so the recap can't be reconstructed from it.
+    #[serde(default)]
+    pub last_user_message: Option<String>,
 }
 
 // ── Transport abstraction ──────────────────────────────────────────────

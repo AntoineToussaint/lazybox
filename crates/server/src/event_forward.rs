@@ -512,6 +512,7 @@ mod tests {
                 replay: b"REPLAY".to_vec(),
                 last_seq: 5,
                 no_permission: false,
+                last_user_message: None,
             }],
             projects: Vec::new(),
         };

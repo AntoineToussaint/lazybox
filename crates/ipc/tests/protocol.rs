@@ -210,6 +210,7 @@ fn all_events() -> Vec<Event> {
                 replay: b"replay-bytes".to_vec(),
                 last_seq: 42,
                 no_permission: true,
+                last_user_message: Some("fix the flaky test".into()),
             }],
             projects: vec![],
         },

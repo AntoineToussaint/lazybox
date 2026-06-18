@@ -247,9 +247,15 @@ impl Terminals {
     /// user-message tracker, so the pinned recap reflects commands
     /// that never flow through the key-by-key path. No-op for
     /// non-Agent terminals. The caller still sends the bytes to the
-    /// PTY — this only updates lazybox's own composing buffer.
-    pub fn record_pty_write(&mut self, id: lazybox_ipc::TerminalId, bytes: &[u8]) {
-        self.inner.record_pty_write(id, bytes);
+    /// PTY — this only updates lazybox's own composing buffer. Returns
+    /// the committed message (when the write ended in a submit) so the
+    /// caller can persist it via `Command::RecordUserMessage`.
+    pub fn record_pty_write(
+        &mut self,
+        id: lazybox_ipc::TerminalId,
+        bytes: &[u8],
+    ) -> Option<String> {
+        self.inner.record_pty_write(id, bytes)
     }
 
     /// Encode a mouse event for the focused terminal. Returns the

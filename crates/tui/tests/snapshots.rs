@@ -213,17 +213,32 @@ fn sidebar_golden_render_empty() {
     insta::assert_snapshot!("sidebar_empty", rendered);
 }
 
-/// Which-key popup for the github leader group (#126). Locks the
-/// `g · github` panel layout — title row plus one `key  label` row
-/// per group member, anchored bottom-left above the footer.
+/// Which-key popup for the `g` leader (#126, #102). Locks the panel
+/// layout — title row plus one `key  label` row per continuation,
+/// anchored bottom-left above the footer. The rows are derived from
+/// the catalog (every entry whose chord is a `g …` sequence), the same
+/// way the model builds them at render time.
 #[test]
 fn which_key_github_group_golden_render() {
     use lazybox_tui::realm::components::which_key;
-    use lazybox_tui_core::action::ActionGroup;
+    use lazybox_tui_core::action::{ActionDef, Chord, ChordCode, KeyStroke};
+    let g = KeyStroke::new(false, false, false, ChordCode::Char('g'));
+    let rows: Vec<(String, String)> = ActionDef::all()
+        .flat_map(|def| {
+            def.default_chords()
+                .into_iter()
+                .filter_map(move |c| match c {
+                    Chord::Seq(s) if s.len() == 2 && s[0] == g => {
+                        Some((s[1].display(), def.label.to_string()))
+                    }
+                    _ => None,
+                })
+        })
+        .collect();
     let backend = TestBackend::new(40, 12);
     let mut term = Terminal::new(backend).unwrap();
     term.draw(|frame| {
-        which_key::render(frame, Rect::new(0, 0, 40, 12), ActionGroup::Github);
+        which_key::render(frame, Rect::new(0, 0, 40, 12), g, &rows);
     })
     .unwrap();
     let buf = term.backend().buffer();

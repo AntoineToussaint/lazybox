@@ -380,85 +380,14 @@ fn populated_sidebar() -> Sidebar {
     s
 }
 
-#[test]
-fn c_emits_spawn_claude_for_selected() {
-    let mut s = populated_sidebar();
-    let mut cmds = Vec::new();
-    s.handle_key(key_code(KeyCode::Char('c')), &mut cmds);
-    assert_eq!(cmds.len(), 1);
-    match &cmds[0] {
-        Command::Spawn {
-            session_key,
-            kind: TerminalKind::Agent(agent),
-            ..
-        } => {
-            assert_eq!(session_key.to_string(), expected_session_key("o/r#1"));
-            assert_eq!(agent, "claude");
-        }
-        other => panic!("expected Spawn Agent(claude), got {other:?}"),
-    }
-}
-
-#[test]
-fn x_emits_spawn_codex_for_selected() {
-    let mut s = populated_sidebar();
-    let mut cmds = Vec::new();
-    s.handle_key(key_code(KeyCode::Char('x')), &mut cmds);
-    assert_eq!(cmds.len(), 1);
-    match &cmds[0] {
-        Command::Spawn {
-            session_key,
-            kind: TerminalKind::Agent(agent),
-            ..
-        } => {
-            assert_eq!(session_key.to_string(), expected_session_key("o/r#1"));
-            assert_eq!(agent, "codex", "x maps to Codex by default");
-        }
-        other => panic!("expected Spawn Agent(codex), got {other:?}"),
-    }
-}
-
-#[test]
-fn custom_agent_shortcuts_override_defaults() {
-    let mut s = Sidebar::new(PaneId::new(1))
-        .with_agent_shortcuts([('c', "claude".into()), ('a', "aider".into())]);
-    let now = Utc::now();
-    s.on_event(&Event::WorkspaceUpserted(Box::new(make_workspace(
-        "owner/repo",
-        "o/r#1",
-        now,
-    ))));
-
-    let mut cmds = Vec::new();
-    s.handle_key(key_code(KeyCode::Char('a')), &mut cmds);
-    match cmds.as_slice() {
-        [
-            Command::Spawn {
-                kind: TerminalKind::Agent(agent),
-                ..
-            },
-        ] => assert_eq!(agent, "aider"),
-        _ => panic!("expected Spawn Agent(aider), got {cmds:?}"),
-    }
-
-    // `x` is no longer mapped in the custom set — bubbles up.
-    let mut cmds = Vec::new();
-    let outcome = s.handle_key(key_code(KeyCode::Char('x')), &mut cmds);
-    assert_eq!(
-        outcome,
-        lazybox_tui::PaneOutcome::Pass,
-        "unmapped key bubbles, doesn't spawn a random default"
-    );
-    assert!(cmds.is_empty());
-}
-
-#[test]
-fn c_on_empty_sidebar_emits_nothing() {
-    let mut s = Sidebar::new(PaneId::new(1));
-    let mut cmds = Vec::new();
-    s.handle_key(key_code(KeyCode::Char('c')), &mut cmds);
-    assert!(cmds.is_empty());
-}
+// The per-agent spawn keys (`c` / `x` / `u`) moved out of the sidebar
+// into the action catalog (#102 P2): they're generated `SpawnAgent`
+// rows dispatched by the Model before the sidebar's `handle_key` ever
+// runs. Keyboard coverage now lives in the orchestrator tests
+// (`model_orchestrator.rs::spawn_agent_*`) and the catalog generation
+// itself is unit-tested in `lazybox_tui_core::action`. The sidebar no
+// longer spawns agents on its own, so its old direct-dispatch tests
+// were removed.
 
 #[test]
 fn s_emits_spawn_shell() {
@@ -494,26 +423,8 @@ fn m_emits_mark_read() {
 // tests/model_orchestrator.rs. `Shift-Z` long-snooze is still inline
 // here pending its own catalog migration.)
 
-#[test]
-fn shift_z_archives_a_year_out() {
-    let mut s = populated_sidebar();
-    let mut cmds = Vec::new();
-    let before = Utc::now();
-    // Two presses now — first arms, second fires. The 1-year
-    // snooze is irreversible enough to deserve a confirmation,
-    // same as Shift-X / Shift-M.
-    s.handle_key(shift_char('Z'), &mut cmds);
-    assert!(cmds.is_empty(), "first Shift-Z arms, doesn't fire");
-    s.handle_key(shift_char('Z'), &mut cmds);
-    assert_eq!(cmds.len(), 1);
-    match &cmds[0] {
-        Command::Snooze { until, .. } => {
-            let min = before + Duration::days(364);
-            assert!(*until >= min, "archive snooze should be roughly a year");
-        }
-        other => panic!("expected Snooze, got {other:?}"),
-    }
-}
+// `Shift-Z` long-snooze is a `Confirm`-guarded catalog action now
+// (#102 P3) — covered at the model layer in `model_orchestrator.rs`.
 
 // ── Navigation bounds ─────────────────────────────────────────────────
 //
@@ -1069,48 +980,11 @@ fn s_on_workspace_emits_shell_spawn() {
     }
 }
 
-#[test]
-fn shift_z_requires_two_presses_to_emit_long_snooze() {
-    // 1-year snooze is effectively "hide forever" — a single
-    // fat-fingered Shift-Z used to mute the row with no obvious
-    // undo. Two-press latch mirrors Shift-X / Shift-M.
-    let mut s = sidebar_with_pr(|_| {});
-    let mut cmds: Vec<Command> = Vec::new();
-    s.handle_key(shift_char('Z'), &mut cmds);
-    assert!(
-        cmds.is_empty(),
-        "first Shift-Z must arm the latch, not fire",
-    );
-    s.handle_key(shift_char('Z'), &mut cmds);
-    assert_eq!(cmds.len(), 1);
-    match &cmds[0] {
-        Command::Snooze { until, .. } => {
-            // ~365 days into the future is a long snooze.
-            let delta = (*until - chrono::Utc::now()).num_days();
-            assert!(
-                (360..=370).contains(&delta),
-                "Shift-Z must snooze ~1 year, got {delta} days",
-            );
-        }
-        other => panic!("expected Snooze, got {other:?}"),
-    }
-}
-
-#[test]
-fn unrelated_key_disarms_shift_z_latch() {
-    // Any key other than Shift-Z disarms the long-snooze prompt
-    // (same pattern as Shift-X / Shift-M).
-    let mut s = sidebar_with_pr(|_| {});
-    let mut cmds: Vec<Command> = Vec::new();
-    s.handle_key(shift_char('Z'), &mut cmds);
-    s.handle_key(key_code(KeyCode::Char('s')), &mut cmds); // disarms
-    cmds.clear();
-    s.handle_key(shift_char('Z'), &mut cmds);
-    assert!(
-        cmds.is_empty(),
-        "after disarming, single Shift-Z must NOT fire snooze",
-    );
-}
+// `Shift-Z` long-snooze moved out of the sidebar into the catalog as
+// a `Confirm`-guarded `LongSnooze` row (#102 P3): pressing it mounts
+// the unified Confirm modal instead of arming a sidebar two-press
+// latch, which let the per-pane `LatchSet` be deleted. The keyboard +
+// confirm flow is covered in `model_orchestrator.rs::long_snooze_*`.
 
 #[test]
 fn m_on_workspace_emits_mark_read() {
@@ -1370,7 +1244,7 @@ fn merged_closed_hidden_from_inbox_by_default() {
 fn show_inactive_in_inbox_surfaces_merged_and_closed() {
     // Toggle on → merged + closed appear in the Inbox alongside open
     // work. Verifies both the config plumbing and the filter switch.
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::BTreeSet;
 
     let mut s = Sidebar::new(PaneId::new(1));
     let display = lazybox_config::DisplayConfig {
@@ -1380,10 +1254,8 @@ fn show_inactive_in_inbox_surfaces_merged_and_closed() {
     s.apply_config(
         lazybox_config::AttentionConfig::default(),
         BTreeSet::new(),
-        HashMap::new(),
         None,
         &display,
-        &lazybox_config::UiDefaults::default(),
     );
 
     let now = Utc::now();
@@ -1708,7 +1580,7 @@ fn desktop_notify_off_suppresses_os_banner_but_keeps_footer_notice() {
     // must NOT queue an OS banner, but the in-app footer notice (a
     // separate, quiet surface) still fires so the user isn't left
     // blind to the prompt.
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::BTreeSet;
 
     let mut s = Sidebar::new(PaneId::new(1));
     let attention = lazybox_config::AttentionConfig {
@@ -1718,10 +1590,8 @@ fn desktop_notify_off_suppresses_os_banner_but_keeps_footer_notice() {
     s.apply_config(
         attention,
         BTreeSet::new(),
-        HashMap::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
-        &lazybox_config::UiDefaults::default(),
     );
 
     let now = Utc::now();
@@ -1808,7 +1678,7 @@ fn first_sight_of_workspace_does_not_notify() {
 
 #[test]
 fn ci_failure_transition_respects_desktop_notify_off() {
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::BTreeSet;
     let mut s = Sidebar::new(PaneId::new(1));
     s.apply_config(
         lazybox_config::AttentionConfig {
@@ -1816,10 +1686,8 @@ fn ci_failure_transition_respects_desktop_notify_off() {
             ..lazybox_config::AttentionConfig::default()
         },
         BTreeSet::new(),
-        HashMap::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
-        &lazybox_config::UiDefaults::default(),
     );
     s.on_event(&Event::WorkspaceUpserted(Box::new(workspace_with(
         "o/r#1",

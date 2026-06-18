@@ -41,6 +41,17 @@ impl<T: TerminalAdapter> Model<T> {
                 // would have.
                 return Vec::new();
             };
+            // Archive is the only destructive action that applies to a
+            // project header (it deletes the project + cascades). Any
+            // other — e.g. `Shift-Z` long-snooze pressed while the
+            // cursor sits on a project header with no workspace
+            // selected — has nothing to act on, so drop it silently
+            // rather than mount a confirm that would no-op on Yes.
+            if matches!(target, ActionConfirmTarget::Project(_))
+                && !matches!(action, lazybox_tui_core::action::Action::Archive)
+            {
+                return Vec::new();
+            }
             // Project-header focused Archive deletes the whole
             // project (cascading to its workspaces) — the default
             // confirm prompt assumes a workspace target, which would
@@ -89,6 +100,25 @@ impl<T: TerminalAdapter> Model<T> {
                     Action::Archive => vec![IpcCommand::Kill {
                         session_key: session_key.clone(),
                     }],
+                    Action::LongSnooze => {
+                        // Re-resolve against the stashed workspace so a
+                        // state change while the modal was up can't
+                        // snooze the wrong row.
+                        if let crate::intent::Intent::Snooze {
+                            session_key,
+                            duration,
+                        } = crate::intent::resolve_long_snooze(
+                            workspace.as_ref(),
+                            self.ui_defaults.long_snooze,
+                        ) {
+                            let until = chrono::Utc::now()
+                                + chrono::Duration::from_std(duration)
+                                    .unwrap_or_else(|_| chrono::Duration::days(365));
+                            vec![IpcCommand::Snooze { session_key, until }]
+                        } else {
+                            Vec::new()
+                        }
+                    }
                     Action::MergePr => {
                         // Re-check merge preconditions against the
                         // STASHED workspace — state may have moved

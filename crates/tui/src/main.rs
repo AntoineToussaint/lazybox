@@ -643,25 +643,49 @@ async fn run_embedded_realm(
         let editors = lazybox_tui::editors::discover_at_startup(load_user_editors());
         tracing::info!("detected {} editor(s)", editors.len());
         model.cache_editors(editors);
-        // Apply ~/.lazybox/config.yaml::{attention, ui, agent_shortcuts}
-        // → sidebar + Model. Single load; subsequent reads happen
-        // on-demand via Config::save_with for the writable parts.
+        // Apply ~/.lazybox/config.yaml::{attention, ui, setup} → sidebar
+        // + Model. Single load; subsequent reads happen on-demand via
+        // Config::save_with for the writable parts.
         let user_config = lazybox_config::Config::load().unwrap_or_else(|e| {
             tracing::warn!("config.yaml load: {e}; using defaults");
             lazybox_config::Config::default()
         });
-        let agent_shortcuts: std::collections::HashMap<char, String> =
-            user_config.agent_shortcuts.clone().into_iter().collect();
         let ui_defaults = user_config.resolved_ui();
         model.apply_sidebar_config(
             user_config.attention.clone(),
             user_config.ui.collapsed_repos.clone(),
-            agent_shortcuts,
             user_config.setup.default_agent.clone(),
             &user_config.display,
             &ui_defaults,
         );
-        model.apply_action_key_overrides(user_config.ui.action_keys.clone());
+        // Generate the per-agent SpawnAgent catalog rows (#102 P2):
+        // exactly the agents the wizard enabled. An unconfigured user
+        // (empty `setup.agents`) falls back to the built-in trio so the
+        // zero-config `c` / `x` / `u` keys still work out of the box.
+        // Using the enabled set (rather than unioning it with the
+        // built-ins) avoids binding both `cursor` and `cursor-agent` to
+        // `u`. Per-agent key remaps live in `ui.action_keys` under
+        // `spawn_agent.<id>`.
+        let agents: Vec<String> = if user_config.setup.agents.is_empty() {
+            ["claude", "codex", "cursor"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            user_config.setup.agents.iter().cloned().collect()
+        };
+        model.set_agents(agents);
+        // Keymap = the selected in-tree preset (#102 P4) as a base
+        // layer, with the user's explicit `ui.action_keys` on top so
+        // individual tweaks win over the preset.
+        let mut overrides = user_config
+            .ui
+            .keymap_preset
+            .as_deref()
+            .and_then(lazybox_tui_core::action::keymap_preset)
+            .unwrap_or_default();
+        overrides.extend(user_config.ui.action_keys.clone());
+        model.apply_action_key_overrides(overrides);
         // Arm the feature tour for anyone who hasn't seen it. It
         // launches on wizard Finish for first-run users, or at startup
         // (just below) for returning ones.

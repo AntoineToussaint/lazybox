@@ -4650,7 +4650,10 @@ mod tests {
     #[test]
     fn derive_branch_for_branchless_linear() {
         let t = titled_task("linear", "ENG-456", "Ship it");
-        assert_eq!(derive_branch_for_branchless("", &t), "linear-eng-456-ship-it");
+        assert_eq!(
+            derive_branch_for_branchless("", &t),
+            "linear-eng-456-ship-it"
+        );
     }
 
     /// A non-numeric GitHub key (no `#`) falls through to the

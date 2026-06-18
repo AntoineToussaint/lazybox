@@ -399,7 +399,7 @@ impl ActionDef {
                 kind: ActionKind::OpenTour,
                 default_keys: "Shift-T",
                 label: "tour",
-                describe: "Launch the guided feature walkthrough (inbox, work, snippets, navigation, config).",
+                describe: "Launch the guided onboarding walkthrough (start from scratch, inbox, putting an agent on a task, juggling sessions, config).",
                 section: Section::Global,
             },
             ActionKind::OpenSyncStatus => &Self {

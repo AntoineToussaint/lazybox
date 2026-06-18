@@ -75,6 +75,12 @@ pub enum Id {
     /// Single-line input prompt for naming a brand-new local
     /// Project. Submit → `Command::CreateProject { name }`.
     NewProject,
+    /// Repo picker for the `Shift-N` new-workspace flow. Lists the
+    /// already-tracked repos plus a "create a new local project"
+    /// escape hatch. Choices live in `new_workspace_repo_choices`;
+    /// `Msg::ChoicePicked` either funnels into the new-workspace name
+    /// input under the chosen repo, or mounts `NewProject`.
+    NewWorkspaceRepo,
     /// Picker for selecting an editor when 2+ are detected.
     /// Submit → `editors::launch(template, worktree)`.
     Editor,
@@ -502,6 +508,12 @@ pub struct Model<T: TerminalAdapter> {
     /// picker, in row order. `Msg::ChoicePicked` indexes into this to
     /// recover the chosen `ProjectKey`, then mounts the name input.
     start_agent_project_choices: Vec<lazybox_core::ProjectKey>,
+    /// Candidate repos for the active `Shift-N` new-workspace picker,
+    /// in row order. The picker shows one extra trailing row (the
+    /// "create a new local project" escape hatch), so a pick index
+    /// equal to this vec's length means "make a new project" rather
+    /// than indexing it.
+    new_workspace_repo_choices: Vec<lazybox_core::ProjectKey>,
     /// Transient UI status (polling spinner + footer notice). See
     /// `StatusCtx`.
     status: StatusCtx,
@@ -752,6 +764,7 @@ impl<T: TerminalAdapter> Model<T> {
             pending_adopt_source: None,
             adopt_choices: Vec::new(),
             start_agent_project_choices: Vec::new(),
+            new_workspace_repo_choices: Vec::new(),
             status: StatusCtx::new(),
             ui_defaults: lazybox_config::UiDefaults::default(),
             pr_details_fetched: std::collections::HashSet::new(),

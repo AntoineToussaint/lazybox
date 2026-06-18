@@ -367,7 +367,7 @@ pub fn resolve_open_editor(workspace: Option<&Workspace>) -> Intent {
 pub fn resolve_new_workspace(focused_project_key: Option<lazybox_core::ProjectKey>) -> Intent {
     match focused_project_key {
         Some(project_key) => Intent::MountNewWorkspaceInput { project_key },
-        None => Intent::Notice("Select a project first (Shift-N creates one).".to_string()),
+        None => Intent::Notice("No project at the cursor — Shift-N picks a repo.".to_string()),
     }
 }
 

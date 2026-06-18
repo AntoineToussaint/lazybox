@@ -16,7 +16,7 @@ expression: rendered
 
    ⇧W   start agent
    n    new workspace
-   ⇧N   new project
+   ⇧N   pick a repo
 
   or open a tool yourself:
    c    claude

@@ -248,6 +248,68 @@ mod effects_tests {
         );
     }
 
+    /// `Shift-N` with no tracked repos has nothing to pick, so it
+    /// skips the picker and drops straight into the new-project input
+    /// — the only way to bootstrap a brand-new, empty inbox.
+    #[test]
+    fn new_workspace_picker_without_projects_mounts_new_project_input() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        m.dispatch_action(&Action::NewProject);
+        assert_eq!(m.modal_stack.last(), Some(&Id::NewProject));
+    }
+
+    /// `Shift-N` with tracked repos mounts the repo picker, listing
+    /// each repo plus the trailing "create a new local project" row.
+    #[test]
+    fn new_workspace_picker_with_projects_mounts_repo_picker() {
+        use lazybox_ipc::Event as IpcEvent;
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let pk = lazybox_core::ProjectKey::github("acme", "widget");
+        m.handle_daemon_event(IpcEvent::ProjectUpserted(Box::new(
+            lazybox_core::Project::new(pk.clone(), "acme/widget", chrono::Utc::now()),
+        )));
+        m.dispatch_action(&Action::NewProject);
+        assert_eq!(m.modal_stack.last(), Some(&Id::NewWorkspaceRepo));
+        assert_eq!(m.new_workspace_repo_choices, vec![pk]);
+    }
+
+    /// Picking a repo row funnels into the new-workspace name input
+    /// under that repo (no project-creation step). The pick sends no
+    /// IPC and drains the stashed choices.
+    #[test]
+    fn new_workspace_repo_pick_funnels_into_name_input() {
+        let mut m = build_model();
+        let pk = lazybox_core::ProjectKey::github("acme", "widget");
+        m.new_workspace_repo_choices = vec![pk.clone()];
+        m.modal_stack.push(Id::NewWorkspaceRepo);
+        let cmds = m.handle_choice_picked(vec![0]);
+        assert!(cmds.is_empty(), "picking a repo sends no IPC yet");
+        assert_eq!(m.modal_stack.last(), Some(&Id::NewWorkspace));
+        assert_eq!(m.pending_new_workspace_project.as_ref(), Some(&pk));
+        assert!(
+            m.new_workspace_repo_choices.is_empty(),
+            "choices drained after pick"
+        );
+    }
+
+    /// Picking the trailing escape-hatch row (index past the repo
+    /// list) keeps the brand-new-project path available.
+    #[test]
+    fn new_workspace_repo_pick_escape_hatch_mounts_new_project() {
+        let mut m = build_model();
+        let pk = lazybox_core::ProjectKey::github("acme", "widget");
+        m.new_workspace_repo_choices = vec![pk];
+        m.modal_stack.push(Id::NewWorkspaceRepo);
+        // Index 1 is the "create a new local project" row (the single
+        // repo occupies index 0).
+        let cmds = m.handle_choice_picked(vec![1]);
+        assert!(cmds.is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::NewProject));
+        assert!(m.new_workspace_repo_choices.is_empty());
+    }
+
     /// Empty / whitespace-only input is dropped silently.
     #[test]
     fn input_submitted_with_empty_text_returns_no_commands() {

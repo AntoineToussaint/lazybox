@@ -119,7 +119,8 @@ fn transparent_conf(native_scrollback: bool) -> String {
          set -g escape-time 0\n\
          set -g window-size latest\n\
          set -g mode-style \"fg=default,bg=default\"\n\
-         set -g message-style \"fg=default,bg=default\"\n",
+         set -g message-style \"fg=default,bg=default\"\n\
+         set -g focus-events on\n",
     );
     // Clipboard passthrough. `set-clipboard on` lets an inner program's
     // OSC 52 reach the attach client (which relays it to the host), and
@@ -176,6 +177,10 @@ fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
         vec!["set-option", "-g", "set-clipboard", "on"],
         vec!["set-option", "-g", "allow-passthrough", "on"],
     ];
+    // Agents (e.g. Claude Code) nag when they detect tmux with
+    // focus-events off. We own the config, so enable it for both fresh
+    // and recovered servers.
+    let focus_events = vec!["set-option", "-g", "focus-events", "on"];
     // `terminal-features` is independent of the scrollback flavor — an
     // already-running server must learn the client speaks OSC 8 either
     // way, else surviving sessions keep stripping hyperlinks.
@@ -204,6 +209,7 @@ fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
         ]
     };
     cmds.extend(clipboard);
+    cmds.push(focus_events);
     cmds
 }
 
@@ -877,6 +883,7 @@ mod tests {
             "terminal-features",
             "xterm*:hyperlinks",
         ];
+        let focus_events = vec!["set-option", "-g", "focus-events", "on"];
         let native = server_option_cmds(true);
         assert_eq!(
             native,
@@ -891,6 +898,7 @@ mod tests {
                 hyperlinks.clone(),
                 clipboard[0].clone(),
                 clipboard[1].clone(),
+                focus_events.clone(),
             ]
         );
         let legacy = server_option_cmds(false);
@@ -902,6 +910,7 @@ mod tests {
                 hyperlinks,
                 clipboard[0].clone(),
                 clipboard[1].clone(),
+                focus_events,
             ]
         );
     }
@@ -935,6 +944,24 @@ mod tests {
         assert!(
             transparent_conf(false).contains("set -as terminal-features 'xterm*:hyperlinks'\n")
         );
+    }
+
+    /// Both conf flavors and both server-option paths enable focus-events
+    /// so agents (e.g. Claude Code) running inside the tmux backend stop
+    /// nagging "focus-events off". Regression for the focus-events warning.
+    #[test]
+    fn both_paths_enable_focus_events() {
+        for native in [true, false] {
+            assert!(
+                transparent_conf(native).contains("set -g focus-events on\n"),
+                "native={native}"
+            );
+            assert!(
+                server_option_cmds(native)
+                    .contains(&vec!["set-option", "-g", "focus-events", "on"]),
+                "native={native}"
+            );
+        }
     }
 
     /// `with_socket` drops the native-flavor conf to disk and the

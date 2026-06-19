@@ -17,7 +17,7 @@
 //! isn't necessarily running. Driving it through `realm::Model`
 //! would force us to construct the whole component tree just to ask
 //! two questions. Stdin / println is the right surface here, the
-//! same way `lazybox daemon status` is plain text and not a panel.
+//! same way `lazybox server status` is plain text and not a panel.
 //!
 //! ## I/O abstraction
 //!

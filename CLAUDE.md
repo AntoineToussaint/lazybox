@@ -59,7 +59,7 @@ crates/
                    #   resolvers, latches, editors, platform shims.
   tui/             # tuirealm-based TUI client. Hosts `lazybox` binary with
                    #   subcommands: default (in-process daemon + TUI),
-                   #   `daemon start/stop/status`, `server api`,
+                   #   `server start/stop/status`, `server api`,
                    #   `--connect <socket>`.
 ```
 

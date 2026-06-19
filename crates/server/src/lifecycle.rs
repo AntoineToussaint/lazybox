@@ -14,7 +14,7 @@
 //! ```
 //!
 //! Clients resolve the socket via the same paths, so `lazybox` and
-//! `lazybox daemon *` agree without having to pass paths around.
+//! `lazybox server *` agree without having to pass paths around.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

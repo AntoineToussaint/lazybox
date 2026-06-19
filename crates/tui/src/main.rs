@@ -7,9 +7,9 @@
 //!                                  workspace, no setup, no polling —
 //!                                  for trying side panel + terminal
 //!                                  pane end-to-end without GitHub
-//!   lazybox daemon start            standalone daemon (for remote access)
-//!   lazybox daemon stop             stop a running standalone daemon
-//!   lazybox daemon status           show daemon status
+//!   lazybox server start            standalone daemon (for remote access)
+//!   lazybox server stop             stop a running standalone daemon
+//!   lazybox server status           show daemon status
 //!   lazybox server api              foreground JSON HTTP API gateway
 //!   lazybox slack init              interactive Slack token setup wizard
 //!   lazybox slack doctor            read-only validation of an existing setup

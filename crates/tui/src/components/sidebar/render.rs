@@ -30,8 +30,11 @@ impl Sidebar {
         let ci_failing = self.ci_failing_count();
         let review_pending = self.review_pending_count();
 
+        // Right inset reserves the scroll-indicator column (drawn at
+        // `area.width - 2`) plus a one-cell edge margin; the content
+        // ends flush against the indicator with no extra dead gutter.
         let l_pad: u16 = 1;
-        let r_pad: u16 = 3;
+        let r_pad: u16 = 2;
         let inner_width = area.width.saturating_sub(l_pad + r_pad);
 
         // Row 0 — app title + counts.
@@ -331,12 +334,11 @@ impl Sidebar {
                     Line::from(spans)
                 }
                 VisibleRow::KindHeader(kind) => {
-                    // Indented PR/Issue section header, sitting
-                    // between the repo header and the workspace rows
-                    // of that kind. Distinct from `RepoHeader` by
-                    // indent + leading marker; the chip-coloured
-                    // marker mirrors the per-row PR/issue pills so
-                    // the eye lines them up.
+                    // PR/Issue section header, sitting between the repo
+                    // header and the workspace rows of that kind. The
+                    // chip-coloured marker mirrors the per-row PR/issue
+                    // pills and sits at the same inset as the workspace
+                    // type glyph so the eye lines them up.
                     let is_cursor = i == self.cursor;
                     let row_bg = if is_cursor && focused {
                         Some(theme.row_focused())
@@ -358,9 +360,6 @@ impl Sidebar {
                             caret.to_string(),
                             row_bg.unwrap_or_default().fg(theme.text_dim),
                         ),
-                        // Two-space indent so kind headers tuck under
-                        // their parent repo header visually.
-                        Span::raw("  "),
                         Span::styled(format!("{marker} "), row_bg.unwrap_or_default().fg(color)),
                         Span::styled(
                             label,
@@ -371,8 +370,8 @@ impl Sidebar {
                         ),
                     ];
                     if let Some(bg) = row_bg {
-                        // caret + 2-space indent + "X " marker + label.
-                        let used = caret.chars().count() + 2 + 2 + label.chars().count();
+                        // caret + "X " marker + label.
+                        let used = caret.chars().count() + 2 + label.chars().count();
                         if used < row_budget {
                             spans.push(Span::styled(" ".repeat(row_budget - used), bg));
                         }
@@ -404,7 +403,7 @@ impl Sidebar {
                     } else {
                         Style::default().fg(theme.text_dim)
                     };
-                    let prefix = if is_cursor { "      ▸ " } else { "        " };
+                    let prefix = if is_cursor { "    ▸ " } else { "      " };
                     let name_budget = row_budget.saturating_sub(visual_width(prefix));
                     let name_text = truncate_ellipsis(name, name_budget);
                     let used = visual_width(prefix) + visual_width(&name_text);

@@ -5,10 +5,10 @@ expression: rendered
  LAZYBOX  3  [7d]
  f [all]  o [split]
 
- ────────────────────────────────────
+ ─────────────────────────────────────
 
    ▾  owner/repo
-     I Issues
-   ▸ ○ 1 A   task: o/r#1          10m
-     ○ 2 A   task: o/r#2           1h
-     ○ 3 A   task: o/r#3           2h
+   I Issues
+ ▸ ○ 1 A   task: o/r#1             10m
+   ○ 2 A   task: o/r#2              1h
+   ○ 3 A   task: o/r#3              2h

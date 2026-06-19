@@ -123,17 +123,19 @@ const STEPS: &[TourStep] = &[
     TourStep {
         title: "5 · Ship it & make it yours",
         body: &[
-            "When a PR is ready, the g leader opens the GitHub chord:",
+            "When a PR is ready, press g — a which-key menu pops up",
+            "showing everything you can do to this PR:",
             "",
-            "  g m  merge     g v  reviewers     g a  assignees",
-            "  g l  labels    g o  open in browser",
+            "  g m  merge PR    g v  reviewers   g a  assignees",
+            "  g l  labels      g o  open in browser",
             "",
-            "? shows the full keymap, , opens Settings, q q quits.",
-            "Inside a terminal every key goes to the agent — press ]]",
-            "to return to the sidebar first, then q q, ? and the other",
-            "global shortcuts apply.",
+            "g shows the menu; the second key picks. The old",
+            "Shift-M/V/G/L/O keys still work as direct aliases.",
             "",
-            "Everything is plain YAML in ~/.lazybox/config.yaml — scopes,",
+            "? shows the full keymap, , Settings, q q quits. In a",
+            "terminal keys go to the agent — press ]] to return first.",
+            "",
+            "It's all plain YAML in ~/.lazybox/config.yaml: scopes,",
             "agents, keybindings.",
             "",
             "That's the tour — Enter to finish, Shift-T to re-open it.",
@@ -496,6 +498,29 @@ mod tests {
                 "catalog default for {kind:?} drifted from the tour hint",
             );
             assert!(all.contains(hint), "tour no longer shows {hint}");
+        }
+    }
+
+    #[test]
+    fn github_leader_demo_matches_the_catalog() {
+        use lazybox_tui_core::action::{ActionDef, ActionGroup};
+        // The ship-it step demonstrates the g leader as a menu, and its
+        // chords + labels must be the catalog's — so the demo can't
+        // drift from the live keymap (issue #145, #114).
+        let all = render_all();
+        assert!(
+            all.contains("press g"),
+            "tour no longer frames g as a which-key menu"
+        );
+        let group = ActionGroup::Github;
+        for (key, kind) in group.members() {
+            let chord = format!("{} {key}", group.leader());
+            assert!(all.contains(&chord), "tour missing leader chord {chord}");
+            let label = ActionDef::for_kind(*kind).label;
+            assert!(
+                all.contains(label),
+                "tour missing label {label:?} for {chord}"
+            );
         }
     }
 

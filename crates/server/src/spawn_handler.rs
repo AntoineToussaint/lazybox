@@ -1064,7 +1064,6 @@ pub async fn handle_spawn(
         let id = terminal_id;
         let first_output = first_output_signal_for_inject;
         let ready_signal = ready_signal_for_inject;
-        let agent_states = config.agent_states.clone();
         let t0_for_inject = t0;
         let config_for_inject = config.clone();
         tokio::spawn(async move {
@@ -1107,33 +1106,34 @@ pub async fn handle_spawn(
                 SETTLE,
             )
             .await;
-            // The deadline rung pastes blindly — but if the screen is a
-            // boot-time gate (folder-trust / login / bypass chooser),
-            // the paste plus its follow-up `\r` would blindly ANSWER
-            // the chooser instead of landing in the input box. When the
-            // cached state says the agent is parked on a gate, keep
-            // waiting for the next ready / state change rather than
-            // pasting, with an overall cap; past the cap, drop the
-            // prompt loudly rather than feed it into the dialog.
-            if trigger == InjectTrigger::Deadline {
-                const GATE_CAP: std::time::Duration = std::time::Duration::from_secs(600);
-                let gate_start = std::time::Instant::now();
-                while agent_states.lock().await.get(&id).copied()
-                    == Some(lazybox_ipc::AgentState::InputNeeded)
-                {
-                    if gate_start.elapsed() >= GATE_CAP {
-                        tracing::warn!(
-                            terminal_id = ?id,
-                            "initial_prompt: agent still on an input gate after {GATE_CAP:?}; dropping the prompt rather than answering the gate with it"
-                        );
-                        return;
-                    }
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(1),
-                        ready_signal.notified(),
-                    )
-                    .await;
-                }
+            // The deadline rung means `ready` never fired within
+            // HARD_DEADLINE. For an agent with an authoritative readiness
+            // detector (Claude) that does NOT mean "safe to paste": under
+            // many concurrent spawns the pump lags behind the deadline, or
+            // the agent is still parked on a boot-time gate (folder-trust /
+            // login / bypass chooser). A blind paste here lands the
+            // work-context prompt in a half-drawn screen or, with its
+            // follow-up `\r`, ANSWERS the gate with it — the prompt is lost
+            // and the user has no signal it happened. So instead of dropping
+            // (the old `GATE_CAP` path) or pasting blindly, keep the prompt
+            // pending and deliver it the moment the agent genuinely reaches
+            // ready, bounded only by terminal liveness. The bare-deadline
+            // blind paste is kept for detector-less agents (`requires_ready`
+            // false), whose `ready` signal never fires — losing the prompt
+            // to a cold-start hang is worse there than a best-effort paste.
+            if trigger == InjectTrigger::Deadline
+                && agent.inject_requires_ready()
+                && !await_pending_ready(id, &ready_signal, &config_for_inject.terminals).await
+            {
+                tracing::warn!(
+                    terminal_id = ?id,
+                    "initial_prompt: terminal exited before the agent became ready — work prompt not delivered"
+                );
+                let _ = config_for_inject.bus.send(Event::Notification {
+                    title: "Work prompt not delivered".into(),
+                    body: "agent never became ready — press w again to retry".into(),
+                });
+                return;
             }
             tracing::info!(
                 terminal_id = ?id,
@@ -1150,6 +1150,11 @@ pub async fn handle_spawn(
                     terminal_id = ?id,
                     "initial_prompt: backend.write(paste) failed: {e}"
                 );
+                let _ = config_for_inject.bus.send(Event::Notification {
+                    title: "Work prompt not delivered".into(),
+                    body: "agent terminal closed before the prompt landed — press w again to retry"
+                        .into(),
+                });
                 return;
             }
             // Paste/submit split. Agents like Claude Code batch rapid
@@ -1236,6 +1241,36 @@ async fn await_inject_window(
             let _ = tokio::time::timeout(hard_deadline, first_output_notify).await;
             tokio::time::sleep(settle).await;
         } => InjectTrigger::Settle,
+    }
+}
+
+/// Park a pending spawn-time prompt until the agent is genuinely ready to
+/// receive it, instead of dropping it or pasting blindly past the inject
+/// deadline. Returns `true` once `ready` fires (deliver the prompt now),
+/// `false` once the terminal has gone away (nothing left to deliver to —
+/// the caller surfaces the failure).
+///
+/// `ready` is the pump's one-shot composer-drawn signal; it fires when the
+/// agent leaves any boot-time gate (folder-trust / login / bypass chooser)
+/// AND its input box is drawn, so waiting on it subsumes the old
+/// gate-polling loop. The 1s poll re-checks terminal liveness so a terminal
+/// that exits (or never finishes booting) ends the wait rather than leaking
+/// the task — the pump removes its `terminals` entry on exit.
+async fn await_pending_ready(
+    id: TerminalId,
+    ready: &tokio::sync::Notify,
+    terminals: &tokio::sync::Mutex<std::collections::HashMap<TerminalId, String>>,
+) -> bool {
+    loop {
+        if !terminals.lock().await.contains_key(&id) {
+            return false;
+        }
+        if tokio::time::timeout(std::time::Duration::from_secs(1), ready.notified())
+            .await
+            .is_ok()
+        {
+            return true;
+        }
     }
 }
 
@@ -4942,5 +4977,50 @@ mod tests {
             } => unreachable!(),
         };
         assert_eq!(trigger, InjectTrigger::Settle);
+    }
+
+    /// A prompt parked past the deadline must be released the instant the
+    /// agent reaches ready — even though `ready` only fires once, and even
+    /// when that firing lands before the waiter registers (`notify_one`
+    /// stores a permit). This is the "pending prompt survives a gate and
+    /// is delivered once ready" path.
+    #[tokio::test(start_paused = true)]
+    async fn pending_prompt_released_when_agent_becomes_ready() {
+        let ready = std::sync::Arc::new(tokio::sync::Notify::new());
+        let terminals =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::from([
+                (TerminalId(7), "k".to_string()),
+            ])));
+        let ready_signal = ready.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            ready_signal.notify_one();
+        });
+        assert!(
+            await_pending_ready(TerminalId(7), &ready, &terminals).await,
+            "ready firing must release the pending prompt for delivery",
+        );
+    }
+
+    /// When the terminal exits before the agent ever reaches ready, the
+    /// pending prompt can't be delivered — the helper reports failure so
+    /// the caller surfaces it instead of leaking the task forever. The
+    /// pump signals exit by removing the id from the `terminals` map.
+    #[tokio::test(start_paused = true)]
+    async fn pending_prompt_gives_up_when_terminal_exits() {
+        let ready = std::sync::Arc::new(tokio::sync::Notify::new());
+        let terminals =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::from([
+                (TerminalId(7), "k".to_string()),
+            ])));
+        let terminals_for_exit = terminals.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            terminals_for_exit.lock().await.remove(&TerminalId(7));
+        });
+        assert!(
+            !await_pending_ready(TerminalId(7), &ready, &terminals).await,
+            "a terminal that exits before ready must end the wait as a failure",
+        );
     }
 }

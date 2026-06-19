@@ -1,12 +1,12 @@
-# Repo-local snippet library for pilot itself.
+# Repo-local snippet library for lazybox itself.
 #
 # Snippets are keystroke shortcuts: inside a terminal pane, press `]`
 # then a key to expand the prompt below and auto-send it to the active
 # agent. Type to filter; a unique match fires instantly (so `]rev`
 # sends the review prompt in three keystrokes).
 #
-# This file is checked in, so everyone working on pilot shares the same
-# starter set. Add your own personal ones in `~/.pilot/snippets.yaml`
+# This file is checked in, so everyone working on lazybox shares the same
+# starter set. Add your own personal ones in `~/.lazybox/snippets.yaml`
 # (repo-local entries win on key conflict).
 snippets:
   rev:

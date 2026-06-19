@@ -1,16 +1,16 @@
 name: Bug report
-description: Something in pilot is broken or behaving unexpectedly.
+description: Something in lazybox is broken or behaving unexpectedly.
 title: "[bug]: "
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to file a report. pilot is pre-1.0 and runs
+        Thanks for taking the time to file a report. lazybox is pre-1.0 and runs
         in early-adopter dev mode, so sharp edges are expected — but details help
         us fix them fast. Please fill in as much as you can.
 
-        A `/tmp/pilot.log` excerpt and the exact commit you built from are the
+        A `/tmp/lazybox.log` excerpt and the exact commit you built from are the
         two most useful things you can include.
   - type: textarea
     id: what-happened
@@ -42,8 +42,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: pilot version / commit
-      description: Output of `pilot --version`, or the `git rev-parse HEAD` of the commit you built from.
+      label: lazybox version / commit
+      description: Output of `lazybox --version`, or the `git rev-parse HEAD` of the commit you built from.
       placeholder: a26b963
     validations:
       required: true
@@ -61,8 +61,8 @@ body:
     attributes:
       label: Relevant log excerpt
       description: >
-        Paste the relevant portion of `/tmp/pilot.log` (re-run with
-        `RUST_LOG=pilot=debug` for verbose output). This will be rendered as
+        Paste the relevant portion of `/tmp/lazybox.log` (re-run with
+        `RUST_LOG=lazybox=debug` for verbose output). This will be rendered as
         code, so no backticks needed.
       render: text
     validations:

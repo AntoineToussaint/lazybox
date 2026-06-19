@@ -36,7 +36,7 @@ workspace — built for developers juggling many PRs and AI coding agents at onc
 - **🌳 A worktree per task** — every row opens an isolated git worktree, so PRs never step on each other's working trees.
 - **🤖 Agents built in** — spawn Claude Code, Codex, or Cursor in a row's worktree with one key; `w` picks the right prompt for the row's state (fix CI / address comments / implement issue).
 - **🖥️ Embedded terminals** — a live PTY per workspace (split & tile them), powered by a vendored ghostty VT parser.
-- **🔌 Source-agnostic** — GitHub today; Linear, Slack, and more plug in behind the same interface.
+- **🔌 Source-agnostic** — GitHub and Linear today, surfacing in one inbox behind the same interface, with an optional Slack mirror.
 - **🛰️ Remote-friendly** — a client/daemon split runs over an SSH-forwarded socket for working against a remote box.
 
 ## Install

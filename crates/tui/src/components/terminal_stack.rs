@@ -864,16 +864,17 @@ impl TerminalStack {
     }
 
     /// True when every agent slot keyed to `session_key` already
-    /// shows `state` in its tab badge — i.e. applying the matching
-    /// `Event::AgentState` again would change nothing on screen.
-    /// Mirrors the session-wide apply in the `AgentState` event arm.
+    /// shows `state` in its tab badge. The orchestrator uses it as a
+    /// conservative redraw gate: a `false` means at least one agent
+    /// tab in the session would paint differently from `state`, so an
+    /// incoming `Event::AgentState` is worth a redraw.
     ///
-    /// The orchestrator checks this ALONGSIDE the sidebar's
-    /// equivalent before skipping a redraw: badges are per-terminal,
-    /// so a freshly-spawned second agent in a workspace can need a
-    /// badge flip even when the sidebar's session-level state is
-    /// already correct. Vacuously true when the session has no agent
-    /// slots (nothing to repaint).
+    /// Checked ALONGSIDE the sidebar's equivalent before skipping a
+    /// redraw: badges are per-terminal (the event arm applies state to
+    /// the one terminal it names), so a freshly-spawned second agent in
+    /// a workspace can need a badge flip even when the sidebar's
+    /// session-level state is already correct. Vacuously true when the
+    /// session has no agent slots (nothing to repaint).
     pub fn displays_agent_state(
         &self,
         session_key: &SessionKey,
@@ -1959,20 +1960,21 @@ impl TerminalStack {
                 self.focus_terminal(*terminal_id);
             }
             Event::AgentState {
-                session_key, state, ..
+                terminal_id, state, ..
             } => {
-                // Update every agent slot in this session — the
-                // daemon broadcasts one event per terminal, but the
-                // sidebar's needs-input indicator is session-keyed so
-                // we apply by session_key. The wire `terminal_id` is
-                // for per-terminal consumers (chat dispatcher); it's
-                // intentionally unused here.
-                for slot in self.terminals.values_mut() {
-                    if &slot.session_key == session_key
-                        && matches!(slot.kind, TerminalKind::Agent(_))
-                    {
-                        slot.agent_state = *state;
-                    }
+                // The tab badge is per-terminal. The daemon caches and
+                // broadcasts agent state per terminal, so a workspace
+                // running two agents (a `Ctrl-w` split, or claude +
+                // codex) must have each badge track its OWN terminal.
+                // Applying by `session_key` instead clobbered every
+                // sibling badge with the last terminal's state — a
+                // busy agent read Idle the moment a quiet sibling
+                // emitted, and an idle one read Working off a busy
+                // sibling. Update only the slot the event names.
+                if let Some(slot) = self.terminals.get_mut(terminal_id)
+                    && matches!(slot.kind, TerminalKind::Agent(_))
+                {
+                    slot.agent_state = *state;
                 }
             }
             Event::TerminalExited { terminal_id, .. } => {
@@ -4135,6 +4137,52 @@ mod agent_badge_tests {
         // to repaint.
         let other = SessionKey::new("github:o/r#2");
         assert!(stack.displays_agent_state(&other, AgentState::Working));
+    }
+
+    /// A state event for one agent must not clobber a sibling agent's
+    /// badge. Two agents in one session diverge (Working / Done); an
+    /// event for one leaves the other's badge untouched. The pre-fix
+    /// session-wide apply overwrote every sibling, so a busy agent read
+    /// the last sibling's Idle/Done (false negative) and an idle one
+    /// read a sibling's Working (false positive).
+    #[test]
+    fn agent_state_event_updates_only_its_own_terminal() {
+        use lazybox_ipc::AgentState;
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+
+        spawn_agent(&mut stack, 1, &sk, "claude");
+        spawn_agent(&mut stack, 2, &sk, "codex");
+
+        let badge = |stack: &TerminalStack, id: u64| {
+            stack.terminals.get(&TerminalId(id)).map(|s| s.agent_state)
+        };
+
+        stack.on_event(&Event::AgentState {
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            state: AgentState::Working,
+        });
+        stack.on_event(&Event::AgentState {
+            terminal_id: TerminalId(2),
+            session_key: sk.clone(),
+            state: AgentState::Done,
+        });
+        assert_eq!(badge(&stack, 1), Some(AgentState::Working));
+        assert_eq!(badge(&stack, 2), Some(AgentState::Done));
+
+        // Terminal 1 finishes — terminal 2's badge is left alone.
+        stack.on_event(&Event::AgentState {
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            state: AgentState::Idle,
+        });
+        assert_eq!(badge(&stack, 1), Some(AgentState::Idle));
+        assert_eq!(
+            badge(&stack, 2),
+            Some(AgentState::Done),
+            "a sibling's state event must not overwrite this badge",
+        );
     }
 }
 

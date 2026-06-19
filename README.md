@@ -2,10 +2,15 @@
 
 # 📥 lazybox
 
-**A reactive PR inbox in your terminal.** Instead of refreshing GitHub, events
-flow to you — new comments, CI failures, and review requests surface as they
-land. Each task opens a git worktree with an embedded terminal for Claude Code,
-Codex, Cursor, or a shell.
+**Run a fleet of coding agents from your terminal — and step in when it
+matters.** Every task gets its own isolated git worktree and a live embedded
+terminal for Claude Code, Codex, Cursor, or a shell, so you can spin up and
+juggle many agents without ever managing worktrees by hand. Useful even with a
+quiet GitHub.
+
+Wire up GitHub or Linear and it's also a **reactive inbox**: instead of
+refreshing, events flow to you — new comments, CI failures, and review requests
+surface as they land, with per-row read/unread tracking.
 
 Think a TUI inbox (lazygit-style) where every row is also a ready-to-run
 workspace — built for developers juggling many PRs and AI coding agents at once.
@@ -92,7 +97,7 @@ lazybox --test     # throwaway tempdir repo + one seeded workspace, no GitHub
 You land on the inbox. Then:
 
 ```
-j / k     move between workspaces
+↑ / ↓     move between workspaces   (j / k also works)
 Enter     open the selected workspace
 c         spawn a Claude Code session in its worktree   (s for a plain shell)
 ]]        back to the inbox
@@ -123,16 +128,18 @@ it — is in [`docs/features/`](docs/features/).
 ## Essential keys
 
 The bottom hint bar always shows what's available in the focused pane; press `?`
-for the full overlay. The ones you'll reach for first:
+for the full overlay. lazybox is also fully mouse-driven — click a pane or row
+to focus it, drag the splitters to resize, wheel-scroll, and right-click links
+(or rows) for the context menu. The keys you'll reach for first:
 
 | Key | Action |
 |---|---|
 | `Tab` | Cycle Sidebar → Activity → Terminals |
-| `j` / `k` · `Enter` | Navigate the inbox · open a workspace |
-| `c` / `x` / `u` · `s` | Spawn Claude / Codex / Cursor · spawn a shell |
+| `↑` / `↓` · `Enter` | Navigate the inbox (`j` / `k` also works) · open a workspace |
+| `c` / `x` / `u` · `s` | Spawn Claude / Codex / Cursor · spawn a shell (`c` needs the `claude` CLI on `PATH`; `s` always works) |
 | `w` | "Work" — spawn Claude with the right prompt for the row's state (fix CI / address comments / implement issue) |
 | `m` · `r` | Mark read · reply |
-| `Shift-M` · `Shift-V` · `Shift-L` · `Shift-O` | Merge PR · reviewers · labels · open in browser |
+| `g` | GitHub menu (which-key popup): `g m` merge · `g v` reviewers · `g a` assignees · `g l` labels · `g o` open in browser (`Shift-M` / `Shift-V` / `Shift-L` / `Shift-O` are direct aliases) |
 | `,` · `?` · `q q` | Settings · help · quit |
 | `]]` | Leave a terminal, back to the sidebar |
 

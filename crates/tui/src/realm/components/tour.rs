@@ -19,7 +19,9 @@ use crate::realm::Msg;
 use crate::realm::UserEvent;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
-use tuirealm::event::{Event, Key, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use tuirealm::event::{
+    Event, Key, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
@@ -305,7 +307,11 @@ impl Component for Tour {
             Style::default().fg(theme.accent).bold(),
         ));
         push(&mut spans, &mut x, "  ".to_string(), Style::default());
-        let next_label = if self.is_last() { " Finish " } else { " Next → " };
+        let next_label = if self.is_last() {
+            " Finish "
+        } else {
+            " Next → "
+        };
         self.next_btn = Some(push(
             &mut spans,
             &mut x,
@@ -548,7 +554,13 @@ mod tests {
         // Mouse support is a first-class point: focus, select, resize,
         // scroll, and right-click-to-open links.
         let all = render_all().to_lowercase();
-        for needle in ["click a pane", "row to select", "resize", "scrolls", "right-click"] {
+        for needle in [
+            "click a pane",
+            "row to select",
+            "resize",
+            "scrolls",
+            "right-click",
+        ] {
             assert!(all.contains(needle), "mouse hint {needle:?} missing");
         }
     }

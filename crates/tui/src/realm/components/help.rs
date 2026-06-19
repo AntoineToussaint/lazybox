@@ -6,7 +6,7 @@
 use crate::pane::Binding;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
-use lazybox_tui_core::action::{ActionDef, Section};
+use lazybox_tui_core::action::{ActionDef, ActionGroup, Section};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::Event;
@@ -27,8 +27,48 @@ pub struct HelpSection {
     pub bindings: Vec<Binding>,
 }
 
+/// A leader-key chord group rendered as its own labeled block at the
+/// top of the panel — the which-key system surfaced as discoverable
+/// UI so users learn that `g` *opens a menu* rather than memorizing
+/// five separate chords. Built from [`ActionGroup`] so the leader,
+/// chords, and aliases all track the catalog (issue #145).
+pub struct LeaderGroup {
+    /// Heading line, e.g. `github — press g, then:`.
+    heading: String,
+    /// One row per in-group chord: keys `g m`, label `merge PR`.
+    chords: Vec<Binding>,
+    /// The legacy direct-key aliases this group replaced, e.g.
+    /// `aliases: Shift-M · Shift-V · Shift-G · Shift-L · Shift-O`.
+    aliases: String,
+}
+
+impl LeaderGroup {
+    fn from_action_group(group: ActionGroup) -> Self {
+        let chords = group
+            .members()
+            .iter()
+            .map(|(key, kind)| Binding {
+                keys: std::borrow::Cow::Owned(format!("{} {key}", group.leader())),
+                label: std::borrow::Cow::Borrowed(ActionDef::for_kind(*kind).label),
+            })
+            .collect();
+        let aliases = group
+            .members()
+            .iter()
+            .map(|(_, kind)| ActionDef::for_kind(*kind).default_keys)
+            .collect::<Vec<_>>()
+            .join(" · ");
+        Self {
+            heading: format!("{} — press {}, then:", group.title(), group.leader()),
+            chords,
+            aliases: format!("aliases: {aliases}"),
+        }
+    }
+}
+
 /// Yazi-style which-key panel.
 pub struct Help {
+    leaders: Vec<LeaderGroup>,
     sections: Vec<HelpSection>,
 }
 
@@ -72,7 +112,11 @@ impl Help {
                 HelpSection { title, bindings }
             })
             .collect();
-        Self { sections }
+        let leaders = ActionGroup::all()
+            .iter()
+            .map(|g| LeaderGroup::from_action_group(*g))
+            .collect();
+        Self { leaders, sections }
     }
 
     fn flat(&self) -> Vec<&Binding> {
@@ -94,8 +138,19 @@ impl Component for Help {
         if bindings.is_empty() {
             return;
         }
-        let rows = bindings.len().div_ceil(COLS) as u16;
-        let panel_h = (rows + PADDING_Y * 2).min(area.height);
+
+        // The leader band is a heading + a chord grid + an aliases note
+        // per group, with one blank separator before the catalog grid.
+        let leader_rows: u16 = self
+            .leaders
+            .iter()
+            .map(|lg| 1 + lg.chords.len().div_ceil(COLS) as u16 + 1)
+            .sum();
+        let sep_rows = if self.leaders.is_empty() { 0 } else { 1 };
+        let grid_rows = bindings.len().div_ceil(COLS) as u16;
+        let content_rows = leader_rows + sep_rows + grid_rows;
+
+        let panel_h = (content_rows + PADDING_Y * 2).min(area.height);
         let panel = Rect {
             x: area.x.saturating_add(PADDING_X.min(area.width)),
             y: area
@@ -126,41 +181,88 @@ impl Component for Help {
             .map(|_| Constraint::Ratio(1, COLS as u32))
             .collect();
         let cols = Layout::horizontal(col_constraints).split(panel);
+        let bottom = panel.y + panel.height;
 
-        for (idx, b) in bindings.iter().enumerate() {
-            let col_idx = idx % COLS;
-            let row_idx = (idx / COLS) as u16;
-            let col = cols[col_idx];
+        // Draw a binding grid starting at `start_y`; returns the row
+        // just past it. Shared by the leader chords and the catalog.
+        let draw_grid = |frame: &mut Frame, items: &[&Binding], start_y: u16| -> u16 {
+            for (idx, b) in items.iter().enumerate() {
+                let col = cols[idx % COLS];
+                let cell = Rect {
+                    x: col.x,
+                    y: start_y + (idx / COLS) as u16,
+                    width: col.width,
+                    height: 1,
+                };
+                if cell.y >= bottom {
+                    break;
+                }
+                const KEY_PAD: usize = 14;
+                let mut key = format_keys_for_display(&b.keys);
+                if key.chars().count() < KEY_PAD {
+                    key.push_str(&" ".repeat(KEY_PAD - key.chars().count()));
+                }
+                let key_style = Style::default()
+                    .bg(theme.surface)
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD);
+                let sep_style = Style::default().bg(theme.surface).fg(theme.text_dim);
+                let label_style = Style::default().bg(theme.surface).fg(theme.text_strong);
+                let line = Line::from(vec![
+                    Span::styled(" ", panel_bg),
+                    Span::styled(key, key_style),
+                    Span::styled("  ", sep_style),
+                    Span::styled(b.label.clone(), label_style),
+                ]);
+                frame.render_widget(Paragraph::new(line), cell);
+            }
+            start_y + items.len().div_ceil(COLS) as u16
+        };
+
+        let full_line = |frame: &mut Frame, text: &str, y: u16, style: Style| {
+            if y >= bottom {
+                return;
+            }
             let cell = Rect {
-                x: col.x,
-                y: col.y + PADDING_Y + row_idx,
-                width: col.width,
+                x: panel.x,
+                y,
+                width: panel.width,
                 height: 1,
             };
-            if cell.y >= panel.y + panel.height {
-                break;
-            }
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(format!(" {text}"), style))),
+                cell,
+            );
+        };
 
-            const KEY_PAD: usize = 14;
-            let mut key = format_keys_for_display(&b.keys);
-            if key.chars().count() < KEY_PAD {
-                key.push_str(&" ".repeat(KEY_PAD - key.chars().count()));
-            }
-
-            let key_style = Style::default()
-                .bg(theme.surface)
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD);
-            let sep_style = Style::default().bg(theme.surface).fg(theme.text_dim);
-            let label_style = Style::default().bg(theme.surface).fg(theme.text_strong);
-            let line = Line::from(vec![
-                Span::styled(" ", panel_bg),
-                Span::styled(key, key_style),
-                Span::styled("  ", sep_style),
-                Span::styled(b.label.clone(), label_style),
-            ]);
-            frame.render_widget(Paragraph::new(line), cell);
+        let mut y = panel.y + PADDING_Y;
+        for lg in &self.leaders {
+            full_line(
+                frame,
+                &lg.heading,
+                y,
+                Style::default()
+                    .bg(theme.surface)
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            );
+            y += 1;
+            let chords: Vec<&Binding> = lg.chords.iter().collect();
+            y = draw_grid(frame, &chords, y);
+            full_line(
+                frame,
+                &lg.aliases,
+                y,
+                Style::default()
+                    .bg(theme.surface)
+                    .fg(theme.text_dim)
+                    .add_modifier(Modifier::ITALIC),
+            );
+            y += 1;
         }
+        y += sep_rows;
+
+        draw_grid(frame, &bindings, y);
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -228,7 +330,63 @@ fn format_keys_for_display(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_keys_for_display;
+    use super::{Help, format_keys_for_display};
+    use lazybox_tui_core::action::{ActionDef, ActionGroup};
+
+    /// Render the help panel into a throwaway backend and return the
+    /// visible text — the surface for asserting the leader section.
+    fn render_help() -> String {
+        use tuirealm::component::Component;
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        use tuirealm::ratatui::layout::Rect;
+        let mut h = Help::from_catalog(&std::collections::BTreeMap::new());
+        let (w, ht) = (120u16, 40u16);
+        let mut term = Terminal::new(TestBackend::new(w, ht)).unwrap();
+        term.draw(|f| h.view(f, Rect::new(0, 0, w, ht))).unwrap();
+        let buf = term.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                let mut row = String::new();
+                for x in 0..buf.area.width {
+                    row.push_str(buf[(x, y)].symbol());
+                }
+                row.trim_end().to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn leader_section_lists_the_github_chords_from_the_catalog() {
+        // The g leader gets its own labeled block: the group title +
+        // every in-group chord and its catalog label. Pulling from the
+        // catalog keeps it from drifting (issue #145, #114).
+        let text = render_help();
+        let group = ActionGroup::Github;
+        assert!(text.contains(group.title()), "leader section title missing");
+        for (key, kind) in group.members() {
+            let chord = format!("{} {key}", group.leader());
+            assert!(text.contains(&chord), "help missing leader chord {chord}");
+            let label = ActionDef::for_kind(*kind).label;
+            assert!(text.contains(label), "help missing label {label:?}");
+        }
+    }
+
+    #[test]
+    fn leader_section_reflects_the_shift_aliases() {
+        // Each chord's legacy Shift-* key still works; the section says
+        // so, derived from the same catalog defaults.
+        let text = render_help();
+        for (_, kind) in ActionGroup::Github.members() {
+            let alias = ActionDef::for_kind(*kind).default_keys;
+            assert!(
+                text.contains(alias),
+                "help leader section omits alias {alias}"
+            );
+        }
+        assert!(text.contains("aliases"), "aliases note missing");
+    }
 
     #[test]
     fn modifier_letter_normalized() {

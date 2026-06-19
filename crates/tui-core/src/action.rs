@@ -279,6 +279,13 @@ impl ActionGroup {
         }
     }
 
+    /// Every leader group, in display order. UI surfaces (the help
+    /// panel's leader section, the which-key popup) iterate this so a
+    /// newly-added group shows up everywhere without per-surface edits.
+    pub fn all() -> &'static [ActionGroup] {
+        &[ActionGroup::Github]
+    }
+
     /// Resolve a group from its leader key, or `None` when the key
     /// isn't a group leader.
     pub fn from_leader(c: char) -> Option<Self> {
@@ -1451,6 +1458,18 @@ mod tests {
             ActionDef::for_kind(ActionKind::LeaveTerminal).available_in_terminal(),
             "the `]]` leave chord is the gateway back to the globals",
         );
+    }
+
+    #[test]
+    fn all_groups_round_trip_through_their_leader() {
+        // `all()` is what the UI iterates; every group it yields must
+        // be reachable from its own leader key so the help section and
+        // the live which-key popup can't list a group the keyboard
+        // won't open.
+        assert!(!ActionGroup::all().is_empty());
+        for &group in ActionGroup::all() {
+            assert_eq!(ActionGroup::from_leader(group.leader()), Some(group));
+        }
     }
 
     #[test]

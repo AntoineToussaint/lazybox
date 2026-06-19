@@ -276,6 +276,10 @@ pub struct ServerConfig {
     /// by the registering inject task; the pump also sweeps on
     /// `TerminalExited`.
     pub prompt_submit_signals: Arc<Mutex<HashMap<TerminalId, Arc<tokio::sync::Notify>>>>,
+    /// Factory for a structured agent run's underlying process I/O.
+    /// Defaults to spawning a real subprocess; tests swap in an
+    /// in-memory fake so they never launch `claude` or a shell.
+    pub agent_stream_spawner: Arc<dyn agent_stream::AgentStreamSpawner>,
     /// Structured stream-json agent runs. Keyed by wire-side run id.
     pub agent_runs: Arc<Mutex<HashMap<AgentRunId, agent_runs::AgentRunHandle>>>,
     /// Process-wide structured run id allocator.
@@ -448,6 +452,7 @@ impl ServerConfig {
             agent_detect_resets: Arc::new(Mutex::new(HashSet::new())),
             hook_driven_terminals: Arc::new(Mutex::new(HashMap::new())),
             prompt_submit_signals: Arc::new(Mutex::new(HashMap::new())),
+            agent_stream_spawner: Arc::new(agent_stream::ProcessAgentStreamSpawner),
             agent_runs: Arc::new(Mutex::new(HashMap::new())),
             next_agent_run_id: Arc::new(AtomicU64::new(1)),
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),

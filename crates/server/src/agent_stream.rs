@@ -15,9 +15,11 @@ macro_rules! bail {
     ($($t:tt)*) => { return Err(crate::ServerError::Agent(format!($($t)*))) };
 }
 use serde_json::{Value, json};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 /// Configuration for launching Claude Code in bidirectional JSONL mode.
@@ -387,50 +389,7 @@ fn first_string_field(value: &Value, keys: &[&str]) -> Option<String> {
     }
 }
 
-/// Minimal async child wrapper for driving Claude Code stream-json mode.
-pub struct ClaudeStreamChild {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: Lines<BufReader<ChildStdout>>,
-}
-
-impl ClaudeStreamChild {
-    pub async fn spawn(config: ClaudeStreamConfig) -> Result<Self> {
-        spawn_claude_stream(config).await
-    }
-
-    pub async fn send_user_text(&mut self, text: impl Into<String>) -> Result<()> {
-        let line = encode_user_text_jsonl(text)?;
-        self.stdin
-            .write_all(line.as_bytes())
-            .await
-            .ctx("write Claude stream input")?;
-        self.stdin.flush().await.ctx("flush Claude stream input")?;
-        Ok(())
-    }
-
-    pub async fn next_event(&mut self) -> Result<Option<ParsedAgentEvent>> {
-        match self
-            .stdout
-            .next_line()
-            .await
-            .ctx("read Claude stream output")?
-        {
-            Some(line) => parse_jsonl_line(&line).map(Some),
-            None => Ok(None),
-        }
-    }
-
-    pub async fn wait(mut self) -> Result<std::process::ExitStatus> {
-        self.child.wait().await.ctx("wait for Claude child")
-    }
-
-    pub(crate) fn split(self) -> (Child, ChildStdin, Lines<BufReader<ChildStdout>>) {
-        (self.child, self.stdin, self.stdout)
-    }
-}
-
-pub async fn spawn_claude_stream(config: ClaudeStreamConfig) -> Result<ClaudeStreamChild> {
+fn spawn_claude_command(config: &ClaudeStreamConfig) -> Result<(Child, ChildStdin, ChildStdout)> {
     let argv = config.argv();
     let (program, args) = argv
         .split_first()
@@ -449,12 +408,52 @@ pub async fn spawn_claude_stream(config: ClaudeStreamConfig) -> Result<ClaudeStr
     let mut child = command.spawn().ctx("spawn Claude stream child")?;
     let stdin = child.stdin.take().ctx("Claude child stdin unavailable")?;
     let stdout = child.stdout.take().ctx("Claude child stdout unavailable")?;
+    Ok((child, stdin, stdout))
+}
 
-    Ok(ClaudeStreamChild {
-        child,
-        stdin,
-        stdout: BufReader::new(stdout).lines(),
-    })
+/// Split, owned async I/O for one structured agent run, decoupled from
+/// the concrete child process. The production spawner wires these to a
+/// real subprocess; tests inject in-memory readers/writers so they
+/// never launch `claude` or a shell (CONTRIBUTING rule #5).
+pub struct AgentStreamIo {
+    pub stdin: Pin<Box<dyn AsyncWrite + Send>>,
+    pub stdout: Pin<Box<dyn AsyncRead + Send>>,
+    /// Resolves to the child's exit code once it terminates. The driver
+    /// awaits this only after stdout reaches EOF.
+    pub wait: Pin<Box<dyn Future<Output = Option<i32>> + Send>>,
+}
+
+/// Factory for the underlying process of a structured stream-json agent
+/// run. The server obtains a run's I/O through this seam instead of
+/// hard-coding a subprocess spawn, so tests mock at this boundary
+/// rather than executing a real program.
+pub trait AgentStreamSpawner: Send + Sync + 'static {
+    fn spawn<'a>(
+        &'a self,
+        config: ClaudeStreamConfig,
+    ) -> Pin<Box<dyn Future<Output = Result<AgentStreamIo>> + Send + 'a>>;
+}
+
+/// Default spawner: launches the configured program as a real child
+/// process and exposes its stdio.
+pub struct ProcessAgentStreamSpawner;
+
+impl AgentStreamSpawner for ProcessAgentStreamSpawner {
+    fn spawn<'a>(
+        &'a self,
+        config: ClaudeStreamConfig,
+    ) -> Pin<Box<dyn Future<Output = Result<AgentStreamIo>> + Send + 'a>> {
+        Box::pin(async move {
+            let (mut child, stdin, stdout) = spawn_claude_command(&config)?;
+            Ok(AgentStreamIo {
+                stdin: Box::pin(stdin),
+                stdout: Box::pin(stdout),
+                wait: Box::pin(
+                    async move { child.wait().await.ok().and_then(|status| status.code()) },
+                ),
+            })
+        })
+    }
 }
 
 pub fn user_text_value(text: impl Into<String>) -> Value {

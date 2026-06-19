@@ -1,5 +1,5 @@
 # Snippet inlined into every job of the cargo-dist-generated release
-# workflow. Installs the prerequisites pilot's build needs that
+# workflow. Installs the prerequisites lazybox's build needs that
 # Rust's toolchain doesn't provide:
 #
 # - Zig 0.15.2: libghostty-vt's `build.rs` invokes `zig build` to

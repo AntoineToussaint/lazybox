@@ -1,5 +1,6 @@
 [package]
 name = "lazybox-gh"
+description = "GitHub PRs and Issues provider for lazybox via octocrab polling."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

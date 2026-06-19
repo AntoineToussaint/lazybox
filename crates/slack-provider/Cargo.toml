@@ -1,5 +1,6 @@
 [package]
 name = "lazybox-slack"
+description = "Slack DMs/channels provider for lazybox via Web API plus Socket Mode."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

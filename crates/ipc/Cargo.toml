@@ -1,5 +1,6 @@
 [package]
 name = "lazybox-ipc"
+description = "Wire types, framing, and transports for lazybox's client/daemon IPC."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,5 +1,6 @@
 [package]
 name = "lazybox-server"
+description = "Server library for lazybox: PTY lifecycle, provider polling, agent runs."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

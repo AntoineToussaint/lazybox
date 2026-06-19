@@ -4015,7 +4015,7 @@ mod summarize_message_tests {
     fn collapses_leading_image_path_with_raw_spaces() {
         // The motivating case: a CleanShot path with unescaped spaces,
         // followed by the user's actual prompt.
-        let msg = "/Users/antoine/Library/Application Support/CleanShot/media/media_qjLWRXdkJW/CleanShot 2026-06-02 at 11.35.48@2x.png create an issue: foo";
+        let msg = "/tmp/Application Support/CleanShot/media/media_qjLWRXdkJW/CleanShot 2026-06-02 at 11.35.48@2x.png create an issue: foo";
         assert_eq!(summarize_message(msg), "[image] create an issue: foo");
     }
 

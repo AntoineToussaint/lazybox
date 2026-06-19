@@ -1,5 +1,6 @@
 [package]
 name = "lazybox-config"
+description = "YAML loader for lazybox's ~/.lazybox/config.yaml."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

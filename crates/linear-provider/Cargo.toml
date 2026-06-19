@@ -1,5 +1,6 @@
 [package]
 name = "lazybox-linear"
+description = "Linear issues provider for lazybox via GraphQL."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

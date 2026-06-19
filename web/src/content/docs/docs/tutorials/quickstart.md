@@ -84,7 +84,8 @@ In the sidebar:
 1. Press `j` / `k` to move the selection to a workspace.
 2. Press `Enter` to open it.
 3. Press `c` to spawn a **Claude Code** session — or `s` for a plain **shell**
-   if you'd rather not start an agent yet.
+   if you'd rather not start an agent yet. `c` needs the `claude` CLI on your
+   `PATH`; `s` always works.
 
 A terminal pane opens, embedded right inside lazybox, running in that
 workspace's own git worktree. Type a command; it runs in the worktree. That's

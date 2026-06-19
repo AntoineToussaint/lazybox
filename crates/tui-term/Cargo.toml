@@ -1,5 +1,6 @@
 [package]
 name = "lazybox-tui-term"
+description = "Embedded terminal widget for lazybox: portable-pty plus libghostty-vt."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

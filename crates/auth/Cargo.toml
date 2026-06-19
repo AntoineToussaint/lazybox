@@ -1,5 +1,6 @@
 [package]
 name = "lazybox-auth"
+description = "CredentialProvider trait and resolution chain for lazybox."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

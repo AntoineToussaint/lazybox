@@ -1,5 +1,6 @@
 [package]
 name = "lazybox-agents"
+description = "Agent trait plus Claude/Codex/Cursor/GenericCli runners for lazybox."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -98,6 +98,8 @@ c         spawn a Claude Code session in its worktree   (s for a plain shell)
 ]]        back to the inbox
 ```
 
+`c` needs the `claude` CLI on your `PATH`; `s` (a plain shell) always works.
+
 That's the whole model in one screen: the workspace got an **isolated git
 worktree** and a **live embedded terminal**, and you never left the inbox.
 Run `lazybox` (no `--test`) to do the same against your real PRs — the first

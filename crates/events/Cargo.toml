@@ -1,5 +1,6 @@
 [package]
 name = "lazybox-events"
+description = "Legacy in-process event bus for lazybox."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

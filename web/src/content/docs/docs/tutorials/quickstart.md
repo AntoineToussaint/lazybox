@@ -93,6 +93,18 @@ never left the inbox.
 
 To get back to the sidebar from a terminal, press `]]` (two presses).
 
+:::note[Don't see anything yet?]
+An empty sidebar right after setup is normal, not a bug:
+
+- The first poll can take up to ~60s (`providers.github.poll_interval`). Press
+  `Shift-R` to force a refresh instead of waiting.
+- Rows can be hidden by the role filter. Press `f` to widen it
+  (`all → author → reviewer → assignee → mentioned → all`).
+- If you simply have little GitHub activity, there may be nothing to show. You
+  don't need a PR to get the win above — press `n` to spin up a fresh scratch
+  workspace and open a session in it.
+:::
+
 ## What next
 
 You opened a seeded or existing workspace — now wire up a real repository:

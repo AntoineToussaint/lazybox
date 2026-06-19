@@ -98,7 +98,9 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///
 /// Order (left → right):
 ///
-/// 0. Prefix — `  ▸ ` (cursor) / `    ` (no cursor).
+/// 0. Prefix — `▸ ` (cursor) / `  ` (no cursor). The caret doubles as
+///    the left inset; rows align under the repo header's disclosure
+///    arrow rather than carrying an extra indent on top of the caret.
 /// 1. Type glyph — `⇄` / `○` / `◆` (or ASCII `p`/`i`/`l`) / blank,
 ///    followed by a single space separator (2 cells total) so the
 ///    row reads `⇄ 312` rather than the cramped `⇄312` — see issues
@@ -158,7 +160,7 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     // title is just a word fragment + `…` and tells you nothing.
     const TITLE_MIN: usize = 20;
     vec![
-        Column::fixed(4),                          // 0: prefix
+        Column::fixed(2),                          // 0: prefix (caret + space)
         Column::fixed(2),                          // 1: type glyph + trailing space separator
         Column::fixed(max_pr_num_width), // 2: pr_num (left-aligned, one space off the glyph)
         Column::fixed(2).priority(P_ROLE), // 3: role (" R" or blank)
@@ -198,7 +200,7 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
 }
 
 fn cell_prefix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let s = if ctx.is_cursor { "  ▸ " } else { "    " };
+    let s = if ctx.is_cursor { "▸ " } else { "  " };
     Cell::from_span(Span::styled(s, ctx.row_style()))
 }
 
@@ -603,6 +605,35 @@ mod tests {
             .map(|(i, _)| i)
             .collect();
         assert_eq!(flex_indices, vec![5]);
+    }
+
+    /// Regression for issue #121: the row prefix is a 2-cell caret
+    /// column (`▸ ` / `  `), not the old 4-cell caret-plus-indent. The
+    /// caret doubles as the left inset so workspace labels start two
+    /// columns closer to the pane edge.
+    #[test]
+    fn cell_prefix_is_two_cell_caret_without_extra_indent() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+
+        ctx.is_cursor = false;
+        let cell = cell_prefix(&ctx);
+        assert_eq!(cell.width(), 2);
+        assert_eq!(cell_text(&cell), "  ");
+
+        ctx.is_cursor = true;
+        let cell = cell_prefix(&ctx);
+        assert_eq!(cell.width(), 2);
+        assert_eq!(cell_text(&cell), "▸ ");
+
+        // The fixed prefix column matches the cell width so the table
+        // doesn't pad the inset back out.
+        match build_columns(4)[0].width {
+            crate::components::table::ColumnWidth::Fixed(w) => assert_eq!(w, 2),
+            other => panic!("expected Fixed(2) prefix column, got {other:?}"),
+        }
     }
 
     #[test]

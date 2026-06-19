@@ -5,9 +5,9 @@ expression: rendered
  LAZYBOX  3  [7d]
  f [all]  o [recent]
 
- ────────────────────────────────────
+ ─────────────────────────────────────
 
    ▾  owner/repo
-   ▸ ⇄ 10 A   task: o/r#10
-     ○ 11 A   task: o/r#11
-     ○ 12 A   task: o/r#12
+ ▸ ⇄ 10 A   task: o/r#10            5m
+   ○ 11 A   task: o/r#11           30m
+   ○ 12 A   task: o/r#12            1h

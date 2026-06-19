@@ -10,10 +10,18 @@
 //! even when lazybox runs over SSH, and needs no helper binary.
 //!
 //! Two sequences cover the field:
-//!   - **OSC 777** `ESC ] 777 ; notify ; TITLE ; BODY BEL` — full
+//!   - **OSC 777** `ESC ] 777 ; notify ; TITLE ; BODY ST` — full
 //!     title + body. Ghostty, Kitty, WezTerm.
-//!   - **OSC 9** `ESC ] 9 ; BODY BEL` — body only, no title field.
+//!   - **OSC 9** `ESC ] 9 ; BODY ST` — body only, no title field.
 //!     iTerm2; the title is folded into the body.
+//!
+//! Both are terminated with **ST** (`ESC \`), not BEL (`0x07`). A BEL
+//! terminator rings the host terminal's audible bell on every
+//! notification — and notifications fire on every agent state change,
+//! so a chatty agent rang it continuously (issue #135). ST is accepted
+//! as an OSC terminator by all four target terminals (the OSC 52
+//! clipboard path already relies on this), so the banner still lands
+//! without the bell.
 //!
 //! Inside tmux the sequence is wrapped in a passthrough envelope so
 //! it reaches the outer terminal — tmux must have `allow-passthrough`
@@ -24,9 +32,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 /// Which OSC notification dialect the controlling terminal speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OscNotifier {
-    /// `ESC ] 777 ; notify ; TITLE ; BODY BEL` — title + body.
+    /// `ESC ] 777 ; notify ; TITLE ; BODY ST` — title + body.
     Osc777,
-    /// `ESC ] 9 ; BODY BEL` — body only.
+    /// `ESC ] 9 ; BODY ST` — body only.
     Osc9,
 }
 
@@ -87,7 +95,7 @@ pub fn detect_osc_notifier() -> Option<OscNotifier> {
 pub fn osc_sequence(notifier: OscNotifier, title: &str, body: &str, in_tmux: bool) -> String {
     let seq = match notifier {
         OscNotifier::Osc777 => format!(
-            "\x1b]777;notify;{};{}\x07",
+            "\x1b]777;notify;{};{}\x1b\\",
             // The title is `;`-delimited from the body, so a `;`
             // inside it would shift the body into the wrong field.
             sanitize(title, true),
@@ -100,7 +108,7 @@ pub fn osc_sequence(notifier: OscNotifier, title: &str, body: &str, in_tmux: boo
                 (false, true) => title.to_string(),
                 (true, _) => body.to_string(),
             };
-            format!("\x1b]9;{}\x07", sanitize(&combined, false))
+            format!("\x1b]9;{}\x1b\\", sanitize(&combined, false))
         }
     };
     if in_tmux { wrap_tmux(&seq) } else { seq }
@@ -169,21 +177,21 @@ mod tests {
     #[test]
     fn osc777_carries_title_and_body() {
         let seq = osc_sequence(OscNotifier::Osc777, "Title", "Body", false);
-        assert_eq!(seq, "\x1b]777;notify;Title;Body\x07");
+        assert_eq!(seq, "\x1b]777;notify;Title;Body\x1b\\");
     }
 
     #[test]
     fn osc9_folds_title_into_body() {
         let seq = osc_sequence(OscNotifier::Osc9, "Title", "Body", false);
-        assert_eq!(seq, "\x1b]9;Title — Body\x07");
+        assert_eq!(seq, "\x1b]9;Title — Body\x1b\\");
         // Body-only and title-only collapse cleanly.
         assert_eq!(
             osc_sequence(OscNotifier::Osc9, "", "Body", false),
-            "\x1b]9;Body\x07"
+            "\x1b]9;Body\x1b\\"
         );
         assert_eq!(
             osc_sequence(OscNotifier::Osc9, "Title", "", false),
-            "\x1b]9;Title\x07"
+            "\x1b]9;Title\x1b\\"
         );
     }
 
@@ -193,13 +201,36 @@ mod tests {
         // string early, and a `;` in an OSC 777 title must not shift
         // the body into the wrong field.
         let seq = osc_sequence(OscNotifier::Osc777, "a;b\x1bc", "x\x07y", false);
-        assert_eq!(seq, "\x1b]777;notify;a,b c;x y\x07");
+        assert_eq!(seq, "\x1b]777;notify;a,b c;x y\x1b\\");
     }
 
     #[test]
     fn tmux_wrapping_doubles_inner_escapes() {
         let seq = osc_sequence(OscNotifier::Osc777, "T", "B", true);
-        assert_eq!(seq, "\x1bPtmux;\x1b\x1b]777;notify;T;B\x07\x1b\\");
+        // The inner OSC is now ST-terminated (`ESC \`), so its ESC is
+        // doubled by the passthrough envelope alongside the introducer.
+        assert_eq!(seq, "\x1bPtmux;\x1b\x1b]777;notify;T;B\x1b\x1b\\\x1b\\");
+    }
+
+    #[test]
+    fn never_emits_an_audible_bell() {
+        // Regression for issue #135: notifications fire on every agent
+        // state change, and a BEL (0x07) terminator rang the host's
+        // audible bell each time — disruptive, and on some hosts the
+        // bell handling swallowed the keystroke being typed. The OSC
+        // must terminate with ST and carry no BEL anywhere, including
+        // when a caller smuggles one in via the title/body or inside a
+        // tmux passthrough envelope.
+        for in_tmux in [false, true] {
+            for notifier in [OscNotifier::Osc777, OscNotifier::Osc9] {
+                let seq = osc_sequence(notifier, "ti\x07tle", "bo\x07dy", in_tmux);
+                assert!(
+                    !seq.contains('\x07'),
+                    "OSC notification must not contain BEL: {seq:?}"
+                );
+                assert!(seq.ends_with("\x1b\\"), "must be ST-terminated: {seq:?}");
+            }
+        }
     }
 
     #[test]

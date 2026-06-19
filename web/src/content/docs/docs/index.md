@@ -11,8 +11,8 @@ the way an email client surfaces mail. Each task becomes a *workspace*: a git
 worktree plus an embedded terminal running Claude Code, Codex, Cursor, or a
 plain shell.
 
-lazybox is source-agnostic. GitHub today, Linear, and an optional Slack mirror —
-all in the same inbox, with the same keys.
+lazybox is source-agnostic. GitHub and Linear today, with an optional Slack
+mirror — all in the same inbox, with the same keys.
 
 :::caution[Pre-1.0, early-adopter dev mode]
 lazybox is daily-driven on macOS; Linux runs the same code paths but is less

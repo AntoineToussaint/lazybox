@@ -22,8 +22,8 @@ issue, a piece of pre-PR work — maps to exactly one workspace.
 ## The reactive inbox model
 
 Most tools make you *pull*: you refresh GitHub, scan for what changed, and
-decide what to act on. lazybox inverts this. Providers (GitHub today, Linear, an
-optional Slack mirror) poll upstream and **push** events onto an internal bus.
+decide what to act on. lazybox inverts this. Providers (GitHub and Linear today,
+an optional Slack mirror) poll upstream and **push** events onto an internal bus.
 Subscribers — the TUI, the JSON API gateway — react. New comments, CI failures,
 and review requests arrive on their own and surface in the sidebar.
 

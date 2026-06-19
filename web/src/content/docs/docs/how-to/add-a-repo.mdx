@@ -51,6 +51,16 @@ You should now see the repository's rows in the sidebar with unread markers on
 items that have new activity. Selecting a row populates the activity pane on the
 right.
 
+:::note[Don't see anything yet?]
+A blank sidebar just after adding a repo is normal, not a bug:
+
+- The first poll can take up to ~60s (`providers.github.poll_interval`). Press
+  `Shift-R` to force a refresh instead of waiting.
+- Rows may be hidden by the role filter — press `f` to widen it back to `all`.
+- If the repo simply has little activity tied to you, there may be nothing to
+  show. Press `n` to spin up a fresh scratch workspace and open a session in it.
+:::
+
 ## Related
 
 - Configure polling and other per-repo behaviour in the

@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
 # lazybox pre-commit hook.
 #
-# Runs the same fmt + clippy + rustdoc gates as CI so a botched format,
-# a clippy warning, or a broken doc link never leaves the laptop.
-# Install once: `make install-hooks`.
+# Two depths, selected by the `lazybox.precommitFull` git config flag:
+#
+#   * Default (flag unset) — fmt check only. ~1s, no cargo build, no
+#     build-lock contention. This is what `scripts/bootstrap.sh` installs
+#     for everyone, and it's safe to run concurrently across worktrees
+#     (multiple agent sessions committing at once won't deadlock on the
+#     shared target/ build lock).
+#
+#   * Full (flag = true) — fmt + clippy + rustdoc, the exact CI gates, so
+#     a clippy warning or a broken doc link never leaves the laptop. Opt
+#     in with `make install-hooks`, which sets the flag. Heavier (a full
+#     workspace build); avoid it where many worktrees commit in parallel.
 #
 # Bypass for a one-off "I know what I'm doing" commit:
 #     git commit --no-verify
 # (Don't do this on the shared branch.)
 
 set -euo pipefail
+
+# Full gate only when explicitly opted in (set by `make install-hooks`).
+full="$(git config --bool --get lazybox.precommitFull 2>/dev/null || true)"
 
 # Honor lazybox's pinned zig if present — same resolution run.sh and the
 # Makefile use so anything the hook spawns picks up zig 0.15.2 instead
@@ -42,6 +54,13 @@ pre-commit: rustfmt diff above. Run \`cargo fmt --all\` (or
 if intentional (don't do this on shared branches).
 EOF
     exit 1
+fi
+
+# Fast path stops here. Clippy + rustdoc only run under the full gate
+# (`make install-hooks`); the default fmt-only hook is done.
+if [ "${full}" != "true" ]; then
+    echo "pre-commit: ok (fmt only — \`make install-hooks\` adds clippy + rustdoc)"
+    exit 0
 fi
 
 # 2. Clippy on the staged tree. Slower but catches the things CI

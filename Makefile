@@ -120,13 +120,16 @@ fmt: ## Format every crate in-place. Run before committing.
 fmt-check: ## Verify formatting WITHOUT modifying files. Matches CI's fmt job.
 	@cargo fmt --all -- --check
 
-pre-commit: fmt-check ## Same gate the .githooks/pre-commit hook runs (fmt + clippy + rustdoc).
+pre-commit: fmt-check ## Run the full gate by hand (fmt + clippy + rustdoc).
 	@PATH="$(PINNED_PATH)" cargo clippy --workspace --all-targets -- -D warnings
 	@PATH="$(PINNED_PATH)" RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --quiet
 
-install-hooks: ## Activate the in-tree .githooks/* (one-time per clone).
+install-hooks: ## Activate .githooks/ with the FULL gate (fmt + clippy + rustdoc).
 	@git config core.hooksPath .githooks
-	@echo "Installed .githooks/. Bypass any hook with \`git commit --no-verify\`."
+	@git config lazybox.precommitFull true
+	@echo "Installed .githooks/ (full gate: fmt + clippy + rustdoc)."
+	@echo "scripts/bootstrap.sh installs the fast fmt-only variant by default."
+	@echo "Bypass any hook with \`git commit --no-verify\`."
 
 clean: ## Clean cargo build artifacts (preserves the shared zig cache).
 	@cargo clean

@@ -119,6 +119,13 @@ impl Component for Splash {
             Style::default().fg(theme.text_dim),
         )));
         lines.push(Line::raw(""));
+        // Set expectations before dropping into the wizard: a first-run
+        // user lands here, then on the providers/agents/scopes pickers.
+        lines.push(Line::from(Span::styled(
+            "    Next: a ~30-second setup — pick your repos and agents.",
+            Style::default().fg(theme.text_dim),
+        )));
+        lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
             "    Press Enter to begin · Esc to cancel",
             Style::default()

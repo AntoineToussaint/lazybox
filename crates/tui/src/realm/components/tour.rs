@@ -19,7 +19,7 @@ use crate::realm::Msg;
 use crate::realm::UserEvent;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
-use tuirealm::event::{Event, Key, KeyEvent, KeyModifiers};
+use tuirealm::event::{Event, Key, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
@@ -49,8 +49,9 @@ const STEPS: &[TourStep] = &[
             "inbox, but you don't need any of that to start — a",
             "worktree-backed session works from an empty inbox too.",
             "",
-            "Step through with → / Enter, back with ←, Esc to skip.",
-            "Re-open this tour any time with Shift-T.",
+            "Keyboard or mouse — lazybox drives fully with either.",
+            "Step with → / Enter (or click below); ← goes back,",
+            "Esc skips. Re-open this tour any time with Shift-T.",
         ],
     },
     TourStep {
@@ -78,8 +79,13 @@ const STEPS: &[TourStep] = &[
             "  • CI failing            • review pending",
             "  • agent asking          • unread activity",
             "",
-            "j / k move    Enter opens    / searches",
+            "↑ / ↓ move    Enter opens    / searches",
             "Shift-S cycles mailboxes: Inbox → Inactive → Snoozed.",
+            "",
+            "Prefer the mouse? lazybox is fully clickable:",
+            "  • click a pane to focus it, a row to select it",
+            "  • drag the splitters to resize, wheel scrolls back",
+            "  • right-click a link in a terminal to open it",
         ],
     },
     TourStep {
@@ -136,15 +142,36 @@ const STEPS: &[TourStep] = &[
 pub struct Tour {
     /// Index into [`STEPS`]. Always in range — navigation clamps.
     cursor: usize,
+    /// Footer hit-boxes recorded by `view`, consumed by `on_mouse` so
+    /// an all-mouse user can click through the tour. `None` until the
+    /// first render.
+    back_btn: Option<Rect>,
+    next_btn: Option<Rect>,
+    skip_btn: Option<Rect>,
 }
 
 impl Tour {
     pub fn new() -> Self {
-        Self { cursor: 0 }
+        Self {
+            cursor: 0,
+            back_btn: None,
+            next_btn: None,
+            skip_btn: None,
+        }
     }
 
     fn is_last(&self) -> bool {
         self.cursor + 1 >= STEPS.len()
+    }
+
+    /// Step forward, finishing once we move past the last card.
+    fn advance(&mut self) -> Option<Msg> {
+        if self.is_last() {
+            Some(Msg::TourFinished)
+        } else {
+            self.cursor += 1;
+            None
+        }
     }
 
     /// Pure key handler — kept a method so tests can drive it without
@@ -155,15 +182,8 @@ impl Tour {
             return Some(Msg::TourFinished);
         }
         match key.code {
-            // Advance — and finish once we step past the last card.
-            Key::Right | Key::Enter | Key::Char(' ' | 'n' | 'l') => {
-                if self.is_last() {
-                    Some(Msg::TourFinished)
-                } else {
-                    self.cursor += 1;
-                    None
-                }
-            }
+            // Arrow keys lead; j/k-style aliases stay for muscle memory.
+            Key::Right | Key::Enter | Key::Char(' ' | 'n' | 'l') => self.advance(),
             Key::Left | Key::Backspace | Key::Char('p' | 'h') => {
                 self.cursor = self.cursor.saturating_sub(1);
                 None
@@ -171,6 +191,32 @@ impl Tour {
             Key::Char('q') => Some(Msg::TourFinished),
             _ => None,
         }
+    }
+
+    /// Pure mouse handler — only left button-down reaches a mounted
+    /// modal (drag/scroll are filtered upstream). Skip/Back hit their
+    /// footer boxes; any other click advances, so a mouse-only user can
+    /// click anywhere on the card to step forward.
+    pub fn on_mouse(&mut self, ev: &MouseEvent) -> Option<Msg> {
+        if !matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return None;
+        }
+        let hit = |b: Option<Rect>| {
+            b.is_some_and(|r| {
+                ev.column >= r.x
+                    && ev.column < r.x + r.width
+                    && ev.row >= r.y
+                    && ev.row < r.y + r.height
+            })
+        };
+        if hit(self.skip_btn) {
+            return Some(Msg::TourFinished);
+        }
+        if hit(self.back_btn) {
+            self.cursor = self.cursor.saturating_sub(1);
+            return None;
+        }
+        self.advance()
     }
 }
 
@@ -234,24 +280,47 @@ impl Component for Tour {
         }
         frame.render_widget(Paragraph::new(lines), body_rect);
 
-        let progress = format!("step {}/{}", self.cursor + 1, STEPS.len());
-        let next_label = if self.is_last() { "finish" } else { "next" };
-        let help = Line::from(vec![
-            Span::styled(
-                format!("  {progress}   "),
-                Style::default().fg(theme.text_dim),
-            ),
-            Span::styled("→/Enter", Style::default().fg(theme.success).bold()),
-            Span::styled(
-                format!(" {next_label}  "),
-                Style::default().fg(theme.text_dim),
-            ),
-            Span::styled("←", Style::default().fg(theme.accent).bold()),
-            Span::styled(" back  ", Style::default().fg(theme.text_dim)),
-            Span::styled("Esc", Style::default().fg(theme.error).bold()),
-            Span::styled(" skip", Style::default().fg(theme.text_dim)),
-        ]);
-        frame.render_widget(Paragraph::new(help), help_rect);
+        // Footer buttons. Each is rendered AND recorded as a hit-box so
+        // `on_mouse` can route clicks — the tour is fully mouse-drivable.
+        let mut spans: Vec<Span> = Vec::new();
+        let mut x = help_rect.x;
+        let push = |spans: &mut Vec<Span>, x: &mut u16, text: String, style: Style| -> Rect {
+            let w = text.chars().count() as u16;
+            let rect = Rect::new(*x, help_rect.y, w, 1);
+            spans.push(Span::styled(text, style));
+            *x += w;
+            rect
+        };
+
+        push(
+            &mut spans,
+            &mut x,
+            format!("  step {}/{}   ", self.cursor + 1, STEPS.len()),
+            Style::default().fg(theme.text_dim),
+        );
+        self.back_btn = Some(push(
+            &mut spans,
+            &mut x,
+            " ← Back ".to_string(),
+            Style::default().fg(theme.accent).bold(),
+        ));
+        push(&mut spans, &mut x, "  ".to_string(), Style::default());
+        let next_label = if self.is_last() { " Finish " } else { " Next → " };
+        self.next_btn = Some(push(
+            &mut spans,
+            &mut x,
+            next_label.to_string(),
+            Style::default().fg(theme.success).bold(),
+        ));
+        push(&mut spans, &mut x, "  ".to_string(), Style::default());
+        self.skip_btn = Some(push(
+            &mut spans,
+            &mut x,
+            " Esc Skip ".to_string(),
+            Style::default().fg(theme.error).bold(),
+        ));
+
+        frame.render_widget(Paragraph::new(Line::from(spans)), help_rect);
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -270,6 +339,7 @@ impl AppComponent<Msg, UserEvent> for Tour {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
         match ev {
             Event::Keyboard(key) => self.on_key(key),
+            Event::Mouse(m) => self.on_mouse(m),
             _ => None,
         }
     }
@@ -281,6 +351,32 @@ mod tests {
 
     fn ke(code: Key) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn click(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Render a tour at `cursor` and hand back the instance — the
+    /// footer hit-boxes are only populated after a `view` pass.
+    fn rendered_tour(cursor: usize) -> Tour {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        let mut t = Tour::new();
+        t.cursor = cursor;
+        let (w, h) = (90u16, 30u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| t.view(f, Rect::new(0, 0, w, h))).unwrap();
+        t
+    }
+
+    fn center(r: Rect) -> (u16, u16) {
+        (r.x + r.width / 2, r.y)
     }
 
     /// Render the card at `cursor` into a throwaway backend and return
@@ -433,5 +529,71 @@ mod tests {
         let mut t = Tour::new();
         let ev = KeyEvent::new(Key::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(t.on_key(&ev), Some(Msg::TourFinished));
+    }
+
+    #[test]
+    fn leads_with_arrow_keys_not_jk() {
+        // The inbox step taught navigation with `j / k`; onboarding now
+        // leads with the arrow keys most newcomers reach for.
+        let all = render_all();
+        assert!(all.contains("↑ / ↓ move"), "arrow-key nav hint missing");
+        assert!(
+            !all.contains("j / k"),
+            "j/k is still the primary nav instruction"
+        );
+    }
+
+    #[test]
+    fn advertises_mouse_support() {
+        // Mouse support is a first-class point: focus, select, resize,
+        // scroll, and right-click-to-open links.
+        let all = render_all().to_lowercase();
+        for needle in ["click a pane", "row to select", "resize", "scrolls", "right-click"] {
+            assert!(all.contains(needle), "mouse hint {needle:?} missing");
+        }
+    }
+
+    #[test]
+    fn click_advances_then_finishes_on_last_step() {
+        let mut t = rendered_tour(0);
+        // A click anywhere that isn't Back/Skip steps forward.
+        assert_eq!(t.on_mouse(&click(1, 1)), None);
+        assert_eq!(t.cursor, 1);
+        // The Next button advances too.
+        let (nx, ny) = center(t.next_btn.unwrap());
+        assert_eq!(t.on_mouse(&click(nx, ny)), None);
+        assert_eq!(t.cursor, 2);
+
+        let mut last = rendered_tour(STEPS.len() - 1);
+        let (nx, ny) = center(last.next_btn.unwrap());
+        assert_eq!(last.on_mouse(&click(nx, ny)), Some(Msg::TourFinished));
+    }
+
+    #[test]
+    fn clicking_back_button_retreats() {
+        let mut t = rendered_tour(2);
+        let (bx, by) = center(t.back_btn.unwrap());
+        assert_eq!(t.on_mouse(&click(bx, by)), None);
+        assert_eq!(t.cursor, 1);
+    }
+
+    #[test]
+    fn clicking_skip_button_finishes() {
+        let mut t = rendered_tour(0);
+        let (sx, sy) = center(t.skip_btn.unwrap());
+        assert_eq!(t.on_mouse(&click(sx, sy)), Some(Msg::TourFinished));
+    }
+
+    #[test]
+    fn non_left_clicks_are_ignored() {
+        let mut t = rendered_tour(1);
+        let ev = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(t.on_mouse(&ev), None);
+        assert_eq!(t.cursor, 1, "right-click must not navigate");
     }
 }

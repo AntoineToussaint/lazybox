@@ -99,7 +99,12 @@ impl<T: TerminalAdapter> Model<T> {
                         {
                             vec![IpcCommand::MergePr { workspace_key }]
                         } else {
-                            self.flash_info("PR is no longer merge-ready — nothing done");
+                            let reason = workspace
+                                .as_ref()
+                                .and_then(|w| w.pr.as_ref())
+                                .and_then(crate::intent::merge_block_reason)
+                                .unwrap_or("the PR is no longer merge-ready");
+                            self.flash_info(format!("can't merge: {reason}"));
                             Vec::new()
                         }
                     }

@@ -2690,7 +2690,7 @@ mod destructive_confirm_tests {
     //!    drifted onto.
     use super::super::{ActionConfirmTarget, Id, Model};
     use chrono::Utc;
-    use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
+    use lazybox_core::{SessionKey, Task, TaskId, Workspace, WorkspaceKey};
     use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent, channel};
     use lazybox_tui_core::action::Action;
     use tuirealm::ratatui::layout::Size;
@@ -2753,6 +2753,75 @@ mod destructive_confirm_tests {
             Some((Action::MergePr, ActionConfirmTarget::Workspace(k))) => assert_eq!(k, &sk),
             other => panic!("expected a stashed MergePr aimed at the menu's row, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn merge_confirm_fires_on_green_ci_without_approval() {
+        // Regression for #144: a green-CI PR with no formal approval
+        // (a personal repo / your own PR) is mergeable on GitHub, so
+        // confirming `g m` must dispatch the merge — not flash
+        // "no longer merge-ready" and do nothing.
+        let mut m = build_model();
+        let pr = merge_ready_pr_without_approval("github:owner/repo#1");
+        let wk = pr.key.clone();
+        let sk = SessionKey::from(&wk);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk), "PR row focusable");
+
+        let cmds = m.dispatch_action(&Action::MergePr);
+        assert!(
+            cmds.is_empty(),
+            "merge must gate on confirm first: {cmds:?}"
+        );
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+
+        let cmds = m.handle_confirmed(true);
+        match cmds.as_slice() {
+            [IpcCommand::MergePr { workspace_key }] => assert_eq!(workspace_key, &wk),
+            other => panic!("expected a single MergePr command, got {other:?}"),
+        }
+    }
+
+    /// A PR workspace GitHub would let you merge right now — CI green,
+    /// no conflict — but with NO approving review, the case #144 was
+    /// falsely blocking.
+    fn merge_ready_pr_without_approval(key: &str) -> Workspace {
+        let num = key.rsplit_once('#').map(|(_, n)| n).unwrap_or("1");
+        let task = Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("PR {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::Success,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/owner/repo/pull/{num}"),
+            repo: Some("owner/repo".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+        Workspace::from_task(task, Utc::now())
     }
 
     #[test]

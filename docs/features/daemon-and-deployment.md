@@ -57,21 +57,21 @@ disconnects — for SSH / multi-client setups (same model as a tmux server).
 
 ### How to use it
 ```sh
-lazybox server start     # start a standalone daemon (also: lazybox daemon start)
-lazybox daemon status    # PID + socket path if running
-lazybox daemon stop      # SIGTERM the daemon
+lazybox server start     # start a standalone daemon
+lazybox server status    # PID + socket path if running
+lazybox server stop      # SIGTERM the daemon
 ```
 
 ### How it works (brief)
 `server_start` (`crates/tui/src/main.rs`) forks a daemon listening on the Unix
-socket and writes a PID file. `daemon stop` sends SIGTERM via the lifecycle
-helper; `daemon status` reports PID + socket. Socket/PID paths derive from
+socket and writes a PID file. `server stop` sends SIGTERM via the lifecycle
+helper; `server status` reports PID + socket. Socket/PID paths derive from
 `LAZYBOX_HOME`.
 
 ### Test checklist
 - [ ] `lazybox server start` starts a daemon and binds the socket.
-- [ ] `lazybox daemon status` reports the running PID + socket path.
-- [ ] `lazybox daemon stop` terminates it and clears the PID file.
+- [ ] `lazybox server status` reports the running PID + socket path.
+- [ ] `lazybox server stop` terminates it and clears the PID file.
 - [ ] The daemon survives a client disconnect.
 
 ### Known sharp edges

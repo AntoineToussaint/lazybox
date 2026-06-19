@@ -192,7 +192,7 @@ pub const TERMINAL_MAP_LOCK_ORDER: &str =
 /// `Sender` (clone is a refcount), `agents` is a small struct.
 ///
 /// Per-process invariant: there is exactly **one** `ServerConfig` for
-/// the whole process. Both `run_embedded` and `lazybox daemon start`
+/// the whole process. Both `run_embedded` and `lazybox server start`
 /// build it once at startup so the polling loop's `SessionUpserted`
 /// events reach every connected TUI.
 #[derive(Clone)]

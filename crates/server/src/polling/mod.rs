@@ -1631,7 +1631,7 @@ pub async fn sources_for(
 
 /// Convenience: build the default source set assuming both providers
 /// are enabled with their default filters. Used by binaries that
-/// bypass the setup screen (e.g. headless `lazybox daemon start` in
+/// bypass the setup screen (e.g. headless `lazybox server start` in
 /// CI). When a saved `PersistedSetup` exists in the store, prefer
 /// that instead.
 pub async fn default_sources(
@@ -2341,7 +2341,7 @@ pub async fn rescope_with_state(
 }
 
 /// Spawn the long-lived polling loop. Returns the join handle so the
-/// caller can `abort()` on shutdown if it wants — `lazybox daemon stop`
+/// caller can `abort()` on shutdown if it wants — `lazybox server stop`
 /// drops the whole process so we don't bother in main.
 ///
 /// Each tick reads `~/.lazybox/config.yaml` fresh and rebuilds the

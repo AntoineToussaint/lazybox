@@ -1197,9 +1197,10 @@ fn contextual_bindings_honor_user_key_overrides() {
 
 #[test]
 fn merge_target_fires_when_pr_is_ready() {
-    // READY = approved + green CI (or no CI). The merge key should
-    // only advertise itself for rows GitHub will actually let us
-    // merge.
+    // READY = green CI (or no CI), no conflict, and no
+    // ChangesRequested. The merge key advertises itself for any row
+    // GitHub would let us merge — a formal approval is NOT required
+    // (repos without required reviews have none). See #144.
     let mut s = Sidebar::new(PaneId::new(1));
     let mut pr = make_task("o/r", "o/r#1", Utc::now());
     pr.review = ReviewStatus::Approved;
@@ -1213,10 +1214,32 @@ fn merge_target_fires_when_pr_is_ready() {
 }
 
 #[test]
-fn merge_target_is_hidden_without_approval() {
+fn merge_target_fires_on_green_ci_without_approval() {
+    // Regression for #144: a green-CI PR with no approving review
+    // (your own PR, a solo repo) is mergeable on GitHub — the merge
+    // target must fire instead of falsely hiding.
+    for review in [ReviewStatus::None, ReviewStatus::Pending] {
+        let mut s = Sidebar::new(PaneId::new(1));
+        let mut pr = make_task("o/r", "o/r#1", Utc::now());
+        pr.review = review;
+        pr.ci = CiStatus::Success;
+        s.on_event(&Event::Snapshot {
+            workspaces: vec![Workspace::from_task(pr, Utc::now())],
+            terminals: vec![],
+            projects: vec![],
+        });
+        assert!(
+            s.merge_target_for_cursor().is_some(),
+            "review {review:?} with green CI must be merge-ready",
+        );
+    }
+}
+
+#[test]
+fn merge_target_is_hidden_when_changes_requested() {
     let mut s = Sidebar::new(PaneId::new(1));
     let mut pr = make_task("o/r", "o/r#1", Utc::now());
-    pr.review = ReviewStatus::Pending;
+    pr.review = ReviewStatus::ChangesRequested;
     pr.ci = CiStatus::Success;
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],

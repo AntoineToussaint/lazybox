@@ -774,32 +774,16 @@ impl Sidebar {
     }
 
     /// Return the workspace key the `Shift-M` merge shortcut would
-    /// target. Only fires when the focused row is a PR in a state
-    /// GitHub would let us merge — Approved + CI green / none — so
-    /// the contextual footer can advertise the key only when it'll
-    /// actually work.
+    /// target. Delegates to [`resolve_merge`] so the contextual footer
+    /// advertises the key under exactly the same conditions the merge
+    /// dispatch fires — no second predicate to drift out of sync.
+    ///
+    /// [`resolve_merge`]: lazybox_tui_core::intent::resolve_merge
     pub fn merge_target_for_cursor(&self) -> Option<lazybox_core::WorkspaceKey> {
-        let workspace = self.selected_workspace()?;
-        let pr = workspace.pr.as_ref()?;
-        if !matches!(
-            pr.state,
-            lazybox_core::TaskState::Open | lazybox_core::TaskState::InReview
-        ) {
-            return None;
+        match lazybox_tui_core::intent::resolve_merge(self.selected_workspace()) {
+            lazybox_tui_core::intent::Intent::MergePr { workspace_key } => Some(workspace_key),
+            _ => None,
         }
-        if !matches!(pr.review, lazybox_core::ReviewStatus::Approved) {
-            return None;
-        }
-        if !matches!(
-            pr.ci,
-            lazybox_core::CiStatus::Success | lazybox_core::CiStatus::None
-        ) {
-            return None;
-        }
-        if pr.mergeable.is_conflicting() {
-            return None;
-        }
-        Some(lazybox_core::WorkspaceKey::new(workspace.key.as_str()))
     }
 
     /// If the row under the cursor is a PR with `ci == Fail`, return

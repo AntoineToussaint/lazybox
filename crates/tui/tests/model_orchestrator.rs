@@ -1731,3 +1731,115 @@ fn j_and_k_navigate_the_activity_feed() {
     m.dispatch_key(key(Key::Char('k')));
     assert_eq!(m.__test_right().comment_cursor(), 0, "k moves back up");
 }
+
+// ── Worktree-provisioning progress modal (#172) ────────────────────
+
+#[test]
+fn worktree_progress_event_mounts_the_checklist_modal() {
+    use lazybox_ipc::{WorktreeStep, WorktreeStepStatus};
+    let mut m = build_model();
+    let sk = SessionKey::new("github:o/r#42");
+    assert!(m.modal_stack.is_empty());
+    m.handle_daemon_event(IpcEvent::WorktreeProgress {
+        session_key: sk,
+        step: WorktreeStep::Checkout,
+        status: WorktreeStepStatus::Started,
+    });
+    assert_eq!(
+        m.modal_stack.last(),
+        Some(&Id::WorktreeProgress),
+        "first progress event mounts the checklist",
+    );
+}
+
+#[test]
+fn progress_events_remount_in_place_without_stacking() {
+    use lazybox_ipc::{WorktreeStep, WorktreeStepStatus};
+    let mut m = build_model();
+    let sk = SessionKey::new("github:o/r#42");
+    for status in [WorktreeStepStatus::Started, WorktreeStepStatus::Done] {
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: sk.clone(),
+            step: WorktreeStep::Checkout,
+            status,
+        });
+    }
+    m.handle_daemon_event(IpcEvent::WorktreeProgress {
+        session_key: sk,
+        step: WorktreeStep::Setup,
+        status: WorktreeStepStatus::Started,
+    });
+    assert_eq!(
+        m.modal_stack
+            .iter()
+            .filter(|id| *id == &Id::WorktreeProgress)
+            .count(),
+        1,
+        "the checklist must advance in place, not pile duplicate modals",
+    );
+}
+
+#[test]
+fn terminal_spawned_dismisses_the_progress_checklist() {
+    use lazybox_ipc::{TerminalId, TerminalKind, WorktreeStep, WorktreeStepStatus};
+    let mut m = build_model();
+    let sk = SessionKey::new("github:o/r#42");
+    m.handle_daemon_event(IpcEvent::WorktreeProgress {
+        session_key: sk.clone(),
+        step: WorktreeStep::Setup,
+        status: WorktreeStepStatus::Done,
+    });
+    assert_eq!(m.modal_stack.last(), Some(&Id::WorktreeProgress));
+    m.handle_daemon_event(IpcEvent::TerminalSpawned {
+        terminal_id: TerminalId(1),
+        session_key: sk,
+        kind: TerminalKind::Agent("claude".into()),
+        no_permission: false,
+    });
+    assert!(
+        !m.modal_stack.contains(&Id::WorktreeProgress),
+        "the ready session tears the checklist down",
+    );
+}
+
+#[test]
+fn instant_resume_does_not_flash_the_progress_modal() {
+    use lazybox_ipc::{TerminalId, TerminalKind};
+    let mut m = build_model();
+    // No WorktreeProgress events precede this spawn — the existing
+    // worktree was reused, so the checklist must never appear.
+    m.handle_daemon_event(IpcEvent::TerminalSpawned {
+        terminal_id: TerminalId(1),
+        session_key: SessionKey::new("github:o/r#42"),
+        kind: TerminalKind::Agent("claude".into()),
+        no_permission: false,
+    });
+    assert!(
+        !m.modal_stack.contains(&Id::WorktreeProgress),
+        "an instant resume provisions nothing and shows no modal",
+    );
+}
+
+#[test]
+fn failed_step_keeps_the_checklist_up_past_terminal_spawned() {
+    use lazybox_ipc::{TerminalId, TerminalKind, WorktreeStep, WorktreeStepStatus};
+    let mut m = build_model();
+    let sk = SessionKey::new("github:o/r#42");
+    m.handle_daemon_event(IpcEvent::WorktreeProgress {
+        session_key: sk.clone(),
+        step: WorktreeStep::Checkout,
+        status: WorktreeStepStatus::Failed("remote unreachable".into()),
+    });
+    // The daemon's empty-dir fallback still spawns a terminal.
+    m.handle_daemon_event(IpcEvent::TerminalSpawned {
+        terminal_id: TerminalId(1),
+        session_key: sk,
+        kind: TerminalKind::Shell,
+        no_permission: false,
+    });
+    assert_eq!(
+        m.modal_stack.last(),
+        Some(&Id::WorktreeProgress),
+        "a failed step holds the modal so the error is read, not silently dismissed",
+    );
+}

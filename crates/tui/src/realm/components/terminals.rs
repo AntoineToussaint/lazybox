@@ -111,8 +111,12 @@ impl Terminals {
     pub fn contextual_bindings(
         &self,
         overrides: &std::collections::BTreeMap<String, String>,
+        escape_char: char,
     ) -> Vec<crate::pane::Binding> {
-        crate::components::terminal_stack::TerminalStack::contextual_bindings(overrides)
+        crate::components::terminal_stack::TerminalStack::contextual_bindings(
+            overrides,
+            escape_char,
+        )
     }
 
     /// Scroll the active terminal's viewport by `delta` rows. Negative

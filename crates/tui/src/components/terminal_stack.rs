@@ -1696,10 +1696,16 @@ impl TerminalStack {
     /// `all keys → PTY` entry — that describes an implementation mode
     /// rather than an actionable shortcut, so it was noise in the
     /// footer. The user always knows their typing reaches the inner
-    /// program; what they need surfaced is *escape hatches*: scroll
-    /// the scrollback, leave the pane, send SIGINT. Keys are sourced
-    /// from the catalog where possible so a rebind / rename in
-    /// `ActionDef` flows through automatically.
+    /// program; what they need surfaced is *escape hatches*: leave the
+    /// pane (the only way back to the sidebar once the PTY owns the
+    /// keyboard), scroll the scrollback, manage tiles, send SIGINT.
+    /// Keys are sourced from the catalog where possible so a rebind /
+    /// rename in `ActionDef` flows through automatically.
+    ///
+    /// `escape_char` is the configured `ui.terminal_escape_char` (the
+    /// `]` in the default `]]` leader). The leader-based hints render
+    /// it doubled rather than a hardcoded `]]` so a user who remapped
+    /// the escape char sees the chord they actually type (#170).
     ///
     /// Associated function (no `&self`) because the bindings don't
     /// depend on terminal-stack state — they're the same whether the
@@ -1709,26 +1715,50 @@ impl TerminalStack {
     /// reaches through to this stateless implementation.
     pub fn contextual_bindings(
         overrides: &std::collections::BTreeMap<String, String>,
+        escape_char: char,
     ) -> Vec<crate::Binding> {
         use crate::Binding;
         use lazybox_tui_core::action::{ActionDef, ActionKind};
-        // `Shift-PgUp/Dn scroll` removed in #11 — the mouse wheel
-        // is the primary scroll path and the keyboard fallback
-        // wasn't worth its slot in the hint bar. Leave + interrupt
-        // are the only escape hatches that need surfacing here.
+        use std::borrow::Cow;
         let leave = ActionDef::for_kind(ActionKind::LeaveTerminal);
+        let leader = format!("{escape_char}{escape_char}");
+        // Honor a user rebind of `leave_terminal`; otherwise render the
+        // configured escape char doubled instead of the catalog's
+        // hardcoded `]]` default (#170).
+        let leave_keys = leave.effective_keys_display(overrides);
+        let leave_keys: Cow<'static, str> = if leave_keys.as_ref() == leave.default_keys {
+            Cow::Owned(leader.clone())
+        } else {
+            leave_keys
+        };
+        let scroll = ActionDef::for_kind(ActionKind::TerminalScroll);
         vec![
+            // Bare `]]` (the configured escape char doubled) — the way
+            // back to the sidebar once the PTY owns the keyboard. The
+            // issue (#170) was that this had no footer hint, so the
+            // route back to focus was invisible from inside Claude Code.
             Binding {
-                keys: leave.effective_keys_display(overrides),
-                label: std::borrow::Cow::Borrowed(leave.label),
+                keys: leave_keys,
+                label: Cow::Borrowed(leave.label),
             },
             // `Ctrl-c` is forwarded straight to the PTY rather than
             // being a catalog action — but it's actionable knowledge
             // for the user (escape a hung process), so it stays in
             // the hint bar as a hand-curated entry.
             Binding {
-                keys: std::borrow::Cow::Borrowed("Ctrl-c"),
-                label: std::borrow::Cow::Borrowed("interrupt"),
+                keys: Cow::Borrowed("Ctrl-c"),
+                label: Cow::Borrowed("interrupt"),
+            },
+            Binding {
+                keys: scroll.effective_keys_display(overrides),
+                label: Cow::Borrowed(scroll.label),
+            },
+            // `Ctrl-w` is the tile prefix (split / focus-move / close);
+            // like `Ctrl-c` it's forwarded to the dispatcher rather than
+            // a catalog action, so it's hand-curated here.
+            Binding {
+                keys: Cow::Borrowed("Ctrl-w"),
+                label: Cow::Borrowed("tiles"),
             },
             // Snippet picker entry point (issues #40, #205). The `]]`
             // leader is shared with LeaveTerminal: `]]` alone leaves,
@@ -1737,8 +1767,8 @@ impl TerminalStack {
             // Routing the picker under the leader frees a lone `]` to
             // reach the agent verbatim.
             Binding {
-                keys: std::borrow::Cow::Borrowed("]]<key>"),
-                label: std::borrow::Cow::Borrowed("snippets"),
+                keys: Cow::Owned(format!("{leader}<key>")),
+                label: Cow::Borrowed("snippets"),
             },
         ]
     }
@@ -3919,7 +3949,7 @@ mod footer_scroll_independence {
     fn render_rows(stack: &mut TerminalStack) -> Vec<String> {
         let backend = TestBackend::new(W, H);
         let mut term = Terminal::new(backend).unwrap();
-        let binds = TerminalStack::contextual_bindings(&std::collections::BTreeMap::new());
+        let binds = TerminalStack::contextual_bindings(&std::collections::BTreeMap::new(), ']');
         term.draw(|f| {
             // Footer owns the last row; the panes fill everything above.
             let pane = Rect::new(0, 0, W, H - 1);
@@ -4467,7 +4497,7 @@ mod terminal_availability_tests {
         // is the `]]` leave chord — the gateway back to the globals —
         // and none of the universal shortcuts may be advertised here.
         let overrides = BTreeMap::new();
-        let bindings = TerminalStack::contextual_bindings(&overrides);
+        let bindings = TerminalStack::contextual_bindings(&overrides, ']');
 
         let leave = ActionDef::for_kind(ActionKind::LeaveTerminal);
         assert!(

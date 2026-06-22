@@ -213,6 +213,21 @@ fn sidebar_golden_render_empty() {
     insta::assert_snapshot!("sidebar_empty", rendered);
 }
 
+/// The build version sits next to the brand name so a running instance
+/// is identifiable. Asserted against the live `CARGO_PKG_VERSION` so a
+/// release bump can't silently drop the tag (the golden snapshots pin
+/// the literal version and only verify placement).
+#[test]
+fn sidebar_header_shows_build_version() {
+    let mut s = sidebar();
+    let rendered = render_to_string(&mut s, 40, 5, true);
+    let expected = concat!("v", env!("CARGO_PKG_VERSION"));
+    assert!(
+        rendered.contains(expected),
+        "sidebar header {rendered:?} should contain {expected:?}"
+    );
+}
+
 /// Issue #100: a genuinely empty inbox swaps the blank content area
 /// for a getting-started panel that names the next actions, leading
 /// with the worktree-session flow. Rendered tall enough to fit the

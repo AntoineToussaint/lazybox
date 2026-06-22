@@ -40,6 +40,17 @@ impl Sidebar {
         // Row 0 — app title + counts.
         let mut header_spans: Vec<Span> = Vec::with_capacity(12);
         header_spans.push(Span::styled(mailbox_label, theme.title(focused)));
+        // Brand-tied build version, so a running instance is identifiable
+        // at a glance (e.g. confirming a fix actually shipped). Only on
+        // the Inbox view, where the title is the app name rather than a
+        // mailbox label.
+        if matches!(self.mailbox, Mailbox::Inbox) {
+            header_spans.push(Span::raw(" "));
+            header_spans.push(Span::styled(
+                concat!("v", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(theme.text_dim),
+            ));
+        }
         header_spans.push(Span::raw("  "));
         header_spans.push(Span::styled(
             count.to_string(),

@@ -13,4 +13,4 @@
   Shift+S         mailbox           /               search             Enter           toggle section
   →/←             expand/collapse   g               top                Shift+G         bottom
   d               description       Space           select row         z               undo mark-read
-  Shift+PgUp/Dn   scroll            ] ]             exit to sidebar    ]]<key>         snippets
+  Shift+PgUp/Dn   scroll            ]]              exit to sidebar    ]]<key>         snippets

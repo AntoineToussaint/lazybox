@@ -698,7 +698,7 @@ impl ActionDef {
             },
             ActionKind::LeaveTerminal => &Self {
                 kind: ActionKind::LeaveTerminal,
-                default_keys: "] ]",
+                default_keys: "]]",
                 label: "exit to sidebar",
                 describe: "Double-tap the escape char to leave the terminal. The same `]]` is a leader: `]]<key>` opens snippets; a lone `]` is sent to the agent.",
                 section: Section::Terminal,
@@ -1878,6 +1878,11 @@ mod tests {
             "Shift-PgUp/Dn",
             "Shift-Arrows",
             "all keys",
+            // The terminal `]]` leave chord is dispatched by the
+            // terminal-pane escape-char latch (rendered from the
+            // configured `ui.terminal_escape_char`, #170), never by the
+            // catalog matcher — so it carries no parseable catalog chord.
+            "]]",
         ];
         for def in ActionDef::all() {
             if presentation.contains(&def.default_keys) {

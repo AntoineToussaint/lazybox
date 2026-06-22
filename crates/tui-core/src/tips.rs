@@ -164,9 +164,7 @@ mod tests {
         };
         let tip = next_tip(&ctx, &[], &no_overrides()).expect("a tip");
         assert_eq!(tip.id, "leave_terminal");
-        // The leave-terminal chord is two `]` keystrokes; the catalog
-        // renders the sequence space-joined (`] ]`), same as `q q` / `g m`.
-        assert!(tip.message.contains("] ]"), "{}", tip.message);
+        assert!(tip.message.contains("]]"), "{}", tip.message);
     }
 
     #[test]

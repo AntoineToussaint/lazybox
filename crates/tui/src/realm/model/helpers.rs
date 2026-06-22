@@ -334,8 +334,13 @@ pub(super) fn drain_daemon_events<T: TerminalAdapter>(
         .filter(|e| matches!(e, IpcEvent::TerminalResync { .. }))
         .count();
     for evt in coalesce_adjacent_output(collected) {
-        model.handle_daemon_event(evt);
+        model.dispatch_daemon_event(evt);
     }
+    // One pane projection for the whole batch: a merge burst or a
+    // multi-row poll moves the sidebar selection several times in a
+    // single drain, but only the final selection needs projecting onto
+    // the right pane + terminal stack (see `Model::dispatch_daemon_event`).
+    model.flush_pane_sync();
     model.event_backlog.observe_resyncs(resyncs);
     // Whatever is still queued after this drain is the backlog the
     // consumer hasn't caught up on — feed it to the monitor.

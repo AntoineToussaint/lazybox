@@ -69,11 +69,41 @@ impl<T: TerminalAdapter> Model<T> {
         active || queued
     }
 
-    /// Forward an inbound daemon event into all three panes. Each
-    /// pane decides whether the event is relevant. After the very
-    /// first Snapshot, apply any pending CLI preselect. Also feeds
-    /// the polling modal so it can detect "first task arrived".
+    /// Forward an inbound daemon event into all three panes, then
+    /// project the (possibly moved) sidebar selection onto the right
+    /// pane + terminal stack. The projection is deferred to a single
+    /// [`Self::flush_pane_sync`] so processing one event in isolation
+    /// (the per-event test entry point) still ends fully synced, while
+    /// the run loop's drain can coalesce a whole batch into one
+    /// projection — see [`Self::dispatch_daemon_event`].
     pub fn handle_daemon_event(&mut self, event: IpcEvent) {
+        self.dispatch_daemon_event(event);
+        self.flush_pane_sync();
+    }
+
+    /// Run the deferred `sync_panes` if any event in this drain batch
+    /// asked for one. A no-op when nothing pane-affecting was seen, so
+    /// the run loop can call it unconditionally after every drain.
+    pub(super) fn flush_pane_sync(&mut self) {
+        if self.needs_pane_sync {
+            self.needs_pane_sync = false;
+            self.sync_panes();
+        }
+    }
+
+    /// Route one daemon event into the panes and the pending-modal
+    /// queues. Handlers that move the sidebar selection set
+    /// `needs_pane_sync` rather than calling `sync_panes` inline, so a
+    /// merge burst (`TerminalsRebadged` → `WorkspaceRemoved` →
+    /// `WorkspaceMerged`) drained together re-projects the panes once
+    /// instead of once per event — each `sync_panes` clones the
+    /// selected `Workspace` and re-emits `FocusWorkspace`, work that
+    /// only the batch's final selection makes worthwhile.
+    ///
+    /// After the very first Snapshot, apply any pending CLI preselect.
+    /// Also feeds the polling modal so it can detect "first task
+    /// arrived".
+    pub(super) fn dispatch_daemon_event(&mut self, event: IpcEvent) {
         // Hot path: PTY output. Bytes only mutate one terminal's grid
         // — no workspace / sidebar / layout state changes — so skip
         // the full fan-out (and the Workspace clone inside
@@ -262,7 +292,7 @@ impl<T: TerminalAdapter> Model<T> {
             if self.merge_follow_from.take().as_ref() == Some(issue_workspace_key) {
                 let pr_key: lazybox_core::SessionKey = pr_workspace_key.into();
                 if self.sidebar.focus_workspace_key(&pr_key) {
-                    self.sync_panes();
+                    self.needs_pane_sync = true;
                 }
             }
             self.redraw = true;
@@ -505,7 +535,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.set_focus_attr();
             self.status.clear_spawning_notice();
             self.status.clear_spawning();
-            self.sync_panes();
+            self.needs_pane_sync = true;
             // Editor-deferred-by-spawn: the user pressed `e` on a
             // workspace with no worktree; we asked the daemon to
             // spawn a shell so a worktree got provisioned. Look
@@ -523,7 +553,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.launch_editor(&editor, &worktree);
             }
         } else {
-            self.sync_panes();
+            self.needs_pane_sync = true;
         }
         self.redraw = true;
     }
@@ -639,7 +669,8 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Project sidebar selection onto the right pane + terminal stack.
     /// Cheap to call; the inner setters bail when nothing changed.
-    /// Called after every key dispatch and every daemon event.
+    /// Called after every key dispatch and once per daemon-event drain
+    /// batch (via [`Self::flush_pane_sync`]).
     pub(super) fn sync_panes(&mut self) {
         let workspace = self.sidebar.selected_workspace().cloned();
         let session_key = self.sidebar.selected_workspace_key().cloned();

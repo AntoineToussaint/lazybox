@@ -63,11 +63,14 @@ impl LeaderGroup {
                     continue;
                 }
                 let leader = strokes[0];
-                let idx = leaders.iter().position(|l| *l == leader).unwrap_or_else(|| {
-                    leaders.push(leader);
-                    members.push(Vec::new());
-                    leaders.len() - 1
-                });
+                let idx = leaders
+                    .iter()
+                    .position(|l| *l == leader)
+                    .unwrap_or_else(|| {
+                        leaders.push(leader);
+                        members.push(Vec::new());
+                        leaders.len() - 1
+                    });
                 members[idx].push((strokes[1], entry));
             }
         }

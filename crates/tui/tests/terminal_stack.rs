@@ -1504,7 +1504,7 @@ fn footer_drops_all_keys_to_pty_noise() {
     // leave the pane, interrupt the process. (Shift-PgUp/Dn scroll
     // was dropped in #11 — mouse-wheel is the primary scroll path.)
     let overrides = std::collections::BTreeMap::new();
-    let bindings = TerminalStack::contextual_bindings(&overrides);
+    let bindings = TerminalStack::contextual_bindings(&overrides, ']');
     let labels: Vec<String> = bindings.iter().map(|b| b.label.to_string()).collect();
     assert!(
         !labels.iter().any(|l| l.contains("→ PTY")),
@@ -1521,6 +1521,57 @@ fn footer_drops_all_keys_to_pty_noise() {
 }
 
 #[test]
+fn footer_surfaces_leader_tile_and_scroll_escape_hatches() {
+    // Issue #170: from inside a focused terminal there was no footer
+    // hint for the way back to the sidebar, nor for tile / scroll
+    // controls. The hint bar must now carry all of them.
+    let overrides = std::collections::BTreeMap::new();
+    let bindings = TerminalStack::contextual_bindings(&overrides, ']');
+    let labels: Vec<String> = bindings.iter().map(|b| b.label.to_string()).collect();
+    let keys: Vec<String> = bindings.iter().map(|b| b.keys.to_string()).collect();
+    assert!(
+        labels.iter().any(|l| l == "exit to sidebar"),
+        "the way back to focus must be advertised, got {labels:?}",
+    );
+    assert!(keys.iter().any(|k| k == "]]"), "leave chord, got {keys:?}");
+    assert!(
+        labels.iter().any(|l| l == "scroll"),
+        "scroll hint, got {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l == "tiles"),
+        "tile hint, got {labels:?}"
+    );
+    assert!(
+        keys.iter().any(|k| k == "Ctrl-w"),
+        "tile prefix, got {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|k| k == "]]<key>"),
+        "snippet leader, got {keys:?}"
+    );
+}
+
+#[test]
+fn footer_leader_hints_honor_the_configured_escape_char() {
+    // Issue #170: a user who remapped `ui.terminal_escape_char` must
+    // see the chord they actually type — `}}` / `}}<key>`, not the
+    // hardcoded `]]` default.
+    let overrides = std::collections::BTreeMap::new();
+    let bindings = TerminalStack::contextual_bindings(&overrides, '}');
+    let keys: Vec<String> = bindings.iter().map(|b| b.keys.to_string()).collect();
+    assert!(keys.iter().any(|k| k == "}}"), "leave chord, got {keys:?}");
+    assert!(
+        keys.iter().any(|k| k == "}}<key>"),
+        "snippet leader, got {keys:?}"
+    );
+    assert!(
+        keys.iter().all(|k| !k.contains("]]")),
+        "no hardcoded `]]` should leak through, got {keys:?}",
+    );
+}
+
+#[test]
 fn footer_keys_follow_user_action_key_overrides() {
     // Catalog-driven footer: a user rebind in `~/.lazybox/config.yaml`
     // → `ui.action_keys.leave_terminal: "Esc"` should appear in the
@@ -1530,7 +1581,7 @@ fn footer_keys_follow_user_action_key_overrides() {
     // both through `ActionDef::effective_keys_display`.
     let mut overrides = std::collections::BTreeMap::new();
     overrides.insert("leave_terminal".to_string(), "Esc".to_string());
-    let bindings = TerminalStack::contextual_bindings(&overrides);
+    let bindings = TerminalStack::contextual_bindings(&overrides, ']');
     let leave = bindings.iter().find(|b| b.label == "exit to sidebar");
     assert!(leave.is_some(), "leave-terminal binding must surface");
     assert_eq!(leave.unwrap().keys, "Esc");

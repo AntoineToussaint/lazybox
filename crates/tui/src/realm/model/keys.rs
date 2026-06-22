@@ -48,9 +48,7 @@ impl<T: TerminalAdapter> Model<T> {
         // When a group leader is armed, THIS key is the action
         // selector — resolved before anything else so the second
         // press never leaks to a pane or PTY. A matching in-group key
-        // fires its action through the unified `dispatch_action`;
-        // anything else (Esc, an unmapped key) just cancels, which is
-        // the which-key convention.
+        // fires its action through the unified `dispatch_action`.
         if let Some(group) = self.leader.take() {
             self.redraw = true;
             if let Key::Char(c) = key.code
@@ -64,8 +62,16 @@ impl<T: TerminalAdapter> Model<T> {
                     let rewritten = self.rewrite_spawn_to_inject(cmd);
                     self.send_cmd(rewritten);
                 }
+                return;
             }
-            return;
+            // The key matched no in-group action. `Esc` is the explicit
+            // cancel and stops here; any other key cancels the chord but
+            // falls through to normal dispatch so the keystroke isn't
+            // silently swallowed (issue #165) — e.g. a mistyped `g x`
+            // still runs `x`'s own action instead of vanishing.
+            if key.code == Key::Esc {
+                return;
+            }
         }
         // ── Terminal `]]` leader (issue #205) ───────────────────────
         // Once `]]` arms the leader, THIS key selects a binding under

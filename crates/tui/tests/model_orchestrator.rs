@@ -1237,34 +1237,31 @@ fn leader_g_then_esc_cancels() {
     assert_eq!(m.top_modal(), None);
 }
 
-/// A key with no binding in the group cancels the chord (which-key
-/// convention) without firing anything.
+/// A key with no binding in the group cancels the chord but is then
+/// re-dispatched normally instead of being silently swallowed (issue
+/// #165). `g` arms the github group; `z` isn't a github in-group key,
+/// so the chord cancels and `z` runs its own action (ToggleSnooze),
+/// mounting the snooze duration picker.
 #[test]
-fn leader_g_then_unmapped_key_cancels_without_firing() {
-    use lazybox_ipc::Command;
-    let (client, mut server) = channel::pair();
+fn leader_g_then_unmapped_key_redispatches() {
+    let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let pr_ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    let pr_key: SessionKey = (&pr_ws.key).into();
     m.handle_daemon_event(IpcEvent::Snapshot {
-        workspaces: vec![Workspace::from_task(task_with_pr("o/r#1"), Utc::now())],
+        workspaces: vec![pr_ws],
         terminals: vec![],
         projects: vec![],
     });
-
-    // Drain any setup commands (e.g. the snapshot's FocusWorkspace) so
-    // the post-chord assertion sees only what the chord produced.
-    while server.rx.try_recv().is_ok() {}
+    assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
 
     m.dispatch_key(key(Key::Char('g')));
     m.dispatch_key(key(Key::Char('z'))); // 'z' isn't a github in-group key
-    assert_eq!(m.leader_pending(), None);
-    assert_eq!(m.top_modal(), None);
-    let mut commands: Vec<Command> = Vec::new();
-    while let Ok(cmd) = server.rx.try_recv() {
-        commands.push(cmd);
-    }
-    assert!(
-        commands.is_empty(),
-        "unmapped second key must fire nothing, got: {commands:#?}"
+    assert_eq!(m.leader_pending(), None, "chord must cancel");
+    assert_eq!(
+        m.top_modal(),
+        Some(&Id::SnoozeDuration),
+        "the re-dispatched 'z' must run ToggleSnooze, not vanish"
     );
 }
 

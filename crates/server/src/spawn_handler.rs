@@ -443,7 +443,10 @@ pub async fn handle_spawn(
     // Per-repo env injection: look up the workspace's primary task
     // repo, read `repos.<owner/name>.env` from YAML, fan it into
     // the spawn. Missing config or workspace = empty env, no error.
-    let env = collect_repo_env(config, &session_key);
+    // Then pin a per-worktree `CARGO_TARGET_DIR` so concurrent cargo
+    // builds across sessions don't block on a shared target lock.
+    let env =
+        with_worktree_cargo_target(collect_repo_env(config, &session_key), cwd_path.as_deref());
     tracing::info!(
         ?argv,
         cwd_path = ?cwd_path,
@@ -1739,6 +1742,34 @@ fn collect_repo_env(config: &ServerConfig, session_key: &SessionKey) -> Vec<(Str
         Err(_) => return Vec::new(),
     };
     env_for_repo(&cfg, &repo)
+}
+
+/// Pin Cargo's build directory under the session's own worktree so
+/// concurrent `cargo` invocations across sessions don't serialize on a
+/// shared `target/` lock. Git worktrees each get their own `target/` by
+/// default, but a globally-exported `CARGO_TARGET_DIR` (a common
+/// build-cache optimization) collapses every worktree onto one
+/// directory — then a build in one session makes any `cargo` in another
+/// wait on the build lock. Setting it explicitly per worktree overrides
+/// that inherited value. The registry cache stays shared, so only build
+/// artifacts (not downloads) are duplicated. Skipped when the repo
+/// config already set `CARGO_TARGET_DIR` — an explicit choice wins.
+fn with_worktree_cargo_target(
+    mut env: Vec<(String, String)>,
+    cwd: Option<&Path>,
+) -> Vec<(String, String)> {
+    let Some(cwd) = cwd else {
+        return env;
+    };
+    if env.iter().any(|(k, _)| k == "CARGO_TARGET_DIR") {
+        return env;
+    }
+    let target = cwd.join("target");
+    env.push((
+        "CARGO_TARGET_DIR".to_string(),
+        target.to_string_lossy().into_owned(),
+    ));
+    env
 }
 
 /// Whether a spawn should launch in no-permission / bypass mode.
@@ -3517,6 +3548,35 @@ mod tests {
     fn env_for_repo_returns_empty_when_repo_not_configured() {
         let cfg = lazybox_config::Config::default();
         assert!(env_for_repo(&cfg, "no/such-repo").is_empty());
+    }
+
+    #[test]
+    fn cargo_target_dir_is_pinned_under_the_worktree() {
+        let cwd = PathBuf::from("/wt/acme-widget-feature");
+        let out = with_worktree_cargo_target(Vec::new(), Some(&cwd));
+        let map: std::collections::BTreeMap<_, _> = out.into_iter().collect();
+        assert_eq!(
+            map.get("CARGO_TARGET_DIR").map(String::as_str),
+            Some("/wt/acme-widget-feature/target")
+        );
+    }
+
+    #[test]
+    fn cargo_target_dir_respects_an_explicit_repo_setting() {
+        let cwd = PathBuf::from("/wt/acme-widget-feature");
+        let env = vec![("CARGO_TARGET_DIR".to_string(), "/shared/target".to_string())];
+        let out = with_worktree_cargo_target(env, Some(&cwd));
+        let map: std::collections::BTreeMap<_, _> = out.into_iter().collect();
+        assert_eq!(
+            map.get("CARGO_TARGET_DIR").map(String::as_str),
+            Some("/shared/target")
+        );
+    }
+
+    #[test]
+    fn cargo_target_dir_is_not_added_without_a_worktree() {
+        let out = with_worktree_cargo_target(Vec::new(), None);
+        assert!(out.is_empty());
     }
 
     fn input_resolved_states() -> std::sync::Arc<

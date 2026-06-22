@@ -311,6 +311,19 @@ pub struct RepoSummary {
     pub attention: usize,
 }
 
+/// At-a-glance attention tallies across the visible mailbox, surfaced
+/// by the focus-mode event header so a heads-down user stays aware of
+/// incoming work without the full sidebar. Each count reuses the same
+/// `AttentionSignal` producer the per-row pills and header counters
+/// read, so the strip can never disagree with what the sidebar shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AttentionSummary {
+    pub unread: usize,
+    pub asking: usize,
+    pub ci_failing: usize,
+    pub review_pending: usize,
+}
+
 pub struct Sidebar {
     id: PaneId,
     workspaces: HashMap<SessionKey, Workspace>,
@@ -968,6 +981,53 @@ impl Sidebar {
             return false;
         };
         self.focus_workspace_key(&target)
+    }
+
+    /// Move the cursor onto the next visible workspace that has a
+    /// coding-agent session, starting AFTER the current row and
+    /// wrapping. Returns true when a target was found and the cursor
+    /// moved. Backs the `F3` focus-mode "next agent" jump.
+    pub fn focus_next_agent_workspace(&mut self) -> bool {
+        let keys_order: Vec<SessionKey> = self
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        let with_agent: std::collections::HashSet<SessionKey> = keys_order
+            .iter()
+            .filter(|k| {
+                self.workspaces.get(*k).is_some_and(|w| {
+                    w.sessions
+                        .iter()
+                        .any(|s| matches!(s.kind, lazybox_core::SessionKind::Agent { .. }))
+                })
+            })
+            .cloned()
+            .collect();
+        let current = self.selected_session_key().cloned();
+        let Some(target) = crate::agent_attention::next_flagged_workspace(
+            &with_agent,
+            &keys_order,
+            current.as_ref(),
+        ) else {
+            return false;
+        };
+        self.focus_workspace_key(&target)
+    }
+
+    /// At-a-glance attention tallies for the focus-mode event header.
+    /// Reuses the same per-signal counters that drive the sidebar's
+    /// own header badges so the two never drift.
+    pub fn attention_summary(&self) -> AttentionSummary {
+        AttentionSummary {
+            unread: self.total_unread_count(),
+            asking: self.input_pending_count(),
+            ci_failing: self.ci_failing_count(),
+            review_pending: self.review_pending_count(),
+        }
     }
 
     /// Move the cursor onto the session sub-row matching `id`. No-op

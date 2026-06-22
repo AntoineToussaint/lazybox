@@ -259,6 +259,29 @@ pub(crate) fn pane_areas(
     (cols[0], rows[0], rows[1])
 }
 
+/// Rows reserved for the focus-mode event header (issue #156).
+pub(crate) const FOCUS_HEADER_HEIGHT: u16 = 1;
+
+/// Split the pane area for focus mode into `(header, terminal_body)`.
+/// The header is a slim strip at the top; the terminal takes the rest.
+/// When the area is too short for both, the header wins and the body
+/// collapses to empty (the caller renders nothing into a zero rect).
+pub(crate) fn focus_mode_areas(pane_area: Rect) -> (Rect, Rect) {
+    if pane_area.height <= FOCUS_HEADER_HEIGHT {
+        return (pane_area, Rect::default());
+    }
+    let header = Rect {
+        height: FOCUS_HEADER_HEIGHT,
+        ..pane_area
+    };
+    let body = Rect {
+        y: pane_area.y + FOCUS_HEADER_HEIGHT,
+        height: pane_area.height - FOCUS_HEADER_HEIGHT,
+        ..pane_area
+    };
+    (header, body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

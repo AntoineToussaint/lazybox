@@ -141,10 +141,12 @@ The footer hint bar reads each pane's `contextual_bindings()`.
 
 **Global**: `Tab` cycle panes, `?` help, `q q` quit, `,` settings,
 `Shift-R` refresh, `Shift-T` tour, `Shift-D` sync status, `!` jump to
-agent-asking workspace, `Shift-F` jump to failing CI, `Shift-arrows`
-resize splitters, `F8` / `Alt-s` / `Ctrl-Alt-s` toggle mouse capture
-(host-native text selection), mouse-click any pane to focus it,
-mouse-drag splitters to resize.
+agent-asking workspace, `Shift-F` jump to failing CI, `F2` toggle
+focus mode (near-fullscreen agent terminal behind a slim event
+header; `]]` also exits), `F3` jump the focused terminal to the next
+agent workspace, `Shift-arrows` resize splitters, `F8` / `Alt-s` /
+`Ctrl-Alt-s` toggle mouse capture (host-native text selection),
+mouse-click any pane to focus it, mouse-drag splitters to resize.
 
 **Sidebar**: `j/k` or arrows navigate, `Enter` open (focus activity),
 `w` work on this (contextual agent prompt), `c` claude, `x` codex,

@@ -3217,3 +3217,191 @@ mod tips_tests {
         );
     }
 }
+
+/// Focus mode (issue #156): the F2 toggle, the F3 next-agent jump, and
+/// the interaction with the `]]` terminal-leave path.
+#[cfg(test)]
+mod focus_mode_tests {
+    use super::super::*;
+    use chrono::Utc;
+    use lazybox_core::{SessionKey, Task, Workspace};
+    use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind, channel};
+    use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn workspace_with_agent(key: &str) -> Workspace {
+        let task = Task {
+            id: lazybox_core::TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("task: {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{}", key.replace('#', "/pull/")),
+            repo: Some("owner/repo".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+        let mut ws = Workspace::from_task(task, Utc::now());
+        let wk = ws.key.clone();
+        ws.add_session(lazybox_core::WorkspaceSession::new(
+            wk,
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            std::path::PathBuf::from("/tmp/wt"),
+            Utc::now(),
+        ));
+        ws
+    }
+
+    /// Mark the terminal stack non-empty by spawning a terminal for the
+    /// active session — the precondition for entering focus mode.
+    fn spawn_terminal(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, key: &SessionKey) {
+        m.terminals.set_active_session(Some(key.clone()));
+        m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+    }
+
+    fn f_key(n: u8) -> RealmKey {
+        RealmKey::new(Key::Function(n), RealmMods::NONE)
+    }
+
+    /// F2 with a live terminal enters focus mode and pins focus to the
+    /// terminal; a second F2 exits, leaving focus on the terminal so
+    /// the user keeps driving the same agent in the three-pane view.
+    #[test]
+    fn f2_toggles_focus_mode() {
+        let mut m = build_model();
+        let ws = workspace_with_agent("owner/repo#1");
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        spawn_terminal(&mut m, &key);
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+
+        m.dispatch_key(f_key(2));
+        assert!(m.focus_mode, "F2 enters focus mode");
+        assert_eq!(m.focus(), PaneFocus::Terminals);
+
+        m.dispatch_key(f_key(2));
+        assert!(!m.focus_mode, "second F2 exits focus mode");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "exit keeps the terminal");
+    }
+
+    /// With no live terminal there's nothing to maximize, so F2 is a
+    /// no-op rather than dropping the user onto a blank screen.
+    #[test]
+    fn f2_without_terminal_is_a_noop() {
+        let mut m = build_model();
+        m.focus = PaneFocus::Sidebar;
+        m.dispatch_key(f_key(2));
+        assert!(!m.focus_mode, "no terminal → no focus mode");
+    }
+
+    /// `]]` (with no snippets configured) leaves the terminal — and in
+    /// focus mode that must also drop focus mode, since the sidebar it
+    /// returns to is hidden while focus mode is on.
+    #[test]
+    fn bracket_leave_exits_focus_mode() {
+        let mut m = build_model();
+        let ws = workspace_with_agent("owner/repo#1");
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        spawn_terminal(&mut m, &key);
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        m.dispatch_key(f_key(2));
+        assert!(m.focus_mode);
+
+        // No snippets → `]]` leaves immediately.
+        let bracket = RealmKey::new(Key::Char(']'), RealmMods::NONE);
+        m.dispatch_key(bracket);
+        m.dispatch_key(bracket);
+        assert!(!m.focus_mode, "`]]` exits focus mode");
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
+    }
+
+    /// F3 moves the displayed terminal to the next workspace running an
+    /// agent, wrapping, and keeps focus mode on so the user hops between
+    /// agents heads-down.
+    #[test]
+    fn f3_jumps_to_next_agent_workspace_in_focus_mode() {
+        let mut m = build_model();
+        let ws1 = workspace_with_agent("owner/repo#1");
+        let ws2 = workspace_with_agent("owner/repo#2");
+        let key1 = SessionKey::from(&ws1.key);
+        let key2 = SessionKey::from(&ws2.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws1)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws2)));
+
+        assert!(m.sidebar.focus_workspace_key(&key1));
+        spawn_terminal(&mut m, &key1);
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        m.dispatch_key(f_key(2));
+        assert!(m.focus_mode);
+
+        m.dispatch_key(f_key(3));
+        assert!(m.focus_mode, "jump stays in focus mode");
+        assert_eq!(
+            m.sidebar.selected_workspace_key(),
+            Some(&key2),
+            "F3 advances to the other agent workspace",
+        );
+    }
+
+    /// The attention summary the header reads counts unread / asking /
+    /// CI / review across the visible mailbox.
+    #[test]
+    fn attention_summary_tracks_unread() {
+        let mut m = build_model();
+        let mut ws = workspace_with_agent("owner/repo#1");
+        ws.activity.push(lazybox_core::Activity {
+            author: "alice".into(),
+            body: "ping".into(),
+            created_at: Utc::now(),
+            kind: lazybox_core::ActivityKind::Comment,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        });
+        ws.seen_count = 0;
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        let summary = m.sidebar.attention_summary();
+        assert_eq!(summary.unread, 1, "the unseen comment counts as unread");
+    }
+}

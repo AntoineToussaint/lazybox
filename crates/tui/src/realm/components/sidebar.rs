@@ -307,6 +307,18 @@ impl Sidebar {
         self.inner.focus_next_failing_ci_workspace()
     }
 
+    /// Move the cursor onto the next workspace running a coding agent,
+    /// wrapping around. Returns true when a target was found. Backs
+    /// the `F3` focus-mode "next agent" jump.
+    pub fn focus_next_agent_workspace(&mut self) -> bool {
+        self.inner.focus_next_agent_workspace()
+    }
+
+    /// At-a-glance attention tallies for the focus-mode event header.
+    pub fn attention_summary(&self) -> crate::components::sidebar::AttentionSummary {
+        self.inner.attention_summary()
+    }
+
     /// State-aware short list for the footer hint bar. Catalog-driven;
     /// `overrides` carries the user's `ui.action_keys` map (empty when
     /// untouched) and flows into the catalog's `effective_keys_display`.

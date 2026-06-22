@@ -117,6 +117,7 @@ impl<T: TerminalAdapter> Model<T> {
             // normally — there's no inner program to forward it to.
             Key::Tab
                 if !key.modifiers.contains(KeyModifiers::SHIFT)
+                    && !self.focus_mode
                     && (self.focus != PaneFocus::Terminals
                         || self.terminals.is_empty()
                         || !self.terminal_user_typed_since_focus) =>
@@ -202,6 +203,23 @@ impl<T: TerminalAdapter> Model<T> {
                 self.toggle_mouse_capture();
                 return;
             }
+            // Focus mode (#156). Like F8, handled as a function-key
+            // arm rather than through catalog dispatch so it fires
+            // from every pane INCLUDING the terminal — the whole point
+            // is to toggle / hop agents while heads-down in a focused
+            // PTY, where catalog keys don't reach. F2 enters/exits;
+            // F3 jumps the displayed terminal to the next agent
+            // workspace without leaving focus mode.
+            Key::Function(2) => {
+                self.q_latch.disarm();
+                self.toggle_focus_mode();
+                return;
+            }
+            Key::Function(3) => {
+                self.q_latch.disarm();
+                self.jump_next_agent_workspace();
+                return;
+            }
             Key::Char('s')
                 if key.modifiers.contains(KeyModifiers::ALT)
                     && !key.modifiers.contains(KeyModifiers::SHIFT) =>
@@ -257,8 +275,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // no bindings to offer, so `]]` leaves immediately —
                 // no idle delay for users who never configured any.
                 if self.snippets.is_empty() {
-                    self.focus = PaneFocus::Sidebar;
-                    self.set_focus_attr();
+                    self.leave_terminal_to_sidebar();
                 } else {
                     self.terminal_leader_at = Some(std::time::Instant::now());
                 }
@@ -342,6 +359,12 @@ impl<T: TerminalAdapter> Model<T> {
                     Some(Action::JumpToFailingCi)
                 }
                 lazybox_tui_core::action::ActionKind::StartAgent => Some(Action::StartAgent),
+                lazybox_tui_core::action::ActionKind::ToggleFocusMode => {
+                    Some(Action::ToggleFocusMode)
+                }
+                lazybox_tui_core::action::ActionKind::FocusNextAgent => {
+                    Some(Action::FocusNextAgent)
+                }
                 _ => None,
             };
             if let Some(action) = action {
@@ -656,12 +679,23 @@ impl<T: TerminalAdapter> Model<T> {
         if self.layout.last_area.width == 0 || self.layout.last_area.height == 0 {
             return;
         }
-        let (sidebar_rect, right_top_rect, right_bottom_rect) = pane_areas(
-            self.layout.last_area,
-            self.layout.sidebar_pct,
-            self.layout.right_top_pct,
-            self.layout.sidebar_user_resized,
-        );
+        // In focus mode the sidebar + activity pane aren't drawn, so
+        // their hit rects collapse to empty (no point can land in
+        // them) and the terminal owns everything below the slim event
+        // header — clicks and wheel events all route to the PTY. Keep
+        // this split in lockstep with `view`'s focus-mode layout.
+        let (sidebar_rect, right_top_rect, right_bottom_rect) = if self.focus_mode {
+            let (pane_area, _) = super::split_for_footer(self.layout.last_area);
+            let (_, body) = crate::realm::layout::focus_mode_areas(pane_area);
+            (Rect::default(), Rect::default(), body)
+        } else {
+            pane_areas(
+                self.layout.last_area,
+                self.layout.sidebar_pct,
+                self.layout.right_top_pct,
+                self.layout.sidebar_user_resized,
+            )
+        };
 
         match m.kind {
             MouseEventKind::Down(button) => {

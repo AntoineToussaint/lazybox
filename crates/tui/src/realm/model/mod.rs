@@ -314,6 +314,12 @@ pub struct Model<T: TerminalAdapter> {
     pub viewer_logins: std::collections::HashMap<String, String>,
     /// Which pane has focus when no modal is active.
     focus: PaneFocus,
+    /// Focus mode (issue #156): when `true`, the sidebar and activity
+    /// pane are hidden and the focused workspace's terminal expands to
+    /// near-fullscreen behind a slim event header. Focus is pinned to
+    /// `Terminals` while this is on; leaving the terminal via `]]`
+    /// clears it. Toggled by `F2`.
+    focus_mode: bool,
     /// Three pane wrappers held as typed fields so the orchestrator
     /// can call `.drain_cmds()` etc. directly. The wrappers also
     /// track their own `focused: bool` flag, which we keep in sync
@@ -687,7 +693,7 @@ pub struct Preselect {
     pub session_id_raw: Option<String>,
 }
 
-use crate::realm::layout::{LayoutCtx, pane_areas};
+use crate::realm::layout::{LayoutCtx, focus_mode_areas, pane_areas};
 use crate::realm::setup_ctx::{SettingsAction, SetupCtx};
 use crate::realm::status_ctx::StatusCtx;
 
@@ -744,6 +750,7 @@ impl<T: TerminalAdapter> Model<T> {
             modal_stack: Vec::new(),
             viewer_logins: std::collections::HashMap::new(),
             focus: PaneFocus::Sidebar,
+            focus_mode: false,
             sidebar: Sidebar::new(SIDEBAR_PID),
             right: Right::new(RIGHT_PID),
             terminals: Terminals::new(TERMINALS_PID),
@@ -2081,16 +2088,56 @@ impl<T: TerminalAdapter> Model<T> {
         } else {
             Vec::new()
         };
+        // Focus mode (#156): hide the sidebar + activity pane and give
+        // the terminal the whole window behind a slim event header.
+        // Resolve the header's contents out here so the draw closure
+        // doesn't need to borrow `self` immutably while it also holds
+        // the mutable terminal borrow.
+        let focus_mode = self.focus_mode;
+        let (focus_title, focus_summary, focus_hint) = if focus_mode {
+            use lazybox_tui_core::action::{ActionDef, ActionKind};
+            let title = self
+                .terminals
+                .active_session()
+                .and_then(|k| self.sidebar.workspace_by_key(k))
+                .or_else(|| self.sidebar.selected_workspace())
+                .map(|w| w.name.clone())
+                .unwrap_or_else(|| "no workspace".to_string());
+            let hint = format!(
+                "{} next agent · {} exit",
+                ActionDef::for_kind(ActionKind::FocusNextAgent)
+                    .effective_keys_display(&self.action_key_overrides),
+                ActionDef::for_kind(ActionKind::ToggleFocusMode)
+                    .effective_keys_display(&self.action_key_overrides),
+            );
+            (title, self.sidebar.attention_summary(), hint)
+        } else {
+            (String::new(), Default::default(), String::new())
+        };
         let mut captured_area = Rect::default();
         let _ = self.terminal.draw(|f| {
             let area = f.area();
             captured_area = area;
             let (pane_area, footer_area) = split_for_footer(area);
-            let (left, right_top, right_bottom) =
-                pane_areas(pane_area, sidebar_pct, right_top_pct, sidebar_user_resized);
-            self.sidebar.view_in(left, f);
-            self.right.view_in(right_top, f);
-            self.terminals.view_in(right_bottom, f);
+            let right_bottom = if focus_mode {
+                let (header, body) = focus_mode_areas(pane_area);
+                crate::realm::components::focus_header::render(
+                    f,
+                    header,
+                    &focus_title,
+                    focus_summary,
+                    &focus_hint,
+                );
+                self.terminals.view_in(body, f);
+                body
+            } else {
+                let (left, right_top, right_bottom) =
+                    pane_areas(pane_area, sidebar_pct, right_top_pct, sidebar_user_resized);
+                self.sidebar.view_in(left, f);
+                self.right.view_in(right_top, f);
+                self.terminals.view_in(right_bottom, f);
+                right_bottom
+            };
 
             // Selection highlight overlay. Painted AFTER the terminal
             // widget so the reverse-video pass lands on the just-

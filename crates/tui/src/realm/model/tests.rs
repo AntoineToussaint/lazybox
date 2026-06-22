@@ -2177,6 +2177,89 @@ mod merge_focus_follow_tests {
             "a merge the user wasn't watching must not yank their cursor",
         );
     }
+
+    /// Regression for #160: the daemon's issue→PR merge burst
+    /// (`TerminalsRebadged` → `WorkspaceRemoved` → `WorkspaceMerged`)
+    /// arrives as one drain batch and must leave the loop responsive —
+    /// projecting the panes ONCE for the batch, not once per event. A
+    /// per-event `sync_panes` clones the selected `Workspace` and
+    /// re-emits `FocusWorkspace` for every intermediate cursor position;
+    /// under a real merge that compounded into the UI-thread stall the
+    /// issue reported. We assert the whole burst drains without backlog,
+    /// focus follows the merge onto the PR, and the daemon's focus hint
+    /// was re-aimed at most once.
+    #[test]
+    fn merge_burst_coalesces_to_a_single_pane_sync() {
+        use super::super::helpers::drain_daemon_events;
+        use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY};
+        use tokio::sync::mpsc;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+
+        // A decoy PR sits newest, so the post-removal cursor fallback
+        // would land THERE first: without coalescing the `WorkspaceRemoved`
+        // sync emits `FocusWorkspace(decoy)` before `WorkspaceMerged`
+        // re-aims at the real PR — two focus hints for one logical move.
+        let decoy = workspace("owner/repo#9", true, Duration::minutes(1));
+        let issue = workspace("owner/repo#1", false, Duration::hours(1));
+        let mut pr = workspace("owner/repo#2", true, Duration::hours(2));
+        let issue_key = issue.key.clone();
+        let pr_key = pr.key.clone();
+        pr.add_session(agent_session(&pr_key));
+
+        // Seed the rows, park the cursor on the issue, and settle the
+        // focus baseline so the burst is measured from "viewing the issue".
+        for ws in [decoy, issue.clone(), pr.clone()] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        }
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&issue_key)));
+        m.sync_panes();
+        while cmd_rx.try_recv().is_ok() {} // drop setup focus/fetch traffic
+
+        // The daemon's merge burst, delivered as ONE drain batch.
+        let from: SessionKey = (&issue_key).into();
+        let to: SessionKey = (&pr_key).into();
+        for evt in [
+            IpcEvent::TerminalsRebadged {
+                from: from.clone(),
+                to: to.clone(),
+            },
+            IpcEvent::WorkspaceRemoved(issue_key.clone()),
+            IpcEvent::WorkspaceMerged {
+                issue_workspace_key: issue_key.clone(),
+                pr_workspace_key: pr_key.clone(),
+                issue_label: "owner/repo#1".into(),
+                pr_label: "owner/repo#2".into(),
+            },
+        ] {
+            evt_tx.try_send(evt).expect("room in the bounded channel");
+        }
+
+        let backlog = drain_daemon_events(&mut m, None);
+        assert!(!backlog, "a 3-event burst is well under the per-tick cap");
+
+        assert_eq!(
+            m.sidebar.selected_workspace().map(|w| w.key.clone()),
+            Some(pr_key.clone()),
+            "focus followed the merge onto the PR workspace",
+        );
+
+        let focus_hints = std::iter::from_fn(|| cmd_rx.try_recv().ok())
+            .filter(|c| matches!(c, Command::FocusWorkspace { .. }))
+            .count();
+        assert_eq!(
+            focus_hints, 1,
+            "merge burst coalesced to a single FocusWorkspace hint \
+             (per-event sync would re-aim it for the intermediate decoy too)",
+        );
+    }
 }
 
 #[cfg(test)]

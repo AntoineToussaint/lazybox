@@ -1690,6 +1690,18 @@ impl Sidebar {
             actions.push(Action::ToggleSnooze);
             actions.push(Action::Archive);
         }
+        // Focus mode (`.`) surfaces only when the selected workspace
+        // has a coding agent to maximize — otherwise the key is a
+        // no-op, so advertising it would be noise. The `]]<digit>`
+        // jumps live under the terminal `]]` leader (and its popup),
+        // not the sidebar footer.
+        if workspace.is_some_and(|w| {
+            w.sessions
+                .iter()
+                .any(|s| matches!(s.kind, lazybox_core::SessionKind::Agent { .. }))
+        }) {
+            actions.push(Action::ToggleFocusMode);
+        }
         // Creation actions live last in the row but Project comes
         // BEFORE Workspace: projects are containers; you need one
         // before a workspace makes sense. Reversed order read

@@ -44,7 +44,7 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Stable id for a spawned terminal. Distinct from SessionKey because a
 /// single session may hold multiple terminals (agent + shell + logs).
@@ -912,6 +912,18 @@ pub enum Event {
     /// scoped Spawn. Sidebar uses this to expand the workspace row
     /// into session sub-rows once the count crosses 1.
     SessionCreated(Box<lazybox_core::WorkspaceSession>),
+    /// Progress signal during first-time worktree provisioning (cold
+    /// clone / fetch / `git worktree add` / mounts / scripts). Emitted
+    /// only on the provisioning path — an instant resume of an existing
+    /// worktree sends none, so the TUI's progress modal never flashes
+    /// for the fast path. `session_key` ties the events to the spawn
+    /// the user just triggered; the matching `TerminalSpawned` dismisses
+    /// the modal once the session is ready.
+    WorktreeProgress {
+        session_key: SessionKey,
+        step: WorktreeStep,
+        status: WorktreeStepStatus,
+    },
     /// A session ended (process exited and the worktree was reaped,
     /// OR the user explicitly killed it). Includes the workspace
     /// key so consumers can look up which row to update without
@@ -1173,6 +1185,29 @@ impl ProviderErrorKind {
             Self::Permanent => "permanent",
         }
     }
+}
+
+/// A single phase of first-time worktree provisioning, reported by
+/// `Event::WorktreeProgress`. Ordered as the daemon runs them so the
+/// TUI's progress checklist can render them top-to-bottom without
+/// carrying ordering on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorktreeStep {
+    /// `git worktree add` after a (possibly cold) clone + fetch — the
+    /// slow part on a brand-new repo.
+    Checkout,
+    /// Applying configured mounts + setup scripts to the fresh tree.
+    Setup,
+}
+
+/// State transition for a [`WorktreeStep`]. `Started`/`Done` advance
+/// the checklist; `Failed` carries the error so the modal can surface
+/// it instead of dismissing silently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorktreeStepStatus {
+    Started,
+    Done,
+    Failed(String),
 }
 
 impl Event {

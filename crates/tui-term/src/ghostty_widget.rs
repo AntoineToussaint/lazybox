@@ -190,6 +190,13 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
                     if cell_style.italic {
                         style = style.add_modifier(Modifier::ITALIC);
                     }
+                    // Deliberately drop `cell_style.blink` (SGR 5/6).
+                    // Forwarding it to Modifier::SLOW_BLINK makes the host
+                    // terminal blink every styled glyph — divider rules and
+                    // status panels visibly flicker even though they never
+                    // change. The grid already redraws on real updates, so a
+                    // blink attribute buys nothing but flicker.
+                    //
                     // Suppress UNDERLINED / CROSSED_OUT on
                     // whitespace-only cells. Claude Code (and other
                     // CLIs) sometimes leave the underline-on ANSI
@@ -607,5 +614,98 @@ mod tests {
         assert!(!is_blank_glyph("─"));
         // Space embedded in real content — overall not blank.
         assert!(!is_blank_glyph("a b"));
+    }
+    /// #174 regression: libghostty sets `blink` on cells carrying the
+    /// SGR 5 / 6 attribute, but the widget must NOT translate it into a
+    /// ratatui blink modifier — doing so makes the host terminal blink
+    /// every styled glyph (divider rules, status panels), which is the
+    /// reported flicker. Assert an SGR-5 box-drawing run reaches ratatui
+    /// with no blink modifier even though the VT cell flags it.
+    #[test]
+    fn blink_attribute_is_not_forwarded_to_ratatui() {
+        let mut h = Harness::new(6, 1);
+        let area = Rect::new(0, 0, 6, 1);
+        // SGR 5 (slow blink) on three box-drawing dashes, then reset.
+        h.terminal
+            .vt_write("\x1b[5m\u{2500}\u{2500}\u{2500}\x1b[0m".as_bytes());
+
+        // Sanity: the VT really does carry the blink flag on those cells,
+        // so this test would catch a future change that maps it through.
+        // Scoped so the snapshot's borrow of `h` ends before `h.render`.
+        {
+            let snap = h.render_state.update(&h.terminal).unwrap();
+            let mut ri = RowIterator::new().unwrap();
+            let mut rows = ri.update(&snap).unwrap();
+            let row = rows.next().unwrap();
+            let mut ci = CellIterator::new().unwrap();
+            let mut cells = ci.update(row).unwrap();
+            assert!(
+                cells.next().unwrap().style().unwrap().blink,
+                "precondition: libghostty must flag the SGR-5 cell as blink",
+            );
+        }
+
+        let buf = h.render(area);
+        let blink = Modifier::SLOW_BLINK | Modifier::RAPID_BLINK;
+        for x in 0..3 {
+            assert!(
+                !buf[(x, 0u16)].modifier.intersects(blink),
+                "cell {x} must not carry a blink modifier",
+            );
+        }
+    }
+
+    /// #174 regression: a static horizontal rule must stay put while a
+    /// neighbouring line updates live (spinner / token counter ticking).
+    /// Feed an Ink-style status block, then redraw only the spinner row
+    /// repeatedly; the divider rows must show ZERO spurious damage in the
+    /// frame-to-frame diff and keep their content, so the host terminal
+    /// never repaints — and therefore never flickers — them.
+    #[test]
+    fn horizontal_rules_stay_stable_across_partial_redraws() {
+        let mut h = Harness::new(30, 6);
+        let area = Rect::new(0, 0, 30, 6);
+        let dash = "\u{2500}".repeat(30);
+        // header / divider / prompt / divider / spinner / blank
+        h.terminal.vt_write(
+            format!("header\r\n{dash}\r\n\u{276f} \r\n{dash}\r\n  . 0 tokens\r\n").as_bytes(),
+        );
+        let mut prev = h.render(area);
+        let rowstr = |buf: &Buffer, y: u16| {
+            (0..30)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        assert_eq!(rowstr(&prev, 1), dash);
+        assert_eq!(rowstr(&prev, 3), dash);
+
+        // Spinner ticks: reposition to the spinner row, erase it, rewrite
+        // only its content. The divider rows are never touched.
+        let frames = [
+            "  o 12 tokens",
+            "  O 48 tokens",
+            "  o 96 tokens",
+            "  . 150 tokens",
+        ];
+        for (n, body) in frames.iter().enumerate() {
+            h.terminal
+                .vt_write(format!("\x1b[5;1H\x1b[2K{body}").as_bytes());
+            let cur = h.render(area);
+            let damage = prev.diff(&cur);
+            let dmg_on = |y: u16| damage.iter().filter(|(_, yy, _)| *yy == y).count();
+            assert_eq!(dmg_on(1), 0, "tick {n}: top divider spuriously damaged");
+            assert_eq!(dmg_on(3), 0, "tick {n}: bottom divider spuriously damaged");
+            assert_eq!(
+                rowstr(&cur, 1),
+                dash,
+                "tick {n}: top divider content changed"
+            );
+            assert_eq!(
+                rowstr(&cur, 3),
+                dash,
+                "tick {n}: bottom divider content changed"
+            );
+            prev = cur;
+        }
     }
 }

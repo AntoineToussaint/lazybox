@@ -30,7 +30,9 @@ use lazybox_agents::SpawnCtx;
 use lazybox_core::{
     SessionId, SessionKey, SessionKind, Task, Workspace, WorkspaceKey, WorkspaceSession as Session,
 };
-use lazybox_ipc::{Event, TerminalId, TerminalKind, TerminalSnapshot};
+use lazybox_ipc::{
+    Event, TerminalId, TerminalKind, TerminalSnapshot, WorktreeStep, WorktreeStepStatus,
+};
 use lazybox_store::WorkspaceRecord;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1403,11 +1405,11 @@ async fn resolve_or_create_session(
         let session = workspace.find_session(id).ok_or_else(|| {
             crate::ServerError::Workspace(format!("session {id:?} not in workspace"))
         })?;
-        ensure_worktree_present(config, &workspace, &session.worktree_path).await;
+        ensure_worktree_present(config, &workspace, &session.worktree_path, session_key).await;
         return Ok((session.worktree_path.clone(), session.id));
     }
     if let Some(session) = workspace.default_session() {
-        ensure_worktree_present(config, &workspace, &session.worktree_path).await;
+        ensure_worktree_present(config, &workspace, &session.worktree_path, session_key).await;
         return Ok((session.worktree_path.clone(), session.id));
     }
 
@@ -1422,7 +1424,7 @@ async fn resolve_or_create_session(
     let path = worktree_path_for_session(&workspace, 0);
 
     let prov_start = std::time::Instant::now();
-    let provisioned = provision_worktree(config, &workspace, &path).await;
+    let provisioned = provision_worktree(config, &workspace, &path, session_key).await;
     tracing::info!(
         elapsed_ms = prov_start.elapsed().as_millis(),
         ok = provisioned.is_ok(),
@@ -1435,6 +1437,16 @@ async fn resolve_or_create_session(
         // a non-fatal error so the user knows their `s` press landed
         // in a bare directory, not the PR's tree.
         tracing::warn!("worktree provisioning failed: {e}");
+        // Surface the failure in the progress modal too, so a cold
+        // clone that can't reach GitHub shows the error instead of the
+        // checklist hanging on a forever spinner. Checkout is the only
+        // phase that aborts provisioning (mounts/scripts are best-effort).
+        emit_worktree_progress(
+            config,
+            session_key,
+            WorktreeStep::Checkout,
+            WorktreeStepStatus::Failed(e.to_string()),
+        );
         let _ = config.bus.send(Event::provider_error_retryable(
             "worktree",
             format!("git worktree setup failed; using empty dir ({e})"),
@@ -1586,10 +1598,26 @@ fn clonable_repo_from_project(
 /// Try to set up a real git worktree at `target` for the workspace's
 /// primary task. Returns Ok(()) when a checkout succeeded, Err when
 /// we couldn't (caller falls back to a plain mkdir).
+/// Broadcast a single worktree-provisioning progress transition.
+/// Best-effort: a closed bus (no TUI attached) just drops it.
+fn emit_worktree_progress(
+    config: &ServerConfig,
+    session_key: &SessionKey,
+    step: WorktreeStep,
+    status: WorktreeStepStatus,
+) {
+    let _ = config.bus.send(Event::WorktreeProgress {
+        session_key: session_key.clone(),
+        step,
+        status,
+    });
+}
+
 async fn provision_worktree(
     config: &ServerConfig,
     workspace: &Workspace,
     target: &std::path::Path,
+    session_key: &SessionKey,
 ) -> Result<(), crate::ServerError> {
     use crate::ServerError;
     // A blank workspace (created via `n` under a project, no issue/PR
@@ -1611,6 +1639,12 @@ async fn provision_worktree(
         None => clonable_repo_from_project(config, workspace).ok(),
     };
 
+    emit_worktree_progress(
+        config,
+        session_key,
+        WorktreeStep::Checkout,
+        WorktreeStepStatus::Started,
+    );
     let (worktree, repo_key) = match repo {
         Some(repo) => {
             let (owner, name) = repo.split_once('/').ok_or_else(|| {
@@ -1665,6 +1699,18 @@ async fn provision_worktree(
             (worktree, None)
         }
     };
+    emit_worktree_progress(
+        config,
+        session_key,
+        WorktreeStep::Checkout,
+        WorktreeStepStatus::Done,
+    );
+    emit_worktree_progress(
+        config,
+        session_key,
+        WorktreeStep::Setup,
+        WorktreeStepStatus::Started,
+    );
 
     // Apply mounts: global `worktree.mounts` + per-repo
     // `repos.<owner/name>.mounts` from YAML. Best-effort — a mount
@@ -1718,6 +1764,12 @@ async fn provision_worktree(
     let _ = worktree; // silence dead-binding warning from the
     // signature change; the worktree value is what
     // apply_mounts mutated and we're done with it.
+    emit_worktree_progress(
+        config,
+        session_key,
+        WorktreeStep::Setup,
+        WorktreeStepStatus::Done,
+    );
     Ok(())
 }
 
@@ -2006,13 +2058,20 @@ async fn ensure_worktree_present(
     config: &ServerConfig,
     workspace: &Workspace,
     path: &std::path::Path,
+    session_key: &SessionKey,
 ) {
     if path.exists() {
         return;
     }
     tracing::info!("worktree {} missing — re-provisioning", path.display());
-    if let Err(e) = provision_worktree(config, workspace, path).await {
+    if let Err(e) = provision_worktree(config, workspace, path, session_key).await {
         tracing::warn!("re-provision failed: {e}");
+        emit_worktree_progress(
+            config,
+            session_key,
+            WorktreeStep::Checkout,
+            WorktreeStepStatus::Failed(e.to_string()),
+        );
         let _ = config.bus.send(Event::provider_error_retryable(
             "worktree",
             format!("re-checkout failed; using empty dir ({e})"),
@@ -5015,8 +5074,37 @@ mod tests {
         ws.project_key = Some(lazybox_core::ProjectKey::local("notes"));
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("worktree");
-        provision_worktree(&config, &ws, &dir).await.unwrap();
+        let session_key = SessionKey::new("scratch");
+        let mut bus_rx = config.bus.subscribe();
+        provision_worktree(&config, &ws, &dir, &session_key)
+            .await
+            .unwrap();
         assert!(dir.join(".git").exists(), "a real git repo was created");
+
+        // The checklist-driving progress events fire in order:
+        // Checkout Started/Done then Setup Started/Done, all keyed to
+        // the spawn's session.
+        let mut progress = Vec::new();
+        while let Ok(ev) = bus_rx.try_recv() {
+            if let Event::WorktreeProgress {
+                session_key: sk,
+                step,
+                status,
+            } = ev
+            {
+                assert_eq!(sk, session_key);
+                progress.push((step, status));
+            }
+        }
+        assert_eq!(
+            progress,
+            vec![
+                (WorktreeStep::Checkout, WorktreeStepStatus::Started),
+                (WorktreeStep::Checkout, WorktreeStepStatus::Done),
+                (WorktreeStep::Setup, WorktreeStepStatus::Started),
+                (WorktreeStep::Setup, WorktreeStepStatus::Done),
+            ],
+        );
         let head = std::process::Command::new("git")
             .current_dir(&dir)
             .args(["symbolic-ref", "--short", "HEAD"])

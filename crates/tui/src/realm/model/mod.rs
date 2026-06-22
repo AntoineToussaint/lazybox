@@ -183,6 +183,13 @@ pub enum Id {
     /// scrollable view of recent provider-sync outcomes built from
     /// `self.status.sync`. No pending state — dismiss just pops it.
     SyncStatus,
+    /// Spinner + step checklist shown while a first spawn on a fresh
+    /// workspace provisions its worktree. Mounted on the first
+    /// `WorktreeProgress` daemon event (so an instant resume never
+    /// flashes it), re-mounted from `worktree_progress` as steps land,
+    /// dismissed by the matching `TerminalSpawned` (or Esc / a failed
+    /// step the user acknowledges).
+    WorktreeProgress,
 }
 
 /// Why a workspace-removal confirm prompt is being shown. Both
@@ -248,6 +255,10 @@ pub enum Msg {
     ChoiceRefresh,
     ChoiceBack,
     LoadingResolved(PayloadCarrier),
+    /// Spinner heartbeat from the `WorktreeProgress` modal. Carries no
+    /// data — its only job is to be a non-empty message so the run loop
+    /// repaints the advancing spinner during the silent checkout.
+    WorktreeProgressTick,
     PollingError((String, String, String, String)),
     PollingTimeout,
     PollingEmptyInbox(Vec<String>),
@@ -500,6 +511,11 @@ pub struct Model<T: TerminalAdapter> {
     /// (issue, PR) pair currently being prompted about. Consumed by
     /// `Msg::Confirmed` when the top modal is `Id::MergeConfirm`.
     active_merge_prompt: Option<(lazybox_core::WorkspaceKey, lazybox_core::WorkspaceKey)>,
+    /// Accumulated state behind the `Id::WorktreeProgress` modal, keyed
+    /// to the spawn whose worktree is being provisioned. `Some` only
+    /// while the checklist is up — created on the first
+    /// `WorktreeProgress` event, cleared when the modal dismisses.
+    worktree_progress: Option<crate::realm::components::worktree_progress::WorktreeProgressState>,
     /// Workspace key whose PR is being confirmed for merge by the
     /// `Shift-M` Confirm modal. Set when the modal mounts, taken on
     /// `Msg::Confirmed` / `Msg::ModalDismissed`.
@@ -806,6 +822,7 @@ impl<T: TerminalAdapter> Model<T> {
             active_removal_prompt: None,
             pending_merge_prompts: std::collections::VecDeque::new(),
             active_merge_prompt: None,
+            worktree_progress: None,
             pending_adopt_source: None,
             adopt_choices: Vec::new(),
             start_agent_project_choices: Vec::new(),
@@ -2390,6 +2407,10 @@ impl<T: TerminalAdapter> Model<T> {
                 let cmds = self.handle_modal_dismissed();
                 self.dispatch_cmds(cmds);
             }
+            // Pure repaint heartbeat — the spinner already advanced in
+            // the component's `on(Tick)`; being a non-empty message is
+            // what flips `redraw` in the run loop.
+            Msg::WorktreeProgressTick => {}
             Msg::Confirmed(yes) => {
                 let cmds = self.handle_confirmed(yes);
                 self.dispatch_cmds(cmds);

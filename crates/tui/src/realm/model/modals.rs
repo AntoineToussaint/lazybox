@@ -965,6 +965,75 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::MergeConfirm, modal);
     }
 
+    /// Fold one `WorktreeProgress` daemon event into the checklist and
+    /// (re)mount the modal. Mounted lazily on the first event so an
+    /// instant resume — which provisions nothing and emits no events —
+    /// never flashes the modal. Re-mounting on each step keeps the
+    /// checklist advancing in place; the `retain` guards against piling
+    /// duplicate ids onto the stack.
+    pub(super) fn apply_worktree_progress(
+        &mut self,
+        session_key: lazybox_core::SessionKey,
+        step: lazybox_ipc::WorktreeStep,
+        status: lazybox_ipc::WorktreeStepStatus,
+    ) {
+        use crate::realm::components::worktree_progress::{
+            WorktreeProgress, WorktreeProgressState,
+        };
+        // A new spawn supersedes any stale checklist (e.g. the previous
+        // one errored and the user re-pressed `w`).
+        let state = match self.worktree_progress.as_mut() {
+            Some(s) if s.session_key == session_key => s,
+            _ => {
+                self.worktree_progress = Some(WorktreeProgressState::new(session_key));
+                self.worktree_progress.as_mut().expect("just assigned Some")
+            }
+        };
+        state.apply(step, status);
+        let modal = WorktreeProgress::from_state(state);
+        self.modal_stack.retain(|id| id != &Id::WorktreeProgress);
+        self.mount_modal(Id::WorktreeProgress, modal);
+    }
+
+    /// Dismiss the worktree-progress checklist if one is up for
+    /// `session_key` and it isn't sitting on a failed step (a failure
+    /// stays up until the user acknowledges it with Esc). Returns
+    /// whether a modal was actually torn down.
+    pub(super) fn dismiss_worktree_progress(
+        &mut self,
+        session_key: &lazybox_core::SessionKey,
+    ) -> bool {
+        let dismiss = self
+            .worktree_progress
+            .as_ref()
+            .is_some_and(|s| &s.session_key == session_key && !s.failed());
+        if dismiss {
+            self.worktree_progress = None;
+            self.modal_stack.retain(|id| id != &Id::WorktreeProgress);
+            let _ = self.app.umount(&Id::WorktreeProgress);
+            if let Some(top) = self.modal_stack.last() {
+                let _ = self.app.active(top);
+            }
+            self.redraw = true;
+        }
+        dismiss
+    }
+
+    /// Unconditionally tear down the worktree-progress checklist
+    /// (regardless of session or failed state). Used when a spawn fails
+    /// outright — the error goes to the footer and there's nothing left
+    /// for the checklist to advance toward.
+    pub(super) fn force_dismiss_worktree_progress(&mut self) {
+        if self.worktree_progress.take().is_some() {
+            self.modal_stack.retain(|id| id != &Id::WorktreeProgress);
+            let _ = self.app.umount(&Id::WorktreeProgress);
+            if let Some(top) = self.modal_stack.last() {
+                let _ = self.app.active(top);
+            }
+            self.redraw = true;
+        }
+    }
+
     /// Push a modal.
     pub fn push_modal(&mut self, id: Id) {
         self.modal_stack.push(id.clone());

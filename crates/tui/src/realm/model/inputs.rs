@@ -562,6 +562,12 @@ impl<T: TerminalAdapter> Model<T> {
                 self.pending_snooze_workspace = None;
                 self.snooze_choices.clear();
             }
+            Some(Id::WorktreeProgress) => {
+                // Esc on the checklist — drop the accumulated state so a
+                // later spawn starts a fresh one. Provisioning keeps
+                // running on the daemon; this only closes the view.
+                self.worktree_progress = None;
+            }
             _ => {}
         }
         // Always try to surface a queued prompt after a modal

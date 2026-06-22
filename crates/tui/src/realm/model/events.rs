@@ -381,6 +381,20 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // First-time worktree provisioning progress. Drives the
+        // spinner + step checklist modal. The panes ignore it, so
+        // handle + return here rather than fan out. The matching
+        // `TerminalSpawned` below dismisses the modal once ready.
+        if let IpcEvent::WorktreeProgress {
+            session_key,
+            step,
+            status,
+        } = &event
+        {
+            self.apply_worktree_progress(session_key.clone(), *step, status.clone());
+            self.redraw = true;
+            return;
+        }
         self.sidebar.on_daemon_event(&event);
         // Surface Active→Asking transitions in the footer with a
         // brief Hint-severity notice. The sidebar already pushed an
@@ -460,6 +474,13 @@ impl<T: TerminalAdapter> Model<T> {
                         if self.status.clear_spawning() {
                             self.redraw = true;
                         }
+                        // No `TerminalSpawned` is coming, so a progress
+                        // checklist that reached "Starting agent" would
+                        // hang — surface the error in the footer and
+                        // tear it down. `ProviderError` carries no
+                        // session, so this clears whichever checklist
+                        // is up (only ever one).
+                        self.force_dismiss_worktree_progress();
                         self.flash_error(format!("✗ spawn failed — {message}"));
                     }
                     // Manual refresh failed — convert the ack flag
@@ -527,6 +548,13 @@ impl<T: TerminalAdapter> Model<T> {
             self.apply_preselect();
         }
         if is_spawn {
+            // The session is ready — tear down the provisioning
+            // checklist (unless a step failed, in which case it stays
+            // up for the user to read). Keyed by session_key so a
+            // concurrent unrelated spawn can't dismiss the wrong modal.
+            if let IpcEvent::TerminalSpawned { session_key, .. } = &event {
+                self.dismiss_worktree_progress(session_key);
+            }
             // A terminal just appeared — auto-focus the Terminals
             // pane so the user can start typing immediately, and
             // clear any "Spawning…" footer notice that was set when

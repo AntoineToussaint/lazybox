@@ -574,6 +574,17 @@ impl Sidebar {
             .iter()
             .filter(|r| matches!(r, VisibleRow::Workspace(_)))
             .count();
+        // 1-based jump numbers for the first nine agent workspaces, in
+        // sidebar order — the badge that pairs with the `]]<digit>`
+        // jump. Past the ninth there's no single-digit key, so it gets
+        // no badge.
+        let agent_numbers: std::collections::HashMap<SessionKey, usize> = self
+            .agent_workspace_keys()
+            .into_iter()
+            .take(9)
+            .enumerate()
+            .map(|(i, k)| (k, i + 1))
+            .collect();
         let mut positions: Vec<usize> = Vec::with_capacity(workspace_count);
         let mut rows: Vec<TableRow> = Vec::with_capacity(workspace_count);
         for (i, row) in self.visible.iter().enumerate() {
@@ -603,6 +614,7 @@ impl Sidebar {
                     self.working_spinner_frame,
                 ),
                 badges: self.runner_badges(key),
+                agent_number: agent_numbers.get(key).copied(),
                 ascii_glyphs: self.ascii_glyphs,
             };
             positions.push(i);

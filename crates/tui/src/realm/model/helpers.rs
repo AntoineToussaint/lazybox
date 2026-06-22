@@ -142,9 +142,9 @@ pub(crate) fn key_event_to_chord(
         KeyCode::PageDown => ChordCode::Named(NamedKey::PageDown),
         KeyCode::Delete => ChordCode::Named(NamedKey::Delete),
         KeyCode::Insert => ChordCode::Named(NamedKey::Insert),
+        KeyCode::F(n) => ChordCode::Named(NamedKey::Function(n)),
         // Space is reported as Char(' ') by crossterm — covered by
-        // the Char arm above. Function keys / unknown variants fall
-        // through to None.
+        // the Char arm above. Unmodeled variants fall through to None.
         _ => return None,
     };
     let _ = ctrl;

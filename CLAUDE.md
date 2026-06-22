@@ -141,10 +141,15 @@ The footer hint bar reads each pane's `contextual_bindings()`.
 
 **Global**: `Tab` cycle panes, `?` help, `q q` quit, `,` settings,
 `Shift-R` refresh, `Shift-T` tour, `Shift-D` sync status, `!` jump to
-agent-asking workspace, `Shift-F` jump to failing CI, `Shift-arrows`
-resize splitters, `F8` / `Alt-s` / `Ctrl-Alt-s` toggle mouse capture
-(host-native text selection), mouse-click any pane to focus it,
-mouse-drag splitters to resize.
+agent-asking workspace, `Shift-F` jump to failing CI, `.` toggle
+focus mode (near-fullscreen agent terminal behind a slim event
+header; from inside a terminal use `]]f`, and `]]` also exits),
+`]]<digit>` jump the focused terminal straight to the Nth agent
+workspace (sidebar order; the number rides a badge on each agent row
+and the `]]` leader popup), `Shift-arrows` resize splitters, `F8` /
+`Alt-s` / `Ctrl-Alt-s` toggle mouse capture (host-native text
+selection), mouse-click any pane to focus it, mouse-drag splitters to
+resize.
 
 **Sidebar**: `j/k` or arrows navigate, `Enter` open (focus activity),
 `w` work on this (contextual agent prompt), `c` claude, `x` codex,
@@ -167,11 +172,15 @@ selection, `d` toggle PR/issue description, `m` mark the focused row
 read, `z` undo mark-read, `r` reply.
 
 **TerminalStack**: all keys forward to the PTY. `]]` (configurable
-escape sequence) is a leader: bare `]]` returns to the sidebar, while
-`]]<key>` opens the snippet picker (see
+escape sequence) is a leader: bare `]]` returns to the sidebar (on the
+idle tick), `]]f` toggles focus mode, `]]<digit>` jumps to the Nth
+agent workspace, and `]]<key>` opens the snippet picker (see
 [`docs/snippets.md`](docs/snippets.md)) — fuzzy-filters by snippet
-key, auto-submits when the filter uniquely matches. A lone `]`
-followed by any non-`]` key is sent to the agent verbatim. `Ctrl-c`
+key, auto-submits when the filter uniquely matches. The `]]` leader
+popup lists the agent roster (digits) above the snippet keys. Digits
+and `f` are reserved by the leader, shadowing any snippet bound to
+them. A lone `]` followed by any non-`]` key is sent to the agent
+verbatim. `Ctrl-c`
 is forwarded as an interrupt. `Ctrl-w` is the tile prefix:
 `Ctrl-w |` / `Ctrl-w -` split, `Ctrl-w <arrow>` moves tile focus,
 `Ctrl-w q` closes the focused tile. `Shift-PgUp/PgDn` scroll the

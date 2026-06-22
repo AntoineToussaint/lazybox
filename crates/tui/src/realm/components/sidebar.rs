@@ -230,19 +230,11 @@ impl Sidebar {
         &mut self,
         attention: lazybox_config::AttentionConfig,
         collapsed_repos: std::collections::BTreeSet<String>,
-        agent_shortcuts: std::collections::HashMap<char, String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
-        ui: &lazybox_config::UiDefaults,
     ) {
-        self.inner.apply_config(
-            attention,
-            collapsed_repos,
-            agent_shortcuts,
-            default_agent,
-            display,
-            ui,
-        );
+        self.inner
+            .apply_config(attention, collapsed_repos, default_agent, display);
     }
 
     /// Replace the set of subscribed-repo names that should show up
@@ -362,6 +354,26 @@ impl Sidebar {
     /// `Space` key on a header.
     pub fn toggle_repo_at_cursor(&mut self) -> bool {
         self.inner.toggle_repo_at_cursor()
+    }
+
+    /// Cycle the role filter (catalog `CycleRoleFilter`, default `f`).
+    pub fn cycle_role_filter(&mut self) {
+        self.inner.cycle_role_filter();
+    }
+
+    /// Cycle the sort order (catalog `CycleSort`, default `o`).
+    pub fn cycle_sort(&mut self) {
+        self.inner.cycle_sort_mode();
+    }
+
+    /// Cycle the mailbox view (catalog `CycleMailbox`, default `Shift-S`).
+    pub fn cycle_mailbox(&mut self) {
+        self.inner.cycle_mailbox();
+    }
+
+    /// Open the incremental search bar (catalog `OpenSearch`, default `/`).
+    pub fn open_search(&mut self) {
+        self.inner.open_search();
     }
 }
 

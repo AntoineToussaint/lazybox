@@ -35,11 +35,6 @@ pub struct WorkspaceRowCtx<'a> {
     /// render pass. Every row's pr-number cell pads to this width
     /// so the role / asking columns line up across rows.
     pub max_pr_num_width: usize,
-    /// `LatchSet::armed(...) == Some(this_key)` for the long-snooze
-    /// latch — paints the `[snooze 1y?]` chrome. The kill latch
-    /// retired when Archive moved to a Confirm modal (every
-    /// destructive action goes through `ActionConfirm` now).
-    pub long_snooze_armed: bool,
     /// Any agent in this workspace is in `AgentState::InputNeeded`.
     /// Renders the `?` pill in the shared state slot. Mutually
     /// exclusive with `working` — input-needed wins if both were ever
@@ -131,29 +126,27 @@ impl<'a> WorkspaceRowCtx<'a> {
 /// 6. Labels — ` [bug] [ci] +2`, or blank. Max so the title flex
 ///    reclaims the space when no row has labels; truncates at 3
 ///    chips with a `+N` overflow indicator.
-/// 7. Kill mark — ` [snooze 1y?]`, or blank. Max so the title flex
-///    reclaims the space when no row is armed.
-/// 8. Unread pill — ` ●N `, right-aligned. Max so the column collapses
+/// 7. Unread pill — ` ●N `, right-aligned. Max so the column collapses
 ///    when no row has unread, and lines up at a consistent x when any
 ///    row does.
-/// 9. Badge: agent slot — ` C ` / ` C×2 ` / blank. Same Max semantics.
-/// 10. Badge: shell slot — ` S ` / blank. Cell carries a leading space
+/// 8. Badge: agent slot — ` C ` / ` C×2 ` / blank. Same Max semantics.
+/// 9. Badge: shell slot — ` S ` / blank. Cell carries a leading space
 ///    so the two badges visually separate when both present.
-/// 11. Status pill — ` MERGED  ` / ` REVIEW   CI FAIL ` / blank.
+/// 10. Status pill — ` MERGED  ` / ` REVIEW   CI FAIL ` / blank.
 ///    Right-aligned. Cell is empty (width 0) when both review + CI
 ///    pills are None, so the column collapses for an all-empty table
 ///    instead of always reserving 19 cells of dead air.
-/// 12. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
+/// 11. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
 ///    baked into the cell so a 1-cell gap separates time from
 ///    whatever sits to its left (status pill or, when status is
 ///    empty, the title flex padding).
 pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     // Drop order when the sidebar is too narrow to fit every column:
     // lower priority sheds first. The issue number + title (and the
-    // type glyph that tells issue-from-PR, and the destructive
-    // snooze-confirm chrome) are kept; secondary columns drop in the
-    // order the issue calls out — timestamps, then status chips, then
-    // indicators — so the title elides to `…` only after they're gone.
+    // type glyph that tells issue-from-PR) are kept; secondary columns
+    // drop in the order the issue calls out — timestamps, then status
+    // chips, then indicators — so the title elides to `…` only after
+    // they're gone.
     const P_TIME: u8 = 10;
     const P_STATUS: u8 = 20;
     const P_LABELS: u8 = 30;
@@ -174,12 +167,11 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
         Column::fixed(3).priority(P_STATE), // 4: state slot (" ? "/" ⠋ "/blank, reserved)
         Column::flex(TITLE_MIN),         // 5: title
         Column::max(0).priority(P_LABELS), // 6: labels
-        Column::max(0),                  // 7: kill_mark (destructive confirm — never shed)
-        Column::max(0).right().priority(P_UNREAD), // 8: unread
-        Column::max(0).priority(P_BADGE_AGENT), // 9: badge_agent
-        Column::max(0).priority(P_BADGE_SHELL), // 10: badge_shell (carries its own leading space)
-        Column::max(0).right().priority(P_STATUS), // 11: status
-        Column::max(0).right().priority(P_TIME), // 12: time (carries its own leading space)
+        Column::max(0).right().priority(P_UNREAD), // 7: unread
+        Column::max(0).priority(P_BADGE_AGENT), // 8: badge_agent
+        Column::max(0).priority(P_BADGE_SHELL), // 9: badge_shell (carries its own leading space)
+        Column::max(0).right().priority(P_STATUS), // 10: status
+        Column::max(0).right().priority(P_TIME), // 11: time (carries its own leading space)
     ]
 }
 
@@ -196,7 +188,6 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
         cell_state(ctx),
         cell_title(ctx),
         cell_labels(ctx),
-        cell_kill_mark(ctx),
         cell_unread(ctx),
         cell_badge_agent(ctx),
         cell_badge_shell(ctx),
@@ -414,17 +405,6 @@ fn label_text_style(theme: &Theme, hex: &str) -> Style {
     }
 }
 
-fn cell_kill_mark(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let text = if ctx.long_snooze_armed {
-        " [snooze 1y?]"
-    } else {
-        return Cell::empty();
-    };
-    // Kill mark text is theme.error fg with the row's bg behind it.
-    // Style only carries fg — bg falls through from the row.
-    Cell::from_span(Span::styled(text, Style::default().fg(ctx.theme.error)))
-}
-
 fn cell_unread(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let unread = ctx.workspace.map(|w| w.unread_count()).unwrap_or(0);
     if unread == 0 {
@@ -611,7 +591,6 @@ mod tests {
             focused: true,
             is_cursor: false,
             max_pr_num_width: 4,
-            long_snooze_armed: false,
             asking: false,
             working: false,
             done: false,
@@ -629,7 +608,9 @@ mod tests {
     #[test]
     fn build_columns_have_expected_count_and_order() {
         let cols = build_columns(5);
-        assert_eq!(cols.len(), 13);
+        // 12 columns since the long-snooze kill-mark column retired
+        // when long-snooze became a Confirm-guarded catalog action.
+        assert_eq!(cols.len(), 12);
         // Title column (idx 5) is the only Flex one.
         let flex_indices: Vec<_> = cols
             .iter()
@@ -869,7 +850,6 @@ mod tests {
             focused: false,
             is_cursor: false,
             max_pr_num_width: 2,
-            long_snooze_armed: false,
             asking: false,
             working: false,
             done: false,
@@ -930,19 +910,6 @@ mod tests {
         ctx.focused = false;
         let row = build_row(&ctx);
         assert_eq!(row.fill_style, Some(theme.row_unfocused()));
-    }
-
-    /// Long-snooze armed wins over no-latch (and trumps kill in the
-    /// "neither armed" case via empty return).
-    #[test]
-    fn cell_kill_mark_renders_long_snooze_when_armed() {
-        let task = make_task("owner/repo#1", "x");
-        let ws = Workspace::from_task(task.clone(), fixed_time());
-        let theme = theme();
-        let mut ctx = ctx_for(&ws, &task, &theme);
-        ctx.long_snooze_armed = true;
-        let cell = cell_kill_mark(&ctx);
-        assert_eq!(cell.spans[0].content.as_ref(), " [snooze 1y?]");
     }
 
     /// No badges, no agent cell content.
@@ -1026,7 +993,6 @@ mod tests {
             focused: false,
             is_cursor: false,
             max_pr_num_width: 3,
-            long_snooze_armed: false,
             asking: false,
             working: false,
             done: false,
@@ -1404,7 +1370,6 @@ mod tests {
             focused: false,
             is_cursor: false,
             max_pr_num_width: 4,
-            long_snooze_armed: false,
             asking: false,
             working: false,
             done: false,

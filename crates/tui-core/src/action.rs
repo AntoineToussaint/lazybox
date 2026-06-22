@@ -68,6 +68,9 @@ pub enum Action {
     MarkAllRead,
     /// Toggle snooze on the focused workspace (short snooze, ~4h).
     ToggleSnooze,
+    /// Long-snooze the focused workspace (~1 year — effectively "hide").
+    /// Confirm-guarded because it has no obvious undo.
+    LongSnooze,
     /// Archive the workspace + kill any of its sessions. Destructive.
     Archive,
     /// Merge the workspace's PR if it's in a merge-ready state. Only
@@ -96,6 +99,21 @@ pub enum Action {
     /// in-lazybox UI doesn't carry every affordance yet (mobile-rich
     /// review thread, full diff view, etc.).
     OpenInBrowser,
+
+    // ── Sidebar list management ────────────────────────────────────
+    // These act on the sidebar's list/view rather than a single
+    // workspace: filtering, sorting, switching mailbox, searching.
+    // They only resolve when the sidebar has focus (Section::Sidebar)
+    // so they never bleed into the activity pane the way the
+    // workspace-scoped actions deliberately do.
+    /// Cycle the role filter (All → Author → Reviewer → …).
+    CycleRoleFilter,
+    /// Cycle the sort order (Default → ByRole → ByRoleSplit).
+    CycleSort,
+    /// Cycle the mailbox view (Inbox → Inactive → Snoozed).
+    CycleMailbox,
+    /// Open the incremental search bar scoped to the focused project.
+    OpenSearch,
 
     // ── Activity pane (right) ──────────────────────────────────────
     /// Toggle the activity-section collapse on the focused workspace.
@@ -212,6 +230,7 @@ pub enum ActionKind {
     NewProject,
     MarkAllRead,
     ToggleSnooze,
+    LongSnooze,
     Archive,
     MergePr,
     AdoptSessions,
@@ -220,6 +239,11 @@ pub enum ActionKind {
     AddAssignees,
     ManageLabels,
     OpenInBrowser,
+    // Sidebar list management
+    CycleRoleFilter,
+    CycleSort,
+    CycleMailbox,
+    OpenSearch,
     // Activity
     ToggleActivity,
     ToggleRow,
@@ -248,88 +272,42 @@ pub enum ActionKind {
     LeaveTerminal,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
     Global,
     Workspace,
+    /// Sidebar list/view management (filter, sort, mailbox, search).
+    /// Distinct from `Workspace` because these resolve ONLY under
+    /// sidebar focus — they manage the list, not the selected row, so
+    /// they must not shadow activity-pane keys the way workspace
+    /// actions intentionally do.
+    Sidebar,
     Activity,
     Terminal,
 }
 
-/// A *leader group* for the grouped two-step (leader-key) chords from
-/// issue #126: the first key picks the group, the second picks an
-/// action within it. The point is to free the single-letter namespace
-/// — actions slot into a group instead of fighting for a top-level
-/// letter — and to make the bindings self-documenting through a
-/// which-key popup that appears once the leader is pressed.
-///
-/// Only `Github` is wired today. It collapses the awkward
-/// `Shift-M` / `Shift-V` / `Shift-G` / `Shift-L` / `Shift-O` cluster
-/// (which the issue calls out as modifier-inconsistent) into a single
-/// `g`-led chord: `g m` merge, `g v` reviewers, `g a` assignees,
-/// `g l` labels, `g o` open-in-browser. The original `Shift-*` keys
-/// stay live as direct aliases during the transition — this is purely
-/// additive. The taxonomy is meant to grow (workspace lifecycle,
-/// activity, terminal/tiles) as the rest of the catalog migrates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ActionGroup {
-    /// GitHub / PR actions on the focused workspace.
-    Github,
-}
-
-impl ActionGroup {
-    /// Leader key that opens this group's which-key popup. Single
-    /// char, no modifiers — pressed first, then the in-group key.
-    pub fn leader(self) -> char {
+impl Section {
+    /// Display / sort rank — also the order `ActionDef::all()` emits
+    /// sections in, and the order the help panel renders them.
+    pub fn order(self) -> u8 {
         match self {
-            ActionGroup::Github => 'g',
+            Section::Global => 0,
+            Section::Workspace => 1,
+            Section::Sidebar => 2,
+            Section::Activity => 3,
+            Section::Terminal => 4,
         }
     }
 
-    /// Short title shown at the top of the which-key popup.
+    /// Human-facing section title for the help panel.
     pub fn title(self) -> &'static str {
         match self {
-            ActionGroup::Github => "github",
+            Section::Global => "Global",
+            Section::Workspace => "Workspace",
+            Section::Sidebar => "Sidebar",
+            Section::Activity => "Activity",
+            Section::Terminal => "Terminal",
         }
-    }
-
-    /// Every leader group, in display order. UI surfaces (the help
-    /// panel's leader section, the which-key popup) iterate this so a
-    /// newly-added group shows up everywhere without per-surface edits.
-    pub fn all() -> &'static [ActionGroup] {
-        &[ActionGroup::Github]
-    }
-
-    /// Resolve a group from its leader key, or `None` when the key
-    /// isn't a group leader.
-    pub fn from_leader(c: char) -> Option<Self> {
-        match c {
-            'g' => Some(ActionGroup::Github),
-            _ => None,
-        }
-    }
-
-    /// The actions in this group, in popup display order, each paired
-    /// with the in-group key that fires it (the SECOND press of the
-    /// chord). In-group keys are unique within a group.
-    pub fn members(self) -> &'static [(char, ActionKind)] {
-        match self {
-            ActionGroup::Github => &[
-                ('m', ActionKind::MergePr),
-                ('v', ActionKind::RequestReviewers),
-                ('a', ActionKind::AddAssignees),
-                ('l', ActionKind::ManageLabels),
-                ('o', ActionKind::OpenInBrowser),
-            ],
-        }
-    }
-
-    /// Look up the action bound to the in-group key `c`, if any.
-    pub fn action_for_key(self, c: char) -> Option<ActionKind> {
-        self.members()
-            .iter()
-            .find(|(k, _)| *k == c)
-            .map(|(_, kind)| *kind)
     }
 }
 
@@ -345,6 +323,7 @@ impl Action {
             Action::NewProject => ActionKind::NewProject,
             Action::MarkAllRead => ActionKind::MarkAllRead,
             Action::ToggleSnooze => ActionKind::ToggleSnooze,
+            Action::LongSnooze => ActionKind::LongSnooze,
             Action::Archive => ActionKind::Archive,
             Action::MergePr => ActionKind::MergePr,
             Action::AdoptSessions => ActionKind::AdoptSessions,
@@ -353,6 +332,10 @@ impl Action {
             Action::AddAssignees => ActionKind::AddAssignees,
             Action::ManageLabels => ActionKind::ManageLabels,
             Action::OpenInBrowser => ActionKind::OpenInBrowser,
+            Action::CycleRoleFilter => ActionKind::CycleRoleFilter,
+            Action::CycleSort => ActionKind::CycleSort,
+            Action::CycleMailbox => ActionKind::CycleMailbox,
+            Action::OpenSearch => ActionKind::OpenSearch,
             Action::ToggleActivity => ActionKind::ToggleActivity,
             Action::ToggleRow => ActionKind::ToggleRow,
             Action::Reply => ActionKind::Reply,
@@ -556,6 +539,13 @@ impl ActionDef {
                 describe: "Snooze the workspace for ~4h (toggle).",
                 section: Section::Workspace,
             },
+            ActionKind::LongSnooze => &Self {
+                kind: ActionKind::LongSnooze,
+                default_keys: "Shift-Z",
+                label: "long snooze",
+                describe: "Snooze the workspace for ~1 year (effectively hide). Confirmed first.",
+                section: Section::Workspace,
+            },
             ActionKind::Archive => &Self {
                 kind: ActionKind::Archive,
                 default_keys: "Shift-X",
@@ -565,7 +555,7 @@ impl ActionDef {
             },
             ActionKind::MergePr => &Self {
                 kind: ActionKind::MergePr,
-                default_keys: "Shift-M",
+                default_keys: "g m | Shift-M",
                 label: "merge PR",
                 describe: "Merge the PR (only when CI green + approved + no conflicts).",
                 section: Section::Workspace,
@@ -586,31 +576,60 @@ impl ActionDef {
             },
             ActionKind::RequestReviewers => &Self {
                 kind: ActionKind::RequestReviewers,
-                default_keys: "Shift-V",
+                default_keys: "g v | Shift-V",
                 label: "reviewers",
                 describe: "Request reviewer(s) on the workspace's PR.",
                 section: Section::Workspace,
             },
             ActionKind::AddAssignees => &Self {
                 kind: ActionKind::AddAssignees,
-                default_keys: "Shift-G",
+                default_keys: "g a | Shift-G",
                 label: "assignees",
                 describe: "Change assignees on the workspace's PR / issue — pre-checks existing; toggle to add or remove.",
                 section: Section::Workspace,
             },
             ActionKind::ManageLabels => &Self {
                 kind: ActionKind::ManageLabels,
-                default_keys: "Shift-L",
+                default_keys: "g l | Shift-L",
                 label: "labels",
                 describe: "Add / remove labels on the workspace's PR or issue. Picker pre-checks the labels currently applied; submit replaces the set.",
                 section: Section::Workspace,
             },
             ActionKind::OpenInBrowser => &Self {
                 kind: ActionKind::OpenInBrowser,
-                default_keys: "Shift-O",
+                default_keys: "g o | Shift-O",
                 label: "open in browser",
                 describe: "Open the focused workspace's PR / issue page in your default web browser.",
                 section: Section::Workspace,
+            },
+            // ── Sidebar list management ─────────────────────────────
+            ActionKind::CycleRoleFilter => &Self {
+                kind: ActionKind::CycleRoleFilter,
+                default_keys: "f",
+                label: "filter",
+                describe: "Cycle the role filter (All → Author → Reviewer → Assignee → Mentioned).",
+                section: Section::Sidebar,
+            },
+            ActionKind::CycleSort => &Self {
+                kind: ActionKind::CycleSort,
+                default_keys: "o",
+                label: "sort",
+                describe: "Cycle the sort order (recency → by-role → by-role with section headers).",
+                section: Section::Sidebar,
+            },
+            ActionKind::CycleMailbox => &Self {
+                kind: ActionKind::CycleMailbox,
+                default_keys: "Shift-S",
+                label: "mailbox",
+                describe: "Cycle the mailbox view (Inbox → Inactive → Snoozed).",
+                section: Section::Sidebar,
+            },
+            ActionKind::OpenSearch => &Self {
+                kind: ActionKind::OpenSearch,
+                default_keys: "/",
+                label: "search",
+                describe: "Open the incremental search bar scoped to the focused project.",
+                section: Section::Sidebar,
             },
             // ── Activity ────────────────────────────────────────────
             ActionKind::ToggleActivity => &Self {
@@ -724,6 +743,7 @@ impl ActionDef {
             ActionKind::OpenEditor,
             ActionKind::MarkAllRead,
             ActionKind::ToggleSnooze,
+            ActionKind::LongSnooze,
             // Project comes before Workspace — projects are
             // containers; the user reads "create a project, then
             // create workspaces inside it." Help modal + any other
@@ -739,6 +759,11 @@ impl ActionDef {
             ActionKind::AdoptSessions,
             ActionKind::CollapseIntoPr,
             ActionKind::Archive,
+            // Sidebar list management
+            ActionKind::CycleRoleFilter,
+            ActionKind::CycleSort,
+            ActionKind::CycleMailbox,
+            ActionKind::OpenSearch,
             // Activity
             ActionKind::ToggleActivity,
             ActionKind::ToggleRow,
@@ -757,40 +782,44 @@ impl ActionDef {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// KeyChord — typed representation of a keystroke, with parser
+// Chord / KeyStroke — typed representation of a binding, with parser
 // ──────────────────────────────────────────────────────────────────
 
-/// A single keystroke (or two-press chord) matched against a
-/// `KeyEvent` at dispatch time. Parsed from the catalog's
-/// `default_keys` string so the catalog stays human-readable
-/// (`"Shift-M"`, `"Ctrl-Shift-D"`, `"q q"`) but the matcher can
-/// compare strictly typed.
-///
-/// Not every catalog `default_keys` parses into a chord:
-/// - `"g/G"`, `"↑/↓"`, `"→/←"`, `"PgUp/Dn"` are *presentation*
-///   strings meaning "multiple keys, multiple actions" — they don't
-///   round-trip to a single chord and `parse` returns `None`.
-/// - `"all keys"` is the terminal pane's "forward everything"
-///   marker and likewise doesn't parse.
-///
-/// Callers that need to migrate the matcher should add explicit
-/// catalog entries for the secondary keys (e.g. `NavTop` /
-/// `NavBottom` for `g` / `G`) so the parser stays simple.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum KeyChord {
-    /// Single keystroke. Modifiers + code.
-    Single {
-        ctrl: bool,
-        shift: bool,
-        alt: bool,
-        code: ChordCode,
-    },
-    /// Two-key chord (e.g. `q q` for quit). Both keys are single
-    /// presses of the same chord; runtime tracks the latch.
-    Double(Box<KeyChord>),
+/// A single keystroke: modifiers + a key code. The atom every chord
+/// is built from. `Copy` so `Chord::Seq` can live in a `&'static`
+/// slice in the catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KeyStroke {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub code: ChordCode,
 }
 
+/// A bound chord: either one keystroke, or an ordered *sequence* of
+/// keystrokes (a leader chord like `g m`, or the two-press `q q`).
+///
+/// `Seq` subsumes every leader mechanism the catalog used to express
+/// out-of-band: the github `g`-group (`g m`, `g v`, …), the two-press
+/// quit (`q q`), and the terminal escape (`] ]`). The which-key popup
+/// is then a pure function of the armed prefix — "which catalog
+/// entries have a `Seq` starting with this stroke?" — instead of a
+/// hardcoded `ActionGroup` table.
+///
+/// Parsed from the catalog's `default_keys` string so the catalog
+/// stays human-readable: alternatives are separated by ` | `
+/// (`"g m | Shift-M"`), and the keystrokes WITHIN one alternative are
+/// space-separated (`"g m"`, `"q q"`). Presentation-only strings
+/// (`"g/G"`, `"↑/↓"`, `"all keys"`) still don't parse to a chord.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Chord {
+    /// Single keystroke.
+    Key(KeyStroke),
+    /// Ordered sequence of keystrokes (`g m`, `q q`, `] ]`).
+    Seq(Vec<KeyStroke>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChordCode {
     Char(char),
     Named(NamedKey),
@@ -801,7 +830,6 @@ pub enum NamedKey {
     Tab,
     Enter,
     Esc,
-    Space,
     Backspace,
     Up,
     Down,
@@ -817,26 +845,93 @@ pub enum NamedKey {
     Function(u8),
 }
 
-impl KeyChord {
-    /// Parse a `default_keys` string into a typed chord. Returns
-    /// `None` for the presentation-only forms (`g/G`, `↑/↓`,
-    /// `all keys`, etc.) — those need explicit catalog entries
-    /// rather than a runtime parse.
-    pub fn parse(s: &str) -> Option<Self> {
-        let trimmed = s.trim();
-        // Two-key chord: "q q" → Double(single 'q').
-        if let Some((a, b)) = trimmed.split_once(' ')
-            && a == b
-            && let Some(inner) = Self::parse_single(a)
-        {
-            return Some(KeyChord::Double(Box::new(inner)));
+impl NamedKey {
+    /// Canonical display label — the same token [`KeyStroke::parse`]
+    /// accepts, so display round-trips back through the parser. Returns
+    /// `Cow` because a function key's label (`F8`) carries its number
+    /// and can't be a `&'static str`.
+    pub fn label(self) -> std::borrow::Cow<'static, str> {
+        use std::borrow::Cow;
+        Cow::Borrowed(match self {
+            NamedKey::Tab => "Tab",
+            NamedKey::Enter => "Enter",
+            NamedKey::Esc => "Esc",
+            NamedKey::Backspace => "Backspace",
+            NamedKey::Up => "Up",
+            NamedKey::Down => "Down",
+            NamedKey::Left => "Left",
+            NamedKey::Right => "Right",
+            NamedKey::Home => "Home",
+            NamedKey::End => "End",
+            NamedKey::PageUp => "PgUp",
+            NamedKey::PageDown => "PgDn",
+            NamedKey::Delete => "Del",
+            NamedKey::Insert => "Insert",
+            NamedKey::Function(n) => return Cow::Owned(format!("F{n}")),
+        })
+    }
+}
+
+impl KeyStroke {
+    /// Const helper for catalog literals + tests.
+    pub const fn new(ctrl: bool, shift: bool, alt: bool, code: ChordCode) -> Self {
+        Self {
+            ctrl,
+            shift,
+            alt,
+            code,
         }
-        Self::parse_single(trimmed)
     }
 
-    fn parse_single(s: &str) -> Option<Self> {
-        // Presentation strings — explicitly not single chords.
-        if s.contains('/') || s == "all keys" || s.is_empty() {
+    /// Human-readable display, the inverse of [`KeyStroke::parse`]:
+    /// modifier prefixes then the key. A `Shift-`-modified letter is
+    /// shown uppercase without the prefix (`M`), matching how the
+    /// catalog writes single-letter shifted keys. Used by the which-key
+    /// popup and the generated Keys screen.
+    pub fn display(&self) -> String {
+        let mut out = String::new();
+        if self.ctrl {
+            out.push_str("Ctrl-");
+        }
+        let named = matches!(self.code, ChordCode::Named(_));
+        // For a shifted single letter, fold Shift into uppercase
+        // (`M`); for a shifted named key keep the explicit prefix
+        // (`Shift-Tab`).
+        if self.shift && named {
+            out.push_str("Shift-");
+        }
+        if self.alt {
+            out.push_str("Alt-");
+        }
+        match self.code {
+            ChordCode::Char(' ') => out.push_str("Space"),
+            ChordCode::Char(c) => {
+                if self.shift {
+                    out.extend(c.to_uppercase());
+                } else {
+                    out.push(c);
+                }
+            }
+            ChordCode::Named(n) => out.push_str(&n.label()),
+        }
+        out
+    }
+
+    /// Parse one keystroke token (`"Shift-M"`, `"Ctrl-Shift-D"`,
+    /// `"Tab"`, `"g"`). Returns `None` for presentation-only / unknown
+    /// tokens.
+    ///
+    /// Char/named unification: `Space` is the one named key crossterm
+    /// reports as a printable (`Char(' ')`), so the catalog form
+    /// `"Space"` parses to `Char(' ')` rather than a distinct named
+    /// variant — otherwise a catalog `Space` binding could never match
+    /// the runtime keystroke (the snag deferred from #99).
+    pub fn parse(s: &str) -> Option<Self> {
+        // Presentation strings — explicitly not a keystroke. A
+        // multi-glyph string with a `/` is a "this key OR that key"
+        // display form (`g/G`, `→/←`); a lone `/` is the literal
+        // slash key (sidebar search) and parses normally below.
+        if (s.chars().count() > 1 && s.contains('/')) || s == "all keys" || s.is_empty() {
             return None;
         }
         // Strip modifier prefixes one at a time. Order matters:
@@ -863,7 +958,8 @@ impl KeyChord {
             "Tab" => ChordCode::Named(NamedKey::Tab),
             "Enter" => ChordCode::Named(NamedKey::Enter),
             "Esc" => ChordCode::Named(NamedKey::Esc),
-            "Space" => ChordCode::Named(NamedKey::Space),
+            // Space unifies to the printable form crossterm delivers.
+            "Space" => ChordCode::Char(' '),
             "Backspace" => ChordCode::Named(NamedKey::Backspace),
             "Up" => ChordCode::Named(NamedKey::Up),
             "Down" => ChordCode::Named(NamedKey::Down),
@@ -884,7 +980,7 @@ impl KeyChord {
             // Single ASCII letter / symbol — uppercase letters
             // mean Shift-letter; lowercase stays as-is. The Shift
             // prefix takes precedence (`"Shift-M"` parses to
-            // `shift=true, code=Char('M')` either way).
+            // `shift=true, code=Char('m')` either way).
             other if other.chars().count() == 1 => {
                 let c = other.chars().next().unwrap();
                 if c.is_ascii_uppercase() {
@@ -894,7 +990,7 @@ impl KeyChord {
             }
             _ => return None,
         };
-        Some(KeyChord::Single {
+        Some(KeyStroke {
             ctrl,
             shift,
             alt,
@@ -903,13 +999,71 @@ impl KeyChord {
     }
 }
 
+impl Chord {
+    /// Parse one alternative — space-separated keystrokes. A single
+    /// token yields `Chord::Key`; two or more yield `Chord::Seq`.
+    /// Returns `None` if any token fails to parse (presentation form,
+    /// unknown key).
+    pub fn parse(s: &str) -> Option<Self> {
+        let trimmed = s.trim();
+        let strokes: Vec<&str> = trimmed.split_whitespace().collect();
+        match strokes.as_slice() {
+            [] => None,
+            [one] => KeyStroke::parse(one).map(Chord::Key),
+            // A `/` token inside a multi-key string is the "this key OR
+            // that key" presentation separator (`c / x / u`), not a
+            // real sequence — a lone `/` only ever binds as a single
+            // chord (sidebar search). Reject so presentation strings
+            // don't fabricate a bogus sequence.
+            many if many.iter().any(|t| t.contains('/')) => None,
+            many => {
+                let parsed: Option<Vec<KeyStroke>> =
+                    many.iter().map(|t| KeyStroke::parse(t)).collect();
+                parsed.map(Chord::Seq)
+            }
+        }
+    }
+
+    /// The first keystroke of this chord — the one that arms a leader
+    /// (for `Seq`) or fires directly (for `Key`).
+    pub fn head(&self) -> &KeyStroke {
+        match self {
+            Chord::Key(k) => k,
+            // A `Seq` is never constructed empty (the parser yields
+            // `Key` for a single token), so `[0]` is sound.
+            Chord::Seq(strokes) => &strokes[0],
+        }
+    }
+
+    /// Number of keystrokes in the chord (1 for `Key`). Never zero —
+    /// the parser yields `Key` for a single token and `Seq` only for
+    /// two-plus, so there is deliberately no `is_empty`.
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        match self {
+            Chord::Key(_) => 1,
+            Chord::Seq(s) => s.len(),
+        }
+    }
+}
+
 impl ActionDef {
-    /// Typed chord for this action's default keystroke. `None` for
-    /// presentation-only `default_keys` like `g/G` or `↑/↓` (see
-    /// `KeyChord` docs). Cheap; parses each call. Re-parse cost is
-    /// negligible vs. caching given how rarely we look up.
-    pub fn default_chord(&self) -> Option<KeyChord> {
-        KeyChord::parse(self.default_keys)
+    /// Every chord bound to this action — the ` | `-separated
+    /// alternatives in `default_keys`, each parsed. Presentation-only
+    /// alternatives are silently dropped, so an entry like `"g/G"`
+    /// yields an empty list (no parseable chord).
+    pub fn default_chords(&self) -> Vec<Chord> {
+        self.default_keys
+            .split('|')
+            .filter_map(Chord::parse)
+            .collect()
+    }
+
+    /// First parseable default chord, or `None` for presentation-only
+    /// `default_keys`. Kept for the singular callers (quit-chord
+    /// resolution, the catalog collision test).
+    pub fn default_chord(&self) -> Option<Chord> {
+        self.default_chords().into_iter().next()
     }
 
     /// Whether this action's keystroke actually fires while the
@@ -928,58 +1082,86 @@ impl ActionDef {
         matches!(self.section, Section::Terminal)
     }
 
-    /// True when this action is *destructive* — invoking it commits
-    /// state the user can't trivially undo (merging a PR, archiving
-    /// a workspace, killing a session). The dispatch path
-    /// (`Model::dispatch_action`) routes destructive actions
-    /// through a unified Confirm modal BEFORE firing; non-
-    /// destructive actions fire immediately.
+    /// The guard standing between a keypress and this action firing —
+    /// the third gap the catalog closed (#102 P3). Moves the
+    /// double-press / confirm machinery that used to live in per-pane
+    /// latches onto the catalog row:
     ///
-    /// Adding a new destructive action: mark it here AND add the
-    /// matching `confirm_prompt` arm. Forgetting one half is a
-    /// catalog bug — the type system can't catch it directly, but
-    /// the test `destructive_actions_have_prompts` does.
-    pub fn is_destructive(&self) -> bool {
-        matches!(self.kind, ActionKind::Archive | ActionKind::MergePr,)
-    }
-
-    /// Confirm-modal prompt text for a destructive action. Returns
-    /// `None` for non-destructive actions — those shouldn't be
-    /// routed through the confirm path. The catalog default is
-    /// static; specific surfaces (e.g. the merge-PR flow knows the
-    /// PR number) can override at mount time.
-    pub fn confirm_prompt(&self) -> Option<&'static str> {
+    /// - `None` — fires immediately.
+    /// - `DoublePress` — needs a timed two-press (quit's `q q`).
+    /// - `Confirm(prompt)` — mounts a Confirm modal first (archive,
+    ///   merge, long-snooze). The prompt is the static default; a
+    ///   surface that knows specifics (the PR number) can override at
+    ///   mount time.
+    pub fn guard(&self) -> Guard {
         match self.kind {
-            ActionKind::Archive => Some(
+            ActionKind::Quit => Guard::DoublePress,
+            ActionKind::Archive => Guard::Confirm(
                 "Archive the focused workspace? Active sessions \
                  are killed and the row drops from the inbox.",
             ),
-            ActionKind::MergePr => Some(
+            ActionKind::MergePr => Guard::Confirm(
                 "Merge the focused PR? Mainline branch updates \
                  immediately and the PR closes.",
             ),
+            ActionKind::LongSnooze => Guard::Confirm(
+                "Long-snooze this workspace (~1 year)? It drops from \
+                 the inbox until then — effectively hidden.",
+            ),
+            _ => Guard::None,
+        }
+    }
+
+    /// True when this action is gated behind a Confirm modal — the
+    /// dispatch path (`Model::dispatch_action`) routes these through a
+    /// unified Confirm before firing. (Named for history; really
+    /// "guard is `Confirm`".)
+    pub fn is_destructive(&self) -> bool {
+        matches!(self.guard(), Guard::Confirm(_))
+    }
+
+    /// Confirm-modal prompt text, for a `Confirm`-guarded action;
+    /// `None` otherwise — those shouldn't be routed through the
+    /// confirm path.
+    pub fn confirm_prompt(&self) -> Option<&'static str> {
+        match self.guard() {
+            Guard::Confirm(prompt) => Some(prompt),
             _ => None,
         }
     }
 
-    /// Resolve the effective key chord: user override from the
-    /// config map if present, otherwise the catalog default.
+    /// Resolve the effective chords (alternatives): a user override
+    /// from the config map if present and parseable, otherwise the
+    /// catalog defaults.
     ///
     /// `overrides` keys are the snake_case `ActionKind` names
     /// (`"merge_pr"`, `"spawn_shell"`, etc.) — see [`ActionKind::name`].
-    /// A user-supplied string that fails to parse falls back to the
-    /// default rather than erroring out: a typo in YAML shouldn't
-    /// break the keyboard.
+    /// A user-supplied string follows the same grammar as
+    /// `default_keys` (` | `-separated alternatives, space-separated
+    /// sequences); if NONE of its alternatives parse it falls back to
+    /// the default rather than leaving the action unbound — a typo in
+    /// YAML shouldn't break the keyboard.
+    pub fn effective_chords(
+        &self,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<Chord> {
+        if let Some(raw) = overrides.get(self.kind.name()) {
+            let parsed: Vec<Chord> = raw.split('|').filter_map(Chord::parse).collect();
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+        self.default_chords()
+    }
+
+    /// First effective chord — user override if present and parseable,
+    /// else the catalog default. Used by the singular callers
+    /// (quit-chord resolution).
     pub fn effective_chord(
         &self,
         overrides: &std::collections::BTreeMap<String, String>,
-    ) -> Option<KeyChord> {
-        if let Some(raw) = overrides.get(self.kind.name())
-            && let Some(c) = KeyChord::parse(raw)
-        {
-            return Some(c);
-        }
-        self.default_chord()
+    ) -> Option<Chord> {
+        self.effective_chords(overrides).into_iter().next()
     }
 
     /// Resolve the display string for this action's effective key
@@ -992,7 +1174,7 @@ impl ActionDef {
         overrides: &std::collections::BTreeMap<String, String>,
     ) -> std::borrow::Cow<'static, str> {
         if let Some(raw) = overrides.get(self.kind.name())
-            && KeyChord::parse(raw).is_some()
+            && raw.split('|').any(|alt| Chord::parse(alt).is_some())
         {
             return std::borrow::Cow::Owned(raw.clone());
         }
@@ -1016,6 +1198,7 @@ impl ActionKind {
             ActionKind::NewProject => "new_project",
             ActionKind::MarkAllRead => "mark_all_read",
             ActionKind::ToggleSnooze => "toggle_snooze",
+            ActionKind::LongSnooze => "long_snooze",
             ActionKind::Archive => "archive",
             ActionKind::MergePr => "merge_pr",
             ActionKind::AdoptSessions => "adopt_sessions",
@@ -1024,6 +1207,10 @@ impl ActionKind {
             ActionKind::AddAssignees => "add_assignees",
             ActionKind::ManageLabels => "manage_labels",
             ActionKind::OpenInBrowser => "open_in_browser",
+            ActionKind::CycleRoleFilter => "cycle_role_filter",
+            ActionKind::CycleSort => "cycle_sort",
+            ActionKind::CycleMailbox => "cycle_mailbox",
+            ActionKind::OpenSearch => "open_search",
             ActionKind::ToggleActivity => "toggle_activity",
             ActionKind::ToggleRow => "toggle_row",
             ActionKind::ActivityTop => "activity_top",
@@ -1048,6 +1235,202 @@ impl ActionKind {
             ActionKind::TerminalScroll => "terminal_scroll",
             ActionKind::LeaveTerminal => "leave_terminal",
         }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Runtime catalog — static rows + generated parameterized rows
+// ──────────────────────────────────────────────────────────────────
+
+/// Runtime parameterization of a catalog row. The static `ActionKind`
+/// is the verb; `Param` carries the operand resolved at startup — today
+/// only the agent id for the per-agent `SpawnAgent` rows (#102 P2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Param {
+    /// Agent id for a generated `SpawnAgent` row (`claude`, `codex`, …).
+    Agent(String),
+}
+
+/// The guard between a keypress and an action firing — the per-row
+/// replacement for the scattered double-press / confirm latches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Guard {
+    /// Fires immediately.
+    None,
+    /// Needs a timed two-press of the chord (e.g. quit's `q q`).
+    DoublePress,
+    /// Mounts a Confirm modal carrying this prompt before firing.
+    Confirm(&'static str),
+}
+
+/// A resolved catalog row: a static action plus any runtime
+/// parameterization, with its effective chords (`ui.action_keys`
+/// overrides already applied). Built once at startup by
+/// [`ActionDef::catalog`] and consulted by keyboard dispatch, the help
+/// panel, and the collision detector — the single surface that knows
+/// about the generated per-agent rows the static table can't express.
+#[derive(Debug, Clone)]
+pub struct CatalogEntry {
+    pub kind: ActionKind,
+    /// Operand for a parameterized row (the agent id). `None` for the
+    /// fixed actions.
+    pub param: Option<Param>,
+    pub section: Section,
+    /// Footer / help label. Owned because generated rows carry a
+    /// per-agent label (`spawn claude`).
+    pub label: std::borrow::Cow<'static, str>,
+    pub describe: &'static str,
+    /// Effective chords — overrides already applied.
+    pub chords: Vec<Chord>,
+    /// Effective display string for the help panel / Keys screen.
+    pub keys_display: std::borrow::Cow<'static, str>,
+    /// The `ui.action_keys` map key that remaps this row
+    /// (`ActionKind::name`, or `spawn_agent.<id>` for an agent row).
+    pub config_key: String,
+}
+
+/// Built-in keymap preset names (#102 P4, #98 possibility F). A
+/// preset is just an `action_keys` map shipped in-tree; the user
+/// selects one with `ui.keymap_preset` and their own `ui.action_keys`
+/// still layers on top.
+pub const KEYMAP_PRESETS: &[&str] = &["default", "vim"];
+
+/// Resolve a named keymap preset to its `action_keys` overrides, or
+/// `None` for an unknown name. `default` is the bare catalog (no
+/// overrides). `vim` goes leaders-primary — the github actions bind to
+/// their `g …` chord only, dropping the legacy `Shift-*` aliases — and
+/// moves pane-cycling onto `Ctrl-w` (vim's window key). Every preset is
+/// collision-checked by the `preset_*_has_no_collisions` tests so a
+/// bad entry can't ship.
+pub fn keymap_preset(name: &str) -> Option<std::collections::BTreeMap<String, String>> {
+    let mut m = std::collections::BTreeMap::new();
+    match name {
+        "default" => {}
+        "vim" => {
+            // Leaders-primary: keep only the `g …` chord for the github
+            // actions (the `Shift-*` aliases drop away).
+            m.insert("merge_pr".into(), "g m".into());
+            m.insert("request_reviewers".into(), "g v".into());
+            m.insert("add_assignees".into(), "g a".into());
+            m.insert("manage_labels".into(), "g l".into());
+            m.insert("open_in_browser".into(), "g o".into());
+            // Vim's window key cycles panes.
+            m.insert("cycle_pane".into(), "Ctrl-w".into());
+        }
+        _ => return None,
+    }
+    Some(m)
+}
+
+/// The default single-letter key a known agent binds to. `None` for
+/// agents lazybox doesn't ship a convention for — they still get a
+/// catalog row (in help, remappable), just no default chord.
+pub fn agent_default_key(id: &str) -> Option<char> {
+    match id {
+        "claude" => Some('c'),
+        "codex" => Some('x'),
+        "cursor" | "cursor-agent" => Some('u'),
+        _ => None,
+    }
+}
+
+impl ActionDef {
+    /// Build the runtime catalog: every static action EXCEPT the
+    /// generic `SpawnAgent` placeholder, plus one concrete `SpawnAgent`
+    /// row per enabled agent. The agent rows are what let `c` / `x` /
+    /// `u` live in the catalog — remappable via `ui.action_keys`
+    /// (`spawn_agent.<id>`), listed in help, and collision-checked —
+    /// instead of in a side map.
+    ///
+    /// `overrides` (`ui.action_keys`) are applied here so every
+    /// consumer reads resolved chords + display strings.
+    pub fn catalog(
+        agents: &[String],
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<CatalogEntry> {
+        let mut out: Vec<CatalogEntry> = Vec::new();
+        for def in ActionDef::all() {
+            // The static SpawnAgent row is a placeholder for the
+            // generated per-agent rows below — drop it.
+            if def.kind == ActionKind::SpawnAgent {
+                continue;
+            }
+            out.push(CatalogEntry {
+                kind: def.kind,
+                param: None,
+                section: def.section,
+                label: std::borrow::Cow::Borrowed(def.label),
+                describe: def.describe,
+                chords: def.effective_chords(overrides),
+                keys_display: def.effective_keys_display(overrides),
+                config_key: def.kind.name().to_string(),
+            });
+        }
+        let spawn = ActionDef::for_kind(ActionKind::SpawnAgent);
+        // Chords already claimed by an earlier agent row's BUILT-IN
+        // default. Two agents sharing a default key (`cursor` and
+        // `cursor-agent` both want `u`) would otherwise resolve
+        // ambiguously; the second keeps its row (in help, remappable)
+        // but loses the colliding default binding. An explicit
+        // override is always honored — the user asked for it.
+        let mut claimed_defaults: Vec<Chord> = Vec::new();
+        for id in agents {
+            let config_key = format!("spawn_agent.{id}");
+            // Override wins when it has at least one parseable
+            // alternative; otherwise the built-in single-letter default
+            // (which may be empty for an agent with no convention).
+            let (mut chords, mut keys_display): (Vec<Chord>, std::borrow::Cow<'static, str>) =
+                match overrides.get(&config_key) {
+                    Some(raw) => {
+                        let parsed: Vec<Chord> = raw.split('|').filter_map(Chord::parse).collect();
+                        if parsed.is_empty() {
+                            default_agent_chords(id)
+                        } else {
+                            (parsed, std::borrow::Cow::Owned(raw.clone()))
+                        }
+                    }
+                    None => default_agent_chords(id),
+                };
+            // Drop a built-in default chord already taken by an earlier
+            // agent (only when it's the default, never an override).
+            if !overrides.contains_key(&config_key)
+                && chords.iter().any(|c| claimed_defaults.contains(c))
+            {
+                chords.clear();
+                keys_display = std::borrow::Cow::Borrowed("");
+            } else {
+                claimed_defaults.extend(chords.iter().cloned());
+            }
+            out.push(CatalogEntry {
+                kind: ActionKind::SpawnAgent,
+                param: Some(Param::Agent(id.clone())),
+                section: spawn.section,
+                label: std::borrow::Cow::Owned(format!("spawn {id}")),
+                describe: spawn.describe,
+                chords,
+                keys_display,
+                config_key,
+            });
+        }
+        out
+    }
+}
+
+/// Default chord(s) + display for an agent row from the built-in
+/// key convention. An agent lazybox has no convention for gets an
+/// empty chord list (no default binding) and a blank display.
+fn default_agent_chords(id: &str) -> (Vec<Chord>, std::borrow::Cow<'static, str>) {
+    match agent_default_key(id) {
+        Some(c) => (
+            vec![Chord::Key(KeyStroke::new(
+                false,
+                false,
+                false,
+                ChordCode::Char(c),
+            ))],
+            std::borrow::Cow::Owned(c.to_string()),
+        ),
+        None => (Vec::new(), std::borrow::Cow::Borrowed("")),
     }
 }
 
@@ -1140,6 +1523,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::SpawnAgent
         | ActionKind::MarkAllRead
         | ActionKind::ToggleSnooze
+        | ActionKind::LongSnooze
         | ActionKind::RequestReviewers
         | ActionKind::AddAssignees
         | ActionKind::ManageLabels
@@ -1156,6 +1540,13 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::SelectRow
         | ActionKind::ToggleDescription
         | ActionKind::UndoMarkRead => has_ws,
+        // Sidebar list-management actions act on the list / view,
+        // not a selected workspace — always usable while the sidebar
+        // has focus (which `section_rank` already gates).
+        ActionKind::CycleRoleFilter
+        | ActionKind::CycleSort
+        | ActionKind::CycleMailbox
+        | ActionKind::OpenSearch => true,
         // Global / no-workspace-needed actions.
         ActionKind::NewWorkspace
         | ActionKind::NewProject
@@ -1278,12 +1669,7 @@ mod tests {
         let chord = def.effective_chord(&overrides).unwrap();
         assert_eq!(
             chord,
-            KeyChord::Single {
-                ctrl: true,
-                shift: false,
-                alt: false,
-                code: ChordCode::Char('m'),
-            }
+            Chord::Key(KeyStroke::new(true, false, false, ChordCode::Char('m'))),
         );
     }
 
@@ -1340,72 +1726,88 @@ mod tests {
     }
 
     #[test]
-    fn key_chord_parses_simple_letter() {
-        let c = KeyChord::parse("s").unwrap();
+    fn key_stroke_parses_simple_letter() {
+        let c = Chord::parse("s").unwrap();
         assert_eq!(
             c,
-            KeyChord::Single {
-                ctrl: false,
-                shift: false,
-                alt: false,
-                code: ChordCode::Char('s'),
-            }
+            Chord::Key(KeyStroke::new(false, false, false, ChordCode::Char('s'))),
         );
     }
 
     #[test]
-    fn key_chord_parses_uppercase_as_shift() {
+    fn key_stroke_parses_uppercase_as_shift() {
         // `Shift-M` and `M` should yield the same chord; the
         // catalog uses either form interchangeably.
-        let explicit = KeyChord::parse("Shift-M").unwrap();
-        let implicit = KeyChord::parse("M").unwrap();
+        let explicit = Chord::parse("Shift-M").unwrap();
+        let implicit = Chord::parse("M").unwrap();
         assert_eq!(explicit, implicit);
         assert_eq!(
             explicit,
-            KeyChord::Single {
-                ctrl: false,
-                shift: true,
-                alt: false,
-                code: ChordCode::Char('m'),
-            }
+            Chord::Key(KeyStroke::new(false, true, false, ChordCode::Char('m'))),
         );
     }
 
     #[test]
-    fn key_chord_parses_modifier_stack() {
-        let c = KeyChord::parse("Ctrl-Shift-D").unwrap();
+    fn key_stroke_parses_modifier_stack() {
+        let c = Chord::parse("Ctrl-Shift-D").unwrap();
         assert_eq!(
             c,
-            KeyChord::Single {
-                ctrl: true,
-                shift: true,
-                alt: false,
-                code: ChordCode::Char('d'),
-            }
+            Chord::Key(KeyStroke::new(true, true, false, ChordCode::Char('d'))),
         );
     }
 
     #[test]
-    fn key_chord_parses_named_keys() {
+    fn key_stroke_parses_named_keys() {
         for (s, expected) in [
-            ("Tab", NamedKey::Tab),
-            ("Enter", NamedKey::Enter),
-            ("PgUp", NamedKey::PageUp),
-            ("PgDn", NamedKey::PageDown),
-            ("Space", NamedKey::Space),
+            ("Tab", ChordCode::Named(NamedKey::Tab)),
+            ("Enter", ChordCode::Named(NamedKey::Enter)),
+            ("PgUp", ChordCode::Named(NamedKey::PageUp)),
+            ("PgDn", ChordCode::Named(NamedKey::PageDown)),
+            // Space unifies to the printable form crossterm reports.
+            ("Space", ChordCode::Char(' ')),
         ] {
-            let c = KeyChord::parse(s).unwrap();
-            match c {
-                KeyChord::Single { code, .. } => assert_eq!(code, ChordCode::Named(expected)),
-                _ => panic!("{s} should parse to a Single chord"),
+            match Chord::parse(s).unwrap() {
+                Chord::Key(k) => assert_eq!(k.code, expected),
+                other => panic!("{s} should parse to a Key chord, got {other:?}"),
             }
         }
     }
 
     #[test]
-    fn key_chord_parses_double() {
-        let c = KeyChord::parse("q q").unwrap();
-        assert!(matches!(c, KeyChord::Double(_)));
+    fn chord_parses_sequence() {
+        // `q q`, `g m`, `] ]` all parse to a Seq of their keystrokes.
+        let c = Chord::parse("q q").unwrap();
+        assert_eq!(
+            c,
+            Chord::Seq(vec![
+                KeyStroke::new(false, false, false, ChordCode::Char('q')),
+                KeyStroke::new(false, false, false, ChordCode::Char('q')),
+            ]),
+        );
+        let g = Chord::parse("g m").unwrap();
+        assert_eq!(
+            g,
+            Chord::Seq(vec![
+                KeyStroke::new(false, false, false, ChordCode::Char('g')),
+                KeyStroke::new(false, false, false, ChordCode::Char('m')),
+            ]),
+        );
+        assert_eq!(g.head().code, ChordCode::Char('g'));
+        assert_eq!(g.len(), 2);
+    }
+
+    #[test]
+    fn default_chords_splits_alternatives() {
+        // `g m | Shift-M` yields the leader sequence AND the legacy
+        // modifier alias as two alternatives.
+        let def = ActionDef::for_kind(ActionKind::MergePr);
+        let chords = def.default_chords();
+        assert_eq!(chords.len(), 2, "merge has a leader + a Shift alias");
+        assert!(matches!(chords[0], Chord::Seq(_)));
+        assert_eq!(
+            chords[1],
+            Chord::Key(KeyStroke::new(false, true, false, ChordCode::Char('m'))),
+        );
     }
 
     #[test]
@@ -1413,19 +1815,61 @@ mod tests {
         // `g/G` etc. are display-only — we don't try to fabricate
         // a chord. Callers needing the secondary key add an
         // explicit catalog entry.
-        assert!(KeyChord::parse("g/G").is_none());
-        assert!(KeyChord::parse("↑/↓").is_none());
-        assert!(KeyChord::parse("Shift-PgUp/Dn").is_none());
-        assert!(KeyChord::parse("all keys").is_none());
+        assert!(Chord::parse("g/G").is_none());
+        assert!(Chord::parse("↑/↓").is_none());
+        assert!(Chord::parse("Shift-PgUp/Dn").is_none());
+        assert!(Chord::parse("all keys").is_none());
+        // Space-separated presentation form with `/` separators — the
+        // static SpawnAgent placeholder — must not fabricate a Seq.
+        assert!(Chord::parse("c / x / u").is_none());
+    }
+
+    #[test]
+    fn lone_slash_parses_as_a_chord() {
+        // A bare `/` is the literal slash key (sidebar search), not a
+        // "this OR that" presentation form — it must parse so the key
+        // resolves through the catalog like any other.
+        assert_eq!(
+            Chord::parse("/").unwrap(),
+            Chord::Key(KeyStroke::new(false, false, false, ChordCode::Char('/'))),
+        );
+    }
+
+    #[test]
+    fn no_chord_collisions_within_a_section() {
+        // Collision detector (issue #98): within a single section
+        // every parseable default chord must be unique. Two actions
+        // in the same section sharing a chord is a genuine ambiguity —
+        // dispatch (`find_action_for_chord`) breaks the tie by
+        // iteration order, so the second action is silently
+        // unreachable. Cross-section shadowing (e.g. `Shift-G` =
+        // assignees in Workspace vs jump-to-bottom in Activity) is a
+        // DELIBERATE, focus-ranked override and intentionally not
+        // flagged here. This is the single audit surface the catalog
+        // gained so collisions surface at build time instead of as
+        // tribal knowledge in CLAUDE.md.
+        use std::collections::HashMap;
+        let mut seen: HashMap<(Section, Chord), ActionKind> = HashMap::new();
+        for def in ActionDef::all() {
+            // Every alternative is a distinct binding — check each.
+            for chord in def.default_chords() {
+                if let Some(prev) = seen.insert((def.section, chord.clone()), def.kind) {
+                    panic!(
+                        "chord {:?} bound twice in {:?}: {:?} and {:?}",
+                        chord, def.section, prev, def.kind,
+                    );
+                }
+            }
+        }
     }
 
     #[test]
     fn every_parseable_default_round_trips_to_chord() {
-        // Smoke: every catalog entry whose default_keys is a
-        // single chord (not a presentation form) must parse. Catches
+        // Smoke: every catalog entry whose default_keys carries at
+        // least one parseable alternative must yield a chord. Catches
         // a typo in `default_keys` that would silently break the
         // matcher.
-        // Presentation-only `default_keys` — not a single chord.
+        // Presentation-only `default_keys` — no parseable chord.
         let presentation = [
             "c / x / u",
             "g/G",
@@ -1434,8 +1878,11 @@ mod tests {
             "Shift-PgUp/Dn",
             "Shift-Arrows",
             "all keys",
+            // The terminal `]]` leave chord is dispatched by the
+            // terminal-pane escape-char latch (rendered from the
+            // configured `ui.terminal_escape_char`, #170), never by the
+            // catalog matcher — so it carries no parseable catalog chord.
             "]]",
-            "q q",
         ];
         for def in ActionDef::all() {
             if presentation.contains(&def.default_keys) {
@@ -1449,7 +1896,7 @@ mod tests {
                 continue;
             }
             assert!(
-                def.default_chord().is_some(),
+                !def.default_chords().is_empty(),
                 "{:?} default_keys `{}` failed to parse",
                 def.kind,
                 def.default_keys,
@@ -1467,6 +1914,42 @@ mod tests {
         assert!(availability(ActionKind::Refresh, None));
         assert!(availability(ActionKind::OpenHelp, None));
         assert!(availability(ActionKind::NewWorkspace, None));
+    }
+
+    #[test]
+    fn github_leader_chords_share_one_prefix() {
+        // The github actions migrated off the `ActionGroup` table onto
+        // catalog data: each carries a `g <key>` leader sequence as its
+        // first alternative. Assert they all share the `g` prefix and
+        // their second keystrokes are unique — the property the old
+        // `group_in_keys_are_unique` test guarded, now derived from the
+        // catalog itself.
+        let g = KeyStroke::new(false, false, false, ChordCode::Char('g'));
+        let github = [
+            ActionKind::MergePr,
+            ActionKind::RequestReviewers,
+            ActionKind::AddAssignees,
+            ActionKind::ManageLabels,
+            ActionKind::OpenInBrowser,
+        ];
+        let mut seconds = Vec::new();
+        for kind in github {
+            let def = ActionDef::for_kind(kind);
+            let seq = def
+                .default_chords()
+                .into_iter()
+                .find_map(|c| match c {
+                    Chord::Seq(strokes) if strokes.first() == Some(&g) => Some(strokes),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{kind:?} missing a `g` leader sequence"));
+            assert_eq!(seq.len(), 2, "{kind:?} leader should be two keystrokes");
+            seconds.push(seq[1]);
+        }
+        let before = seconds.len();
+        seconds.sort_by_key(|k| format!("{k:?}"));
+        seconds.dedup();
+        assert_eq!(before, seconds.len(), "duplicate in-group keys");
     }
 
     #[test]
@@ -1508,76 +1991,152 @@ mod tests {
     }
 
     #[test]
-    fn all_groups_round_trip_through_their_leader() {
-        // `all()` is what the UI iterates; every group it yields must
-        // be reachable from its own leader key so the help section and
-        // the live which-key popup can't list a group the keyboard
-        // won't open.
-        assert!(!ActionGroup::all().is_empty());
-        for &group in ActionGroup::all() {
-            assert_eq!(ActionGroup::from_leader(group.leader()), Some(group));
+    fn catalog_generates_one_row_per_agent() {
+        use std::collections::BTreeMap;
+        let agents: Vec<String> = ["claude", "codex", "aider"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let catalog = ActionDef::catalog(&agents, &BTreeMap::new());
+
+        // No generic SpawnAgent placeholder survives — only concrete
+        // per-agent rows.
+        let spawn_rows: Vec<&CatalogEntry> = catalog
+            .iter()
+            .filter(|e| e.kind == ActionKind::SpawnAgent)
+            .collect();
+        assert_eq!(spawn_rows.len(), 3, "one row per agent");
+
+        let claude = spawn_rows
+            .iter()
+            .find(|e| e.param == Some(Param::Agent("claude".into())))
+            .expect("claude row");
+        assert_eq!(claude.config_key, "spawn_agent.claude");
+        // Built-in convention: claude → `c`.
+        assert_eq!(
+            claude.chords,
+            vec![Chord::Key(KeyStroke::new(
+                false,
+                false,
+                false,
+                ChordCode::Char('c')
+            ))],
+        );
+
+        // An agent with no built-in convention gets a row but no chord.
+        let aider = spawn_rows
+            .iter()
+            .find(|e| e.param == Some(Param::Agent("aider".into())))
+            .expect("aider row");
+        assert!(aider.chords.is_empty(), "aider has no default key");
+    }
+
+    #[test]
+    fn catalog_dedupes_shared_agent_default_key() {
+        // `cursor` and `cursor-agent` both default to `u`; only the
+        // first keeps the binding, the second still gets a (remappable)
+        // row but no colliding default chord.
+        use std::collections::BTreeMap;
+        let agents: Vec<String> = ["cursor", "cursor-agent"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let catalog = ActionDef::catalog(&agents, &BTreeMap::new());
+        let u = Chord::Key(KeyStroke::new(false, false, false, ChordCode::Char('u')));
+        let bound_to_u: Vec<&CatalogEntry> =
+            catalog.iter().filter(|e| e.chords.contains(&u)).collect();
+        assert_eq!(bound_to_u.len(), 1, "only one agent keeps `u`");
+        // Both agents still have a row.
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|e| e.kind == ActionKind::SpawnAgent)
+                .count(),
+            2,
+        );
+    }
+
+    #[test]
+    fn catalog_agent_row_honors_override() {
+        use std::collections::BTreeMap;
+        let mut overrides = BTreeMap::new();
+        overrides.insert("spawn_agent.claude".to_string(), "Ctrl-j".to_string());
+        let catalog = ActionDef::catalog(&["claude".to_string()], &overrides);
+        let claude = catalog
+            .iter()
+            .find(|e| e.param == Some(Param::Agent("claude".into())))
+            .unwrap();
+        assert_eq!(
+            claude.chords,
+            vec![Chord::Key(KeyStroke::new(
+                true,
+                false,
+                false,
+                ChordCode::Char('j')
+            ))],
+        );
+    }
+
+    #[test]
+    fn every_preset_resolves_and_is_collision_free() {
+        // Each shipped preset must (a) resolve, and (b) produce a
+        // catalog with no two bindings sharing a chord within a
+        // section — the same invariant the default catalog holds, now
+        // guarded for presets so a bad in-tree keymap can't ship.
+        use std::collections::HashMap;
+        let agents: Vec<String> = ["claude", "codex", "cursor"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for name in KEYMAP_PRESETS {
+            let overrides = keymap_preset(name).unwrap_or_else(|| panic!("{name} must resolve"));
+            let catalog = ActionDef::catalog(&agents, &overrides);
+            let mut seen: HashMap<(Section, Chord), String> = HashMap::new();
+            for entry in &catalog {
+                for chord in &entry.chords {
+                    let id = format!("{:?}/{:?}", entry.kind, entry.param);
+                    if let Some(prev) = seen.insert((entry.section, chord.clone()), id.clone()) {
+                        panic!(
+                            "preset `{name}`: chord {chord:?} bound twice in \
+                             {:?}: {prev} and {id}",
+                            entry.section,
+                        );
+                    }
+                }
+            }
         }
+        assert!(keymap_preset("nope").is_none());
     }
 
     #[test]
-    fn group_leader_round_trips() {
-        // `from_leader` is the inverse of `leader`.
-        let group = ActionGroup::Github;
-        assert_eq!(ActionGroup::from_leader(group.leader()), Some(group));
-        // A non-leader key resolves to nothing.
-        assert_eq!(ActionGroup::from_leader('q'), None);
-    }
-
-    #[test]
-    fn group_members_resolve_to_real_catalog_entries() {
-        // Every (key, kind) in a group must have a catalog def and be
-        // reachable via `action_for_key`. Catches a member that names
-        // an ActionKind the group's chord can't actually fire.
-        let group = ActionGroup::Github;
-        for (key, kind) in group.members() {
-            assert_eq!(group.action_for_key(*key), Some(*kind));
-            // `for_kind` panics on an unmatched variant, so this also
-            // asserts the kind is a real catalog entry.
-            let _ = ActionDef::for_kind(*kind);
-        }
-    }
-
-    #[test]
-    fn group_in_keys_are_unique() {
-        // Two members sharing an in-group key would make the second
-        // unreachable — the chord would always fire the first match.
-        let group = ActionGroup::Github;
-        let mut keys: Vec<char> = group.members().iter().map(|(k, _)| *k).collect();
-        keys.sort_unstable();
-        let before = keys.len();
-        keys.dedup();
-        assert_eq!(before, keys.len(), "{group:?} has duplicate in-group keys");
-    }
-
-    #[test]
-    fn github_group_excludes_its_own_leader_key() {
-        // `g` is the leader; an in-group key of `g` would be
-        // ambiguous (`g g`). Guard against it.
-        let g = ActionGroup::Github;
-        assert!(
-            g.members().iter().all(|(k, _)| *k != g.leader()),
-            "in-group key collides with the leader",
+    fn vim_preset_is_leaders_primary() {
+        // The vim preset drops the legacy `Shift-M` alias for merge —
+        // only the `g m` leader survives.
+        let overrides = keymap_preset("vim").unwrap();
+        let catalog = ActionDef::catalog(&[], &overrides);
+        let merge = catalog
+            .iter()
+            .find(|e| e.kind == ActionKind::MergePr)
+            .unwrap();
+        assert_eq!(
+            merge.chords,
+            vec![Chord::Seq(vec![
+                KeyStroke::new(false, false, false, ChordCode::Char('g')),
+                KeyStroke::new(false, false, false, ChordCode::Char('m')),
+            ])],
+            "vim merge keeps only the g-leader, no Shift-M",
         );
     }
 
     #[test]
     fn all_is_sorted_by_section() {
         // The `all()` iterator emits Global first, then Workspace,
-        // then Activity, then Terminal. Help relies on this for its
-        // section dividers — assert here so a reorder surfaces.
+        // then Sidebar, then Activity, then Terminal. Help relies on
+        // this for its section dividers — assert here so a reorder
+        // surfaces.
         let order: Vec<Section> = ActionDef::all().map(|d| d.section).collect();
         let mut last_idx = 0;
-        let order_of = |s: Section| match s {
-            Section::Global => 0,
-            Section::Workspace => 1,
-            Section::Activity => 2,
-            Section::Terminal => 3,
-        };
+        let order_of = Section::order;
         for s in order {
             let idx = order_of(s);
             assert!(idx >= last_idx, "section {s:?} appeared out of order");

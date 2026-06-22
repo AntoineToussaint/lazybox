@@ -538,6 +538,54 @@ fn r_mounts_reply_modal_from_right_pane() {
 }
 
 #[test]
+fn slash_opens_sidebar_search_through_the_catalog() {
+    // `/` migrated into the action catalog (Section::Sidebar, issue
+    // #98). Pressing it from sidebar focus must dispatch through
+    // `dispatch_action` → `Sidebar::open_search`, not the deleted
+    // per-pane match arm. Proves the catalog absorbed the key without
+    // regressing dispatch.
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let workspace = Workspace::empty(WorkspaceKey("github:o/r#1".into()), "main", Utc::now());
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![workspace],
+        terminals: Vec::new(),
+        projects: vec![],
+    });
+    assert_eq!(m.focus(), PaneFocus::Sidebar);
+    assert!(!m.sidebar().search_editing());
+    m.dispatch_key(key(Key::Char('/')));
+    assert!(
+        m.sidebar().search_editing(),
+        "`/` must open the sidebar search bar via the catalog",
+    );
+}
+
+#[test]
+fn remapped_search_binding_opens_search() {
+    // The migration's payoff: a sidebar list key is now remappable
+    // via `ui.action_keys`. Rebind `open_search` to Ctrl-f and assert
+    // the chord opens search — impossible while `/` was hard-coded in
+    // the pane handler.
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let workspace = Workspace::empty(WorkspaceKey("github:o/r#1".into()), "main", Utc::now());
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![workspace],
+        terminals: Vec::new(),
+        projects: vec![],
+    });
+    let mut overrides = std::collections::BTreeMap::new();
+    overrides.insert("open_search".to_string(), "Ctrl-f".to_string());
+    m.apply_action_key_overrides(overrides);
+    m.dispatch_key(key_with(Key::Char('f'), KeyModifiers::CONTROL));
+    assert!(
+        m.sidebar().search_editing(),
+        "remapped Ctrl-f must open search",
+    );
+}
+
+#[test]
 fn out_of_scope_with_active_session_queues_a_prompt() {
     // Phase 2 of the rescope flow: when the daemon sends a
     // `WorkspaceOutOfScope` event (a workspace fell out of the
@@ -1177,12 +1225,13 @@ fn tick_right_drives_auto_mark_and_emits_command() {
 
 // ── Grouped two-step (leader-key) chords — issue #126 ────────────────
 
-/// `g` in the sidebar with a workspace selected arms the github
-/// leader group — the which-key popup's pending state — without
-/// firing anything or mounting a modal.
+/// `g` in the sidebar arms the leader (the `g …` prefix) — the
+/// which-key popup's pending state — without firing anything or
+/// mounting a modal. Which entries continue the prefix is a pure
+/// function of the catalog (`seq_continuations`).
 #[test]
 fn leader_g_arms_github_group_when_workspace_selected() {
-    use lazybox_tui_core::action::ActionGroup;
+    use lazybox_tui_core::action::{ChordCode, KeyStroke};
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     m.handle_daemon_event(IpcEvent::Snapshot {
@@ -1192,7 +1241,10 @@ fn leader_g_arms_github_group_when_workspace_selected() {
     });
 
     m.dispatch_key(key(Key::Char('g')));
-    assert_eq!(m.leader_pending(), Some(ActionGroup::Github));
+    assert_eq!(
+        m.leader_pending(),
+        Some(KeyStroke::new(false, false, false, ChordCode::Char('g'))),
+    );
     assert_eq!(m.top_modal(), None, "arming must not mount a modal");
 }
 
@@ -1265,14 +1317,156 @@ fn leader_g_then_unmapped_key_redispatches() {
     );
 }
 
-/// Without a selected workspace the leader never arms — `g` falls
-/// through to its normal (no-op) sidebar handling.
+/// Arming is purely catalog-driven: `g` arms the leader from sidebar
+/// focus even with no workspace selected (just like the single-key
+/// `Shift-M` resolves at the keyboard layer regardless of target). The
+/// completed chord then no-ops in `dispatch_action` if nothing is
+/// actionable — same contract as every other workspace action.
 #[test]
-fn leader_g_does_not_arm_without_workspace() {
+fn leader_g_arms_from_sidebar_without_workspace() {
+    use lazybox_tui_core::action::{ChordCode, KeyStroke};
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     m.dispatch_key(key(Key::Char('g')));
-    assert_eq!(m.leader_pending(), None);
+    assert_eq!(
+        m.leader_pending(),
+        Some(KeyStroke::new(false, false, false, ChordCode::Char('g'))),
+    );
+}
+
+// ── Per-agent spawn keys are catalog rows (#102 P2) ──────────────────
+
+/// The agent id of the first `Spawn(Agent)` command in `cmds`.
+fn first_spawned_agent(cmds: &[lazybox_ipc::Command]) -> Option<String> {
+    use lazybox_ipc::{Command, TerminalKind};
+    cmds.iter().find_map(|c| match c {
+        Command::Spawn {
+            kind: TerminalKind::Agent(a),
+            ..
+        } => Some(a.clone()),
+        _ => None,
+    })
+}
+
+/// `c` on the selected workspace spawns the default `claude` agent —
+/// the generated `SpawnAgent` row dispatched by the Model, not a
+/// sidebar arm.
+#[test]
+fn spawn_agent_c_spawns_claude() {
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let pr_ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    let pr_key: SessionKey = (&pr_ws.key).into();
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![pr_ws],
+        terminals: vec![],
+        projects: vec![],
+    });
+    assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
+    while server.rx.try_recv().is_ok() {}
+    m.dispatch_key(key(Key::Char('c')));
+    let cmds: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+    assert_eq!(first_spawned_agent(&cmds).as_deref(), Some("claude"));
+}
+
+/// `x` spawns codex — the second generated agent row.
+#[test]
+fn spawn_agent_x_spawns_codex() {
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let pr_ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    let pr_key: SessionKey = (&pr_ws.key).into();
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![pr_ws],
+        terminals: vec![],
+        projects: vec![],
+    });
+    assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
+    while server.rx.try_recv().is_ok() {}
+    m.dispatch_key(key(Key::Char('x')));
+    let cmds: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+    assert_eq!(first_spawned_agent(&cmds).as_deref(), Some("codex"));
+}
+
+/// An agent row is remappable through `ui.action_keys` keyed by
+/// `spawn_agent.<id>`: after remapping claude to `Ctrl-j`, the default
+/// `c` no longer spawns it and `Ctrl-j` does.
+#[test]
+fn spawn_agent_key_is_remappable() {
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let mut overrides = std::collections::BTreeMap::new();
+    overrides.insert("spawn_agent.claude".to_string(), "Ctrl-j".to_string());
+    m.apply_action_key_overrides(overrides);
+    let pr_ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    let pr_key: SessionKey = (&pr_ws.key).into();
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![pr_ws],
+        terminals: vec![],
+        projects: vec![],
+    });
+    assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
+    while server.rx.try_recv().is_ok() {}
+
+    // `c` is no longer claude's key — nothing spawns.
+    m.dispatch_key(key(Key::Char('c')));
+    let after_c: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+    assert_eq!(first_spawned_agent(&after_c), None, "c was remapped away");
+
+    // The remapped chord spawns claude.
+    m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::CONTROL));
+    let after_remap: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+    assert_eq!(first_spawned_agent(&after_remap).as_deref(), Some("claude"));
+}
+
+// ── Long-snooze is a Confirm-guarded catalog row (#102 P3) ───────────
+
+/// `Shift-Z` long-snooze is `Confirm`-guarded: it mounts the unified
+/// ActionConfirm modal instead of the old sidebar two-press latch, and
+/// only snoozes (~1 year) once the user confirms with `y`.
+#[test]
+fn long_snooze_confirms_then_snoozes_a_year_out() {
+    use lazybox_ipc::Command;
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let pr_ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    let pr_key: SessionKey = (&pr_ws.key).into();
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![pr_ws],
+        terminals: vec![],
+        projects: vec![],
+    });
+    assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
+    while server.rx.try_recv().is_ok() {}
+
+    // First press mounts the confirm — no snooze yet.
+    m.dispatch_key(key(Key::Char('Z')));
+    assert_eq!(
+        m.top_modal(),
+        Some(&Id::ActionConfirm),
+        "Shift-Z must mount the Confirm modal, not snooze immediately",
+    );
+    let before_confirm: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+    assert!(
+        !before_confirm
+            .iter()
+            .any(|c| matches!(c, Command::Snooze { .. })),
+        "no snooze before confirming",
+    );
+
+    // Confirming fires the ~1-year snooze.
+    m.dispatch_modal_key(key(Key::Char('y')));
+    let after: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+    let snooze = after.iter().find_map(|c| match c {
+        Command::Snooze { until, .. } => Some(*until),
+        _ => None,
+    });
+    let until = snooze.expect("confirming Shift-Z snoozes");
+    let days = (until - Utc::now()).num_days();
+    assert!(
+        (360..=370).contains(&days),
+        "expected ~1 year, got {days} days"
+    );
 }
 
 /// Flatten the current frame buffer into a newline-joined string of

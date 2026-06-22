@@ -600,7 +600,6 @@ impl Sidebar {
                 focused,
                 is_cursor: i == self.cursor,
                 max_pr_num_width,
-                long_snooze_armed: self.latches.armed(TRIGGER_LONG_SNOOZE) == Some(key),
                 asking: workspace.is_some_and(|w| {
                     crate::agent_attention::workspace_is_asking(w, &self.agents_asking)
                 }),

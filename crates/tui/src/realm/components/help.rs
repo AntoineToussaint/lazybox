@@ -6,7 +6,7 @@
 use crate::pane::Binding;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
-use lazybox_tui_core::action::{ActionDef, ActionGroup, Section};
+use lazybox_tui_core::action::{CatalogEntry, Chord, KeyStroke, Section};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::Event;
@@ -30,39 +30,77 @@ pub struct HelpSection {
 /// A leader-key chord group rendered as its own labeled block at the
 /// top of the panel — the which-key system surfaced as discoverable
 /// UI so users learn that `g` *opens a menu* rather than memorizing
-/// five separate chords. Built from [`ActionGroup`] so the leader,
-/// chords, and aliases all track the catalog (issue #145).
+/// five separate chords. Derived from the runtime catalog (every entry
+/// whose effective chord is a two-step `<leader> <key>` sequence), the
+/// data-driven replacement for the old `ActionGroup` table so the
+/// leader, chords, and aliases can't drift from the live keymap
+/// (issues #145, #102).
 pub struct LeaderGroup {
-    /// Heading line, e.g. `github — press g, then:`.
+    /// Heading line, e.g. `press g, then:`.
     heading: String,
     /// One row per in-group chord: keys `g m`, label `merge PR`.
     chords: Vec<Binding>,
-    /// The legacy direct-key aliases this group replaced, e.g.
-    /// `aliases: Shift-M · Shift-V · Shift-G · Shift-L · Shift-O`.
+    /// The full key display for each in-group action, so the legacy
+    /// direct-key aliases (`Shift-M`, …) stay visible alongside the
+    /// leader chord, e.g. `aliases: g m | Shift-M · g v | Shift-V`.
     aliases: String,
 }
 
 impl LeaderGroup {
-    fn from_action_group(group: ActionGroup) -> Self {
-        let chords = group
-            .members()
-            .iter()
-            .map(|(key, kind)| Binding {
-                keys: std::borrow::Cow::Owned(format!("{} {key}", group.leader())),
-                label: std::borrow::Cow::Borrowed(ActionDef::for_kind(*kind).label),
-            })
-            .collect();
-        let aliases = group
-            .members()
-            .iter()
-            .map(|(_, kind)| ActionDef::for_kind(*kind).default_keys)
-            .collect::<Vec<_>>()
-            .join(" · ");
-        Self {
-            heading: format!("{} — press {}, then:", group.title(), group.leader()),
-            chords,
-            aliases: format!("aliases: {aliases}"),
+    /// Build one block per distinct leader keystroke that begins a
+    /// two-step chord in the catalog, in first-appearance order. Each
+    /// block lists every continuation's `<leader> <key>` display and
+    /// its catalog label. Mirrors the live which-key popup, which keys
+    /// off the same `Chord::Seq` data.
+    fn all_from_catalog(catalog: &[CatalogEntry]) -> Vec<Self> {
+        // First-appearance order of leaders, with their continuations.
+        let mut leaders: Vec<KeyStroke> = Vec::new();
+        let mut members: Vec<Vec<(KeyStroke, &CatalogEntry)>> = Vec::new();
+        for entry in catalog {
+            for chord in &entry.chords {
+                let Chord::Seq(strokes) = chord else { continue };
+                if strokes.len() != 2 {
+                    continue;
+                }
+                let leader = strokes[0];
+                let idx = leaders
+                    .iter()
+                    .position(|l| *l == leader)
+                    .unwrap_or_else(|| {
+                        leaders.push(leader);
+                        members.push(Vec::new());
+                        leaders.len() - 1
+                    });
+                members[idx].push((strokes[1], entry));
+            }
         }
+        leaders
+            .iter()
+            .zip(members.iter())
+            .map(|(leader, group)| {
+                let leader_disp = leader.display();
+                let chords = group
+                    .iter()
+                    .map(|(second, entry)| Binding {
+                        keys: std::borrow::Cow::Owned(format!(
+                            "{leader_disp} {}",
+                            second.display()
+                        )),
+                        label: entry.label.clone(),
+                    })
+                    .collect();
+                let aliases = group
+                    .iter()
+                    .map(|(_, entry)| entry.keys_display.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                Self {
+                    heading: format!("press {leader_disp}, then:"),
+                    chords,
+                    aliases: format!("aliases: {aliases}"),
+                }
+            })
+            .collect()
     }
 }
 
@@ -73,49 +111,47 @@ pub struct Help {
 }
 
 impl Help {
-    /// Build the help panel from `ActionDef::all()` — the canonical
-    /// catalog — honoring user keybinding overrides. Every action
-    /// surfaces; the user sees a complete reference instead of the
-    /// pane-stitched subset the legacy constructor produced.
-    pub fn from_catalog(overrides: &std::collections::BTreeMap<String, String>) -> Self {
-        let mut by_section: std::collections::BTreeMap<u8, Vec<Binding>> =
+    /// Build the help panel from the runtime catalog — every action,
+    /// including the generated per-agent `SpawnAgent` rows, with
+    /// effective (post-override) chords. The user sees a complete
+    /// reference instead of the pane-stitched subset the legacy
+    /// constructor produced.
+    pub fn from_catalog(catalog: &[CatalogEntry]) -> Self {
+        let mut by_section: std::collections::BTreeMap<u8, (&'static str, Vec<Binding>)> =
             std::collections::BTreeMap::new();
-        for def in ActionDef::all() {
-            let order = match def.section {
-                Section::Global => 0,
-                Section::Workspace => 1,
-                Section::Activity => 2,
-                Section::Terminal => 3,
-            };
-            by_section.entry(order).or_default().push(Binding {
-                keys: def.effective_keys_display(overrides),
-                label: std::borrow::Cow::Borrowed(def.label),
-            });
+        for entry in catalog {
+            // An agent with no default binding and no remap has nothing
+            // to show in the keys column — skip it rather than render a
+            // blank row.
+            if entry.keys_display.is_empty() {
+                continue;
+            }
+            by_section
+                .entry(entry.section.order())
+                .or_insert_with(|| (entry.section.title(), Vec::new()))
+                .1
+                .push(Binding {
+                    keys: entry.keys_display.clone(),
+                    label: entry.label.clone(),
+                });
         }
         // The snippet leader (`]]<key>`) isn't a catalog `Action` —
         // it's a terminal-pane chord whose binding set is the user's
         // snippet library — so it's hand-added to the Terminal section
         // here, the same way the hint bar curates it (issue #205).
-        by_section.entry(3).or_default().push(Binding {
-            keys: std::borrow::Cow::Borrowed("]]<key>"),
-            label: std::borrow::Cow::Borrowed("snippets"),
-        });
+        by_section
+            .entry(Section::Terminal.order())
+            .or_insert_with(|| (Section::Terminal.title(), Vec::new()))
+            .1
+            .push(Binding {
+                keys: std::borrow::Cow::Borrowed("]]<key>"),
+                label: std::borrow::Cow::Borrowed("snippets"),
+            });
         let sections: Vec<HelpSection> = by_section
             .into_iter()
-            .map(|(order, bindings)| {
-                let title = match order {
-                    0 => "Global",
-                    1 => "Workspace",
-                    2 => "Activity",
-                    _ => "Terminal",
-                };
-                HelpSection { title, bindings }
-            })
+            .map(|(_, (title, bindings))| HelpSection { title, bindings })
             .collect();
-        let leaders = ActionGroup::all()
-            .iter()
-            .map(|g| LeaderGroup::from_action_group(*g))
-            .collect();
+        let leaders = LeaderGroup::all_from_catalog(catalog);
         Self { leaders, sections }
     }
 
@@ -331,61 +367,110 @@ fn format_keys_for_display(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Help, format_keys_for_display};
-    use lazybox_tui_core::action::{ActionDef, ActionGroup};
 
-    /// Render the help panel into a throwaway backend and return the
-    /// visible text — the surface for asserting the leader section.
-    fn render_help() -> String {
-        use tuirealm::component::Component;
-        use tuirealm::ratatui::Terminal;
-        use tuirealm::ratatui::backend::TestBackend;
-        use tuirealm::ratatui::layout::Rect;
-        let mut h = Help::from_catalog(&std::collections::BTreeMap::new());
-        let (w, ht) = (120u16, 40u16);
-        let mut term = Terminal::new(TestBackend::new(w, ht)).unwrap();
-        term.draw(|f| h.view(f, Rect::new(0, 0, w, ht))).unwrap();
-        let buf = term.backend().buffer();
-        (0..buf.area.height)
-            .map(|y| {
-                let mut row = String::new();
-                for x in 0..buf.area.width {
-                    row.push_str(buf[(x, y)].symbol());
-                }
-                row.trim_end().to_string()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+    /// The generated Keys screen (#102 P4) is the catalog made visible:
+    /// it must list the per-agent spawn rows and the long-snooze guard
+    /// row — the bindings that only exist in the runtime catalog — with
+    /// their effective keys, grouped by scope.
+    #[test]
+    fn from_catalog_lists_generated_rows() {
+        use lazybox_tui_core::action::ActionDef;
+        let catalog = ActionDef::catalog(
+            &["claude".to_string(), "codex".to_string()],
+            &std::collections::BTreeMap::new(),
+        );
+        let help = Help::from_catalog(&catalog);
+        let rows: Vec<(String, String)> = help
+            .sections
+            .iter()
+            .flat_map(|s| s.bindings.iter())
+            .map(|b| (b.keys.to_string(), b.label.to_string()))
+            .collect();
+        assert!(
+            rows.iter().any(|(k, l)| k == "c" && l == "spawn claude"),
+            "per-agent claude row missing from Keys screen: {rows:?}",
+        );
+        assert!(
+            rows.iter().any(|(k, l)| k == "x" && l == "spawn codex"),
+            "per-agent codex row missing",
+        );
+        assert!(
+            rows.iter().any(|(_, l)| l == "long snooze"),
+            "long-snooze guard row missing",
+        );
+        // No bare generic "spawn agent" placeholder survives.
+        assert!(!rows.iter().any(|(_, l)| l == "spawn agent"));
     }
 
+    /// A keymap preset's remaps surface in the Keys screen — the vim
+    /// preset shows merge as `g m`, not `Shift-M`.
+    #[test]
+    fn from_catalog_reflects_preset_overrides() {
+        use lazybox_tui_core::action::{ActionDef, keymap_preset};
+        let overrides = keymap_preset("vim").unwrap();
+        let catalog = ActionDef::catalog(&[], &overrides);
+        let help = Help::from_catalog(&catalog);
+        let merge_keys = help
+            .sections
+            .iter()
+            .flat_map(|s| s.bindings.iter())
+            .find(|b| b.label == "merge PR")
+            .map(|b| b.keys.to_string());
+        assert_eq!(merge_keys.as_deref(), Some("g m"));
+    }
+
+    /// The `g` leader gets its own labeled block built from the catalog:
+    /// every in-group chord (`g m`, …) with its catalog label, so the
+    /// which-key section can't drift from the live keymap (#145, #114).
     #[test]
     fn leader_section_lists_the_github_chords_from_the_catalog() {
-        // The g leader gets its own labeled block: the group title +
-        // every in-group chord and its catalog label. Pulling from the
-        // catalog keeps it from drifting (issue #145, #114).
-        let text = render_help();
-        let group = ActionGroup::Github;
-        assert!(text.contains(group.title()), "leader section title missing");
-        for (key, kind) in group.members() {
-            let chord = format!("{} {key}", group.leader());
-            assert!(text.contains(&chord), "help missing leader chord {chord}");
-            let label = ActionDef::for_kind(*kind).label;
-            assert!(text.contains(label), "help missing label {label:?}");
+        use lazybox_tui_core::action::ActionDef;
+        let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
+        let help = Help::from_catalog(&catalog);
+        let g = help
+            .leaders
+            .iter()
+            .find(|lg| lg.heading.contains("press g"))
+            .expect("g leader block missing from help panel");
+        let rows: Vec<(String, String)> = g
+            .chords
+            .iter()
+            .map(|b| (b.keys.to_string(), b.label.to_string()))
+            .collect();
+        for (chord, label) in [
+            ("g m", "merge PR"),
+            ("g v", "reviewers"),
+            ("g a", "assignees"),
+            ("g l", "labels"),
+            ("g o", "open in browser"),
+        ] {
+            assert!(
+                rows.iter().any(|(k, l)| k == chord && l == label),
+                "g leader block missing {chord} → {label}; got {rows:?}",
+            );
         }
     }
 
+    /// The aliases line carries each action's full key display, so the
+    /// legacy Shift-* aliases stay visible alongside the leader chord —
+    /// derived from the same catalog key displays.
     #[test]
     fn leader_section_reflects_the_shift_aliases() {
-        // Each chord's legacy Shift-* key still works; the section says
-        // so, derived from the same catalog defaults.
-        let text = render_help();
-        for (_, kind) in ActionGroup::Github.members() {
-            let alias = ActionDef::for_kind(*kind).default_keys;
+        use lazybox_tui_core::action::ActionDef;
+        let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
+        let help = Help::from_catalog(&catalog);
+        let g = help
+            .leaders
+            .iter()
+            .find(|lg| lg.heading.contains("press g"))
+            .expect("g leader block missing from help panel");
+        for alias in ["Shift-M", "Shift-V", "Shift-G", "Shift-L", "Shift-O"] {
             assert!(
-                text.contains(alias),
-                "help leader section omits alias {alias}"
+                g.aliases.contains(alias),
+                "aliases line omits {alias}: {:?}",
+                g.aliases,
             );
         }
-        assert!(text.contains("aliases"), "aliases note missing");
     }
 
     #[test]

@@ -133,10 +133,28 @@ via YAML config without recompilation.
 
 ## Keybindings
 
-Most keys live in the action catalog (`crates/tui-core/src/action.rs`,
-remappable via `ui.action_keys`) and dispatch through
-`Model::handle_pane_key` → `dispatch_action`; navigation/latch keys are
-per-pane match arms in `components/{sidebar,right_pane,terminal_stack}`.
+Nearly every key lives in the action catalog
+(`crates/tui-core/src/action.rs`, remappable via `ui.action_keys`) and
+dispatches through `Model::handle_pane_key` → `dispatch_action`; only
+per-pane cursor navigation (`j/k`, arrows) stays as pane match arms in
+`components/{sidebar,right_pane,terminal_stack}`. A catalog row is one
+enriched binding (#102): `chords: Vec<Chord>` where `Chord = Key |
+Seq` — `Seq` is every leader/double-press (`g m`, `q q`, `] ]`), and
+multiple chords are alternatives (`g m | Shift-M`); a `param`
+(agent id) that generates one real `SpawnAgent` row per enabled agent
+at startup; and a `guard` (`None | DoublePress | Confirm(prompt)`) that
+carries the `q q` double-tap and the archive/merge/long-snooze confirm
+modals. The Model holds a runtime catalog (static rows + generated
+agent rows, overrides baked in); leader arming + the which-key popup
+are pure functions of it (`seq_continuations`, `find_action_for_seq`).
+Each row's `Section` (`Global` / `Workspace` / `Sidebar` / `Activity` /
+`Terminal`) doubles as its resolution scope — `section_rank`
+(`realm/model/helpers.rs`) maps `(Section, focus)` to a priority, and a
+collision-detector test fails the build on two bindings colliding
+within a section or at the same rank under a focus. The `?` help is the
+generated Keys screen: every binding by scope with effective
+(post-override) chords. `ui.keymap_preset` selects an in-tree starter
+keymap (`default`, `vim`); explicit `ui.action_keys` layers on top.
 The footer hint bar reads each pane's `contextual_bindings()`.
 
 **Global**: `Tab` cycle panes, `?` help, `q q` quit, `,` settings,

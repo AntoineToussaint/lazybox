@@ -503,7 +503,7 @@ mod tests {
 
     #[test]
     fn github_leader_demo_matches_the_catalog() {
-        use lazybox_tui_core::action::{ActionDef, ActionGroup};
+        use lazybox_tui_core::action::{ActionDef, ActionKind};
         // The ship-it step demonstrates the g leader as a menu, and its
         // chords + labels must be the catalog's — so the demo can't
         // drift from the live keymap (issue #145, #114).
@@ -512,14 +512,32 @@ mod tests {
             all.contains("press g"),
             "tour no longer frames g as a which-key menu"
         );
-        let group = ActionGroup::Github;
-        for (key, kind) in group.members() {
-            let chord = format!("{} {key}", group.leader());
+        // The github actions carry their `g <key>` leader as a catalog
+        // chord now (ActionGroup is gone); read it straight off the def.
+        let github = [
+            ActionKind::MergePr,
+            ActionKind::RequestReviewers,
+            ActionKind::AddAssignees,
+            ActionKind::ManageLabels,
+            ActionKind::OpenInBrowser,
+        ];
+        for kind in github {
+            let def = ActionDef::for_kind(kind);
+            let chord = def
+                .default_chords()
+                .into_iter()
+                .find_map(|c| match c {
+                    lazybox_tui_core::action::Chord::Seq(strokes) if strokes.len() == 2 => {
+                        Some(format!("{} {}", strokes[0].display(), strokes[1].display()))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{kind:?} missing a leader sequence"));
             assert!(all.contains(&chord), "tour missing leader chord {chord}");
-            let label = ActionDef::for_kind(*kind).label;
             assert!(
-                all.contains(label),
-                "tour missing label {label:?} for {chord}"
+                all.contains(def.label),
+                "tour missing label {:?} for {chord}",
+                def.label
             );
         }
     }

@@ -547,6 +547,16 @@ pub struct Model<T: TerminalAdapter> {
     /// preselect) feeds the daemon's round-robin scheduler without
     /// each call site needing its own emit hook.
     last_focused_session_key: Option<lazybox_core::SessionKey>,
+    /// Set by a daemon-event handler that needs the panes re-projected
+    /// from the (possibly moved) sidebar selection, flushed to a single
+    /// `sync_panes` once the whole drain batch is handled. A merge burst
+    /// (`TerminalsRebadged` → `WorkspaceRemoved` → `WorkspaceMerged`) or
+    /// a multi-row poll arrives as several events in one drain; running
+    /// `sync_panes` per event would clone the selected `Workspace` and
+    /// re-emit `FocusWorkspace` for every intermediate cursor position,
+    /// when only the batch's final selection matters. Coalescing collapses
+    /// that to one projection per batch.
+    needs_pane_sync: bool,
     /// Per-workspace manual override of the Activity pane's
     /// visibility, keyed by workspace. The pane auto-hides when a
     /// workspace has no activity worth showing (`Right::
@@ -818,6 +828,7 @@ impl<T: TerminalAdapter> Model<T> {
             ui_defaults: lazybox_config::UiDefaults::default(),
             pr_details_fetched: std::collections::HashSet::new(),
             last_focused_session_key: None,
+            needs_pane_sync: false,
             activity_pane_overrides: std::collections::HashMap::new(),
             pending_sidebar_context: None,
             action_key_overrides: std::collections::BTreeMap::new(),

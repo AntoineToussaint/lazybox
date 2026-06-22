@@ -239,6 +239,33 @@ fn write_hook_settings(
     }
 }
 
+/// The terminal's current owning session, read from the authoritative
+/// `terminal_meta` map rather than a value captured when its output
+/// pump spawned. `rebadge_terminals` (issue→PR collapse, manual adopt)
+/// moves a live terminal's meta entry onto the new workspace; resolving
+/// the key live here is what keeps the moved agent's `AgentState`
+/// transitions flowing to the PR session instead of the now-deleted
+/// issue one — otherwise the agent (even one parked on a prompt) shows
+/// no badge on the PR and reads as lost (#161). Falls back to the
+/// `captured` key only when the terminal is already gone from the map
+/// (mid-teardown), where the event is moot anyway.
+async fn live_session_key(
+    terminal_meta: &std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
+        >,
+    >,
+    id: TerminalId,
+    captured: &SessionKey,
+) -> SessionKey {
+    terminal_meta
+        .lock()
+        .await
+        .get(&id)
+        .map(|(sk, _)| sk.clone())
+        .unwrap_or_else(|| captured.clone())
+}
+
 /// Spawn a terminal inside a session and broadcast
 /// `Event::TerminalSpawned`. Failures emit `Event::ProviderError` so
 /// the user gets feedback in the TUI rather than a silent miss.
@@ -660,7 +687,16 @@ pub async fn handle_spawn(
             >,
             bus: &tokio::sync::broadcast::Sender<Event>,
             id: TerminalId,
+            // Captured at spawn — used only as a fallback. The live key
+            // is re-resolved from `terminal_meta` at emit time so a
+            // terminal rebadged onto a PR (issue→PR collapse) broadcasts
+            // its state under the PR session, not the deleted issue one.
             session_key: &SessionKey,
+            terminal_meta: &std::sync::Arc<
+                tokio::sync::Mutex<
+                    std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
+                >,
+            >,
             last_input_needed_at: &mut Option<std::time::Instant>,
             hysteresis: std::time::Duration,
             last_working_at: &mut Option<std::time::Instant>,
@@ -873,6 +909,19 @@ pub async fn handle_spawn(
                 map.insert(id, new_state);
                 current
             };
+            // Re-resolve the owning session from the authoritative
+            // `terminal_meta` map rather than trusting the key captured
+            // when this pump spawned. `rebadge_terminals` (issue→PR
+            // collapse, manual adopt) moves a live terminal's meta entry
+            // onto the new workspace; a pump still broadcasting the OLD
+            // captured key sends every Working/InputNeeded transition to
+            // a workspace that no longer exists. The user's moved agent —
+            // including one parked on a prompt waiting for them — then
+            // shows no badge on the PR and looks lost (issue #161). Fall
+            // back to the captured key only if the terminal was already
+            // swept (mid-teardown), where the event is moot anyway.
+            let live_session_key = live_session_key(terminal_meta, id, session_key).await;
+            let session_key = &live_session_key;
             // Loud log so when the user reports "the pill didn't
             // show", we can confirm whether the daemon-side
             // detector actually fired vs. the event got lost
@@ -936,6 +985,7 @@ pub async fn handle_spawn(
                 &bus,
                 id_for_pump,
                 &session_key_for_pump,
+                &terminal_meta_map,
                 &mut last_input_needed_at,
                 INPUT_NEEDED_HYSTERESIS,
                 &mut last_working_at,
@@ -993,6 +1043,7 @@ pub async fn handle_spawn(
                 &bus,
                 id_for_pump,
                 &session_key_for_pump,
+                &terminal_meta_map,
                 &mut last_input_needed_at,
                 INPUT_NEEDED_HYSTERESIS,
                 &mut last_working_at,
@@ -3577,6 +3628,51 @@ mod tests {
     fn cargo_target_dir_is_not_added_without_a_worktree() {
         let out = with_worktree_cargo_target(Vec::new(), None);
         assert!(out.is_empty());
+    }
+
+    /// Regression for #161: after an issue→PR collapse, `rebadge_terminals`
+    /// repoints the live terminal's `terminal_meta` entry onto the PR
+    /// session. The output pump must broadcast its `AgentState` under the
+    /// CURRENT (PR) key, not the issue key it captured at spawn — else a
+    /// moved agent (e.g. one waiting on a prompt) emits state for the
+    /// deleted issue workspace and looks lost. `live_session_key` is the
+    /// resolution the pump uses; it must prefer the map over the captured
+    /// fallback.
+    #[tokio::test]
+    async fn live_session_key_follows_a_rebadged_terminal_onto_the_pr() {
+        let id = TerminalId(7);
+        let issue_key: SessionKey = "github-o-r-161".into(); // captured at spawn
+        let pr_key: SessionKey = "github-o-r-164".into(); // where rebadge moved it
+        let meta = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        meta.lock().await.insert(
+            id,
+            (
+                pr_key.clone(),
+                lazybox_ipc::TerminalKind::Agent("claude".into()),
+            ),
+        );
+
+        let resolved = live_session_key(&meta, id, &issue_key).await;
+        assert_eq!(
+            resolved, pr_key,
+            "a rebadged terminal must broadcast state under the PR session, not the captured issue key",
+        );
+    }
+
+    /// The captured key is the fallback only when the terminal is already
+    /// gone from `terminal_meta` (mid-teardown) — a still-mapped terminal
+    /// never falls back, so a stale capture can't leak through.
+    #[tokio::test]
+    async fn live_session_key_falls_back_to_captured_when_terminal_swept() {
+        let id = TerminalId(7);
+        let captured: SessionKey = "github-o-r-161".into();
+        let meta = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+
+        let resolved = live_session_key(&meta, id, &captured).await;
+        assert_eq!(
+            resolved, captured,
+            "missing meta entry falls back to the captured key"
+        );
     }
 
     fn input_resolved_states() -> std::sync::Arc<

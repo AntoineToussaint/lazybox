@@ -190,6 +190,12 @@ pub enum Id {
     /// dismissed by the matching `TerminalSpawned` (or Esc / a failed
     /// step the user acknowledges).
     WorktreeProgress,
+    /// Fuzzy switcher over every workspace (`JumpToWorkspace`, default
+    /// `` ` ``; from a terminal, `]]` then `` ` ``). The parallel
+    /// session keys live in `jump_choices`; `Msg::ChoicePicked`
+    /// resolves the picked index and lands the cursor via
+    /// `focus_workspace_key`. See `realm::components::jump_picker`.
+    JumpPicker,
 }
 
 /// Why a workspace-removal confirm prompt is being shown. Both
@@ -657,6 +663,10 @@ pub struct Model<T: TerminalAdapter> {
     /// mount/unmount. Storing keys (not full rows) avoids cloning
     /// the snippet body twice on every picker mount.
     pub(crate) snippet_choices: Vec<String>,
+    /// Session keys backing the active `JumpPicker`, in the same order
+    /// as its rows — `Msg::ChoicePicked(idx)` resolves to a key here.
+    /// Cleared on mount/unmount.
+    pub(crate) jump_choices: Vec<lazybox_core::SessionKey>,
     /// Set at startup from `ui.tour_seen` (inverted): `true` means
     /// the feature tour should auto-launch once the panes are
     /// visible. Cleared the moment the tour mounts so it never
@@ -871,6 +881,7 @@ impl<T: TerminalAdapter> Model<T> {
             merge_follow_from: None,
             snippets: lazybox_config::Snippets::default(),
             snippet_choices: Vec::new(),
+            jump_choices: Vec::new(),
             auto_tour_pending: false,
             tips_enabled: false,
             tips_seen: Vec::new(),
@@ -1242,6 +1253,49 @@ impl<T: TerminalAdapter> Model<T> {
         self.snippet_choices = keys;
         let picker = SnippetPicker::new(rows, initial_filter);
         self.mount_modal(Id::SnippetPicker, picker);
+    }
+
+    /// Mount the fuzzy workspace switcher (`JumpToWorkspace`). Rows are
+    /// every tracked workspace across repos, attention-needing ones
+    /// first; the parallel session keys are stashed in `jump_choices`
+    /// so `handle_choice_picked` can land the cursor on the chosen one.
+    /// No-op (with a footer hint) when there's nothing to jump to.
+    pub(crate) fn mount_jump_picker(&mut self) {
+        use crate::realm::components::jump_picker::JumpPicker;
+        if matches!(self.modal_stack.last(), Some(Id::JumpPicker)) {
+            return;
+        }
+        let targets = self.sidebar.jump_targets();
+        if targets.is_empty() {
+            self.flash_info("no workspaces to jump to yet");
+            return;
+        }
+        let (keys, labels): (Vec<_>, Vec<_>) = targets.into_iter().unzip();
+        self.jump_choices = keys;
+        self.mount_modal(Id::JumpPicker, JumpPicker::new(labels));
+    }
+
+    /// Land the cursor on `key` and follow it with the panes: show its
+    /// terminal when it has a live one (so a jump-to-agent keeps you
+    /// driving), otherwise fall back to the sidebar. Exits focus mode
+    /// when the target has no terminal — focus mode needs one to fill
+    /// the screen. Backs both the `` ` `` picker and the `]]` `` ` ``
+    /// terminal jump.
+    pub(crate) fn jump_to_workspace_key(&mut self, key: &lazybox_core::SessionKey) {
+        if !self.sidebar.focus_workspace_key(key) {
+            self.flash_info("workspace is gone — nothing to jump to");
+            return;
+        }
+        self.sync_panes();
+        if self.terminals.active_terminal_id().is_some() {
+            self.focus = PaneFocus::Terminals;
+            self.terminal_user_typed_since_focus = false;
+        } else {
+            self.focus_mode = false;
+            self.focus = PaneFocus::Sidebar;
+        }
+        self.set_focus_attr();
+        self.redraw = true;
     }
 
     /// Apply catalog-driven action key overrides (`ui.action_keys`).
@@ -2246,6 +2300,7 @@ impl<T: TerminalAdapter> Model<T> {
                         .map(|w| ((i + 1).to_string(), w.name.clone()))
                 })
                 .collect();
+            rows.push(("`".to_string(), "jump to workspace".to_string()));
             rows.push(("f".to_string(), "focus mode".to_string()));
             rows
         } else {

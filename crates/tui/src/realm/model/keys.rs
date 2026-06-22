@@ -103,13 +103,17 @@ impl<T: TerminalAdapter> Model<T> {
                 //     replacing the old `F2`.
                 // Both shadow snippets bound to those keys (digits and
                 // `f`), which is the documented trade-off for keeping
-                // the jumps reachable heads-down.
+                // the jumps reachable heads-down. `` ` `` is reserved
+                // the same way: it opens the fuzzy workspace switcher,
+                // so "jump to any workspace" works without first
+                // leaving the agent (issue #171).
                 match c {
                     '1'..='9' => {
                         let n = c.to_digit(10).unwrap_or(0) as usize;
                         self.jump_to_agent_workspace(n);
                     }
                     'f' => self.toggle_focus_mode(),
+                    '`' => self.mount_jump_picker(),
                     _ => self.mount_snippet_picker(c.to_string()),
                 }
             }
@@ -1082,6 +1086,7 @@ fn action_from_kind(
         ActionKind::OpenTour => Action::OpenTour,
         ActionKind::OpenSyncStatus => Action::OpenSyncStatus,
         ActionKind::OpenSettings => Action::OpenSettings,
+        ActionKind::JumpToWorkspace => Action::JumpToWorkspace,
         ActionKind::JumpToAsking => Action::JumpToAsking,
         ActionKind::JumpToFailingCi => Action::JumpToFailingCi,
         ActionKind::StartAgent => Action::StartAgent,

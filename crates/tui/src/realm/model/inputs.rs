@@ -200,6 +200,20 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info(format!("sent snippet ]{key}"));
             return cmds;
         }
+        // Jump picker (Id::JumpPicker) — pick → land the cursor on the
+        // chosen workspace (and follow it into its terminal when it has
+        // one). Empty / Esc pick drops the stash without moving.
+        if matches!(self.modal_stack.last(), Some(Id::JumpPicker)) {
+            let target = picks
+                .first()
+                .and_then(|i| self.jump_choices.get(*i).cloned());
+            self.jump_choices.clear();
+            self.pop_modal();
+            if let Some(key) = target {
+                self.jump_to_workspace_key(&key);
+            }
+            return cmds;
+        }
         // Sidebar right-click context menu. Pick → route through
         // `dispatch_action`, the same single fan-out the keyboard
         // shortcut uses. That keeps the destructive gate intact:
@@ -567,6 +581,9 @@ impl<T: TerminalAdapter> Model<T> {
                 // later spawn starts a fresh one. Provisioning keeps
                 // running on the daemon; this only closes the view.
                 self.worktree_progress = None;
+            }
+            Some(Id::JumpPicker) => {
+                self.jump_choices.clear();
             }
             _ => {}
         }

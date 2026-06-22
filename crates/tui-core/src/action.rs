@@ -142,6 +142,12 @@ pub enum Action {
     OpenSyncStatus,
     /// Open the `,` Settings palette.
     OpenSettings,
+    /// Open a fuzzy picker over every workspace (across repos) and
+    /// jump the cursor to the one chosen (default `` ` ``). The
+    /// general switcher the narrow `!` / `Shift-F` jumps lacked —
+    /// reachable from any pane, including inside an agent terminal
+    /// via the `]]` leader.
+    JumpToWorkspace,
     /// Jump the sidebar cursor to the next workspace whose agent
     /// is in `Asking` state (`!`). Wraps around.
     JumpToAsking,
@@ -260,6 +266,7 @@ pub enum ActionKind {
     OpenTour,
     OpenSyncStatus,
     OpenSettings,
+    JumpToWorkspace,
     JumpToAsking,
     JumpToFailingCi,
     ToggleFocusMode,
@@ -348,6 +355,7 @@ impl Action {
             Action::OpenTour => ActionKind::OpenTour,
             Action::OpenSyncStatus => ActionKind::OpenSyncStatus,
             Action::OpenSettings => ActionKind::OpenSettings,
+            Action::JumpToWorkspace => ActionKind::JumpToWorkspace,
             Action::JumpToAsking => ActionKind::JumpToAsking,
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
             Action::ToggleFocusMode => ActionKind::ToggleFocusMode,
@@ -422,18 +430,25 @@ impl ActionDef {
                 describe: "Open the Settings palette.",
                 section: Section::Global,
             },
+            ActionKind::JumpToWorkspace => &Self {
+                kind: ActionKind::JumpToWorkspace,
+                default_keys: "`",
+                label: "jump to workspace",
+                describe: "Open a fuzzy picker over every workspace (across repos) and jump to the one you pick. Works from any pane; inside an agent terminal reach it via `]]` then `` ` ``.",
+                section: Section::Global,
+            },
             ActionKind::JumpToAsking => &Self {
                 kind: ActionKind::JumpToAsking,
                 default_keys: "!",
                 label: "next asking",
-                describe: "Jump the sidebar cursor to the next workspace whose agent is waiting on input.",
+                describe: "Jump the cursor to the next workspace whose agent is waiting on input (a quick jump; the workspace picker `` ` `` reaches any workspace).",
                 section: Section::Global,
             },
             ActionKind::JumpToFailingCi => &Self {
                 kind: ActionKind::JumpToFailingCi,
                 default_keys: "Shift-F",
                 label: "next failing",
-                describe: "Jump the sidebar cursor to the next PR whose CI is failing.",
+                describe: "Jump the cursor to the next PR whose CI is failing (a quick jump; the workspace picker `` ` `` reaches any workspace).",
                 section: Section::Global,
             },
             ActionKind::ToggleFocusMode => &Self {
@@ -728,6 +743,9 @@ impl ActionDef {
             ActionKind::OpenHelp,
             ActionKind::OpenTour,
             ActionKind::OpenSyncStatus,
+            // The three Jump actions sit together so the help panel
+            // reads them as one coherent group.
+            ActionKind::JumpToWorkspace,
             ActionKind::JumpToAsking,
             ActionKind::JumpToFailingCi,
             ActionKind::ToggleFocusMode,
@@ -1225,6 +1243,7 @@ impl ActionKind {
             ActionKind::OpenTour => "open_tour",
             ActionKind::OpenSyncStatus => "open_sync_status",
             ActionKind::OpenSettings => "open_settings",
+            ActionKind::JumpToWorkspace => "jump_to_workspace",
             ActionKind::JumpToAsking => "jump_to_asking",
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
             ActionKind::ToggleFocusMode => "toggle_focus_mode",
@@ -1557,6 +1576,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenTour
         | ActionKind::OpenSyncStatus
         | ActionKind::OpenSettings
+        | ActionKind::JumpToWorkspace
         | ActionKind::JumpToAsking
         | ActionKind::JumpToFailingCi
         | ActionKind::ToggleActivityPane
@@ -1902,6 +1922,37 @@ mod tests {
                 def.default_keys,
             );
         }
+    }
+
+    #[test]
+    fn jump_to_workspace_is_a_global_backtick_chord() {
+        // The new general jump is a no-workspace-needed global, so it
+        // fires from the sidebar / activity panes and resolves with no
+        // selection. Its default chord is the (vim-jump-mnemonic)
+        // backtick.
+        let def = ActionDef::for_kind(ActionKind::JumpToWorkspace);
+        assert_eq!(def.section, Section::Global);
+        assert!(availability(ActionKind::JumpToWorkspace, None));
+        assert_eq!(
+            def.default_chord(),
+            Some(Chord::Key(KeyStroke::new(
+                false,
+                false,
+                false,
+                ChordCode::Char('`'),
+            ))),
+        );
+    }
+
+    #[test]
+    fn jump_actions_are_grouped_in_the_catalog_order() {
+        // Help renders `all()` in order; the three Jump actions must be
+        // contiguous so the panel reads them as one coherent group.
+        let order: Vec<ActionKind> = ActionDef::all().map(|d| d.kind).collect();
+        let pos = |k: ActionKind| order.iter().position(|x| *x == k).unwrap();
+        let ws = pos(ActionKind::JumpToWorkspace);
+        assert_eq!(pos(ActionKind::JumpToAsking), ws + 1);
+        assert_eq!(pos(ActionKind::JumpToFailingCi), ws + 2);
     }
 
     #[test]

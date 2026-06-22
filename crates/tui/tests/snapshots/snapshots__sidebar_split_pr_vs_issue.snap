@@ -2,14 +2,14 @@
 source: crates/tui/tests/snapshots.rs
 expression: rendered
 ---
- LAZYBOX  3  [7d]
+ LAZYBOX v0.1.4  3  [7d]
  f [all]  o [split]
 
- ────────────────────────────────────
+ ─────────────────────────────────────
 
    ▾  owner/repo
-     P PRs
-   ▸ ⇄ 10 A   task: o/r#10
-     I Issues
-     ○ 11 A   task: o/r#11
-     ○ 12 A   task: o/r#12
+   P PRs
+ ▸ ⇄ 10 A   task: o/r#10            5m
+   I Issues
+   ○ 11 A   task: o/r#11           30m
+   ○ 12 A   task: o/r#12            1h

@@ -367,7 +367,7 @@ pub fn resolve_open_editor(workspace: Option<&Workspace>) -> Intent {
 pub fn resolve_new_workspace(focused_project_key: Option<lazybox_core::ProjectKey>) -> Intent {
     match focused_project_key {
         Some(project_key) => Intent::MountNewWorkspaceInput { project_key },
-        None => Intent::Notice("Select a project first (Shift-N creates one).".to_string()),
+        None => Intent::Notice("No project at the cursor — Shift-N picks a repo.".to_string()),
     }
 }
 
@@ -386,7 +386,8 @@ pub fn resolve_adopt(workspace: Option<&Workspace>) -> Intent {
 }
 
 /// Resolve `Shift-M` (merge). Same READY-gating the contextual
-/// footer uses — the resolver and the hint share one predicate.
+/// footer uses — the resolver and the hint share one predicate via
+/// [`merge_block_reason`].
 pub fn resolve_merge(workspace: Option<&Workspace>) -> Intent {
     let Some(ws) = workspace else {
         return Intent::NoOp;
@@ -394,27 +395,49 @@ pub fn resolve_merge(workspace: Option<&Workspace>) -> Intent {
     let Some(pr) = ws.pr.as_ref() else {
         return Intent::NoOp;
     };
-    if !matches!(
-        pr.state,
-        lazybox_core::TaskState::Open | lazybox_core::TaskState::InReview
-    ) {
-        return Intent::NoOp;
-    }
-    if !matches!(pr.review, lazybox_core::ReviewStatus::Approved) {
-        return Intent::NoOp;
-    }
-    if !matches!(
-        pr.ci,
-        lazybox_core::CiStatus::Success | lazybox_core::CiStatus::None
-    ) {
-        return Intent::NoOp;
-    }
-    if pr.mergeable.is_conflicting() {
+    if merge_block_reason(pr).is_some() {
         return Intent::NoOp;
     }
     Intent::MergePr {
         workspace_key: ws.key.clone(),
     }
+}
+
+/// Why this PR can't be merged from lazybox right now, as a
+/// user-facing phrase — or `None` when nothing blocks it. Drives both
+/// the merge-ready gate ([`resolve_merge`]) and the message shown when
+/// a confirmed merge can't proceed, so the hint and the explanation
+/// never disagree.
+///
+/// We deliberately do NOT require a formal `Approved` review. Repos
+/// without required reviews — a personal repo, your own PR — let you
+/// merge with no approval, so demanding one here produced false
+/// "not merge-ready" blocks. We only veto on `ChangesRequested`, which
+/// is an unambiguous "not yet" regardless of branch protection. For
+/// anything subtler (a required review that isn't satisfied, a
+/// required-but-unfinished check) we let the merge dispatch and surface
+/// GitHub's real rejection rather than guessing at protection rules we
+/// don't fetch.
+pub fn merge_block_reason(pr: &lazybox_core::Task) -> Option<&'static str> {
+    if !matches!(
+        pr.state,
+        lazybox_core::TaskState::Open | lazybox_core::TaskState::InReview
+    ) {
+        return Some("the PR isn't open");
+    }
+    if matches!(pr.review, lazybox_core::ReviewStatus::ChangesRequested) {
+        return Some("changes were requested — address the review first");
+    }
+    if !matches!(
+        pr.ci,
+        lazybox_core::CiStatus::Success | lazybox_core::CiStatus::None
+    ) {
+        return Some("CI isn't green yet");
+    }
+    if pr.mergeable.is_conflicting() {
+        return Some("the branch has merge conflicts");
+    }
+    None
 }
 
 /// Resolve `Shift-X` (kill workspace). Always available when a
@@ -978,15 +1001,49 @@ mod tests {
     }
 
     #[test]
-    fn merge_without_approval_is_noop() {
-        let ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Pending);
+    fn merge_without_approval_still_merges_on_green_ci() {
+        // Repos without required reviews (your own PR, a solo repo)
+        // have no formal Approved review, but GitHub merges them
+        // immediately — so green CI + no approval must NOT block.
+        for review in [ReviewStatus::None, ReviewStatus::Pending] {
+            let ws = pr("o/r#1", CiStatus::Success, review);
+            match resolve_merge(Some(&ws)) {
+                Intent::MergePr { workspace_key } => assert_eq!(workspace_key, ws.key),
+                other => panic!("expected MergePr for {review:?}, got {other:?}"),
+            }
+            assert_eq!(merge_block_reason(ws.pr.as_ref().unwrap()), None);
+        }
+    }
+
+    #[test]
+    fn merge_with_changes_requested_is_blocked() {
+        let ws = pr("o/r#1", CiStatus::Success, ReviewStatus::ChangesRequested);
         assert_eq!(resolve_merge(Some(&ws)), Intent::NoOp);
+        assert_eq!(
+            merge_block_reason(ws.pr.as_ref().unwrap()),
+            Some("changes were requested — address the review first")
+        );
     }
 
     #[test]
     fn merge_with_red_ci_is_noop() {
         let ws = pr("o/r#1", CiStatus::Failure, ReviewStatus::Approved);
         assert_eq!(resolve_merge(Some(&ws)), Intent::NoOp);
+        assert_eq!(
+            merge_block_reason(ws.pr.as_ref().unwrap()),
+            Some("CI isn't green yet")
+        );
+    }
+
+    #[test]
+    fn merge_with_conflict_reports_conflict() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
+        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
+        assert_eq!(resolve_merge(Some(&ws)), Intent::NoOp);
+        assert_eq!(
+            merge_block_reason(ws.pr.as_ref().unwrap()),
+            Some("the branch has merge conflicts")
+        );
     }
 
     #[test]

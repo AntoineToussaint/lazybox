@@ -129,7 +129,12 @@ impl<T: TerminalAdapter> Model<T> {
                         {
                             vec![IpcCommand::MergePr { workspace_key }]
                         } else {
-                            self.flash_info("PR is no longer merge-ready — nothing done");
+                            let reason = workspace
+                                .as_ref()
+                                .and_then(|w| w.pr.as_ref())
+                                .and_then(crate::intent::merge_block_reason)
+                                .unwrap_or("the PR is no longer merge-ready");
+                            self.flash_info(format!("can't merge: {reason}"));
                             Vec::new()
                         }
                     }
@@ -298,7 +303,7 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::NewProject => {
-                self.mount_new_project_input();
+                self.mount_new_workspace_repo_picker();
             }
             Action::MarkAllRead => {
                 // Context-sensitive: when the user has activities
@@ -476,6 +481,31 @@ impl<T: TerminalAdapter> Model<T> {
                     self.flash_hint("no failing PRs");
                 }
             }
+            Action::ToggleActivityPane => {
+                // Flip the Activity pane's visibility for the focused
+                // workspace and remember the choice (so navigating away
+                // and back keeps it). The recorded value is the desired
+                // visibility — the negation of what's currently shown.
+                if let Some(ws_key) = self.sidebar.selected_workspace().map(|w| w.key.clone()) {
+                    let now_visible = self.activity_pane_visible();
+                    self.activity_pane_overrides.insert(ws_key, !now_visible);
+                    // Don't strand focus on a pane we just hid.
+                    self.enforce_pane_focus();
+                    self.redraw = true;
+                }
+            }
+            Action::ToggleFocusMode => {
+                self.toggle_focus_mode();
+            }
+            Action::StartAgent => {
+                // Global "just start working" entry point. Unlike `n`
+                // (which needs the sidebar cursor on a project), this
+                // works from any pane: mount a project picker, then
+                // the name input, then create+spawn. With a single
+                // project the picker is skipped and we jump straight
+                // to naming.
+                self.start_agent_flow();
+            }
             Action::Reply => {
                 // Reply targets the focused workspace. Resolver
                 // returns `Intent::MountReply` when a workspace is
@@ -593,5 +623,57 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
         cmds
+    }
+
+    /// Enter or leave focus mode (issue #156). Entering requires a
+    /// live terminal to maximize — focus mode over an empty stack
+    /// would show a blank screen — so we flash a hint and stay put
+    /// when there's nothing to focus. Entering pins focus to the
+    /// terminal; leaving keeps it there so the user lands back in the
+    /// three-pane view still driving the same agent.
+    pub(super) fn toggle_focus_mode(&mut self) {
+        if self.focus_mode {
+            self.focus_mode = false;
+            self.redraw = true;
+            return;
+        }
+        if self.terminals.is_empty() {
+            self.flash_hint("no agent terminal to focus");
+            return;
+        }
+        self.focus_mode = true;
+        self.focus = PaneFocus::Terminals;
+        self.terminal_user_typed_since_focus = false;
+        self.set_focus_attr();
+        self.redraw = true;
+    }
+
+    /// Switch the displayed terminal to the Nth agent workspace,
+    /// counting in sidebar (top-down) order — the deterministic
+    /// `]]<digit>` jump that replaced the old `F3` cycle. `n` is
+    /// 1-based, matching the number badge on the sidebar row and the
+    /// roster in the `]]` leader popup. Keeps focus on the terminal so
+    /// it works seamlessly inside focus mode; flashes when there's no
+    /// agent at that slot. Mirrors the `!` / `Shift-F` jumps but lands
+    /// the cursor on a specific agent rather than asking / failing-CI.
+    pub(super) fn jump_to_agent_workspace(&mut self, n: usize) {
+        if self.sidebar.focus_nth_agent_workspace(n) {
+            self.focus = PaneFocus::Terminals;
+            self.terminal_user_typed_since_focus = false;
+            self.set_focus_attr();
+            self.sync_panes();
+            self.redraw = true;
+        } else {
+            self.flash_hint(format!("no agent #{n}"));
+        }
+    }
+
+    /// Leave the terminal pane back to the sidebar. Exits focus mode
+    /// if it was on — the sidebar is hidden there, so returning to it
+    /// must restore the normal three-pane layout.
+    pub(super) fn leave_terminal_to_sidebar(&mut self) {
+        self.focus_mode = false;
+        self.focus = PaneFocus::Sidebar;
+        self.set_focus_attr();
     }
 }

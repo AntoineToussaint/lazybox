@@ -1,6 +1,7 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import sitemap from '@astrojs/sitemap';
 
 // One Astro build serves the whole public site on the apex domain:
 //
@@ -18,6 +19,7 @@ import starlight from '@astrojs/starlight';
 export default defineConfig({
   site: 'https://lazybox.ai',
   integrations: [
+    sitemap(),
     starlight({
       title: 'lazybox',
       description: 'A reactive PR inbox in your terminal.',

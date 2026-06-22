@@ -511,7 +511,20 @@ fn r_mounts_reply_modal_from_right_pane() {
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     let target_key = "github:owner/repo#42";
-    let workspace = Workspace::empty(WorkspaceKey(target_key.to_string()), "main", Utc::now());
+    let mut workspace = Workspace::empty(WorkspaceKey(target_key.to_string()), "main", Utc::now());
+    // Activity keeps the pane visible so it's focusable — the read
+    // flow this test exercises (read a comment, hit `r` to reply).
+    workspace.activity.push(lazybox_core::Activity {
+        author: "alice".into(),
+        body: "needs a tweak".into(),
+        created_at: Utc::now(),
+        kind: lazybox_core::ActivityKind::Comment,
+        node_id: None,
+        path: None,
+        line: None,
+        diff_hunk: None,
+        thread_id: None,
+    });
     m.handle_daemon_event(IpcEvent::Snapshot {
         workspaces: vec![workspace],
         terminals: Vec::new(),
@@ -918,7 +931,9 @@ fn w_on_issue_from_right_pane_also_injects() {
     use lazybox_ipc::{Command, TerminalId, TerminalKind};
     let (client, mut server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
-    let issue = task_with_issue("o/r#42", "Migrate to Postgres 16", None);
+    // A description keeps the Activity pane visible (and focusable)
+    // for an issue with no comment activity yet.
+    let issue = task_with_issue("o/r#42", "Migrate to Postgres 16", Some("Move the store."));
     let ws = Workspace::from_task(issue, Utc::now());
     let ws_key = ws.key.clone();
 

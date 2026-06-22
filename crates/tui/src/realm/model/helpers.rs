@@ -140,9 +140,9 @@ pub(crate) fn key_event_to_stroke(
         KeyCode::PageDown => ChordCode::Named(NamedKey::PageDown),
         KeyCode::Delete => ChordCode::Named(NamedKey::Delete),
         KeyCode::Insert => ChordCode::Named(NamedKey::Insert),
+        KeyCode::F(n) => ChordCode::Named(NamedKey::Function(n)),
         // Space is reported as Char(' ') by crossterm — covered by
-        // the Char arm above. Function keys / unknown variants fall
-        // through to None.
+        // the Char arm above. Unmodeled variants fall through to None.
         _ => return None,
     };
     Some(KeyStroke {
@@ -1086,6 +1086,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             model.update(msg);
         }
         model.tick_notice();
+        model.tick_tips();
         model.tick_right();
         model.tick_working();
         model.tick_terminal_leader();

@@ -1,6 +1,7 @@
   Tab             cycle panes       Shift+R         refresh            ,               settings
   ?               help              Shift+T         tour               Shift+D         sync status
-  !               next asking       Shift+F         next failing       Shift+Arrows    resize splitters
+  !               next asking       Shift+F         next failing       .               focus mode
+  Shift+W         start agent       Shift+P         activity pane      Shift+Arrows    resize splitters
   q q             quit              Enter           open               w               work on this
   s               shell             e               editor             m               mark read
   z               snooze            Shift+Z         long snooze        Shift+N         new project

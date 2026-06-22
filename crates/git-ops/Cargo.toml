@@ -1,5 +1,6 @@
 [package]
 name = "lazybox-git-ops"
+description = "Worktree manager for lazybox: bare clones plus per-task worktrees."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

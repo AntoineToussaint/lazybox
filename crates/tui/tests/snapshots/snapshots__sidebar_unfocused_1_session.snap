@@ -2,9 +2,9 @@
 source: crates/tui/tests/snapshots.rs
 expression: rendered
 ---
- LAZYBOX  1  [7d]
+ LAZYBOX v0.1.4  1  [7d]
  f [all]  o [split]
 
- ────────────────────────────────────
+ ─────────────────────────────────────
 
-   ▸ ○ 1 A   task: o/r#1          10m █
+ ▸ ○ 1 A   task: o/r#1             10m█

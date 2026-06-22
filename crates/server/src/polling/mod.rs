@@ -1631,7 +1631,7 @@ pub async fn sources_for(
 
 /// Convenience: build the default source set assuming both providers
 /// are enabled with their default filters. Used by binaries that
-/// bypass the setup screen (e.g. headless `lazybox daemon start` in
+/// bypass the setup screen (e.g. headless `lazybox server start` in
 /// CI). When a saved `PersistedSetup` exists in the store, prefer
 /// that instead.
 pub async fn default_sources(
@@ -2262,6 +2262,25 @@ pub async fn rescope_with_state(
         }
         match active_counts.get(r.key.as_str()).copied() {
             None | Some(0) => {
+                // A live terminal isn't the only thing worth preserving:
+                // a session whose PTY has exited (the agent finished and
+                // closed Claude, the common case right after it opens a
+                // PR) keeps a recoverable worktree + session record, but
+                // leaves no `terminal_meta` entry. Reaping here on a full
+                // sweep that happened to drop the workspace from scope is
+                // the "session lost on merge" bug (#136): a merged PR is
+                // surfaced for removal once, at the merge transition, via
+                // `MergedPrRemovable` — rescope must not race ahead of
+                // that prompt and silently destroy the work. Gate the
+                // sweep on session records, not just live terminals, so
+                // the only rows it reaps are genuinely session-less.
+                if stored_ws.as_ref().is_some_and(|w| !w.sessions.is_empty()) {
+                    tracing::info!(
+                        workspace_key = %r.key,
+                        "rescope: preserving out-of-scope workspace with recoverable sessions"
+                    );
+                    continue;
+                }
                 // Safe to remove silently: nothing's running.
                 tracing::info!(
                     workspace_key = %r.key,
@@ -2341,7 +2360,7 @@ pub async fn rescope_with_state(
 }
 
 /// Spawn the long-lived polling loop. Returns the join handle so the
-/// caller can `abort()` on shutdown if it wants — `lazybox daemon stop`
+/// caller can `abort()` on shutdown if it wants — `lazybox server stop`
 /// drops the whole process so we don't bother in main.
 ///
 /// Each tick reads `~/.lazybox/config.yaml` fresh and rebuilds the
@@ -4519,14 +4538,16 @@ mod rescope_collapse_tests {
         );
     }
 
-    /// Counterpart: an out-of-scope issue with sessions but NO claiming
-    /// PR has nowhere to collapse into, so the reaper must leave the
-    /// existing prompt/silent-delete behavior intact — here, a live
-    /// session is absent from `terminal_meta`, so without a PR the row
-    /// is removed. This pins that the collapse path is gated on a real
-    /// claiming PR and doesn't swallow every out-of-scope issue.
+    /// Counterpart: an out-of-scope workspace with sessions but NO
+    /// claiming PR has nowhere to collapse into, so the reaper leaves it
+    /// alone — the session's PTY has exited (absent from `terminal_meta`)
+    /// but its worktree + record are still recoverable, and rescope must
+    /// never silently destroy that (#136). This pins both that the
+    /// collapse path is gated on a real claiming PR (the row is NOT moved
+    /// onto some unrelated PR) and that the fallback is preserve, not
+    /// delete.
     #[tokio::test]
-    async fn out_of_scope_issue_without_claiming_pr_is_not_collapsed() {
+    async fn out_of_scope_issue_without_claiming_pr_is_preserved() {
         let store = Arc::new(lazybox_store::MemoryStore::new());
         let config = ServerConfig::with_store(store.clone());
 
@@ -4563,9 +4584,130 @@ mod rescope_collapse_tests {
         let mut state = TickState::default();
         rescope_with_state(&config, &outcome, &mut state).await;
 
+        let preserved =
+            load_workspace(&config, &issue_key).expect("session-bearing row must be preserved");
+        assert_eq!(
+            preserved.sessions.len(),
+            1,
+            "without a claiming PR the session stays put rather than being reaped"
+        );
+        let other_after = load_workspace(&config, &other_key).expect("unrelated PR survives");
         assert!(
-            load_workspace(&config, &issue_key).is_none(),
-            "without a claiming PR the out-of-scope issue follows the normal reaper path"
+            other_after.sessions.is_empty(),
+            "the session must not be collapsed onto an unrelated PR"
+        );
+    }
+
+    /// Regression + stress for #136: merging a PR must preserve its
+    /// session reliably, not "sometimes." A merged PR whose agent
+    /// terminal has exited still owns a recoverable worktree + session
+    /// record but leaves no `terminal_meta` entry. When a later full
+    /// sweep drops the PR from scope (the recently-merged `is:merged`
+    /// sub-query transiently failed, or round-robin didn't cover its
+    /// repo this tick), the rescope reaper used to silently delete it
+    /// whenever no live terminal was attached — losing the session.
+    /// Repeated rescope passes must always preserve it.
+    #[tokio::test]
+    async fn merged_pr_session_survives_repeated_out_of_scope_rescope() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let pr_task = gh_task(
+            "o/r#77",
+            "https://github.com/o/r/pull/77",
+            TaskState::Merged,
+            vec![],
+        );
+        let mut pr_ws = Workspace::from_task(pr_task, Utc::now());
+        let session = WorkspaceSession::new(
+            pr_ws.key.clone(),
+            SessionKind::Shell,
+            std::path::PathBuf::from("/nonexistent/worktree"),
+            Utc::now(),
+        );
+        let session_id = session.id;
+        pr_ws.add_session(session);
+        let pr_key = pr_ws.key.clone();
+        seed(&store, &pr_ws);
+
+        // Another PR is the only thing in scope this tick — the merged
+        // PR fell out of the recently-merged sweep. No `terminal_meta`
+        // entry: the agent finished and its PTY exited.
+        let other = gh_task(
+            "o/r#88",
+            "https://github.com/o/r/pull/88",
+            TaskState::Open,
+            vec![],
+        );
+        let other_ws = Workspace::from_task(other, Utc::now());
+        let other_key = other_ws.key.clone();
+        seed(&store, &other_ws);
+
+        let outcome = exhaustive_github_tick(vec![other_key.clone()]);
+        let mut state = TickState::default();
+        for pass in 0..25 {
+            rescope_with_state(&config, &outcome, &mut state).await;
+            let after = load_workspace(&config, &pr_key)
+                .unwrap_or_else(|| panic!("merged PR session reaped on rescope pass {pass}"));
+            assert!(
+                after.sessions.iter().any(|s| s.id == session_id),
+                "the merged PR's session must never be silently reaped (pass {pass})"
+            );
+        }
+    }
+
+    /// The other half of "preserve a live session across merge": a
+    /// merged PR with a LIVE terminal attached takes the prompt branch,
+    /// not the silent-delete branch, so it likewise survives rescope.
+    #[tokio::test]
+    async fn merged_pr_session_with_live_terminal_survives_rescope() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let pr_task = gh_task(
+            "o/r#77",
+            "https://github.com/o/r/pull/77",
+            TaskState::Merged,
+            vec![],
+        );
+        let mut pr_ws = Workspace::from_task(pr_task, Utc::now());
+        let session = WorkspaceSession::new(
+            pr_ws.key.clone(),
+            SessionKind::Shell,
+            std::path::PathBuf::from("/nonexistent/worktree"),
+            Utc::now(),
+        );
+        let session_id = session.id;
+        pr_ws.add_session(session);
+        let pr_key = pr_ws.key.clone();
+        seed(&store, &pr_ws);
+
+        // Live agent: a terminal is attached to the PR's session.
+        let session_key: lazybox_core::SessionKey = (&pr_key).into();
+        config.terminal_meta.lock().await.insert(
+            lazybox_ipc::TerminalId(1),
+            (session_key, lazybox_ipc::TerminalKind::Shell),
+        );
+
+        let other = gh_task(
+            "o/r#88",
+            "https://github.com/o/r/pull/88",
+            TaskState::Open,
+            vec![],
+        );
+        let other_ws = Workspace::from_task(other, Utc::now());
+        let other_key = other_ws.key.clone();
+        seed(&store, &other_ws);
+
+        let outcome = exhaustive_github_tick(vec![other_key.clone()]);
+        let mut state = TickState::default();
+        rescope_with_state(&config, &outcome, &mut state).await;
+
+        let after = load_workspace(&config, &pr_key)
+            .expect("merged PR with a live terminal must survive rescope");
+        assert!(
+            after.sessions.iter().any(|s| s.id == session_id),
+            "the live session must be preserved across merge"
         );
     }
 

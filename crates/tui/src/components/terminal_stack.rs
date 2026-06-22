@@ -568,13 +568,17 @@ impl TerminalSlot {
     /// Commit the trimmed composing buffer as the latest user message
     /// and reset it for the next prompt. An all-whitespace buffer is
     /// ignored, so mashing Enter on an empty prompt (e.g. dismissing
-    /// an agent approval) doesn't blank out the recap.
-    fn commit_composing(&mut self) {
+    /// an agent approval) doesn't blank out the recap. Returns the
+    /// committed message when one was recorded, so the caller can ship
+    /// it to the daemon for persistence (`Command::RecordUserMessage`).
+    fn commit_composing(&mut self) -> Option<String> {
         let trimmed = self.composing.trim();
-        if !trimmed.is_empty() {
-            self.last_user_message = Some(trimmed.to_string());
+        let committed = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        if let Some(msg) = &committed {
+            self.last_user_message = Some(msg.clone());
         }
         self.composing.clear();
+        committed
     }
 
     /// Feed the *exact bytes* that are about to be written to this
@@ -609,7 +613,14 @@ impl TerminalSlot {
     /// never sees an `ESC[200~ … ESC[201~` body. Decoding is lossy
     /// UTF-8: the recap is display-only, so a stray invalid byte
     /// degrades to U+FFFD rather than dropping the write.
-    fn record_pty_bytes(&mut self, bytes: &[u8]) {
+    ///
+    /// Returns the message committed by a trailing submit (CR) in this
+    /// write, if any — the caller forwards it to the daemon so the
+    /// recap can be restored after a restart. A write that only edits
+    /// the in-flight line returns `None`. When a single write carries
+    /// multiple submits (rare: a scripted multi-command paste), the
+    /// last committed message wins, matching what the recap shows.
+    fn record_pty_bytes(&mut self, bytes: &[u8]) -> Option<String> {
         // ECMA-48: a CSI sequence runs until its final byte, which
         // lies in 0x40..=0x7e. Intermediate / parameter bytes are all
         // below that range, so the first byte in it terminates.
@@ -617,6 +628,7 @@ impl TerminalSlot {
 
         let text = String::from_utf8_lossy(bytes);
         let mut chars = text.chars().peekable();
+        let mut committed = None;
         while let Some(c) = chars.next() {
             match c {
                 '\x1b' => match chars.peek() {
@@ -657,7 +669,11 @@ impl TerminalSlot {
                 // here (Enter maps to CR, never LF), so a multi-line
                 // snippet body commits once, on its trailing CR, not
                 // at each embedded newline.
-                '\r' => self.commit_composing(),
+                '\r' => {
+                    if let Some(msg) = self.commit_composing() {
+                        committed = Some(msg);
+                    }
+                }
                 '\n' => self.push_composing('\n'),
                 // DEL / Backspace.
                 '\x7f' | '\x08' => {
@@ -671,6 +687,7 @@ impl TerminalSlot {
                 c => self.push_composing(c),
             }
         }
+        committed
     }
 
     /// Append `text` to the composing buffer, truncated to stay
@@ -847,16 +864,17 @@ impl TerminalStack {
     }
 
     /// True when every agent slot keyed to `session_key` already
-    /// shows `state` in its tab badge — i.e. applying the matching
-    /// `Event::AgentState` again would change nothing on screen.
-    /// Mirrors the session-wide apply in the `AgentState` event arm.
+    /// shows `state` in its tab badge. The orchestrator uses it as a
+    /// conservative redraw gate: a `false` means at least one agent
+    /// tab in the session would paint differently from `state`, so an
+    /// incoming `Event::AgentState` is worth a redraw.
     ///
-    /// The orchestrator checks this ALONGSIDE the sidebar's
-    /// equivalent before skipping a redraw: badges are per-terminal,
-    /// so a freshly-spawned second agent in a workspace can need a
-    /// badge flip even when the sidebar's session-level state is
-    /// already correct. Vacuously true when the session has no agent
-    /// slots (nothing to repaint).
+    /// Checked ALONGSIDE the sidebar's equivalent before skipping a
+    /// redraw: badges are per-terminal (the event arm applies state to
+    /// the one terminal it names), so a freshly-spawned second agent in
+    /// a workspace can need a badge flip even when the sidebar's
+    /// session-level state is already correct. Vacuously true when the
+    /// session has no agent slots (nothing to repaint).
     pub fn displays_agent_state(
         &self,
         session_key: &SessionKey,
@@ -1578,6 +1596,7 @@ impl TerminalStack {
         kind: TerminalKind,
         last_seq: u64,
         no_permission: bool,
+        last_user_message: Option<String>,
     ) -> TerminalSlot {
         let vt = TerminalVt::new().expect("libghostty-vt init");
         TerminalSlot {
@@ -1590,7 +1609,7 @@ impl TerminalStack {
             agent_state: lazybox_ipc::AgentState::Idle,
             last_rendered_size: None,
             composing: String::new(),
-            last_user_message: None,
+            last_user_message,
             no_permission,
         }
     }
@@ -1638,13 +1657,15 @@ impl TerminalStack {
     /// Used by callers that synthesise a full command and submit it in
     /// one shot (snippet expansion writes the body + a trailing `\r`),
     /// which would otherwise leave the "you ▸ …" recap showing the
-    /// previous message. No-op for non-Agent terminals.
-    pub fn record_pty_write(&mut self, id: TerminalId, bytes: &[u8]) {
-        if let Some(slot) = self.terminals.get_mut(&id)
-            && matches!(slot.kind, TerminalKind::Agent(_))
-        {
-            slot.record_pty_bytes(bytes);
+    /// previous message. No-op for non-Agent terminals. Returns the
+    /// committed message (if this write ended in a submit) so the
+    /// caller can persist it via `Command::RecordUserMessage`.
+    pub fn record_pty_write(&mut self, id: TerminalId, bytes: &[u8]) -> Option<String> {
+        let slot = self.terminals.get_mut(&id)?;
+        if !matches!(slot.kind, TerminalKind::Agent(_)) {
+            return None;
         }
+        slot.record_pty_bytes(bytes)
     }
 
     fn tab_label(kind: &TerminalKind) -> String {
@@ -1820,15 +1841,26 @@ impl TerminalStack {
         // the agent receives. Scoped to Agent terminals — shells don't
         // have a single semantic "user prompt", so the recap would be
         // noisy (every cd, every grep) and surprising.
-        if let Some(slot) = self.terminals.get_mut(&id)
+        let committed = if let Some(slot) = self.terminals.get_mut(&id)
             && matches!(slot.kind, TerminalKind::Agent(_))
         {
-            slot.record_pty_bytes(&bytes);
-        }
+            slot.record_pty_bytes(&bytes)
+        } else {
+            None
+        };
         cmds.push(Command::Write {
             terminal_id: id,
             bytes,
         });
+        // Persist the submitted prompt daemon-side so the recap survives
+        // a restart — the replay ring only carries PTY output, not the
+        // input we composed here.
+        if let Some(message) = committed {
+            cmds.push(Command::RecordUserMessage {
+                terminal_id: id,
+                message,
+            });
+        }
         PaneOutcome::Consumed
     }
 
@@ -1842,6 +1874,7 @@ impl TerminalStack {
                         snap.kind.clone(),
                         snap.last_seq,
                         snap.no_permission,
+                        snap.last_user_message.clone(),
                     );
                     // Replay the daemon-side ring through the VT so
                     // the cell grid reflects what was on screen
@@ -1858,7 +1891,8 @@ impl TerminalStack {
                 kind,
                 no_permission,
             } => {
-                let slot = Self::make_slot(session_key.clone(), kind.clone(), 0, *no_permission);
+                let slot =
+                    Self::make_slot(session_key.clone(), kind.clone(), 0, *no_permission, None);
                 self.terminals.insert(*terminal_id, slot);
                 // A fresh terminal arrived for the active session —
                 // expand so the user actually sees it. We bypass the
@@ -1926,20 +1960,21 @@ impl TerminalStack {
                 self.focus_terminal(*terminal_id);
             }
             Event::AgentState {
-                session_key, state, ..
+                terminal_id, state, ..
             } => {
-                // Update every agent slot in this session — the
-                // daemon broadcasts one event per terminal, but the
-                // sidebar's needs-input indicator is session-keyed so
-                // we apply by session_key. The wire `terminal_id` is
-                // for per-terminal consumers (chat dispatcher); it's
-                // intentionally unused here.
-                for slot in self.terminals.values_mut() {
-                    if &slot.session_key == session_key
-                        && matches!(slot.kind, TerminalKind::Agent(_))
-                    {
-                        slot.agent_state = *state;
-                    }
+                // The tab badge is per-terminal. The daemon caches and
+                // broadcasts agent state per terminal, so a workspace
+                // running two agents (a `Ctrl-w` split, or claude +
+                // codex) must have each badge track its OWN terminal.
+                // Applying by `session_key` instead clobbered every
+                // sibling badge with the last terminal's state — a
+                // busy agent read Idle the moment a quiet sibling
+                // emitted, and an idle one read Working off a busy
+                // sibling. Update only the slot the event names.
+                if let Some(slot) = self.terminals.get_mut(terminal_id)
+                    && matches!(slot.kind, TerminalKind::Agent(_))
+                {
+                    slot.agent_state = *state;
                 }
             }
             Event::TerminalExited { terminal_id, .. } => {
@@ -3387,7 +3422,7 @@ mod ctrl_w_tests {
     fn shell_stack() -> TerminalStack {
         let sk = SessionKey::new("session");
         let mut stack = TerminalStack::new(PaneId::new(0));
-        let slot = TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false);
+        let slot = TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false, None);
         stack.terminals.insert(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
         stack
@@ -3633,14 +3668,19 @@ mod extract_text_offset_tests {
     ) -> TerminalStack {
         let sk = SessionKey::new("session");
         let mut stack = TerminalStack::new(PaneId::new(0));
-        let mut slot = TerminalStack::make_slot(sk.clone(), kind, 0, false);
+        let mut slot = TerminalStack::make_slot(
+            sk.clone(),
+            kind,
+            0,
+            false,
+            last_user_message.map(str::to_string),
+        );
         let mut payload = String::new();
         for line in lines {
             payload.push_str(line);
             payload.push_str("\r\n");
         }
         slot.vt.feed(payload.as_bytes());
-        slot.last_user_message = last_user_message.map(str::to_string);
         stack.terminals.insert(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
         stack
@@ -3732,8 +3772,8 @@ mod extract_text_offset_tests {
     #[test]
     fn recap_rows_refused_when_body_too_short() {
         let sk = SessionKey::new("session");
-        let slot = TerminalStack::make_slot(sk, TerminalKind::Agent("claude".into()), 0, false);
-        let mut slot = slot;
+        let mut slot =
+            TerminalStack::make_slot(sk, TerminalKind::Agent("claude".into()), 0, false, None);
         slot.last_user_message = Some("hi".into());
         assert_eq!(TerminalStack::recap_rows(&slot, 2), 0);
         assert_eq!(TerminalStack::recap_rows(&slot, 3), 2);
@@ -3885,7 +3925,7 @@ mod footer_scroll_independence {
             let pane = Rect::new(0, 0, W, H - 1);
             let footer = Rect::new(0, H - 1, W, 1);
             stack.render(pane, f, true);
-            crate::realm::components::footer::render(f, footer, &binds, None, None);
+            crate::realm::components::footer::render(f, footer, &binds, &[], None, None);
         })
         .unwrap();
         let buf = term.backend().buffer().clone();
@@ -3903,8 +3943,13 @@ mod footer_scroll_independence {
     fn agent_stack_with_scrollback() -> TerminalStack {
         let sk = SessionKey::new("s");
         let mut stack = TerminalStack::new(PaneId::new(0));
-        let mut slot =
-            TerminalStack::make_slot(sk.clone(), TerminalKind::Agent("claude".into()), 0, false);
+        let mut slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Agent("claude".into()),
+            0,
+            false,
+            None,
+        );
         slot.vt.ensure_size(W - 3, H - 4);
         let mut payload = String::new();
         for i in 0..40 {
@@ -3972,7 +4017,7 @@ mod summarize_message_tests {
     fn collapses_leading_image_path_with_raw_spaces() {
         // The motivating case: a CleanShot path with unescaped spaces,
         // followed by the user's actual prompt.
-        let msg = "/Users/antoine/Library/Application Support/CleanShot/media/media_qjLWRXdkJW/CleanShot 2026-06-02 at 11.35.48@2x.png create an issue: foo";
+        let msg = "/tmp/Application Support/CleanShot/media/media_qjLWRXdkJW/CleanShot 2026-06-02 at 11.35.48@2x.png create an issue: foo";
         assert_eq!(summarize_message(msg), "[image] create an issue: foo");
     }
 
@@ -4092,6 +4137,52 @@ mod agent_badge_tests {
         // to repaint.
         let other = SessionKey::new("github:o/r#2");
         assert!(stack.displays_agent_state(&other, AgentState::Working));
+    }
+
+    /// A state event for one agent must not clobber a sibling agent's
+    /// badge. Two agents in one session diverge (Working / Done); an
+    /// event for one leaves the other's badge untouched. The pre-fix
+    /// session-wide apply overwrote every sibling, so a busy agent read
+    /// the last sibling's Idle/Done (false negative) and an idle one
+    /// read a sibling's Working (false positive).
+    #[test]
+    fn agent_state_event_updates_only_its_own_terminal() {
+        use lazybox_ipc::AgentState;
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+
+        spawn_agent(&mut stack, 1, &sk, "claude");
+        spawn_agent(&mut stack, 2, &sk, "codex");
+
+        let badge = |stack: &TerminalStack, id: u64| {
+            stack.terminals.get(&TerminalId(id)).map(|s| s.agent_state)
+        };
+
+        stack.on_event(&Event::AgentState {
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            state: AgentState::Working,
+        });
+        stack.on_event(&Event::AgentState {
+            terminal_id: TerminalId(2),
+            session_key: sk.clone(),
+            state: AgentState::Done,
+        });
+        assert_eq!(badge(&stack, 1), Some(AgentState::Working));
+        assert_eq!(badge(&stack, 2), Some(AgentState::Done));
+
+        // Terminal 1 finishes — terminal 2's badge is left alone.
+        stack.on_event(&Event::AgentState {
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            state: AgentState::Idle,
+        });
+        assert_eq!(badge(&stack, 1), Some(AgentState::Idle));
+        assert_eq!(
+            badge(&stack, 2),
+            Some(AgentState::Done),
+            "a sibling's state event must not overwrite this badge",
+        );
     }
 }
 
@@ -4314,5 +4405,83 @@ mod spawn_focus_tests {
 
         // The background spawn must not pull focus off the active session.
         assert_eq!(stack.focused_terminal_id(), Some(TerminalId(1)));
+    }
+}
+
+#[cfg(test)]
+mod terminal_availability_tests {
+    //! Issue #114: the splash / tour / footer advertise a set of
+    //! "always available" globals (`?`, `q q`, `Shift-T`, …). In a
+    //! focused terminal the PTY eats every key, so those globals don't
+    //! fire — the advertised set must match what `TerminalStack`
+    //! actually dispatches. These tests pin that contract: the catalog
+    //! flag `available_in_terminal` is the single source of truth, and
+    //! the pane's real behavior agrees with it.
+    use super::*;
+    use lazybox_tui_core::action::{self, ActionDef, ActionKind};
+    use std::collections::BTreeMap;
+
+    fn stack_with_agent() -> TerminalStack {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+        stack.set_active_session(Some(sk));
+        stack
+    }
+
+    #[test]
+    fn universal_globals_forward_to_the_pty_instead_of_firing() {
+        // Every "universal" shortcut, pressed in a live terminal, must
+        // reach the PTY as a `Write` — proof the global action did NOT
+        // intercept it. This is the behavior the catalog encodes via
+        // `available_in_terminal == false`, asserted directly against
+        // the pane that owns the keys.
+        let probes = [
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), // quit chord
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE), // help
+            KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT), // tour
+            KeyEvent::new(KeyCode::Char(','), KeyModifiers::NONE), // settings
+        ];
+        for key in probes {
+            let mut stack = stack_with_agent();
+            let mut cmds = Vec::new();
+            let outcome = stack.handle_key(key, &mut cmds);
+            assert!(matches!(outcome, PaneOutcome::Consumed));
+            assert!(
+                cmds.iter()
+                    .any(|c| matches!(c, Command::Write { terminal_id, .. } if *terminal_id == TerminalId(1))),
+                "{key:?} must forward to the PTY, not fire a global action",
+            );
+        }
+    }
+
+    #[test]
+    fn advertised_terminal_bindings_are_what_the_catalog_allows() {
+        // The hint bar must only surface keys the pane will actually
+        // dispatch in terminal focus. The single catalog-backed binding
+        // is the `]]` leave chord — the gateway back to the globals —
+        // and none of the universal shortcuts may be advertised here.
+        let overrides = BTreeMap::new();
+        let bindings = TerminalStack::contextual_bindings(&overrides);
+
+        let leave = ActionDef::for_kind(ActionKind::LeaveTerminal);
+        assert!(
+            bindings.iter().any(|b| b.keys == leave.default_keys),
+            "the `]]` leave chord must be advertised as the way out",
+        );
+        for def in action::universal_shortcuts() {
+            assert!(
+                bindings.iter().all(|b| b.keys != def.default_keys),
+                "{:?} ({}) is advertised in the terminal hint bar but \
+                 the PTY would eat it",
+                def.kind,
+                def.default_keys,
+            );
+        }
     }
 }

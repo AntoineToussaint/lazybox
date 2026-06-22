@@ -84,7 +84,8 @@ In the sidebar:
 1. Press `j` / `k` to move the selection to a workspace.
 2. Press `Enter` to open it.
 3. Press `c` to spawn a **Claude Code** session — or `s` for a plain **shell**
-   if you'd rather not start an agent yet.
+   if you'd rather not start an agent yet. `c` needs the `claude` CLI on your
+   `PATH`; `s` always works.
 
 A terminal pane opens, embedded right inside lazybox, running in that
 workspace's own git worktree. Type a command; it runs in the worktree. That's
@@ -92,6 +93,18 @@ the win: lazybox gave the task an isolated worktree and a live terminal, and you
 never left the inbox.
 
 To get back to the sidebar from a terminal, press `]]` (two presses).
+
+:::note[Don't see anything yet?]
+An empty sidebar right after setup is normal, not a bug:
+
+- The first poll can take up to ~60s (`providers.github.poll_interval`). Press
+  `Shift-R` to force a refresh instead of waiting.
+- Rows can be hidden by the role filter. Press `f` to widen it
+  (`all → author → reviewer → assignee → mentioned → all`).
+- If you simply have little GitHub activity, there may be nothing to show. You
+  don't need a PR to get the win above — press `n` to spin up a fresh scratch
+  workspace and open a session in it.
+:::
 
 ## What next
 

@@ -214,6 +214,41 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::NewProject, modal);
     }
 
+    /// Drive the `Shift-N` new-workspace flow: pick a tracked repo to
+    /// spin a workspace up on, with "create a new local project" kept
+    /// as an explicit escape hatch rather than the forced first step.
+    ///
+    /// - **No tracked repos** → there's nothing to pick, so go
+    ///   straight to the new-project input (the only way to bootstrap
+    ///   a brand-new user with an empty inbox).
+    /// - **One or more** → mount a picker listing each repo plus a
+    ///   trailing "new local project" row. The pick funnels into the
+    ///   new-workspace name input under the chosen repo
+    ///   (`handle_choice_picked`), or into the new-project input.
+    pub(crate) fn mount_new_workspace_repo_picker(&mut self) {
+        use crate::realm::components::choice::Choice;
+
+        if matches!(self.modal_stack.last(), Some(Id::NewWorkspaceRepo)) {
+            return;
+        }
+        let projects = self.sidebar.projects_for_picker();
+        if projects.is_empty() {
+            self.mount_new_project_input();
+            return;
+        }
+        // Trailing escape-hatch row sits at index == projects.len(),
+        // so `handle_choice_picked` reads any out-of-range pick as
+        // "create a new local project".
+        let mut labels: Vec<String> = projects.iter().map(|(_, name)| name.clone()).collect();
+        labels.push("＋ Create a new local project…".to_string());
+        self.new_workspace_repo_choices = projects.into_iter().map(|(k, _)| k).collect();
+
+        let modal = Choice::single("Start a workspace on which repo?", labels)
+            .title("New workspace")
+            .label(|s: &String| s.clone());
+        self.mount_modal(Id::NewWorkspaceRepo, modal);
+    }
+
     /// Mount the "request reviewers" multi-select picker for the
     /// given workspace's PR. Candidates are gathered from the
     /// workspace's known people; Space toggles, Enter submits →
@@ -855,6 +890,48 @@ impl<T: TerminalAdapter> Model<T> {
             .title("Adopt sessions")
             .label(|s: &String| s.clone());
         self.mount_modal(Id::AdoptTarget, modal);
+    }
+
+    /// Drive the global "start agent" (`Shift-W`) flow. Resolve the
+    /// project set up front:
+    ///
+    /// - **No projects** → footer nudge pointing at `Shift-N`; there's
+    ///   nothing to create a workspace under yet.
+    /// - **One project** → skip the picker and go straight to the
+    ///   name input (the project is unambiguous).
+    /// - **Several** → mount the project picker; the pick funnels into
+    ///   the same name input.
+    ///
+    /// The name input's submit auto-spawns the configured default
+    /// agent (see `handle_input_submitted`), so this whole flow is
+    /// "create workspace + start agent" in one keystroke chain.
+    pub(crate) fn start_agent_flow(&mut self) {
+        let projects = self.sidebar.projects_for_picker();
+        match projects.len() {
+            0 => {
+                self.flash_info("no projects yet — create one with Shift-N");
+            }
+            1 => {
+                let (key, _) = projects.into_iter().next().expect("len checked == 1");
+                self.mount_new_workspace_input(key);
+            }
+            _ => self.mount_start_agent_picker(projects),
+        }
+    }
+
+    /// Mount the project picker for the `Shift-W` start-agent flow.
+    /// Mirrors `mount_adopt_picker`: stash the keys in row order so
+    /// `Msg::ChoicePicked` can recover the chosen `ProjectKey`.
+    fn mount_start_agent_picker(&mut self, projects: Vec<(lazybox_core::ProjectKey, String)>) {
+        use crate::realm::components::choice::Choice;
+
+        let labels: Vec<String> = projects.iter().map(|(_, name)| name.clone()).collect();
+        self.start_agent_project_choices = projects.into_iter().map(|(k, _)| k).collect();
+
+        let modal = Choice::single("Start agent in which project?", labels)
+            .title("Start agent")
+            .label(|s: &String| s.clone());
+        self.mount_modal(Id::StartAgentProject, modal);
     }
 
     /// Surface the next queued issue→PR merge prompt when no modal

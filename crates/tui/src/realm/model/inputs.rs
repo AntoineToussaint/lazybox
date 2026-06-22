@@ -74,12 +74,25 @@ impl<T: TerminalAdapter> Model<T> {
                 let project_key = self.pending_new_workspace_project.take();
                 match (name.is_empty(), project_key) {
                     (false, Some(project_key)) => {
+                        // Land the user in a live session immediately:
+                        // creating a workspace and then having to know to
+                        // press `c` was the main first-run friction. The
+                        // daemon spawns the configured default agent into
+                        // the new workspace (see `CreateWorkspace`
+                        // server handler). Same behavior for the global
+                        // "start agent" shortcut, which funnels here.
+                        let spawn_agent = Some(self.sidebar.default_agent().to_string());
                         tracing::info!(
                             workspace_name = %name,
                             project_key = %project_key,
+                            ?spawn_agent,
                             "creating new pre-PR workspace under project",
                         );
-                        cmds.push(IpcCommand::CreateWorkspace { name, project_key });
+                        cmds.push(IpcCommand::CreateWorkspace {
+                            name,
+                            project_key,
+                            spawn_agent,
+                        });
                     }
                     (false, None) => {
                         tracing::warn!(
@@ -176,8 +189,14 @@ impl<T: TerminalAdapter> Model<T> {
             // command submitted in one shot, so without this the
             // pinned "you ▸ …" line would keep showing the previous
             // message.
-            self.terminals.record_pty_write(terminal_id, &bytes);
+            let committed = self.terminals.record_pty_write(terminal_id, &bytes);
             cmds.push(IpcCommand::Write { terminal_id, bytes });
+            if let Some(message) = committed {
+                cmds.push(IpcCommand::RecordUserMessage {
+                    terminal_id,
+                    message,
+                });
+            }
             self.flash_info(format!("sent snippet ]{key}"));
             return cmds;
         }
@@ -226,6 +245,45 @@ impl<T: TerminalAdapter> Model<T> {
                     target_workspace_key: target_key.clone(),
                 });
                 self.flash_info(format!("adopted sessions: {source_key} → {target_key}"));
+            }
+            return cmds;
+        }
+        // Start-agent project picker (Id::StartAgentProject) — pick a
+        // project, then funnel into the new-workspace name input. That
+        // input's submit auto-spawns the default agent, so this is the
+        // first leg of "create workspace + start agent". Empty / Esc
+        // pick drops the stash without advancing.
+        if matches!(self.modal_stack.last(), Some(Id::StartAgentProject)) {
+            let project = picks
+                .first()
+                .and_then(|i| self.start_agent_project_choices.get(*i).cloned());
+            self.start_agent_project_choices.clear();
+            self.pop_modal();
+            if let Some(project_key) = project {
+                self.mount_new_workspace_input(project_key);
+            }
+            return cmds;
+        }
+        // New-workspace repo picker (Id::NewWorkspaceRepo) — the
+        // `Shift-N` entry point. A pick that indexes into the repo
+        // list funnels into the new-workspace name input under that
+        // repo; the trailing escape-hatch row (index == list length)
+        // falls back to creating a new local project. Empty / Esc
+        // pick drops the stash without advancing.
+        if matches!(self.modal_stack.last(), Some(Id::NewWorkspaceRepo)) {
+            // `.get` is `None` exactly at the trailing escape-hatch row
+            // (index == list length), so a picked repo → name input and
+            // the escape hatch → new-project input. An empty pick (Esc)
+            // just closes the picker.
+            let picked = picks
+                .first()
+                .map(|i| self.new_workspace_repo_choices.get(*i).cloned());
+            self.new_workspace_repo_choices.clear();
+            self.pop_modal();
+            match picked {
+                Some(Some(project_key)) => self.mount_new_workspace_input(project_key),
+                Some(None) => self.mount_new_project_input(),
+                None => {}
             }
             return cmds;
         }

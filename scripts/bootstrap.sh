@@ -142,6 +142,27 @@ if [ "${os}" = "linux" ]; then
   fi
 fi
 
+# ── Install git hooks ───────────────────────────────────────────────────
+# Point git at the in-tree .githooks/ so the FAST fmt-only pre-commit
+# check runs on every commit (catches a botched format before it reaches
+# CI; ~1s, no cargo build). Git won't auto-run hooks from a checkout, so
+# this step is what turns them on. We deliberately do NOT set
+# `lazybox.precommitFull` here: the heavier fmt+clippy+rustdoc gate is
+# opt-in via `make install-hooks`, since a full build on every commit
+# deadlocks on the shared target/ build lock when several worktrees
+# commit at once. Idempotent: only writes when not already pointed there.
+# core.hooksPath lives in the shared repo config, so one install covers
+# every worktree of this clone. Skipped in CI — the runner has no commits
+# to gate and the checks run as their own jobs.
+if [ -z "${GITHUB_ACTIONS:-}" ] && [ -z "${CI:-}" ] && [ -d "${ROOT}/.githooks" ]; then
+  if [ "$(git -C "${ROOT}" config core.hooksPath 2>/dev/null || true)" = ".githooks" ]; then
+    echo "git hooks: already installed (.githooks, fmt-only)"
+  else
+    git -C "${ROOT}" config core.hooksPath .githooks
+    echo "git hooks: installed .githooks (fmt-only; \`make install-hooks\` adds clippy + rustdoc)"
+  fi
+fi
+
 # ── Print activation hint ───────────────────────────────────────────────
 echo
 echo "Bootstrap complete. To use pinned zig in this shell:"

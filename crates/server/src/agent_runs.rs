@@ -7,7 +7,7 @@
 
 use crate::ServerConfig;
 use crate::agent_stream::{
-    ClaudeStreamConfig, ParsedAgentEvent, encode_user_text_jsonl, spawn_claude_stream,
+    AgentStreamIo, ClaudeStreamConfig, ParsedAgentEvent, encode_user_text_jsonl,
 };
 use lazybox_agents::SpawnCtx;
 use lazybox_ipc::{
@@ -18,7 +18,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 /// Server-side handle for a running structured agent process.
@@ -84,8 +84,8 @@ pub async fn handle_start_agent_run(
         ..ClaudeStreamConfig::default()
     };
 
-    let child = match spawn_claude_stream(stream_config).await {
-        Ok(child) => child,
+    let io = match config.agent_stream_spawner.spawn(stream_config).await {
+        Ok(io) => io,
         Err(e) => {
             let _ = config.bus.send(Event::provider_error_permanent(
                 &format!("agent_run:{agent}"),
@@ -111,7 +111,7 @@ pub async fn handle_start_agent_run(
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(async move {
         let _ = ready_rx.await;
-        drive_claude_stream(run_id, child, input_rx, bus.clone()).await;
+        drive_claude_stream(run_id, io, input_rx, bus.clone()).await;
         runs.lock().await.remove(&run_id);
     });
     let abort = task.abort_handle();
@@ -242,11 +242,16 @@ async fn resolve_cwd(
 
 async fn drive_claude_stream(
     run_id: AgentRunId,
-    child: crate::agent_stream::ClaudeStreamChild,
+    io: AgentStreamIo,
     mut input_rx: mpsc::UnboundedReceiver<AgentInputMessage>,
     bus: tokio::sync::broadcast::Sender<Event>,
 ) {
-    let (mut child, mut stdin, mut stdout) = child.split();
+    let AgentStreamIo {
+        mut stdin,
+        stdout,
+        wait,
+    } = io;
+    let mut stdout = BufReader::new(stdout).lines();
     let mut mapper = StreamEventMapper::default();
     let mut input_closed = false;
     loop {
@@ -279,22 +284,11 @@ async fn drive_claude_stream(
                         }
                     },
                     Ok(None) => {
-                        match child.wait().await {
-                            Ok(status) => {
-                                let _ = bus.send(Event::AgentRunFinished {
-                                    run_id,
-                                    exit_code: status.code(),
-                                    error: None,
-                                });
-                            }
-                            Err(e) => {
-                                let _ = bus.send(Event::AgentRunFinished {
-                                    run_id,
-                                    exit_code: None,
-                                    error: Some(e.to_string()),
-                                });
-                            }
-                        }
+                        let _ = bus.send(Event::AgentRunFinished {
+                            run_id,
+                            exit_code: wait.await,
+                            error: None,
+                        });
                         break;
                     },
                     Err(e) => {
@@ -310,10 +304,13 @@ async fn drive_claude_stream(
     }
 }
 
-async fn write_agent_input(
-    stdin: &mut tokio::process::ChildStdin,
+async fn write_agent_input<W>(
+    stdin: &mut W,
     input: AgentInputMessage,
-) -> Result<(), crate::ServerError> {
+) -> Result<(), crate::ServerError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let line = if let Some(json) = input.json {
         if json.ends_with('\n') {
             json

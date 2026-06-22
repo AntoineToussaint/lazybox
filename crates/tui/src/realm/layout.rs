@@ -107,8 +107,12 @@ impl LayoutCtx {
             return Some(DragTarget::SidebarRight);
         }
         // Horizontal splitter sits between right-top and right-bottom.
+        // A zero-height right-top means the Activity pane is hidden —
+        // there's no splitter to grab, so don't synthesize one at the
+        // top edge of the terminal stack.
         let h_y = right_top_rect.y + right_top_rect.height;
-        if row + 1 >= h_y
+        if right_top_rect.height > 0
+            && row + 1 >= h_y
             && row <= h_y + 1
             && col >= right_top_rect.x
             && col < right_top_rect.x + right_top_rect.width
@@ -257,6 +261,59 @@ pub(crate) fn pane_areas(
         .constraints([Constraint::Percentage(right_top_pct), Constraint::Min(0)])
         .split(cols[1]);
     (cols[0], rows[0], rows[1])
+}
+
+/// Fold the activity row into the terminal stack when the Activity
+/// pane is hidden (a workspace with no activity worth showing, or a
+/// manual hide). `right_top` collapses to zero height and
+/// `right_bottom` spans the full right column. A zero-height
+/// `right_top` reads as "hidden" everywhere downstream: the renderer
+/// skips it and mouse hit-tests can't land on it.
+pub(crate) fn apply_activity_visibility(
+    rects: (Rect, Rect, Rect),
+    activity_visible: bool,
+) -> (Rect, Rect, Rect) {
+    let (sidebar, right_top, right_bottom) = rects;
+    if activity_visible {
+        return (sidebar, right_top, right_bottom);
+    }
+    let merged = Rect {
+        x: right_top.x,
+        y: right_top.y,
+        width: right_top.width,
+        height: right_top.height + right_bottom.height,
+    };
+    (
+        sidebar,
+        Rect {
+            height: 0,
+            ..right_top
+        },
+        merged,
+    )
+}
+
+/// Rows reserved for the focus-mode event header (issue #156).
+pub(crate) const FOCUS_HEADER_HEIGHT: u16 = 1;
+
+/// Split the pane area for focus mode into `(header, terminal_body)`.
+/// The header is a slim strip at the top; the terminal takes the rest.
+/// When the area is too short for both, the header wins and the body
+/// collapses to empty (the caller renders nothing into a zero rect).
+pub(crate) fn focus_mode_areas(pane_area: Rect) -> (Rect, Rect) {
+    if pane_area.height <= FOCUS_HEADER_HEIGHT {
+        return (pane_area, Rect::default());
+    }
+    let header = Rect {
+        height: FOCUS_HEADER_HEIGHT,
+        ..pane_area
+    };
+    let body = Rect {
+        y: pane_area.y + FOCUS_HEADER_HEIGHT,
+        height: pane_area.height - FOCUS_HEADER_HEIGHT,
+        ..pane_area
+    };
+    (header, body)
 }
 
 #[cfg(test)]
@@ -420,5 +477,66 @@ mod tests {
         // Second drag at the same column → no change → false.
         let changed = c.update_drag(DragTarget::SidebarRight, target_col, 10);
         assert!(!changed);
+    }
+
+    #[test]
+    fn apply_activity_visibility_keeps_rects_when_visible() {
+        let c = ctx();
+        let rects = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
+        assert_eq!(apply_activity_visibility(rects, true), rects);
+    }
+
+    #[test]
+    fn apply_activity_visibility_folds_top_into_bottom_when_hidden() {
+        let c = ctx();
+        let (sidebar, right_top, right_bottom) = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
+        let (s, top, bottom) = apply_activity_visibility((sidebar, right_top, right_bottom), false);
+        assert_eq!(s, sidebar, "sidebar is untouched");
+        assert_eq!(
+            top.height, 0,
+            "hidden activity row collapses to zero height"
+        );
+        assert_eq!(top.y, right_top.y);
+        // The terminal stack reclaims the full right column.
+        assert_eq!(bottom.y, right_top.y);
+        assert_eq!(bottom.height, right_top.height + right_bottom.height);
+        assert_eq!(bottom.width, right_top.width);
+    }
+
+    #[test]
+    fn hidden_activity_row_has_no_horizontal_splitter() {
+        let c = ctx();
+        let (sidebar, right_top, right_bottom) = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
+        let (_, hidden_top, _) =
+            apply_activity_visibility((sidebar, right_top, right_bottom), false);
+        // The old splitter sat at `right_top.y + right_top.height`. With
+        // the row hidden (zero height) nothing there should hit-test as
+        // a draggable splitter.
+        let h_y = right_top.y + right_top.height;
+        assert_eq!(
+            c.hit_test_splitter(right_top.x + 5, h_y, sidebar, hidden_top),
+            None,
+        );
+        // The vertical sidebar splitter is unaffected.
+        let v_x = sidebar.x + sidebar.width;
+        assert_eq!(
+            c.hit_test_splitter(v_x, 10, sidebar, hidden_top),
+            Some(DragTarget::SidebarRight),
+        );
     }
 }

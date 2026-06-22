@@ -20,7 +20,7 @@ These are enforced in code review:
 
 1. **Files over 1500 lines are unacceptable.** Split aggressively into sibling files. `model.rs` was 4626 lines, now lives in 8 focused files under `crates/tui/src/realm/model/`. Same shape applies elsewhere.
 2. **No `unwrap()` in library crates.** `thiserror` for error types in `crates/{core,auth,events,store,config,git-ops,gh-provider,linear-provider,tui-term,tui-core,ipc,agents,llm-proxy}`. `anyhow` is only allowed in the `lazybox-tui` binary crate.
-3. **Core 4 isolation.** `lazybox-core`, `lazybox-auth`, `lazybox-events`, `lazybox-store` must NOT depend on each other. Provider crates depend on core + events + auth only.
+3. **Core 4 isolation.** `lazybox-core`, `lazybox-auth`, `lazybox-events`, `lazybox-store` must NOT depend on each other. Provider crates depend on core + auth only.
 4. **Tests with every change.** Every public function has a test; every TUI component has a render snapshot (insta + ratatui `TestBackend`); every bug fix lands with a regression test. See `crates/tui/tests/` for the realm-level effect-contract tests.
 5. **No real subprocesses in tests.** No real `claude` / `sh` / `curl` / `tmux` invocations. Mock at the trait boundary (`Agent`, `SessionBackend`, `CredentialProvider`) or `#[ignore]`-gate.
 6. **Every async test needs a timeout.** Wrap the body in `tokio::time::timeout` — no exceptions. `cargo-nextest` enforces a 10s slow-test budget; relying on it is fine for healthy tests but explicit `timeout` is the rule for ones that historically hung.
@@ -41,11 +41,14 @@ crates/
   config/         # YAML loader for ~/.lazybox/config.yaml.
   git-ops/        # Worktree manager.
   tui-term/       # Embedded terminal widget.
+  libghostty-vt/  # Vendored safe Rust bindings for ghostty's VT parser.
+  libghostty-vt-sys/ # Raw FFI layer under libghostty-vt.
   tui-core/       # Action catalog + intent resolvers.
 
   # ── providers ───────────────────────────────────────────────────────
   gh-provider/    # GitHub PRs + Issues.
   linear-provider/ # Linear issues.
+  slack-provider/ # Slack DMs/channels.
 
   # ── daemon-side ─────────────────────────────────────────────────────
   ipc/            # Command/Event wire types.
@@ -54,7 +57,7 @@ crates/
   server/         # Server library.
 
   # ── client / binary ─────────────────────────────────────────────────
-  tui/            # Component-tree TUI client + `lazybox` binary.
+  tui/            # tuirealm-based TUI client + `lazybox` binary.
 ```
 
 More detail in [`CLAUDE.md`](./CLAUDE.md) (architecture decisions, key patterns).

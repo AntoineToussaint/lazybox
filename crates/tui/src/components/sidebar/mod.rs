@@ -303,6 +303,19 @@ pub struct RepoSummary {
     pub attention: usize,
 }
 
+/// At-a-glance attention tallies across the visible mailbox, surfaced
+/// by the focus-mode event header so a heads-down user stays aware of
+/// incoming work without the full sidebar. Each count reuses the same
+/// `AttentionSignal` producer the per-row pills and header counters
+/// read, so the strip can never disagree with what the sidebar shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AttentionSummary {
+    pub unread: usize,
+    pub asking: usize,
+    pub ci_failing: usize,
+    pub review_pending: usize,
+}
+
 pub struct Sidebar {
     id: PaneId,
     workspaces: HashMap<SessionKey, Workspace>,
@@ -709,32 +722,16 @@ impl Sidebar {
     }
 
     /// Return the workspace key the `Shift-M` merge shortcut would
-    /// target. Only fires when the focused row is a PR in a state
-    /// GitHub would let us merge — Approved + CI green / none — so
-    /// the contextual footer can advertise the key only when it'll
-    /// actually work.
+    /// target. Delegates to [`resolve_merge`] so the contextual footer
+    /// advertises the key under exactly the same conditions the merge
+    /// dispatch fires — no second predicate to drift out of sync.
+    ///
+    /// [`resolve_merge`]: lazybox_tui_core::intent::resolve_merge
     pub fn merge_target_for_cursor(&self) -> Option<lazybox_core::WorkspaceKey> {
-        let workspace = self.selected_workspace()?;
-        let pr = workspace.pr.as_ref()?;
-        if !matches!(
-            pr.state,
-            lazybox_core::TaskState::Open | lazybox_core::TaskState::InReview
-        ) {
-            return None;
+        match lazybox_tui_core::intent::resolve_merge(self.selected_workspace()) {
+            lazybox_tui_core::intent::Intent::MergePr { workspace_key } => Some(workspace_key),
+            _ => None,
         }
-        if !matches!(pr.review, lazybox_core::ReviewStatus::Approved) {
-            return None;
-        }
-        if !matches!(
-            pr.ci,
-            lazybox_core::CiStatus::Success | lazybox_core::CiStatus::None
-        ) {
-            return None;
-        }
-        if pr.mergeable.is_conflicting() {
-            return None;
-        }
-        Some(lazybox_core::WorkspaceKey::new(workspace.key.as_str()))
     }
 
     /// If the row under the cursor is a PR with `ci == Fail`, return
@@ -921,6 +918,55 @@ impl Sidebar {
         self.focus_workspace_key(&target)
     }
 
+    /// The visible workspaces that have a coding-agent session, in
+    /// sidebar (top-down) order. The 1-based index into this list is
+    /// the number shown on the row's jump badge and dialed by the
+    /// `]]<digit>` focus-mode jump, so both read from the same source
+    /// and can't drift.
+    pub fn agent_workspace_keys(&self) -> Vec<SessionKey> {
+        self.visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k),
+                _ => None,
+            })
+            .filter(|k| {
+                self.workspaces.get(*k).is_some_and(|w| {
+                    w.sessions
+                        .iter()
+                        .any(|s| matches!(s.kind, lazybox_core::SessionKind::Agent { .. }))
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Move the cursor onto the `n`th (1-based) agent workspace in
+    /// sidebar order. Returns true when that slot exists and the
+    /// cursor moved. Backs the `]]<digit>` focus-mode jump — the
+    /// deterministic replacement for the old `F3` cycle.
+    pub fn focus_nth_agent_workspace(&mut self, n: usize) -> bool {
+        let Some(target) = n
+            .checked_sub(1)
+            .and_then(|i| self.agent_workspace_keys().into_iter().nth(i))
+        else {
+            return false;
+        };
+        self.focus_workspace_key(&target)
+    }
+
+    /// At-a-glance attention tallies for the focus-mode event header.
+    /// Reuses the same per-signal counters that drive the sidebar's
+    /// own header badges so the two never drift.
+    pub fn attention_summary(&self) -> AttentionSummary {
+        AttentionSummary {
+            unread: self.total_unread_count(),
+            asking: self.input_pending_count(),
+            ci_failing: self.ci_failing_count(),
+            review_pending: self.review_pending_count(),
+        }
+    }
+
     /// Move the cursor onto the session sub-row matching `id`. No-op
     /// when the row isn't visible — caller must already have aligned
     /// the workspace via `focus_workspace_key`.
@@ -998,6 +1044,20 @@ impl Sidebar {
         self.visible.len()
     }
 
+    /// True when the inbox is genuinely empty — no rows at all on the
+    /// default, unfiltered Inbox view, with no search narrowing it.
+    /// A first-run user with little/no GitHub data lands here, so the
+    /// renderer swaps the blank list for a getting-started panel that
+    /// teaches the next actions (issue #100). A list emptied by a
+    /// role filter, a non-Inbox mailbox, or a search query is NOT
+    /// this case — those are user-driven narrowings, not first-run.
+    pub fn is_getting_started(&self) -> bool {
+        self.visible.is_empty()
+            && self.mailbox == Mailbox::Inbox
+            && self.role_filter == RoleFilter::All
+            && self.search.as_ref().is_none_or(|s| s.query.is_empty())
+    }
+
     /// How many *workspace* rows are visible (excluding repo headers).
     /// Title bar uses this — counting headers would be confusing
     /// because they're navigation chrome, not items.
@@ -1015,6 +1075,17 @@ impl Sidebar {
     /// before moving sessions.
     pub fn workspace_iter(&self) -> impl Iterator<Item = (&SessionKey, &Workspace)> {
         self.workspaces.iter()
+    }
+
+    /// Every known Project as `(key, display name)`, in the sidebar's
+    /// stable `BTreeMap` order. Drives the global "start agent"
+    /// (`Shift-W`) picker, which — unlike `n` — can't lean on the
+    /// cursor to resolve a project, so it offers the full list.
+    pub fn projects_for_picker(&self) -> Vec<(lazybox_core::ProjectKey, String)> {
+        self.projects
+            .values()
+            .map(|p| (p.key.clone(), p.name.clone()))
+            .collect()
     }
 
     /// The Project the cursor is currently "in" — drives the `n` (new
@@ -1254,6 +1325,21 @@ impl Sidebar {
     /// "agents stuck on prompts" tally.
     fn input_pending_count(&self) -> usize {
         self.count_visible_with_signal(AttentionSignal::AgentAsking)
+    }
+
+    /// Whether any visible workspace currently has an agent waiting on
+    /// input. Drives the agent-waiting feature tip (#115); reads the
+    /// same `AgentAsking` signal as the header counter and the `!`
+    /// jump so the tip only shows when that jump would do something.
+    pub fn has_asking_agent(&self) -> bool {
+        self.input_pending_count() > 0
+    }
+
+    /// Whether any visible workspace's PR has failing / mixed CI.
+    /// Drives the failing-CI feature tip (#115), keyed off the same
+    /// signal as `Shift-F`.
+    pub fn has_failing_ci(&self) -> bool {
+        self.ci_failing_count() > 0
     }
 
     /// Drives the `N CI` summary — at-a-glance "how many of my PRs
@@ -1551,6 +1637,18 @@ impl Sidebar {
             actions.push(Action::OpenEditor);
             actions.push(Action::ToggleSnooze);
             actions.push(Action::Archive);
+        }
+        // Focus mode (`.`) surfaces only when the selected workspace
+        // has a coding agent to maximize — otherwise the key is a
+        // no-op, so advertising it would be noise. The `]]<digit>`
+        // jumps live under the terminal `]]` leader (and its popup),
+        // not the sidebar footer.
+        if workspace.is_some_and(|w| {
+            w.sessions
+                .iter()
+                .any(|s| matches!(s.kind, lazybox_core::SessionKind::Agent { .. }))
+        }) {
+            actions.push(Action::ToggleFocusMode);
         }
         // Creation actions live last in the row but Project comes
         // BEFORE Workspace: projects are containers; you need one

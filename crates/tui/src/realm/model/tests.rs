@@ -188,9 +188,11 @@ mod effects_tests {
 
     /// NewWorkspace input with a non-empty trimmed name AND a
     /// pre-stashed project_key produces `CreateWorkspace { name,
-    /// project_key }`. Without a stashed project_key the submit
-    /// drops (see `mount_new_workspace_input` — the catalog `n`
-    /// flow only mounts when a project is focused).
+    /// project_key, spawn_agent }`. `spawn_agent` carries the
+    /// configured default agent so creating a workspace lands the
+    /// user straight in a live session. Without a stashed project_key
+    /// the submit drops (see `mount_new_workspace_input` — the catalog
+    /// `n` flow only mounts when a project is focused).
     #[test]
     fn input_submitted_for_new_workspace_returns_create_workspace() {
         let mut m = build_model();
@@ -200,12 +202,112 @@ mod effects_tests {
         let cmds = m.handle_input_submitted("  my-feature  ".into());
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
-            IpcCommand::CreateWorkspace { name, project_key } => {
+            IpcCommand::CreateWorkspace {
+                name,
+                project_key,
+                spawn_agent,
+            } => {
                 assert_eq!(name, "my-feature");
                 assert_eq!(project_key, &pk);
+                // Default agent is "claude" unless YAML overrides it.
+                assert_eq!(spawn_agent.as_deref(), Some("claude"));
             }
             other => panic!("expected CreateWorkspace, got {other:?}"),
         }
+    }
+
+    /// `Shift-W` with no projects yet can't resolve a container, so
+    /// it surfaces a nudge instead of mounting a picker.
+    #[test]
+    fn start_agent_flow_without_projects_mounts_no_modal() {
+        let mut m = build_model();
+        m.start_agent_flow();
+        assert!(
+            m.modal_stack.is_empty(),
+            "no project → footer nudge, no modal"
+        );
+    }
+
+    /// Picking a project in the `Shift-W` start-agent picker funnels
+    /// into the new-workspace name input (which then auto-spawns the
+    /// default agent on submit). The pick itself sends no IPC and
+    /// drains the stashed choices.
+    #[test]
+    fn start_agent_project_pick_funnels_into_new_workspace_input() {
+        let mut m = build_model();
+        let pk = lazybox_core::ProjectKey::local("proj");
+        m.start_agent_project_choices = vec![pk.clone()];
+        m.modal_stack.push(Id::StartAgentProject);
+        let cmds = m.handle_choice_picked(vec![0]);
+        assert!(cmds.is_empty(), "picking a project sends no IPC yet");
+        assert_eq!(m.modal_stack.last(), Some(&Id::NewWorkspace));
+        assert_eq!(m.pending_new_workspace_project.as_ref(), Some(&pk));
+        assert!(
+            m.start_agent_project_choices.is_empty(),
+            "choices drained after pick"
+        );
+    }
+
+    /// `Shift-N` with no tracked repos has nothing to pick, so it
+    /// skips the picker and drops straight into the new-project input
+    /// — the only way to bootstrap a brand-new, empty inbox.
+    #[test]
+    fn new_workspace_picker_without_projects_mounts_new_project_input() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        m.dispatch_action(&Action::NewProject);
+        assert_eq!(m.modal_stack.last(), Some(&Id::NewProject));
+    }
+
+    /// `Shift-N` with tracked repos mounts the repo picker, listing
+    /// each repo plus the trailing "create a new local project" row.
+    #[test]
+    fn new_workspace_picker_with_projects_mounts_repo_picker() {
+        use lazybox_ipc::Event as IpcEvent;
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let pk = lazybox_core::ProjectKey::github("acme", "widget");
+        m.handle_daemon_event(IpcEvent::ProjectUpserted(Box::new(
+            lazybox_core::Project::new(pk.clone(), "acme/widget", chrono::Utc::now()),
+        )));
+        m.dispatch_action(&Action::NewProject);
+        assert_eq!(m.modal_stack.last(), Some(&Id::NewWorkspaceRepo));
+        assert_eq!(m.new_workspace_repo_choices, vec![pk]);
+    }
+
+    /// Picking a repo row funnels into the new-workspace name input
+    /// under that repo (no project-creation step). The pick sends no
+    /// IPC and drains the stashed choices.
+    #[test]
+    fn new_workspace_repo_pick_funnels_into_name_input() {
+        let mut m = build_model();
+        let pk = lazybox_core::ProjectKey::github("acme", "widget");
+        m.new_workspace_repo_choices = vec![pk.clone()];
+        m.modal_stack.push(Id::NewWorkspaceRepo);
+        let cmds = m.handle_choice_picked(vec![0]);
+        assert!(cmds.is_empty(), "picking a repo sends no IPC yet");
+        assert_eq!(m.modal_stack.last(), Some(&Id::NewWorkspace));
+        assert_eq!(m.pending_new_workspace_project.as_ref(), Some(&pk));
+        assert!(
+            m.new_workspace_repo_choices.is_empty(),
+            "choices drained after pick"
+        );
+    }
+
+    /// Picking the trailing escape-hatch row (index past the repo
+    /// list) keeps the brand-new-project path available.
+    #[test]
+    fn new_workspace_repo_pick_escape_hatch_mounts_new_project() {
+        let mut m = build_model();
+        let pk = lazybox_core::ProjectKey::github("acme", "widget");
+        m.new_workspace_repo_choices = vec![pk];
+        m.modal_stack.push(Id::NewWorkspaceRepo);
+        // Index 1 is the "create a new local project" row (the single
+        // repo occupies index 0).
+        let cmds = m.handle_choice_picked(vec![1]);
+        assert!(cmds.is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::NewProject));
+        assert!(m.new_workspace_repo_choices.is_empty());
     }
 
     /// Empty / whitespace-only input is dropped silently.
@@ -802,17 +904,20 @@ snippets:
         assert_eq!(m.focus(), PaneFocus::Terminals, "leader doesn't leave yet");
     }
 
-    /// With no snippets configured there are no bindings to offer, so
-    /// `]]` leaves to the sidebar immediately (no leader, no idle wait).
+    /// Even with no snippets configured the leader still has bindings to
+    /// offer — `]]f` focus toggle and `]]<digit>` agent jumps — so `]]`
+    /// arms the leader and keeps focus on the terminal; the pane only
+    /// leaves on the idle tick if no follow key arrives (#156 follow-up,
+    /// which replaced the old leave-immediately path).
     #[test]
-    fn double_bracket_leaves_immediately_without_snippets() {
+    fn double_bracket_arms_leader_even_without_snippets() {
         let mut m = build_model();
         m.focus = PaneFocus::Terminals;
         m.set_focus_attr();
         m.dispatch_key(esc_key());
         m.dispatch_key(esc_key());
-        assert!(!m.terminal_leader_pending());
-        assert_eq!(m.focus(), PaneFocus::Sidebar);
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "leader doesn't leave yet");
     }
 
     /// `]]<printable>` opens the snippet picker pre-filtered by the
@@ -1873,6 +1978,53 @@ mod modal_input_responsiveness_tests {
     }
 }
 
+/// The `q q` quit chord (issue #100): the first `q` arms a hint
+/// instead of quitting silently; a second `q` quits; `Esc` cancels.
+mod quit_chord_tests {
+    use super::super::Model;
+    use lazybox_ipc::channel;
+    use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn q() -> KeyEvent {
+        KeyEvent::new(Key::Char('q'), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn first_q_arms_the_hint_without_quitting() {
+        let mut m = build_model();
+        m.dispatch_key(q());
+        assert!(!m.quit, "a single q must not quit");
+        assert!(
+            m.q_arm_pending(),
+            "the first q must arm the chord so the hint surfaces",
+        );
+    }
+
+    #[test]
+    fn second_q_quits() {
+        let mut m = build_model();
+        m.dispatch_key(q());
+        m.dispatch_key(q());
+        assert!(m.quit, "q q must quit");
+    }
+
+    #[test]
+    fn esc_cancels_the_armed_chord() {
+        let mut m = build_model();
+        m.dispatch_key(q());
+        assert!(m.q_arm_pending());
+        m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert!(!m.quit, "Esc after the first q must not quit");
+        assert!(!m.q_arm_pending(), "Esc must disarm the chord");
+    }
+}
+
 #[cfg(test)]
 mod merge_focus_follow_tests {
     //! Issue→PR collapse (#34): when the user is viewing the issue
@@ -2518,8 +2670,9 @@ mod wheel_routing_tests {
         );
     }
 
-    /// `]]` completes the leader (here: leaves to the sidebar, no
-    /// snippets) and must NOT flush a literal `]` to the PTY.
+    /// `]]` completes the leader (here: arms it — even with no snippets
+    /// the leader offers `]]f` / `]]<digit>`) and must NOT flush a
+    /// literal `]` to the PTY.
     #[test]
     fn completed_leader_does_not_flush_a_bracket() {
         let (mut m, mut server, _bottom) = build_model_with_terminal();
@@ -2527,7 +2680,8 @@ mod wheel_routing_tests {
 
         m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
         m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
-        assert_eq!(m.focus(), PaneFocus::Sidebar);
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "leader doesn't leave yet");
         assert!(
             !drained_write_bytes(&mut server).contains(&b']'),
             "`]]` is a chord, not two literal brackets"
@@ -2552,7 +2706,7 @@ mod destructive_confirm_tests {
     //!    drifted onto.
     use super::super::{ActionConfirmTarget, Id, Model};
     use chrono::Utc;
-    use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
+    use lazybox_core::{SessionKey, Task, TaskId, Workspace, WorkspaceKey};
     use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent, channel};
     use lazybox_tui_core::action::Action;
     use tuirealm::ratatui::layout::Size;
@@ -2615,6 +2769,75 @@ mod destructive_confirm_tests {
             Some((Action::MergePr, ActionConfirmTarget::Workspace(k))) => assert_eq!(k, &sk),
             other => panic!("expected a stashed MergePr aimed at the menu's row, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn merge_confirm_fires_on_green_ci_without_approval() {
+        // Regression for #144: a green-CI PR with no formal approval
+        // (a personal repo / your own PR) is mergeable on GitHub, so
+        // confirming `g m` must dispatch the merge — not flash
+        // "no longer merge-ready" and do nothing.
+        let mut m = build_model();
+        let pr = merge_ready_pr_without_approval("github:owner/repo#1");
+        let wk = pr.key.clone();
+        let sk = SessionKey::from(&wk);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk), "PR row focusable");
+
+        let cmds = m.dispatch_action(&Action::MergePr);
+        assert!(
+            cmds.is_empty(),
+            "merge must gate on confirm first: {cmds:?}"
+        );
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+
+        let cmds = m.handle_confirmed(true);
+        match cmds.as_slice() {
+            [IpcCommand::MergePr { workspace_key }] => assert_eq!(workspace_key, &wk),
+            other => panic!("expected a single MergePr command, got {other:?}"),
+        }
+    }
+
+    /// A PR workspace GitHub would let you merge right now — CI green,
+    /// no conflict — but with NO approving review, the case #144 was
+    /// falsely blocking.
+    fn merge_ready_pr_without_approval(key: &str) -> Workspace {
+        let num = key.rsplit_once('#').map(|(_, n)| n).unwrap_or("1");
+        let task = Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("PR {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::Success,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/owner/repo/pull/{num}"),
+            repo: Some("owner/repo".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+        Workspace::from_task(task, Utc::now())
     }
 
     #[test]
@@ -2917,5 +3140,478 @@ mod collapse_into_pr_tests {
             m.terminals.active_terminal_id() == Some(TerminalId(7)),
             "the live Claude terminal must remain visible on the PR",
         );
+    }
+}
+
+#[cfg(test)]
+mod tips_tests {
+    //! Issue #115: the progressive feature-tip gating. `pick_tip` is
+    //! the pure decision (no IO) behind `tick_tips`; these freeze the
+    //! "stay quiet" rules — off when opted out, before the idle delay,
+    //! while a modal / notice owns the footer — and the one positive
+    //! path (idle + in-terminal → the leave-terminal tip).
+    use super::super::*;
+    use lazybox_ipc::channel;
+    use std::time::{Duration, Instant};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    /// Enable tips and backdate the idle baseline so the delay gate is
+    /// satisfied — the common setup for "a tip should now be eligible."
+    fn armed_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let mut m = build_model();
+        m.set_tips(true, Vec::new());
+        m.tips_armed_at = Instant::now() - Duration::from_secs(60);
+        m
+    }
+
+    #[test]
+    fn no_tip_when_disabled() {
+        let mut m = armed_model();
+        m.set_tips(false, Vec::new());
+        m.focus = PaneFocus::Terminals;
+        assert!(m.pick_tip().is_none());
+    }
+
+    #[test]
+    fn no_tip_before_idle_delay() {
+        let mut m = armed_model();
+        m.tips_armed_at = Instant::now();
+        m.focus = PaneFocus::Terminals;
+        assert!(m.pick_tip().is_none(), "a tip must wait out the idle delay",);
+    }
+
+    #[test]
+    fn no_tip_while_a_notice_owns_the_footer() {
+        let mut m = armed_model();
+        m.focus = PaneFocus::Terminals;
+        m.flash_info("something else");
+        assert!(
+            m.pick_tip().is_none(),
+            "a tip must not clobber an existing notice",
+        );
+    }
+
+    #[test]
+    fn no_tip_while_a_modal_is_open() {
+        let mut m = armed_model();
+        m.focus = PaneFocus::Terminals;
+        m.modal_stack.push(Id::Help);
+        assert!(
+            m.pick_tip().is_none(),
+            "a tip must never compete with a modal",
+        );
+    }
+
+    #[test]
+    fn in_terminal_surfaces_the_leave_terminal_tip_once() {
+        let mut m = armed_model();
+        m.focus = PaneFocus::Terminals;
+        let tip = m.pick_tip().expect("the in-terminal tip is eligible");
+        assert_eq!(tip.id, "leave_terminal");
+        // Once it has been marked shown this session, the cap kicks in.
+        m.tip_shown_this_session = true;
+        assert!(
+            m.pick_tip().is_none(),
+            "at most one tip surfaces per session",
+        );
+    }
+
+    #[test]
+    fn already_seen_tip_does_not_resurface() {
+        let mut m = armed_model();
+        m.set_tips(true, vec!["leave_terminal".to_string()]);
+        m.tips_armed_at = Instant::now() - Duration::from_secs(60);
+        m.focus = PaneFocus::Terminals;
+        assert!(
+            m.pick_tip().is_none(),
+            "a tip already in tips_seen never repeats",
+        );
+    }
+}
+
+#[cfg(test)]
+mod activity_pane_visibility_tests {
+    //! Hide the Activity pane when a workspace has no activity worth
+    //! showing (#162), with `Shift-P` to reveal / re-hide on demand.
+    use super::super::{Model, PaneFocus};
+    use chrono::Utc;
+    use lazybox_core::{Workspace, WorkspaceKey};
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn empty_ws(key: &str) -> Workspace {
+        Workspace::empty(WorkspaceKey::new(key), "main", Utc::now())
+    }
+
+    fn ws_with_activity(key: &str) -> Workspace {
+        let mut w = empty_ws(key);
+        w.activity.push(lazybox_core::Activity {
+            author: "alice".into(),
+            body: "ping".into(),
+            created_at: Utc::now(),
+            kind: lazybox_core::ActivityKind::Comment,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        });
+        w
+    }
+
+    fn seed(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, workspaces: Vec<Workspace>) {
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces,
+            terminals: vec![],
+            projects: vec![],
+        });
+    }
+
+    fn shift_p() -> KeyEvent {
+        KeyEvent::new(Key::Char('P'), KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn empty_workspace_hides_the_activity_pane() {
+        let mut m = build_model();
+        seed(&mut m, vec![empty_ws("github:o/r#1")]);
+        assert!(
+            !m.activity_pane_visible(),
+            "a workspace with no activity / description hides the pane",
+        );
+    }
+
+    #[test]
+    fn workspace_with_activity_shows_the_pane() {
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        assert!(m.activity_pane_visible());
+    }
+
+    #[test]
+    fn no_selection_keeps_the_pane_visible() {
+        // The auto-hide rule is about a *selected* workspace with no
+        // activity; an empty inbox keeps the pane's prior behavior.
+        let m = build_model();
+        assert!(m.activity_pane_visible());
+    }
+
+    #[test]
+    fn shift_p_reveals_an_empty_pane_then_re_hides() {
+        let mut m = build_model();
+        seed(&mut m, vec![empty_ws("github:o/r#1")]);
+        assert!(!m.activity_pane_visible(), "auto-hidden when empty");
+
+        m.dispatch_key(shift_p());
+        assert!(m.activity_pane_visible(), "Shift-P reveals it on demand");
+
+        m.dispatch_key(shift_p());
+        assert!(!m.activity_pane_visible(), "Shift-P again re-hides it");
+    }
+
+    #[test]
+    fn shift_p_can_hide_a_non_empty_pane() {
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        assert!(m.activity_pane_visible());
+        m.dispatch_key(shift_p());
+        assert!(
+            !m.activity_pane_visible(),
+            "the override can hide a non-empty pane too"
+        );
+    }
+
+    #[test]
+    fn override_is_remembered_per_workspace_across_navigation() {
+        let mut m = build_model();
+        // Two empty rows; reveal the first, then move to the second.
+        seed(
+            &mut m,
+            vec![empty_ws("github:o/r#1"), empty_ws("github:o/r#2")],
+        );
+        let first: lazybox_core::SessionKey = (&WorkspaceKey::new("github:o/r#1")).into();
+        let second: lazybox_core::SessionKey = (&WorkspaceKey::new("github:o/r#2")).into();
+
+        assert!(m.sidebar.focus_workspace_key(&first));
+        m.sync_panes();
+        m.dispatch_key(shift_p());
+        assert!(m.activity_pane_visible(), "revealed on the first row");
+
+        // Navigate to the second row — its own default (hidden) applies.
+        assert!(m.sidebar.focus_workspace_key(&second));
+        m.sync_panes();
+        assert!(
+            !m.activity_pane_visible(),
+            "the manual reveal doesn't leak onto a different workspace",
+        );
+
+        // Back to the first — the reveal override is still in effect.
+        assert!(m.sidebar.focus_workspace_key(&first));
+        m.sync_panes();
+        assert!(
+            m.activity_pane_visible(),
+            "the per-workspace override persists across navigation",
+        );
+    }
+
+    #[test]
+    fn tab_skips_the_hidden_activity_pane() {
+        let mut m = build_model();
+        seed(&mut m, vec![empty_ws("github:o/r#1")]);
+        // Start on the sidebar; Tab should jump past the hidden Activity
+        // pane straight to the terminal stack.
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
+        m.dispatch_key(KeyEvent::new(Key::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Terminals,
+            "Tab skips the hidden Activity pane",
+        );
+    }
+
+    #[test]
+    fn enter_on_empty_workspace_goes_straight_to_terminal() {
+        let mut m = build_model();
+        seed(&mut m, vec![empty_ws("github:o/r#1")]);
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
+        m.dispatch_key(KeyEvent::new(Key::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Terminals,
+            "opening an activity-less workspace lands on the terminal",
+        );
+    }
+
+    #[test]
+    fn enter_with_activity_focuses_the_activity_pane() {
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
+        m.dispatch_key(KeyEvent::new(Key::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Right,
+            "with activity present, Enter focuses the Activity pane to read it",
+        );
+    }
+}
+
+#[cfg(test)]
+mod focus_mode_tests {
+    use super::super::*;
+    use chrono::Utc;
+    use lazybox_core::{SessionKey, Task, Workspace};
+    use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind, channel};
+    use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn workspace_with_agent(key: &str) -> Workspace {
+        let task = Task {
+            id: lazybox_core::TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("task: {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{}", key.replace('#', "/pull/")),
+            repo: Some("owner/repo".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+        let mut ws = Workspace::from_task(task, Utc::now());
+        let wk = ws.key.clone();
+        ws.add_session(lazybox_core::WorkspaceSession::new(
+            wk,
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            std::path::PathBuf::from("/tmp/wt"),
+            Utc::now(),
+        ));
+        ws
+    }
+
+    /// Mark the terminal stack non-empty by spawning a terminal for the
+    /// active session — the precondition for entering focus mode.
+    fn spawn_terminal(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, key: &SessionKey) {
+        m.terminals.set_active_session(Some(key.clone()));
+        m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+    }
+
+    fn char_key(c: char) -> RealmKey {
+        RealmKey::new(Key::Char(c), RealmMods::NONE)
+    }
+
+    /// Arm the `]]` leader (two presses of the escape char) and then
+    /// press `follow`, so `]]<follow>` resolves in one call. Focus must
+    /// already be on the terminal.
+    fn bracket_leader(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, follow: char) {
+        m.dispatch_key(char_key(']'));
+        m.dispatch_key(char_key(']'));
+        m.dispatch_key(char_key(follow));
+    }
+
+    /// `.` from the sidebar enters focus mode (with a live terminal) and
+    /// pins focus to the terminal; `]]f` from inside the terminal exits,
+    /// leaving focus on the terminal so the user keeps driving the same
+    /// agent in the three-pane view.
+    #[test]
+    fn dot_and_bracket_f_toggle_focus_mode() {
+        let mut m = build_model();
+        let ws = workspace_with_agent("owner/repo#1");
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        spawn_terminal(&mut m, &key);
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+
+        m.dispatch_key(char_key('.'));
+        assert!(m.focus_mode, "`.` enters focus mode");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "focus pins to terminal");
+
+        bracket_leader(&mut m, 'f');
+        assert!(!m.focus_mode, "`]]f` exits focus mode");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "exit keeps the terminal");
+    }
+
+    /// With no live terminal there's nothing to maximize, so `.` is a
+    /// no-op rather than dropping the user onto a blank screen.
+    #[test]
+    fn dot_without_terminal_is_a_noop() {
+        let mut m = build_model();
+        m.focus = PaneFocus::Sidebar;
+        m.dispatch_key(char_key('.'));
+        assert!(!m.focus_mode, "no terminal → no focus mode");
+    }
+
+    /// Bare `]]` arms the leader; with no follow key the pane leaves on
+    /// the idle tick — and in focus mode that must also drop focus mode,
+    /// since the sidebar it returns to is hidden while focus mode is on.
+    #[test]
+    fn bracket_idle_leave_exits_focus_mode() {
+        let mut m = build_model();
+        let ws = workspace_with_agent("owner/repo#1");
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        spawn_terminal(&mut m, &key);
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        m.focus_mode = true;
+
+        // `]]` arms the leader (no immediate leave now that the leader
+        // always has bindings to offer); with no follow key the idle
+        // tick leaves the pane once the escape window lapses.
+        m.dispatch_key(char_key(']'));
+        m.dispatch_key(char_key(']'));
+        assert!(m.terminal_leader_at.is_some(), "`]]` arms the leader");
+        // Force the idle window past, then tick — Instant can't be
+        // fast-forwarded, so backdate the arm timestamp instead.
+        m.terminal_leader_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(60));
+        m.tick_terminal_leader();
+        assert!(!m.focus_mode, "idle `]]` exits focus mode");
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
+    }
+
+    /// `]]<digit>` moves the displayed terminal to the Nth agent
+    /// workspace in sidebar order and keeps focus mode on, so the user
+    /// hops to a specific agent heads-down.
+    #[test]
+    fn bracket_digit_jumps_to_agent_workspace_in_focus_mode() {
+        let mut m = build_model();
+        let ws1 = workspace_with_agent("owner/repo#1");
+        let ws2 = workspace_with_agent("owner/repo#2");
+        let key1 = SessionKey::from(&ws1.key);
+        let key2 = SessionKey::from(&ws2.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws1)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws2)));
+
+        // The jump number is the slot in this roster (sidebar order),
+        // which the badge mirrors — read it rather than assume an order.
+        let roster = m.sidebar.agent_workspace_keys();
+        assert_eq!(roster.len(), 2, "both agents in the roster");
+        assert!(roster.contains(&key1) && roster.contains(&key2));
+
+        // Start parked on slot 2 so `]]1` is a real move to slot 1.
+        let slot1 = roster[0].clone();
+        let slot2 = roster[1].clone();
+        assert!(m.sidebar.focus_workspace_key(&slot2));
+        spawn_terminal(&mut m, &slot2);
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        m.focus_mode = true;
+
+        bracket_leader(&mut m, '1');
+        assert!(m.focus_mode, "jump stays in focus mode");
+        assert_eq!(
+            m.sidebar.selected_workspace_key(),
+            Some(&slot1),
+            "`]]1` jumps to the first agent workspace in the roster",
+        );
+    }
+
+    /// The attention summary the header reads counts unread / asking /
+    /// CI / review across the visible mailbox.
+    #[test]
+    fn attention_summary_tracks_unread() {
+        let mut m = build_model();
+        let mut ws = workspace_with_agent("owner/repo#1");
+        ws.activity.push(lazybox_core::Activity {
+            author: "alice".into(),
+            body: "ping".into(),
+            created_at: Utc::now(),
+            kind: lazybox_core::ActivityKind::Comment,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        });
+        ws.seen_count = 0;
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        let summary = m.sidebar.attention_summary();
+        assert_eq!(summary.unread, 1, "the unseen comment counts as unread");
     }
 }

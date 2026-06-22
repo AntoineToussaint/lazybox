@@ -100,6 +100,18 @@ impl Sidebar {
         self.inner.drain_pending_asking_notices()
     }
 
+    /// Whether any visible workspace has an agent waiting on input —
+    /// drives the agent-waiting feature tip (#115).
+    pub fn has_asking_agent(&self) -> bool {
+        self.inner.has_asking_agent()
+    }
+
+    /// Whether any visible workspace's PR has failing / mixed CI —
+    /// drives the failing-CI feature tip (#115).
+    pub fn has_failing_ci(&self) -> bool {
+        self.inner.has_failing_ci()
+    }
+
     /// Advance the "working" spinner on a low-rate tick. Returns
     /// `true` when the glyph changed so the run loop can mark the
     /// frame dirty. Delegates to the inner lazybox sidebar.
@@ -206,6 +218,12 @@ impl Sidebar {
         self.inner.workspace_iter()
     }
 
+    /// Every known Project as `(key, display name)`. Backs the global
+    /// "start agent" (`Shift-W`) project picker.
+    pub fn projects_for_picker(&self) -> Vec<(lazybox_core::ProjectKey, String)> {
+        self.inner.projects_for_picker()
+    }
+
     /// Apply `~/.lazybox/config.yaml` overrides to the inner pane in
     /// place. Used by `Model::apply_sidebar_config` once at startup.
     pub fn apply_inner_config(
@@ -279,6 +297,24 @@ impl Sidebar {
     /// Backs the `Shift-F` global key.
     pub fn focus_next_failing_ci_workspace(&mut self) -> bool {
         self.inner.focus_next_failing_ci_workspace()
+    }
+
+    /// Move the cursor onto the `n`th (1-based) agent workspace in
+    /// sidebar order. Returns true when that slot exists. Backs the
+    /// `]]<digit>` focus-mode jump.
+    pub fn focus_nth_agent_workspace(&mut self, n: usize) -> bool {
+        self.inner.focus_nth_agent_workspace(n)
+    }
+
+    /// The visible agent workspaces in sidebar (top-down) order — the
+    /// roster the `]]<digit>` jump and its badges read from.
+    pub fn agent_workspace_keys(&self) -> Vec<lazybox_core::SessionKey> {
+        self.inner.agent_workspace_keys()
+    }
+
+    /// At-a-glance attention tallies for the focus-mode event header.
+    pub fn attention_summary(&self) -> crate::components::sidebar::AttentionSummary {
+        self.inner.attention_summary()
     }
 
     /// State-aware short list for the footer hint bar. Catalog-driven;

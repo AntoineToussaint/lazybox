@@ -18,7 +18,6 @@ use super::{
     key_event_to_stroke, rect_contains, seq_continuations,
 };
 use crate::realm::keymap::realm_key_to_crossterm;
-use crate::realm::layout::pane_areas;
 use lazybox_ipc::Command as IpcCommand;
 use std::time::Duration;
 use tuirealm::application::PollStrategy;
@@ -88,7 +87,23 @@ impl<T: TerminalAdapter> Model<T> {
                 && !c.is_control()
                 && c != self.ui_defaults.terminal_escape_char
             {
-                self.mount_snippet_picker(c.to_string());
+                // Reserved leader keys win over the snippet picker:
+                //   - `]]<1..9>` jumps the view straight to the Nth
+                //     agent workspace (sidebar order, top-down) — the
+                //     numbered replacement for the old `F3` cycle;
+                //   - `]]f` toggles focus mode without leaving the PTY,
+                //     replacing the old `F2`.
+                // Both shadow snippets bound to those keys (digits and
+                // `f`), which is the documented trade-off for keeping
+                // the jumps reachable heads-down.
+                match c {
+                    '1'..='9' => {
+                        let n = c.to_digit(10).unwrap_or(0) as usize;
+                        self.jump_to_agent_workspace(n);
+                    }
+                    'f' => self.toggle_focus_mode(),
+                    _ => self.mount_snippet_picker(c.to_string()),
+                }
             }
             return;
         }
@@ -101,6 +116,7 @@ impl<T: TerminalAdapter> Model<T> {
             // normally — there's no inner program to forward it to.
             Key::Tab
                 if !key.modifiers.contains(KeyModifiers::SHIFT)
+                    && !self.focus_mode
                     && (self.focus != PaneFocus::Terminals
                         || self.terminals.is_empty()
                         || !self.terminal_user_typed_since_focus) =>
@@ -112,6 +128,11 @@ impl<T: TerminalAdapter> Model<T> {
                 // shell for autocomplete.
                 self.q_latch.disarm();
                 self.focus = self.focus.next();
+                // Skip the Activity pane when it's hidden — Tab should
+                // never land focus on a pane the user can't see.
+                if self.focus == PaneFocus::Right && !self.activity_pane_visible() {
+                    self.focus = self.focus.next();
+                }
                 self.set_focus_attr();
                 self.redraw = true;
                 return;
@@ -145,7 +166,15 @@ impl<T: TerminalAdapter> Model<T> {
                 && key.modifiers.is_empty() =>
             {
                 self.q_latch.disarm();
-                self.focus = PaneFocus::Right;
+                // With no activity to show the pane is hidden, so jump
+                // straight to the terminal — "open workspace → drive
+                // the agent" in one keystroke. Otherwise focus the
+                // Activity pane so the user can read / reply.
+                self.focus = if self.activity_pane_visible() {
+                    PaneFocus::Right
+                } else {
+                    PaneFocus::Terminals
+                };
                 self.set_focus_attr();
                 self.redraw = true;
                 return;
@@ -187,6 +216,14 @@ impl<T: TerminalAdapter> Model<T> {
                 self.toggle_mouse_capture();
                 return;
             }
+            // Focus mode (#156). From the sidebar / activity panes it
+            // rides the catalog dispatch below (the `.` binding). From
+            // inside a terminal the PTY eats every key, so the entry
+            // point there is the `]]` leader: `]]f` toggles focus mode
+            // and `]]<digit>` jumps to a specific agent — both handled
+            // in the leader block above. F-keys were dropped (#156
+            // follow-up): macOS steals them for brightness / Mission
+            // Control, so they never reliably reached lazybox.
             Key::Char('s')
                 if key.modifiers.contains(KeyModifiers::ALT)
                     && !key.modifiers.contains(KeyModifiers::SHIFT) =>
@@ -208,7 +245,12 @@ impl<T: TerminalAdapter> Model<T> {
             // Refresh, AdoptSessions all flow through the catalog
             // dispatch below — see the whitelist further down.
             _ => {
-                // Any other key disarms.
+                // Any other key disarms. If the quit hint was showing,
+                // force a redraw so it clears even when the key itself
+                // (e.g. Esc) doesn't otherwise repaint.
+                if self.q_latch.is_armed() {
+                    self.redraw = true;
+                }
                 self.q_latch.disarm();
             }
         }
@@ -229,19 +271,15 @@ impl<T: TerminalAdapter> Model<T> {
         {
             let was_armed = self.escape_latch.is_armed();
             if self.escape_latch.tap(self.ui_defaults.escape_window) {
-                // Second `]` within the window completes `]]`. With a
-                // snippet library present, arm the leader so the next
-                // key can invoke a binding (`]]<key>`); the pane only
-                // leaves if no key follows within the window (see
-                // `tick_terminal_leader`). With no snippets there are
-                // no bindings to offer, so `]]` leaves immediately —
-                // no idle delay for users who never configured any.
-                if self.snippets.is_empty() {
-                    self.focus = PaneFocus::Sidebar;
-                    self.set_focus_attr();
-                } else {
-                    self.terminal_leader_at = Some(std::time::Instant::now());
-                }
+                // Second `]` within the window completes `]]`: arm the
+                // leader so the next key can invoke a binding
+                // (`]]<key>`). The leader always has something to offer
+                // now — `]]f` toggles focus mode and `]]<digit>` jumps
+                // to an agent even with no snippets configured — so it
+                // arms unconditionally; the pane still leaves on the
+                // idle tick if no key follows (see `tick_terminal_leader`).
+                // (Previously a snippet-less `]]` left instantly.)
+                self.terminal_leader_at = Some(std::time::Instant::now());
                 self.redraw = true;
                 return;
             }
@@ -610,12 +648,22 @@ impl<T: TerminalAdapter> Model<T> {
         if self.layout.last_area.width == 0 || self.layout.last_area.height == 0 {
             return;
         }
-        let (sidebar_rect, right_top_rect, right_bottom_rect) = pane_areas(
-            self.layout.last_area,
-            self.layout.sidebar_pct,
-            self.layout.right_top_pct,
-            self.layout.sidebar_user_resized,
-        );
+        // In focus mode the sidebar + activity pane aren't drawn, so
+        // their hit rects collapse to empty (no point can land in
+        // them) and the terminal owns everything below the slim event
+        // header — clicks and wheel events all route to the PTY. Keep
+        // this split in lockstep with `view`'s focus-mode layout.
+        // Outside focus mode, `effective_pane_rects` accounts for a
+        // hidden Activity pane: when hidden, `right_top` is zero-height
+        // so clicks there route to the terminal stack (and the
+        // horizontal splitter disappears).
+        let (sidebar_rect, right_top_rect, right_bottom_rect) = if self.focus_mode {
+            let (pane_area, _) = super::split_for_footer(self.layout.last_area);
+            let (_, body) = crate::realm::layout::focus_mode_areas(pane_area);
+            (Rect::default(), Rect::default(), body)
+        } else {
+            self.effective_pane_rects(self.layout.last_area)
+        };
 
         match m.kind {
             MouseEventKind::Down(button) => {
@@ -1028,6 +1076,9 @@ fn action_from_kind(
         ActionKind::OpenSettings => Action::OpenSettings,
         ActionKind::JumpToAsking => Action::JumpToAsking,
         ActionKind::JumpToFailingCi => Action::JumpToFailingCi,
+        ActionKind::StartAgent => Action::StartAgent,
+        ActionKind::ToggleActivityPane => Action::ToggleActivityPane,
+        ActionKind::ToggleFocusMode => Action::ToggleFocusMode,
         _ => return None,
     })
 }

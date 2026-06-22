@@ -1,4 +1,4 @@
-# Sets up the toolchain pilot needs to compile its workspace: Zig
+# Sets up the toolchain lazybox needs to compile its workspace: Zig
 # (for the vendored libghostty-vt-sys build.rs), libc++ on Linux (so
 # the Zig-built static archive links), and the Rust stable
 # toolchain + sccache-style Cargo cache.

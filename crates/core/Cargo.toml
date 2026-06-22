@@ -1,5 +1,6 @@
 [package]
 name = "lazybox-core"
+description = "Source-agnostic domain types for lazybox: Task, Session, Activity, SessionKey."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

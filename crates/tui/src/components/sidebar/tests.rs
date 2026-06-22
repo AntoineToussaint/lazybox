@@ -1647,6 +1647,46 @@ mod done_alert_tests {
         (sb, key)
     }
 
+    /// Focus mode (`.`) surfaces in the contextual footer only when the
+    /// selected workspace has a coding agent to maximize — advertising
+    /// it on an agent-less row would point at a no-op key.
+    #[test]
+    fn focus_mode_surfaces_in_footer_only_with_an_agent() {
+        let overrides = std::collections::BTreeMap::new();
+
+        // Plain workspace, no agent session → no focus-mode hint.
+        let (mut sb, key) = sidebar_with_one_workspace();
+        assert!(sb.focus_workspace_key(&key), "cursor on the workspace");
+        assert!(
+            !sb.contextual_bindings(&overrides)
+                .iter()
+                .any(|b| b.label.contains("focus mode")),
+            "no agent → no focus-mode footer hint",
+        );
+
+        // Add an agent session → `.` focus-mode hint appears.
+        let wk = sb.workspaces.get(&key).unwrap().key.clone();
+        sb.workspaces
+            .get_mut(&key)
+            .unwrap()
+            .add_session(lazybox_core::WorkspaceSession::new(
+                wk,
+                lazybox_core::SessionKind::Agent {
+                    agent_id: "claude".into(),
+                },
+                std::path::PathBuf::from("/tmp/wt"),
+                chrono::Utc::now(),
+            ));
+        sb.recompute_visible();
+        assert!(sb.focus_workspace_key(&key));
+        assert!(
+            sb.contextual_bindings(&overrides)
+                .iter()
+                .any(|b| b.label.contains("focus mode") && b.keys == "."),
+            "agent present → `.` focus-mode footer hint",
+        );
+    }
+
     /// Reaching `Done` (agent finished its turn) alerts the user: it
     /// flags the done-set, queues an OS notification, and a footer
     /// notice — the #80 "tell me when it's done" requirement.
@@ -1702,5 +1742,62 @@ mod done_alert_tests {
         sb.on_event(&agent_state(&key, AgentState::Working));
         assert!(!sb.agents_done.contains(&key));
         assert!(sb.agents_working.contains(&key));
+    }
+}
+
+mod getting_started_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+
+    fn one_workspace_sidebar() -> Sidebar {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut t = base_task();
+        t.id.key = "1".into();
+        t.url = "https://github.com/o/r/pull/1".into();
+        let w = Workspace::from_task(t, chrono::Utc::now());
+        sb.workspaces.insert(SessionKey::from(&w.key), w);
+        sb.recompute_visible();
+        sb
+    }
+
+    #[test]
+    fn fresh_empty_inbox_is_getting_started() {
+        // Default construction: Inbox mailbox, All filter, no rows.
+        let sb = Sidebar::new(PaneId::new(1));
+        assert!(sb.is_getting_started());
+    }
+
+    #[test]
+    fn populated_inbox_is_not_getting_started() {
+        let sb = one_workspace_sidebar();
+        assert_eq!(sb.workspace_count(), 1);
+        assert!(!sb.is_getting_started());
+    }
+
+    #[test]
+    fn role_filtered_empty_view_is_not_getting_started() {
+        // An empty list because a role filter hid everything is a
+        // user-driven narrowing, not first-run — no panel.
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.role_filter = RoleFilter::Author;
+        assert!(!sb.is_getting_started());
+    }
+
+    #[test]
+    fn non_inbox_mailbox_is_not_getting_started() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.mailbox = Mailbox::Snoozed;
+        assert!(!sb.is_getting_started());
+    }
+
+    #[test]
+    fn active_search_query_suppresses_getting_started() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.search = Some(SearchState {
+            scope: String::new(),
+            query: "foo".into(),
+            editing: true,
+        });
+        assert!(!sb.is_getting_started());
     }
 }

@@ -2026,3 +2026,108 @@ async fn collapse_into_pr_carries_live_terminal_to_the_pr() {
     .await
     .expect("deadline");
 }
+
+/// Issue #134: pressing `w` on many issues in quick succession must
+/// deliver EVERY work prompt. Pre-fix, concurrent spawns competing for
+/// CPU and the shared state mutexes let readiness detection lag past the
+/// inject deadline; the deadline rung then pasted blindly (into a screen
+/// that wasn't ready) or dropped the prompt at the gate cap — so some
+/// agents opened with no instruction and no signal that it happened.
+///
+/// This drives N prompt-carrying spawns concurrently against the mock
+/// backend, signals each one ready, and asserts all N distinct prompts
+/// were delivered (paste + submit) to their own sessions.
+#[tokio::test]
+async fn many_concurrent_prompt_spawns_all_deliver() {
+    timeout(Duration::from_secs(20), async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        const N: usize = 16;
+        let prompts: Vec<String> = (0..N)
+            .map(|i| format!("Work item {i}: implement the feature."))
+            .collect();
+
+        // Fire all spawns at once — distinct workspaces so none collapse
+        // onto another (the singleton guard keys on session_key).
+        let mut handles = Vec::new();
+        for (i, prompt) in prompts.iter().enumerate() {
+            let cfg = config.clone();
+            let cwd = cwd.clone();
+            let prompt = prompt.clone();
+            handles.push(tokio::spawn(async move {
+                lazybox_server::spawn_handler::handle_spawn(
+                    &cfg,
+                    format!("test:ws-stress-{i}").into(),
+                    None,
+                    TerminalKind::Agent("claude".into()),
+                    Some(cwd),
+                    Some(prompt),
+                    false,
+                )
+                .await;
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // One backend session per spawn.
+        let keys = mock.list().await.unwrap();
+        assert_eq!(keys.len(), N, "expected {N} sessions, got {}", keys.len());
+
+        // Signal every agent ready (the input-box footer markers
+        // `detect_ready_for_prompt` keys on, no permission gate up).
+        for key in &keys {
+            mock.emit(key, b"Esc to cancel  Tab to amend").await;
+        }
+
+        // Poll until every distinct prompt has been delivered somewhere,
+        // each with its committing Enter.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let mut delivered = 0usize;
+            for key in &keys {
+                let joined = mock
+                    .writes_for(key)
+                    .await
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<u8>>();
+                let text = String::from_utf8_lossy(&joined);
+                if prompts.iter().any(|p| text.contains(p.as_str())) && joined.contains(&b'\r') {
+                    delivered += 1;
+                }
+            }
+            if delivered == N || tokio::time::Instant::now() >= deadline {
+                assert_eq!(
+                    delivered, N,
+                    "only {delivered}/{N} agents received their work prompt + submit",
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Every distinct prompt is present across the sessions — none lost.
+        let mut all_writes = String::new();
+        for key in &keys {
+            let joined = mock
+                .writes_for(key)
+                .await
+                .into_iter()
+                .flatten()
+                .collect::<Vec<u8>>();
+            all_writes.push_str(&String::from_utf8_lossy(&joined));
+        }
+        for prompt in &prompts {
+            assert!(
+                all_writes.contains(prompt.as_str()),
+                "work prompt was dropped: {prompt:?}",
+            );
+        }
+    })
+    .await
+    .expect("deadline");
+}

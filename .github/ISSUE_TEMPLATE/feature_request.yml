@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest an improvement or new capability for pilot.
+description: Suggest an improvement or new capability for lazybox.
 title: "[feature]: "
 labels: ["enhancement"]
 body:
@@ -9,12 +9,12 @@ body:
         Thanks for the idea. Describing the problem you're hitting — not just the
         feature you have in mind — helps us find the right solution. If this is
         more of a question or open-ended discussion, consider starting a
-        [Discussion](https://github.com/AntoineToussaint/pilot/discussions) instead.
+        [Discussion](https://github.com/AntoineToussaint/lazybox/discussions) instead.
   - type: textarea
     id: problem
     attributes:
       label: Problem / motivation
-      description: What are you trying to do, and where does pilot get in the way today?
+      description: What are you trying to do, and where does lazybox get in the way today?
       placeholder: When I have ten workspaces open I can't tell at a glance which ones have failing CI.
     validations:
       required: true
@@ -22,7 +22,7 @@ body:
     id: solution
     attributes:
       label: Proposed solution
-      description: What would you like pilot to do?
+      description: What would you like lazybox to do?
     validations:
       required: true
   - type: textarea

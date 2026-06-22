@@ -30,13 +30,27 @@ impl Sidebar {
         let ci_failing = self.ci_failing_count();
         let review_pending = self.review_pending_count();
 
+        // Right inset reserves the scroll-indicator column (drawn at
+        // `area.width - 2`) plus a one-cell edge margin; the content
+        // ends flush against the indicator with no extra dead gutter.
         let l_pad: u16 = 1;
-        let r_pad: u16 = 3;
+        let r_pad: u16 = 2;
         let inner_width = area.width.saturating_sub(l_pad + r_pad);
 
         // Row 0 — app title + counts.
         let mut header_spans: Vec<Span> = Vec::with_capacity(12);
         header_spans.push(Span::styled(mailbox_label, theme.title(focused)));
+        // Brand-tied build version, so a running instance is identifiable
+        // at a glance (e.g. confirming a fix actually shipped). Only on
+        // the Inbox view, where the title is the app name rather than a
+        // mailbox label.
+        if matches!(self.mailbox, Mailbox::Inbox) {
+            header_spans.push(Span::raw(" "));
+            header_spans.push(Span::styled(
+                concat!("v", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(theme.text_dim),
+            ));
+        }
         header_spans.push(Span::raw("  "));
         header_spans.push(Span::styled(
             count.to_string(),
@@ -331,12 +345,11 @@ impl Sidebar {
                     Line::from(spans)
                 }
                 VisibleRow::KindHeader(kind) => {
-                    // Indented PR/Issue section header, sitting
-                    // between the repo header and the workspace rows
-                    // of that kind. Distinct from `RepoHeader` by
-                    // indent + leading marker; the chip-coloured
-                    // marker mirrors the per-row PR/issue pills so
-                    // the eye lines them up.
+                    // PR/Issue section header, sitting between the repo
+                    // header and the workspace rows of that kind. The
+                    // chip-coloured marker mirrors the per-row PR/issue
+                    // pills and sits at the same inset as the workspace
+                    // type glyph so the eye lines them up.
                     let is_cursor = i == self.cursor;
                     let row_bg = if is_cursor && focused {
                         Some(theme.row_focused())
@@ -358,9 +371,6 @@ impl Sidebar {
                             caret.to_string(),
                             row_bg.unwrap_or_default().fg(theme.text_dim),
                         ),
-                        // Two-space indent so kind headers tuck under
-                        // their parent repo header visually.
-                        Span::raw("  "),
                         Span::styled(format!("{marker} "), row_bg.unwrap_or_default().fg(color)),
                         Span::styled(
                             label,
@@ -371,8 +381,8 @@ impl Sidebar {
                         ),
                     ];
                     if let Some(bg) = row_bg {
-                        // caret + 2-space indent + "X " marker + label.
-                        let used = caret.chars().count() + 2 + 2 + label.chars().count();
+                        // caret + "X " marker + label.
+                        let used = caret.chars().count() + 2 + label.chars().count();
                         if used < row_budget {
                             spans.push(Span::styled(" ".repeat(row_budget - used), bg));
                         }
@@ -404,7 +414,7 @@ impl Sidebar {
                     } else {
                         Style::default().fg(theme.text_dim)
                     };
-                    let prefix = if is_cursor { "      ▸ " } else { "        " };
+                    let prefix = if is_cursor { "    ▸ " } else { "      " };
                     let name_budget = row_budget.saturating_sub(visual_width(prefix));
                     let name_text = truncate_ellipsis(name, name_budget);
                     let used = visual_width(prefix) + visual_width(&name_text);
@@ -437,6 +447,15 @@ impl Sidebar {
 
         let para = Paragraph::new(lines).scroll((self.scroll as u16, 0));
         frame.render_widget(para, inner);
+
+        // First-run / empty-inbox guidance. When the list is genuinely
+        // empty (default Inbox, no filter, no search) the blank pane is
+        // a dead end — replace it with a panel that names the next
+        // actions, foregrounding the worktree-session flow that works
+        // with zero GitHub data (issue #100).
+        if self.is_getting_started() {
+            self.render_getting_started(inner, frame, theme);
+        }
 
         // Scroll-position indicator in the right padding strip —
         // auto-hides when the whole list fits.
@@ -478,6 +497,55 @@ impl Sidebar {
         }
     }
 
+    /// Paint the empty-inbox getting-started panel into the content
+    /// area. Leads with the worktree-session flow (which needs no
+    /// GitHub data) and closes with the orientation shortcuts, so a
+    /// new user with an empty inbox has somewhere to go (issue #100).
+    fn render_getting_started(&self, inner: Rect, frame: &mut Frame, theme: &crate::theme::Theme) {
+        if inner.height < 4 {
+            return;
+        }
+        let heading = Style::default()
+            .fg(theme.text_strong)
+            .add_modifier(Modifier::BOLD);
+        let prose = Style::default().fg(theme.text_dim);
+        let key = Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let label = Style::default().fg(theme.text_dim);
+        // `key` (left-padded to a column) + label, one shortcut per row.
+        let hint = |k: &str, text: &str| {
+            Line::from(vec![
+                Span::styled(format!("  {k:<5}"), key),
+                Span::styled(text.to_string(), label),
+            ])
+        };
+
+        let lines: Vec<Line<'static>> = vec![
+            Line::raw(""),
+            Line::from(Span::styled(" No PRs or issues yet", heading)),
+            Line::raw(""),
+            Line::from(Span::styled(" lazybox also manages your", prose)),
+            Line::from(Span::styled(" git worktrees — spin up an", prose)),
+            Line::from(Span::styled(" agent session per task:", prose)),
+            Line::raw(""),
+            hint("⇧W", "start agent"),
+            hint("n", "new workspace"),
+            hint("⇧N", "pick a repo"),
+            Line::raw(""),
+            Line::from(Span::styled(" or open a tool yourself:", prose)),
+            hint("c", "claude"),
+            hint("s", "shell"),
+            hint("e", "editor"),
+            Line::raw(""),
+            Line::from(Span::styled(" new here?", prose)),
+            hint("?", "help"),
+            hint("⇧T", "tour"),
+            hint("⇧R", "refresh inbox"),
+        ];
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
     /// Build & lay out every visible workspace row in one
     /// `render_table` pass, then scatter the resulting Lines back to
     /// the visible-list indices they belong to.
@@ -506,6 +574,17 @@ impl Sidebar {
             .iter()
             .filter(|r| matches!(r, VisibleRow::Workspace(_)))
             .count();
+        // 1-based jump numbers for the first nine agent workspaces, in
+        // sidebar order — the badge that pairs with the `]]<digit>`
+        // jump. Past the ninth there's no single-digit key, so it gets
+        // no badge.
+        let agent_numbers: std::collections::HashMap<SessionKey, usize> = self
+            .agent_workspace_keys()
+            .into_iter()
+            .take(9)
+            .enumerate()
+            .map(|(i, k)| (k, i + 1))
+            .collect();
         let mut positions: Vec<usize> = Vec::with_capacity(workspace_count);
         let mut rows: Vec<TableRow> = Vec::with_capacity(workspace_count);
         for (i, row) in self.visible.iter().enumerate() {
@@ -534,6 +613,7 @@ impl Sidebar {
                     self.working_spinner_frame,
                 ),
                 badges: self.runner_badges(key),
+                agent_number: agent_numbers.get(key).copied(),
                 ascii_glyphs: self.ascii_glyphs,
             };
             positions.push(i);

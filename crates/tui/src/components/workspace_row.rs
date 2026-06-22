@@ -57,6 +57,13 @@ pub struct WorkspaceRowCtx<'a> {
     pub working_glyph: &'static str,
     /// `Sidebar::runner_badges(key)` — `[('C', n), ('S', m)]` etc.
     pub badges: Vec<(char, usize)>,
+    /// This workspace's 1-based jump number — its slot in the
+    /// sidebar-order agent roster (`Sidebar::agent_workspace_keys`).
+    /// `Some` only for workspaces with a coding agent; rendered as a
+    /// small badge ahead of the agent pill so the user can see which
+    /// `]]<digit>` lands here. `None` for non-agent rows (and for
+    /// agents past the 9th, which have no single-digit jump).
+    pub agent_number: Option<usize>,
     /// Render the type indicator as plain ASCII (`p`/`i`/`l`) instead
     /// of the default unicode glyphs (`⇄`/`○`/`◆`). Wired from
     /// `display.ascii_glyphs` in `~/.lazybox/config.yaml`.
@@ -93,7 +100,9 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///
 /// Order (left → right):
 ///
-/// 0. Prefix — `  ▸ ` (cursor) / `    ` (no cursor).
+/// 0. Prefix — `▸ ` (cursor) / `  ` (no cursor). The caret doubles as
+///    the left inset; rows align under the repo header's disclosure
+///    arrow rather than carrying an extra indent on top of the caret.
 /// 1. Type glyph — `⇄` / `○` / `◆` (or ASCII `p`/`i`/`l`) / blank,
 ///    followed by a single space separator (2 cells total) so the
 ///    row reads `⇄ 312` rather than the cramped `⇄312` — see issues
@@ -151,7 +160,7 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     // title is just a word fragment + `…` and tells you nothing.
     const TITLE_MIN: usize = 20;
     vec![
-        Column::fixed(4),                          // 0: prefix
+        Column::fixed(2),                          // 0: prefix (caret + space)
         Column::fixed(2),                          // 1: type glyph + trailing space separator
         Column::fixed(max_pr_num_width), // 2: pr_num (left-aligned, one space off the glyph)
         Column::fixed(2).priority(P_ROLE), // 3: role (" R" or blank)
@@ -189,7 +198,7 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
 }
 
 fn cell_prefix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let s = if ctx.is_cursor { "  ▸ " } else { "    " };
+    let s = if ctx.is_cursor { "▸ " } else { "  " };
     Cell::from_span(Span::styled(s, ctx.row_style()))
 }
 
@@ -419,11 +428,36 @@ fn cell_unread(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 }
 
 /// Agent-letter pill — pulled from `ctx.badges` (the first
-/// non-`S` entry). Always 3 cells wide; blank when no agent
-/// running. Multi-instance (` C×2 `) widens by 2 cells.
+/// non-`S` entry). Blank when no agent running; multi-instance
+/// (` C×2 `) widens by 2 cells. When the row carries a jump number
+/// (`agent_number`), a dim ` N` prefix rides ahead of the pill —
+/// ` 2 C ` — so the user can see which `]]<digit>` lands here.
 fn cell_badge_agent(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let agent = ctx.badges.iter().find(|(c, _)| *c != 'S').copied();
-    badge_slot_cell(ctx, agent)
+    match (agent, ctx.agent_number) {
+        (Some((letter, n)), Some(num)) => {
+            let count = if n > 1 {
+                format!("×{n}")
+            } else {
+                String::new()
+            };
+            let num_style = if ctx.is_cursor {
+                ctx.row_style()
+            } else {
+                Style::default()
+                    .fg(ctx.theme.text_dim)
+                    .add_modifier(Modifier::BOLD)
+            };
+            Cell::new(vec![
+                Span::styled(format!(" {num}"), num_style),
+                Span::styled(
+                    format!(" {letter}{count} "),
+                    badge_pill_style(ctx.theme, letter),
+                ),
+            ])
+        }
+        _ => badge_slot_cell(ctx, agent),
+    }
 }
 
 fn cell_badge_shell(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -562,6 +596,7 @@ mod tests {
             done: false,
             working_glyph: working_glyph(0),
             badges: vec![],
+            agent_number: None,
             ascii_glyphs: false,
         }
     }
@@ -584,6 +619,35 @@ mod tests {
             .map(|(i, _)| i)
             .collect();
         assert_eq!(flex_indices, vec![5]);
+    }
+
+    /// Regression for issue #121: the row prefix is a 2-cell caret
+    /// column (`▸ ` / `  `), not the old 4-cell caret-plus-indent. The
+    /// caret doubles as the left inset so workspace labels start two
+    /// columns closer to the pane edge.
+    #[test]
+    fn cell_prefix_is_two_cell_caret_without_extra_indent() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+
+        ctx.is_cursor = false;
+        let cell = cell_prefix(&ctx);
+        assert_eq!(cell.width(), 2);
+        assert_eq!(cell_text(&cell), "  ");
+
+        ctx.is_cursor = true;
+        let cell = cell_prefix(&ctx);
+        assert_eq!(cell.width(), 2);
+        assert_eq!(cell_text(&cell), "▸ ");
+
+        // The fixed prefix column matches the cell width so the table
+        // doesn't pad the inset back out.
+        match build_columns(4)[0].width {
+            crate::components::table::ColumnWidth::Fixed(w) => assert_eq!(w, 2),
+            other => panic!("expected Fixed(2) prefix column, got {other:?}"),
+        }
     }
 
     #[test]
@@ -791,6 +855,7 @@ mod tests {
             done: false,
             working_glyph: working_glyph(0),
             badges: vec![],
+            agent_number: None,
             ascii_glyphs: false,
         };
         assert_eq!(cell_type(&ctx).width(), 0);
@@ -880,6 +945,37 @@ mod tests {
         assert_eq!(cell_badge_agent(&ctx).width(), 5);
     }
 
+    /// A jump number prefixes the agent pill (` 2 C `, 5 cells) so the
+    /// `]]<digit>` target is visible; the digit is the `agent_number`.
+    #[test]
+    fn cell_badge_agent_shows_jump_number() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.badges = vec![('C', 1)];
+        ctx.agent_number = Some(2);
+        let cell = cell_badge_agent(&ctx);
+        // ` 2`(2) + ` C `(3) = 5 cells, vs. 3 for the bare pill.
+        assert_eq!(cell.width(), 5);
+        let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains('2'), "jump number missing: {text:?}");
+        assert!(text.contains('C'), "agent letter missing: {text:?}");
+    }
+
+    /// Without a jump number the agent pill stays at its bare ` C ` —
+    /// non-agent rows and agents past the ninth get no badge.
+    #[test]
+    fn cell_badge_agent_no_number_stays_bare() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.badges = vec![('C', 1)];
+        ctx.agent_number = None;
+        assert_eq!(cell_badge_agent(&ctx).width(), 3);
+    }
+
     /// Empty workspace (no task): title falls back to workspace name.
     #[test]
     fn cell_title_falls_back_to_workspace_name_when_no_task() {
@@ -902,6 +998,7 @@ mod tests {
             done: false,
             working_glyph: working_glyph(0),
             badges: vec![],
+            agent_number: None,
             ascii_glyphs: false,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
@@ -1278,6 +1375,7 @@ mod tests {
             done: false,
             working_glyph: working_glyph(0),
             badges: vec![],
+            agent_number: None,
             ascii_glyphs: false,
         };
         let columns = build_columns(4);

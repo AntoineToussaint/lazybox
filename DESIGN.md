@@ -84,8 +84,8 @@ but not in v2.0.
 | Client / daemon communication | **Abstracted behind a `Client` trait so local == in-process.** When client and daemon are in the same process (the common case) the "transport" is a pair of tokio mpsc channels — zero serialization, zero sockets. Only when actually remote does it serialize over a socket. TUI code doesn't branch on local vs remote. |
 | Session wrapper (tmux etc.) | **Abstracted via `SessionWrapper` trait.** `TmuxWrapper` is the default impl. Swappable so we can add `ScreenWrapper`, `ZellijWrapper`, or a no-wrapper "raw PTY" mode later without touching the daemon core. |
 | Remote access | **SSH-tunneled Unix socket.** Server binds `~/.lazybox/v2/daemon.sock`; remote clients connect through `ssh -L`. No TCP, no TLS cert management — SSH is the trust boundary. |
-| Server lifetime | **Long-running service when out-of-process.** First client auto-starts the daemon subprocess; survives client disconnect; `lazybox daemon stop` terminates. Same model as tmux server. For the common in-process case, daemon lives and dies with the TUI. |
-| Binary | **One binary.** `lazybox` with subcommands: `lazybox` (default: TUI + in-process daemon), `lazybox daemon start/stop/status` (manage a standalone daemon), `lazybox server api [addr]` (foreground JSON HTTP API gateway), `lazybox --connect <socket>` (remote TUI, don't start a local daemon). |
+| Server lifetime | **Long-running service when out-of-process.** First client auto-starts the daemon subprocess; survives client disconnect; `lazybox server stop` terminates. Same model as tmux server. For the common in-process case, daemon lives and dies with the TUI. |
+| Binary | **One binary.** `lazybox` with subcommands: `lazybox` (default: TUI + in-process daemon), `lazybox server start/stop/status` (manage a standalone daemon), `lazybox server api [addr]` (foreground JSON HTTP API gateway), `lazybox --connect <socket>` (remote TUI, don't start a local daemon). |
 
 ## Crate layout
 

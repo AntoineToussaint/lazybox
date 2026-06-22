@@ -45,7 +45,7 @@ use std::path::PathBuf;
 /// resolve paths independently — threading a `--profile` arg
 /// through every entry point is a lot of plumbing for the same
 /// outcome. `LAZYBOX_HOME=path lazybox` reads identically to a flag
-/// and works for every subcommand (`lazybox`, `lazybox daemon start`,
+/// and works for every subcommand (`lazybox`, `lazybox server start`,
 /// `lazybox server api`) without per-subcommand wiring.
 pub fn home() -> PathBuf {
     if let Ok(dir) = std::env::var("LAZYBOX_HOME")

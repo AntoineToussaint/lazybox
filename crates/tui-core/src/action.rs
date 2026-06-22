@@ -148,6 +148,24 @@ pub enum Action {
     /// Jump the sidebar cursor to the next workspace whose PR has
     /// failing / mixed CI (`Shift-F`). Wraps around.
     JumpToFailingCi,
+    /// Toggle focus mode — maximize the focused workspace's terminal
+    /// to near-fullscreen behind a slim event header, hiding the
+    /// sidebar and activity pane (`.` from the sidebar, `]]f` from
+    /// inside a terminal). Jump straight to a specific agent with
+    /// `]]<digit>` (sidebar order, top-down).
+    ToggleFocusMode,
+    /// Start a fresh agent session from anywhere (`Shift-W`): pick a
+    /// project, name the workspace, and the daemon creates it and
+    /// spawns the default agent in one step. The zero-friction entry
+    /// point for "I just want to start working" — no need to first
+    /// navigate the sidebar to a project header.
+    StartAgent,
+    /// Show or hide the Activity (right) pane for the focused
+    /// workspace. The pane auto-hides when the workspace has no
+    /// activity worth showing; this reveals it on demand (and
+    /// re-hides it). The override is remembered per workspace for
+    /// the session.
+    ToggleActivityPane,
     /// Begin the two-press quit chord. Single-press from a remap
     /// just fires.
     Quit,
@@ -244,6 +262,9 @@ pub enum ActionKind {
     OpenSettings,
     JumpToAsking,
     JumpToFailingCi,
+    ToggleFocusMode,
+    StartAgent,
+    ToggleActivityPane,
     Quit,
     ResizeSplitter,
     // Terminal
@@ -329,6 +350,9 @@ impl Action {
             Action::OpenSettings => ActionKind::OpenSettings,
             Action::JumpToAsking => ActionKind::JumpToAsking,
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
+            Action::ToggleFocusMode => ActionKind::ToggleFocusMode,
+            Action::StartAgent => ActionKind::StartAgent,
+            Action::ToggleActivityPane => ActionKind::ToggleActivityPane,
             Action::Quit => ActionKind::Quit,
             Action::ResizeSplitter(_) => ActionKind::ResizeSplitter,
             Action::TerminalScroll(_) => ActionKind::TerminalScroll,
@@ -381,7 +405,7 @@ impl ActionDef {
                 kind: ActionKind::OpenTour,
                 default_keys: "Shift-T",
                 label: "tour",
-                describe: "Launch the guided feature walkthrough (inbox, work, snippets, navigation, config).",
+                describe: "Launch the guided onboarding walkthrough (start from scratch, inbox, putting an agent on a task, juggling sessions, config).",
                 section: Section::Global,
             },
             ActionKind::OpenSyncStatus => &Self {
@@ -410,6 +434,27 @@ impl ActionDef {
                 default_keys: "Shift-F",
                 label: "next failing",
                 describe: "Jump the sidebar cursor to the next PR whose CI is failing.",
+                section: Section::Global,
+            },
+            ActionKind::ToggleFocusMode => &Self {
+                kind: ActionKind::ToggleFocusMode,
+                default_keys: ".",
+                label: "focus mode",
+                describe: "Maximize the focused workspace's terminal to near-fullscreen behind a slim event header, hiding the sidebar and activity pane. From inside a terminal use `]]f`; jump straight to agent N with `]]<digit>` (sidebar order). Press again or `]]` to exit.",
+                section: Section::Global,
+            },
+            ActionKind::StartAgent => &Self {
+                kind: ActionKind::StartAgent,
+                default_keys: "Shift-W",
+                label: "start agent",
+                describe: "Pick a project, name a workspace, and start the default agent in it — all in one step, from any pane.",
+                section: Section::Global,
+            },
+            ActionKind::ToggleActivityPane => &Self {
+                kind: ActionKind::ToggleActivityPane,
+                default_keys: "Shift-P",
+                label: "activity pane",
+                describe: "Show or hide the activity pane. It auto-hides when the workspace has no activity; this reveals it on demand and re-hides it.",
                 section: Section::Global,
             },
             ActionKind::Quit => &Self {
@@ -476,8 +521,8 @@ impl ActionDef {
             ActionKind::NewProject => &Self {
                 kind: ActionKind::NewProject,
                 default_keys: "Shift-N",
-                label: "new project",
-                describe: "Create a local project (a top-level container, asks for a name).",
+                label: "new workspace",
+                describe: "Pick a tracked repo to start a workspace on, or create a new local project.",
                 section: Section::Workspace,
             },
             ActionKind::MarkAllRead => &Self {
@@ -685,6 +730,9 @@ impl ActionDef {
             ActionKind::OpenSyncStatus,
             ActionKind::JumpToAsking,
             ActionKind::JumpToFailingCi,
+            ActionKind::ToggleFocusMode,
+            ActionKind::StartAgent,
+            ActionKind::ToggleActivityPane,
             ActionKind::ResizeSplitter,
             ActionKind::Quit,
             // Workspace
@@ -793,13 +841,18 @@ pub enum NamedKey {
     PageDown,
     Delete,
     Insert,
+    /// Function key `F1`..`F12`.
+    Function(u8),
 }
 
 impl NamedKey {
     /// Canonical display label — the same token [`KeyStroke::parse`]
-    /// accepts, so display round-trips back through the parser.
-    pub fn label(self) -> &'static str {
-        match self {
+    /// accepts, so display round-trips back through the parser. Returns
+    /// `Cow` because a function key's label (`F8`) carries its number
+    /// and can't be a `&'static str`.
+    pub fn label(self) -> std::borrow::Cow<'static, str> {
+        use std::borrow::Cow;
+        Cow::Borrowed(match self {
             NamedKey::Tab => "Tab",
             NamedKey::Enter => "Enter",
             NamedKey::Esc => "Esc",
@@ -814,7 +867,8 @@ impl NamedKey {
             NamedKey::PageDown => "PgDn",
             NamedKey::Delete => "Del",
             NamedKey::Insert => "Insert",
-        }
+            NamedKey::Function(n) => return Cow::Owned(format!("F{n}")),
+        })
     }
 }
 
@@ -858,7 +912,7 @@ impl KeyStroke {
                     out.push(c);
                 }
             }
-            ChordCode::Named(n) => out.push_str(n.label()),
+            ChordCode::Named(n) => out.push_str(&n.label()),
         }
         out
     }
@@ -917,6 +971,12 @@ impl KeyStroke {
             "PageDown" | "PgDn" => ChordCode::Named(NamedKey::PageDown),
             "Delete" | "Del" => ChordCode::Named(NamedKey::Delete),
             "Insert" => ChordCode::Named(NamedKey::Insert),
+            // Function keys: `F1`..`F12`.
+            fk if fk.starts_with('F')
+                && fk[1..].parse::<u8>().is_ok_and(|n| (1..=12).contains(&n)) =>
+            {
+                ChordCode::Named(NamedKey::Function(fk[1..].parse().unwrap()))
+            }
             // Single ASCII letter / symbol — uppercase letters
             // mean Shift-letter; lowercase stays as-is. The Shift
             // prefix takes precedence (`"Shift-M"` parses to
@@ -1004,6 +1064,22 @@ impl ActionDef {
     /// resolution, the catalog collision test).
     pub fn default_chord(&self) -> Option<Chord> {
         self.default_chords().into_iter().next()
+    }
+
+    /// Whether this action's keystroke actually fires while the
+    /// terminal pane holds focus.
+    ///
+    /// The terminal forwards every key to the PTY by design
+    /// (`TerminalStack::handle_key`) — only the Terminal-section
+    /// chords (`]]` to leave, scrollback) escape that. So every
+    /// "global" the splash / tour / footer advertise as universally
+    /// available — `?` help, `q q` quit, `Shift-T` tour, settings,
+    /// refresh, cycle-pane — does NOT fire here: the user has to press
+    /// `]]` to return to the sidebar first. Surfaces gate their
+    /// "always available" claims on this so the advertised set can't
+    /// drift from what the terminal really dispatches (issue #114).
+    pub fn available_in_terminal(&self) -> bool {
+        matches!(self.section, Section::Terminal)
     }
 
     /// The guard standing between a keypress and this action firing —
@@ -1151,6 +1227,9 @@ impl ActionKind {
             ActionKind::OpenSettings => "open_settings",
             ActionKind::JumpToAsking => "jump_to_asking",
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
+            ActionKind::ToggleFocusMode => "toggle_focus_mode",
+            ActionKind::StartAgent => "start_agent",
+            ActionKind::ToggleActivityPane => "toggle_activity_pane",
             ActionKind::Quit => "quit",
             ActionKind::ResizeSplitter => "resize_splitter",
             ActionKind::TerminalScroll => "terminal_scroll",
@@ -1471,6 +1550,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // Global / no-workspace-needed actions.
         ActionKind::NewWorkspace
         | ActionKind::NewProject
+        | ActionKind::StartAgent
         | ActionKind::CyclePane
         | ActionKind::Refresh
         | ActionKind::OpenHelp
@@ -1479,11 +1559,38 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenSettings
         | ActionKind::JumpToAsking
         | ActionKind::JumpToFailingCi
+        | ActionKind::ToggleActivityPane
+        | ActionKind::ToggleFocusMode
         | ActionKind::Quit
         | ActionKind::ResizeSplitter
         | ActionKind::TerminalScroll
         | ActionKind::LeaveTerminal => true,
     }
+}
+
+/// The orientation shortcuts lazybox advertises as universally
+/// reachable — help, tour, settings, refresh, cycle-pane, quit. The
+/// splash card, the footer's globals tail, and the `?` help all read
+/// this one list so "always available" can't quietly mean different
+/// things on different surfaces (issue #114). Order is advertise
+/// order, with `quit` last — it's the most important escape hatch, so
+/// it should survive footer truncation on a narrow line.
+///
+/// "Universal" holds from the sidebar / activity panes. From the
+/// terminal pane the PTY eats every key, so each of these needs the
+/// `]]` leave chord first — see [`ActionDef::available_in_terminal`].
+pub fn universal_shortcuts() -> Vec<&'static ActionDef> {
+    [
+        ActionKind::OpenHelp,
+        ActionKind::OpenTour,
+        ActionKind::OpenSettings,
+        ActionKind::Refresh,
+        ActionKind::CyclePane,
+        ActionKind::Quit,
+    ]
+    .into_iter()
+    .map(ActionDef::for_kind)
+    .collect()
 }
 
 #[cfg(test)]
@@ -1604,13 +1711,16 @@ mod tests {
     fn effective_keys_display_returns_override_string() {
         use std::collections::BTreeMap;
         let mut overrides = BTreeMap::new();
-        overrides.insert("refresh".into(), "F5".into());
+        overrides.insert("refresh".into(), "Hyper-Q".into());
         let def = ActionDef::for_kind(ActionKind::Refresh);
-        // F5 doesn't parse as a chord (no Function-key support yet),
-        // so it should fall back to the default — typo guard.
+        // An unparseable override falls back to the default — typo guard.
         assert_eq!(def.effective_keys_display(&overrides), "Shift-R");
 
-        // A parseable override surfaces.
+        // A parseable override surfaces — including function keys, now
+        // that the parser models `F1`..`F12`.
+        overrides.insert("refresh".into(), "F5".into());
+        assert_eq!(def.effective_keys_display(&overrides), "F5");
+
         overrides.insert("refresh".into(), "Ctrl-r".into());
         assert_eq!(def.effective_keys_display(&overrides), "Ctrl-r");
     }
@@ -1835,6 +1945,44 @@ mod tests {
         seconds.sort_by_key(|k| format!("{k:?}"));
         seconds.dedup();
         assert_eq!(before, seconds.len(), "duplicate in-group keys");
+    }
+
+    #[test]
+    fn available_in_terminal_tracks_section() {
+        // The terminal pane forwards every key to the PTY; only its
+        // own section's chords (`]]`, scrollback) survive that. The
+        // predicate must equal "is a Terminal-section action" for
+        // every catalog entry — that equivalence is the single source
+        // of truth every surface gates its terminal claims on (#114).
+        for def in ActionDef::all() {
+            assert_eq!(
+                def.available_in_terminal(),
+                def.section == Section::Terminal,
+                "{:?} availability disagrees with its section",
+                def.kind,
+            );
+        }
+    }
+
+    #[test]
+    fn universal_shortcuts_do_not_fire_in_terminal_focus() {
+        // The lie this issue guards against: the splash / tour / footer
+        // present these as "always available," but in a focused
+        // terminal the PTY eats them. None may report
+        // `available_in_terminal` — the honest contract is "press `]]`
+        // first." The `]]` leave chord is the one that genuinely works.
+        for def in universal_shortcuts() {
+            assert!(
+                !def.available_in_terminal(),
+                "{:?} is advertised as universal but does not fire in a \
+                 focused terminal — surfaces would mislead the user",
+                def.kind,
+            );
+        }
+        assert!(
+            ActionDef::for_kind(ActionKind::LeaveTerminal).available_in_terminal(),
+            "the `]]` leave chord is the gateway back to the globals",
+        );
     }
 
     #[test]

@@ -192,7 +192,7 @@ pub const TERMINAL_MAP_LOCK_ORDER: &str =
 /// `Sender` (clone is a refcount), `agents` is a small struct.
 ///
 /// Per-process invariant: there is exactly **one** `ServerConfig` for
-/// the whole process. Both `run_embedded` and `lazybox daemon start`
+/// the whole process. Both `run_embedded` and `lazybox server start`
 /// build it once at startup so the polling loop's `SessionUpserted`
 /// events reach every connected TUI.
 #[derive(Clone)]
@@ -276,6 +276,10 @@ pub struct ServerConfig {
     /// by the registering inject task; the pump also sweeps on
     /// `TerminalExited`.
     pub prompt_submit_signals: Arc<Mutex<HashMap<TerminalId, Arc<tokio::sync::Notify>>>>,
+    /// Factory for a structured agent run's underlying process I/O.
+    /// Defaults to spawning a real subprocess; tests swap in an
+    /// in-memory fake so they never launch `claude` or a shell.
+    pub agent_stream_spawner: Arc<dyn agent_stream::AgentStreamSpawner>,
     /// Structured stream-json agent runs. Keyed by wire-side run id.
     pub agent_runs: Arc<Mutex<HashMap<AgentRunId, agent_runs::AgentRunHandle>>>,
     /// Process-wide structured run id allocator.
@@ -448,6 +452,7 @@ impl ServerConfig {
             agent_detect_resets: Arc::new(Mutex::new(HashSet::new())),
             hook_driven_terminals: Arc::new(Mutex::new(HashMap::new())),
             prompt_submit_signals: Arc::new(Mutex::new(HashMap::new())),
+            agent_stream_spawner: Arc::new(agent_stream::ProcessAgentStreamSpawner),
             agent_runs: Arc::new(Mutex::new(HashMap::new())),
             next_agent_run_id: Arc::new(AtomicU64::new(1)),
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),
@@ -586,6 +591,7 @@ impl Server {
                         lazybox_ipc::Command::Subscribe => "Subscribe",
                         lazybox_ipc::Command::Refresh => "Refresh",
                         lazybox_ipc::Command::Write { .. } => "Write",
+                        lazybox_ipc::Command::RecordUserMessage { .. } => "RecordUserMessage",
                         lazybox_ipc::Command::Resize { .. } => "Resize",
                         lazybox_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
                         lazybox_ipc::Command::MarkRead { .. } => "MarkRead",
@@ -767,6 +773,14 @@ impl Server {
                         lazybox_ipc::Command::Write { terminal_id, bytes } => {
                             spawn_handler::handle_write(&self.config, terminal_id, &bytes).await;
                         }
+                        lazybox_ipc::Command::RecordUserMessage { terminal_id, message } => {
+                            spawn_handler::handle_record_user_message(
+                                &self.config,
+                                terminal_id,
+                                &message,
+                            )
+                            .await;
+                        }
                         lazybox_ipc::Command::InjectPrompt {
                             terminal_id,
                             prompt,
@@ -922,8 +936,41 @@ impl Server {
                             );
                             polling::unmark_activity_read(&self.config, &key, index);
                         }
-                        lazybox_ipc::Command::CreateWorkspace { name, project_key } => {
-                            polling::create_empty_workspace(&self.config, &name, project_key);
+                        lazybox_ipc::Command::CreateWorkspace {
+                            name,
+                            project_key,
+                            spawn_agent,
+                        } => {
+                            // create_empty_workspace runs inline (cheap
+                            // store write) and returns the final key —
+                            // which may carry a `-2` collision suffix, so
+                            // the client can't predict it. When the caller
+                            // asked to land in a live session, chain the
+                            // spawn here off that returned key rather than
+                            // round-tripping through the client.
+                            let key =
+                                polling::create_empty_workspace(&self.config, &name, project_key);
+                            if let Some(agent_id) = spawn_agent {
+                                // Detach — same worktree-provision (cold
+                                // `git clone --bare`) exposure as a bare
+                                // Spawn; never block the serve loop on it.
+                                // Bare interactive spawn (no prompt) keeps
+                                // the human-in-the-loop approval gate.
+                                let cfg = self.config.clone();
+                                let session_key: lazybox_core::SessionKey = (&key).into();
+                                mutations.spawn(async move {
+                                    spawn_handler::handle_spawn(
+                                        &cfg,
+                                        session_key,
+                                        None,
+                                        lazybox_ipc::TerminalKind::Agent(agent_id),
+                                        None,
+                                        None,
+                                        false,
+                                    )
+                                    .await;
+                                });
+                            }
                         }
                         lazybox_ipc::Command::CreateProject { name } => {
                             polling::create_local_project(&self.config, &name);

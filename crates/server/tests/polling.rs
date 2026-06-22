@@ -3355,6 +3355,259 @@ async fn collapse_into_pr_is_noop_when_no_claiming_pr_known() {
     assert!(config.store.get_workspace(&issue_key).unwrap().is_some());
 }
 
+/// Seed an issue workspace carrying `n` distinct session records and
+/// return its key alongside the ids. Sessions are DEAD records (no
+/// live terminal registered) so the silent auto-merge path absorbs
+/// them without prompting. Each session gets a unique worktree path +
+/// `created_at` so the post-absorb path migration treats them as
+/// genuinely separate worktrees.
+async fn seed_issue_with_n_sessions(
+    config: &ServerConfig,
+    issue_short_key: &str,
+    n: usize,
+) -> (lazybox_core::WorkspaceKey, Vec<lazybox_core::SessionId>) {
+    use lazybox_core::{SessionKind, WorkspaceKey, WorkspaceSession};
+    polling::upsert(config, make_issue_task(issue_short_key)).await;
+    let issue_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_issue_task(
+        issue_short_key,
+    )));
+    let mut issue_ws: lazybox_core::Workspace = {
+        let record = config.store.get_workspace(&issue_key).unwrap().unwrap();
+        serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
+    };
+    let mut ids = Vec::with_capacity(n);
+    for i in 0..n {
+        let session_id = lazybox_core::SessionId::new();
+        ids.push(session_id);
+        issue_ws.add_session(WorkspaceSession {
+            id: session_id,
+            workspace_key: issue_key.clone(),
+            name: format!("claude-{i}"),
+            kind: SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            state: lazybox_core::SessionRunState::Active,
+            worktree_path: std::path::PathBuf::from(format!(
+                "/tmp/lazybox-test/{}-{i}",
+                issue_key.as_str()
+            )),
+            created_at: Utc::now() + chrono::Duration::seconds(i as i64),
+            last_output_at: None,
+            layout: lazybox_core::SessionLayout::default(),
+        });
+    }
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: issue_key.as_str().to_string(),
+            created_at: issue_ws.created_at,
+            workspace_json: Some(serde_json::to_string(&issue_ws).unwrap()),
+        })
+        .unwrap();
+    (issue_key, ids)
+}
+
+#[tokio::test]
+async fn combining_multiple_issues_with_multiple_sessions_preserves_every_session() {
+    // Regression for #161 (data loss): a PR that closes SEVERAL issues,
+    // each carrying SEVERAL sessions, must fold every issue workspace
+    // into the PR and carry ALL N×M sessions across. PR #90 only
+    // covered the single-issue / single-session join; the multi-issue,
+    // multi-session combine is what dropped sessions.
+    use lazybox_core::WorkspaceKey;
+
+    let config = ServerConfig::in_memory();
+
+    const N_ISSUES: usize = 3;
+    const M_SESSIONS: usize = 2;
+
+    let issue_short_keys = ["o/r#71", "o/r#72", "o/r#73"];
+    let mut expected_ids: Vec<lazybox_core::SessionId> = Vec::new();
+    let mut issue_keys: Vec<WorkspaceKey> = Vec::new();
+    for short in issue_short_keys.iter().take(N_ISSUES) {
+        let (issue_key, ids) = seed_issue_with_n_sessions(&config, short, M_SESSIONS).await;
+        expected_ids.extend(ids);
+        issue_keys.push(issue_key);
+    }
+    assert_eq!(expected_ids.len(), N_ISSUES * M_SESSIONS);
+
+    // One PR closing all N issues — the "combine multiple issues into a
+    // PR" event. Drives the silent auto-merge path (no live terminals).
+    let pr = make_pr_closing("o/r#141", &issue_short_keys[..N_ISSUES]);
+    polling::upsert(&config, pr.clone()).await;
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&pr));
+
+    // Every issue row collapsed away.
+    for issue_key in &issue_keys {
+        assert!(
+            config.store.get_workspace(issue_key).unwrap().is_none(),
+            "issue workspace {issue_key} must be removed after combine",
+        );
+    }
+
+    // The PR workspace must hold all N×M sessions, each rekeyed onto it.
+    let pr_ws: lazybox_core::Workspace = {
+        let record = config.store.get_workspace(&pr_key).unwrap().unwrap();
+        serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
+    };
+    assert_eq!(
+        pr_ws.sessions.len(),
+        N_ISSUES * M_SESSIONS,
+        "all {} sessions must survive the combine, found {}",
+        N_ISSUES * M_SESSIONS,
+        pr_ws.sessions.len(),
+    );
+    for id in &expected_ids {
+        let moved = pr_ws
+            .sessions
+            .iter()
+            .find(|s| s.id == *id)
+            .unwrap_or_else(|| panic!("session {id} lost during combine"));
+        assert_eq!(
+            moved.workspace_key, pr_key,
+            "session {id} must be rekeyed onto the PR workspace",
+        );
+    }
+}
+
+/// Register a live terminal bound to `key`'s session_key — the
+/// in-memory `terminal_meta`/`terminals` maps AND the persisted
+/// `terminal:{backend_key}` record `recover_sessions` reads at
+/// startup — exactly as `handle_spawn` would have left it. Returns
+/// the backend key so the caller can assert the persisted record
+/// followed the merge.
+async fn attach_live_terminal_persisted(
+    config: &ServerConfig,
+    key: &lazybox_core::WorkspaceKey,
+    terminal_id: u64,
+    backend_key: &str,
+) {
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{TerminalId, TerminalKind};
+    let session_key: SessionKey = key.into();
+    config.terminal_meta.lock().await.insert(
+        TerminalId(terminal_id),
+        (session_key.clone(), TerminalKind::Shell),
+    );
+    config
+        .terminals
+        .lock()
+        .await
+        .insert(TerminalId(terminal_id), backend_key.to_string());
+    config
+        .store
+        .set_kv(
+            &format!("terminal:{backend_key}"),
+            &serde_json::to_string(&(session_key.as_str(), TerminalKind::Shell)).unwrap(),
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn combining_multiple_issues_with_live_sessions_rebadges_every_terminal() {
+    // Regression for #161 (data loss), live-terminal variant: combining
+    // SEVERAL issues that each carry SEVERAL LIVE sessions must carry
+    // every terminal onto the PR — in memory AND in the persisted
+    // records `recover_sessions` reads at startup. A live terminal
+    // stalls the silent auto-merge behind a per-issue confirm prompt;
+    // the user accepting each one drives `handle_confirm_merge`. This is
+    // the path that exercises `rebadge_terminals` with more than one
+    // terminal per issue — the case PR #90 never covered.
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::{TerminalId, TerminalKind};
+
+    let config = ServerConfig::in_memory();
+
+    let issue_short_keys = ["o/r#71", "o/r#72"];
+    let mut expected_session_ids: Vec<lazybox_core::SessionId> = Vec::new();
+    let mut issue_keys: Vec<WorkspaceKey> = Vec::new();
+    // (terminal_id, backend_key) for every live terminal we stand up.
+    let mut terminals: Vec<(u64, String)> = Vec::new();
+
+    let mut next_terminal_id = 1u64;
+    for (issue_idx, short) in issue_short_keys.iter().enumerate() {
+        // Two dead-but-recoverable session records per issue…
+        let (issue_key, ids) = seed_issue_with_n_sessions(&config, short, 2).await;
+        expected_session_ids.extend(ids);
+        // …plus two LIVE terminals per issue.
+        for term_in_issue in 0..2 {
+            let backend_key = format!("lazybox-test-{issue_idx}-{term_in_issue}");
+            attach_live_terminal_persisted(&config, &issue_key, next_terminal_id, &backend_key)
+                .await;
+            terminals.push((next_terminal_id, backend_key));
+            next_terminal_id += 1;
+        }
+        issue_keys.push(issue_key);
+    }
+
+    // PR closing both issues.
+    let pr = make_pr_closing("o/r#141", &issue_short_keys);
+    polling::upsert(&config, pr.clone()).await;
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&pr));
+    let pr_session_key: SessionKey = (&pr_key).into();
+
+    // User accepts the per-issue merge prompt for each combined issue.
+    for issue_key in &issue_keys {
+        polling::handle_confirm_merge(&config, issue_key.clone(), pr_key.clone(), true).await;
+    }
+
+    // Every issue row is gone…
+    for issue_key in &issue_keys {
+        assert!(
+            config.store.get_workspace(issue_key).unwrap().is_none(),
+            "issue workspace {issue_key} must be removed after combine",
+        );
+    }
+
+    // …all session records survive on the PR…
+    let pr_ws: lazybox_core::Workspace = {
+        let record = config.store.get_workspace(&pr_key).unwrap().unwrap();
+        serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
+    };
+    assert_eq!(
+        pr_ws.sessions.len(),
+        expected_session_ids.len(),
+        "every session record must survive the combine",
+    );
+    for id in &expected_session_ids {
+        assert!(
+            pr_ws.sessions.iter().any(|s| s.id == *id),
+            "session {id} lost during combine",
+        );
+    }
+
+    // …every live terminal followed onto the PR, in memory…
+    {
+        let meta = config.terminal_meta.lock().await;
+        for (tid, _) in &terminals {
+            let entry = meta
+                .get(&TerminalId(*tid))
+                .unwrap_or_else(|| panic!("terminal {tid} dropped during combine"));
+            assert_eq!(
+                entry.0, pr_session_key,
+                "terminal {tid} must repoint at the PR after combine",
+            );
+        }
+    }
+
+    // …and in the persisted records `recover_sessions` reads at startup
+    // (else a restart reattaches each terminal under its deleted issue
+    // workspace and the session is lost).
+    for (tid, backend_key) in &terminals {
+        let raw = config
+            .store
+            .get_kv(&format!("terminal:{backend_key}"))
+            .unwrap()
+            .unwrap_or_else(|| panic!("persisted record for terminal {tid} must survive"));
+        let (persisted_key, _kind): (String, TerminalKind) = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            persisted_key,
+            pr_session_key.as_str(),
+            "persisted record for terminal {tid} must follow the session to the PR",
+        );
+    }
+}
+
 /// `delete_project` on a project with NO workspaces still removes
 /// the project record and fires `ProjectRemoved`. Covers the "user
 /// just made a local project, hasn't added a workspace yet, presses

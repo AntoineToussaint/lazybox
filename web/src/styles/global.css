@@ -42,6 +42,8 @@
 
 html {
   scroll-behavior: smooth;
+  /* Keep section headings clear of the sticky 4rem nav on anchor jumps. */
+  scroll-padding-top: 5rem;
   -webkit-text-size-adjust: 100%;
 }
 

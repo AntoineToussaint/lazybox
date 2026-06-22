@@ -1,8 +1,11 @@
-//! `Tour` — the in-app feature walkthrough (issue #146).
+//! `Tour` — the in-app onboarding walkthrough (issue #146, #112).
 //!
-//! A skippable, stepped overlay card that introduces lazybox's
-//! highlights: the inbox + attention signals, spawning work, the
-//! snippet system (`]<key>`), navigation, and where config lives.
+//! A skippable, stepped overlay card built around the workflows a
+//! first-time user actually runs: starting a worktree-backed session
+//! from scratch, triaging the inbox, putting an agent on a task,
+//! juggling several sessions, and shipping. Each card is a short
+//! user story rather than a feature dump, and the flow works even
+//! from an empty inbox (a fresh user has no row to act on yet).
 //!
 //! Launched automatically the first time lazybox boots into the panes
 //! (tracked by `~/.lazybox/config.yaml::ui.tour_seen`) and re-invocable
@@ -16,7 +19,9 @@ use crate::realm::Msg;
 use crate::realm::UserEvent;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
-use tuirealm::event::{Event, Key, KeyEvent, KeyModifiers};
+use tuirealm::event::{
+    Event, Key, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
@@ -25,8 +30,10 @@ use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tuirealm::state::State;
 
 /// One tour card: a heading plus the body lines under it. Body keeps
-/// inline key hints (`]<key>`, `w`, `Tab`) as plain text — the
+/// inline key hints (`w`, `Tab`, `Shift-N`) as plain text — the
 /// default bindings are stable and a card reads cleaner than a table.
+/// Keys mirror the action catalog (`lazybox_tui_core::action`); when a
+/// binding moves there, update the matching hint here.
 struct TourStep {
     title: &'static str,
     body: &'static [&'static str],
@@ -36,80 +43,102 @@ const STEPS: &[TourStep] = &[
     TourStep {
         title: "Welcome to lazybox",
         body: &[
-            "A reactive PR inbox in your terminal. Instead of polling",
-            "GitHub, events flow to you — new comments, CI failures and",
-            "review requests surface automatically, with read/unread",
-            "tracking.",
+            "lazybox turns work into sessions: every task gets its own",
+            "git worktree with an agent (Claude Code) or a shell running",
+            "in it — and lazybox hides the worktree juggling for you.",
             "",
-            "This quick tour shows the highlights. Step through with",
-            "→ / Enter, go back with ←, or press Esc to skip — you can",
-            "re-open it any time with Shift-T.",
+            "Track GitHub repos and their PRs/issues flow into your",
+            "inbox, but you don't need any of that to start — a",
+            "worktree-backed session works from an empty inbox too.",
+            "",
+            "Keyboard or mouse — lazybox drives fully with either.",
+            "Step with → / Enter (or click below); ← goes back,",
+            "Esc skips. Re-open this tour any time with Shift-T.",
         ],
     },
     TourStep {
-        title: "1 · The inbox",
+        title: "1 · Start from scratch",
         body: &[
-            "The sidebar is your inbox: PRs and Issues across every",
-            "scope you subscribed to, grouped by repo.",
+            "Empty inbox? Here's a first move that needs no PRs:",
             "",
-            "Rows carry attention signals so you can triage at a glance:",
+            "  Shift-N   new project (register a repo or local space)",
+            "  n         new workspace inside it",
+            "  c / s     start Claude Code, or a plain shell in it",
+            "",
+            "You land in a fresh git worktree + session, zero setup.",
+            "",
+            "In a hurry? Shift-W does project → workspace → agent in",
+            "one step, from any pane.",
+        ],
+    },
+    TourStep {
+        title: "2 · Your inbox",
+        body: &[
+            "Once you track GitHub repos, PRs and issues flow in,",
+            "grouped by repo and sorted by what needs you.",
+            "",
+            "Rows carry attention signals so you triage at a glance:",
             "  • CI failing            • review pending",
-            "  • input-needed (agent asking)   • unread activity",
+            "  • agent asking          • unread activity",
             "",
-            "j / k move the cursor; Enter opens a row; / searches.",
+            "↑ / ↓ move    Enter opens    / searches",
+            "Shift-S cycles mailboxes: Inbox → Inactive → Snoozed.",
+            "",
+            "Prefer the mouse? lazybox is fully clickable:",
+            "  • click a pane to focus it, a row to select it",
+            "  • drag the splitters to resize, wheel scrolls back",
+            "  • right-click a link in a terminal to open it",
         ],
     },
     TourStep {
-        title: "2 · Spawn work on an item",
+        title: "3 · Put an agent on it",
         body: &[
-            "Press w on a row to start working on it. lazybox spins up a",
-            "git worktree and launches the default agent (Claude Code)",
-            "with a contextual prompt — fix the failing CI, address the",
-            "review, implement the issue.",
+            "Press w on any row and lazybox opens a worktree, then",
+            "launches Claude Code with a prompt fit to the task. A few",
+            "ways that plays out:",
             "",
-            "The agent runs in the embedded terminal pane on the right.",
-            "c / x / u spawn a specific agent; s opens a plain shell.",
+            "  • A PR you review has failing CI → Shift-F jumps to it,",
+            "    then w lets the agent fix the build.",
+            "  • An open issue → w starts an agent to implement it.",
+            "  • A scratch idea on a repo you track → n then c, done.",
+            "",
+            "c / x / u pick the agent (Claude / Codex / Cursor); s is a",
+            "plain shell; e opens the worktree in your editor.",
         ],
     },
     TourStep {
-        title: "3 · Snippets — ]<key>",
+        title: "4 · Juggle many sessions",
         body: &[
-            "Inside a terminal, press ] then a snippet key to expand a",
-            "pre-defined prompt and auto-send it to the agent. Type the",
-            "key to filter; a unique match fires instantly (so ]rev",
-            "sends your review prompt in three keystrokes).",
+            "Every task is its own worktree-backed session, so you can",
+            "run several at once without minding the git plumbing.",
             "",
-            "Starter snippets ship out of the box — rev (review the",
-            "diff) and pr (open a PR with summary + test plan).",
+            "  !          jump to the next agent waiting on your input",
+            "  Shift-A    adopt worktrees/agents you started elsewhere",
+            "  Tab        cycle the sidebar, activity and terminal panes",
             "",
-            "Add your own in ~/.lazybox/snippets.yaml (global) or a repo's",
-            ".lazybox/snippets.yaml (checked in, shared with the team).",
+            "The agent runs live in the terminal pane on the right while",
+            "new events keep flowing into the sidebar.",
         ],
     },
     TourStep {
-        title: "4 · Navigation & layout",
+        title: "5 · Ship it & make it yours",
         body: &[
-            "Tab cycles focus between the sidebar, activity and terminal",
-            "panes. Shift+arrows resize the splitters; mouse-drag works",
-            "too.",
+            "When a PR is ready, press g — a which-key menu pops up",
+            "showing everything you can do to this PR:",
             "",
-            "! jumps to the next agent waiting on input; Shift-F jumps",
-            "to the next failing PR. ? opens the full keymap any time.",
-        ],
-    },
-    TourStep {
-        title: "5 · Where config lives",
-        body: &[
-            "Everything is plain YAML you can hand-edit:",
+            "  g m  merge PR    g v  reviewers   g a  assignees",
+            "  g l  labels      g o  open in browser",
             "",
-            "  ~/.lazybox/config.yaml    scopes, agents, UI, keybindings",
-            "  ~/.lazybox/snippets.yaml  your global snippet library",
-            "  <repo>/.lazybox/snippets.yaml   repo-local snippets",
+            "g shows the menu; the second key picks. The old",
+            "Shift-M/V/G/L/O keys still work as direct aliases.",
             "",
-            "Press , for the in-app Settings palette.",
+            "? shows the full keymap, , Settings, q q quits. In a",
+            "terminal keys go to the agent — press ]] to return first.",
             "",
-            "That's the tour — press Enter to finish. Re-open with",
-            "Shift-T whenever you want a refresher.",
+            "It's all plain YAML in ~/.lazybox/config.yaml: scopes,",
+            "agents, keybindings.",
+            "",
+            "That's the tour — Enter to finish, Shift-T to re-open it.",
         ],
     },
 ];
@@ -117,15 +146,36 @@ const STEPS: &[TourStep] = &[
 pub struct Tour {
     /// Index into [`STEPS`]. Always in range — navigation clamps.
     cursor: usize,
+    /// Footer hit-boxes recorded by `view`, consumed by `on_mouse` so
+    /// an all-mouse user can click through the tour. `None` until the
+    /// first render.
+    back_btn: Option<Rect>,
+    next_btn: Option<Rect>,
+    skip_btn: Option<Rect>,
 }
 
 impl Tour {
     pub fn new() -> Self {
-        Self { cursor: 0 }
+        Self {
+            cursor: 0,
+            back_btn: None,
+            next_btn: None,
+            skip_btn: None,
+        }
     }
 
     fn is_last(&self) -> bool {
         self.cursor + 1 >= STEPS.len()
+    }
+
+    /// Step forward, finishing once we move past the last card.
+    fn advance(&mut self) -> Option<Msg> {
+        if self.is_last() {
+            Some(Msg::TourFinished)
+        } else {
+            self.cursor += 1;
+            None
+        }
     }
 
     /// Pure key handler — kept a method so tests can drive it without
@@ -136,15 +186,8 @@ impl Tour {
             return Some(Msg::TourFinished);
         }
         match key.code {
-            // Advance — and finish once we step past the last card.
-            Key::Right | Key::Enter | Key::Char(' ' | 'n' | 'l') => {
-                if self.is_last() {
-                    Some(Msg::TourFinished)
-                } else {
-                    self.cursor += 1;
-                    None
-                }
-            }
+            // Arrow keys lead; j/k-style aliases stay for muscle memory.
+            Key::Right | Key::Enter | Key::Char(' ' | 'n' | 'l') => self.advance(),
             Key::Left | Key::Backspace | Key::Char('p' | 'h') => {
                 self.cursor = self.cursor.saturating_sub(1);
                 None
@@ -152,6 +195,32 @@ impl Tour {
             Key::Char('q') => Some(Msg::TourFinished),
             _ => None,
         }
+    }
+
+    /// Pure mouse handler — only left button-down reaches a mounted
+    /// modal (drag/scroll are filtered upstream). Skip/Back hit their
+    /// footer boxes; any other click advances, so a mouse-only user can
+    /// click anywhere on the card to step forward.
+    pub fn on_mouse(&mut self, ev: &MouseEvent) -> Option<Msg> {
+        if !matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return None;
+        }
+        let hit = |b: Option<Rect>| {
+            b.is_some_and(|r| {
+                ev.column >= r.x
+                    && ev.column < r.x + r.width
+                    && ev.row >= r.y
+                    && ev.row < r.y + r.height
+            })
+        };
+        if hit(self.skip_btn) {
+            return Some(Msg::TourFinished);
+        }
+        if hit(self.back_btn) {
+            self.cursor = self.cursor.saturating_sub(1);
+            return None;
+        }
+        self.advance()
     }
 }
 
@@ -215,24 +284,51 @@ impl Component for Tour {
         }
         frame.render_widget(Paragraph::new(lines), body_rect);
 
-        let progress = format!("step {}/{}", self.cursor + 1, STEPS.len());
-        let next_label = if self.is_last() { "finish" } else { "next" };
-        let help = Line::from(vec![
-            Span::styled(
-                format!("  {progress}   "),
-                Style::default().fg(theme.text_dim),
-            ),
-            Span::styled("→/Enter", Style::default().fg(theme.success).bold()),
-            Span::styled(
-                format!(" {next_label}  "),
-                Style::default().fg(theme.text_dim),
-            ),
-            Span::styled("←", Style::default().fg(theme.accent).bold()),
-            Span::styled(" back  ", Style::default().fg(theme.text_dim)),
-            Span::styled("Esc", Style::default().fg(theme.error).bold()),
-            Span::styled(" skip", Style::default().fg(theme.text_dim)),
-        ]);
-        frame.render_widget(Paragraph::new(help), help_rect);
+        // Footer buttons. Each is rendered AND recorded as a hit-box so
+        // `on_mouse` can route clicks — the tour is fully mouse-drivable.
+        let mut spans: Vec<Span> = Vec::new();
+        let mut x = help_rect.x;
+        let push = |spans: &mut Vec<Span>, x: &mut u16, text: String, style: Style| -> Rect {
+            let w = text.chars().count() as u16;
+            let rect = Rect::new(*x, help_rect.y, w, 1);
+            spans.push(Span::styled(text, style));
+            *x += w;
+            rect
+        };
+
+        push(
+            &mut spans,
+            &mut x,
+            format!("  step {}/{}   ", self.cursor + 1, STEPS.len()),
+            Style::default().fg(theme.text_dim),
+        );
+        self.back_btn = Some(push(
+            &mut spans,
+            &mut x,
+            " ← Back ".to_string(),
+            Style::default().fg(theme.accent).bold(),
+        ));
+        push(&mut spans, &mut x, "  ".to_string(), Style::default());
+        let next_label = if self.is_last() {
+            " Finish "
+        } else {
+            " Next → "
+        };
+        self.next_btn = Some(push(
+            &mut spans,
+            &mut x,
+            next_label.to_string(),
+            Style::default().fg(theme.success).bold(),
+        ));
+        push(&mut spans, &mut x, "  ".to_string(), Style::default());
+        self.skip_btn = Some(push(
+            &mut spans,
+            &mut x,
+            " Esc Skip ".to_string(),
+            Style::default().fg(theme.error).bold(),
+        ));
+
+        frame.render_widget(Paragraph::new(Line::from(spans)), help_rect);
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -251,6 +347,7 @@ impl AppComponent<Msg, UserEvent> for Tour {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
         match ev {
             Event::Keyboard(key) => self.on_key(key),
+            Event::Mouse(m) => self.on_mouse(m),
             _ => None,
         }
     }
@@ -264,12 +361,184 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn click(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Render a tour at `cursor` and hand back the instance — the
+    /// footer hit-boxes are only populated after a `view` pass.
+    fn rendered_tour(cursor: usize) -> Tour {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        let mut t = Tour::new();
+        t.cursor = cursor;
+        let (w, h) = (90u16, 30u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| t.view(f, Rect::new(0, 0, w, h))).unwrap();
+        t
+    }
+
+    fn center(r: Rect) -> (u16, u16) {
+        (r.x + r.width / 2, r.y)
+    }
+
+    /// Render the card at `cursor` into a throwaway backend and return
+    /// the visible text — the snapshot surface for the step content.
+    fn render_step(cursor: usize) -> String {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        let mut t = Tour::new();
+        t.cursor = cursor;
+        let (w, h) = (90u16, 30u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| t.view(f, Rect::new(0, 0, w, h))).unwrap();
+        let buf = term.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                let mut row = String::new();
+                for x in 0..buf.area.width {
+                    row.push_str(buf[(x, y)].symbol());
+                }
+                row.trim_end().to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The whole tour rendered top to bottom — one string to scan for
+    /// content invariants that span steps.
+    fn render_all() -> String {
+        (0..STEPS.len())
+            .map(render_step)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn steps_are_non_empty() {
         assert!(!STEPS.is_empty());
         for s in STEPS {
             assert!(!s.title.is_empty());
             assert!(!s.body.is_empty());
+        }
+    }
+
+    #[test]
+    fn body_lines_fit_the_modal_width() {
+        // The card is 68 cols wide with a 2-space gutter, so a body
+        // line over ~62 chars would clip. Guard the new copy.
+        for s in STEPS {
+            for l in s.body {
+                assert!(
+                    l.chars().count() <= 62,
+                    "step {:?} line too wide ({}): {l:?}",
+                    s.title,
+                    l.chars().count(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn covers_from_scratch_entry_points() {
+        // A fresh user with an empty inbox must see a first move that
+        // needs no pre-existing row: new project / new workspace.
+        let all = render_all();
+        assert!(all.contains("Shift-N"), "new-project key missing");
+        assert!(all.contains("new workspace"), "new-workspace step missing");
+        assert!(
+            all.contains("Start from scratch"),
+            "from-scratch step missing",
+        );
+    }
+
+    #[test]
+    fn mentions_adopt_sessions() {
+        assert!(
+            render_all().contains("Shift-A"),
+            "adopt-sessions key missing"
+        );
+    }
+
+    #[test]
+    fn snippets_step_is_gone() {
+        // Snippets are a power-user feature; onboarding shouldn't carry
+        // them. Guard against the step creeping back in.
+        let all = render_all().to_lowercase();
+        assert!(
+            !all.contains("snippet"),
+            "snippets leaked back into the tour"
+        );
+        assert!(!all.contains("]<key>"), "snippet leader hint still present");
+    }
+
+    #[test]
+    fn key_hints_match_the_action_catalog() {
+        use lazybox_tui_core::action::{ActionDef, ActionKind};
+        // Each hint shown in the tour must be the catalog's current
+        // default for that action — the catalog is the source of truth.
+        let all = render_all();
+        for (kind, hint) in [
+            (ActionKind::NewProject, "Shift-N"),
+            (ActionKind::NewWorkspace, "n"),
+            (ActionKind::AdoptSessions, "Shift-A"),
+            (ActionKind::JumpToAsking, "!"),
+            (ActionKind::JumpToFailingCi, "Shift-F"),
+            (ActionKind::StartAgent, "Shift-W"),
+            (ActionKind::CyclePane, "Tab"),
+        ] {
+            assert_eq!(
+                ActionDef::for_kind(kind).default_keys,
+                hint,
+                "catalog default for {kind:?} drifted from the tour hint",
+            );
+            assert!(all.contains(hint), "tour no longer shows {hint}");
+        }
+    }
+
+    #[test]
+    fn github_leader_demo_matches_the_catalog() {
+        use lazybox_tui_core::action::{ActionDef, ActionKind};
+        // The ship-it step demonstrates the g leader as a menu, and its
+        // chords + labels must be the catalog's — so the demo can't
+        // drift from the live keymap (issue #145, #114).
+        let all = render_all();
+        assert!(
+            all.contains("press g"),
+            "tour no longer frames g as a which-key menu"
+        );
+        // The github actions carry their `g <key>` leader as a catalog
+        // chord now (ActionGroup is gone); read it straight off the def.
+        let github = [
+            ActionKind::MergePr,
+            ActionKind::RequestReviewers,
+            ActionKind::AddAssignees,
+            ActionKind::ManageLabels,
+            ActionKind::OpenInBrowser,
+        ];
+        for kind in github {
+            let def = ActionDef::for_kind(kind);
+            let chord = def
+                .default_chords()
+                .into_iter()
+                .find_map(|c| match c {
+                    lazybox_tui_core::action::Chord::Seq(strokes) if strokes.len() == 2 => {
+                        Some(format!("{} {}", strokes[0].display(), strokes[1].display()))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{kind:?} missing a leader sequence"));
+            assert!(all.contains(&chord), "tour missing leader chord {chord}");
+            assert!(
+                all.contains(def.label),
+                "tour missing label {:?} for {chord}",
+                def.label
+            );
         }
     }
 
@@ -309,5 +578,77 @@ mod tests {
         let mut t = Tour::new();
         let ev = KeyEvent::new(Key::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(t.on_key(&ev), Some(Msg::TourFinished));
+    }
+
+    #[test]
+    fn leads_with_arrow_keys_not_jk() {
+        // The inbox step taught navigation with `j / k`; onboarding now
+        // leads with the arrow keys most newcomers reach for.
+        let all = render_all();
+        assert!(all.contains("↑ / ↓ move"), "arrow-key nav hint missing");
+        assert!(
+            !all.contains("j / k"),
+            "j/k is still the primary nav instruction"
+        );
+    }
+
+    #[test]
+    fn advertises_mouse_support() {
+        // Mouse support is a first-class point: focus, select, resize,
+        // scroll, and right-click-to-open links.
+        let all = render_all().to_lowercase();
+        for needle in [
+            "click a pane",
+            "row to select",
+            "resize",
+            "scrolls",
+            "right-click",
+        ] {
+            assert!(all.contains(needle), "mouse hint {needle:?} missing");
+        }
+    }
+
+    #[test]
+    fn click_advances_then_finishes_on_last_step() {
+        let mut t = rendered_tour(0);
+        // A click anywhere that isn't Back/Skip steps forward.
+        assert_eq!(t.on_mouse(&click(1, 1)), None);
+        assert_eq!(t.cursor, 1);
+        // The Next button advances too.
+        let (nx, ny) = center(t.next_btn.unwrap());
+        assert_eq!(t.on_mouse(&click(nx, ny)), None);
+        assert_eq!(t.cursor, 2);
+
+        let mut last = rendered_tour(STEPS.len() - 1);
+        let (nx, ny) = center(last.next_btn.unwrap());
+        assert_eq!(last.on_mouse(&click(nx, ny)), Some(Msg::TourFinished));
+    }
+
+    #[test]
+    fn clicking_back_button_retreats() {
+        let mut t = rendered_tour(2);
+        let (bx, by) = center(t.back_btn.unwrap());
+        assert_eq!(t.on_mouse(&click(bx, by)), None);
+        assert_eq!(t.cursor, 1);
+    }
+
+    #[test]
+    fn clicking_skip_button_finishes() {
+        let mut t = rendered_tour(0);
+        let (sx, sy) = center(t.skip_btn.unwrap());
+        assert_eq!(t.on_mouse(&click(sx, sy)), Some(Msg::TourFinished));
+    }
+
+    #[test]
+    fn non_left_clicks_are_ignored() {
+        let mut t = rendered_tour(1);
+        let ev = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(t.on_mouse(&ev), None);
+        assert_eq!(t.cursor, 1, "right-click must not navigate");
     }
 }

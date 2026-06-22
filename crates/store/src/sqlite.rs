@@ -30,7 +30,7 @@ impl SqliteStore {
         }
         // WAL keeps readers (the TUI snapshot path) from blocking
         // behind the poll loop's writes; the busy timeout makes a
-        // second process (e.g. `lazybox daemon status` racing the
+        // second process (e.g. `lazybox server status` racing the
         // daemon) wait briefly instead of failing with SQLITE_BUSY.
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| StoreError::Backend(e.to_string()))?;

@@ -75,6 +75,12 @@ pub enum Id {
     /// Single-line input prompt for naming a brand-new local
     /// Project. Submit → `Command::CreateProject { name }`.
     NewProject,
+    /// Repo picker for the `Shift-N` new-workspace flow. Lists the
+    /// already-tracked repos plus a "create a new local project"
+    /// escape hatch. Choices live in `new_workspace_repo_choices`;
+    /// `Msg::ChoicePicked` either funnels into the new-workspace name
+    /// input under the chosen repo, or mounts `NewProject`.
+    NewWorkspaceRepo,
     /// Picker for selecting an editor when 2+ are detected.
     /// Submit → `editors::launch(template, worktree)`.
     Editor,
@@ -100,6 +106,12 @@ pub enum Id {
     /// the picked index out of `adopt_choices` and dispatches
     /// `Command::AdoptSessions`.
     AdoptTarget,
+    /// Project picker for the global "start agent" (`Shift-W`) flow.
+    /// Choices live in `start_agent_project_choices`; `Msg::ChoicePicked`
+    /// resolves the project, then funnels into the new-workspace name
+    /// input (which auto-spawns the default agent on submit). Skipped
+    /// when only one project exists.
+    StartAgentProject,
     /// Single-line input prompt for the reviewer-login(s) to add to
     /// the focused workspace's PR. Submit →
     /// `Command::RequestReviewers { workspace_key, logins }`. The
@@ -302,6 +314,13 @@ pub struct Model<T: TerminalAdapter> {
     pub viewer_logins: std::collections::HashMap<String, String>,
     /// Which pane has focus when no modal is active.
     focus: PaneFocus,
+    /// Focus mode (issue #156): when `true`, the sidebar and activity
+    /// pane are hidden and the focused workspace's terminal expands to
+    /// near-fullscreen behind a slim event header. Focus is pinned to
+    /// `Terminals` while this is on; leaving the terminal via `]]`
+    /// clears it. Toggled by `.` (sidebar) or `]]f` (terminal);
+    /// `]]<digit>` jumps straight to a specific agent.
+    focus_mode: bool,
     /// Three pane wrappers held as typed fields so the orchestrator
     /// can call `.drain_cmds()` etc. directly. The wrappers also
     /// track their own `focused: bool` flag, which we keep in sync
@@ -495,6 +514,16 @@ pub struct Model<T: TerminalAdapter> {
     /// in the same order as the picker's row indices. `Msg::ChoicePicked`
     /// indexes into this to recover the chosen `WorkspaceKey`.
     adopt_choices: Vec<lazybox_core::WorkspaceKey>,
+    /// Candidate projects for the active "start agent" (`Shift-W`)
+    /// picker, in row order. `Msg::ChoicePicked` indexes into this to
+    /// recover the chosen `ProjectKey`, then mounts the name input.
+    start_agent_project_choices: Vec<lazybox_core::ProjectKey>,
+    /// Candidate repos for the active `Shift-N` new-workspace picker,
+    /// in row order. The picker shows one extra trailing row (the
+    /// "create a new local project" escape hatch), so a pick index
+    /// equal to this vec's length means "make a new project" rather
+    /// than indexing it.
+    new_workspace_repo_choices: Vec<lazybox_core::ProjectKey>,
     /// Transient UI status (polling spinner + footer notice). See
     /// `StatusCtx`.
     status: StatusCtx,
@@ -518,6 +547,14 @@ pub struct Model<T: TerminalAdapter> {
     /// preselect) feeds the daemon's round-robin scheduler without
     /// each call site needing its own emit hook.
     last_focused_session_key: Option<lazybox_core::SessionKey>,
+    /// Per-workspace manual override of the Activity pane's
+    /// visibility, keyed by workspace. The pane auto-hides when a
+    /// workspace has no activity worth showing (`Right::
+    /// has_visible_content`); `ToggleActivityPane` (Shift-P) flips
+    /// that and records the user's choice here so navigating away and
+    /// back keeps it. Session-scoped — not persisted across launches.
+    /// An entry's `bool` is the desired visibility (`true` = shown).
+    activity_pane_overrides: std::collections::HashMap<lazybox_core::WorkspaceKey, bool>,
     /// Active sidebar right-click context menu state: the workspace
     /// row the menu was raised over plus the ordered list of catalog
     /// `Action`s the picker is offering. `Msg::ChoicePicked` indexes
@@ -600,6 +637,18 @@ pub struct Model<T: TerminalAdapter> {
     /// double-fires; manual `Shift-T` invocation ignores it. See
     /// `maybe_mount_tour` / `mount_tour`.
     auto_tour_pending: bool,
+    /// Progressive feature-discovery tips (#115). `tips_enabled`
+    /// mirrors `ui.show_tips` (opt-out); `tips_seen` mirrors
+    /// `ui.tour_seen` but per-tip (ids already surfaced, persisted so
+    /// a tip never repeats across sessions). `tip_shown_this_session`
+    /// caps it to one tip per run so they stay quiet, and
+    /// `tips_armed_at` is the idle baseline — a tip only fires once
+    /// the footer has sat free of any modal / notice for a beat. See
+    /// `tick_tips`.
+    tips_enabled: bool,
+    tips_seen: Vec<String>,
+    tip_shown_this_session: bool,
+    tips_armed_at: std::time::Instant,
     /// Inertia damper for trackpad scroll. macOS sends ~20-50 wheel
     /// events per flick (the OS inertia phase); each one moves the
     /// viewport `STEP` rows, so a single gesture scrolls hundreds of
@@ -667,7 +716,7 @@ pub struct Preselect {
     pub session_id_raw: Option<String>,
 }
 
-use crate::realm::layout::{LayoutCtx, pane_areas};
+use crate::realm::layout::{LayoutCtx, apply_activity_visibility, focus_mode_areas, pane_areas};
 use crate::realm::setup_ctx::{SettingsAction, SetupCtx};
 use crate::realm::status_ctx::StatusCtx;
 
@@ -677,6 +726,13 @@ use crate::realm::status_ctx::StatusCtx;
 /// delivered key is always reflected on screen even when it produces
 /// no `Msg`. See `Model::forward_modal_event`.
 const MODAL_REDRAW_WINDOW: Duration = Duration::from_millis(120);
+
+/// How long the footer must sit idle (no modal, no notice) after
+/// startup before a feature tip (#115) is allowed to surface. Long
+/// enough that the first-run tour and the initial-poll spinner clear
+/// first, short enough that a settled user sees a tip the same
+/// session. See `Model::tick_tips`.
+const TIP_IDLE_DELAY: Duration = Duration::from_secs(8);
 
 /// How long the first `q` stays armed waiting for the second tap.
 // `Q_DOUBLE_TAP_WINDOW` retired — value lives on `ui_defaults`
@@ -717,6 +773,7 @@ impl<T: TerminalAdapter> Model<T> {
             modal_stack: Vec::new(),
             viewer_logins: std::collections::HashMap::new(),
             focus: PaneFocus::Sidebar,
+            focus_mode: false,
             sidebar: Sidebar::new(SIDEBAR_PID),
             right: Right::new(RIGHT_PID),
             terminals: Terminals::new(TERMINALS_PID),
@@ -755,10 +812,13 @@ impl<T: TerminalAdapter> Model<T> {
             active_merge_prompt: None,
             pending_adopt_source: None,
             adopt_choices: Vec::new(),
+            start_agent_project_choices: Vec::new(),
+            new_workspace_repo_choices: Vec::new(),
             status: StatusCtx::new(),
             ui_defaults: lazybox_config::UiDefaults::default(),
             pr_details_fetched: std::collections::HashSet::new(),
             last_focused_session_key: None,
+            activity_pane_overrides: std::collections::HashMap::new(),
             pending_sidebar_context: None,
             action_key_overrides: std::collections::BTreeMap::new(),
             // Built-in agents + their `c` / `x` / `u` convention. The
@@ -784,6 +844,10 @@ impl<T: TerminalAdapter> Model<T> {
             snippets: lazybox_config::Snippets::default(),
             snippet_choices: Vec::new(),
             auto_tour_pending: false,
+            tips_enabled: false,
+            tips_seen: Vec::new(),
+            tip_shown_this_session: false,
+            tips_armed_at: std::time::Instant::now(),
             scroll_inertia: None,
             modal_redraw_until: None,
         }
@@ -1052,6 +1116,74 @@ impl<T: TerminalAdapter> Model<T> {
     fn mark_tour_seen(&mut self) {
         if let Err(e) = lazybox_config::Config::save_with(|c| c.ui.tour_seen = true) {
             tracing::warn!("save tour_seen failed: {e}");
+        }
+    }
+
+    /// Seed the feature-tips state from `~/.lazybox/config.yaml` at
+    /// startup. `enabled` is `ui.show_tips`; `seen` is `ui.tips_seen`.
+    pub fn set_tips(&mut self, enabled: bool, seen: Vec<String>) {
+        self.tips_enabled = enabled;
+        self.tips_seen = seen;
+    }
+
+    /// Surface one progressive feature-discovery tip (#115) when the
+    /// moment is quiet. Called once per run-loop iteration alongside
+    /// the other tick helpers.
+    ///
+    /// Deliberately conservative so tips never nag: at most one tip
+    /// per session, only while no modal is up and no notice already
+    /// occupies the footer, and only after the footer has been idle
+    /// for `TIP_IDLE_DELAY` (so a tip never races the first-run tour
+    /// or the initial-poll spinner). The tip itself is a dim,
+    /// auto-fading `Hint` — it never steals focus.
+    ///
+    /// The gating decision lives in `Self::pick_tip` (pure, no side
+    /// effects); this wrapper records the tip as shown + persists it +
+    /// flashes it.
+    pub fn tick_tips(&mut self) {
+        let Some(tip) = self.pick_tip() else {
+            return;
+        };
+        self.tip_shown_this_session = true;
+        self.tips_seen.push(tip.id.clone());
+        self.persist_tip_seen(tip.id);
+        self.flash_hint(tip.message);
+    }
+
+    /// Decide which feature tip (if any) should surface right now —
+    /// all the "stay quiet" gating, with no side effects so it's
+    /// unit-testable. Returns the resolved tip to show, or `None` when
+    /// tips are off, one already showed this session, a modal / notice
+    /// holds the footer, the idle delay hasn't elapsed, or no tip
+    /// matches the current state.
+    fn pick_tip(&self) -> Option<lazybox_tui_core::tips::ResolvedTip> {
+        if !self.tips_enabled || self.tip_shown_this_session {
+            return None;
+        }
+        if !self.modal_stack.is_empty() || self.status.notice.is_some() {
+            return None;
+        }
+        if self.tips_armed_at.elapsed() < TIP_IDLE_DELAY {
+            return None;
+        }
+        let ctx = lazybox_tui_core::tips::TipContext {
+            agent_waiting: self.sidebar.has_asking_agent(),
+            failing_ci: self.sidebar.has_failing_ci(),
+            in_terminal: self.focus == PaneFocus::Terminals,
+        };
+        lazybox_tui_core::tips::next_tip(&ctx, &self.tips_seen, &self.action_key_overrides)
+    }
+
+    /// Append `id` to `ui.tips_seen` so the tip never resurfaces.
+    /// Best-effort, mirroring `mark_tour_seen`: a write failure just
+    /// means the tip may show once more next boot.
+    fn persist_tip_seen(&self, id: String) {
+        if let Err(e) = lazybox_config::Config::save_with(move |c| {
+            if !c.ui.tips_seen.contains(&id) {
+                c.ui.tips_seen.push(id.clone());
+            }
+        }) {
+            tracing::warn!("save tips_seen failed: {e}");
         }
     }
 
@@ -1914,6 +2046,49 @@ impl<T: TerminalAdapter> Model<T> {
         let _ = self.terminal.leave_alternate_screen();
         let _ = self.terminal.disable_raw_mode();
     }
+    /// Whether the Activity (right) pane should render for the
+    /// currently-selected workspace. A per-workspace manual override
+    /// (set by `ToggleActivityPane`) wins; otherwise the pane shows
+    /// only when the workspace has content worth showing. The
+    /// auto-hide rule is about a *selected* workspace with no
+    /// activity — with nothing selected (empty inbox) the pane keeps
+    /// its prior always-on behavior.
+    pub(super) fn activity_pane_visible(&self) -> bool {
+        let Some(ws) = self.sidebar.selected_workspace() else {
+            return true;
+        };
+        if let Some(&shown) = self.activity_pane_overrides.get(&ws.key) {
+            return shown;
+        }
+        self.right.has_visible_content()
+    }
+
+    /// The three pane rects, accounting for a hidden Activity pane.
+    /// When the pane is hidden its row folds into the terminal stack:
+    /// the returned `right_top` is zero-height (so hit-tests and the
+    /// render skip it) and `right_bottom` spans the full right column.
+    pub(super) fn effective_pane_rects(&self, area: Rect) -> (Rect, Rect, Rect) {
+        let rects = pane_areas(
+            area,
+            self.layout.sidebar_pct,
+            self.layout.right_top_pct,
+            self.layout.sidebar_user_resized,
+        );
+        apply_activity_visibility(rects, self.activity_pane_visible())
+    }
+
+    /// Keep focus off the Activity pane while it's hidden — Tab,
+    /// click, and programmatic moves all funnel through here so a
+    /// hidden pane never silently swallows keystrokes. Falls through
+    /// to the terminal stack (which forwards to the sidebar when no
+    /// terminal is live).
+    pub(super) fn enforce_pane_focus(&mut self) {
+        if self.focus == PaneFocus::Right && !self.activity_pane_visible() {
+            self.focus = PaneFocus::Terminals;
+            self.set_focus_attr();
+        }
+    }
+
     /// Render the current frame.
     pub fn view(&mut self) {
         // Pull state out before the closure so the borrow checker is
@@ -1922,6 +2097,10 @@ impl<T: TerminalAdapter> Model<T> {
         let sidebar_pct = self.layout.sidebar_pct;
         let right_top_pct = self.layout.right_top_pct;
         let sidebar_user_resized = self.layout.sidebar_user_resized;
+        // Computed outside the draw closure: calling a `&self` method
+        // inside it would capture all of `self` and clash with the
+        // disjoint `&mut self.sidebar` / `self.right` borrows below.
+        let activity_visible = self.activity_pane_visible();
         // Pick the polling indicator for the footer:
         // - During the initial blocking modal, surface the rich
         //   first-poll spinner.
@@ -1957,6 +2136,48 @@ impl<T: TerminalAdapter> Model<T> {
                 .terminals
                 .contextual_bindings(&self.action_key_overrides),
         };
+        // Universal hints appended to every pane's footer (issue #100):
+        // the orientation + escape shortcuts a lost first-time user
+        // always needs in view. `quit` last so it's the rightmost,
+        // most-findable hint.
+        //
+        // But in a focused terminal the PTY eats every key, so those
+        // globals don't fire — advertising `q q` / `?` there is a lie
+        // (issue #114). The catalog's `available_in_terminal` is the
+        // single source of truth for this; when nothing universal
+        // survives terminal focus we advertise the `]]` gateway that
+        // unlocks them instead, so the footer never claims a shortcut
+        // the focused pane won't dispatch.
+        let globals: Vec<crate::pane::Binding> = {
+            use lazybox_tui_core::action::{ActionDef, ActionKind};
+            // Footer's curated short tail of `universal_shortcuts()` —
+            // kept to three so a narrow line never truncates `quit`
+            // off the right edge.
+            let tail = [ActionKind::OpenHelp, ActionKind::OpenTour, ActionKind::Quit]
+                .map(ActionDef::for_kind);
+            if self.focus == PaneFocus::Terminals
+                && tail.iter().all(|def| !def.available_in_terminal())
+            {
+                let leave = ActionDef::for_kind(ActionKind::LeaveTerminal);
+                let help = ActionDef::for_kind(ActionKind::OpenHelp);
+                let quit = ActionDef::for_kind(ActionKind::Quit);
+                vec![crate::pane::Binding {
+                    keys: leave.effective_keys_display(&self.action_key_overrides),
+                    label: std::borrow::Cow::Owned(format!(
+                        "exit for {} · {}",
+                        help.effective_keys_display(&self.action_key_overrides),
+                        quit.effective_keys_display(&self.action_key_overrides),
+                    )),
+                }]
+            } else {
+                tail.iter()
+                    .map(|def| crate::pane::Binding {
+                        keys: def.effective_keys_display(&self.action_key_overrides),
+                        label: std::borrow::Cow::Borrowed(def.label),
+                    })
+                    .collect()
+            }
+        };
         let notice = self.status.notice.clone();
         // Which-key rows for an armed catalog leader — the
         // `(next-key, label)` continuations of the armed prefix, a pure
@@ -1979,16 +2200,90 @@ impl<T: TerminalAdapter> Model<T> {
         } else {
             Vec::new()
         };
+        // Agent-jump roster for the `]]` leader popup: `1..9` → agent
+        // workspace name (sidebar order), plus the `f` focus-mode row.
+        // Shown above the snippets so the heads-down user can pick a
+        // jump target by number. Built only while the leader is armed.
+        let agent_leader_rows: Vec<(String, String)> = if self.terminal_leader_at.is_some() {
+            let mut rows: Vec<(String, String)> = self
+                .sidebar
+                .agent_workspace_keys()
+                .into_iter()
+                .take(9)
+                .enumerate()
+                .filter_map(|(i, k)| {
+                    self.sidebar
+                        .workspace_by_key(&k)
+                        .map(|w| ((i + 1).to_string(), w.name.clone()))
+                })
+                .collect();
+            rows.push(("f".to_string(), "focus mode".to_string()));
+            rows
+        } else {
+            Vec::new()
+        };
+        // Focus mode (#156): hide the sidebar + activity pane and give
+        // the terminal the whole window behind a slim event header.
+        // Resolve the header's contents out here so the draw closure
+        // doesn't need to borrow `self` immutably while it also holds
+        // the mutable terminal borrow.
+        let focus_mode = self.focus_mode;
+        let (focus_title, focus_summary, focus_hint) = if focus_mode {
+            let active = self.terminals.active_session();
+            let name = active
+                .and_then(|k| self.sidebar.workspace_by_key(k))
+                .or_else(|| self.sidebar.selected_workspace())
+                .map(|w| w.name.clone())
+                .unwrap_or_else(|| "no workspace".to_string());
+            // Prefix the title with this agent's jump number (its
+            // 1-based slot in the sidebar-order agent roster) so the
+            // user knows which `]]<digit>` lands back here.
+            let agents = self.sidebar.agent_workspace_keys();
+            let number = active.and_then(|k| agents.iter().position(|a| a == k));
+            let title = match number {
+                Some(i) => format!("{} · {name}", i + 1),
+                None => name,
+            };
+            // Inside focus mode the PTY owns the keyboard, so the
+            // reachable controls are all `]]` leader chords: `]]<digit>`
+            // jumps to another agent, `]]` exits back to the sidebar.
+            let esc = self.ui_defaults.terminal_escape_char;
+            let hint = format!("{esc}{esc}<n> jump · {esc}{esc} exit");
+            (title, self.sidebar.attention_summary(), hint)
+        } else {
+            (String::new(), Default::default(), String::new())
+        };
         let mut captured_area = Rect::default();
         let _ = self.terminal.draw(|f| {
             let area = f.area();
             captured_area = area;
             let (pane_area, footer_area) = split_for_footer(area);
-            let (left, right_top, right_bottom) =
-                pane_areas(pane_area, sidebar_pct, right_top_pct, sidebar_user_resized);
-            self.sidebar.view_in(left, f);
-            self.right.view_in(right_top, f);
-            self.terminals.view_in(right_bottom, f);
+            let right_bottom = if focus_mode {
+                let (header, body) = focus_mode_areas(pane_area);
+                crate::realm::components::focus_header::render(
+                    f,
+                    header,
+                    &focus_title,
+                    focus_summary,
+                    &focus_hint,
+                );
+                self.terminals.view_in(body, f);
+                body
+            } else {
+                let (left, right_top, right_bottom) = apply_activity_visibility(
+                    pane_areas(pane_area, sidebar_pct, right_top_pct, sidebar_user_resized),
+                    activity_visible,
+                );
+                self.sidebar.view_in(left, f);
+                // A zero-height `right_top` means the Activity pane is
+                // hidden for this workspace — its space went to the
+                // terminal stack below.
+                if right_top.height > 0 {
+                    self.right.view_in(right_top, f);
+                }
+                self.terminals.view_in(right_bottom, f);
+                right_bottom
+            };
 
             // Selection highlight overlay. Painted AFTER the terminal
             // widget so the reverse-video pass lands on the just-
@@ -2002,11 +2297,12 @@ impl<T: TerminalAdapter> Model<T> {
                 paint_selection(f.buffer_mut(), right_bottom, start, end);
             }
 
-            // Footer: keymap + polling status + notice.
+            // Footer: keymap + globals + polling status + notice.
             crate::realm::components::footer::render(
                 f,
                 footer_area,
                 &keymap,
+                &globals,
                 polling_status.as_ref().map(|(s, l)| (*s, l.as_str())),
                 notice.as_ref(),
             );
@@ -2022,14 +2318,25 @@ impl<T: TerminalAdapter> Model<T> {
                 crate::realm::components::which_key::render(f, area, prefix, &leader_rows);
             }
             // Which-key popup for the armed terminal `]]` leader
-            // (#205): lists the snippet keys reachable as `]]<key>`.
+            // (#205): the agent-jump roster (`]]<digit>`, `]]f`) on top
+            // of the snippet keys reachable as `]]<key>`.
             if self.terminal_leader_at.is_some() {
                 crate::realm::components::which_key::render_terminal_leader(
                     f,
                     area,
                     self.ui_defaults.terminal_escape_char,
+                    &agent_leader_rows,
                     &snippet_leader_rows,
                 );
+            }
+            // After the first press of the `q q` quit chord, surface a
+            // which-key style nudge so the chord is self-explanatory
+            // rather than silently swallowing the keystroke (#100).
+            if self.q_latch.is_armed() {
+                use lazybox_tui_core::action::{ActionDef, ActionKind};
+                let keys = ActionDef::for_kind(ActionKind::Quit)
+                    .effective_keys_display(&self.action_key_overrides);
+                crate::realm::components::which_key::render_quit_hint(f, area, &keys);
             }
 
             // Modal stack last (highest z-order).

@@ -631,3 +631,99 @@ mod teaser_tests {
         assert_eq!(teaser_text("### Title\nbody text", 80), "Title");
     }
 }
+
+#[cfg(test)]
+mod has_visible_content_tests {
+    //! `has_visible_content` drives whether the orchestrator hides the
+    //! Activity pane: empty workspaces collapse the pane and hand the
+    //! space to the terminal.
+    use super::super::{PaneId, RightPane};
+    use chrono::Utc;
+    use lazybox_core::{Task, TaskId, Workspace, WorkspaceKey};
+
+    fn empty_ws() -> Workspace {
+        Workspace::empty(WorkspaceKey::new("github:o/r#1"), "main", Utc::now())
+    }
+
+    fn pane_with(ws: Option<Workspace>) -> RightPane {
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(ws);
+        pane
+    }
+
+    fn issue_task_with_body(body: Option<&str>) -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: "github:o/r#1".into(),
+            },
+            title: "an issue".into(),
+            body: body.map(Into::into),
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/issues/1".into(),
+            repo: Some("o/r".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    #[test]
+    fn no_workspace_has_no_content() {
+        assert!(!pane_with(None).has_visible_content());
+    }
+
+    #[test]
+    fn empty_workspace_has_no_content() {
+        assert!(!pane_with(Some(empty_ws())).has_visible_content());
+    }
+
+    #[test]
+    fn workspace_with_activity_has_content() {
+        let mut ws = empty_ws();
+        ws.activity.push(lazybox_core::Activity {
+            author: "alice".into(),
+            body: "hi".into(),
+            created_at: Utc::now(),
+            kind: lazybox_core::ActivityKind::Comment,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        });
+        assert!(pane_with(Some(ws)).has_visible_content());
+    }
+
+    #[test]
+    fn workspace_with_description_has_content() {
+        let ws = Workspace::from_task(issue_task_with_body(Some("Real body")), Utc::now());
+        assert!(pane_with(Some(ws)).has_visible_content());
+    }
+
+    #[test]
+    fn blank_description_is_not_content() {
+        let ws = Workspace::from_task(issue_task_with_body(Some("   \n  ")), Utc::now());
+        assert!(!pane_with(Some(ws)).has_visible_content());
+    }
+}

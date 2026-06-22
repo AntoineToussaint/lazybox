@@ -109,21 +109,21 @@ mod tests {
             ci_failing: 0,
             review_pending: 2,
         };
-        let line = render_to_string("fix-the-thing", summary, "F3 next · F2 exit");
+        let line = render_to_string("fix-the-thing", summary, "]]<n> jump · ]] exit");
         assert!(line.contains("fix-the-thing"), "title missing: {line:?}");
         assert!(line.contains("1 asking"), "asking count missing: {line:?}");
         assert!(line.contains("3 new"), "unread count missing: {line:?}");
         assert!(line.contains("2 review"), "review count missing: {line:?}");
         // ci_failing is zero, so its segment is omitted entirely.
         assert!(!line.contains("CI"), "zero CI should not render: {line:?}");
-        assert!(line.contains("F2 exit"), "hint missing: {line:?}");
+        assert!(line.contains("]] exit"), "hint missing: {line:?}");
     }
 
     #[test]
     fn quiet_workspace_shows_only_title_and_hint() {
-        let line = render_to_string("scratch", AttentionSummary::default(), "F2 exit");
+        let line = render_to_string("scratch", AttentionSummary::default(), "]] exit");
         assert!(line.contains("scratch"));
-        assert!(line.contains("F2 exit"));
+        assert!(line.contains("]] exit"));
         assert!(!line.contains("new"));
         assert!(!line.contains("asking"));
     }

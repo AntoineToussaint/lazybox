@@ -454,9 +454,6 @@ impl<T: TerminalAdapter> Model<T> {
             Action::ToggleFocusMode => {
                 self.toggle_focus_mode();
             }
-            Action::FocusNextAgent => {
-                self.jump_next_agent_workspace();
-            }
             Action::StartAgent => {
                 // Global "just start working" entry point. Unlike `n`
                 // (which needs the sidebar cursor on a project), this
@@ -596,20 +593,23 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
-    /// Switch the displayed terminal to the next workspace running a
-    /// coding agent, wrapping around. Keeps focus on the terminal (so
-    /// it works seamlessly inside focus mode); flashes when no other
-    /// agent workspace exists. Mirrors the `!` / `Shift-F` jumps but
-    /// lands the cursor on agents rather than asking / failing-CI rows.
-    pub(super) fn jump_next_agent_workspace(&mut self) {
-        if self.sidebar.focus_next_agent_workspace() {
+    /// Switch the displayed terminal to the Nth agent workspace,
+    /// counting in sidebar (top-down) order — the deterministic
+    /// `]]<digit>` jump that replaced the old `F3` cycle. `n` is
+    /// 1-based, matching the number badge on the sidebar row and the
+    /// roster in the `]]` leader popup. Keeps focus on the terminal so
+    /// it works seamlessly inside focus mode; flashes when there's no
+    /// agent at that slot. Mirrors the `!` / `Shift-F` jumps but lands
+    /// the cursor on a specific agent rather than asking / failing-CI.
+    pub(super) fn jump_to_agent_workspace(&mut self, n: usize) {
+        if self.sidebar.focus_nth_agent_workspace(n) {
             self.focus = PaneFocus::Terminals;
             self.terminal_user_typed_since_focus = false;
             self.set_focus_attr();
             self.sync_panes();
             self.redraw = true;
         } else {
-            self.flash_hint("no agent workspaces");
+            self.flash_hint(format!("no agent #{n}"));
         }
     }
 

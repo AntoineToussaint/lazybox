@@ -132,12 +132,10 @@ pub enum Action {
     JumpToFailingCi,
     /// Toggle focus mode — maximize the focused workspace's terminal
     /// to near-fullscreen behind a slim event header, hiding the
-    /// sidebar and activity pane (`F2`).
+    /// sidebar and activity pane (`.` from the sidebar, `]]f` from
+    /// inside a terminal). Jump straight to a specific agent with
+    /// `]]<digit>` (sidebar order, top-down).
     ToggleFocusMode,
-    /// Jump the displayed terminal to the next workspace that has a
-    /// coding-agent session, wrapping around (`F3`). Stays in focus
-    /// mode so the user can hop between agents heads-down.
-    FocusNextAgent,
     /// Start a fresh agent session from anywhere (`Shift-W`): pick a
     /// project, name the workspace, and the daemon creates it and
     /// spawns the default agent in one step. The zero-friction entry
@@ -235,7 +233,6 @@ pub enum ActionKind {
     JumpToAsking,
     JumpToFailingCi,
     ToggleFocusMode,
-    FocusNextAgent,
     StartAgent,
     Quit,
     ResizeSplitter,
@@ -364,7 +361,6 @@ impl Action {
             Action::JumpToAsking => ActionKind::JumpToAsking,
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
             Action::ToggleFocusMode => ActionKind::ToggleFocusMode,
-            Action::FocusNextAgent => ActionKind::FocusNextAgent,
             Action::StartAgent => ActionKind::StartAgent,
             Action::Quit => ActionKind::Quit,
             Action::ResizeSplitter(_) => ActionKind::ResizeSplitter,
@@ -451,16 +447,9 @@ impl ActionDef {
             },
             ActionKind::ToggleFocusMode => &Self {
                 kind: ActionKind::ToggleFocusMode,
-                default_keys: "F2",
+                default_keys: ".",
                 label: "focus mode",
-                describe: "Maximize the focused workspace's terminal to near-fullscreen behind a slim event header, hiding the sidebar and activity pane. Press again to exit; `]]` also exits.",
-                section: Section::Global,
-            },
-            ActionKind::FocusNextAgent => &Self {
-                kind: ActionKind::FocusNextAgent,
-                default_keys: "F3",
-                label: "next agent",
-                describe: "Switch the displayed terminal to the next workspace running a coding agent, without leaving focus mode.",
+                describe: "Maximize the focused workspace's terminal to near-fullscreen behind a slim event header, hiding the sidebar and activity pane. From inside a terminal use `]]f`; jump straight to agent N with `]]<digit>` (sidebar order). Press again or `]]` to exit.",
                 section: Section::Global,
             },
             ActionKind::StartAgent => &Self {
@@ -708,7 +697,6 @@ impl ActionDef {
             ActionKind::JumpToAsking,
             ActionKind::JumpToFailingCi,
             ActionKind::ToggleFocusMode,
-            ActionKind::FocusNextAgent,
             ActionKind::StartAgent,
             ActionKind::ResizeSplitter,
             ActionKind::Quit,
@@ -1037,7 +1025,6 @@ impl ActionKind {
             ActionKind::JumpToAsking => "jump_to_asking",
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
             ActionKind::ToggleFocusMode => "toggle_focus_mode",
-            ActionKind::FocusNextAgent => "focus_next_agent",
             ActionKind::StartAgent => "start_agent",
             ActionKind::Quit => "quit",
             ActionKind::ResizeSplitter => "resize_splitter",
@@ -1165,7 +1152,6 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::JumpToAsking
         | ActionKind::JumpToFailingCi
         | ActionKind::ToggleFocusMode
-        | ActionKind::FocusNextAgent
         | ActionKind::Quit
         | ActionKind::ResizeSplitter
         | ActionKind::TerminalScroll

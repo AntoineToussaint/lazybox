@@ -86,7 +86,23 @@ impl<T: TerminalAdapter> Model<T> {
                 && !c.is_control()
                 && c != self.ui_defaults.terminal_escape_char
             {
-                self.mount_snippet_picker(c.to_string());
+                // Reserved leader keys win over the snippet picker:
+                //   - `]]<1..9>` jumps the view straight to the Nth
+                //     agent workspace (sidebar order, top-down) — the
+                //     numbered replacement for the old `F3` cycle;
+                //   - `]]f` toggles focus mode without leaving the PTY,
+                //     replacing the old `F2`.
+                // Both shadow snippets bound to those keys (digits and
+                // `f`), which is the documented trade-off for keeping
+                // the jumps reachable heads-down.
+                match c {
+                    '1'..='9' => {
+                        let n = c.to_digit(10).unwrap_or(0) as usize;
+                        self.jump_to_agent_workspace(n);
+                    }
+                    'f' => self.toggle_focus_mode(),
+                    _ => self.mount_snippet_picker(c.to_string()),
+                }
             }
             return;
         }
@@ -203,23 +219,14 @@ impl<T: TerminalAdapter> Model<T> {
                 self.toggle_mouse_capture();
                 return;
             }
-            // Focus mode (#156). Like F8, handled as a function-key
-            // arm rather than through catalog dispatch so it fires
-            // from every pane INCLUDING the terminal — the whole point
-            // is to toggle / hop agents while heads-down in a focused
-            // PTY, where catalog keys don't reach. F2 enters/exits;
-            // F3 jumps the displayed terminal to the next agent
-            // workspace without leaving focus mode.
-            Key::Function(2) => {
-                self.q_latch.disarm();
-                self.toggle_focus_mode();
-                return;
-            }
-            Key::Function(3) => {
-                self.q_latch.disarm();
-                self.jump_next_agent_workspace();
-                return;
-            }
+            // Focus mode (#156). From the sidebar / activity panes it
+            // rides the catalog dispatch below (the `.` binding). From
+            // inside a terminal the PTY eats every key, so the entry
+            // point there is the `]]` leader: `]]f` toggles focus mode
+            // and `]]<digit>` jumps to a specific agent — both handled
+            // in the leader block above. F-keys were dropped (#156
+            // follow-up): macOS steals them for brightness / Mission
+            // Control, so they never reliably reached lazybox.
             Key::Char('s')
                 if key.modifiers.contains(KeyModifiers::ALT)
                     && !key.modifiers.contains(KeyModifiers::SHIFT) =>
@@ -267,18 +274,15 @@ impl<T: TerminalAdapter> Model<T> {
         {
             let was_armed = self.escape_latch.is_armed();
             if self.escape_latch.tap(self.ui_defaults.escape_window) {
-                // Second `]` within the window completes `]]`. With a
-                // snippet library present, arm the leader so the next
-                // key can invoke a binding (`]]<key>`); the pane only
-                // leaves if no key follows within the window (see
-                // `tick_terminal_leader`). With no snippets there are
-                // no bindings to offer, so `]]` leaves immediately —
-                // no idle delay for users who never configured any.
-                if self.snippets.is_empty() {
-                    self.leave_terminal_to_sidebar();
-                } else {
-                    self.terminal_leader_at = Some(std::time::Instant::now());
-                }
+                // Second `]` within the window completes `]]`: arm the
+                // leader so the next key can invoke a binding
+                // (`]]<key>`). The leader always has something to offer
+                // now — `]]f` toggles focus mode and `]]<digit>` jumps
+                // to an agent even with no snippets configured — so it
+                // arms unconditionally; the pane still leaves on the
+                // idle tick if no key follows (see `tick_terminal_leader`).
+                // (Previously a snippet-less `]]` left instantly.)
+                self.terminal_leader_at = Some(std::time::Instant::now());
                 self.redraw = true;
                 return;
             }
@@ -361,9 +365,6 @@ impl<T: TerminalAdapter> Model<T> {
                 lazybox_tui_core::action::ActionKind::StartAgent => Some(Action::StartAgent),
                 lazybox_tui_core::action::ActionKind::ToggleFocusMode => {
                     Some(Action::ToggleFocusMode)
-                }
-                lazybox_tui_core::action::ActionKind::FocusNextAgent => {
-                    Some(Action::FocusNextAgent)
                 }
                 _ => None,
             };

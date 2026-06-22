@@ -904,17 +904,20 @@ snippets:
         assert_eq!(m.focus(), PaneFocus::Terminals, "leader doesn't leave yet");
     }
 
-    /// With no snippets configured there are no bindings to offer, so
-    /// `]]` leaves to the sidebar immediately (no leader, no idle wait).
+    /// Even with no snippets configured the leader still has bindings to
+    /// offer — `]]f` focus toggle and `]]<digit>` agent jumps — so `]]`
+    /// arms the leader and keeps focus on the terminal; the pane only
+    /// leaves on the idle tick if no follow key arrives (#156 follow-up,
+    /// which replaced the old leave-immediately path).
     #[test]
-    fn double_bracket_leaves_immediately_without_snippets() {
+    fn double_bracket_arms_leader_even_without_snippets() {
         let mut m = build_model();
         m.focus = PaneFocus::Terminals;
         m.set_focus_attr();
         m.dispatch_key(esc_key());
         m.dispatch_key(esc_key());
-        assert!(!m.terminal_leader_pending());
-        assert_eq!(m.focus(), PaneFocus::Sidebar);
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "leader doesn't leave yet");
     }
 
     /// `]]<printable>` opens the snippet picker pre-filtered by the
@@ -2656,8 +2659,9 @@ mod wheel_routing_tests {
         );
     }
 
-    /// `]]` completes the leader (here: leaves to the sidebar, no
-    /// snippets) and must NOT flush a literal `]` to the PTY.
+    /// `]]` completes the leader (here: arms it — even with no snippets
+    /// the leader offers `]]f` / `]]<digit>`) and must NOT flush a
+    /// literal `]` to the PTY.
     #[test]
     fn completed_leader_does_not_flush_a_bracket() {
         let (mut m, mut server, _bottom) = build_model_with_terminal();
@@ -2665,7 +2669,8 @@ mod wheel_routing_tests {
 
         m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
         m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
-        assert_eq!(m.focus(), PaneFocus::Sidebar);
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "leader doesn't leave yet");
         assert!(
             !drained_write_bytes(&mut server).contains(&b']'),
             "`]]` is a chord, not two literal brackets"
@@ -3218,8 +3223,8 @@ mod tips_tests {
     }
 }
 
-/// Focus mode (issue #156): the F2 toggle, the F3 next-agent jump, and
-/// the interaction with the `]]` terminal-leave path.
+/// Focus mode (issue #156): the `.` / `]]f` toggle, the `]]<digit>`
+/// agent jump, and the interaction with the `]]` terminal-leave path.
 #[cfg(test)]
 mod focus_mode_tests {
     use super::super::*;
@@ -3294,47 +3299,57 @@ mod focus_mode_tests {
         });
     }
 
-    fn f_key(n: u8) -> RealmKey {
-        RealmKey::new(Key::Function(n), RealmMods::NONE)
+    fn char_key(c: char) -> RealmKey {
+        RealmKey::new(Key::Char(c), RealmMods::NONE)
     }
 
-    /// F2 with a live terminal enters focus mode and pins focus to the
-    /// terminal; a second F2 exits, leaving focus on the terminal so
-    /// the user keeps driving the same agent in the three-pane view.
+    /// Arm the `]]` leader (two presses of the escape char) and then
+    /// press `follow`, so `]]<follow>` resolves in one call. Focus must
+    /// already be on the terminal.
+    fn bracket_leader(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, follow: char) {
+        m.dispatch_key(char_key(']'));
+        m.dispatch_key(char_key(']'));
+        m.dispatch_key(char_key(follow));
+    }
+
+    /// `.` from the sidebar enters focus mode (with a live terminal) and
+    /// pins focus to the terminal; `]]f` from inside the terminal exits,
+    /// leaving focus on the terminal so the user keeps driving the same
+    /// agent in the three-pane view.
     #[test]
-    fn f2_toggles_focus_mode() {
+    fn dot_and_bracket_f_toggle_focus_mode() {
         let mut m = build_model();
         let ws = workspace_with_agent("owner/repo#1");
         let key = SessionKey::from(&ws.key);
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
         spawn_terminal(&mut m, &key);
-        m.focus = PaneFocus::Terminals;
+        m.focus = PaneFocus::Sidebar;
         m.set_focus_attr();
 
-        m.dispatch_key(f_key(2));
-        assert!(m.focus_mode, "F2 enters focus mode");
-        assert_eq!(m.focus(), PaneFocus::Terminals);
+        m.dispatch_key(char_key('.'));
+        assert!(m.focus_mode, "`.` enters focus mode");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "focus pins to terminal");
 
-        m.dispatch_key(f_key(2));
-        assert!(!m.focus_mode, "second F2 exits focus mode");
+        bracket_leader(&mut m, 'f');
+        assert!(!m.focus_mode, "`]]f` exits focus mode");
         assert_eq!(m.focus(), PaneFocus::Terminals, "exit keeps the terminal");
     }
 
-    /// With no live terminal there's nothing to maximize, so F2 is a
+    /// With no live terminal there's nothing to maximize, so `.` is a
     /// no-op rather than dropping the user onto a blank screen.
     #[test]
-    fn f2_without_terminal_is_a_noop() {
+    fn dot_without_terminal_is_a_noop() {
         let mut m = build_model();
         m.focus = PaneFocus::Sidebar;
-        m.dispatch_key(f_key(2));
+        m.dispatch_key(char_key('.'));
         assert!(!m.focus_mode, "no terminal → no focus mode");
     }
 
-    /// `]]` (with no snippets configured) leaves the terminal — and in
-    /// focus mode that must also drop focus mode, since the sidebar it
-    /// returns to is hidden while focus mode is on.
+    /// Bare `]]` arms the leader; with no follow key the pane leaves on
+    /// the idle tick — and in focus mode that must also drop focus mode,
+    /// since the sidebar it returns to is hidden while focus mode is on.
     #[test]
-    fn bracket_leave_exits_focus_mode() {
+    fn bracket_idle_leave_exits_focus_mode() {
         let mut m = build_model();
         let ws = workspace_with_agent("owner/repo#1");
         let key = SessionKey::from(&ws.key);
@@ -3342,22 +3357,27 @@ mod focus_mode_tests {
         spawn_terminal(&mut m, &key);
         m.focus = PaneFocus::Terminals;
         m.set_focus_attr();
-        m.dispatch_key(f_key(2));
-        assert!(m.focus_mode);
+        m.focus_mode = true;
 
-        // No snippets → `]]` leaves immediately.
-        let bracket = RealmKey::new(Key::Char(']'), RealmMods::NONE);
-        m.dispatch_key(bracket);
-        m.dispatch_key(bracket);
-        assert!(!m.focus_mode, "`]]` exits focus mode");
+        // `]]` arms the leader (no immediate leave now that the leader
+        // always has bindings to offer); with no follow key the idle
+        // tick leaves the pane once the escape window lapses.
+        m.dispatch_key(char_key(']'));
+        m.dispatch_key(char_key(']'));
+        assert!(m.terminal_leader_at.is_some(), "`]]` arms the leader");
+        // Force the idle window past, then tick — Instant can't be
+        // fast-forwarded, so backdate the arm timestamp instead.
+        m.terminal_leader_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(60));
+        m.tick_terminal_leader();
+        assert!(!m.focus_mode, "idle `]]` exits focus mode");
         assert_eq!(m.focus(), PaneFocus::Sidebar);
     }
 
-    /// F3 moves the displayed terminal to the next workspace running an
-    /// agent, wrapping, and keeps focus mode on so the user hops between
-    /// agents heads-down.
+    /// `]]<digit>` moves the displayed terminal to the Nth agent
+    /// workspace in sidebar order and keeps focus mode on, so the user
+    /// hops to a specific agent heads-down.
     #[test]
-    fn f3_jumps_to_next_agent_workspace_in_focus_mode() {
+    fn bracket_digit_jumps_to_agent_workspace_in_focus_mode() {
         let mut m = build_model();
         let ws1 = workspace_with_agent("owner/repo#1");
         let ws2 = workspace_with_agent("owner/repo#2");
@@ -3366,19 +3386,27 @@ mod focus_mode_tests {
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws1)));
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws2)));
 
-        assert!(m.sidebar.focus_workspace_key(&key1));
-        spawn_terminal(&mut m, &key1);
+        // The jump number is the slot in this roster (sidebar order),
+        // which the badge mirrors — read it rather than assume an order.
+        let roster = m.sidebar.agent_workspace_keys();
+        assert_eq!(roster.len(), 2, "both agents in the roster");
+        assert!(roster.contains(&key1) && roster.contains(&key2));
+
+        // Start parked on slot 2 so `]]1` is a real move to slot 1.
+        let slot1 = roster[0].clone();
+        let slot2 = roster[1].clone();
+        assert!(m.sidebar.focus_workspace_key(&slot2));
+        spawn_terminal(&mut m, &slot2);
         m.focus = PaneFocus::Terminals;
         m.set_focus_attr();
-        m.dispatch_key(f_key(2));
-        assert!(m.focus_mode);
+        m.focus_mode = true;
 
-        m.dispatch_key(f_key(3));
+        bracket_leader(&mut m, '1');
         assert!(m.focus_mode, "jump stays in focus mode");
         assert_eq!(
             m.sidebar.selected_workspace_key(),
-            Some(&key2),
-            "F3 advances to the other agent workspace",
+            Some(&slot1),
+            "`]]1` jumps to the first agent workspace in the roster",
         );
     }
 

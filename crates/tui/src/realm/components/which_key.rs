@@ -165,21 +165,26 @@ pub fn render_quit_hint(frame: &mut Frame, area: Rect, quit_keys: &str) {
 const LEADER_MAX_ROWS: usize = 8;
 
 /// Render the which-key popup for the armed terminal `]]` leader
-/// (issue #205). Lists the snippet keys reachable as `]]<key>` plus
-/// a hint that an idle window leaves the pane. Visual twin of
-/// [`render`], but the binding set is the snippet library rather than
-/// an `ActionGroup`, so it takes the rows directly.
+/// (issue #205). Lists the agent-jump roster (`]]<digit>` → workspace,
+/// `]]f` → focus mode) on top of the snippet keys reachable as
+/// `]]<key>`, plus a hint that an idle window leaves the pane. Visual
+/// twin of [`render`], but the binding set is the agent roster + the
+/// snippet library, so it takes the rows directly.
 pub fn render_terminal_leader(
     frame: &mut Frame,
     area: Rect,
     escape_char: char,
+    agents: &[(String, String)],
     snippets: &[(String, String)],
 ) {
     let theme = crate::theme::current();
-    let shown = snippets.len().min(LEADER_MAX_ROWS);
-    let overflow = snippets.len() - shown;
+    // Agent jumps come first — they're why a heads-down user armed the
+    // leader — then the snippet library. One flat list, capped together.
+    let rows: Vec<(String, String)> = agents.iter().chain(snippets.iter()).cloned().collect();
+    let shown = rows.len().min(LEADER_MAX_ROWS);
+    let overflow = rows.len() - shown;
     let extra_rows = if overflow > 0 { 1 } else { 0 };
-    // title + footer hint + one row per shown snippet (+ overflow),
+    // title + footer hint + one row per shown binding (+ overflow),
     // plus a blank row top and bottom.
     let panel_h = (shown as u16 + extra_rows as u16 + 4).min(area.height);
     let panel_w = PANEL_W.min(area.width);
@@ -196,8 +201,13 @@ pub fn render_terminal_leader(
     frame.render_widget(Clear, panel);
     frame.render_widget(Block::default().style(bg), panel);
 
+    let title_kind = if snippets.is_empty() {
+        "jump"
+    } else {
+        "jump · snippets"
+    };
     let title = Line::from(Span::styled(
-        format!(" {escape_char}{escape_char} · snippets "),
+        format!(" {escape_char}{escape_char} · {title_kind} "),
         Style::default()
             .bg(theme.surface)
             .fg(theme.text_dim)
@@ -218,7 +228,7 @@ pub fn render_terminal_leader(
         .fg(theme.accent)
         .add_modifier(Modifier::BOLD);
     let label_style = Style::default().bg(theme.surface).fg(theme.text_strong);
-    for (i, (k, desc)) in snippets.iter().take(shown).enumerate() {
+    for (i, (k, desc)) in rows.iter().take(shown).enumerate() {
         let y = panel.y + 2 + i as u16;
         if y >= panel.y + panel.height {
             break;

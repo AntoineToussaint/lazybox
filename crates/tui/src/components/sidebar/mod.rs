@@ -983,21 +983,18 @@ impl Sidebar {
         self.focus_workspace_key(&target)
     }
 
-    /// Move the cursor onto the next visible workspace that has a
-    /// coding-agent session, starting AFTER the current row and
-    /// wrapping. Returns true when a target was found and the cursor
-    /// moved. Backs the `F3` focus-mode "next agent" jump.
-    pub fn focus_next_agent_workspace(&mut self) -> bool {
-        let keys_order: Vec<SessionKey> = self
-            .visible
+    /// The visible workspaces that have a coding-agent session, in
+    /// sidebar (top-down) order. The 1-based index into this list is
+    /// the number shown on the row's jump badge and dialed by the
+    /// `]]<digit>` focus-mode jump, so both read from the same source
+    /// and can't drift.
+    pub fn agent_workspace_keys(&self) -> Vec<SessionKey> {
+        self.visible
             .iter()
             .filter_map(|r| match r {
-                VisibleRow::Workspace(k) => Some(k.clone()),
+                VisibleRow::Workspace(k) => Some(k),
                 _ => None,
             })
-            .collect();
-        let with_agent: std::collections::HashSet<SessionKey> = keys_order
-            .iter()
             .filter(|k| {
                 self.workspaces.get(*k).is_some_and(|w| {
                     w.sessions
@@ -1006,13 +1003,18 @@ impl Sidebar {
                 })
             })
             .cloned()
-            .collect();
-        let current = self.selected_session_key().cloned();
-        let Some(target) = crate::agent_attention::next_flagged_workspace(
-            &with_agent,
-            &keys_order,
-            current.as_ref(),
-        ) else {
+            .collect()
+    }
+
+    /// Move the cursor onto the `n`th (1-based) agent workspace in
+    /// sidebar order. Returns true when that slot exists and the
+    /// cursor moved. Backs the `]]<digit>` focus-mode jump — the
+    /// deterministic replacement for the old `F3` cycle.
+    pub fn focus_nth_agent_workspace(&mut self, n: usize) -> bool {
+        let Some(target) = n
+            .checked_sub(1)
+            .and_then(|i| self.agent_workspace_keys().into_iter().nth(i))
+        else {
             return false;
         };
         self.focus_workspace_key(&target)

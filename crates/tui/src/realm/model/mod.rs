@@ -318,7 +318,8 @@ pub struct Model<T: TerminalAdapter> {
     /// pane are hidden and the focused workspace's terminal expands to
     /// near-fullscreen behind a slim event header. Focus is pinned to
     /// `Terminals` while this is on; leaving the terminal via `]]`
-    /// clears it. Toggled by `F2`.
+    /// clears it. Toggled by `.` (sidebar) or `]]f` (terminal);
+    /// `]]<digit>` jumps straight to a specific agent.
     focus_mode: bool,
     /// Three pane wrappers held as typed fields so the orchestrator
     /// can call `.drain_cmds()` etc. directly. The wrappers also
@@ -2088,6 +2089,28 @@ impl<T: TerminalAdapter> Model<T> {
         } else {
             Vec::new()
         };
+        // Agent-jump roster for the `]]` leader popup: `1..9` → agent
+        // workspace name (sidebar order), plus the `f` focus-mode row.
+        // Shown above the snippets so the heads-down user can pick a
+        // jump target by number. Built only while the leader is armed.
+        let agent_leader_rows: Vec<(String, String)> = if self.terminal_leader_at.is_some() {
+            let mut rows: Vec<(String, String)> = self
+                .sidebar
+                .agent_workspace_keys()
+                .into_iter()
+                .take(9)
+                .enumerate()
+                .filter_map(|(i, k)| {
+                    self.sidebar
+                        .workspace_by_key(&k)
+                        .map(|w| ((i + 1).to_string(), w.name.clone()))
+                })
+                .collect();
+            rows.push(("f".to_string(), "focus mode".to_string()));
+            rows
+        } else {
+            Vec::new()
+        };
         // Focus mode (#156): hide the sidebar + activity pane and give
         // the terminal the whole window behind a slim event header.
         // Resolve the header's contents out here so the draw closure
@@ -2095,21 +2118,26 @@ impl<T: TerminalAdapter> Model<T> {
         // the mutable terminal borrow.
         let focus_mode = self.focus_mode;
         let (focus_title, focus_summary, focus_hint) = if focus_mode {
-            use lazybox_tui_core::action::{ActionDef, ActionKind};
-            let title = self
-                .terminals
-                .active_session()
+            let active = self.terminals.active_session();
+            let name = active
                 .and_then(|k| self.sidebar.workspace_by_key(k))
                 .or_else(|| self.sidebar.selected_workspace())
                 .map(|w| w.name.clone())
                 .unwrap_or_else(|| "no workspace".to_string());
-            let hint = format!(
-                "{} next agent · {} exit",
-                ActionDef::for_kind(ActionKind::FocusNextAgent)
-                    .effective_keys_display(&self.action_key_overrides),
-                ActionDef::for_kind(ActionKind::ToggleFocusMode)
-                    .effective_keys_display(&self.action_key_overrides),
-            );
+            // Prefix the title with this agent's jump number (its
+            // 1-based slot in the sidebar-order agent roster) so the
+            // user knows which `]]<digit>` lands back here.
+            let agents = self.sidebar.agent_workspace_keys();
+            let number = active.and_then(|k| agents.iter().position(|a| a == k));
+            let title = match number {
+                Some(i) => format!("{} · {name}", i + 1),
+                None => name,
+            };
+            // Inside focus mode the PTY owns the keyboard, so the
+            // reachable controls are all `]]` leader chords: `]]<digit>`
+            // jumps to another agent, `]]` exits back to the sidebar.
+            let esc = self.ui_defaults.terminal_escape_char;
+            let hint = format!("{esc}{esc}<n> jump · {esc}{esc} exit");
             (title, self.sidebar.attention_summary(), hint)
         } else {
             (String::new(), Default::default(), String::new())
@@ -2170,12 +2198,14 @@ impl<T: TerminalAdapter> Model<T> {
                 crate::realm::components::which_key::render(f, area, group);
             }
             // Which-key popup for the armed terminal `]]` leader
-            // (#205): lists the snippet keys reachable as `]]<key>`.
+            // (#205): the agent-jump roster (`]]<digit>`, `]]f`) on top
+            // of the snippet keys reachable as `]]<key>`.
             if self.terminal_leader_at.is_some() {
                 crate::realm::components::which_key::render_terminal_leader(
                     f,
                     area,
                     self.ui_defaults.terminal_escape_char,
+                    &agent_leader_rows,
                     &snippet_leader_rows,
                 );
             }

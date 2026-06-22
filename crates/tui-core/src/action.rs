@@ -130,6 +130,12 @@ pub enum Action {
     /// Jump the sidebar cursor to the next workspace whose PR has
     /// failing / mixed CI (`Shift-F`). Wraps around.
     JumpToFailingCi,
+    /// Toggle focus mode — maximize the focused workspace's terminal
+    /// to near-fullscreen behind a slim event header, hiding the
+    /// sidebar and activity pane (`.` from the sidebar, `]]f` from
+    /// inside a terminal). Jump straight to a specific agent with
+    /// `]]<digit>` (sidebar order, top-down).
+    ToggleFocusMode,
     /// Start a fresh agent session from anywhere (`Shift-W`): pick a
     /// project, name the workspace, and the daemon creates it and
     /// spawns the default agent in one step. The zero-friction entry
@@ -232,6 +238,7 @@ pub enum ActionKind {
     OpenSettings,
     JumpToAsking,
     JumpToFailingCi,
+    ToggleFocusMode,
     StartAgent,
     ToggleActivityPane,
     Quit,
@@ -360,6 +367,7 @@ impl Action {
             Action::OpenSettings => ActionKind::OpenSettings,
             Action::JumpToAsking => ActionKind::JumpToAsking,
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
+            Action::ToggleFocusMode => ActionKind::ToggleFocusMode,
             Action::StartAgent => ActionKind::StartAgent,
             Action::ToggleActivityPane => ActionKind::ToggleActivityPane,
             Action::Quit => ActionKind::Quit,
@@ -443,6 +451,13 @@ impl ActionDef {
                 default_keys: "Shift-F",
                 label: "next failing",
                 describe: "Jump the sidebar cursor to the next PR whose CI is failing.",
+                section: Section::Global,
+            },
+            ActionKind::ToggleFocusMode => &Self {
+                kind: ActionKind::ToggleFocusMode,
+                default_keys: ".",
+                label: "focus mode",
+                describe: "Maximize the focused workspace's terminal to near-fullscreen behind a slim event header, hiding the sidebar and activity pane. From inside a terminal use `]]f`; jump straight to agent N with `]]<digit>` (sidebar order). Press again or `]]` to exit.",
                 section: Section::Global,
             },
             ActionKind::StartAgent => &Self {
@@ -696,6 +711,7 @@ impl ActionDef {
             ActionKind::OpenSyncStatus,
             ActionKind::JumpToAsking,
             ActionKind::JumpToFailingCi,
+            ActionKind::ToggleFocusMode,
             ActionKind::StartAgent,
             ActionKind::ToggleActivityPane,
             ActionKind::ResizeSplitter,
@@ -797,6 +813,8 @@ pub enum NamedKey {
     PageDown,
     Delete,
     Insert,
+    /// Function key `F1`..`F12`.
+    Function(u8),
 }
 
 impl KeyChord {
@@ -857,6 +875,12 @@ impl KeyChord {
             "PageDown" | "PgDn" => ChordCode::Named(NamedKey::PageDown),
             "Delete" | "Del" => ChordCode::Named(NamedKey::Delete),
             "Insert" => ChordCode::Named(NamedKey::Insert),
+            // Function keys: `F1`..`F12`.
+            fk if fk.starts_with('F')
+                && fk[1..].parse::<u8>().is_ok_and(|n| (1..=12).contains(&n)) =>
+            {
+                ChordCode::Named(NamedKey::Function(fk[1..].parse().unwrap()))
+            }
             // Single ASCII letter / symbol — uppercase letters
             // mean Shift-letter; lowercase stays as-is. The Shift
             // prefix takes precedence (`"Shift-M"` parses to
@@ -1016,6 +1040,7 @@ impl ActionKind {
             ActionKind::OpenSettings => "open_settings",
             ActionKind::JumpToAsking => "jump_to_asking",
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
+            ActionKind::ToggleFocusMode => "toggle_focus_mode",
             ActionKind::StartAgent => "start_agent",
             ActionKind::ToggleActivityPane => "toggle_activity_pane",
             ActionKind::Quit => "quit",
@@ -1144,6 +1169,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::JumpToAsking
         | ActionKind::JumpToFailingCi
         | ActionKind::ToggleActivityPane
+        | ActionKind::ToggleFocusMode
         | ActionKind::Quit
         | ActionKind::ResizeSplitter
         | ActionKind::TerminalScroll
@@ -1299,13 +1325,16 @@ mod tests {
     fn effective_keys_display_returns_override_string() {
         use std::collections::BTreeMap;
         let mut overrides = BTreeMap::new();
-        overrides.insert("refresh".into(), "F5".into());
+        overrides.insert("refresh".into(), "Hyper-Q".into());
         let def = ActionDef::for_kind(ActionKind::Refresh);
-        // F5 doesn't parse as a chord (no Function-key support yet),
-        // so it should fall back to the default — typo guard.
+        // An unparseable override falls back to the default — typo guard.
         assert_eq!(def.effective_keys_display(&overrides), "Shift-R");
 
-        // A parseable override surfaces.
+        // A parseable override surfaces — including function keys, now
+        // that the parser models `F1`..`F12`.
+        overrides.insert("refresh".into(), "F5".into());
+        assert_eq!(def.effective_keys_display(&overrides), "F5");
+
         overrides.insert("refresh".into(), "Ctrl-r".into());
         assert_eq!(def.effective_keys_display(&overrides), "Ctrl-r");
     }

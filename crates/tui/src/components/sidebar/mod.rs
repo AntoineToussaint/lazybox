@@ -311,6 +311,19 @@ pub struct RepoSummary {
     pub attention: usize,
 }
 
+/// At-a-glance attention tallies across the visible mailbox, surfaced
+/// by the focus-mode event header so a heads-down user stays aware of
+/// incoming work without the full sidebar. Each count reuses the same
+/// `AttentionSignal` producer the per-row pills and header counters
+/// read, so the strip can never disagree with what the sidebar shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AttentionSummary {
+    pub unread: usize,
+    pub asking: usize,
+    pub ci_failing: usize,
+    pub review_pending: usize,
+}
+
 pub struct Sidebar {
     id: PaneId,
     workspaces: HashMap<SessionKey, Workspace>,
@@ -970,6 +983,55 @@ impl Sidebar {
         self.focus_workspace_key(&target)
     }
 
+    /// The visible workspaces that have a coding-agent session, in
+    /// sidebar (top-down) order. The 1-based index into this list is
+    /// the number shown on the row's jump badge and dialed by the
+    /// `]]<digit>` focus-mode jump, so both read from the same source
+    /// and can't drift.
+    pub fn agent_workspace_keys(&self) -> Vec<SessionKey> {
+        self.visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k),
+                _ => None,
+            })
+            .filter(|k| {
+                self.workspaces.get(*k).is_some_and(|w| {
+                    w.sessions
+                        .iter()
+                        .any(|s| matches!(s.kind, lazybox_core::SessionKind::Agent { .. }))
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Move the cursor onto the `n`th (1-based) agent workspace in
+    /// sidebar order. Returns true when that slot exists and the
+    /// cursor moved. Backs the `]]<digit>` focus-mode jump — the
+    /// deterministic replacement for the old `F3` cycle.
+    pub fn focus_nth_agent_workspace(&mut self, n: usize) -> bool {
+        let Some(target) = n
+            .checked_sub(1)
+            .and_then(|i| self.agent_workspace_keys().into_iter().nth(i))
+        else {
+            return false;
+        };
+        self.focus_workspace_key(&target)
+    }
+
+    /// At-a-glance attention tallies for the focus-mode event header.
+    /// Reuses the same per-signal counters that drive the sidebar's
+    /// own header badges so the two never drift.
+    pub fn attention_summary(&self) -> AttentionSummary {
+        AttentionSummary {
+            unread: self.total_unread_count(),
+            asking: self.input_pending_count(),
+            ci_failing: self.ci_failing_count(),
+            review_pending: self.review_pending_count(),
+        }
+    }
+
     /// Move the cursor onto the session sub-row matching `id`. No-op
     /// when the row isn't visible — caller must already have aligned
     /// the workspace via `focus_workspace_key`.
@@ -1627,6 +1689,18 @@ impl Sidebar {
             actions.push(Action::OpenEditor);
             actions.push(Action::ToggleSnooze);
             actions.push(Action::Archive);
+        }
+        // Focus mode (`.`) surfaces only when the selected workspace
+        // has a coding agent to maximize — otherwise the key is a
+        // no-op, so advertising it would be noise. The `]]<digit>`
+        // jumps live under the terminal `]]` leader (and its popup),
+        // not the sidebar footer.
+        if workspace.is_some_and(|w| {
+            w.sessions
+                .iter()
+                .any(|s| matches!(s.kind, lazybox_core::SessionKind::Agent { .. }))
+        }) {
+            actions.push(Action::ToggleFocusMode);
         }
         // Creation actions live last in the row but Project comes
         // BEFORE Workspace: projects are containers; you need one

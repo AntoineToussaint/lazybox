@@ -572,8 +572,7 @@ impl<T: TerminalAdapter> Model<T> {
             && armed_at.elapsed() >= self.ui_defaults.escape_window
         {
             self.terminal_leader_at = None;
-            self.focus = PaneFocus::Sidebar;
-            self.set_focus_attr();
+            self.leave_terminal_to_sidebar();
             self.redraw = true;
         }
         // A lone `]` that armed the chord but never saw a second press

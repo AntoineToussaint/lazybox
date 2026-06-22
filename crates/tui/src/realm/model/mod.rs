@@ -314,6 +314,13 @@ pub struct Model<T: TerminalAdapter> {
     pub viewer_logins: std::collections::HashMap<String, String>,
     /// Which pane has focus when no modal is active.
     focus: PaneFocus,
+    /// Focus mode (issue #156): when `true`, the sidebar and activity
+    /// pane are hidden and the focused workspace's terminal expands to
+    /// near-fullscreen behind a slim event header. Focus is pinned to
+    /// `Terminals` while this is on; leaving the terminal via `]]`
+    /// clears it. Toggled by `.` (sidebar) or `]]f` (terminal);
+    /// `]]<digit>` jumps straight to a specific agent.
+    focus_mode: bool,
     /// Three pane wrappers held as typed fields so the orchestrator
     /// can call `.drain_cmds()` etc. directly. The wrappers also
     /// track their own `focused: bool` flag, which we keep in sync
@@ -695,7 +702,7 @@ pub struct Preselect {
     pub session_id_raw: Option<String>,
 }
 
-use crate::realm::layout::{LayoutCtx, apply_activity_visibility, pane_areas};
+use crate::realm::layout::{LayoutCtx, apply_activity_visibility, focus_mode_areas, pane_areas};
 use crate::realm::setup_ctx::{SettingsAction, SetupCtx};
 use crate::realm::status_ctx::StatusCtx;
 
@@ -752,6 +759,7 @@ impl<T: TerminalAdapter> Model<T> {
             modal_stack: Vec::new(),
             viewer_logins: std::collections::HashMap::new(),
             focus: PaneFocus::Sidebar,
+            focus_mode: false,
             sidebar: Sidebar::new(SIDEBAR_PID),
             right: Right::new(RIGHT_PID),
             terminals: Terminals::new(TERMINALS_PID),
@@ -2137,23 +2145,90 @@ impl<T: TerminalAdapter> Model<T> {
         } else {
             Vec::new()
         };
+        // Agent-jump roster for the `]]` leader popup: `1..9` → agent
+        // workspace name (sidebar order), plus the `f` focus-mode row.
+        // Shown above the snippets so the heads-down user can pick a
+        // jump target by number. Built only while the leader is armed.
+        let agent_leader_rows: Vec<(String, String)> = if self.terminal_leader_at.is_some() {
+            let mut rows: Vec<(String, String)> = self
+                .sidebar
+                .agent_workspace_keys()
+                .into_iter()
+                .take(9)
+                .enumerate()
+                .filter_map(|(i, k)| {
+                    self.sidebar
+                        .workspace_by_key(&k)
+                        .map(|w| ((i + 1).to_string(), w.name.clone()))
+                })
+                .collect();
+            rows.push(("f".to_string(), "focus mode".to_string()));
+            rows
+        } else {
+            Vec::new()
+        };
+        // Focus mode (#156): hide the sidebar + activity pane and give
+        // the terminal the whole window behind a slim event header.
+        // Resolve the header's contents out here so the draw closure
+        // doesn't need to borrow `self` immutably while it also holds
+        // the mutable terminal borrow.
+        let focus_mode = self.focus_mode;
+        let (focus_title, focus_summary, focus_hint) = if focus_mode {
+            let active = self.terminals.active_session();
+            let name = active
+                .and_then(|k| self.sidebar.workspace_by_key(k))
+                .or_else(|| self.sidebar.selected_workspace())
+                .map(|w| w.name.clone())
+                .unwrap_or_else(|| "no workspace".to_string());
+            // Prefix the title with this agent's jump number (its
+            // 1-based slot in the sidebar-order agent roster) so the
+            // user knows which `]]<digit>` lands back here.
+            let agents = self.sidebar.agent_workspace_keys();
+            let number = active.and_then(|k| agents.iter().position(|a| a == k));
+            let title = match number {
+                Some(i) => format!("{} · {name}", i + 1),
+                None => name,
+            };
+            // Inside focus mode the PTY owns the keyboard, so the
+            // reachable controls are all `]]` leader chords: `]]<digit>`
+            // jumps to another agent, `]]` exits back to the sidebar.
+            let esc = self.ui_defaults.terminal_escape_char;
+            let hint = format!("{esc}{esc}<n> jump · {esc}{esc} exit");
+            (title, self.sidebar.attention_summary(), hint)
+        } else {
+            (String::new(), Default::default(), String::new())
+        };
         let mut captured_area = Rect::default();
         let _ = self.terminal.draw(|f| {
             let area = f.area();
             captured_area = area;
             let (pane_area, footer_area) = split_for_footer(area);
-            let (left, right_top, right_bottom) = apply_activity_visibility(
-                pane_areas(pane_area, sidebar_pct, right_top_pct, sidebar_user_resized),
-                activity_visible,
-            );
-            self.sidebar.view_in(left, f);
-            // A zero-height `right_top` means the Activity pane is
-            // hidden for this workspace — its space went to the
-            // terminal stack below.
-            if right_top.height > 0 {
-                self.right.view_in(right_top, f);
-            }
-            self.terminals.view_in(right_bottom, f);
+            let right_bottom = if focus_mode {
+                let (header, body) = focus_mode_areas(pane_area);
+                crate::realm::components::focus_header::render(
+                    f,
+                    header,
+                    &focus_title,
+                    focus_summary,
+                    &focus_hint,
+                );
+                self.terminals.view_in(body, f);
+                body
+            } else {
+                let (left, right_top, right_bottom) = apply_activity_visibility(
+                    pane_areas(pane_area, sidebar_pct, right_top_pct, sidebar_user_resized),
+                    activity_visible,
+                );
+                self.sidebar.view_in(left, f);
+                // A zero-height `right_top` means the Activity pane is
+                // hidden for this workspace — its space went to the
+                // terminal stack below.
+                if right_top.height > 0 {
+                    self.right.view_in(right_top, f);
+                }
+                self.terminals.view_in(right_bottom, f);
+                right_bottom
+            };
 
             // Selection highlight overlay. Painted AFTER the terminal
             // widget so the reverse-video pass lands on the just-
@@ -2186,12 +2261,14 @@ impl<T: TerminalAdapter> Model<T> {
                 crate::realm::components::which_key::render(f, area, group);
             }
             // Which-key popup for the armed terminal `]]` leader
-            // (#205): lists the snippet keys reachable as `]]<key>`.
+            // (#205): the agent-jump roster (`]]<digit>`, `]]f`) on top
+            // of the snippet keys reachable as `]]<key>`.
             if self.terminal_leader_at.is_some() {
                 crate::realm::components::which_key::render_terminal_leader(
                     f,
                     area,
                     self.ui_defaults.terminal_escape_char,
+                    &agent_leader_rows,
                     &snippet_leader_rows,
                 );
             }

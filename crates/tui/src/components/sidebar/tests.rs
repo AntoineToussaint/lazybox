@@ -1650,6 +1650,46 @@ mod done_alert_tests {
         (sb, key)
     }
 
+    /// Focus mode (`.`) surfaces in the contextual footer only when the
+    /// selected workspace has a coding agent to maximize — advertising
+    /// it on an agent-less row would point at a no-op key.
+    #[test]
+    fn focus_mode_surfaces_in_footer_only_with_an_agent() {
+        let overrides = std::collections::BTreeMap::new();
+
+        // Plain workspace, no agent session → no focus-mode hint.
+        let (mut sb, key) = sidebar_with_one_workspace();
+        assert!(sb.focus_workspace_key(&key), "cursor on the workspace");
+        assert!(
+            !sb.contextual_bindings(&overrides)
+                .iter()
+                .any(|b| b.label.contains("focus mode")),
+            "no agent → no focus-mode footer hint",
+        );
+
+        // Add an agent session → `.` focus-mode hint appears.
+        let wk = sb.workspaces.get(&key).unwrap().key.clone();
+        sb.workspaces
+            .get_mut(&key)
+            .unwrap()
+            .add_session(lazybox_core::WorkspaceSession::new(
+                wk,
+                lazybox_core::SessionKind::Agent {
+                    agent_id: "claude".into(),
+                },
+                std::path::PathBuf::from("/tmp/wt"),
+                chrono::Utc::now(),
+            ));
+        sb.recompute_visible();
+        assert!(sb.focus_workspace_key(&key));
+        assert!(
+            sb.contextual_bindings(&overrides)
+                .iter()
+                .any(|b| b.label.contains("focus mode") && b.keys == "."),
+            "agent present → `.` focus-mode footer hint",
+        );
+    }
+
     /// Reaching `Done` (agent finished its turn) alerts the user: it
     /// flags the done-set, queues an OS notification, and a footer
     /// notice — the #80 "tell me when it's done" requirement.

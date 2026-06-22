@@ -307,6 +307,24 @@ impl Sidebar {
         self.inner.focus_next_failing_ci_workspace()
     }
 
+    /// Move the cursor onto the `n`th (1-based) agent workspace in
+    /// sidebar order. Returns true when that slot exists. Backs the
+    /// `]]<digit>` focus-mode jump.
+    pub fn focus_nth_agent_workspace(&mut self, n: usize) -> bool {
+        self.inner.focus_nth_agent_workspace(n)
+    }
+
+    /// The visible agent workspaces in sidebar (top-down) order — the
+    /// roster the `]]<digit>` jump and its badges read from.
+    pub fn agent_workspace_keys(&self) -> Vec<lazybox_core::SessionKey> {
+        self.inner.agent_workspace_keys()
+    }
+
+    /// At-a-glance attention tallies for the focus-mode event header.
+    pub fn attention_summary(&self) -> crate::components::sidebar::AttentionSummary {
+        self.inner.attention_summary()
+    }
+
     /// State-aware short list for the footer hint bar. Catalog-driven;
     /// `overrides` carries the user's `ui.action_keys` map (empty when
     /// untouched) and flows into the catalog's `effective_keys_display`.

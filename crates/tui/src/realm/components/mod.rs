@@ -8,6 +8,7 @@
 pub mod choice;
 pub mod confirm;
 pub mod error;
+pub mod focus_header;
 pub mod footer;
 pub mod help;
 pub mod input;

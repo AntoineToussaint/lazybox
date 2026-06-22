@@ -464,6 +464,9 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                 }
             }
+            Action::ToggleFocusMode => {
+                self.toggle_focus_mode();
+            }
             Action::StartAgent => {
                 // Global "just start working" entry point. Unlike `n`
                 // (which needs the sidebar cursor on a project), this
@@ -578,5 +581,57 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
         cmds
+    }
+
+    /// Enter or leave focus mode (issue #156). Entering requires a
+    /// live terminal to maximize — focus mode over an empty stack
+    /// would show a blank screen — so we flash a hint and stay put
+    /// when there's nothing to focus. Entering pins focus to the
+    /// terminal; leaving keeps it there so the user lands back in the
+    /// three-pane view still driving the same agent.
+    pub(super) fn toggle_focus_mode(&mut self) {
+        if self.focus_mode {
+            self.focus_mode = false;
+            self.redraw = true;
+            return;
+        }
+        if self.terminals.is_empty() {
+            self.flash_hint("no agent terminal to focus");
+            return;
+        }
+        self.focus_mode = true;
+        self.focus = PaneFocus::Terminals;
+        self.terminal_user_typed_since_focus = false;
+        self.set_focus_attr();
+        self.redraw = true;
+    }
+
+    /// Switch the displayed terminal to the Nth agent workspace,
+    /// counting in sidebar (top-down) order — the deterministic
+    /// `]]<digit>` jump that replaced the old `F3` cycle. `n` is
+    /// 1-based, matching the number badge on the sidebar row and the
+    /// roster in the `]]` leader popup. Keeps focus on the terminal so
+    /// it works seamlessly inside focus mode; flashes when there's no
+    /// agent at that slot. Mirrors the `!` / `Shift-F` jumps but lands
+    /// the cursor on a specific agent rather than asking / failing-CI.
+    pub(super) fn jump_to_agent_workspace(&mut self, n: usize) {
+        if self.sidebar.focus_nth_agent_workspace(n) {
+            self.focus = PaneFocus::Terminals;
+            self.terminal_user_typed_since_focus = false;
+            self.set_focus_attr();
+            self.sync_panes();
+            self.redraw = true;
+        } else {
+            self.flash_hint(format!("no agent #{n}"));
+        }
+    }
+
+    /// Leave the terminal pane back to the sidebar. Exits focus mode
+    /// if it was on — the sidebar is hidden there, so returning to it
+    /// must restore the normal three-pane layout.
+    pub(super) fn leave_terminal_to_sidebar(&mut self) {
+        self.focus_mode = false;
+        self.focus = PaneFocus::Sidebar;
+        self.set_focus_attr();
     }
 }

@@ -40,6 +40,17 @@ impl Sidebar {
         // Row 0 — app title + counts.
         let mut header_spans: Vec<Span> = Vec::with_capacity(12);
         header_spans.push(Span::styled(mailbox_label, theme.title(focused)));
+        // Brand-tied build version, so a running instance is identifiable
+        // at a glance (e.g. confirming a fix actually shipped). Only on
+        // the Inbox view, where the title is the app name rather than a
+        // mailbox label.
+        if matches!(self.mailbox, Mailbox::Inbox) {
+            header_spans.push(Span::raw(" "));
+            header_spans.push(Span::styled(
+                concat!("v", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(theme.text_dim),
+            ));
+        }
         header_spans.push(Span::raw("  "));
         header_spans.push(Span::styled(
             count.to_string(),
@@ -563,6 +574,17 @@ impl Sidebar {
             .iter()
             .filter(|r| matches!(r, VisibleRow::Workspace(_)))
             .count();
+        // 1-based jump numbers for the first nine agent workspaces, in
+        // sidebar order — the badge that pairs with the `]]<digit>`
+        // jump. Past the ninth there's no single-digit key, so it gets
+        // no badge.
+        let agent_numbers: std::collections::HashMap<SessionKey, usize> = self
+            .agent_workspace_keys()
+            .into_iter()
+            .take(9)
+            .enumerate()
+            .map(|(i, k)| (k, i + 1))
+            .collect();
         let mut positions: Vec<usize> = Vec::with_capacity(workspace_count);
         let mut rows: Vec<TableRow> = Vec::with_capacity(workspace_count);
         for (i, row) in self.visible.iter().enumerate() {
@@ -592,6 +614,7 @@ impl Sidebar {
                     self.working_spinner_frame,
                 ),
                 badges: self.runner_badges(key),
+                agent_number: agent_numbers.get(key).copied(),
                 ascii_glyphs: self.ascii_glyphs,
             };
             positions.push(i);

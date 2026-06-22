@@ -544,6 +544,14 @@ pub struct Model<T: TerminalAdapter> {
     /// preselect) feeds the daemon's round-robin scheduler without
     /// each call site needing its own emit hook.
     last_focused_session_key: Option<lazybox_core::SessionKey>,
+    /// Per-workspace manual override of the Activity pane's
+    /// visibility, keyed by workspace. The pane auto-hides when a
+    /// workspace has no activity worth showing (`Right::
+    /// has_visible_content`); `ToggleActivityPane` (Shift-P) flips
+    /// that and records the user's choice here so navigating away and
+    /// back keeps it. Session-scoped — not persisted across launches.
+    /// An entry's `bool` is the desired visibility (`true` = shown).
+    activity_pane_overrides: std::collections::HashMap<lazybox_core::WorkspaceKey, bool>,
     /// Active sidebar right-click context menu state: the workspace
     /// row the menu was raised over plus the ordered list of catalog
     /// `Action`s the picker is offering. `Msg::ChoicePicked` indexes
@@ -694,7 +702,7 @@ pub struct Preselect {
     pub session_id_raw: Option<String>,
 }
 
-use crate::realm::layout::{LayoutCtx, focus_mode_areas, pane_areas};
+use crate::realm::layout::{LayoutCtx, apply_activity_visibility, focus_mode_areas, pane_areas};
 use crate::realm::setup_ctx::{SettingsAction, SetupCtx};
 use crate::realm::status_ctx::StatusCtx;
 
@@ -796,6 +804,7 @@ impl<T: TerminalAdapter> Model<T> {
             ui_defaults: lazybox_config::UiDefaults::default(),
             pr_details_fetched: std::collections::HashSet::new(),
             last_focused_session_key: None,
+            activity_pane_overrides: std::collections::HashMap::new(),
             pending_sidebar_context: None,
             action_key_overrides: std::collections::BTreeMap::new(),
             pending_action_confirm: None,
@@ -1993,6 +2002,49 @@ impl<T: TerminalAdapter> Model<T> {
         let _ = self.terminal.leave_alternate_screen();
         let _ = self.terminal.disable_raw_mode();
     }
+    /// Whether the Activity (right) pane should render for the
+    /// currently-selected workspace. A per-workspace manual override
+    /// (set by `ToggleActivityPane`) wins; otherwise the pane shows
+    /// only when the workspace has content worth showing. The
+    /// auto-hide rule is about a *selected* workspace with no
+    /// activity — with nothing selected (empty inbox) the pane keeps
+    /// its prior always-on behavior.
+    pub(super) fn activity_pane_visible(&self) -> bool {
+        let Some(ws) = self.sidebar.selected_workspace() else {
+            return true;
+        };
+        if let Some(&shown) = self.activity_pane_overrides.get(&ws.key) {
+            return shown;
+        }
+        self.right.has_visible_content()
+    }
+
+    /// The three pane rects, accounting for a hidden Activity pane.
+    /// When the pane is hidden its row folds into the terminal stack:
+    /// the returned `right_top` is zero-height (so hit-tests and the
+    /// render skip it) and `right_bottom` spans the full right column.
+    pub(super) fn effective_pane_rects(&self, area: Rect) -> (Rect, Rect, Rect) {
+        let rects = pane_areas(
+            area,
+            self.layout.sidebar_pct,
+            self.layout.right_top_pct,
+            self.layout.sidebar_user_resized,
+        );
+        apply_activity_visibility(rects, self.activity_pane_visible())
+    }
+
+    /// Keep focus off the Activity pane while it's hidden — Tab,
+    /// click, and programmatic moves all funnel through here so a
+    /// hidden pane never silently swallows keystrokes. Falls through
+    /// to the terminal stack (which forwards to the sidebar when no
+    /// terminal is live).
+    pub(super) fn enforce_pane_focus(&mut self) {
+        if self.focus == PaneFocus::Right && !self.activity_pane_visible() {
+            self.focus = PaneFocus::Terminals;
+            self.set_focus_attr();
+        }
+    }
+
     /// Render the current frame.
     pub fn view(&mut self) {
         // Pull state out before the closure so the borrow checker is
@@ -2001,6 +2053,10 @@ impl<T: TerminalAdapter> Model<T> {
         let sidebar_pct = self.layout.sidebar_pct;
         let right_top_pct = self.layout.right_top_pct;
         let sidebar_user_resized = self.layout.sidebar_user_resized;
+        // Computed outside the draw closure: calling a `&self` method
+        // inside it would capture all of `self` and clash with the
+        // disjoint `&mut self.sidebar` / `self.right` borrows below.
+        let activity_visible = self.activity_pane_visible();
         // Pick the polling indicator for the footer:
         // - During the initial blocking modal, surface the rich
         //   first-poll spinner.
@@ -2159,10 +2215,17 @@ impl<T: TerminalAdapter> Model<T> {
                 self.terminals.view_in(body, f);
                 body
             } else {
-                let (left, right_top, right_bottom) =
-                    pane_areas(pane_area, sidebar_pct, right_top_pct, sidebar_user_resized);
+                let (left, right_top, right_bottom) = apply_activity_visibility(
+                    pane_areas(pane_area, sidebar_pct, right_top_pct, sidebar_user_resized),
+                    activity_visible,
+                );
                 self.sidebar.view_in(left, f);
-                self.right.view_in(right_top, f);
+                // A zero-height `right_top` means the Activity pane is
+                // hidden for this workspace — its space went to the
+                // terminal stack below.
+                if right_top.height > 0 {
+                    self.right.view_in(right_top, f);
+                }
                 self.terminals.view_in(right_bottom, f);
                 right_bottom
             };

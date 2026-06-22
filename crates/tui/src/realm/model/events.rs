@@ -323,6 +323,10 @@ impl<T: TerminalAdapter> Model<T> {
         // filter) gets a fresh details fetch on next focus.
         if let IpcEvent::WorkspaceRemoved(key) = &event {
             self.pr_details_fetched.remove(key);
+            // Drop any Activity-pane visibility override so a re-added
+            // workspace re-applies the empty-aware default instead of a
+            // stale manual choice.
+            self.activity_pane_overrides.remove(key);
             // Capture this BEFORE the sidebar (below) moves the cursor
             // off the now-gone row: if the user was viewing the
             // workspace being removed, a trailing `WorkspaceMerged`
@@ -687,6 +691,10 @@ impl<T: TerminalAdapter> Model<T> {
         self.right.set_workspace(workspace);
         self.terminals.set_active_session(session_key);
         self.terminals.set_layout(layout);
+        // If the selection landed on a workspace whose Activity pane is
+        // hidden while that pane held focus, hand focus to the terminal
+        // so keystrokes don't vanish into an unrendered pane.
+        self.enforce_pane_focus();
     }
 
     /// Apply the pending `--workspace [--session]` selection. One-shot

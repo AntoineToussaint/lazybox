@@ -18,7 +18,6 @@ use super::{
     rect_contains,
 };
 use crate::realm::keymap::realm_key_to_crossterm;
-use crate::realm::layout::pane_areas;
 use lazybox_ipc::Command as IpcCommand;
 use std::time::Duration;
 use tuirealm::application::PollStrategy;
@@ -145,6 +144,11 @@ impl<T: TerminalAdapter> Model<T> {
                 // shell for autocomplete.
                 self.q_latch.disarm();
                 self.focus = self.focus.next();
+                // Skip the Activity pane when it's hidden — Tab should
+                // never land focus on a pane the user can't see.
+                if self.focus == PaneFocus::Right && !self.activity_pane_visible() {
+                    self.focus = self.focus.next();
+                }
                 self.set_focus_attr();
                 self.redraw = true;
                 return;
@@ -177,7 +181,15 @@ impl<T: TerminalAdapter> Model<T> {
                 && key.modifiers.is_empty() =>
             {
                 self.q_latch.disarm();
-                self.focus = PaneFocus::Right;
+                // With no activity to show the pane is hidden, so jump
+                // straight to the terminal — "open workspace → drive
+                // the agent" in one keystroke. Otherwise focus the
+                // Activity pane so the user can read / reply.
+                self.focus = if self.activity_pane_visible() {
+                    PaneFocus::Right
+                } else {
+                    PaneFocus::Terminals
+                };
                 self.set_focus_attr();
                 self.redraw = true;
                 return;
@@ -363,6 +375,9 @@ impl<T: TerminalAdapter> Model<T> {
                     Some(Action::JumpToFailingCi)
                 }
                 lazybox_tui_core::action::ActionKind::StartAgent => Some(Action::StartAgent),
+                lazybox_tui_core::action::ActionKind::ToggleActivityPane => {
+                    Some(Action::ToggleActivityPane)
+                }
                 lazybox_tui_core::action::ActionKind::ToggleFocusMode => {
                     Some(Action::ToggleFocusMode)
                 }
@@ -685,17 +700,16 @@ impl<T: TerminalAdapter> Model<T> {
         // them) and the terminal owns everything below the slim event
         // header — clicks and wheel events all route to the PTY. Keep
         // this split in lockstep with `view`'s focus-mode layout.
+        // Outside focus mode, `effective_pane_rects` accounts for a
+        // hidden Activity pane: when hidden, `right_top` is zero-height
+        // so clicks there route to the terminal stack (and the
+        // horizontal splitter disappears).
         let (sidebar_rect, right_top_rect, right_bottom_rect) = if self.focus_mode {
             let (pane_area, _) = super::split_for_footer(self.layout.last_area);
             let (_, body) = crate::realm::layout::focus_mode_areas(pane_area);
             (Rect::default(), Rect::default(), body)
         } else {
-            pane_areas(
-                self.layout.last_area,
-                self.layout.sidebar_pct,
-                self.layout.right_top_pct,
-                self.layout.sidebar_user_resized,
-            )
+            self.effective_pane_rects(self.layout.last_area)
         };
 
         match m.kind {

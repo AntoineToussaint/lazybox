@@ -641,6 +641,25 @@ impl RightPane {
         self.activity_collapsed
     }
 
+    /// Whether the pane has anything worth showing for the current
+    /// workspace: a non-empty activity feed, or a PR / issue
+    /// description body. Drives the orchestrator's decision to hide
+    /// the whole Activity pane (giving its space to the terminal)
+    /// when a workspace is empty. Mirrors the `has_activity` /
+    /// `has_body` predicates `contextual_bindings` already uses.
+    pub fn has_visible_content(&self) -> bool {
+        let Some(w) = self.workspace.as_ref() else {
+            return false;
+        };
+        if !w.activity.is_empty() {
+            return true;
+        }
+        w.primary_task()
+            .and_then(|t| t.body.as_deref())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    }
+
     /// Apply the auto-collapse-on-empty rule. Honours the user
     /// override: once they've toggled explicitly we don't fight them.
     fn auto_collapse_for_workspace(&mut self) {

@@ -451,6 +451,19 @@ impl<T: TerminalAdapter> Model<T> {
                     self.flash_hint("no failing PRs");
                 }
             }
+            Action::ToggleActivityPane => {
+                // Flip the Activity pane's visibility for the focused
+                // workspace and remember the choice (so navigating away
+                // and back keeps it). The recorded value is the desired
+                // visibility — the negation of what's currently shown.
+                if let Some(ws_key) = self.sidebar.selected_workspace().map(|w| w.key.clone()) {
+                    let now_visible = self.activity_pane_visible();
+                    self.activity_pane_overrides.insert(ws_key, !now_visible);
+                    // Don't strand focus on a pane we just hid.
+                    self.enforce_pane_focus();
+                    self.redraw = true;
+                }
+            }
             Action::ToggleFocusMode => {
                 self.toggle_focus_mode();
             }

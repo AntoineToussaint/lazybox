@@ -142,6 +142,12 @@ pub enum Action {
     /// point for "I just want to start working" — no need to first
     /// navigate the sidebar to a project header.
     StartAgent,
+    /// Show or hide the Activity (right) pane for the focused
+    /// workspace. The pane auto-hides when the workspace has no
+    /// activity worth showing; this reveals it on demand (and
+    /// re-hides it). The override is remembered per workspace for
+    /// the session.
+    ToggleActivityPane,
     /// Begin the two-press quit chord. Single-press from a remap
     /// just fires.
     Quit,
@@ -234,6 +240,7 @@ pub enum ActionKind {
     JumpToFailingCi,
     ToggleFocusMode,
     StartAgent,
+    ToggleActivityPane,
     Quit,
     ResizeSplitter,
     // Terminal
@@ -362,6 +369,7 @@ impl Action {
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
             Action::ToggleFocusMode => ActionKind::ToggleFocusMode,
             Action::StartAgent => ActionKind::StartAgent,
+            Action::ToggleActivityPane => ActionKind::ToggleActivityPane,
             Action::Quit => ActionKind::Quit,
             Action::ResizeSplitter(_) => ActionKind::ResizeSplitter,
             Action::TerminalScroll(_) => ActionKind::TerminalScroll,
@@ -457,6 +465,13 @@ impl ActionDef {
                 default_keys: "Shift-W",
                 label: "start agent",
                 describe: "Pick a project, name a workspace, and start the default agent in it — all in one step, from any pane.",
+                section: Section::Global,
+            },
+            ActionKind::ToggleActivityPane => &Self {
+                kind: ActionKind::ToggleActivityPane,
+                default_keys: "Shift-P",
+                label: "activity pane",
+                describe: "Show or hide the activity pane. It auto-hides when the workspace has no activity; this reveals it on demand and re-hides it.",
                 section: Section::Global,
             },
             ActionKind::Quit => &Self {
@@ -698,6 +713,7 @@ impl ActionDef {
             ActionKind::JumpToFailingCi,
             ActionKind::ToggleFocusMode,
             ActionKind::StartAgent,
+            ActionKind::ToggleActivityPane,
             ActionKind::ResizeSplitter,
             ActionKind::Quit,
             // Workspace
@@ -1026,6 +1042,7 @@ impl ActionKind {
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
             ActionKind::ToggleFocusMode => "toggle_focus_mode",
             ActionKind::StartAgent => "start_agent",
+            ActionKind::ToggleActivityPane => "toggle_activity_pane",
             ActionKind::Quit => "quit",
             ActionKind::ResizeSplitter => "resize_splitter",
             ActionKind::TerminalScroll => "terminal_scroll",
@@ -1151,6 +1168,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenSettings
         | ActionKind::JumpToAsking
         | ActionKind::JumpToFailingCi
+        | ActionKind::ToggleActivityPane
         | ActionKind::ToggleFocusMode
         | ActionKind::Quit
         | ActionKind::ResizeSplitter

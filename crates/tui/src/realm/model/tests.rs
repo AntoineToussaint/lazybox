@@ -3223,8 +3223,179 @@ mod tips_tests {
     }
 }
 
-/// Focus mode (issue #156): the `.` / `]]f` toggle, the `]]<digit>`
-/// agent jump, and the interaction with the `]]` terminal-leave path.
+#[cfg(test)]
+mod activity_pane_visibility_tests {
+    //! Hide the Activity pane when a workspace has no activity worth
+    //! showing (#162), with `Shift-P` to reveal / re-hide on demand.
+    use super::super::{Model, PaneFocus};
+    use chrono::Utc;
+    use lazybox_core::{Workspace, WorkspaceKey};
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn empty_ws(key: &str) -> Workspace {
+        Workspace::empty(WorkspaceKey::new(key), "main", Utc::now())
+    }
+
+    fn ws_with_activity(key: &str) -> Workspace {
+        let mut w = empty_ws(key);
+        w.activity.push(lazybox_core::Activity {
+            author: "alice".into(),
+            body: "ping".into(),
+            created_at: Utc::now(),
+            kind: lazybox_core::ActivityKind::Comment,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        });
+        w
+    }
+
+    fn seed(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, workspaces: Vec<Workspace>) {
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces,
+            terminals: vec![],
+            projects: vec![],
+        });
+    }
+
+    fn shift_p() -> KeyEvent {
+        KeyEvent::new(Key::Char('P'), KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn empty_workspace_hides_the_activity_pane() {
+        let mut m = build_model();
+        seed(&mut m, vec![empty_ws("github:o/r#1")]);
+        assert!(
+            !m.activity_pane_visible(),
+            "a workspace with no activity / description hides the pane",
+        );
+    }
+
+    #[test]
+    fn workspace_with_activity_shows_the_pane() {
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        assert!(m.activity_pane_visible());
+    }
+
+    #[test]
+    fn no_selection_keeps_the_pane_visible() {
+        // The auto-hide rule is about a *selected* workspace with no
+        // activity; an empty inbox keeps the pane's prior behavior.
+        let m = build_model();
+        assert!(m.activity_pane_visible());
+    }
+
+    #[test]
+    fn shift_p_reveals_an_empty_pane_then_re_hides() {
+        let mut m = build_model();
+        seed(&mut m, vec![empty_ws("github:o/r#1")]);
+        assert!(!m.activity_pane_visible(), "auto-hidden when empty");
+
+        m.dispatch_key(shift_p());
+        assert!(m.activity_pane_visible(), "Shift-P reveals it on demand");
+
+        m.dispatch_key(shift_p());
+        assert!(!m.activity_pane_visible(), "Shift-P again re-hides it");
+    }
+
+    #[test]
+    fn shift_p_can_hide_a_non_empty_pane() {
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        assert!(m.activity_pane_visible());
+        m.dispatch_key(shift_p());
+        assert!(
+            !m.activity_pane_visible(),
+            "the override can hide a non-empty pane too"
+        );
+    }
+
+    #[test]
+    fn override_is_remembered_per_workspace_across_navigation() {
+        let mut m = build_model();
+        // Two empty rows; reveal the first, then move to the second.
+        seed(
+            &mut m,
+            vec![empty_ws("github:o/r#1"), empty_ws("github:o/r#2")],
+        );
+        let first: lazybox_core::SessionKey = (&WorkspaceKey::new("github:o/r#1")).into();
+        let second: lazybox_core::SessionKey = (&WorkspaceKey::new("github:o/r#2")).into();
+
+        assert!(m.sidebar.focus_workspace_key(&first));
+        m.sync_panes();
+        m.dispatch_key(shift_p());
+        assert!(m.activity_pane_visible(), "revealed on the first row");
+
+        // Navigate to the second row — its own default (hidden) applies.
+        assert!(m.sidebar.focus_workspace_key(&second));
+        m.sync_panes();
+        assert!(
+            !m.activity_pane_visible(),
+            "the manual reveal doesn't leak onto a different workspace",
+        );
+
+        // Back to the first — the reveal override is still in effect.
+        assert!(m.sidebar.focus_workspace_key(&first));
+        m.sync_panes();
+        assert!(
+            m.activity_pane_visible(),
+            "the per-workspace override persists across navigation",
+        );
+    }
+
+    #[test]
+    fn tab_skips_the_hidden_activity_pane() {
+        let mut m = build_model();
+        seed(&mut m, vec![empty_ws("github:o/r#1")]);
+        // Start on the sidebar; Tab should jump past the hidden Activity
+        // pane straight to the terminal stack.
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
+        m.dispatch_key(KeyEvent::new(Key::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Terminals,
+            "Tab skips the hidden Activity pane",
+        );
+    }
+
+    #[test]
+    fn enter_on_empty_workspace_goes_straight_to_terminal() {
+        let mut m = build_model();
+        seed(&mut m, vec![empty_ws("github:o/r#1")]);
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
+        m.dispatch_key(KeyEvent::new(Key::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Terminals,
+            "opening an activity-less workspace lands on the terminal",
+        );
+    }
+
+    #[test]
+    fn enter_with_activity_focuses_the_activity_pane() {
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
+        m.dispatch_key(KeyEvent::new(Key::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Right,
+            "with activity present, Enter focuses the Activity pane to read it",
+        );
+    }
+}
+
 #[cfg(test)]
 mod focus_mode_tests {
     use super::super::*;

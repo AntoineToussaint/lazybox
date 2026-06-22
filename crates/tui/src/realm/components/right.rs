@@ -160,6 +160,14 @@ impl Right {
     pub fn clear_activity_selection(&mut self) {
         self.inner.clear_activity_selection();
     }
+
+    /// Whether the pane has anything worth showing for the current
+    /// workspace. The orchestrator reads this to decide whether to
+    /// render the Activity pane at all (hiding it gives the space to
+    /// the terminal).
+    pub fn has_visible_content(&self) -> bool {
+        self.inner.has_visible_content()
+    }
 }
 
 impl Component for Right {

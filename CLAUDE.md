@@ -141,8 +141,9 @@ The footer hint bar reads each pane's `contextual_bindings()`.
 
 **Global**: `Tab` cycle panes, `?` help, `q q` quit, `,` settings,
 `Shift-R` refresh, `Shift-T` tour, `Shift-D` sync status, `!` jump to
-agent-asking workspace, `Shift-F` jump to failing CI, `.` toggle
-focus mode (near-fullscreen agent terminal behind a slim event
+agent-asking workspace, `Shift-F` jump to failing CI, `Shift-P` toggle
+the activity pane (auto-hidden when the workspace has no activity), `.`
+toggle focus mode (near-fullscreen agent terminal behind a slim event
 header; from inside a terminal use `]]f`, and `]]` also exits),
 `]]<digit>` jump the focused terminal straight to the Nth agent
 workspace (sidebar order; the number rides a badge on each agent row

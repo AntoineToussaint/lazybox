@@ -72,10 +72,10 @@ impl<T: TerminalAdapter> Model<T> {
     /// Forward an inbound daemon event into all three panes, then
     /// project the (possibly moved) sidebar selection onto the right
     /// pane + terminal stack. The projection is deferred to a single
-    /// [`Self::flush_pane_sync`] so processing one event in isolation
+    /// `flush_pane_sync` so processing one event in isolation
     /// (the per-event test entry point) still ends fully synced, while
     /// the run loop's drain can coalesce a whole batch into one
-    /// projection — see [`Self::dispatch_daemon_event`].
+    /// projection — see `dispatch_daemon_event`.
     pub fn handle_daemon_event(&mut self, event: IpcEvent) {
         self.dispatch_daemon_event(event);
         self.flush_pane_sync();

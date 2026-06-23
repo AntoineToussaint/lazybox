@@ -1597,6 +1597,7 @@ dependencies = [
  "lazybox-store",
  "lazybox-tui-term",
  "libc",
+ "libghostty-vt",
  "portable-pty",
  "serde",
  "serde_json",

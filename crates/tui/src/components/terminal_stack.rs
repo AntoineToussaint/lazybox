@@ -62,11 +62,12 @@ pub const RECENT_OUTPUT_CAP: usize = 4 * 1024;
 /// Cap on the raw bytes buffered for a terminal that isn't currently
 /// on screen. Off-screen terminals defer the (expensive) VT parse and
 /// just stash bytes here; the parser is fed lazily on the first render
-/// after the terminal becomes visible. The bound matches the daemon's
-/// `REPLAY_RING_BYTES` (64 KiB) so a chatty hidden agent can't grow it
-/// without limit — when it overflows we keep the most-recent tail and
-/// reset+refeed the parser on display, exactly how a `Snapshot`/resync
-/// reconstructs a grid from a bounded ring.
+/// after the terminal becomes visible. This bounds the *between-render*
+/// backlog of a chatty hidden agent — when it overflows we keep the
+/// most-recent tail and reset+refeed the parser on display. It is
+/// deliberately independent of (and smaller than) the daemon's
+/// `REPLAY_RING_BYTES`: the full recovery replay arrives via `Snapshot`
+/// and is fed straight to the VT, never through this transient buffer.
 const PENDING_FEED_CAP: usize = 64 * 1024;
 
 /// Cap for the per-terminal composing buffer (the in-flight user

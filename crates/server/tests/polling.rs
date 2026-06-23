@@ -2424,6 +2424,86 @@ async fn silent_merge_commits_pr_before_deleting_issue_row() {
 }
 
 #[tokio::test]
+async fn merge_emits_rebadge_then_upsert_then_remove_then_merged() {
+    // Daemon-side pin for the full issue→PR merge event ordering (I1,
+    // I2, I6). The TUI tests assert the CONSUMPTION end (slots follow,
+    // focus follows); this asserts the PRODUCER end, so a refactor of
+    // the single `commit_merge` owner that reordered its steps — e.g.
+    // deleting the issue row before committing the PR — fails here
+    // rather than only in the TUI.
+    //
+    // A live terminal forces the prompt path, so the merge runs through
+    // `handle_confirm_merge`: the one collapse flavour that actually
+    // rebadges a terminal, since a silent auto-collapse by definition
+    // has no live terminal to move. `handle_confirm_merge` shares the
+    // `commit_merge` owner with the silent path, so the order pinned
+    // here is the order both paths emit.
+    use lazybox_core::{SessionKey, WorkspaceKey};
+
+    let config = ServerConfig::in_memory();
+    let (issue_key, _session_id) = seed_issue_with_session(&config, "o/r#71").await;
+    attach_live_terminal(&config, &issue_key, 71).await;
+    polling::upsert(&config, make_pr_closing("o/r#141", &["o/r#71"])).await;
+    let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_pr_closing(
+        "o/r#141",
+        &["o/r#71"],
+    )));
+    let pr_session_key: SessionKey = (&pr_key).into();
+
+    // Subscribe AFTER the prompting upsert so we capture only the
+    // accept-path burst.
+    let mut bus = config.bus.subscribe();
+    polling::handle_confirm_merge(&config, issue_key.clone(), pr_key.clone(), true).await;
+
+    let mut events: Vec<Event> = Vec::new();
+    while let Ok(evt) = bus.try_recv() {
+        events.push(evt);
+    }
+
+    let rebadged_at = events
+        .iter()
+        .position(|e| matches!(e, Event::TerminalsRebadged { to, .. } if *to == pr_session_key))
+        .expect("merge must rebadge the live terminal onto the PR session key");
+    let upserted_at = events
+        .iter()
+        .position(|e| {
+            matches!(e, Event::WorkspaceUpserted(ws)
+                if ws.key == pr_key && ws.gh_issues.iter().any(|t| t.id.key == "o/r#71"))
+        })
+        .expect("PR workspace carrying the absorbed issue must be broadcast");
+    let removed_at = events
+        .iter()
+        .position(|e| matches!(e, Event::WorkspaceRemoved(k) if *k == issue_key))
+        .expect("issue row must be removed");
+    let merged_at = events
+        .iter()
+        .position(|e| {
+            matches!(e, Event::WorkspaceMerged { issue_workspace_key, .. }
+                if *issue_workspace_key == issue_key)
+        })
+        .expect("a WorkspaceMerged notice must follow the removal");
+
+    // I1: terminals rebadged before the issue row disappears, else the
+    // TUI drops the moved terminal slots (they still carry the old key).
+    assert!(
+        rebadged_at < removed_at,
+        "TerminalsRebadged ({rebadged_at}) must precede WorkspaceRemoved ({removed_at})",
+    );
+    // I2: the PR (carrying the moved sessions) is committed before the
+    // issue row is removed, else the sessions are momentarily row-less.
+    assert!(
+        upserted_at < removed_at,
+        "WorkspaceUpserted{{pr}} ({upserted_at}) must precede WorkspaceRemoved ({removed_at})",
+    );
+    // I6: the merge notice trails the removal so the TUI's
+    // `merge_follow_from` fires against an already-pruned sidebar.
+    assert!(
+        removed_at < merged_at,
+        "WorkspaceMerged ({merged_at}) must trail WorkspaceRemoved ({removed_at})",
+    );
+}
+
+#[tokio::test]
 async fn branch_name_fallback_collapses_issue_workspace() {
     // A PR whose head branch is the lazybox-named `lazybox/issue-N`
     // worktree branch claims issue #N even when `closes_issues` is

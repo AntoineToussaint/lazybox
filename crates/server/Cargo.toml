@@ -10,7 +10,6 @@ rust-version.workspace = true
 [dependencies]
 lazybox-core       = { workspace = true }
 lazybox-auth       = { workspace = true }
-lazybox-events     = { workspace = true }
 lazybox-store      = { workspace = true }
 lazybox-config     = { workspace = true }
 lazybox-gh         = { workspace = true }

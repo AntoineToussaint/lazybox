@@ -1373,16 +1373,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lazybox-events"
-version = "0.1.4"
-dependencies = [
- "chrono",
- "lazybox-core",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "lazybox-gh"
 version = "0.1.4"
 dependencies = [
@@ -1391,7 +1381,6 @@ dependencies = [
  "http",
  "lazybox-auth",
  "lazybox-core",
- "lazybox-events",
  "octocrab",
  "serde",
  "serde_json",
@@ -1480,7 +1469,6 @@ dependencies = [
  "lazybox-auth",
  "lazybox-config",
  "lazybox-core",
- "lazybox-events",
  "lazybox-gh",
  "lazybox-git-ops",
  "lazybox-ipc",

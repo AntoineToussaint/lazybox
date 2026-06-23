@@ -93,7 +93,6 @@ but not in v2.0.
 crates/
 ├── core/             source-agnostic types (Task, Session, SessionKey, …)
 ├── auth/             credential chain
-├── events/           daemon-side event bus
 ├── store/            SQLite backend
 ├── config/           YAML loader
 ├── git-ops/          worktrees (bare clones + per-task worktrees)
@@ -107,8 +106,8 @@ crates/
 └── tui/              the `lazybox` binary — component tree + key/event dispatch
 ```
 
-The four core libraries (`core`, `auth`, `events`, `store`) must not depend
-on each other. Provider crates depend only on `core` + `events` + `auth`.
+The core libraries (`core`, `auth`, `store`) must not depend
+on each other. Provider crates depend only on `core` + `auth`.
 
 ## IPC protocol
 

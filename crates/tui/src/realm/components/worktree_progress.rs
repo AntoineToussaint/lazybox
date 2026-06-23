@@ -10,14 +10,27 @@
 //! during the long, otherwise-silent checkout — without it the spinner
 //! would freeze exactly when the user needs to see liveness.
 //!
-//! The matching `TerminalSpawned` dismisses the modal; a failed step
-//! keeps it up (red, with the error) so the user reads it before
-//! pressing Esc rather than facing a silent hang.
+//! Provisioning can be near-instant (warm clone, no mounts/scripts), so
+//! the *displayed* checklist is decoupled from the *daemon* truth: the
+//! daemon's progress sets a `target` stage, and the display walks toward
+//! it at no more than one step per [`MIN_STEP_DWELL`] (driven by the
+//! per-tick [`WorktreeProgressState::tick`]). The dwell is a floor, not
+//! a fixed delay — a step the daemon genuinely spends seconds on still
+//! shows in real time, because the display tracks `target` whenever it's
+//! ahead.
+//!
+//! The matching `TerminalSpawned` doesn't tear the modal down on the
+//! spot; it *queues* the dismiss (`target` jumps to ready), and the
+//! modal closes only once every step has been shown for its dwell — so
+//! a fast spawn walks the full checklist instead of flashing the first
+//! step. A failed step freezes the display (red, with the error) so the
+//! user reads it before pressing Esc rather than facing a silent hang.
 
 use crate::realm::Msg;
 use crate::realm::UserEvent;
 use lazybox_core::SessionKey;
 use lazybox_ipc::{WorktreeStep, WorktreeStepStatus};
+use std::time::{Duration, Instant};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::{Event, Key, KeyEvent, KeyModifiers};
@@ -29,6 +42,19 @@ use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, W
 use tuirealm::state::State;
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Minimum time each checklist step stays visible before the display
+/// advances to the next one. A floor: a step the daemon spends longer on
+/// shows in real time. Keeps a fast provision from flashing past the
+/// checklist faster than the eye can read it.
+pub const MIN_STEP_DWELL: Duration = Duration::from_millis(500);
+
+/// Number of checklist rows: Checkout, Setup, agent launch.
+const STEP_COUNT: u8 = 3;
+
+/// `target`/`shown` value meaning "all steps complete, ready to dismiss"
+/// — one past the last real step.
+const READY: u8 = STEP_COUNT;
 
 /// Render state of one checklist row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,15 +73,28 @@ pub enum StepState {
 /// `Model`; each `Event::WorktreeProgress` folds in via [`Self::apply`]
 /// and the modal is re-mounted from the result so the checklist
 /// advances in place.
+///
+/// The display lags the daemon on purpose. `target` is how far the
+/// daemon has actually gotten (0 = checkout, 1 = setup, 2 = agent,
+/// [`READY`] = the session is live); `shown` is how far the checklist
+/// has been *revealed* to the user. [`Self::tick`] walks `shown` toward
+/// `target` at no more than one step per [`MIN_STEP_DWELL`], so a fast
+/// provision still shows every step legibly.
 #[derive(Debug, Clone)]
 pub struct WorktreeProgressState {
     pub session_key: SessionKey,
-    checkout: StepState,
-    setup: StepState,
-    /// The agent/shell launch. The daemon doesn't report it (its
-    /// completion IS the `TerminalSpawned` that dismisses this modal),
-    /// so it only ever goes Pending → Active, set when `Setup` finishes.
-    agent: StepState,
+    /// Daemon truth: the highest stage reached (`0..=READY`).
+    target: u8,
+    /// Displayed frontier: the stage currently shown as `Active`
+    /// (`0..=READY`). Lower steps render `Done`, higher ones `Pending`.
+    shown: u8,
+    /// When `shown` last advanced — the min-dwell clock.
+    shown_since: Instant,
+    /// `TerminalSpawned` arrived: dismiss once `shown` reaches `READY`.
+    dismiss_queued: bool,
+    /// Index of the failed step (and its error message). Freezes the
+    /// display and keeps the modal up until the user acknowledges it.
+    failed_step: Option<u8>,
     error: Option<String>,
 }
 
@@ -63,9 +102,11 @@ impl WorktreeProgressState {
     pub fn new(session_key: SessionKey) -> Self {
         Self {
             session_key,
-            checkout: StepState::Pending,
-            setup: StepState::Pending,
-            agent: StepState::Pending,
+            target: 0,
+            shown: 0,
+            shown_since: Instant::now(),
+            dismiss_queued: false,
+            failed_step: None,
             error: None,
         }
     }
@@ -76,40 +117,88 @@ impl WorktreeProgressState {
         self.error.is_some()
     }
 
-    /// Fold one daemon progress transition into the checklist.
+    /// Fold one daemon progress transition into the checklist's
+    /// `target`. The display catches up later via [`Self::tick`].
     pub fn apply(&mut self, step: WorktreeStep, status: WorktreeStepStatus) {
         match (step, status) {
-            (WorktreeStep::Checkout, WorktreeStepStatus::Started) => {
-                self.checkout = StepState::Active;
-            }
-            (WorktreeStep::Checkout, WorktreeStepStatus::Done) => {
-                self.checkout = StepState::Done;
-            }
-            (WorktreeStep::Checkout, WorktreeStepStatus::Failed(e)) => {
-                self.checkout = StepState::Failed;
-                self.error = Some(e);
-            }
+            // Checkout is step 0, where `target` already starts — neither
+            // its `Started` nor its `Done` advances the frontier.
+            // `Setup Started` (which implies checkout is done) is what
+            // moves it on, keeping checkout shown as in-flight until setup
+            // truly begins rather than flashing a dead "nothing active"
+            // frame.
+            (WorktreeStep::Checkout, WorktreeStepStatus::Started)
+            | (WorktreeStep::Checkout, WorktreeStepStatus::Done) => {}
             (WorktreeStep::Setup, WorktreeStepStatus::Started) => {
-                self.checkout = StepState::Done;
-                self.setup = StepState::Active;
+                self.target = self.target.max(1);
             }
             (WorktreeStep::Setup, WorktreeStepStatus::Done) => {
-                self.setup = StepState::Done;
-                self.agent = StepState::Active;
+                self.target = self.target.max(2);
+            }
+            (WorktreeStep::Checkout, WorktreeStepStatus::Failed(e)) => {
+                self.fail(0, e);
             }
             (WorktreeStep::Setup, WorktreeStepStatus::Failed(e)) => {
-                self.setup = StepState::Failed;
-                self.error = Some(e);
+                self.fail(1, e);
             }
         }
     }
 
+    fn fail(&mut self, step: u8, error: String) {
+        self.failed_step = Some(step);
+        self.error = Some(error);
+        // Surface the failed row immediately — don't make the user wait
+        // out the dwell to see why provisioning stopped.
+        self.shown = step;
+    }
+
+    /// Queue dismissal: the session is live (`TerminalSpawned`), so the
+    /// modal should close once the display has walked through every step
+    /// for its dwell. The work itself already finished in the background.
+    pub fn queue_dismiss(&mut self) {
+        self.dismiss_queued = true;
+        self.target = READY;
+    }
+
+    /// Advance the displayed checklist one step toward `target` if the
+    /// current step has been shown for at least [`MIN_STEP_DWELL`].
+    /// Returns whether the display changed (so the caller re-renders).
+    /// A no-op once the display has caught up, or on a failed step.
+    pub fn tick(&mut self, now: Instant) -> bool {
+        if self.failed() || self.shown >= self.target {
+            return false;
+        }
+        if now.duration_since(self.shown_since) < MIN_STEP_DWELL {
+            return false;
+        }
+        self.shown += 1;
+        self.shown_since = now;
+        true
+    }
+
+    /// Whether the modal should now be torn down: a `TerminalSpawned`
+    /// queued the dismiss and the display has finished walking the
+    /// checklist.
+    pub fn ready_to_dismiss(&self) -> bool {
+        self.dismiss_queued && self.shown >= READY
+    }
+
     fn steps(&self) -> [(&'static str, StepState); 3] {
-        [
-            ("Creating worktree", self.checkout),
-            ("Setting up", self.setup),
-            ("Starting agent", self.agent),
-        ]
+        const LABELS: [&str; 3] = ["Creating worktree", "Setting up", "Starting agent"];
+        let mut out = [("", StepState::Pending); 3];
+        for (i, label) in LABELS.iter().enumerate() {
+            let idx = i as u8;
+            let state = match self.failed_step {
+                Some(f) if idx == f => StepState::Failed,
+                Some(f) if idx < f => StepState::Done,
+                Some(_) => StepState::Pending,
+                None if idx < self.shown => StepState::Done,
+                None if idx == self.shown => StepState::Active,
+                None => StepState::Pending,
+            };
+            out[i] = (*label, state);
+        }
+        out
     }
 }
 
@@ -271,10 +360,104 @@ mod tests {
         st.apply(WorktreeStep::Setup, WorktreeStepStatus::Started);
         st.apply(WorktreeStep::Setup, WorktreeStepStatus::Done);
         assert!(!st.failed());
+        // Daemon truth says agent is active (target == 2), but the
+        // display only checks earlier steps off once they've dwelt.
+        let t0 = Instant::now();
+        st.shown_since = t0;
+        assert!(st.tick(t0 + MIN_STEP_DWELL));
+        assert!(st.tick(t0 + MIN_STEP_DWELL * 2));
         let mut comp = WorktreeProgress::from_state(&st);
         let out = render(&mut comp, 70, 12);
         // Two completed steps render check marks.
         assert_eq!(out.matches('✓').count(), 2, "{out}");
+    }
+
+    /// The regression: with provisioning faster than the dwell, every
+    /// step must still be shown (Started → Done) before the modal is
+    /// allowed to dismiss.
+    #[test]
+    fn fast_provision_walks_every_step_before_dismissing() {
+        let mut st = state();
+        let t0 = Instant::now();
+        st.shown_since = t0;
+        // All daemon transitions + the TerminalSpawned dismiss land in a
+        // single burst, far faster than the dwell.
+        st.apply(WorktreeStep::Checkout, WorktreeStepStatus::Started);
+        st.apply(WorktreeStep::Checkout, WorktreeStepStatus::Done);
+        st.apply(WorktreeStep::Setup, WorktreeStepStatus::Started);
+        st.apply(WorktreeStep::Setup, WorktreeStepStatus::Done);
+        st.queue_dismiss();
+
+        // First step is shown as Active and the dismiss is held.
+        assert_eq!(st.shown, 0);
+        assert!(
+            !st.ready_to_dismiss(),
+            "dismissed before walking the checklist"
+        );
+
+        // A tick faster than the dwell does NOT advance — the step stays
+        // legible.
+        assert!(!st.tick(t0 + MIN_STEP_DWELL / 5));
+        assert_eq!(st.shown, 0);
+
+        // Each step in turn becomes Active, and only after all three have
+        // dwelt does the modal become ready to dismiss.
+        let mut active_seen = Vec::new();
+        for step in 0..STEP_COUNT {
+            let out = render(&mut WorktreeProgress::from_state(&st), 70, 12);
+            // The currently-shown step is the spinning one; record its
+            // label so we can prove each rendered before dismissal.
+            active_seen.push(st.shown);
+            assert!(!st.ready_to_dismiss(), "dismissed at step {step}: {out}");
+            assert!(st.tick(t0 + MIN_STEP_DWELL * u32::from(step + 1)));
+        }
+        assert_eq!(active_seen, vec![0, 1, 2], "every step shown in order");
+        assert!(
+            st.ready_to_dismiss(),
+            "never dismissed after walking checklist"
+        );
+    }
+
+    /// The dwell is a floor, not a ceiling: a slow provision tracks the
+    /// daemon in real time instead of being held back.
+    #[test]
+    fn slow_provision_tracks_daemon_in_real_time() {
+        let mut st = state();
+        let t0 = Instant::now();
+        st.shown_since = t0;
+        st.apply(WorktreeStep::Checkout, WorktreeStepStatus::Started);
+        // Checkout takes seconds: the display stays on it (no later step
+        // is revealed) however many ticks fire.
+        assert!(!st.tick(t0 + MIN_STEP_DWELL * 10));
+        assert_eq!(st.shown, 0);
+        // Setup finally starts — now the display is free to advance, and
+        // does so immediately (the dwell long since elapsed).
+        st.apply(WorktreeStep::Setup, WorktreeStepStatus::Started);
+        assert!(st.tick(t0 + MIN_STEP_DWELL * 11));
+        assert_eq!(st.shown, 1);
+    }
+
+    /// A failed step freezes the display on the error and never reaches
+    /// the dismiss state, even if a TerminalSpawned tries to queue one.
+    #[test]
+    fn failed_step_never_dismisses() {
+        let mut st = state();
+        let t0 = Instant::now();
+        st.shown_since = t0;
+        st.apply(WorktreeStep::Setup, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::Setup,
+            WorktreeStepStatus::Failed("boom".into()),
+        );
+        st.queue_dismiss();
+        assert!(
+            !st.tick(t0 + MIN_STEP_DWELL * 5),
+            "advanced past a failed step"
+        );
+        assert!(!st.ready_to_dismiss(), "dismissed despite a failed step");
+        let out = render(&mut WorktreeProgress::from_state(&st), 70, 12);
+        assert!(out.contains('✗'), "{out}");
+        assert!(out.contains("boom"), "{out}");
     }
 
     #[test]

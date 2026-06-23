@@ -995,28 +995,54 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::WorktreeProgress, modal);
     }
 
-    /// Dismiss the worktree-progress checklist if one is up for
-    /// `session_key` and it isn't sitting on a failed step (a failure
-    /// stays up until the user acknowledges it with Esc). Returns
-    /// whether a modal was actually torn down.
-    pub(super) fn dismiss_worktree_progress(
+    /// Queue dismissal of the worktree-progress checklist for
+    /// `session_key`. The session is live (`TerminalSpawned`), but the
+    /// modal is NOT torn down here — it stays up until the display has
+    /// walked through every step for its minimum dwell, so a fast
+    /// provision shows the full checklist instead of flashing the first
+    /// step. [`Self::advance_worktree_progress`] performs the actual
+    /// teardown once the display drains. A checklist sitting on a failed
+    /// step is left untouched (it stays up until the user presses Esc).
+    pub(super) fn queue_worktree_progress_dismiss(
         &mut self,
         session_key: &lazybox_core::SessionKey,
-    ) -> bool {
-        let dismiss = self
-            .worktree_progress
-            .as_ref()
-            .is_some_and(|s| &s.session_key == session_key && !s.failed());
-        if dismiss {
-            self.worktree_progress = None;
-            self.modal_stack.retain(|id| id != &Id::WorktreeProgress);
-            let _ = self.app.umount(&Id::WorktreeProgress);
-            if let Some(top) = self.modal_stack.last() {
-                let _ = self.app.active(top);
+    ) {
+        if let Some(state) = self.worktree_progress.as_mut()
+            && &state.session_key == session_key
+            && !state.failed()
+        {
+            state.queue_dismiss();
+            // Nudge the display in case the dwell has already elapsed (a
+            // slow provision), so we don't wait a whole extra tick.
+            self.advance_worktree_progress();
+        }
+    }
+
+    /// Walk the displayed checklist one step toward the daemon's truth
+    /// (gated by the min-dwell) and re-mount the modal if it changed.
+    /// Tears the modal down once a queued dismiss has been fully shown.
+    /// Driven by the per-tick `Msg::WorktreeProgressTick`.
+    pub(super) fn advance_worktree_progress(&mut self) {
+        use crate::realm::components::worktree_progress::WorktreeProgress;
+        let (changed, dismiss) = match self.worktree_progress.as_mut() {
+            Some(state) => {
+                let changed = state.tick(std::time::Instant::now());
+                (changed, state.ready_to_dismiss())
             }
+            None => return,
+        };
+        if dismiss {
+            self.force_dismiss_worktree_progress();
+        } else if changed {
+            let state = self
+                .worktree_progress
+                .as_ref()
+                .expect("present: tick borrowed it");
+            let modal = WorktreeProgress::from_state(state);
+            self.modal_stack.retain(|id| id != &Id::WorktreeProgress);
+            self.mount_modal(Id::WorktreeProgress, modal);
             self.redraw = true;
         }
-        dismiss
     }
 
     /// Unconditionally tear down the worktree-progress checklist

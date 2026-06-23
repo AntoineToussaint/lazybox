@@ -2949,24 +2949,17 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
     //    polls in with `closes_issues`, we fold standalone issue
     //    workspaces into it here. Async (touches the store +
     //    `terminal_meta`) but doesn't yet write the PR's own row.
-    let (mut workspace, pending_merges) = prepare_upsert(config, key, task).await;
+    let (workspace, pending_merges) = prepare_upsert(config, key, task).await;
 
-    // 2. MIGRATE: rename worktree dirs to match the (possibly
-    //    new) PR slug. Async git operation. If it fails, log
-    //    loudly but continue to commit the metadata — the next
-    //    spawn re-provisions paths and a partial mismatch is
-    //    survivable; a missing broadcast is not.
-    crate::spawn_handler::migrate_session_paths_if_needed(config, &mut workspace).await;
+    // 2. COMMIT: migrate worktree dirs to the (possibly new) PR slug,
+    //    persist + broadcast the final state, then retire any absorbed
+    //    issue rows. `commit_merge` owns the exact I1–I6 ordering —
+    //    crucially the issue rows are deleted only AFTER this commit
+    //    lands, so a cancellation (the 15s per-task upsert timeout)
+    //    can't strand the moved sessions in neither stored workspace.
+    commit_merge(config, workspace, pending_merges).await;
 
-    // 3. COMMIT: persist the final state + broadcast it. Failures
-    //    here log at `error` so an operator can spot a workspace
-    //    that won't survive restart. Issue rows absorbed by the
-    //    merge are deleted only AFTER this commit lands — see
-    //    `finalize_issue_merges` for why the order matters.
-    commit_upsert(config, key, workspace);
-    finalize_issue_merges(config, key, pending_merges);
-
-    // 4. MERGED: the PR just merged → either reap its safe-to-delete
+    // 3. MERGED: the PR just merged → either reap its safe-to-delete
     //    worktrees silently (when `worktree.auto_cleanup_merged` is
     //    on) or prompt the user to remove the workspace + worktree
     //    (the default). Runs after the commit so it re-reads the
@@ -3447,6 +3440,38 @@ fn finalize_issue_merges(
     }
 }
 
+/// Single owner of the issue→PR collapse tail — the one place the
+/// I1–I6 event ordering is sequenced, so it's a property of one
+/// function instead of a convention replicated across call sites.
+///
+/// Callers absorb their issue workspace(s) into `pr_ws` FIRST (moving
+/// sessions and rebadging terminals, which already emits
+/// `TerminalsRebadged` — I1), then hand the absorbed PR plus the list
+/// of issues to retire here. This function owns the rest:
+///   1. migrate worktree paths to the (possibly new) PR slug,
+///   2. `commit_upsert` — persist + broadcast `WorkspaceUpserted{pr}`
+///      carrying the moved sessions (I2),
+///   3. `finalize_issue_merges` — delete each issue row only AFTER the
+///      commit (I3), then broadcast `WorkspaceRemoved` followed by
+///      `WorkspaceMerged` per issue (I6).
+///
+/// Commit-before-delete keeps the moved sessions recoverable under the
+/// PR key across a crash in the window — see `finalize_issue_merges`.
+///
+/// `pending` may be empty: the normal (non-merge) upsert path routes
+/// every commit through here too, in which case this is just the
+/// migrate + commit with a no-op finalize.
+async fn commit_merge(
+    config: &ServerConfig,
+    mut pr_ws: Workspace,
+    pending: Vec<PendingIssueMerge>,
+) {
+    crate::spawn_handler::migrate_session_paths_if_needed(config, &mut pr_ws).await;
+    let pr_key = pr_ws.key.clone();
+    commit_upsert(config, &pr_key, pr_ws);
+    finalize_issue_merges(config, &pr_key, pending);
+}
+
 /// Re-run the issue-collapse pass for a stored PR workspace and
 /// persist the result. Used when something OTHER than a provider poll
 /// populates `closes_issues` — today the lazy details backfill
@@ -3465,9 +3490,7 @@ pub(super) async fn collapse_closing_issues_for(config: &ServerConfig, key: &Wor
         // fired instead) — skip the redundant commit + broadcast.
         return;
     }
-    crate::spawn_handler::migrate_session_paths_if_needed(config, &mut workspace).await;
-    commit_upsert(config, key, workspace);
-    finalize_issue_merges(config, key, pending);
+    commit_merge(config, workspace, pending).await;
 }
 
 /// The TUI replied to a `WorkspaceMergePending` prompt. Accept → run
@@ -3526,31 +3549,21 @@ pub async fn handle_confirm_merge(
     let pr_label = workspace_label_for(&pr_ws, &pr_workspace_key);
 
     absorb_issue_workspace(config, &mut pr_ws, issue_ws).await;
-    crate::spawn_handler::migrate_session_paths_if_needed(config, &mut pr_ws).await;
 
-    // Persist the PR — now carrying the moved sessions — BEFORE dropping
-    // the issue record. If we deleted first and crashed before the
-    // commit, the session would exist in neither stored workspace and be
-    // lost on the next start. Commit-then-delete leaves the session
-    // recoverable under the PR key throughout the window.
-    let pr_key = pr_ws.key.clone();
-    commit_upsert(config, &pr_key, pr_ws);
-
-    if let Err(e) = config.store.delete_workspace(&issue_workspace_key) {
-        tracing::warn!(
-            issue_workspace = %issue_workspace_key,
-            "delete_workspace during ConfirmMerge failed: {e}"
-        );
-    }
-    let _ = config
-        .bus
-        .send(Event::WorkspaceRemoved(issue_workspace_key.clone()));
-    let _ = config.bus.send(Event::WorkspaceMerged {
-        issue_workspace_key,
-        pr_workspace_key: pr_key.clone(),
-        issue_label,
-        pr_label,
-    });
+    // Hand off to the single merge owner: it migrates paths, commits
+    // the PR (now carrying the moved sessions) BEFORE deleting the issue
+    // row, and broadcasts WorkspaceRemoved → WorkspaceMerged in the
+    // order the TUI's `merge_follow_from` relies on.
+    commit_merge(
+        config,
+        pr_ws,
+        vec![PendingIssueMerge {
+            issue_key: issue_workspace_key,
+            issue_label,
+            pr_label,
+        }],
+    )
+    .await;
 }
 
 /// Manual issue→PR collapse triggered by the user. Resolves the

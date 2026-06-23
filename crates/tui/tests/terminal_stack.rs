@@ -1572,17 +1572,67 @@ fn footer_leader_hints_honor_the_configured_escape_char() {
 }
 
 #[test]
-fn footer_keys_follow_user_action_key_overrides() {
-    // Catalog-driven footer: a user rebind in `~/.lazybox/config.yaml`
-    // → `ui.action_keys.leave_terminal: "Esc"` should appear in the
-    // footer's `keys` column without any extra plumbing. The original
-    // bug (footer drift from actual shortcuts) was that hint text was
-    // hardcoded separately from the dispatcher; the new design routes
-    // both through `ActionDef::effective_keys_display`.
+fn every_footer_hint_is_catalog_backed_or_allowlisted() {
+    // #188: the footer mixes catalog-derived hints with hand-curated
+    // ones (`Ctrl-c`, `Ctrl-w`, the snippet leader). Nothing else may
+    // creep in untracked — a tile/interrupt handler renamed out from
+    // under its hint, or a label drifting from the catalog, must fail
+    // the build rather than ship a footer that lies.
+    use lazybox_tui_core::action::ActionDef;
+    let overrides = std::collections::BTreeMap::new();
+    let bindings = TerminalStack::contextual_bindings(&overrides, ']');
+    let catalog = ActionDef::catalog(&[], &overrides);
+    let mut catalog_pairs: Vec<(String, String)> = catalog
+        .iter()
+        .map(|e| (e.keys_display.to_string(), e.label.to_string()))
+        .collect();
+    // LeaveTerminal's display is the escape char doubled (owned by
+    // `terminal_escape_char`, not the catalog default string), so vouch
+    // for the rendered form rather than the `]]` catalog placeholder.
+    catalog_pairs.push(("]]".to_string(), "exit to sidebar".to_string()));
+    // The explicit record of what's intentionally NOT catalog-backed:
+    // keys forwarded straight to the PTY (`Ctrl-c` interrupt, `Ctrl-w`
+    // tile prefix) and the snippet leader (its bindings are the user's
+    // snippet library, not catalog actions).
+    let allow: &[(&str, &str)] = &[
+        ("Ctrl-c", "interrupt"),
+        ("Ctrl-w", "tiles"),
+        ("]]<key>", "snippets"),
+    ];
+    for b in &bindings {
+        let keys = b.keys.to_string();
+        let label = b.label.to_string();
+        let backed = catalog_pairs.iter().any(|(k, l)| *k == keys && *l == label)
+            || allow.iter().any(|(k, l)| *k == keys && *l == label);
+        assert!(
+            backed,
+            "footer hint `{keys}` / `{label}` is neither catalog-backed nor allowlisted",
+        );
+    }
+}
+
+#[test]
+fn footer_leave_hint_ignores_a_leave_terminal_override() {
+    // #188: the leave chord is owned by `ui.terminal_escape_char`, not
+    // the `leave_terminal` action_keys slot. Terminal-pane dispatch
+    // matches only the escape char doubled and never the catalog chord,
+    // so honoring a `leave_terminal: "Esc"` rebind here would advertise
+    // a key the dispatcher ignores — the footer would say "Esc exit to
+    // sidebar" while pressing Esc does nothing. The hint must stay the
+    // escape char doubled regardless of the override.
     let mut overrides = std::collections::BTreeMap::new();
     overrides.insert("leave_terminal".to_string(), "Esc".to_string());
     let bindings = TerminalStack::contextual_bindings(&overrides, ']');
     let leave = bindings.iter().find(|b| b.label == "exit to sidebar");
     assert!(leave.is_some(), "leave-terminal binding must surface");
-    assert_eq!(leave.unwrap().keys, "Esc");
+    assert_eq!(
+        leave.unwrap().keys,
+        "]]",
+        "footer must show the escape char doubled, not the ignored rebind",
+    );
+    // Honoring the escape-char rebind is still correct — that field DOES
+    // drive dispatch.
+    let bindings = TerminalStack::contextual_bindings(&overrides, '}');
+    let leave = bindings.iter().find(|b| b.label == "exit to sidebar");
+    assert_eq!(leave.unwrap().keys, "}}");
 }

@@ -116,7 +116,16 @@ impl Help {
     /// effective (post-override) chords. The user sees a complete
     /// reference instead of the pane-stitched subset the legacy
     /// constructor produced.
-    pub fn from_catalog(catalog: &[CatalogEntry]) -> Self {
+    ///
+    /// `escape_char` is the configured `ui.terminal_escape_char`: the
+    /// `]]` leave chord and `]]<key>` snippet leader are dispatched by
+    /// the terminal escape-char latch, not the catalog, so their display
+    /// is rendered from the char doubled here rather than the catalog's
+    /// hardcoded `]]` default — otherwise a user who remaps the escape
+    /// char sees `}}` in the footer but `]]` in `?` help (#188).
+    pub fn from_catalog(catalog: &[CatalogEntry], escape_char: char) -> Self {
+        use lazybox_tui_core::action::ActionKind;
+        let leader = format!("{escape_char}{escape_char}");
         let mut by_section: std::collections::BTreeMap<u8, (&'static str, Vec<Binding>)> =
             std::collections::BTreeMap::new();
         for entry in catalog {
@@ -126,12 +135,21 @@ impl Help {
             if entry.keys_display.is_empty() {
                 continue;
             }
+            // LeaveTerminal's chord is the escape char doubled, owned by
+            // the terminal latch — render it from the live char, not the
+            // catalog default / a `leave_terminal` override the dispatch
+            // ignores (#188).
+            let keys = if entry.kind == ActionKind::LeaveTerminal {
+                std::borrow::Cow::Owned(leader.clone())
+            } else {
+                entry.keys_display.clone()
+            };
             by_section
                 .entry(entry.section.order())
                 .or_insert_with(|| (entry.section.title(), Vec::new()))
                 .1
                 .push(Binding {
-                    keys: entry.keys_display.clone(),
+                    keys,
                     label: entry.label.clone(),
                 });
         }
@@ -144,7 +162,7 @@ impl Help {
             .or_insert_with(|| (Section::Terminal.title(), Vec::new()))
             .1
             .push(Binding {
-                keys: std::borrow::Cow::Borrowed("]]<key>"),
+                keys: std::borrow::Cow::Owned(format!("{leader}<key>")),
                 label: std::borrow::Cow::Borrowed("snippets"),
             });
         let sections: Vec<HelpSection> = by_section
@@ -379,7 +397,7 @@ mod tests {
             &["claude".to_string(), "codex".to_string()],
             &std::collections::BTreeMap::new(),
         );
-        let help = Help::from_catalog(&catalog);
+        let help = Help::from_catalog(&catalog, ']');
         let rows: Vec<(String, String)> = help
             .sections
             .iter()
@@ -409,7 +427,7 @@ mod tests {
         use lazybox_tui_core::action::{ActionDef, keymap_preset};
         let overrides = keymap_preset("vim").unwrap();
         let catalog = ActionDef::catalog(&[], &overrides);
-        let help = Help::from_catalog(&catalog);
+        let help = Help::from_catalog(&catalog, ']');
         let merge_keys = help
             .sections
             .iter()
@@ -426,7 +444,7 @@ mod tests {
     fn leader_section_lists_the_github_chords_from_the_catalog() {
         use lazybox_tui_core::action::ActionDef;
         let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
-        let help = Help::from_catalog(&catalog);
+        let help = Help::from_catalog(&catalog, ']');
         let g = help
             .leaders
             .iter()
@@ -458,7 +476,7 @@ mod tests {
     fn leader_section_reflects_the_shift_aliases() {
         use lazybox_tui_core::action::ActionDef;
         let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
-        let help = Help::from_catalog(&catalog);
+        let help = Help::from_catalog(&catalog, ']');
         let g = help
             .leaders
             .iter()

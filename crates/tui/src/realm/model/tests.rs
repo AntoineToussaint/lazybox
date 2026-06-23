@@ -4098,3 +4098,130 @@ mod jump_to_workspace_tests {
         assert!(m.jump_choices.is_empty());
     }
 }
+
+#[cfg(test)]
+mod terminal_section_dispatch_tests {
+    //! #188: the terminal-pane actions must actually fire under terminal
+    //! focus — `available_in_terminal()` is only a `section == Terminal`
+    //! proxy, so these round-trip each `Section::Terminal` action through
+    //! `handle_pane_key` under `PaneFocus::Terminals` to prove the
+    //! proxy's premise. They also pin the central #188 finding: the leave
+    //! chord is owned by `ui.terminal_escape_char`, NOT a remappable
+    //! `leave_terminal` catalog chord the footer must never advertise.
+    use super::super::*;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind, channel};
+    use lazybox_tui_core::action::{ActionDef, ActionKind, Section};
+    use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+    use tuirealm::ratatui::layout::Size;
+
+    /// A model focused on a live (non-empty) terminal — so dispatch takes
+    /// the real terminal-focus path (`resolve_focus` is `None`), not the
+    /// empty-pane fallback that resolves keys as if the sidebar held
+    /// focus.
+    fn model_in_live_terminal() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = SessionKey::from("github:o/r#1");
+        m.terminals.set_active_session(Some(key.clone()));
+        m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(7),
+            session_key: key,
+            kind: TerminalKind::Shell,
+            no_permission: false,
+        });
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        m
+    }
+
+    fn esc_char(m: &Model<tuirealm::terminal::TestTerminalAdapter>) -> RealmKey {
+        RealmKey::new(
+            Key::Char(m.ui_defaults.terminal_escape_char),
+            RealmMods::NONE,
+        )
+    }
+
+    /// The leave chord is the escape char doubled — that's what the
+    /// dispatcher matches. A baked-in `leave_terminal: Esc` override does
+    /// NOT leave: the catalog chord is never consulted under terminal
+    /// focus, so honoring it in the footer would be a lie.
+    #[test]
+    fn leave_terminal_override_does_not_leave_under_terminal_focus() {
+        let mut m = model_in_live_terminal();
+        let mut ov = std::collections::BTreeMap::new();
+        ov.insert("leave_terminal".to_string(), "Esc".to_string());
+        m.apply_action_key_overrides(ov);
+
+        m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Terminals,
+            "a leave_terminal rebind must not leave; the escape char owns the chord",
+        );
+    }
+
+    /// The escape char doubled leaves even with the `leave_terminal`
+    /// override present — proving `ui.terminal_escape_char` is the chord
+    /// owner. Uses a 1ms window so the idle tick fires without sleeping
+    /// the default escape window.
+    #[test]
+    fn escape_char_doubled_leaves_regardless_of_override() {
+        let mut m = model_in_live_terminal();
+        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
+        let mut ov = std::collections::BTreeMap::new();
+        ov.insert("leave_terminal".to_string(), "Esc".to_string());
+        m.apply_action_key_overrides(ov);
+
+        m.dispatch_key(esc_char(&m));
+        m.dispatch_key(esc_char(&m));
+        assert!(
+            m.terminal_leader_pending(),
+            "the escape char doubled arms the leader"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        m.tick_terminal_leader();
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Sidebar,
+            "escape char doubled is the way out, override or not",
+        );
+    }
+
+    /// The scroll chord (`Shift-PageUp`) is consumed by the terminal pane
+    /// under focus rather than leaving or falling through to the catalog.
+    #[test]
+    fn terminal_scroll_chord_stays_in_the_pane() {
+        let mut m = model_in_live_terminal();
+        m.dispatch_key(RealmKey::new(Key::PageUp, RealmMods::SHIFT));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Terminals,
+            "scrolling scrollback must not leave the terminal",
+        );
+        assert!(m.top_modal().is_none(), "scroll opens no modal");
+    }
+
+    /// Every `Section::Terminal` action is accounted for by a dispatch
+    /// round-trip above — so the `available_in_terminal()` proxy can't
+    /// claim an action fires here without a test that actually exercises
+    /// it. A new Terminal action forces a new arm (and its dispatch
+    /// test).
+    #[test]
+    fn every_terminal_section_action_has_a_dispatch_path() {
+        for def in ActionDef::all() {
+            if def.section != Section::Terminal {
+                continue;
+            }
+            match def.kind {
+                // Exercised by the escape-char dispatch tests above.
+                ActionKind::LeaveTerminal => {}
+                // Exercised by `terminal_scroll_chord_stays_in_the_pane`.
+                ActionKind::TerminalScroll => {}
+                other => panic!(
+                    "Section::Terminal action {other:?} has no dispatch round-trip test (#188)",
+                ),
+            }
+        }
+    }
+}

@@ -496,6 +496,13 @@ mod tests {
             (ActionKind::JumpToFailingCi, "Shift-F"),
             (ActionKind::StartAgent, "Shift-W"),
             (ActionKind::CyclePane, "Tab"),
+            // Previously unchecked hints (#188): a rename/remap of any
+            // of these would silently desync the onboarding copy.
+            (ActionKind::SpawnShell, "s"),
+            (ActionKind::OpenEditor, "e"),
+            (ActionKind::CycleMailbox, "Shift-S"),
+            (ActionKind::OpenHelp, "?"),
+            (ActionKind::OpenSettings, ","),
         ] {
             assert_eq!(
                 ActionDef::for_kind(kind).default_keys,
@@ -504,6 +511,29 @@ mod tests {
             );
             assert!(all.contains(hint), "tour no longer shows {hint}");
         }
+        // The agent-pick hints (`c` / `x` / `u`) are per-agent SpawnAgent
+        // chords, not a single `ActionDef::default_keys` — they come from
+        // the agent-id → key convention. Pin them against that source.
+        for (agent, key) in [("claude", "c"), ("codex", "x"), ("cursor", "u")] {
+            let display = ActionDef::catalog(&[agent.to_string()], &Default::default())
+                .into_iter()
+                .find(|e| e.label == format!("spawn {agent}"))
+                .map(|e| e.keys_display.to_string())
+                .unwrap_or_else(|| panic!("no spawn row for {agent}"));
+            assert_eq!(display, key, "spawn {agent} default chord drifted");
+            assert!(all.contains(key), "tour no longer shows {key} for {agent}");
+        }
+        // The `q q` quit chord and the `]]` return-to-sidebar hint round
+        // out the ship-it card.
+        assert_eq!(ActionDef::for_kind(ActionKind::Quit).default_keys, "q q");
+        assert!(all.contains("q q"), "tour no longer shows the quit chord");
+        // `]]` is `ui.terminal_escape_char` (default `]`) doubled, owned
+        // by the terminal latch rather than the catalog (#188); the tour
+        // documents the default form.
+        assert!(
+            all.contains("]]"),
+            "tour no longer shows the `]]` return hint",
+        );
     }
 
     #[test]

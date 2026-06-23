@@ -1729,15 +1729,14 @@ impl TerminalStack {
         use std::borrow::Cow;
         let leave = ActionDef::for_kind(ActionKind::LeaveTerminal);
         let leader = format!("{escape_char}{escape_char}");
-        // Honor a user rebind of `leave_terminal`; otherwise render the
-        // configured escape char doubled instead of the catalog's
-        // hardcoded `]]` default (#170).
-        let leave_keys = leave.effective_keys_display(overrides);
-        let leave_keys: Cow<'static, str> = if leave_keys.as_ref() == leave.default_keys {
-            Cow::Owned(leader.clone())
-        } else {
-            leave_keys
-        };
+        // The leave chord is owned by `ui.terminal_escape_char`, NOT the
+        // `leave_terminal` action_keys slot. Terminal-pane dispatch
+        // (`model::keys`) matches only the configured escape char doubled
+        // and never the catalog chord, so honoring a `leave_terminal`
+        // override here would advertise a key the dispatcher ignores —
+        // the footer would say "Esc exit to sidebar" while Esc does
+        // nothing (#188). Always render the escape char doubled.
+        let leave_keys: Cow<'static, str> = Cow::Owned(leader.clone());
         let scroll = ActionDef::for_kind(ActionKind::TerminalScroll);
         vec![
             // Bare `]]` (the configured escape char doubled) — the way

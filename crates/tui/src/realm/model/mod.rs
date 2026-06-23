@@ -2320,11 +2320,15 @@ impl<T: TerminalAdapter> Model<T> {
             if self.focus == PaneFocus::Terminals
                 && tail.iter().all(|def| !def.available_in_terminal())
             {
-                let leave = ActionDef::for_kind(ActionKind::LeaveTerminal);
                 let help = ActionDef::for_kind(ActionKind::OpenHelp);
                 let quit = ActionDef::for_kind(ActionKind::Quit);
+                // The way back out is `ui.terminal_escape_char` doubled,
+                // owned by the escape-char latch — not a remappable
+                // catalog chord (#188). Render it from the configured
+                // char so the hint matches what the dispatcher matches.
+                let esc = self.ui_defaults.terminal_escape_char;
                 vec![crate::pane::Binding {
-                    keys: leave.effective_keys_display(&self.action_key_overrides),
+                    keys: std::borrow::Cow::Owned(format!("{esc}{esc}")),
                     label: std::borrow::Cow::Owned(format!(
                         "exit for {} · {}",
                         help.effective_keys_display(&self.action_key_overrides),

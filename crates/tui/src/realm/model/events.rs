@@ -556,12 +556,16 @@ impl<T: TerminalAdapter> Model<T> {
             self.apply_preselect();
         }
         if is_spawn {
-            // The session is ready — tear down the provisioning
-            // checklist (unless a step failed, in which case it stays
-            // up for the user to read). Keyed by session_key so a
-            // concurrent unrelated spawn can't dismiss the wrong modal.
+            // The session is ready — queue the provisioning checklist
+            // for dismissal (unless a step failed, in which case it
+            // stays up for the user to read). The modal isn't torn down
+            // on the spot: it holds until every step has been shown for
+            // its minimum dwell, so a fast provision walks the full
+            // checklist instead of flashing only the first step. Keyed
+            // by session_key so a concurrent unrelated spawn can't
+            // dismiss the wrong modal.
             if let IpcEvent::TerminalSpawned { session_key, .. } = &event {
-                self.dismiss_worktree_progress(session_key);
+                self.queue_worktree_progress_dismiss(session_key);
             }
             // A terminal just appeared — auto-focus the Terminals
             // pane so the user can start typing immediately, and

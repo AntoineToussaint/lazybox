@@ -186,9 +186,10 @@ pub enum Id {
     /// Spinner + step checklist shown while a first spawn on a fresh
     /// workspace provisions its worktree. Mounted on the first
     /// `WorktreeProgress` daemon event (so an instant resume never
-    /// flashes it), re-mounted from `worktree_progress` as steps land,
-    /// dismissed by the matching `TerminalSpawned` (or Esc / a failed
-    /// step the user acknowledges).
+    /// flashes it), re-mounted from `worktree_progress` as steps land
+    /// and the display walks them at a minimum dwell, dismissed once the
+    /// matching `TerminalSpawned` has queued it AND every step has been
+    /// shown (or Esc / a failed step the user acknowledges).
     WorktreeProgress,
     /// Fuzzy switcher over every workspace (`JumpToWorkspace`, default
     /// `` ` ``; from a terminal, `]]` then `` ` ``). The parallel
@@ -2598,10 +2599,12 @@ impl<T: TerminalAdapter> Model<T> {
                 let cmds = self.handle_modal_dismissed();
                 self.dispatch_cmds(cmds);
             }
-            // Pure repaint heartbeat — the spinner already advanced in
-            // the component's `on(Tick)`; being a non-empty message is
-            // what flips `redraw` in the run loop.
-            Msg::WorktreeProgressTick => {}
+            // The component's `on(Tick)` already advanced the spinner;
+            // here we walk the displayed checklist toward the daemon's
+            // truth (gated by the min-dwell) and tear the modal down once
+            // a queued dismiss has been fully shown. Being a non-empty
+            // message is also what flips `redraw` in the run loop.
+            Msg::WorktreeProgressTick => self.advance_worktree_progress(),
             Msg::Confirmed(yes) => {
                 let cmds = self.handle_confirmed(yes);
                 self.dispatch_cmds(cmds);

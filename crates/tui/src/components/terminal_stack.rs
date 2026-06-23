@@ -965,6 +965,13 @@ impl TerminalStack {
         self.visible_terminals().get(self.active_tab_idx).copied()
     }
 
+    /// The session a tracked terminal belongs to. Used by the spawn-
+    /// follow pin to recover the workspace for a `TerminalFocusRequested`
+    /// (which carries only the terminal id).
+    pub fn session_key_for(&self, id: TerminalId) -> Option<&SessionKey> {
+        self.terminals.get(&id).map(|slot| &slot.session_key)
+    }
+
     /// Find an existing runner inside the given session whose kind
     /// has the same singleton-identity as `kind` (e.g. "this session
     /// already has a Claude → don't spawn a second one"). Returns

@@ -645,6 +645,18 @@ pub struct Model<T: TerminalAdapter> {
     /// workspace — otherwise the cursor lands on an arbitrary row and
     /// the merged session looks lost.
     merge_follow_from: Option<lazybox_core::WorkspaceKey>,
+    /// Workspace a `w` ("work on this") spawn was issued on. Set by the
+    /// dispatcher when it fires the `Command::Spawn` and consumed by the
+    /// matching `TerminalSpawned` / `TerminalFocusRequested` to pin focus
+    /// onto that workspace's new agent terminal — even if a slow
+    /// first-time worktree provision let the user navigate away before
+    /// the terminal landed.
+    spawn_follow_to: Option<lazybox_core::SessionKey>,
+    /// Terminal the next `sync_panes` should promote to the active tab.
+    /// Set alongside [`Self::spawn_follow_to`] so `w` lands on the
+    /// freshly-spawned agent rather than whatever tab the followed
+    /// workspace last had focused.
+    pending_focus_terminal: Option<lazybox_ipc::TerminalId>,
     /// Loaded + merged snippet collection (`<lazybox_home>/snippets.yaml`
     /// + `<cwd>/.lazybox/snippets.yaml`). Populated at startup by
     /// `apply_snippets`; the terminal-pane `]` latch reads this to
@@ -869,6 +881,8 @@ impl<T: TerminalAdapter> Model<T> {
             pending_new_workspace_project: None,
             pending_focus_project_name: None,
             merge_follow_from: None,
+            spawn_follow_to: None,
+            pending_focus_terminal: None,
             snippets: lazybox_config::Snippets::default(),
             snippet_choices: Vec::new(),
             auto_tour_pending: false,

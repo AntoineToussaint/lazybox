@@ -37,6 +37,11 @@ path = "src/main.rs"
 # intentional render changes; otherwise CI catches regressions.
 insta = { version = "1", features = ["yaml"] }
 tempfile = "3"
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "terminal_feed"
+harness = false
 
 [dependencies]
 lazybox-core       = { workspace = true }

@@ -357,6 +357,13 @@ impl Sidebar {
         self.inner.cursor_on_repo_header()
     }
 
+    /// Index of the cursor row within the visible list. Observability
+    /// passthrough mirroring `Sidebar::cursor` — used by tests to map a
+    /// workspace onto the screen row a click would land on.
+    pub fn cursor(&self) -> usize {
+        self.inner.cursor()
+    }
+
     /// Toggle the repo header under the cursor. Same effect as the
     /// `Space` key on a header.
     pub fn toggle_repo_at_cursor(&mut self) -> bool {

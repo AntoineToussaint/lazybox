@@ -30,6 +30,10 @@ impl<T: TerminalAdapter> Model<T> {
     /// global escapes, and forwards everything else to the focused
     /// pane wrapper.
     pub(super) fn handle_pane_key(&mut self, key: RealmKey) {
+        // Snapshot the steady focus for the selected workspace before
+        // this key mutates anything, so a later re-select can restore it
+        // (#182).
+        self.record_workspace_focus();
         // The sidebar's `/` search bar, while open, owns every
         // keystroke — route them straight in before pane / catalog /
         // global dispatch so typing a query (`f`, `s`, `Tab`, …) edits
@@ -660,6 +664,10 @@ impl<T: TerminalAdapter> Model<T> {
         if self.layout.last_area.width == 0 || self.layout.last_area.height == 0 {
             return;
         }
+        // Snapshot the steady focus for the selected workspace before
+        // this click mutates anything, so a later re-select can restore
+        // it (#182).
+        self.record_workspace_focus();
         // In focus mode the sidebar + activity pane aren't drawn, so
         // their hit rects collapse to empty (no point can land in
         // them) and the terminal owns everything below the slim event
@@ -809,6 +817,7 @@ impl<T: TerminalAdapter> Model<T> {
                         // sort); if neither hit, fall through to row
                         // selection. All three outcomes update the
                         // same state, so one consolidated branch.
+                        let prev_key = self.sidebar.selected_workspace_key().cloned();
                         let handled = self.sidebar.click_to_cycle_filter(m.column, m.row)
                             || self.sidebar.click_to_cycle_sort(m.column, m.row)
                             || self.sidebar.click_to_select(sidebar_rect, m.row);
@@ -836,6 +845,17 @@ impl<T: TerminalAdapter> Model<T> {
                                     Some((m.column, m.row, std::time::Instant::now()));
                             }
                             self.sync_panes();
+                            // Clicking onto a *different* workspace restores
+                            // the pane it was last focused in — so clicking
+                            // back to a workspace whose agent you were typing
+                            // into returns focus to that terminal instead of
+                            // stranding it on the sidebar (#182). A click on
+                            // the already-selected row keeps the sidebar
+                            // focus the click just set, leaving an explicit
+                            // way to step out of the terminal.
+                            if self.sidebar.selected_workspace_key() != prev_key.as_ref() {
+                                self.restore_workspace_focus();
+                            }
                             self.redraw = true;
                         }
                     }

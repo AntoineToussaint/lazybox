@@ -357,6 +357,10 @@ impl<T: TerminalAdapter> Model<T> {
             // workspace re-applies the empty-aware default instead of a
             // stale manual choice.
             self.activity_pane_overrides.remove(key);
+            // Forget the remembered pane focus too, so a re-added
+            // workspace doesn't inherit a stale restore target.
+            let session_key: lazybox_core::SessionKey = key.into();
+            self.workspace_focus.remove(&session_key);
             // Capture this BEFORE the sidebar (below) moves the cursor
             // off the now-gone row: if the user was viewing the
             // workspace being removed, a trailing `WorkspaceMerged`
@@ -798,6 +802,44 @@ impl<T: TerminalAdapter> Model<T> {
         // hidden while that pane held focus, hand focus to the terminal
         // so keystrokes don't vanish into an unrendered pane.
         self.enforce_pane_focus();
+    }
+
+    /// Snapshot the pane the user currently rests in for the selected
+    /// workspace, so re-selecting that workspace later can restore it
+    /// (#182). Called at input-event entry — i.e. the steady state
+    /// *before* the event mutates focus/selection — so a sidebar click
+    /// that moves focus to the sidebar never overwrites the terminal
+    /// focus of the workspace being left.
+    pub(super) fn record_workspace_focus(&mut self) {
+        if let Some(key) = self.sidebar.selected_workspace_key() {
+            self.workspace_focus.insert(key.clone(), self.focus);
+        }
+    }
+
+    /// Restore the pane focus remembered for the currently-selected
+    /// workspace, falling back to the existing focus when there's no
+    /// memory or the remembered pane isn't currently available (its
+    /// terminal exited, or the Activity pane is hidden). Call after the
+    /// sidebar cursor + panes have synced so the availability checks see
+    /// the target workspace's terminals.
+    pub(super) fn restore_workspace_focus(&mut self) {
+        let Some(remembered) = self
+            .sidebar
+            .selected_workspace_key()
+            .and_then(|key| self.workspace_focus.get(key).copied())
+        else {
+            return;
+        };
+        let available = match remembered {
+            PaneFocus::Terminals => self.terminals.active_terminal_id().is_some(),
+            PaneFocus::Right => self.activity_pane_visible(),
+            PaneFocus::Sidebar => true,
+        };
+        if available && self.focus != remembered {
+            self.focus = remembered;
+            self.set_focus_attr();
+            self.redraw = true;
+        }
     }
 
     /// Apply the pending `--workspace [--session]` selection. One-shot

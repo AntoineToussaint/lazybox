@@ -474,6 +474,10 @@ impl<T: TerminalAdapter> Model<T> {
                         if self.status.clear_spawning() {
                             self.redraw = true;
                         }
+                        // Drop any pending spawn-follow pin — leaving it
+                        // armed would let a later unrelated spawn inherit
+                        // this `w`'s follow.
+                        self.spawn_follow_to = None;
                         // No `TerminalSpawned` is coming, so a progress
                         // checklist that reached "Starting agent" would
                         // hang — surface the error in the footer and
@@ -564,6 +568,37 @@ impl<T: TerminalAdapter> Model<T> {
             self.status.clear_spawning_notice();
             self.status.clear_spawning();
             self.needs_pane_sync = true;
+            // Pinned spawn-follow: a `w` press recorded the workspace it
+            // targeted. When that workspace's terminal finally lands —
+            // possibly seconds later after a cold worktree provision, and
+            // possibly after the user navigated elsewhere — pull the
+            // cursor back to it and mark the new terminal as the tab to
+            // activate, so `w` reliably ends on the freshly-spawned agent
+            // rather than wherever the cursor drifted. `pending_focus_terminal`
+            // is applied by the upcoming `sync_panes`, after
+            // `set_active_session` has rebuilt the followed workspace's
+            // visible terminal set. `TerminalFocusRequested` (singleton
+            // guard: the agent already existed) carries no session key, so
+            // recover it from the terminal's own slot.
+            let spawned = match &event {
+                IpcEvent::TerminalSpawned {
+                    session_key,
+                    terminal_id,
+                    ..
+                } => Some((session_key.clone(), *terminal_id)),
+                IpcEvent::TerminalFocusRequested { terminal_id } => self
+                    .terminals
+                    .session_key_for(*terminal_id)
+                    .map(|sk| (sk.clone(), *terminal_id)),
+                _ => None,
+            };
+            if let Some((spawned_key, terminal_id)) = spawned
+                && self.spawn_follow_to.as_ref() == Some(&spawned_key)
+            {
+                self.spawn_follow_to = None;
+                self.sidebar.focus_workspace_key(&spawned_key);
+                self.pending_focus_terminal = Some(terminal_id);
+            }
             // Editor-deferred-by-spawn: the user pressed `e` on a
             // workspace with no worktree; we asked the daemon to
             // spawn a shell so a worktree got provisioned. Look
@@ -750,6 +785,15 @@ impl<T: TerminalAdapter> Model<T> {
         self.right.set_workspace(workspace);
         self.terminals.set_active_session(session_key);
         self.terminals.set_layout(layout);
+        // A pinned `w` spawn-follow asked for a specific terminal to be
+        // the active tab. Apply it now that `set_active_session` has
+        // (re)built the visible set for the followed workspace, so the
+        // user lands on the fresh agent and not whatever tab the
+        // workspace last had — a no-op if the terminal isn't in the
+        // active session's visible set.
+        if let Some(tid) = self.pending_focus_terminal.take() {
+            self.terminals.focus_terminal(tid);
+        }
         // If the selection landed on a workspace whose Activity pane is
         // hidden while that pane held focus, hand focus to the terminal
         // so keystrokes don't vanish into an unrendered pane.

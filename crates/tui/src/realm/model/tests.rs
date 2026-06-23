@@ -2260,6 +2260,105 @@ mod merge_focus_follow_tests {
              (per-event sync would re-aim it for the intermediate decoy too)",
         );
     }
+
+    /// Regression for #177: `w` provisions a worktree first (seconds) and
+    /// the `TerminalSpawned` lands much later. If the user navigated away
+    /// in the meantime, focus must still snap back to the workspace `w`
+    /// fired on — with the freshly-spawned agent as the active tab — not
+    /// stay on wherever the cursor drifted.
+    #[test]
+    fn w_spawn_follows_to_target_after_navigating_away() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+
+        // A workable issue (slow first-time spawn) plus a decoy PR the
+        // cursor can wander to while the worktree provisions.
+        let issue = workspace("owner/repo#1", false, Duration::hours(1));
+        let decoy = workspace("owner/repo#9", true, Duration::minutes(1));
+        let issue_key = issue.key.clone();
+        let decoy_key = decoy.key.clone();
+        let issue_sk: SessionKey = (&issue_key).into();
+
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(issue)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(decoy)));
+
+        // Press `w` on the issue → arms the follow target + emits Spawn.
+        assert!(m.sidebar.focus_workspace_key(&issue_sk));
+        let cmds = m.dispatch_action(&Action::Work);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, lazybox_ipc::Command::Spawn { .. })),
+            "`w` on a workable issue emits a Spawn",
+        );
+
+        // The worktree is still provisioning; the user wanders to the decoy.
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&decoy_key)));
+        m.sync_panes();
+        assert_eq!(
+            m.sidebar.selected_workspace().map(|w| w.key.clone()),
+            Some(decoy_key),
+            "cursor parked on the decoy before the terminal lands",
+        );
+
+        // The agent terminal finally lands — much later, on the ISSUE.
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(7),
+            session_key: issue_sk,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+
+        // Focus snapped back to the issue, new agent as the active tab.
+        assert_eq!(
+            m.sidebar.selected_workspace().map(|w| w.key.clone()),
+            Some(issue_key),
+            "focus follows the spawn back onto the workspace `w` fired on",
+        );
+        assert_eq!(
+            m.focus,
+            PaneFocus::Terminals,
+            "focus lands on the terminal pane",
+        );
+        assert_eq!(
+            m.terminals.active_terminal_id(),
+            Some(TerminalId(7)),
+            "the freshly-spawned agent is the active tab",
+        );
+    }
+
+    /// Gap #3 of #177: `w` on a workspace with nothing to act on (no PR,
+    /// issue, or selected comments) used to silently do nothing. It must
+    /// now give explicit footer feedback and arm no follow target.
+    #[test]
+    fn w_on_unworkable_workspace_flashes_feedback() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+
+        let bare = Workspace::empty(
+            WorkspaceKey::new("github:owner/repo#sandbox"),
+            "sandbox",
+            Utc::now(),
+        );
+        let bare_sk: SessionKey = (&bare.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(bare)));
+        assert!(m.sidebar.focus_workspace_key(&bare_sk));
+
+        let cmds = m.dispatch_action(&Action::Work);
+        assert!(cmds.is_empty(), "`w` with nothing to do emits no Spawn");
+        assert!(
+            m.spawn_follow_to.is_none(),
+            "no follow target armed when nothing spawns",
+        );
+        let notice = m.status.notice.as_ref().expect("footer feedback shown");
+        assert!(
+            notice.message.contains("nothing to work on"),
+            "explicit feedback instead of a silent no-op: {:?}",
+            notice.message,
+        );
+    }
 }
 
 #[cfg(test)]

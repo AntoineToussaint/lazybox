@@ -80,6 +80,18 @@ impl Terminals {
         self.inner.active_terminal_id()
     }
 
+    /// The session a tracked terminal belongs to. Used by the spawn-
+    /// follow pin to recover the workspace for a `TerminalFocusRequested`.
+    pub fn session_key_for(&self, id: TerminalId) -> Option<&SessionKey> {
+        self.inner.session_key_for(id)
+    }
+
+    /// Promote `target` to the active tab (no-op if it isn't in the
+    /// active session's visible set). Used by the spawn-follow pin.
+    pub fn focus_terminal(&mut self, target: TerminalId) -> bool {
+        self.inner.focus_terminal(target)
+    }
+
     /// Forward a daemon event so the inner stack stays in sync.
     pub fn on_daemon_event(&mut self, evt: &IpcEvent) {
         self.inner.on_event(evt);

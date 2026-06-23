@@ -273,6 +273,12 @@ impl<T: TerminalAdapter> Model<T> {
                     prompt,
                 } = intent
                 {
+                    // Pin the follow target to the workspace `w` fired on
+                    // so the spawned agent's terminal is what focus lands
+                    // on, even if a slow first-time worktree provision lets
+                    // the cursor wander before the `TerminalSpawned`
+                    // arrives (consumed in the spawn-event handler).
+                    self.spawn_follow_to = Some((&workspace_key).into());
                     cmds.push(IpcCommand::Spawn {
                         session_key: (&workspace_key).into(),
                         session_id,
@@ -281,6 +287,11 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: prompt,
                     });
                     self.right.clear_activity_selection();
+                } else {
+                    // `w` had nothing actionable to spawn (no PR, issue,
+                    // or selected comments). Surface that instead of
+                    // silently swallowing the keystroke.
+                    self.flash_hint("nothing to work on here");
                 }
             }
             Action::OpenEditor => {

@@ -155,6 +155,10 @@ pub enum AgentState {
     /// (Claude's `Stop` hook). Distinct from `Idle`, which never
     /// worked. → alert. Sticky: a subsequent idle reading keeps `Done`
     /// until the agent works again or asks for input.
+    ///
+    /// Hook-exclusive: only the lifecycle-hook path ever emits `Done`.
+    /// The PTY screen-scrape detector has no "finished" anchor to read
+    /// and tops out at `Idle`, so a hookless agent never reaches `Done`.
     Done,
 }
 

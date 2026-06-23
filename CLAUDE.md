@@ -22,8 +22,8 @@ Logs go to `/tmp/lazybox.log`. State persisted in `~/.lazybox/v2/state.db`.
 
 ## Architecture
 
-18 crates organized as a client/daemon split with shared library crates. The
-core library crates (core, auth, events, store) must NEVER depend on each
+17 crates organized as a client/daemon split with shared library crates. The
+core library crates (core, auth, store) must NEVER depend on each
 other.
 
 ```
@@ -31,8 +31,6 @@ crates/
   # ── shared libraries ────────────────────────────────────────────────
   core/            # Task, Session, Activity, SessionKey, time helpers. Source-agnostic.
   auth/            # CredentialProvider trait + chain. Env, Command, Static providers.
-  events/          # LEGACY in-process event bus. Dead code: only the unused
-                   #   GhPoller consumes it; live eventing is `ipc::Event`.
   store/           # Store trait + SQLite backend. Sessions, read/unread, snooze.
   config/          # YAML loader for ~/.lazybox/config.yaml.
   git-ops/         # Worktree manager (bare clones + per-task worktrees).
@@ -212,7 +210,7 @@ scrollback, `Shift-Home/End` jump top/bottom (mouse wheel works too).
 
 - `thiserror` for errors in library crates, `anyhow` in the binary (`tui`)
 - No `unwrap()` in library crates
-- Core 4 libraries (core, auth, events, store) must not depend on each other
+- Core libraries (core, auth, store) must not depend on each other
 - Provider crates depend on core + auth only
 - Every public function has a test; every TUI component has a render snapshot
   (insta + ratatui `TestBackend`); every bug fix lands with a regression test

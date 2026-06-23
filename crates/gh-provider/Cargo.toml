@@ -9,7 +9,6 @@ publish.workspace = true
 [dependencies]
 lazybox-auth = { workspace = true }
 lazybox-core = { workspace = true }
-lazybox-events = { workspace = true }
 octocrab = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }

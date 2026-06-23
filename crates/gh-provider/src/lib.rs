@@ -7,7 +7,6 @@ mod client;
 mod graphql;
 pub mod mentions;
 mod notifications;
-mod poller;
 pub mod rate_budget;
 
 pub use client::GhClient;
@@ -17,7 +16,6 @@ pub use notifications::{
     NotificationEntry, NotificationTarget, NotificationTargetKind, NotificationsPoll,
     NotificationsSnapshot,
 };
-pub use poller::GhPoller;
 pub use rate_budget::{AcquireError, RateBudget, RemoteRateLimit, Snapshot as RateSnapshot};
 
 use lazybox_auth::{CommandProvider, CredentialChain, EnvProvider};

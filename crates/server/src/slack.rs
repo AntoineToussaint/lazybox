@@ -161,7 +161,13 @@ impl ChatProvider for SlackProvider {
         name: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ChatError>> + Send + 'a>> {
         Box::pin(async move {
-            if let Some(id) = self.name_to_id.lock().unwrap().get(name).cloned() {
+            if let Some(id) = self
+                .name_to_id
+                .lock()
+                .expect("slack name_to_id mutex poisoned")
+                .get(name)
+                .cloned()
+            {
                 return Ok(id);
             }
             match self.api.conversations_create(name).await {
@@ -169,7 +175,7 @@ impl ChatProvider for SlackProvider {
                     let id = resp.channel.id.clone();
                     self.name_to_id
                         .lock()
-                        .unwrap()
+                        .expect("slack name_to_id mutex poisoned")
                         .insert(name.to_string(), id.clone());
                     tracing::info!(channel = %resp.channel.name, "slack: created channel");
                     Ok(id)
@@ -181,7 +187,10 @@ impl ChatProvider for SlackProvider {
                     tracing::debug!(name = %name, "slack: channel exists, looking up id");
                     match self.api.conversations_list_all().await {
                         Ok(channels) => {
-                            let mut s = self.name_to_id.lock().unwrap();
+                            let mut s = self
+                                .name_to_id
+                                .lock()
+                                .expect("slack name_to_id mutex poisoned");
                             for c in &channels {
                                 s.insert(c.name.clone(), c.id.clone());
                             }

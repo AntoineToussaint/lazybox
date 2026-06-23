@@ -59,6 +59,16 @@ const CTRL_W_PREFIX_WINDOW: std::time::Duration = std::time::Duration::from_secs
 /// 4 KiB is enough to span any prompt the agents have shipped so far.
 pub const RECENT_OUTPUT_CAP: usize = 4 * 1024;
 
+/// Cap on the raw bytes buffered for a terminal that isn't currently
+/// on screen. Off-screen terminals defer the (expensive) VT parse and
+/// just stash bytes here; the parser is fed lazily on the first render
+/// after the terminal becomes visible. The bound matches the daemon's
+/// `REPLAY_RING_BYTES` (64 KiB) so a chatty hidden agent can't grow it
+/// without limit — when it overflows we keep the most-recent tail and
+/// reset+refeed the parser on display, exactly how a `Snapshot`/resync
+/// reconstructs a grid from a bounded ring.
+const PENDING_FEED_CAP: usize = 64 * 1024;
+
 /// Cap for the per-terminal composing buffer (the in-flight user
 /// message that will commit on the next Enter). Practical agent
 /// prompts fit in a few KB; this bound exists to keep a pathological
@@ -552,6 +562,24 @@ struct TerminalSlot {
     /// running unattended). Drives the "no-perms" badge in the tab
     /// strip so it's obvious which sessions skip approval prompts.
     no_permission: bool,
+    /// Whether this terminal was drawn in the last frame. Set by
+    /// `render_one_terminal`, reset for every slot at the top of
+    /// `render`. Output for a displayed terminal is fed to the VT
+    /// parser immediately; output for a hidden one is stashed in
+    /// `pending_feed` and replayed lazily on the next render. Without
+    /// this gate, M chatty off-screen agents each pay full VT-parse
+    /// cost on every chunk on the single UI thread.
+    displayed: bool,
+    /// Raw bytes received while this terminal was hidden, awaiting a
+    /// deferred replay into `vt` on the first render after it becomes
+    /// visible. Bounded by [`PENDING_FEED_CAP`].
+    pending_feed: Vec<u8>,
+    /// Set when `pending_feed` overflowed [`PENDING_FEED_CAP`] and the
+    /// oldest bytes were dropped. The deferred replay then resets the
+    /// parser and re-feeds only the retained tail (resync semantics)
+    /// instead of continuing the pre-hidden grid, which the dropped
+    /// prefix would have desynced.
+    pending_truncated: bool,
 }
 
 impl TerminalSlot {
@@ -579,6 +607,28 @@ impl TerminalSlot {
         }
         self.composing.clear();
         committed
+    }
+
+    /// Replay any bytes buffered while this terminal was hidden into
+    /// the VT parser, then clear the buffer. A no-op when nothing was
+    /// buffered. If the buffer overflowed while hidden we reset the
+    /// parser first and feed only the retained tail — feeding a
+    /// truncated stream onto the stale pre-hidden grid would render
+    /// garbage, so this mirrors the resync path's reset+refeed. On a
+    /// reset failure the bytes are left in place to retry next frame
+    /// rather than being dropped.
+    fn flush_pending(&mut self) {
+        if self.pending_feed.is_empty() {
+            return;
+        }
+        if self.pending_truncated {
+            if !self.vt.reset() {
+                return;
+            }
+            self.pending_truncated = false;
+        }
+        self.vt.feed(&self.pending_feed);
+        self.pending_feed.clear();
     }
 
     /// Feed the *exact bytes* that are about to be written to this
@@ -1225,6 +1275,11 @@ impl TerminalStack {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return String::new();
         };
+        // The grid must reflect every byte received, not just those that
+        // arrived while on screen — copy can fire on a terminal that
+        // gained focus but hasn't re-rendered yet. A no-op when nothing
+        // was buffered.
+        slot.flush_pending();
         // Translate from screen-absolute crossterm coords to the
         // terminal's CONTENT-area coords. The render path puts the
         // terminal grid at `inner = Rect { x: rect.x + 1, y: rect.y
@@ -1550,6 +1605,13 @@ impl TerminalStack {
     }
 
     fn append_output(&mut self, id: TerminalId, bytes: &[u8], seq: u64) {
+        // The focused terminal feeds eagerly even when it hasn't been
+        // rendered yet (collapsed pane, or before the first frame): the
+        // `&self` mouse/alt-screen readers query its live parser state
+        // directly, so deferring its parse would make them stale. Hidden,
+        // non-focused terminals — the chatty background agents this whole
+        // path exists to bound — are never focused, so they still buffer.
+        let eager = self.focused_terminal_id() == Some(id);
         let Some(slot) = self.terminals.get_mut(&id) else {
             return;
         };
@@ -1562,7 +1624,21 @@ impl TerminalStack {
         // libghostty-vt consumes the sequence internally for its
         // own clipboard (which lazybox doesn't surface).
         forward_osc52(&mut slot.osc52_carry, bytes);
-        slot.vt.feed(bytes);
+        // Only the displayed terminal pays the VT-parse cost per chunk;
+        // hidden ones stash raw bytes and replay them lazily on the
+        // first render after they become visible (`flush_pending`).
+        // OSC 52 stays eager above so a background agent's clipboard
+        // intent isn't deferred behind a tab switch.
+        if slot.displayed || eager {
+            slot.vt.feed(bytes);
+        } else {
+            slot.pending_feed.extend_from_slice(bytes);
+            if slot.pending_feed.len() > PENDING_FEED_CAP {
+                let excess = slot.pending_feed.len() - PENDING_FEED_CAP;
+                slot.pending_feed.drain(..excess);
+                slot.pending_truncated = true;
+            }
+        }
         slot.recent.extend_from_slice(bytes);
         if slot.recent.len() > RECENT_OUTPUT_CAP {
             let excess = slot.recent.len() - RECENT_OUTPUT_CAP;
@@ -1592,6 +1668,10 @@ impl TerminalStack {
         // Drop any half-buffered clipboard sequence — the stream is being
         // rebuilt from the ring and we don't re-forward OSC 52 here.
         slot.osc52_carry.clear();
+        // The ring replay is authoritative; any bytes buffered while
+        // hidden are now stale and already covered by it.
+        slot.pending_feed.clear();
+        slot.pending_truncated = false;
         slot.recent.clear();
         let tail_start = replay.len().saturating_sub(RECENT_OUTPUT_CAP);
         slot.recent.extend_from_slice(&replay[tail_start..]);
@@ -1618,6 +1698,9 @@ impl TerminalStack {
             composing: String::new(),
             last_user_message,
             no_permission,
+            displayed: false,
+            pending_feed: Vec::new(),
+            pending_truncated: false,
         }
     }
 
@@ -2096,6 +2179,15 @@ impl TerminalStack {
         // Modern minimal: title row + thin divider, no surrounding box.
         let theme = crate::theme::current();
 
+        // Re-derive on-screen status from scratch each frame. Every slot
+        // starts hidden; `render_one_terminal` flips the ones it actually
+        // draws back on (and flushes their buffered bytes). A terminal
+        // that fell off-screen this frame — collapsed pane, switched
+        // session/tab — therefore reverts to buffering its output.
+        for slot in self.terminals.values_mut() {
+            slot.displayed = false;
+        }
+
         let visible = self.visible_terminals();
         let title_area = Rect::new(
             area.x + 1,
@@ -2545,6 +2637,11 @@ impl TerminalStack {
     ) {
         let _ = focused; // ghostty-vt doesn't render focus chrome itself
         if let Some(slot) = self.terminals.get_mut(&id) {
+            // Coming on screen: drain whatever arrived while hidden into
+            // the parser, then mark displayed so subsequent chunks feed
+            // eagerly (this slot stays current as long as it's visible).
+            slot.flush_pending();
+            slot.displayed = true;
             // Carve off the recap rows (see `recap_rows`): the recap
             // sits on row 0, row 1 stays blank so the agent output
             // doesn't visually run into it, and the body starts at row
@@ -3932,6 +4029,167 @@ mod resync_tests {
             seq: 5,
         });
         assert!(!stack.terminals.contains_key(&TerminalId(99)));
+    }
+}
+
+#[cfg(test)]
+mod hidden_feed_tests {
+    //! Off-screen terminals must not pay the VT-parse cost per chunk.
+    //! Output that arrives while a terminal isn't displayed is buffered
+    //! raw and replayed into the parser lazily on the first render after
+    //! it becomes visible — the resulting grid must match a terminal
+    //! that received the same bytes while on screen.
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    const W: u16 = 80;
+    const H: u16 = 24;
+    const ROW0: (u16, u16) = (1, 3);
+
+    fn render(stack: &mut TerminalStack) {
+        let _ = screen_rows(stack);
+    }
+
+    /// Render the pane to a test backend and return the trimmed screen
+    /// rows. Doubles as the "force a render" path the lazy flush hooks
+    /// into.
+    fn screen_rows(stack: &mut TerminalStack) -> Vec<String> {
+        let backend = TestBackend::new(W, H);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| stack.render(Rect::new(0, 0, W, H), f, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..H)
+            .map(|y| {
+                (0..W)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn spawn(stack: &mut TerminalStack, id: TerminalId, sk: &SessionKey) {
+        stack.on_event(&Event::TerminalSpawned {
+            terminal_id: id,
+            session_key: sk.clone(),
+            kind: TerminalKind::Shell,
+            no_permission: false,
+        });
+    }
+
+    fn feed(stack: &mut TerminalStack, id: TerminalId, bytes: &[u8], seq: u64) {
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: bytes.to_vec(),
+            seq,
+        });
+    }
+
+    fn row0(stack: &mut TerminalStack) -> String {
+        stack.extract_text(Rect::new(0, 0, W, H), ROW0, (20, ROW0.1))
+    }
+
+    /// Two sessions, one terminal each; A is active. After a render, A's
+    /// terminal feeds eagerly while B's buffers — and B's deferred replay
+    /// reconstructs the exact same grid A would show.
+    #[test]
+    fn hidden_terminal_buffers_then_replays_to_match_visible() {
+        let sk_a = SessionKey::new("a");
+        let sk_b = SessionKey::new("b");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        spawn(&mut stack, TerminalId(1), &sk_a);
+        spawn(&mut stack, TerminalId(2), &sk_b);
+        stack.set_active_session(Some(sk_a.clone()));
+        render(&mut stack);
+
+        // A is on screen → fed immediately, nothing buffered.
+        feed(&mut stack, TerminalId(1), b"hello\r\n", 1);
+        assert!(stack.terminals[&TerminalId(1)].displayed);
+        assert!(stack.terminals[&TerminalId(1)].pending_feed.is_empty());
+
+        // B is off screen → byte-for-byte buffered, parser untouched.
+        feed(&mut stack, TerminalId(2), b"hello\r\n", 1);
+        assert!(!stack.terminals[&TerminalId(2)].displayed);
+        assert_eq!(stack.terminals[&TerminalId(2)].pending_feed, b"hello\r\n");
+
+        // Bring B on screen. The render flushes the buffer (asserted
+        // before extract_text, which would itself flush).
+        stack.set_active_session(Some(sk_b.clone()));
+        render(&mut stack);
+        assert!(stack.terminals[&TerminalId(2)].pending_feed.is_empty());
+
+        // Same grid as the eagerly-fed sibling.
+        stack.set_active_session(Some(sk_a));
+        assert_eq!(row0(&mut stack), "hello");
+        stack.set_active_session(Some(sk_b));
+        assert_eq!(row0(&mut stack), "hello");
+    }
+
+    /// A buffer that overflows `PENDING_FEED_CAP` while hidden keeps only
+    /// the most-recent tail and resets+refeeds the parser on display, so
+    /// the visible grid still reflects the latest output.
+    #[test]
+    fn overflowing_hidden_buffer_replays_tail() {
+        let sk_a = SessionKey::new("a");
+        let sk_b = SessionKey::new("b");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        spawn(&mut stack, TerminalId(1), &sk_a);
+        spawn(&mut stack, TerminalId(2), &sk_b);
+        stack.set_active_session(Some(sk_a));
+        render(&mut stack);
+
+        // Overrun the cap with filler, then a final line that must end up
+        // on screen at the live bottom.
+        let filler = vec![b'x'; PENDING_FEED_CAP];
+        feed(&mut stack, TerminalId(2), &filler, 1);
+        feed(&mut stack, TerminalId(2), b"\r\nlast line", 2);
+        let slot = &stack.terminals[&TerminalId(2)];
+        assert!(
+            slot.pending_truncated,
+            "overflow must set the truncation flag"
+        );
+        assert!(slot.pending_feed.len() <= PENDING_FEED_CAP);
+
+        stack.set_active_session(Some(sk_b));
+        let rows = screen_rows(&mut stack);
+        let slot = &stack.terminals[&TerminalId(2)];
+        assert!(slot.pending_feed.is_empty());
+        assert!(!slot.pending_truncated);
+        // The tail survived the truncation and rendered (reset+refeed).
+        assert!(
+            rows.iter().any(|r| r.contains("last line")),
+            "expected the post-truncation tail on screen, got {rows:?}"
+        );
+    }
+
+    /// A resync replaces any bytes buffered while hidden — the ring is
+    /// authoritative, so the stale buffer is dropped.
+    #[test]
+    fn resync_clears_pending_buffer() {
+        let sk_a = SessionKey::new("a");
+        let sk_b = SessionKey::new("b");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        spawn(&mut stack, TerminalId(1), &sk_a);
+        spawn(&mut stack, TerminalId(2), &sk_b);
+        stack.set_active_session(Some(sk_a));
+        render(&mut stack);
+
+        feed(&mut stack, TerminalId(2), b"stale\r\n", 1);
+        assert!(!stack.terminals[&TerminalId(2)].pending_feed.is_empty());
+
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: TerminalId(2),
+            replay: b"fresh\r\n".to_vec(),
+            seq: 9,
+        });
+        assert!(stack.terminals[&TerminalId(2)].pending_feed.is_empty());
+
+        stack.set_active_session(Some(sk_b));
+        assert_eq!(row0(&mut stack), "fresh");
     }
 }
 

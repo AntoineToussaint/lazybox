@@ -4839,3 +4839,188 @@ mod rescope_collapse_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tick_noop_skip_tests {
+    //! The steady-state poll re-fetches every task each tick; when the
+    //! upstream task is byte-identical to the stored workspace,
+    //! `commit_upsert` must skip both the store write AND the
+    //! `WorkspaceUpserted` broadcast. Untested before, this guards the
+    //! short-circuit against a future volatile field silently
+    //! resurrecting the every-tick write+broadcast storm.
+    use super::*;
+    use lazybox_core::{TaskId, TaskRole, TaskState};
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    /// A `TaskSource` that returns whatever tasks the test stashed in
+    /// it. Defaults — `polled_scope = Repos([])`, `last_fetch_kind =
+    /// Full` — keep `tick` on the non-destructive path so the test
+    /// observes only the upsert broadcasts.
+    struct FixtureSource {
+        tasks: Mutex<Vec<Task>>,
+    }
+
+    impl FixtureSource {
+        fn new(tasks: Vec<Task>) -> Self {
+            Self {
+                tasks: Mutex::new(tasks),
+            }
+        }
+        fn set(&self, tasks: Vec<Task>) {
+            *self.tasks.lock().unwrap() = tasks;
+        }
+    }
+
+    impl TaskSource for FixtureSource {
+        fn name(&self) -> &str {
+            lazybox_gh::SOURCE
+        }
+        fn fetch<'a>(
+            &'a self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            let tasks = self.tasks.lock().unwrap().clone();
+            Box::pin(async move { Ok(tasks) })
+        }
+    }
+
+    fn issue(key: &str, title: &str) -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: title.into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{key}").replace('#', "/issues/"),
+            repo: Some("o/r".into()),
+            branch: None,
+            base_branch: None,
+            updated_at: Utc::now(),
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Unknown,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    /// Drain everything currently queued on the receiver without
+    /// blocking. The tick is fully awaited before we call this, so every
+    /// synchronous `bus.send` it made has already landed.
+    fn drain(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<Event> {
+        let mut out = Vec::new();
+        while let Ok(evt) = rx.try_recv() {
+            out.push(evt);
+        }
+        out
+    }
+
+    fn upserted_keys(events: &[Event]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::WorkspaceUpserted(ws) => Some(ws.key.as_str().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn unchanged_task_skips_write_and_broadcast() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        let sources: Vec<Box<dyn TaskSource>> =
+            vec![Box::new(FixtureSource::new(vec![issue("o/r#1", "first")]))];
+
+        let key = lazybox_core::workspace_key_for(&issue("o/r#1", "first"));
+        let mut rx = config.bus.subscribe();
+        tick(&config, &sources).await;
+        let first = drain(&mut rx);
+        assert_eq!(
+            upserted_keys(&first),
+            vec![key],
+            "first sight of a task must upsert + broadcast it"
+        );
+
+        // Re-poll the identical task. The short-circuit must skip it.
+        let mut rx = config.bus.subscribe();
+        tick(&config, &sources).await;
+        let second = drain(&mut rx);
+        assert!(
+            upserted_keys(&second).is_empty(),
+            "a byte-identical re-poll must not re-broadcast WorkspaceUpserted, got {:?}",
+            upserted_keys(&second),
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_task_still_broadcasts() {
+        // Guard against the skip test passing for the wrong reason (e.g.
+        // broadcasts silently disabled): a real field change must flow
+        // through normally.
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        let source = Arc::new(FixtureSource::new(vec![issue("o/r#1", "first")]));
+        let sources: Vec<Box<dyn TaskSource>> = vec![Box::new(FixtureSourceRef(source.clone()))];
+
+        let key = lazybox_core::workspace_key_for(&issue("o/r#1", "first"));
+        let mut rx = config.bus.subscribe();
+        tick(&config, &sources).await;
+        assert_eq!(upserted_keys(&drain(&mut rx)), vec![key.clone()]);
+
+        // Mutate a stored field; the next poll's JSON differs.
+        source.set(vec![issue("o/r#1", "retitled")]);
+        let mut rx = config.bus.subscribe();
+        tick(&config, &sources).await;
+        assert_eq!(
+            upserted_keys(&drain(&mut rx)),
+            vec![key],
+            "a changed task must re-broadcast"
+        );
+    }
+
+    /// Thin newtype so a single `FixtureSource` can be shared with the
+    /// test (to mutate its tasks) while still moving a `Box<dyn
+    /// TaskSource>` into `tick`.
+    struct FixtureSourceRef(Arc<FixtureSource>);
+
+    impl TaskSource for FixtureSourceRef {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        fn fetch<'a>(
+            &'a self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            self.0.fetch()
+        }
+    }
+}

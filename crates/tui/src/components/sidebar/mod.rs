@@ -955,6 +955,45 @@ impl Sidebar {
         self.focus_workspace_key(&target)
     }
 
+    /// Build the fuzzy-switcher target list (`JumpToWorkspace`): every
+    /// tracked workspace across all repos as `(session key, label)`.
+    /// Workspaces needing attention — agent asking or failing CI —
+    /// sort to the top (and carry a tag) so the picker doubles as a
+    /// consolidated `!` / `Shift-F` jump; the rest follow in label
+    /// order. The label embeds the provider id (`owner/repo#N`) so the
+    /// user can filter by repo, number, or title.
+    pub fn jump_targets(&self) -> Vec<(SessionKey, String)> {
+        let mut rows: Vec<(SessionKey, String, bool)> = self
+            .workspaces
+            .iter()
+            .map(|(key, w)| {
+                let signals = workspace_attention_signals(w, &self.agents_asking);
+                let asking = signals.contains(&AttentionSignal::AgentAsking);
+                let ci = signals.contains(&AttentionSignal::CiFailing);
+                let mut label = match w.primary_task() {
+                    Some(t) => format!("{}  {}", t.id.key, w.name),
+                    None => w.name.clone(),
+                };
+                let mut tags: Vec<&str> = Vec::new();
+                if asking {
+                    tags.push("asking");
+                }
+                if ci {
+                    tags.push("CI✗");
+                }
+                if !tags.is_empty() {
+                    label = format!("{label}  [{}]", tags.join(" "));
+                }
+                (key.clone(), label, asking || ci)
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.2.cmp(&a.2)
+                .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+        });
+        rows.into_iter().map(|(k, l, _)| (k, l)).collect()
+    }
+
     /// At-a-glance attention tallies for the focus-mode event header.
     /// Reuses the same per-signal counters that drive the sidebar's
     /// own header badges so the two never drift.

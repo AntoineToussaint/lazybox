@@ -465,6 +465,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenSettings => {
                 self.open_settings();
             }
+            Action::JumpToWorkspace => {
+                self.mount_jump_picker();
+            }
             Action::JumpToAsking => {
                 if self.sidebar.focus_next_asking_workspace() {
                     self.focus = PaneFocus::Sidebar;

@@ -3698,3 +3698,124 @@ mod focus_mode_tests {
         assert_eq!(summary.unread, 1, "the unseen comment counts as unread");
     }
 }
+
+mod jump_to_workspace_tests {
+    use super::super::*;
+    use chrono::{Duration, Utc};
+    use lazybox_core::{SessionKey, Task, TaskId, Workspace};
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn task(key: &str, age: Duration) -> Task {
+        let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("task: {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{path}/pull/{num}"),
+            repo: Some("owner/repo".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now() - age,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    fn seed_two(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+    ) -> (SessionKey, SessionKey) {
+        let a = Workspace::from_task(task("owner/repo#1", Duration::minutes(1)), Utc::now());
+        let b = Workspace::from_task(task("owner/repo#2", Duration::hours(1)), Utc::now());
+        let ak = SessionKey::from(&a.key);
+        let bk = SessionKey::from(&b.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(a)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(b)));
+        (ak, bk)
+    }
+
+    /// The backtick chord mounts the fuzzy switcher from the sidebar and
+    /// stashes one row per tracked workspace.
+    #[test]
+    fn backtick_opens_jump_picker_from_sidebar() {
+        let mut m = build_model();
+        seed_two(&mut m);
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        m.dispatch_key(RealmKey::new(Key::Char('`'), RealmMods::NONE));
+        assert!(matches!(m.top_modal(), Some(Id::JumpPicker)));
+        assert_eq!(m.jump_choices.len(), 2);
+    }
+
+    /// The whole point of #171: the switcher is reachable from inside an
+    /// agent terminal via the `]]` leader (`]]` then `` ` ``), without
+    /// first leaving the terminal.
+    #[test]
+    fn terminal_leader_backtick_opens_jump_picker() {
+        let mut m = build_model();
+        seed_two(&mut m);
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+        m.dispatch_key(RealmKey::new(Key::Char('`'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        assert!(matches!(m.top_modal(), Some(Id::JumpPicker)));
+    }
+
+    /// Picking a row lands the sidebar cursor on that workspace and pops
+    /// the modal.
+    #[test]
+    fn picking_a_target_moves_the_cursor() {
+        let mut m = build_model();
+        let (_a, bk) = seed_two(&mut m);
+        m.mount_jump_picker();
+        let idx = m
+            .jump_choices
+            .iter()
+            .position(|k| *k == bk)
+            .expect("seeded workspace is a jump target");
+        m.handle_choice_picked(vec![idx]);
+        assert!(m.top_modal().is_none(), "modal popped after the pick");
+        assert_eq!(m.sidebar.selected_workspace_key(), Some(&bk));
+    }
+
+    /// With nothing tracked the picker refuses to mount (a footer hint
+    /// fires instead) — no empty modal.
+    #[test]
+    fn no_workspaces_does_not_mount() {
+        let mut m = build_model();
+        m.mount_jump_picker();
+        assert!(m.top_modal().is_none());
+        assert!(m.jump_choices.is_empty());
+    }
+}

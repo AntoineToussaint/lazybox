@@ -317,6 +317,13 @@ impl Sidebar {
         self.inner.attention_summary()
     }
 
+    /// Fuzzy-switcher targets: every workspace across repos as
+    /// `(session key, label)`, attention-needing ones first. Backs the
+    /// `JumpToWorkspace` picker.
+    pub fn jump_targets(&self) -> Vec<(lazybox_core::SessionKey, String)> {
+        self.inner.jump_targets()
+    }
+
     /// State-aware short list for the footer hint bar. Catalog-driven;
     /// `overrides` carries the user's `ui.action_keys` map (empty when
     /// untouched) and flows into the catalog's `effective_keys_display`.

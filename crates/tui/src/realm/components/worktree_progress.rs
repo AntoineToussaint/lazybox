@@ -76,7 +76,7 @@ pub enum StepState {
 ///
 /// The display lags the daemon on purpose. `target` is how far the
 /// daemon has actually gotten (0 = checkout, 1 = setup, 2 = agent,
-/// [`READY`] = the session is live); `shown` is how far the checklist
+/// `READY` = the session is live); `shown` is how far the checklist
 /// has been *revealed* to the user. [`Self::tick`] walks `shown` toward
 /// `target` at no more than one step per [`MIN_STEP_DWELL`], so a fast
 /// provision still shows every step legibly.

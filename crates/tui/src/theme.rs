@@ -2,12 +2,21 @@
 //!
 //! ## Why a runtime-switchable theme
 //!
-//! Lazybox ships several built-in palettes (Lazybox Dark, Catppuccin
-//! Mocha, Tokyo Night, Gruvbox Dark, Rose Pine). The active palette
-//! lives behind `theme::current()`; every component reads from it
-//! instead of hard-coding `Color::*` literals. Switching themes at
-//! runtime is then a single atomic store — no rebuild, no reload,
-//! every render after the switch picks up the new palette.
+//! Lazybox ships several built-in palettes — five dark (Lazybox Dark,
+//! Catppuccin Mocha, Tokyo Night, Gruvbox Dark, Rose Pine), one light
+//! (Lazybox Light), and one accessible High Contrast variant. The
+//! active palette lives behind `theme::current()`; every component
+//! reads from it instead of hard-coding `Color::*` literals. Switching
+//! themes at runtime is then a single atomic store — no rebuild, no
+//! reload, every render after the switch picks up the new palette.
+//!
+//! ## Choosing a theme
+//!
+//! Users open the theme picker with `t` (or via the `,` Settings
+//! palette), arrow through the list with a live preview, and Enter to
+//! keep one. The choice is written to `ui.theme` in
+//! `~/.lazybox/config.yaml` and re-applied with [`set_by_name`] at the
+//! next launch. See `docs/themes.md` for shipping a custom palette.
 //!
 //! ## How a theme is built
 //!
@@ -148,6 +157,42 @@ pub const ROSE_PINE: Theme = Theme {
     surface: Color::Rgb(25, 23, 36),        // base
 };
 
+/// Lazybox Light — the one bright palette. Dark ink on a near-white
+/// surface, with the accent / status hues darkened until they hold
+/// contrast against the light background (the dark themes' pastels
+/// would wash out). For users on a light terminal or in bright rooms.
+pub const LAZYBOX_LIGHT: Theme = Theme {
+    name: "Lazybox Light",
+    accent: Color::Rgb(26, 110, 196),    // strong blue
+    hover: Color::Rgb(193, 53, 116),     // raspberry
+    success: Color::Rgb(35, 134, 78),    // forest green
+    warn: Color::Rgb(159, 106, 0),       // dark amber
+    error: Color::Rgb(193, 53, 116),     // same as hover for cohesion
+    text_strong: Color::Rgb(28, 32, 48), // near-black ink
+    text_dim: Color::Rgb(96, 104, 128),  // slate gray
+    chrome: Color::Rgb(196, 201, 214),   // light divider
+    fill: Color::Rgb(218, 223, 233),     // highlighted-row bg
+    surface: Color::Rgb(247, 248, 250),  // near-white panel bg
+};
+
+/// High Contrast — accessibility-first. Pure-white text and saturated,
+/// bright status hues on a pure-black surface, with a light-gray chrome
+/// so borders stay visible. Maximizes legibility for low-vision users
+/// and harsh lighting; intentionally not "pretty", just readable.
+pub const HIGH_CONTRAST: Theme = Theme {
+    name: "High Contrast",
+    accent: Color::Rgb(0, 224, 255),        // bright cyan
+    hover: Color::Rgb(255, 110, 200),       // bright magenta
+    success: Color::Rgb(80, 240, 120),      // bright green
+    warn: Color::Rgb(255, 214, 64),         // bright yellow
+    error: Color::Rgb(255, 92, 92),         // bright red
+    text_strong: Color::Rgb(255, 255, 255), // pure white
+    text_dim: Color::Rgb(200, 200, 200),    // light gray (still high-contrast)
+    chrome: Color::Rgb(160, 160, 160),      // visible gray borders
+    fill: Color::Rgb(58, 58, 58),           // highlighted-row bg
+    surface: Color::Rgb(0, 0, 0),           // pure black
+};
+
 /// Built-in themes shipped with the kit, in cycle order. Index 0 is
 /// the default. The runtime registry (see [`register`]) starts with
 /// these and grows as apps register their own.
@@ -157,6 +202,8 @@ pub const BUILT_IN_THEMES: &[&Theme] = &[
     &TOKYO_NIGHT,
     &GRUVBOX_DARK,
     &ROSE_PINE,
+    &LAZYBOX_LIGHT,
+    &HIGH_CONTRAST,
 ];
 
 /// Mutable theme registry — built-ins plus anything the host has
@@ -404,5 +451,98 @@ mod tests {
         assert_eq!(current().name, "test_registered_unique");
         // Restore default for other tests.
         set_by_name("Lazybox Dark");
+    }
+
+    /// Approximate relative luminance (0 = black, 1 = white) of an RGB
+    /// color, for the light-vs-dark assertions below. Non-truecolor
+    /// `Color` variants never appear in a built-in theme.
+    fn luminance(c: Color) -> f32 {
+        let Color::Rgb(r, g, b) = c else {
+            panic!("built-in themes use Color::Rgb literals only");
+        };
+        (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0
+    }
+
+    #[test]
+    fn ships_at_least_one_light_and_one_dark_theme() {
+        // A "light" theme has a bright surface; a "dark" theme a deep
+        // one. The picker is pointless without both poles available.
+        let lightest = BUILT_IN_THEMES
+            .iter()
+            .map(|t| luminance(t.surface))
+            .fold(0.0_f32, f32::max);
+        let darkest = BUILT_IN_THEMES
+            .iter()
+            .map(|t| luminance(t.surface))
+            .fold(1.0_f32, f32::min);
+        assert!(
+            lightest > 0.8,
+            "no light theme (brightest surface {lightest})"
+        );
+        assert!(darkest < 0.1, "no dark theme (darkest surface {darkest})");
+    }
+
+    #[test]
+    fn built_in_theme_names_are_unique() {
+        let mut names: Vec<_> = BUILT_IN_THEMES.iter().map(|t| t.name).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "duplicate built-in theme name");
+    }
+
+    /// Render a compact swatch — one row per semantic slot, drawn in
+    /// that slot's color — and capture the glyphs plus each row's
+    /// foreground color. Snapshotting this per theme freezes every
+    /// built-in palette: an accidental edit to any slot fails review.
+    fn render_swatch(theme: &Theme) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::Paragraph;
+
+        let slots: [(&str, Color); 10] = [
+            ("accent", theme.accent),
+            ("hover", theme.hover),
+            ("success", theme.success),
+            ("warn", theme.warn),
+            ("error", theme.error),
+            ("text_strong", theme.text_strong),
+            ("text_dim", theme.text_dim),
+            ("chrome", theme.chrome),
+            ("fill", theme.fill),
+            ("surface", theme.surface),
+        ];
+        let (w, h) = (24u16, slots.len() as u16);
+        let lines: Vec<Line> = slots
+            .iter()
+            .map(|(name, color)| {
+                Line::from(Span::styled(
+                    format!("{name:<12} ████"),
+                    Style::default().fg(*color),
+                ))
+            })
+            .collect();
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| f.render_widget(Paragraph::new(lines), f.area()))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                let text: String = (0..w).map(|x| buf[(x, y)].symbol()).collect();
+                format!("{} fg={:?}", text.trim_end(), buf[(0, y)].fg)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn built_in_theme_swatches_snapshot() {
+        for theme in BUILT_IN_THEMES {
+            insta::assert_snapshot!(
+                format!("swatch_{}", theme.name.replace(' ', "_")),
+                render_swatch(theme)
+            );
+        }
     }
 }

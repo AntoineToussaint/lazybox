@@ -1959,6 +1959,36 @@ mod modal_input_responsiveness_tests {
         assert!(m.top_modal().is_none(), "Esc closes the sync-status window",);
     }
 
+    /// `t` opens the theme picker (catalog → dispatch → mount): the
+    /// modal mounts, every registered palette is offered, and the
+    /// active theme is stashed so Esc can restore it. Esc then closes
+    /// the picker and clears both stashes. The live-preview behavior
+    /// (apply on highlight) is unit-tested on `Choice` itself; the
+    /// persist-on-Enter path by the config round-trip test. This test
+    /// avoids asserting on the process-global active theme, which other
+    /// parallel tests legitimately mutate.
+    #[test]
+    fn theme_picker_opens_from_t_and_cancels_clean() {
+        let mut m = build_model();
+
+        assert!(m.top_modal().is_none(), "no modal before t");
+        m.dispatch_key(KeyEvent::new(Key::Char('t'), KeyModifiers::NONE));
+        assert_eq!(m.top_modal(), Some(&Id::ThemePicker));
+        assert!(
+            m.theme_picker_prev.is_some(),
+            "the open theme is stashed for restore-on-cancel",
+        );
+        assert!(
+            m.theme_choices.iter().any(|n| n == "Lazybox Light"),
+            "the picker lists every registered theme",
+        );
+
+        m.dispatch_modal_key(key(Key::Esc));
+        assert!(m.top_modal().is_none(), "Esc closes the picker");
+        assert!(m.theme_picker_prev.is_none(), "restore stash is consumed");
+        assert!(m.theme_choices.is_empty(), "choices are released");
+    }
+
     /// The redraw window is one-shot per keystroke window: once its
     /// deadline elapses, `modal_redraw_pending` reports false and clears
     /// itself so an idle modal stops re-rendering.

@@ -1,0 +1,14 @@
+---
+source: crates/tui/src/theme.rs
+expression: render_swatch(theme)
+---
+accent       ████ fg=Rgb(156, 207, 216)
+hover        ████ fg=Rgb(196, 167, 231)
+success      ████ fg=Rgb(49, 116, 143)
+warn         ████ fg=Rgb(246, 193, 119)
+error        ████ fg=Rgb(235, 111, 146)
+text_strong  ████ fg=Rgb(224, 222, 244)
+text_dim     ████ fg=Rgb(144, 140, 170)
+chrome       ████ fg=Rgb(57, 53, 82)
+fill         ████ fg=Rgb(38, 35, 58)
+surface      ████ fg=Rgb(25, 23, 36)

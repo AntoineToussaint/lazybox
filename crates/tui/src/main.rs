@@ -650,6 +650,14 @@ async fn run_embedded_realm(
             tracing::warn!("config.yaml load: {e}; using defaults");
             lazybox_config::Config::default()
         });
+        // Apply the persisted theme before the first render so the UI
+        // boots in the user's palette. An unknown name (theme renamed /
+        // removed since they picked it) leaves the default active.
+        if let Some(name) = user_config.ui.theme.as_deref()
+            && !lazybox_tui::theme::set_by_name(name)
+        {
+            tracing::warn!("ui.theme = {name:?} not found; using the default theme");
+        }
         let ui_defaults = user_config.resolved_ui();
         model.apply_sidebar_config(
             user_config.attention.clone(),

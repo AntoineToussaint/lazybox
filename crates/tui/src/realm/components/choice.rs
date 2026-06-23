@@ -37,6 +37,7 @@ enum Mode {
 type LabelFn<T> = Box<dyn Fn(&T) -> String + Send>;
 type SectionFn<T> = Box<dyn Fn(&T) -> &'static str + Send>;
 type SelectableFn<T> = Box<dyn Fn(&T) -> bool + Send>;
+type HighlightFn<T> = Box<dyn Fn(&T) + Send>;
 
 /// Single- or multi-select picker.
 pub struct Choice<T: Clone + 'static + Send> {
@@ -53,6 +54,12 @@ pub struct Choice<T: Clone + 'static + Send> {
     can_refresh: bool,
     require_one: bool,
     show_empty_hint: bool,
+    /// Fired with the newly-highlighted item every time the cursor
+    /// moves (and once at mount). Side-effect only — drives live
+    /// preview, e.g. the theme picker applying a palette as you arrow
+    /// through. Distinct from picking: the effect is provisional until
+    /// Enter confirms, and the caller restores prior state on Esc.
+    on_highlight: Option<HighlightFn<T>>,
     /// Topmost visible body line. Updated lazily in `view` so the
     /// cursor stays on-screen as j/k walk past either edge of
     /// `body_area`. The list is too big for a non-scrolling modal
@@ -83,6 +90,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
             can_refresh: false,
             require_one: true,
             show_empty_hint: false,
+            on_highlight: None,
             scroll: 0,
             body_height: 10,
         }
@@ -105,6 +113,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
             can_refresh: false,
             require_one: true,
             show_empty_hint: false,
+            on_highlight: None,
             scroll: 0,
             body_height: 10,
         }
@@ -184,6 +193,37 @@ impl<T: Clone + 'static + Send> Choice<T> {
             *slot = want;
         }
         self
+    }
+
+    /// Register a live-preview callback fired on every cursor move.
+    /// Also fires once immediately for the initial cursor so the
+    /// preview matches the highlighted row before the user touches a
+    /// key (mounting the theme picker on the active theme previews it
+    /// as a no-op; mounting on any other row applies it at once).
+    pub fn on_highlight<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&T) + Send + 'static,
+    {
+        self.on_highlight = Some(Box::new(f));
+        self.fire_highlight();
+        self
+    }
+
+    /// Start the cursor on a specific row (clamped). Used to open a
+    /// picker pre-positioned on the current selection. Call before
+    /// [`Self::on_highlight`] so the initial preview reads this row.
+    pub fn select_index(mut self, idx: usize) -> Self {
+        if !self.items.is_empty() {
+            self.cursor = idx.min(self.items.len() - 1);
+        }
+        self
+    }
+
+    /// Invoke the highlight callback with the item under the cursor.
+    fn fire_highlight(&self) {
+        if let (Some(cb), Some(item)) = (self.on_highlight.as_ref(), self.items.get(self.cursor)) {
+            cb(item);
+        }
     }
 
     fn is_selectable(&self, idx: usize) -> bool {
@@ -518,7 +558,11 @@ impl<T: Clone + 'static + Send> AppComponent<Msg, UserEvent> for Choice<T> {
         if matches!(key.code, Key::Esc) || (ctrl && matches!(key.code, Key::Char('c'))) {
             return Some(Msg::ModalDismissed);
         }
-        match key.code {
+        // Fire the live-preview callback once after the match if the
+        // cursor moved — covers every navigation arm (arrows, page,
+        // half-page, Home/End) without repeating the call in each.
+        let prev_cursor = self.cursor;
+        let result = match key.code {
             Key::Down => {
                 self.move_cursor(1);
                 self.show_empty_hint = false;
@@ -576,7 +620,11 @@ impl<T: Clone + 'static + Send> AppComponent<Msg, UserEvent> for Choice<T> {
                 ConfirmResult::Picked(picks) => Some(Msg::ChoicePicked(picks)),
             },
             _ => None,
+        };
+        if self.cursor != prev_cursor {
+            self.fire_highlight();
         }
+        result
     }
 }
 
@@ -594,6 +642,37 @@ mod tests {
             .map(|i| Item(Box::leak(format!("i{i}").into_boxed_str())))
             .collect();
         Choice::single("pick", items)
+    }
+
+    #[test]
+    fn on_highlight_fires_at_mount_and_on_move() {
+        use std::sync::{Arc, Mutex};
+        use tuirealm::event::{Event, Key, KeyEvent};
+
+        let seen: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let items = vec![Item("a"), Item("b"), Item("c")];
+        // Start on row 1; the mount preview should fire for "b".
+        let mut c = Choice::single("p", items)
+            .select_index(1)
+            .on_highlight(move |i: &Item| sink.lock().unwrap().push(i.0));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["b"],
+            "mount previews the start row"
+        );
+
+        c.on(&Event::Keyboard(KeyEvent::from(Key::Down))); // → c
+        c.on(&Event::Keyboard(KeyEvent::from(Key::Up))); // → b
+        c.on(&Event::Keyboard(KeyEvent::from(Key::Up))); // → a (top)
+        // Already at the top edge — this move is a no-op and must not
+        // re-fire the preview.
+        c.on(&Event::Keyboard(KeyEvent::from(Key::Up)));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["b", "c", "b", "a"],
+            "preview fires once per actual cursor move, never on a no-op",
+        );
     }
 
     #[test]

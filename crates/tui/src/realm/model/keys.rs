@@ -1086,6 +1086,7 @@ fn action_from_kind(
         ActionKind::OpenTour => Action::OpenTour,
         ActionKind::OpenSyncStatus => Action::OpenSyncStatus,
         ActionKind::OpenSettings => Action::OpenSettings,
+        ActionKind::OpenThemePicker => Action::OpenThemePicker,
         ActionKind::JumpToWorkspace => Action::JumpToWorkspace,
         ActionKind::JumpToAsking => Action::JumpToAsking,
         ActionKind::JumpToFailingCi => Action::JumpToFailingCi,

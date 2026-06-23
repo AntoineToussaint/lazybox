@@ -196,6 +196,12 @@ pub enum Id {
     /// resolves the picked index and lands the cursor via
     /// `focus_workspace_key`. See `realm::components::jump_picker`.
     JumpPicker,
+    /// Theme picker (`t`, or the `,` Settings palette). Single-pick
+    /// `Choice` over `theme::list()` with live preview on highlight:
+    /// arrowing applies a palette at once, Enter keeps it and writes
+    /// `ui.theme`, Esc restores the theme stashed in
+    /// `theme_picker_prev`. Names live in `theme_choices`.
+    ThemePicker,
 }
 
 /// Why a workspace-removal confirm prompt is being shown. Both
@@ -679,6 +685,15 @@ pub struct Model<T: TerminalAdapter> {
     /// as its rows — `Msg::ChoicePicked(idx)` resolves to a key here.
     /// Cleared on mount/unmount.
     pub(crate) jump_choices: Vec<lazybox_core::SessionKey>,
+    /// Theme names backing the active `ThemePicker`, in the same order
+    /// as `theme::list()` — `Msg::ChoicePicked(idx)` resolves the name
+    /// here to persist. Cleared on mount/unmount.
+    pub(crate) theme_choices: Vec<String>,
+    /// Theme name active when the picker opened. Live preview mutates
+    /// the global theme as the cursor moves; Esc restores this so a
+    /// cancelled picker leaves the palette untouched. `None` while no
+    /// picker is open.
+    pub(crate) theme_picker_prev: Option<String>,
     /// Set at startup from `ui.tour_seen` (inverted): `true` means
     /// the feature tour should auto-launch once the panes are
     /// visible. Cleared the moment the tour mounts so it never
@@ -896,6 +911,8 @@ impl<T: TerminalAdapter> Model<T> {
             snippets: lazybox_config::Snippets::default(),
             snippet_choices: Vec::new(),
             jump_choices: Vec::new(),
+            theme_choices: Vec::new(),
+            theme_picker_prev: None,
             auto_tour_pending: false,
             tips_enabled: false,
             tips_seen: Vec::new(),
@@ -1287,6 +1304,36 @@ impl<T: TerminalAdapter> Model<T> {
         let (keys, labels): (Vec<_>, Vec<_>) = targets.into_iter().unzip();
         self.jump_choices = keys;
         self.mount_modal(Id::JumpPicker, JumpPicker::new(labels));
+    }
+
+    /// Mount the theme picker — a single-pick `Choice` over every
+    /// registered palette with live preview: highlighting a row applies
+    /// it immediately (`theme::set_by_name`), so the user sees the whole
+    /// UI recolor as they arrow. The theme active at open is stashed in
+    /// `theme_picker_prev` so Esc restores it; Enter keeps the highlight
+    /// and persists it to `ui.theme`. Opens pre-positioned on the
+    /// current theme.
+    pub(crate) fn mount_theme_picker(&mut self) {
+        use crate::realm::components::choice::Choice;
+        if matches!(self.modal_stack.last(), Some(Id::ThemePicker)) {
+            return;
+        }
+        let names: Vec<String> = crate::theme::list()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let current = crate::theme::current().name;
+        let start = names.iter().position(|n| n == current).unwrap_or(0);
+        self.theme_picker_prev = Some(current.to_string());
+        self.theme_choices = names.clone();
+        let modal = Choice::single("Preview as you move · Enter keeps it", names)
+            .title("Theme")
+            .label(|s: &String| s.clone())
+            .select_index(start)
+            .on_highlight(|name: &String| {
+                crate::theme::set_by_name(name);
+            });
+        self.mount_modal(Id::ThemePicker, modal);
     }
 
     /// Land the cursor on `key` and follow it with the panes: show its
@@ -2027,6 +2074,7 @@ impl<T: TerminalAdapter> Model<T> {
             enabled: skip_permissions,
         });
         actions.push(SettingsAction::EditSnippets);
+        actions.push(SettingsAction::EditTheme);
         actions.push(SettingsAction::InspectWorktrees);
         actions.push(SettingsAction::CleanWorktrees);
         actions.push(SettingsAction::FullSetup);
@@ -2059,6 +2107,11 @@ impl<T: TerminalAdapter> Model<T> {
             self.open_snippets_file();
             return;
         }
+        // Theme picker is its own live-preview modal — not a wizard step.
+        if matches!(action, SettingsAction::EditTheme) {
+            self.mount_theme_picker();
+            return;
+        }
         let Some((report, sources)) = self.setup.inputs.clone() else {
             tracing::warn!("dispatch_settings_action: no cached inputs");
             return;
@@ -2083,8 +2136,9 @@ impl<T: TerminalAdapter> Model<T> {
                 return;
             }
             SettingsAction::ToggleSkipPermissions { .. } => return,
-            // Handled by the early return above; listed for exhaustiveness.
+            // Handled by the early returns above; listed for exhaustiveness.
             SettingsAction::EditSnippets => return,
+            SettingsAction::EditTheme => return,
         };
         // Pre-seed the accumulator from persisted state so partial
         // flows don't drop the user's other-provider config.

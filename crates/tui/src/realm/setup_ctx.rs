@@ -51,6 +51,9 @@ pub enum SettingsAction {
     /// Snippets are file-owned (no in-app editor by design), so this
     /// just gets the user to the file.
     EditSnippets,
+    /// Open the live-preview theme picker (same modal as the `t`
+    /// shortcut). Persists the choice to `ui.theme`.
+    EditTheme,
     /// Bail out and run the full splash → providers → agents → … wizard.
     FullSetup,
     /// Admin: wipe every worktree whose session has no live
@@ -76,6 +79,7 @@ impl SettingsAction {
                 if *enabled { "on" } else { "off" }
             ),
             Self::EditSnippets => "Edit snippets (]]<key> shortcuts)".into(),
+            Self::EditTheme => "Change theme (live preview)".into(),
             Self::FullSetup => "Run the full setup wizard".into(),
             Self::CleanWorktrees => "Clean worktrees (free disk, keep inbox)".into(),
             Self::InspectWorktrees => "Inspect worktrees…".into(),

@@ -202,6 +202,13 @@ pub struct UiSection {
     /// See `lazybox_tui_core::action::keymap_preset`.
     #[serde(default)]
     pub keymap_preset: Option<String>,
+    /// Active UI theme, matched by exact name against the built-in
+    /// palette registry (`"Lazybox Dark"`, `"Lazybox Light"`,
+    /// `"High Contrast"`, …). Written back when the user picks a theme
+    /// from the in-app picker so the choice survives restart. An unknown
+    /// or unset name leaves the default (first registered) theme active.
+    #[serde(default)]
+    pub theme: Option<String>,
     /// Preferred web browser for opening task URLs (the `o` shortcut)
     /// and links right-clicked in the terminal grid. On macOS this is
     /// the application name handed to `open -a` (e.g. `"Google Chrome"`,
@@ -240,6 +247,7 @@ impl Default for UiSection {
         Self {
             collapsed_repos: std::collections::BTreeSet::new(),
             keymap_preset: None,
+            theme: None,
             sidebar_pct: None,
             right_top_pct: None,
             auto_mark_delay: None,
@@ -1200,6 +1208,28 @@ repos:
         assert!(
             reparsed.ui.tour_seen,
             "marking the tour seen survives a save/load round-trip"
+        );
+    }
+
+    /// The theme is unset on a fresh config (so the default palette
+    /// wins) and a chosen theme name survives a save/load round-trip —
+    /// the persistence half of the in-app theme picker.
+    #[test]
+    fn theme_defaults_none_and_round_trips() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(
+            cfg.ui.theme.is_none(),
+            "no theme override on a fresh config"
+        );
+
+        let mut picked = Config::default();
+        picked.ui.theme = Some("Lazybox Light".to_string());
+        let written = serde_yaml::to_string(&picked).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(
+            reparsed.ui.theme.as_deref(),
+            Some("Lazybox Light"),
+            "a picked theme survives a save/load round-trip"
         );
     }
 

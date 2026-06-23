@@ -142,6 +142,10 @@ pub enum Action {
     OpenSyncStatus,
     /// Open the `,` Settings palette.
     OpenSettings,
+    /// Open the theme picker — a live-preview list of every registered
+    /// palette. Highlighting previews; Enter keeps + persists to
+    /// `ui.theme`; Esc restores the theme that was active on open.
+    OpenThemePicker,
     /// Open a fuzzy picker over every workspace (across repos) and
     /// jump the cursor to the one chosen (default `` ` ``). The
     /// general switcher the narrow `!` / `Shift-F` jumps lacked —
@@ -266,6 +270,7 @@ pub enum ActionKind {
     OpenTour,
     OpenSyncStatus,
     OpenSettings,
+    OpenThemePicker,
     JumpToWorkspace,
     JumpToAsking,
     JumpToFailingCi,
@@ -355,6 +360,7 @@ impl Action {
             Action::OpenTour => ActionKind::OpenTour,
             Action::OpenSyncStatus => ActionKind::OpenSyncStatus,
             Action::OpenSettings => ActionKind::OpenSettings,
+            Action::OpenThemePicker => ActionKind::OpenThemePicker,
             Action::JumpToWorkspace => ActionKind::JumpToWorkspace,
             Action::JumpToAsking => ActionKind::JumpToAsking,
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
@@ -428,6 +434,13 @@ impl ActionDef {
                 default_keys: ",",
                 label: "settings",
                 describe: "Open the Settings palette.",
+                section: Section::Global,
+            },
+            ActionKind::OpenThemePicker => &Self {
+                kind: ActionKind::OpenThemePicker,
+                default_keys: "t",
+                label: "theme",
+                describe: "Open the theme picker — arrow through the built-in palettes with a live preview, Enter to keep one. The choice persists to ui.theme and survives restart.",
                 section: Section::Global,
             },
             ActionKind::JumpToWorkspace => &Self {
@@ -740,6 +753,7 @@ impl ActionDef {
             ActionKind::CyclePane,
             ActionKind::Refresh,
             ActionKind::OpenSettings,
+            ActionKind::OpenThemePicker,
             ActionKind::OpenHelp,
             ActionKind::OpenTour,
             ActionKind::OpenSyncStatus,
@@ -1243,6 +1257,7 @@ impl ActionKind {
             ActionKind::OpenTour => "open_tour",
             ActionKind::OpenSyncStatus => "open_sync_status",
             ActionKind::OpenSettings => "open_settings",
+            ActionKind::OpenThemePicker => "open_theme_picker",
             ActionKind::JumpToWorkspace => "jump_to_workspace",
             ActionKind::JumpToAsking => "jump_to_asking",
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
@@ -1576,6 +1591,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenTour
         | ActionKind::OpenSyncStatus
         | ActionKind::OpenSettings
+        | ActionKind::OpenThemePicker
         | ActionKind::JumpToWorkspace
         | ActionKind::JumpToAsking
         | ActionKind::JumpToFailingCi

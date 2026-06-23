@@ -476,6 +476,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenSettings => {
                 self.open_settings();
             }
+            Action::OpenThemePicker => {
+                self.mount_theme_picker();
+            }
             Action::JumpToWorkspace => {
                 self.mount_jump_picker();
             }

@@ -214,6 +214,27 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return cmds;
         }
+        // Theme picker — the highlighted palette is already live (the
+        // on_highlight preview applied it as the cursor moved). Pick →
+        // keep it and persist to `ui.theme`; the prev-theme stash is
+        // dropped so a later Esc on another modal can't revert it.
+        if matches!(self.modal_stack.last(), Some(Id::ThemePicker)) {
+            let name = picks
+                .first()
+                .and_then(|i| self.theme_choices.get(*i).cloned());
+            self.theme_choices.clear();
+            self.theme_picker_prev = None;
+            self.pop_modal();
+            if let Some(name) = name {
+                crate::theme::set_by_name(&name);
+                match lazybox_config::Config::save_with(|c| c.ui.theme = Some(name.clone())) {
+                    Ok(()) => self.flash_info(format!("theme: {name}")),
+                    Err(e) => self.flash_info(format!("couldn't save theme: {e}")),
+                }
+                self.redraw = true;
+            }
+            return cmds;
+        }
         // Sidebar right-click context menu. Pick → route through
         // `dispatch_action`, the same single fan-out the keyboard
         // shortcut uses. That keeps the destructive gate intact:
@@ -584,6 +605,15 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Some(Id::JumpPicker) => {
                 self.jump_choices.clear();
+            }
+            Some(Id::ThemePicker) => {
+                // Esc cancels the preview: restore the palette that was
+                // active when the picker opened and drop the stashes.
+                if let Some(prev) = self.theme_picker_prev.take() {
+                    crate::theme::set_by_name(&prev);
+                }
+                self.theme_choices.clear();
+                self.redraw = true;
             }
             _ => {}
         }

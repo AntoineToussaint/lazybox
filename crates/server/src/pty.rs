@@ -20,10 +20,25 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Mutex, Notify, broadcast, oneshot};
 
-/// Ring-buffer capacity for per-terminal output replay. 64 KiB matches
-/// a typical terminal scrollback and is enough to reconstruct the
-/// visible screen after a client reconnects.
-pub const REPLAY_RING_BYTES: usize = 64 * 1024;
+/// Ring-buffer capacity for per-terminal output replay.
+///
+/// A client (re)attaching or recovering after a restart rebuilds its
+/// entire VT grid — scrollback included — purely from this snapshot, so
+/// the ring has to carry the history, not just the visible screen. The
+/// old 64 KiB was sized for screen reconstruction; it left recovered
+/// sessions with effectively nothing to scroll back through, because a
+/// live agent's redraw churn (spinners, full-screen repaints) inflates
+/// the byte stream far past the lines it ultimately leaves in
+/// scrollback, so 64 KiB of raw bytes spans only a screenful or two of
+/// real output.
+///
+/// 2 MiB carries enough raw history for a reattaching client to
+/// reconstruct a scrollback depth on par with a session that streamed
+/// live, even under that churn. Perfectly reconstructing arbitrarily
+/// deep history would need on-disk persistence; this trades a bounded
+/// slice of per-terminal daemon memory (paid only as output accrues)
+/// for parity with the live experience.
+pub const REPLAY_RING_BYTES: usize = 2 * 1024 * 1024;
 
 /// Broadcast channel capacity. If a subscriber lags by more than this
 /// many chunks it gets dropped with `RecvError::Lagged` — ring-buffer
@@ -126,7 +141,10 @@ impl Default for ReplayRing {
 impl ReplayRing {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
-            buf: Vec::with_capacity(cap),
+            // Grow on demand up to `cap` rather than reserving it all
+            // upfront — an idle terminal shouldn't hold the full
+            // (now multi-MiB) budget before it has emitted anything.
+            buf: Vec::new(),
             cap,
             total_written: 0,
         }

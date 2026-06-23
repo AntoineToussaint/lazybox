@@ -268,6 +268,63 @@ async fn live_session_key(
         .unwrap_or_else(|| captured.clone())
 }
 
+/// Which emitter produced an `Event::AgentState`. Logged on every
+/// broadcast so the PTY detector, the optimistic flip, and hook ingest
+/// interleave as one greppable stream on a single terminal — the view
+/// the #167/#161 stale-key confusion needed but never had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateSource {
+    /// The output pump's PTY screen-scrape detector.
+    Pty,
+    /// The optimistic `InputNeeded → Working` flip in `handle_write`
+    /// when the user answers a prompt.
+    Flip,
+    /// A structured lifecycle hook ingested from the agent.
+    Hook,
+}
+
+/// The single place an `Event::AgentState` is born — the output pump, the
+/// optimistic flip, and hook ingest all route their broadcast here.
+///
+/// Resolving the owning session LIVE from `terminal_meta` (via
+/// [`live_session_key`], never the `captured` key) is the #161/#167
+/// invariant: a terminal rebadged onto a PR (issue→PR collapse) keeps
+/// broadcasting under the PR session rather than the deleted issue one.
+/// Centralising it means that invariant — and the captured-key fallback,
+/// which only applies once the terminal is gone from the map
+/// (mid-teardown), where the event is moot — is reasoned about once
+/// instead of re-implemented at each emitter with subtly different miss
+/// policies. `source` tags the structured log so the three paths read as
+/// one ordered stream.
+async fn broadcast_agent_state(
+    terminal_meta: &std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
+        >,
+    >,
+    bus: &tokio::sync::broadcast::Sender<Event>,
+    id: TerminalId,
+    captured: &SessionKey,
+    previous: Option<lazybox_ipc::AgentState>,
+    state: lazybox_ipc::AgentState,
+    source: StateSource,
+) {
+    let session_key = live_session_key(terminal_meta, id, captured).await;
+    tracing::info!(
+        terminal_id = ?id,
+        %session_key,
+        ?source,
+        previous = ?previous,
+        state = ?state,
+        "agent state transition → broadcasting Event::AgentState",
+    );
+    let _ = bus.send(Event::AgentState {
+        session_key,
+        terminal_id: id,
+        state,
+    });
+}
+
 /// Spawn a terminal inside a session and broadcast
 /// `Event::TerminalSpawned`. Failures emit `Event::ProviderError` so
 /// the user gets feedback in the TUI rather than a silent miss.
@@ -679,269 +736,6 @@ pub async fn handle_spawn(
         // InputNeeded window: the spinner reappears within a frame or two.
         let mut last_working_at: Option<std::time::Instant> = None;
         const WORKING_HYSTERESIS: std::time::Duration = std::time::Duration::from_secs(5);
-
-        async fn maybe_emit_state_change(
-            agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
-            buf: &mut Vec<u8>,
-            bytes: &[u8],
-            states: &std::sync::Arc<
-                tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
-            >,
-            bus: &tokio::sync::broadcast::Sender<Event>,
-            id: TerminalId,
-            // Captured at spawn — used only as a fallback. The live key
-            // is re-resolved from `terminal_meta` at emit time so a
-            // terminal rebadged onto a PR (issue→PR collapse) broadcasts
-            // its state under the PR session, not the deleted issue one.
-            session_key: &SessionKey,
-            terminal_meta: &std::sync::Arc<
-                tokio::sync::Mutex<
-                    std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
-                >,
-            >,
-            last_input_needed_at: &mut Option<std::time::Instant>,
-            hysteresis: std::time::Duration,
-            last_working_at: &mut Option<std::time::Instant>,
-            working_hysteresis: std::time::Duration,
-            hook_driven: &std::sync::Arc<
-                tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
-            >,
-            input_shapes: &std::sync::Arc<
-                tokio::sync::Mutex<
-                    std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>,
-                >,
-            >,
-        ) {
-            const STATE_BUF_CAP: usize = 32 * 1024;
-            let Some(agent) = agent else {
-                return;
-            };
-            buf.extend_from_slice(bytes);
-            if buf.len() > STATE_BUF_CAP {
-                let drop = buf.len() - STATE_BUF_CAP;
-                buf.drain(..drop);
-            }
-            // Search only the recent tail. The 32 KiB outer buffer
-            // exists so spread-out tickers + small chunks accumulate
-            // enough context, but once a prompt scrolls past this
-            // tail it should STOP matching — otherwise the user's
-            // "I answered the prompt and moved on" never reflects:
-            // the old `❯ 1.` text stays in `buf`, every chunk
-            // re-detects Asking, hysteresis refreshes forever, and
-            // the "needs input" label sticks. 4 KiB is enough to
-            // capture a single prompt's render + a screen of context,
-            // small enough that next-screen content evicts the old.
-            // 16 KiB (was 8 KiB) — Claude's bash-permission prompts
-            // can sit BELOW 8+ KiB of preview output (long heredocs,
-            // `cat <<EOF | gh api ...` patches, multi-file `cat`
-            // outputs, etc.). The user reported a real
-            // `Do you want to proceed?` prompt going undetected
-            // because the prompt + arrow + choice markers were
-            // pushed past the old 8 KiB tail. 16 KiB still evicts
-            // stale prompts within ~half a screen of follow-up
-            // output, while comfortably covering claude's largest
-            // tool-preview screens.
-            const DETECT_WINDOW: usize = 16 * 1024;
-            let tail_start = buf.len().saturating_sub(DETECT_WINDOW);
-            let detect_window = &buf[tail_start..];
-            // Chunk-boundary hint: the chunk just appended occupies the
-            // LAST `bytes.len()` bytes of the window. A full-screen
-            // repaint delivers a live dialog and the bottom status bar
-            // in one chunk (status bar last); the chunk-aware detector
-            // keeps the dialog live instead of reading it as already
-            // answered by the "more recent" work anchor.
-            let last_chunk_start = detect_window.len().saturating_sub(bytes.len());
-            let Some(new_state) = agent.detect_state_chunked(detect_window, last_chunk_start)
-            else {
-                return;
-            };
-            // Hooks-primary, PTY-fallback. Once a terminal has reported
-            // any structured lifecycle hook, hooks own the Working↔Idle
-            // distinction (deterministic, no screen-scraping flicker), so
-            // a PTY `Working` reading is ignored for it. The PTY detector
-            // still contributes two corrections hooks miss:
-            //   - a confident idle (composer drawn, ready for a prompt) —
-            //     Ctrl-C / Esc end Claude's turn without firing `Stop`, so
-            //     a hook-driven terminal could otherwise stick at
-            //     `Working` forever;
-            //   - an on-screen permission dialog → `InputNeeded`. An
-            //     inline mid-turn approval fires NO hook (`PreToolUse`
-            //     lands only AFTER approval, `Notification` only after
-            //     Claude goes idle), so the rendered `Esc to cancel`
-            //     dialog is the sole source of truth — without honoring it
-            //     the `?` never shows on a hook-driven terminal. The PTY
-            //     detector's recency gating keeps this from leaking the
-            //     stale-scrollback false positives it once produced.
-            // When the last hook is older than `HOOK_STALENESS`, the
-            // gate opens entirely: hooks that stopped flowing (socket
-            // hiccup, helper failure) must degrade the terminal back to
-            // scraping rather than freeze it on the last hook state.
-            // A terminal that never reported a hook isn't in the map and
-            // keeps full PTY detection unchanged.
-            let last_hook_at = hook_driven.lock().await.get(&id).copied();
-            if let Some(last_hook_at) = last_hook_at {
-                let current = states.lock().await.get(&id).copied();
-                if !pty_reading_allowed(
-                    current,
-                    new_state,
-                    agent.detect_ready_for_prompt(detect_window),
-                    // Lazy: the dialog-supersession scan re-strips the
-                    // window, so only the one reading that needs it
-                    // (stale hooks + Working demoting a cached `?`)
-                    // pays for it.
-                    || agent.working_reading_supersedes_dialog(detect_window),
-                    last_hook_at.elapsed(),
-                    HOOK_STALENESS,
-                ) {
-                    return;
-                }
-            }
-            // Trace-level on steady-state runs (claude emits 100+
-            // chunks/sec during streaming and we don't want to drown
-            // the log). Only ELEVATE to debug-level on every Asking
-            // detection so a missing `?` pill is easy to bisect from
-            // the log without re-running with full trace verbosity.
-            // Toggle full trace via `RUST_LOG=lazybox_server=trace`.
-            tracing::trace!(
-                terminal_id = ?id,
-                buf_len = buf.len(),
-                detected = ?new_state,
-                "detect_state ran",
-            );
-            if new_state == lazybox_ipc::AgentState::InputNeeded {
-                tracing::debug!(
-                    terminal_id = ?id,
-                    buf_len = buf.len(),
-                    tail_tip = %String::from_utf8_lossy(
-                        &detect_window[detect_window.len().saturating_sub(120)..]
-                    ),
-                    "detect_state → InputNeeded",
-                );
-                *last_input_needed_at = Some(std::time::Instant::now());
-                // Every InputNeeded the PTY detector raises is
-                // structurally a chooser / permission / consent dialog
-                // (freeform asks are deliberately not flagged), so a
-                // bare chooser keystroke is a complete answer. Hook-
-                // raised elicitations overwrite this with `FreeText` in
-                // `handle_ingest_hook`. Recorded before the dedupe
-                // below so a re-rendered prompt refreshes the shape.
-                input_shapes
-                    .lock()
-                    .await
-                    .insert(id, lazybox_agents::PromptShape::Chooser);
-            }
-            // Refresh the working anchor on every busy reading, even the
-            // ones deduped below, so the Working-exit hysteresis measures
-            // time since the spinner was LAST seen — a transient frame
-            // that drops it then reads as a recent-enough anchor to damp.
-            if new_state == lazybox_ipc::AgentState::Working {
-                *last_working_at = Some(std::time::Instant::now());
-            }
-            // Hysteresis. Claude's status-bar updates make the
-            // detector miss the prompt for one chunk, then catch
-            // it on the next. Without this guard the pill flickers
-            // every few seconds while Claude is genuinely still
-            // waiting. Only damp the edge that LEAVES InputNeeded —
-            // and only when the new reading is the ambiguous
-            // fall-through. A clear signal that the prompt is gone — a
-            // live Working status line, or an idle composer the
-            // readiness probe affirmatively recognizes — is honored
-            // immediately, so a wrong InputNeeded can't stick for the
-            // full window once Claude is visibly streaming or idle.
-            // Computed once: an affirmatively-recognized idle composer is
-            // a clear end-of-turn for BOTH the InputNeeded and Working
-            // exits below. Only probed for an Idle reading — a Working
-            // reading is itself the clear signal — so streaming chunks
-            // don't pay to re-strip the window.
-            let ready_for_prompt = new_state == lazybox_ipc::AgentState::Idle
-                && agent.detect_ready_for_prompt(detect_window);
-            let clear_exit_signal =
-                new_state == lazybox_ipc::AgentState::Working || ready_for_prompt;
-            // Read + decide + insert under ONE lock acquisition. A
-            // separate read-then-insert let a concurrent writer (hook
-            // ingest, the optimistic Enter flip) land between the two
-            // and be silently clobbered by a stale decision.
-            let current = {
-                let mut map = states.lock().await;
-                let current = map.get(&id).copied();
-                if should_suppress_input_needed_exit(
-                    current,
-                    new_state,
-                    clear_exit_signal,
-                    last_input_needed_at.map(|t| t.elapsed()),
-                    hysteresis,
-                ) {
-                    drop(map);
-                    tracing::debug!(
-                        terminal_id = ?id,
-                        ?new_state,
-                        "state hysteresis: suppressing InputNeeded → {:?}",
-                        new_state,
-                    );
-                    return;
-                }
-                if done_is_sticky(current, new_state) {
-                    return;
-                }
-                // Symmetric damping for the Working→Idle edge: a single
-                // frame where Claude's spinner is absent reads as an
-                // ambiguous Idle (no working anchor, composer not yet
-                // drawn). Suppress it within the window so a busy agent
-                // doesn't flicker to Idle between spinner frames; an
-                // affirmative idle composer (`ready_for_prompt`) is the
-                // real end-of-turn and is honored immediately.
-                if should_suppress_working_exit(
-                    current,
-                    new_state,
-                    ready_for_prompt,
-                    last_working_at.map(|t| t.elapsed()),
-                    working_hysteresis,
-                ) {
-                    drop(map);
-                    tracing::debug!(
-                        terminal_id = ?id,
-                        ?new_state,
-                        "state hysteresis: suppressing Working → Idle",
-                    );
-                    return;
-                }
-                if current == Some(new_state) {
-                    return;
-                }
-                map.insert(id, new_state);
-                current
-            };
-            // Re-resolve the owning session from the authoritative
-            // `terminal_meta` map rather than trusting the key captured
-            // when this pump spawned. `rebadge_terminals` (issue→PR
-            // collapse, manual adopt) moves a live terminal's meta entry
-            // onto the new workspace; a pump still broadcasting the OLD
-            // captured key sends every Working/InputNeeded transition to
-            // a workspace that no longer exists. The user's moved agent —
-            // including one parked on a prompt waiting for them — then
-            // shows no badge on the PR and looks lost (issue #161). Fall
-            // back to the captured key only if the terminal was already
-            // swept (mid-teardown), where the event is moot anyway.
-            let live_session_key = live_session_key(terminal_meta, id, session_key).await;
-            let session_key = &live_session_key;
-            // Loud log so when the user reports "the pill didn't
-            // show", we can confirm whether the daemon-side
-            // detector actually fired vs. the event got lost
-            // somewhere downstream. Keyed off TerminalId so
-            // grep-ing the log file makes the path obvious.
-            tracing::info!(
-                terminal_id = ?id,
-                %session_key,
-                previous = ?current,
-                state = ?new_state,
-                "agent state transition → broadcasting Event::AgentState",
-            );
-            let _ = bus.send(Event::AgentState {
-                session_key: session_key.clone(),
-                terminal_id: id,
-                state: new_state,
-            });
-        }
 
         // Notify the initial-prompt injector exactly once when the
         // first byte of output arrives. `notify_one` STORES a permit
@@ -2566,6 +2360,260 @@ async fn persist_and_broadcast(
     Ok(())
 }
 
+/// Ingest one PTY output chunk for a terminal: append to the rolling
+/// detection buffer, run the chunk-aware detector, apply the
+/// hooks-primary gate and both hysteresis dampers under a single
+/// `agent_states` compare-and-set, and — on a real change — emit via
+/// [`broadcast_agent_state`]. Lifted out of the output pump's spawn
+/// closure so the emitted-on-change sequence is unit-testable (the
+/// #167/#161 bugs were about the transition stream, not single-frame
+/// classification); the pump still owns the buffer and the two anchors
+/// across calls.
+pub(crate) async fn maybe_emit_state_change(
+    agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
+    buf: &mut Vec<u8>,
+    bytes: &[u8],
+    states: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
+    >,
+    bus: &tokio::sync::broadcast::Sender<Event>,
+    id: TerminalId,
+    // Captured at spawn — used only as a fallback. The live key
+    // is re-resolved from `terminal_meta` at emit time so a
+    // terminal rebadged onto a PR (issue→PR collapse) broadcasts
+    // its state under the PR session, not the deleted issue one.
+    session_key: &SessionKey,
+    terminal_meta: &std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
+        >,
+    >,
+    last_input_needed_at: &mut Option<std::time::Instant>,
+    hysteresis: std::time::Duration,
+    last_working_at: &mut Option<std::time::Instant>,
+    working_hysteresis: std::time::Duration,
+    hook_driven: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
+    >,
+    input_shapes: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
+    >,
+) {
+    const STATE_BUF_CAP: usize = 32 * 1024;
+    let Some(agent) = agent else {
+        return;
+    };
+    buf.extend_from_slice(bytes);
+    if buf.len() > STATE_BUF_CAP {
+        let drop = buf.len() - STATE_BUF_CAP;
+        buf.drain(..drop);
+    }
+    // Search only the recent tail. The 32 KiB outer buffer
+    // exists so spread-out tickers + small chunks accumulate
+    // enough context, but once a prompt scrolls past this
+    // tail it should STOP matching — otherwise the user's
+    // "I answered the prompt and moved on" never reflects:
+    // the old `❯ 1.` text stays in `buf`, every chunk
+    // re-detects Asking, hysteresis refreshes forever, and
+    // the "needs input" label sticks. 4 KiB is enough to
+    // capture a single prompt's render + a screen of context,
+    // small enough that next-screen content evicts the old.
+    // 16 KiB (was 8 KiB) — Claude's bash-permission prompts
+    // can sit BELOW 8+ KiB of preview output (long heredocs,
+    // `cat <<EOF | gh api ...` patches, multi-file `cat`
+    // outputs, etc.). The user reported a real
+    // `Do you want to proceed?` prompt going undetected
+    // because the prompt + arrow + choice markers were
+    // pushed past the old 8 KiB tail. 16 KiB still evicts
+    // stale prompts within ~half a screen of follow-up
+    // output, while comfortably covering claude's largest
+    // tool-preview screens.
+    const DETECT_WINDOW: usize = 16 * 1024;
+    let tail_start = buf.len().saturating_sub(DETECT_WINDOW);
+    let detect_window = &buf[tail_start..];
+    // Chunk-boundary hint: the chunk just appended occupies the
+    // LAST `bytes.len()` bytes of the window. A full-screen
+    // repaint delivers a live dialog and the bottom status bar
+    // in one chunk (status bar last); the chunk-aware detector
+    // keeps the dialog live instead of reading it as already
+    // answered by the "more recent" work anchor.
+    let last_chunk_start = detect_window.len().saturating_sub(bytes.len());
+    let Some(new_state) = agent.detect_state_chunked(detect_window, last_chunk_start) else {
+        return;
+    };
+    // Hooks-primary, PTY-fallback. Once a terminal has reported
+    // any structured lifecycle hook, hooks own the Working↔Idle
+    // distinction (deterministic, no screen-scraping flicker), so
+    // a PTY `Working` reading is ignored for it. The PTY detector
+    // still contributes two corrections hooks miss:
+    //   - a confident idle (composer drawn, ready for a prompt) —
+    //     Ctrl-C / Esc end Claude's turn without firing `Stop`, so
+    //     a hook-driven terminal could otherwise stick at
+    //     `Working` forever;
+    //   - an on-screen permission dialog → `InputNeeded`. An
+    //     inline mid-turn approval fires NO hook (`PreToolUse`
+    //     lands only AFTER approval, `Notification` only after
+    //     Claude goes idle), so the rendered `Esc to cancel`
+    //     dialog is the sole source of truth — without honoring it
+    //     the `?` never shows on a hook-driven terminal. The PTY
+    //     detector's recency gating keeps this from leaking the
+    //     stale-scrollback false positives it once produced.
+    // When the last hook is older than `HOOK_STALENESS`, the
+    // gate opens entirely: hooks that stopped flowing (socket
+    // hiccup, helper failure) must degrade the terminal back to
+    // scraping rather than freeze it on the last hook state.
+    // A terminal that never reported a hook isn't in the map and
+    // keeps full PTY detection unchanged.
+    let last_hook_at = hook_driven.lock().await.get(&id).copied();
+    if let Some(last_hook_at) = last_hook_at {
+        let current = states.lock().await.get(&id).copied();
+        if !pty_reading_allowed(
+            current,
+            new_state,
+            agent.detect_ready_for_prompt(detect_window),
+            // Lazy: the dialog-supersession scan re-strips the
+            // window, so only the one reading that needs it
+            // (stale hooks + Working demoting a cached `?`)
+            // pays for it.
+            || agent.working_reading_supersedes_dialog(detect_window),
+            last_hook_at.elapsed(),
+            HOOK_STALENESS,
+        ) {
+            return;
+        }
+    }
+    // Trace-level on steady-state runs (claude emits 100+
+    // chunks/sec during streaming and we don't want to drown
+    // the log). Only ELEVATE to debug-level on every Asking
+    // detection so a missing `?` pill is easy to bisect from
+    // the log without re-running with full trace verbosity.
+    // Toggle full trace via `RUST_LOG=lazybox_server=trace`.
+    tracing::trace!(
+        terminal_id = ?id,
+        buf_len = buf.len(),
+        detected = ?new_state,
+        "detect_state ran",
+    );
+    if new_state == lazybox_ipc::AgentState::InputNeeded {
+        tracing::debug!(
+            terminal_id = ?id,
+            buf_len = buf.len(),
+            tail_tip = %String::from_utf8_lossy(
+                &detect_window[detect_window.len().saturating_sub(120)..]
+            ),
+            "detect_state → InputNeeded",
+        );
+        *last_input_needed_at = Some(std::time::Instant::now());
+        // Every InputNeeded the PTY detector raises is
+        // structurally a chooser / permission / consent dialog
+        // (freeform asks are deliberately not flagged), so a
+        // bare chooser keystroke is a complete answer. Hook-
+        // raised elicitations overwrite this with `FreeText` in
+        // `handle_ingest_hook`. Recorded before the dedupe
+        // below so a re-rendered prompt refreshes the shape.
+        input_shapes
+            .lock()
+            .await
+            .insert(id, lazybox_agents::PromptShape::Chooser);
+    }
+    // Refresh the working anchor on every busy reading, even the
+    // ones deduped below, so the Working-exit hysteresis measures
+    // time since the spinner was LAST seen — a transient frame
+    // that drops it then reads as a recent-enough anchor to damp.
+    if new_state == lazybox_ipc::AgentState::Working {
+        *last_working_at = Some(std::time::Instant::now());
+    }
+    // Hysteresis. Claude's status-bar updates make the
+    // detector miss the prompt for one chunk, then catch
+    // it on the next. Without this guard the pill flickers
+    // every few seconds while Claude is genuinely still
+    // waiting. Only damp the edge that LEAVES InputNeeded —
+    // and only when the new reading is the ambiguous
+    // fall-through. A clear signal that the prompt is gone — a
+    // live Working status line, or an idle composer the
+    // readiness probe affirmatively recognizes — is honored
+    // immediately, so a wrong InputNeeded can't stick for the
+    // full window once Claude is visibly streaming or idle.
+    // Computed once: an affirmatively-recognized idle composer is
+    // a clear end-of-turn for BOTH the InputNeeded and Working
+    // exits below. Only probed for an Idle reading — a Working
+    // reading is itself the clear signal — so streaming chunks
+    // don't pay to re-strip the window.
+    let ready_for_prompt =
+        new_state == lazybox_ipc::AgentState::Idle && agent.detect_ready_for_prompt(detect_window);
+    let clear_exit_signal = new_state == lazybox_ipc::AgentState::Working || ready_for_prompt;
+    // Read + decide + insert under ONE lock acquisition. A
+    // separate read-then-insert let a concurrent writer (hook
+    // ingest, the optimistic Enter flip) land between the two
+    // and be silently clobbered by a stale decision.
+    let current = {
+        let mut map = states.lock().await;
+        let current = map.get(&id).copied();
+        if should_suppress_input_needed_exit(
+            current,
+            new_state,
+            clear_exit_signal,
+            last_input_needed_at.map(|t| t.elapsed()),
+            hysteresis,
+        ) {
+            drop(map);
+            tracing::debug!(
+                terminal_id = ?id,
+                ?new_state,
+                "state hysteresis: suppressing InputNeeded → {:?}",
+                new_state,
+            );
+            return;
+        }
+        if done_is_sticky(current, new_state) {
+            return;
+        }
+        // Symmetric damping for the Working→Idle edge: a single
+        // frame where Claude's spinner is absent reads as an
+        // ambiguous Idle (no working anchor, composer not yet
+        // drawn). Suppress it within the window so a busy agent
+        // doesn't flicker to Idle between spinner frames; an
+        // affirmative idle composer (`ready_for_prompt`) is the
+        // real end-of-turn and is honored immediately.
+        if should_suppress_working_exit(
+            current,
+            new_state,
+            ready_for_prompt,
+            last_working_at.map(|t| t.elapsed()),
+            working_hysteresis,
+        ) {
+            drop(map);
+            tracing::debug!(
+                terminal_id = ?id,
+                ?new_state,
+                "state hysteresis: suppressing Working → Idle",
+            );
+            return;
+        }
+        if current == Some(new_state) {
+            return;
+        }
+        map.insert(id, new_state);
+        current
+    };
+    // The broadcast itself — live-key resolution, the structured
+    // log, and the `bus.send` — lives in `broadcast_agent_state`
+    // so the pump, the optimistic flip, and hook ingest all emit
+    // `AgentState` through one path. That keeps the #161/#167
+    // "re-read the owning key from `terminal_meta`, never the
+    // captured one" invariant in a single place instead of three.
+    broadcast_agent_state(
+        terminal_meta,
+        bus,
+        id,
+        session_key,
+        current,
+        new_state,
+        StateSource::Pty,
+    )
+    .await;
+}
+
 pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes: &[u8]) {
     let Some(key) = config.backend_key_for(terminal_id).await else {
         tracing::trace!("write to unknown terminal {terminal_id:?}");
@@ -2594,6 +2642,12 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     if !pressed_enter && !answered_chooser {
         return;
     }
+    // Only flip a terminal that's actually parked on a prompt. This gate
+    // is also what keeps the flip from clobbering a sticky `Done`: a
+    // finished agent reads `Done`, not `InputNeeded`, so it never reaches
+    // the `Working` send below. That's the only thing protecting `Done`
+    // here — there's no explicit `done_is_sticky` call — so broadening
+    // this condition would need to re-add one.
     if config.agent_state_for(terminal_id).await != Some(lazybox_ipc::AgentState::InputNeeded) {
         return;
     }
@@ -2643,16 +2697,16 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     // prompt. (The regression behind issue #101: "the ? won't go away
     // after I answer.")
     config.agent_detect_resets.lock().await.insert(terminal_id);
-    tracing::debug!(
-        ?terminal_id,
-        pressed_enter,
-        "user answered the prompt; optimistically flipping InputNeeded → Working"
-    );
-    let _ = config.bus.send(Event::AgentState {
-        session_key,
+    broadcast_agent_state(
+        &config.terminal_meta,
+        &config.bus,
         terminal_id,
-        state: lazybox_ipc::AgentState::Working,
-    });
+        &session_key,
+        Some(lazybox_ipc::AgentState::InputNeeded),
+        lazybox_ipc::AgentState::Working,
+        StateSource::Flip,
+    )
+    .await;
 }
 
 /// How long the inject path waits for an active permission gate /
@@ -3231,19 +3285,26 @@ pub async fn handle_ingest_hook(
     if !changed {
         return;
     }
+    // Hook-specific line (carries the originating `hook.kind`); the
+    // source-tagged broadcast line is emitted by `broadcast_agent_state`.
     tracing::info!(
         ?terminal_id,
         %session_key,
         previous = ?prev,
         state = ?new_state,
         hook = ?hook.kind,
-        "hook → broadcasting Event::AgentState",
+        "hook → AgentState transition",
     );
-    let _ = config.bus.send(Event::AgentState {
-        session_key,
+    broadcast_agent_state(
+        &config.terminal_meta,
+        &config.bus,
         terminal_id,
-        state: new_state,
-    });
+        &session_key,
+        prev,
+        new_state,
+        StateSource::Hook,
+    )
+    .await;
 }
 
 /// Bind already-running backend sessions to fresh wire TerminalIds.
@@ -5265,6 +5326,291 @@ mod tests {
         assert!(
             !await_pending_ready(TerminalId(7), &ready, &terminals).await,
             "a terminal that exits before ready must end the wait as a failure",
+        );
+    }
+
+    /// Drives [`maybe_emit_state_change`] across a sequence of PTY chunks
+    /// the way the output pump does — one rolling buffer and the two
+    /// hysteresis anchors persist across calls — and collects the
+    /// `AgentState` the bus emits. Lets a test assert on the
+    /// emitted-on-change *sequence*, which is what the #167/#161 bugs were
+    /// about, rather than a single frame's classification.
+    struct PumpDriver {
+        agent: std::sync::Arc<dyn lazybox_agents::Agent>,
+        buf: Vec<u8>,
+        states: std::sync::Arc<
+            tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
+        >,
+        bus: tokio::sync::broadcast::Sender<Event>,
+        rx: tokio::sync::broadcast::Receiver<Event>,
+        id: TerminalId,
+        session_key: SessionKey,
+        terminal_meta: std::sync::Arc<
+            tokio::sync::Mutex<
+                std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
+            >,
+        >,
+        last_input_needed_at: Option<std::time::Instant>,
+        last_working_at: Option<std::time::Instant>,
+        input_hysteresis: Duration,
+        working_hysteresis: Duration,
+        hook_driven: std::sync::Arc<
+            tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
+        >,
+        input_shapes: std::sync::Arc<
+            tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
+        >,
+    }
+
+    impl PumpDriver {
+        fn new(input_hysteresis: Duration, working_hysteresis: Duration) -> Self {
+            let id = TerminalId(7);
+            let session_key: SessionKey = "github-o-r-1".into();
+            let (bus, rx) = tokio::sync::broadcast::channel(256);
+            let terminal_meta =
+                std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::from([
+                    (
+                        id,
+                        (
+                            session_key.clone(),
+                            lazybox_ipc::TerminalKind::Agent("claude".into()),
+                        ),
+                    ),
+                ])));
+            Self {
+                agent: lazybox_agents::registry()
+                    .get("claude")
+                    .expect("claude agent is a built-in"),
+                buf: Vec::new(),
+                states: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    std::collections::HashMap::new(),
+                )),
+                bus,
+                rx,
+                id,
+                session_key,
+                terminal_meta,
+                last_input_needed_at: None,
+                last_working_at: None,
+                input_hysteresis,
+                working_hysteresis,
+                hook_driven: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    std::collections::HashMap::new(),
+                )),
+                input_shapes: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    std::collections::HashMap::new(),
+                )),
+            }
+        }
+
+        /// Feed one PTY chunk; return the `AgentState`s broadcast for this
+        /// terminal as a result (usually 0 or 1).
+        async fn feed(&mut self, bytes: &[u8]) -> Vec<lazybox_ipc::AgentState> {
+            maybe_emit_state_change(
+                Some(&self.agent),
+                &mut self.buf,
+                bytes,
+                &self.states,
+                &self.bus,
+                self.id,
+                &self.session_key,
+                &self.terminal_meta,
+                &mut self.last_input_needed_at,
+                self.input_hysteresis,
+                &mut self.last_working_at,
+                self.working_hysteresis,
+                &self.hook_driven,
+                &self.input_shapes,
+            )
+            .await;
+            let mut out = Vec::new();
+            while let Ok(ev) = self.rx.try_recv() {
+                if let Event::AgentState {
+                    terminal_id, state, ..
+                } = ev
+                    && terminal_id == self.id
+                {
+                    out.push(state);
+                }
+            }
+            out
+        }
+    }
+
+    /// The transition table: real per-state PTY transcripts replayed as an
+    /// ordered chunk stream must produce the matching emitted-on-change
+    /// sequence. ZERO hysteresis so timing damping can't interfere — this
+    /// pins the stream the per-fixture corpus (`detect_fixtures.rs`) can't,
+    /// since each of those asserts a single frame in isolation.
+    #[tokio::test]
+    async fn agent_state_transitions_emit_an_ordered_sequence() {
+        use lazybox_ipc::AgentState::{Idle, InputNeeded, Working};
+        let idle = include_bytes!("../../agents/tests/fixtures/idle_composer.bin");
+        let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
+        let input = include_bytes!("../../agents/tests/fixtures/permission_prompt_fragmented.bin");
+
+        let mut p = PumpDriver::new(Duration::ZERO, Duration::ZERO);
+        let mut seq = Vec::new();
+        seq.extend(p.feed(idle).await);
+        seq.extend(p.feed(working).await);
+        seq.extend(p.feed(input).await);
+        seq.extend(p.feed(working).await);
+        seq.extend(p.feed(idle).await);
+
+        assert_eq!(
+            seq,
+            vec![Idle, Working, InputNeeded, Working, Idle],
+            "the emitted-on-change sequence must track the chunk stream",
+        );
+    }
+
+    /// The status-ticker flicker: Claude's spinner vanishes for one frame,
+    /// leaving an ambiguous Idle (no work anchor, composer not drawn). The
+    /// Working-exit hysteresis must damp it so a busy agent doesn't blink
+    /// to Idle and back. Proven by contrast: the SAME chunk emits Idle once
+    /// the window is disabled, so it's the hysteresis — not a failure to
+    /// classify — that suppresses it.
+    #[tokio::test]
+    async fn status_ticker_flicker_is_damped_by_working_hysteresis() {
+        use lazybox_ipc::AgentState::{Idle, Working};
+        let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
+        // A screenful of plain prose: classifies Idle, not ready. >16 KiB
+        // so the prior working anchor scrolls out of the detect window.
+        let flicker = "lorem ipsum dolor sit amet\n".repeat(800);
+        let flicker = flicker.as_bytes();
+
+        let mut damped = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(damped.feed(working).await, vec![Working]);
+        assert_eq!(
+            damped.feed(flicker).await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "an ambiguous Working→Idle within the window must be suppressed",
+        );
+
+        let mut undamped = PumpDriver::new(Duration::ZERO, Duration::ZERO);
+        assert_eq!(undamped.feed(working).await, vec![Working]);
+        assert_eq!(
+            undamped.feed(flicker).await,
+            vec![Idle],
+            "with the window disabled the same chunk emits Idle — so it was the hysteresis that damped it",
+        );
+    }
+
+    fn hook_event(kind: lazybox_ipc::HookEventKind) -> lazybox_ipc::HookEvent {
+        lazybox_ipc::HookEvent {
+            kind,
+            session_id: None,
+            cwd: None,
+            tool_name: None,
+            notification: None,
+        }
+    }
+
+    fn recv_state_for(
+        rx: &mut tokio::sync::broadcast::Receiver<Event>,
+        id: TerminalId,
+    ) -> Option<(SessionKey, lazybox_ipc::AgentState)> {
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::AgentState {
+                session_key,
+                terminal_id,
+                state,
+            } = ev
+                && terminal_id == id
+            {
+                return Some((session_key, state));
+            }
+        }
+        None
+    }
+
+    /// The cross-emitter version of the #161 regression: after a terminal
+    /// is rebadged onto a PR mid-flight, ALL THREE emitters — the PTY pump,
+    /// the optimistic flip in `handle_write`, and hook ingest — must
+    /// broadcast under the NEW (PR) key, not the issue key captured at
+    /// spawn. The unify refactor routes all three through
+    /// `broadcast_agent_state`, so this is the one invariant to pin.
+    #[tokio::test]
+    async fn all_three_emitters_broadcast_under_the_rebadged_key() {
+        use lazybox_ipc::AgentState;
+        let id = TerminalId(7);
+        let issue_key: SessionKey = "github-o-r-161".into(); // captured at spawn
+        let pr_key: SessionKey = "github-o-r-164".into(); // rebadge target
+
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        config.terminals.lock().await.insert(id, "mock-key".into());
+        // rebadge_terminals moved the live meta entry onto the PR.
+        config.terminal_meta.lock().await.insert(
+            id,
+            (
+                pr_key.clone(),
+                lazybox_ipc::TerminalKind::Agent("claude".into()),
+            ),
+        );
+
+        // (a) PTY transition: the pump captured the issue key at spawn, but
+        // the live meta entry now points at the PR.
+        let mut rx = config.bus.subscribe();
+        let agent = lazybox_agents::registry().get("claude").unwrap();
+        let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
+        let mut buf = Vec::new();
+        let mut lin = None;
+        let mut lw = None;
+        maybe_emit_state_change(
+            Some(&agent),
+            &mut buf,
+            working,
+            &config.agent_states,
+            &config.bus,
+            id,
+            &issue_key,
+            &config.terminal_meta,
+            &mut lin,
+            Duration::ZERO,
+            &mut lw,
+            Duration::ZERO,
+            &config.hook_driven_terminals,
+            &config.input_needed_shapes,
+        )
+        .await;
+        assert_eq!(
+            recv_state_for(&mut rx, id),
+            Some((pr_key.clone(), AgentState::Working)),
+            "PTY emitter must broadcast under the rebadged PR key",
+        );
+
+        // (b) optimistic flip via handle_write — prereq: parked on a prompt.
+        config
+            .agent_states
+            .lock()
+            .await
+            .insert(id, AgentState::InputNeeded);
+        let mut rx = config.bus.subscribe();
+        handle_write(&config, id, b"\r").await;
+        assert_eq!(
+            recv_state_for(&mut rx, id),
+            Some((pr_key.clone(), AgentState::Working)),
+            "optimistic flip must broadcast under the rebadged PR key",
+        );
+
+        // (c) hook ingest via handle_ingest_hook — PreToolUse maps to Working.
+        config
+            .agent_states
+            .lock()
+            .await
+            .insert(id, AgentState::Idle);
+        let mut rx = config.bus.subscribe();
+        handle_ingest_hook(
+            &config,
+            id,
+            Some("mock-key".into()),
+            hook_event(lazybox_ipc::HookEventKind::PreToolUse),
+        )
+        .await;
+        assert_eq!(
+            recv_state_for(&mut rx, id),
+            Some((pr_key.clone(), AgentState::Working)),
+            "hook emitter must broadcast under the rebadged PR key",
         );
     }
 }

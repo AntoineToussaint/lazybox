@@ -579,6 +579,16 @@ pub struct Model<T: TerminalAdapter> {
     /// when only the batch's final selection matters. Coalescing collapses
     /// that to one projection per batch.
     needs_pane_sync: bool,
+    /// Per-workspace memory of which pane the user last rested in,
+    /// keyed by workspace. Re-selecting a workspace (sidebar click)
+    /// restores this focus so typing lands where the user left off —
+    /// without it a click always dropped focus on the sidebar, silently
+    /// swallowing keystrokes meant for an agent terminal (#182). Snapshotted
+    /// at input-event entry (the steady focus *before* the event mutates
+    /// anything) so the click that moves focus to the sidebar never
+    /// overwrites the terminal focus of the workspace being left.
+    /// Session-scoped — not persisted across launches.
+    workspace_focus: std::collections::HashMap<lazybox_core::SessionKey, PaneFocus>,
     /// Per-workspace manual override of the Activity pane's
     /// visibility, keyed by workspace. The pane auto-hides when a
     /// workspace has no activity worth showing (`Right::
@@ -868,6 +878,7 @@ impl<T: TerminalAdapter> Model<T> {
             pr_details_fetched: std::collections::HashSet::new(),
             last_focused_session_key: None,
             needs_pane_sync: false,
+            workspace_focus: std::collections::HashMap::new(),
             activity_pane_overrides: std::collections::HashMap::new(),
             pending_sidebar_context: None,
             action_key_overrides: std::collections::BTreeMap::new(),

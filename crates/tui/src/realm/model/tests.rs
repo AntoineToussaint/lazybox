@@ -3590,6 +3590,156 @@ mod activity_pane_visibility_tests {
 }
 
 #[cfg(test)]
+mod workspace_focus_memory_tests {
+    //! Re-selecting a workspace restores the pane it was last focused in
+    //! (#182): clicking away from an agent terminal and back must land
+    //! focus on that terminal again, not strand it on the sidebar where
+    //! keystrokes are silently lost.
+    use super::super::{Model, PaneFocus};
+    use chrono::Utc;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
+    use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind, channel};
+    use tuirealm::ratatui::layout::{Rect, Size};
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn empty_ws(key: &str) -> Workspace {
+        Workspace::empty(WorkspaceKey::new(key), "main", Utc::now())
+    }
+
+    fn key_of(key: &str) -> SessionKey {
+        (&WorkspaceKey::new(key)).into()
+    }
+
+    /// Register a live terminal slot for a workspace's session without
+    /// disturbing the active selection — the terminal stack filters its
+    /// visible set by the active session, so the slot only surfaces once
+    /// that workspace is selected.
+    fn spawn_terminal(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        key: &SessionKey,
+        id: u64,
+    ) {
+        m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(id),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+    }
+
+    fn left_down(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Screen row a click must land on to select `key`. The cursor index
+    /// maps to a row below the sidebar's 5-line header (mirrors the
+    /// `HEADER_HEIGHT` constant in `Sidebar::click_to_select`); scroll is
+    /// zero for the handful of rows these tests seed.
+    fn row_of(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        sidebar_rect: Rect,
+        key: &SessionKey,
+    ) -> u16 {
+        assert!(
+            m.__test_sidebar_mut().focus_workspace_key(key),
+            "workspace {key:?} should be in the sidebar",
+        );
+        sidebar_rect.y + 5 + m.sidebar().cursor() as u16
+    }
+
+    #[test]
+    fn re_selecting_a_workspace_restores_its_terminal_focus() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![empty_ws("github:o/r#1"), empty_ws("github:o/r#2")],
+            terminals: vec![],
+            projects: vec![],
+        });
+        let a = key_of("github:o/r#1");
+        let b = key_of("github:o/r#2");
+        spawn_terminal(&mut m, &a, 1);
+        spawn_terminal(&mut m, &b, 2);
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _, right_bottom) = m.effective_pane_rects(area);
+        let row_a = row_of(&mut m, sidebar_rect, &a);
+        let row_b = row_of(&mut m, sidebar_rect, &b);
+
+        // Select WS-A, then click into its agent terminal as if typing.
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        assert_eq!(m.sidebar().selected_workspace_key(), Some(&a));
+        m.dispatch_mouse_in(left_down(right_bottom.x + 2, right_bottom.y + 2), area);
+        assert_eq!(m.focus(), PaneFocus::Terminals, "typing into WS-A's agent");
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
+
+        // Click away to WS-B: first visit has no memory, so focus drops
+        // to the sidebar (today's behavior for an unvisited workspace).
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_b), area);
+        assert_eq!(m.sidebar().selected_workspace_key(), Some(&b));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Sidebar,
+            "clicking a not-yet-driven workspace focuses the sidebar",
+        );
+
+        // Click back to WS-A: its remembered terminal focus is restored,
+        // on WS-A's own active terminal.
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        assert_eq!(m.sidebar().selected_workspace_key(), Some(&a));
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Terminals,
+            "re-selecting WS-A restores focus to its agent terminal",
+        );
+        assert_eq!(
+            m.terminals.active_terminal_id(),
+            Some(TerminalId(1)),
+            "restored focus lands on WS-A's active session, not WS-B's",
+        );
+    }
+
+    #[test]
+    fn clicking_the_already_selected_row_keeps_the_sidebar() {
+        // The escape hatch: clicking the sidebar row of the workspace
+        // whose terminal you're in drops to the sidebar instead of
+        // bouncing focus back into the terminal.
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![empty_ws("github:o/r#1")],
+            terminals: vec![],
+            projects: vec![],
+        });
+        let a = key_of("github:o/r#1");
+        spawn_terminal(&mut m, &a, 1);
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _, right_bottom) = m.effective_pane_rects(area);
+        let row_a = row_of(&mut m, sidebar_rect, &a);
+
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        m.dispatch_mouse_in(left_down(right_bottom.x + 2, right_bottom.y + 2), area);
+        assert_eq!(m.focus(), PaneFocus::Terminals);
+
+        m.dispatch_mouse_in(left_down(sidebar_rect.x + 1, row_a), area);
+        assert_eq!(
+            m.focus(),
+            PaneFocus::Sidebar,
+            "clicking the current workspace's row stays on the sidebar",
+        );
+    }
+}
+
+#[cfg(test)]
 mod focus_mode_tests {
     use super::super::*;
     use chrono::Utc;

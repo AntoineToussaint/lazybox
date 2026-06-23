@@ -88,12 +88,21 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
         // pay an Option-deref per cell). Applied at the end of
         // render — NOT written into the shadow — so a cursor move
         // between frames doesn't leave a ghost at the old position.
-        let cursor_pos = self
-            .snapshot
-            .cursor_viewport()
-            .ok()
-            .flatten()
-            .filter(|_| self.snapshot.cursor_visible().unwrap_or(false));
+        //
+        // A blinking cursor drives its blink by toggling DECTCEM
+        // (mode 25 / `cursor_visible`) on a timer. Gating the
+        // reversed-block highlight on `cursor_visible()` made it
+        // flash in time with that blink — over the prompt's
+        // horizontal rule it reads as a blinking horizontal line.
+        // Same no-blink stance the cell path already takes for SGR
+        // 5/6: when the cursor is *blinking*, render it steadily on
+        // presence and ignore the phase. A non-blinking cursor still
+        // honours `cursor_visible()`, so a full-screen TUI that hides
+        // its cursor (DECTCEM off) doesn't get a stray block.
+        let cursor_pos = self.snapshot.cursor_viewport().ok().flatten().filter(|_| {
+            self.snapshot.cursor_visible().unwrap_or(false)
+                || self.snapshot.cursor_blinking().unwrap_or(false)
+        });
 
         // Shadow state. Resize / first-render = no usable shadow,
         // so we treat every row as dirty regardless of libghostty's
@@ -707,5 +716,57 @@ mod tests {
             );
             prev = cur;
         }
+    }
+
+    /// #192 regression: a blinking cursor must render as a STEADY
+    /// reversed block. Agents drive the blink by toggling DECTCEM
+    /// (mode 25 / `cursor_visible`) on a timer; gating the highlight
+    /// on `cursor_visible()` made the block flash in time with that
+    /// blink — over the prompt's horizontal rule it read as a
+    /// blinking horizontal line. Render two frames one blink phase
+    /// apart (mode 25 on, then off) with the cursor *blinking*: the
+    /// cursor cell must be REVERSED in BOTH.
+    #[test]
+    fn blinking_cursor_stays_steady_across_blink_phases() {
+        let mut h = Harness::new(6, 1);
+        let area = Rect::new(0, 0, 6, 1);
+        // Park the cursor on a horizontal rule (`\x1b[1G` returns to
+        // column 1, onto the first dash) and mark it blinking.
+        h.terminal
+            .vt_write("\u{2500}\u{2500}\u{2500}\x1b[1G\x1b[?12h".as_bytes());
+
+        // Blink "on" phase.
+        h.terminal.vt_write(b"\x1b[?25h");
+        let on = h.render(area);
+        assert!(
+            on[(0u16, 0u16)].modifier.contains(Modifier::REVERSED),
+            "cursor cell must be highlighted in the blink-on phase",
+        );
+
+        // Blink "off" phase: the agent clears DECTCEM. The highlight
+        // must NOT vanish — that toggle is the blink we refuse to
+        // follow, so the two frames are identical at the cursor cell.
+        h.terminal.vt_write(b"\x1b[?25l");
+        let off = h.render(area);
+        assert!(
+            off[(0u16, 0u16)].modifier.contains(Modifier::REVERSED),
+            "blinking cursor must stay steady when DECTCEM toggles off",
+        );
+    }
+
+    /// Counterpart to the steady-cursor fix: a NON-blinking cursor the
+    /// app genuinely hides (DECTCEM off, blink mode unset) must NOT be
+    /// drawn — otherwise a full-screen TUI that parks and hides its
+    /// cursor would show a stray reversed block.
+    #[test]
+    fn hidden_non_blinking_cursor_is_not_drawn() {
+        let mut h = Harness::new(6, 1);
+        let area = Rect::new(0, 0, 6, 1);
+        h.terminal.vt_write("abc\x1b[1G\x1b[?25l".as_bytes());
+        let buf = h.render(area);
+        assert!(
+            !buf[(0u16, 0u16)].modifier.contains(Modifier::REVERSED),
+            "a hidden non-blinking cursor must not be highlighted",
+        );
     }
 }

@@ -150,6 +150,31 @@ pub fn apply_done_state(
     }
 }
 
+/// Re-point an attention set when the daemon rebadges a terminal from
+/// one session onto another (issue→PR collapse, manual adopt). If
+/// `from` was flagged, drop it and flag `to` instead; returns `true`
+/// when membership changed.
+///
+/// This is the `live_session_key`-on-the-client side of the #205
+/// invariant: the daemon re-broadcasts an agent's `AgentState` only on
+/// its next output chunk, but an agent parked on a prompt
+/// (`InputNeeded`) produces none. Without migrating the set here, a
+/// moved agent's pill stays pinned to the now-deleted issue key and the
+/// PR row shows no badge — the session reads as lost when it isn't
+/// (`live_session_key` is in `crates/server/src/spawn_handler.rs`).
+pub fn rebadge_attention(
+    set: &mut HashSet<SessionKey>,
+    from: &SessionKey,
+    to: &SessionKey,
+) -> bool {
+    if set.remove(from) {
+        set.insert(to.clone());
+        true
+    } else {
+        false
+    }
+}
+
 /// True iff the workspace's key is in the working-set. Mirror of
 /// [`workspace_is_asking`] for the "actively working" signal.
 pub fn workspace_is_working(workspace: &Workspace, working_set: &HashSet<SessionKey>) -> bool {
@@ -448,6 +473,29 @@ mod tests {
         assert!(!workspace_is_done(&ws, &set));
         set.insert(SessionKey::from(&ws.key));
         assert!(workspace_is_done(&ws, &set));
+    }
+
+    // ── rebadge_attention ─────────────────────────────────────────
+
+    #[test]
+    fn rebadge_moves_a_flagged_key_to_the_new_session() {
+        // The case that matters: an agent parked on a prompt under the
+        // issue key. The collapse must carry its flag onto the PR.
+        let mut set = HashSet::new();
+        set.insert(ws_key(1));
+        assert!(rebadge_attention(&mut set, &ws_key(1), &ws_key(2)));
+        assert!(!set.contains(&ws_key(1)), "old key dropped");
+        assert!(set.contains(&ws_key(2)), "new key flagged");
+    }
+
+    #[test]
+    fn rebadge_of_an_unflagged_key_is_a_noop() {
+        // An idle agent (no flag) must not spuriously flag the PR.
+        let mut set = HashSet::new();
+        set.insert(ws_key(3));
+        assert!(!rebadge_attention(&mut set, &ws_key(1), &ws_key(2)));
+        assert!(!set.contains(&ws_key(2)));
+        assert!(set.contains(&ws_key(3)), "unrelated key untouched");
     }
 
     // ── next_asking_workspace ─────────────────────────────────────

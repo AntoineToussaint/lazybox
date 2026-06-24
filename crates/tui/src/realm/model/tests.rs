@@ -3353,6 +3353,90 @@ mod collapse_into_pr_tests {
             "the live Claude terminal must remain visible on the PR",
         );
     }
+
+    /// Issue #205 — the NOT-SHOWN dimension. A Claude parked on a prompt
+    /// (`InputNeeded`) emits no further output, so the daemon never
+    /// re-broadcasts its `AgentState` after the collapse. The badge must
+    /// still follow onto the PR purely on the strength of
+    /// `TerminalsRebadged` — otherwise the agent is alive but invisible,
+    /// which is exactly how this bug keeps reading as "session lost".
+    #[test]
+    fn shift_j_keeps_the_input_needed_badge_on_the_pr() {
+        use lazybox_ipc::AgentState;
+
+        let mut m = build_model();
+
+        let issue_key = WorkspaceKey::new("github:o/r#50");
+        let pr_key = WorkspaceKey::new("github:o/r#51");
+        let issue_sk: lazybox_core::SessionKey = (&issue_key).into();
+        let pr_sk: lazybox_core::SessionKey = (&pr_key).into();
+
+        let mut issue_ws = Workspace::empty(issue_key.clone(), "lazybox/issue-50", Utc::now());
+        issue_ws.add_session(WorkspaceSession::new(
+            issue_key.clone(),
+            SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            std::path::PathBuf::from("/tmp/wt-50"),
+            Utc::now(),
+        ));
+        let pr_ws = Workspace::empty(pr_key.clone(), "feature", Utc::now());
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![issue_ws.clone(), pr_ws.clone()],
+            terminals: vec![],
+            projects: vec![],
+        });
+
+        // Claude on the issue is blocked on a prompt.
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(7),
+            session_key: issue_sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: issue_sk.clone(),
+            terminal_id: TerminalId(7),
+            state: AgentState::InputNeeded,
+        });
+        assert!(
+            !m.sidebar
+                .displays_agent_state(&pr_sk, AgentState::InputNeeded),
+            "precondition: the PR is not yet asking",
+        );
+
+        // The collapse burst — note NO trailing AgentState under the PR
+        // key, because the parked agent produced no new output.
+        m.handle_daemon_event(IpcEvent::TerminalsRebadged {
+            from: issue_sk.clone(),
+            to: pr_sk.clone(),
+        });
+        let mut pr_with_session = pr_ws.clone();
+        let mut moved = issue_ws.sessions[0].clone();
+        moved.workspace_key = pr_key.clone();
+        pr_with_session.add_session(moved);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr_with_session)));
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(issue_key.clone()));
+        m.handle_daemon_event(IpcEvent::WorkspaceMerged {
+            issue_workspace_key: issue_key.clone(),
+            pr_workspace_key: pr_key.clone(),
+            issue_label: "#50".into(),
+            pr_label: "#51".into(),
+        });
+
+        // NOT SHOWN guard: the InputNeeded badge rendered on the PR…
+        assert!(
+            m.sidebar
+                .displays_agent_state(&pr_sk, AgentState::InputNeeded),
+            "the agent's InputNeeded badge must follow onto the PR",
+        );
+        // …and stopped pointing at the now-deleted issue key.
+        assert!(
+            !m.sidebar
+                .displays_agent_state(&issue_sk, AgentState::InputNeeded),
+            "the badge must not linger on the deleted issue key",
+        );
+    }
 }
 
 #[cfg(test)]

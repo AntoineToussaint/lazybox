@@ -379,6 +379,28 @@ impl Sidebar {
                     self.recompute_visible();
                 }
             }
+            Event::TerminalsRebadged { from, to } => {
+                // The daemon moved every terminal owned by `from` onto
+                // `to` (issue→PR collapse, manual adopt). The transient
+                // attention sets are keyed by session, so migrate them
+                // the same way `terminal_stack` re-points its slots.
+                // Crucial for an agent parked on a prompt: the daemon
+                // re-broadcasts `AgentState` only on the next output
+                // chunk, which a stalled `InputNeeded` agent never
+                // produces — so without this its `?` pill stays pinned
+                // to the deleted issue key and the PR row shows no
+                // badge, reading as a lost session (#205).
+                let asking =
+                    crate::agent_attention::rebadge_attention(&mut self.agents_asking, from, to);
+                crate::agent_attention::rebadge_attention(&mut self.agents_working, from, to);
+                crate::agent_attention::rebadge_attention(&mut self.agents_done, from, to);
+                if asking {
+                    // Only the asking-set feeds the visible row list
+                    // (per-repo attention counter); the others read
+                    // fresh at render time.
+                    self.recompute_visible();
+                }
+            }
             _ => {}
         }
     }

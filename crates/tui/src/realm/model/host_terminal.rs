@@ -132,8 +132,8 @@ pub(crate) fn enable_host_terminal() {
     let _ = out.flush();
 }
 
-/// Restore every [`HostMode`] (reverse of the enable order), at most
-/// once per process. Idempotent across the [`HostTerminalGuard`]'s
+/// Restore every `HostMode` (reverse of the enable order), at most
+/// once per process. Idempotent across the `HostTerminalGuard`'s
 /// `Drop`, the panic hook, and the signal handler so the host shell is
 /// always left out of raw mode and Kitty keyboard protocol on exit.
 pub fn restore_host_terminal() {

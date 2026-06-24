@@ -1023,6 +1023,37 @@ impl TerminalStack {
         self.terminals.get(&id).map(|slot| &slot.session_key)
     }
 
+    /// Number of terminal slots currently tracked for `session_key`.
+    /// Used as the baseline a non-singleton spawn (a shell) is measured
+    /// against: the spawn is satisfied once the count rises above it.
+    pub fn terminal_count_for(&self, session_key: &SessionKey) -> usize {
+        self.terminals
+            .values()
+            .filter(|slot| &slot.session_key == session_key)
+            .count()
+    }
+
+    /// Whether a spawn of `kind` into `session_key` has produced its
+    /// terminal yet — the projection that drives the footer spawn
+    /// spinner (#206). Singleton kinds (agents, editor) are satisfied
+    /// once a runner of the same identity exists; non-singleton kinds
+    /// (shells) once the session's terminal count exceeds the
+    /// `baseline_count` captured when the spawn was sent. Recomputed
+    /// from the live terminal set, so a dropped / raced / mismatched
+    /// `TerminalSpawned` can't strand the spinner.
+    pub fn spawn_satisfied(
+        &self,
+        session_key: &SessionKey,
+        kind: &TerminalKind,
+        baseline_count: usize,
+    ) -> bool {
+        if kind.singleton_key().is_some() {
+            self.find_runner(session_key, kind).is_some()
+        } else {
+            self.terminal_count_for(session_key) > baseline_count
+        }
+    }
+
     /// Find an existing runner inside the given session whose kind
     /// has the same singleton-identity as `kind` (e.g. "this session
     /// already has a Claude → don't spawn a second one"). Returns
@@ -4781,5 +4812,63 @@ mod terminal_availability_tests {
                 def.default_keys,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod spawn_projection_tests {
+    //! #206: the footer spawn spinner is a projection of the live
+    //! terminal set, cleared by `spawn_satisfied` rather than by a
+    //! single must-arrive `TerminalSpawned` event.
+    use super::*;
+
+    fn spawn(stack: &mut TerminalStack, id: u64, sk: &SessionKey, kind: TerminalKind) {
+        stack.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(id),
+            session_key: sk.clone(),
+            kind,
+            no_permission: false,
+        });
+    }
+
+    #[test]
+    fn agent_spawn_satisfied_once_runner_exists() {
+        let sk = SessionKey::new("github:o/r#1");
+        let kind = TerminalKind::Agent("claude".into());
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        // No terminal yet → spinner stays lit.
+        assert!(!stack.spawn_satisfied(&sk, &kind, 0));
+        // The agent terminal lands → satisfied via the singleton runner,
+        // independent of any explicit clear event.
+        spawn(&mut stack, 1, &sk, kind.clone());
+        assert!(stack.spawn_satisfied(&sk, &kind, 0));
+    }
+
+    #[test]
+    fn agent_spawn_ignores_a_terminal_in_another_session() {
+        let target = SessionKey::new("github:o/r#1");
+        let other = SessionKey::new("github:o/r#2");
+        let kind = TerminalKind::Agent("claude".into());
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        spawn(&mut stack, 1, &other, kind.clone());
+        // A concurrent spawn into a DIFFERENT workspace must not satisfy
+        // ours — the old "any TerminalSpawned clears the spinner" bug.
+        assert!(!stack.spawn_satisfied(&target, &kind, 0));
+    }
+
+    #[test]
+    fn shell_spawn_satisfied_when_count_rises_above_baseline() {
+        let sk = SessionKey::new("github:o/r#1");
+        let kind = TerminalKind::Shell;
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        // Session already has one shell when the new spawn is sent.
+        spawn(&mut stack, 1, &sk, TerminalKind::Shell);
+        let baseline = stack.terminal_count_for(&sk);
+        assert_eq!(baseline, 1);
+        // Not yet satisfied — the count hasn't risen above the baseline.
+        assert!(!stack.spawn_satisfied(&sk, &kind, baseline));
+        // The second shell lands → count exceeds baseline → satisfied.
+        spawn(&mut stack, 2, &sk, TerminalKind::Shell);
+        assert!(stack.spawn_satisfied(&sk, &kind, baseline));
     }
 }

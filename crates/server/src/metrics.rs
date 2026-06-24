@@ -35,6 +35,12 @@ pub struct EventMetrics {
     bus_lagged_events: AtomicU64,
     /// Recovery snapshots sent to re-sync a connection after a lag.
     bus_lag_recoveries: AtomicU64,
+    /// Inline command handlers that held the serve loop past
+    /// [`crate::INLINE_BUDGET`]. A non-zero value means a command in the
+    /// inline lane wedged the loop — exactly the "can't type / sync
+    /// stalls while a handler runs" class of bug (#34, #206). Detached
+    /// handlers can't contribute: they return to `select!` in µs.
+    inline_budget_violations: AtomicU64,
 }
 
 impl EventMetrics {
@@ -59,6 +65,13 @@ impl EventMetrics {
         self.bus_lag_recoveries.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record one inline-budget violation (an inline-lane command held
+    /// the serve loop past [`crate::INLINE_BUDGET`]).
+    pub fn record_inline_budget_violation(&self) {
+        self.inline_budget_violations
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Point-in-time copy of every counter.
     pub fn snapshot(&self) -> EventMetricsSnapshot {
         EventMetricsSnapshot {
@@ -66,6 +79,7 @@ impl EventMetrics {
             terminal_resyncs: self.terminal_resyncs.load(Ordering::Relaxed),
             bus_lagged_events: self.bus_lagged_events.load(Ordering::Relaxed),
             bus_lag_recoveries: self.bus_lag_recoveries.load(Ordering::Relaxed),
+            inline_budget_violations: self.inline_budget_violations.load(Ordering::Relaxed),
         }
     }
 }
@@ -77,6 +91,8 @@ pub struct EventMetricsSnapshot {
     pub terminal_resyncs: u64,
     pub bus_lagged_events: u64,
     pub bus_lag_recoveries: u64,
+    #[serde(default)]
+    pub inline_budget_violations: u64,
 }
 
 #[cfg(test)]
@@ -92,11 +108,14 @@ mod tests {
         m.record_bus_lagged(5);
         m.record_bus_lagged(3);
         m.record_bus_lag_recovery();
+        m.record_inline_budget_violation();
+        m.record_inline_budget_violation();
 
         let snap = m.snapshot();
         assert_eq!(snap.terminal_output_dropped, 2);
         assert_eq!(snap.terminal_resyncs, 1);
         assert_eq!(snap.bus_lagged_events, 8);
         assert_eq!(snap.bus_lag_recoveries, 1);
+        assert_eq!(snap.inline_budget_violations, 2);
     }
 }

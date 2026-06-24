@@ -49,8 +49,9 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 /// checklist faster than the eye can read it.
 pub const MIN_STEP_DWELL: Duration = Duration::from_millis(500);
 
-/// Number of checklist rows: Checkout, Setup, agent launch.
-const STEP_COUNT: u8 = 3;
+/// Number of checklist rows: clone, fetch, worktree-add, setup, agent
+/// launch.
+const STEP_COUNT: u8 = 5;
 
 /// `target`/`shown` value meaning "all steps complete, ready to dismiss"
 /// — one past the last real step.
@@ -75,11 +76,12 @@ pub enum StepState {
 /// advances in place.
 ///
 /// The display lags the daemon on purpose. `target` is how far the
-/// daemon has actually gotten (0 = checkout, 1 = setup, 2 = agent,
-/// `READY` = the session is live); `shown` is how far the checklist
-/// has been *revealed* to the user. [`Self::tick`] walks `shown` toward
-/// `target` at no more than one step per [`MIN_STEP_DWELL`], so a fast
-/// provision still shows every step legibly.
+/// daemon has actually gotten (0 = clone, 1 = fetch, 2 = worktree-add,
+/// 3 = setup, 4 = agent, `READY` = the session is live); `shown` is how
+/// far the checklist has been *revealed* to the user. [`Self::tick`]
+/// walks `shown` toward `target` at no more than one step per
+/// [`MIN_STEP_DWELL`], so a fast provision still shows every step
+/// legibly.
 #[derive(Debug, Clone)]
 pub struct WorktreeProgressState {
     pub session_key: SessionKey,
@@ -118,38 +120,36 @@ impl WorktreeProgressState {
     }
 
     /// Fold one daemon progress transition into the checklist's
-    /// `target`. The display catches up later via [`Self::tick`].
+    /// `target`. The display catches up later via [`Self::tick`]. Each
+    /// step's `Started` advances `target` to that step's row, so the
+    /// previous step checks off and this one becomes the in-flight
+    /// spinner. `Clone` is row 0 where `target` already starts, so it
+    /// stays in-flight until `Fetch` truly begins rather than flashing a
+    /// dead "nothing active" frame.
     pub fn apply(&mut self, step: WorktreeStep, status: WorktreeStepStatus) {
         match (step, status) {
-            // Checkout is step 0, where `target` already starts — neither
-            // its `Started` nor its `Done` advances the frontier.
-            // `Setup Started` (which implies checkout is done) is what
-            // moves it on, keeping checkout shown as in-flight until setup
-            // truly begins rather than flashing a dead "nothing active"
-            // frame.
-            (WorktreeStep::Checkout, WorktreeStepStatus::Started)
-            | (WorktreeStep::Checkout, WorktreeStepStatus::Done) => {}
+            // A failure freezes the checklist on whatever row is on
+            // screen — the daemon's catch-all failure path doesn't know
+            // which sub-phase aborted, and the error text carries the
+            // real detail regardless.
+            (_, WorktreeStepStatus::Failed(e)) => self.fail_current(e),
+            (WorktreeStep::Clone, _) => {}
+            (WorktreeStep::Fetch, _) => self.target = self.target.max(1),
+            (WorktreeStep::WorktreeAdd, _) => self.target = self.target.max(2),
             (WorktreeStep::Setup, WorktreeStepStatus::Started) => {
-                self.target = self.target.max(1);
+                self.target = self.target.max(3);
             }
             (WorktreeStep::Setup, WorktreeStepStatus::Done) => {
-                self.target = self.target.max(2);
-            }
-            (WorktreeStep::Checkout, WorktreeStepStatus::Failed(e)) => {
-                self.fail(0, e);
-            }
-            (WorktreeStep::Setup, WorktreeStepStatus::Failed(e)) => {
-                self.fail(1, e);
+                self.target = self.target.max(4);
             }
         }
     }
 
-    fn fail(&mut self, step: u8, error: String) {
-        self.failed_step = Some(step);
+    fn fail_current(&mut self, error: String) {
+        // Freeze on the row currently on screen rather than jumping to a
+        // named step — the modal stays put showing the error.
+        self.failed_step = Some(self.shown);
         self.error = Some(error);
-        // Surface the failed row immediately — don't make the user wait
-        // out the dwell to see why provisioning stopped.
-        self.shown = step;
     }
 
     /// Queue dismissal: the session is live (`TerminalSpawned`), so the
@@ -183,9 +183,15 @@ impl WorktreeProgressState {
         self.dismiss_queued && self.shown >= READY
     }
 
-    fn steps(&self) -> [(&'static str, StepState); 3] {
-        const LABELS: [&str; 3] = ["Creating worktree", "Setting up", "Starting agent"];
-        let mut out = [("", StepState::Pending); 3];
+    fn steps(&self) -> [(&'static str, StepState); STEP_COUNT as usize] {
+        const LABELS: [&str; STEP_COUNT as usize] = [
+            "Cloning repository",
+            "Fetching changes",
+            "Creating worktree",
+            "Setting up",
+            "Starting agent",
+        ];
+        let mut out = [("", StepState::Pending); STEP_COUNT as usize];
         for (i, label) in LABELS.iter().enumerate() {
             let idx = i as u8;
             let state = match self.failed_step {
@@ -205,7 +211,7 @@ impl WorktreeProgressState {
 /// Modal renderer. A pure snapshot of [`WorktreeProgressState`] plus a
 /// self-advancing spinner index.
 pub struct WorktreeProgress {
-    steps: [(&'static str, StepState); 3],
+    steps: [(&'static str, StepState); STEP_COUNT as usize],
     error: Option<String>,
     spinner_idx: usize,
 }
@@ -339,12 +345,13 @@ mod tests {
     }
 
     #[test]
-    fn checkout_in_flight_shows_spinner_and_pending_rows() {
+    fn clone_in_flight_shows_spinner_and_pending_rows() {
         let mut st = state();
-        st.apply(WorktreeStep::Checkout, WorktreeStepStatus::Started);
+        st.apply(WorktreeStep::Clone, WorktreeStepStatus::Started);
         let mut comp = WorktreeProgress::from_state(&st);
         let out = render(&mut comp, 70, 12);
         assert!(out.contains("Setting up workspace"), "{out}");
+        assert!(out.contains("Cloning repository"), "{out}");
         assert!(out.contains("Creating worktree"), "{out}");
         assert!(out.contains("Starting agent"), "{out}");
         // Later steps still pending → hollow bullet.
@@ -353,28 +360,30 @@ mod tests {
     }
 
     #[test]
-    fn setup_done_checks_off_earlier_steps_and_starts_agent() {
+    fn sub_steps_check_off_earlier_rows_in_order() {
         let mut st = state();
-        st.apply(WorktreeStep::Checkout, WorktreeStepStatus::Started);
-        st.apply(WorktreeStep::Checkout, WorktreeStepStatus::Done);
+        // Cold-clone provision walks clone → fetch → worktree-add → setup.
+        st.apply(WorktreeStep::Clone, WorktreeStepStatus::Started);
+        st.apply(WorktreeStep::Fetch, WorktreeStepStatus::Started);
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
         st.apply(WorktreeStep::Setup, WorktreeStepStatus::Started);
         st.apply(WorktreeStep::Setup, WorktreeStepStatus::Done);
         assert!(!st.failed());
-        // Daemon truth says agent is active (target == 2), but the
+        // Daemon truth says the agent is launching (target == 4), but the
         // display only checks earlier steps off once they've dwelt.
         let t0 = Instant::now();
         st.shown_since = t0;
-        assert!(st.tick(t0 + MIN_STEP_DWELL));
-        assert!(st.tick(t0 + MIN_STEP_DWELL * 2));
+        for n in 1..=4 {
+            assert!(st.tick(t0 + MIN_STEP_DWELL * n));
+        }
         let mut comp = WorktreeProgress::from_state(&st);
         let out = render(&mut comp, 70, 12);
-        // Two completed steps render check marks.
-        assert_eq!(out.matches('✓').count(), 2, "{out}");
+        // Four completed steps render check marks; the agent row spins.
+        assert_eq!(out.matches('✓').count(), 4, "{out}");
     }
 
     /// The regression: with provisioning faster than the dwell, every
-    /// step must still be shown (Started → Done) before the modal is
-    /// allowed to dismiss.
+    /// step must still be shown before the modal is allowed to dismiss.
     #[test]
     fn fast_provision_walks_every_step_before_dismissing() {
         let mut st = state();
@@ -382,8 +391,9 @@ mod tests {
         st.shown_since = t0;
         // All daemon transitions + the TerminalSpawned dismiss land in a
         // single burst, far faster than the dwell.
-        st.apply(WorktreeStep::Checkout, WorktreeStepStatus::Started);
-        st.apply(WorktreeStep::Checkout, WorktreeStepStatus::Done);
+        st.apply(WorktreeStep::Clone, WorktreeStepStatus::Started);
+        st.apply(WorktreeStep::Fetch, WorktreeStepStatus::Started);
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
         st.apply(WorktreeStep::Setup, WorktreeStepStatus::Started);
         st.apply(WorktreeStep::Setup, WorktreeStepStatus::Done);
         st.queue_dismiss();
@@ -400,18 +410,22 @@ mod tests {
         assert!(!st.tick(t0 + MIN_STEP_DWELL / 5));
         assert_eq!(st.shown, 0);
 
-        // Each step in turn becomes Active, and only after all three have
+        // Each step in turn becomes Active, and only after all rows have
         // dwelt does the modal become ready to dismiss.
         let mut active_seen = Vec::new();
         for step in 0..STEP_COUNT {
             let out = render(&mut WorktreeProgress::from_state(&st), 70, 12);
-            // The currently-shown step is the spinning one; record its
-            // label so we can prove each rendered before dismissal.
+            // The currently-shown step is the spinning one; record it so
+            // we can prove each rendered before dismissal.
             active_seen.push(st.shown);
             assert!(!st.ready_to_dismiss(), "dismissed at step {step}: {out}");
             assert!(st.tick(t0 + MIN_STEP_DWELL * u32::from(step + 1)));
         }
-        assert_eq!(active_seen, vec![0, 1, 2], "every step shown in order");
+        assert_eq!(
+            active_seen,
+            vec![0, 1, 2, 3, 4],
+            "every step shown in order"
+        );
         assert!(
             st.ready_to_dismiss(),
             "never dismissed after walking checklist"
@@ -425,14 +439,14 @@ mod tests {
         let mut st = state();
         let t0 = Instant::now();
         st.shown_since = t0;
-        st.apply(WorktreeStep::Checkout, WorktreeStepStatus::Started);
-        // Checkout takes seconds: the display stays on it (no later step
+        st.apply(WorktreeStep::Clone, WorktreeStepStatus::Started);
+        // The clone takes seconds: the display stays on it (no later step
         // is revealed) however many ticks fire.
         assert!(!st.tick(t0 + MIN_STEP_DWELL * 10));
         assert_eq!(st.shown, 0);
-        // Setup finally starts — now the display is free to advance, and
+        // Fetch finally starts — now the display is free to advance, and
         // does so immediately (the dwell long since elapsed).
-        st.apply(WorktreeStep::Setup, WorktreeStepStatus::Started);
+        st.apply(WorktreeStep::Fetch, WorktreeStepStatus::Started);
         assert!(st.tick(t0 + MIN_STEP_DWELL * 11));
         assert_eq!(st.shown, 1);
     }
@@ -444,9 +458,9 @@ mod tests {
         let mut st = state();
         let t0 = Instant::now();
         st.shown_since = t0;
-        st.apply(WorktreeStep::Setup, WorktreeStepStatus::Started);
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
         st.apply(
-            WorktreeStep::Setup,
+            WorktreeStep::WorktreeAdd,
             WorktreeStepStatus::Failed("boom".into()),
         );
         st.queue_dismiss();
@@ -463,9 +477,9 @@ mod tests {
     #[test]
     fn failed_step_surfaces_error_and_switches_footer() {
         let mut st = state();
-        st.apply(WorktreeStep::Checkout, WorktreeStepStatus::Started);
+        st.apply(WorktreeStep::Clone, WorktreeStepStatus::Started);
         st.apply(
-            WorktreeStep::Checkout,
+            WorktreeStep::Clone,
             WorktreeStepStatus::Failed("fatal: could not read from remote".into()),
         );
         assert!(st.failed());

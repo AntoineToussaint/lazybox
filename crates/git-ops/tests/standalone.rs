@@ -4,9 +4,10 @@
 //! session must land in a real git repo on its lazybox branch, and a
 //! re-provision must never wipe the user's work.
 
-use lazybox_git_ops::WorktreeManager;
+use lazybox_git_ops::{CheckoutPhase, WorktreeManager};
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 fn git_out(cwd: &Path, args: &[&str]) -> String {
@@ -44,6 +45,29 @@ async fn init_standalone_creates_real_repo_on_branch() {
         git_out(&wt_path, &["symbolic-ref", "--short", "HEAD"]),
         "lazybox/scratch",
         "HEAD points at the lazybox branch even before the first commit",
+    );
+}
+
+#[tokio::test]
+async fn init_standalone_reports_worktree_add_phase() {
+    let base = TempDir::new().unwrap();
+    let seen: Arc<Mutex<Vec<CheckoutPhase>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = {
+        let seen = Arc::clone(&seen);
+        Arc::new(move |phase: CheckoutPhase| seen.lock().unwrap().push(phase))
+    };
+    let wm = WorktreeManager::new(base.path().to_path_buf()).with_progress(sink);
+    let wt_path = base.path().join("worktrees").join("scratch");
+
+    wm.init_standalone_at(&wt_path, "lazybox/scratch")
+        .await
+        .unwrap();
+    // No upstream to clone or fetch — only the worktree-creation phase
+    // fires for a standalone init.
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![CheckoutPhase::AddingWorktree],
+        "standalone init reports the worktree-add phase and nothing else",
     );
 }
 

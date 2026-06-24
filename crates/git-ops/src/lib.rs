@@ -95,6 +95,25 @@ pub enum ScriptBody {
     Linked(PathBuf),
 }
 
+/// Coarse phase boundary inside a (cold) worktree provision, reported
+/// through [`WorktreeManager`]'s optional progress sink. Lets a caller
+/// animate sub-progress during the otherwise-opaque clone instead of a
+/// single spinner that jumps straight to done. git-ops stays free of any
+/// wire types — the daemon maps these onto `lazybox_ipc::WorktreeStep`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckoutPhase {
+    /// About to run `git clone --bare` (only fired on a real cold clone;
+    /// a cached healthy bare clone is reused without this).
+    Cloning,
+    /// About to refresh the remote-tracking ref.
+    Fetching,
+    /// About to run `git worktree add`.
+    AddingWorktree,
+}
+
+/// Sink the [`WorktreeManager`] calls at each [`CheckoutPhase`] boundary.
+pub type ProgressSink = dyn Fn(CheckoutPhase) + Send + Sync;
+
 /// Manages git worktrees under a base directory.
 ///
 /// Layout:
@@ -107,12 +126,28 @@ pub enum ScriptBody {
 /// ```
 pub struct WorktreeManager {
     base_dir: PathBuf,
+    progress: Option<Arc<ProgressSink>>,
 }
 
 impl WorktreeManager {
     pub fn new(base_dir: impl Into<PathBuf>) -> Self {
         Self {
             base_dir: base_dir.into(),
+            progress: None,
+        }
+    }
+
+    /// Attach a progress sink invoked at each [`CheckoutPhase`] boundary
+    /// during provisioning. Builder-style so callers that don't care
+    /// (tests, the inspector) ignore it entirely.
+    pub fn with_progress(mut self, sink: Arc<ProgressSink>) -> Self {
+        self.progress = Some(sink);
+        self
+    }
+
+    fn report(&self, phase: CheckoutPhase) {
+        if let Some(sink) = &self.progress {
+            sink(phase);
         }
     }
 
@@ -196,6 +231,7 @@ impl WorktreeManager {
             );
             tokio::fs::remove_dir_all(&partial).await?;
         }
+        self.report(CheckoutPhase::Cloning);
         run_git(&["clone", "--bare", &url, &partial.to_string_lossy()]).await?;
         tokio::fs::rename(&partial, &bare_path).await?;
         Ok(bare_path)
@@ -260,11 +296,13 @@ impl WorktreeManager {
         // In all cases the start_point lookup below falls back to the
         // local ref. `fetch_origin_ref` logs a warning so the
         // degradation isn't silent.
+        self.report(CheckoutPhase::Fetching);
         let _ = fetch_origin_ref(&bare_path, owner, repo, branch).await;
 
         if let Some(parent) = wt_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        self.report(CheckoutPhase::AddingWorktree);
         // Prefer the fresh remote-tracking ref; fall back to the local
         // ref when the remote branch was deleted (e.g. auto-delete after
         // merge). Worst case, `-B` uses whichever commit we have.
@@ -397,6 +435,7 @@ impl WorktreeManager {
         // Tolerate fetch failure (offline / auth): warn and proceed
         // from whatever local ref we have. Per the issue's acceptance
         // criteria, worktree creation must not block on the network.
+        self.report(CheckoutPhase::Fetching);
         if fetch_origin_ref(&bare_path, owner, repo, base_branch)
             .await
             .is_ok()
@@ -423,6 +462,7 @@ impl WorktreeManager {
             tokio::fs::create_dir_all(parent).await?;
         }
 
+        self.report(CheckoutPhase::AddingWorktree);
         let start_point =
             if ref_exists(&bare_path, &format!("refs/remotes/origin/{base_branch}")).await {
                 format!("refs/remotes/origin/{base_branch}")
@@ -507,6 +547,7 @@ impl WorktreeManager {
             });
         }
 
+        self.report(CheckoutPhase::AddingWorktree);
         tokio::fs::create_dir_all(wt_path).await?;
         run_git_in(wt_path, &["init", "-q"]).await?;
         // Point HEAD at lazybox's branch as an unborn ref. `symbolic-ref`

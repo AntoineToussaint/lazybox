@@ -25,6 +25,7 @@
 mod dispatch;
 mod events;
 mod helpers;
+mod host_terminal;
 mod inputs;
 mod keys;
 mod modals;
@@ -32,6 +33,8 @@ mod modals;
 mod tests;
 
 pub use helpers::{run_loop_with_model, run_with_client};
+use host_terminal::HostTerminalGuard;
+pub use host_terminal::restore_host_terminal;
 
 // Re-export helper free functions so sibling submodules
 // (`keys.rs`, etc.) can keep their `super::foo` import shape after
@@ -741,6 +744,12 @@ pub struct Model<T: TerminalAdapter> {
     /// without blocking the loop. `None` when no modal input is in
     /// flight. See `forward_modal_event`.
     modal_redraw_until: Option<std::time::Instant>,
+    /// RAII owner of the host-terminal modes (#211). `Some` only for the
+    /// real crossterm `Model::new`; dropping it restores raw mode / alt
+    /// screen / mouse / paste / focus / Kitty keyboard on every exit
+    /// path. `None` for headless test models, which never touch the
+    /// host terminal. See `host_terminal`.
+    term_guard: Option<HostTerminalGuard>,
 }
 
 /// State tracked for the trackpad-scroll damper (see
@@ -932,17 +941,11 @@ impl<T: TerminalAdapter> Model<T> {
             tips_armed_at: std::time::Instant::now(),
             scroll_inertia: None,
             modal_redraw_until: None,
+            term_guard: None,
         }
     }
 }
 
-/// Best-effort restore of the host terminal — disable raw mode,
-/// leave the alt screen, drop mouse capture + bracketed paste +
-/// kitty keyboard flags. Idempotent (each crossterm call no-ops
-/// when the state isn't active). Called both on clean shutdown and
-/// from the panic hook so a crash doesn't strand the user's
-/// terminal in raw mode with mouse-tracking on, where every input
-/// becomes escape sequences pasted into the prompt.
 /// Provider ids that can enumerate scopes (orgs/repos). Passed to the
 /// pure `SetupRunner` so it knows which providers get a scope-picking
 /// step without holding the `ScopeSource`s themselves (those stay in
@@ -956,39 +959,23 @@ fn scope_provider_ids(
         .collect()
 }
 
-fn restore_terminal() {
-    use crossterm::event::{
-        DisableBracketedPaste, DisableMouseCapture, PopKeyboardEnhancementFlags,
-    };
-    use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
-    let mut out = std::io::stdout();
-    let _ = crossterm::execute!(
-        out,
-        PopKeyboardEnhancementFlags,
-        DisableBracketedPaste,
-        DisableMouseCapture,
-        LeaveAlternateScreen,
-    );
-    let _ = disable_raw_mode();
-    // Flush so the host terminal sees the resets before the
-    // panic message (or shell prompt) takes over the screen.
-    use std::io::Write;
-    let _ = out.flush();
-}
-
 /// Install a panic hook that restores the terminal before falling
 /// through to the default panic printer. Without this, a panic
 /// during the TUI run leaves the host stuck in raw mode + the
 /// alt screen, with the panic message painted on top of the still-
 /// live mouse-tracking escape stream — the screenshot the user
-/// just shared. Idempotent across multiple Model::new calls.
+/// just shared. The `HostTerminalGuard`'s `Drop` also restores on
+/// unwind, but the hook runs *before* unwinding so the reset reaches
+/// the host ahead of the panic message; `restore_host_terminal` is
+/// once-only, so the later guard drop is a no-op. Idempotent across
+/// multiple Model::new calls.
 fn install_panic_hook() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            restore_terminal();
+            restore_host_terminal();
             prev(info);
         }));
     });
@@ -997,50 +984,18 @@ fn install_panic_hook() {
 impl Model<CrosstermTerminalAdapter> {
     pub fn new(client: Client) -> anyhow::Result<Self> {
         install_panic_hook();
-        let mut terminal = CrosstermTerminalAdapter::new()?;
-        terminal.enable_raw_mode()?;
-        terminal.enter_alternate_screen()?;
-        // Mouse capture: clicks/drags drive splitter resize +
-        // click-to-focus + lazybox-side text selection inside the
-        // terminal pane (extracted from libghostty's grid, copied
-        // via OSC 52). F8 / Alt-s toggles capture off if the user
-        // wants the host's native selection (which spans across
-        // lazybox's UI chrome and is uglier).
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture,);
-        // Bracketed paste: the host terminal wraps Cmd-V'd text in
-        // `ESC [ 200 ~ … ESC [ 201 ~` so we can tell "user pasted a
-        // chunk" from "user typed N characters very fast." Without
-        // it, every paste hits Claude / shell as a stream of
-        // keystrokes — autocomplete fires mid-paste, the input
-        // jumps around, etc. The `Event::Paste(text)` handler
-        // below forwards the wrapped sequence to the PTY so the
-        // inner program sees it as a single paste.
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste,);
-        // Focus reporting (DEC mode 1004): the host terminal emits
-        // `FocusGained` / `FocusLost` as the user switches windows.
-        // Lazybox tracks it so desktop notifications only fire while
-        // lazybox is unfocused — a banner for what you're already
-        // looking at is just noise. Terminals that don't support it
-        // never send the events, so notifications keep firing there.
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableFocusChange,);
-        // Ask the host terminal to disambiguate modified Enter /
-        // Tab / Backspace etc. via the kitty keyboard protocol.
-        // Without this, most terminals collapse Shift-Enter into
-        // the same byte sequence as Enter and lazybox can't tell
-        // "submit" from "newline in input" — Claude Code's prompt
-        // then ignores Shift-Enter the user pressed expecting a
-        // newline. Terminals that don't support the protocol
-        // silently ignore the request.
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::event::PushKeyboardEnhancementFlags(
-                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
-            ),
-        );
+        let terminal = CrosstermTerminalAdapter::new()?;
+        // Enable raw mode, the alt screen, mouse capture, bracketed
+        // paste, focus reporting and the Kitty keyboard protocol. The
+        // guard owns the whole set: dropping it (clean exit, error, or
+        // panic) runs the one symmetric teardown, so the host shell is
+        // never stranded in Kitty keyboard mode (#211). See
+        // `host_terminal`.
+        let term_guard = HostTerminalGuard::new();
         // Splash is mounted lazily by `start_setup_wizard`. Returning
         // users (with a persisted setup) boot straight to the panes.
         let mut model = Self::build(terminal, client);
+        model.term_guard = Some(term_guard);
         // Subscribe up-front for both first-run and returning users.
         // First-run gets an empty snapshot before the wizard finishes
         // (no polling has run yet) so nothing flickers in behind the
@@ -2186,27 +2141,12 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
-    /// Restore terminal state (idempotent).
+    /// Restore terminal state by dropping the RAII guard (idempotent).
+    /// The run loop calls this on a clean exit; the guard's `Drop` is
+    /// the backstop for error / panic / signal paths so the host shell
+    /// is never stranded in Kitty keyboard mode (#211).
     pub fn shutdown(&mut self) {
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture,);
-        // Drop the bracketed-paste enable we set in `new`. Without
-        // this the host terminal keeps wrapping pastes in
-        // `ESC[200~…ESC[201~` even after lazybox exits — every
-        // subsequent shell paste shows the literal markers.
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste,);
-        // Drop the focus-reporting request from `new` so the host
-        // terminal stops emitting focus events into the user's shell.
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableFocusChange,);
-        // Drop the kitty keyboard protocol bits we pushed in `new`.
-        // Skipping this would leak the request into the user's host
-        // shell after lazybox exits — subsequent commands would still
-        // receive disambiguated key events they didn't ask for.
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::event::PopKeyboardEnhancementFlags,
-        );
-        let _ = self.terminal.leave_alternate_screen();
-        let _ = self.terminal.disable_raw_mode();
+        self.term_guard.take();
     }
     /// Whether the Activity (right) pane should render for the
     /// currently-selected workspace. A per-workspace manual override

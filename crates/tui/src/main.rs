@@ -390,6 +390,7 @@ async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
         }
     });
 
+    spawn_terminal_restore_on_signal();
     tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client)?;
         if let Some(p) = preselect {
@@ -400,6 +401,42 @@ async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
     .await
     .map_err(|e| anyhow::anyhow!("realm task panicked: {e}"))?
     // `fixture` drops here → TempDir cleanup.
+}
+
+/// Restore the host terminal if the process is killed by a signal
+/// (#211). SIGTERM / SIGHUP — and an externally-delivered SIGINT, since
+/// raw mode swallows interactive Ctrl-C — terminate the process without
+/// unwinding, so the `HostTerminalGuard` in `Model` never runs its
+/// `Drop`. We catch those signals, run the same one-shot
+/// `restore_host_terminal` the guard would, then exit — otherwise a
+/// `kill`ed lazybox strands the shell in Kitty keyboard protocol + raw
+/// mode. Spawned before the blocking run loop on every real-terminal
+/// path.
+fn spawn_terminal_restore_on_signal() {
+    tokio::spawn(async {
+        wait_for_exit_signal().await;
+        lazybox_tui::realm::model::restore_host_terminal();
+        // 128 + SIGTERM(15); a conventional signal-exit status.
+        std::process::exit(143);
+    });
+}
+
+#[cfg(unix)]
+async fn wait_for_exit_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    let mut hup = signal(SignalKind::hangup()).expect("install SIGHUP handler");
+    let mut int = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+    tokio::select! {
+        _ = term.recv() => {},
+        _ = hup.recv() => {},
+        _ = int.recv() => {},
+    }
+}
+
+#[cfg(windows)]
+async fn wait_for_exit_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// Remove a flag from `args` if present. Returns `true` if it was
@@ -450,6 +487,7 @@ async fn run_remote(
         }
     };
 
+    spawn_terminal_restore_on_signal();
     tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client)?;
         if let Some(p) = preselect {
@@ -601,6 +639,7 @@ async fn run_embedded_realm(
         None
     };
 
+    spawn_terminal_restore_on_signal();
     let store_for_save = config.store.clone();
     let realm_result = tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client)?;

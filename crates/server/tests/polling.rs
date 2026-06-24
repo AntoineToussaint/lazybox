@@ -3688,6 +3688,365 @@ async fn combining_multiple_issues_with_live_sessions_rebadges_every_terminal() 
     }
 }
 
+#[cfg(test)]
+mod live_collapse_e2e {
+    //! Issue #205, the HARDCORE end-to-end: drive a real `Shift-J`
+    //! collapse through the actual serve loop — a Client talking to a
+    //! Server over the in-process channel, a real agent terminal spawned
+    //! via `Command::Spawn`, its state driven by real PTY output / hooks,
+    //! and the merge run through the real `Command::CollapseIntoPr`
+    //! handler. The assertions separate the two failure modes that four
+    //! prior reports kept conflating:
+    //!
+    //! - **not lost** — the `Session` record AND the PTY/ring-buffer
+    //!   still exist under the PR key after the merge.
+    //! - **live key** — every `Event::AgentState` emitter (PTY pump,
+    //!   optimistic flip, hook ingest) broadcasts under the PR session
+    //!   after the rebadge, never the captured issue key (#161/#167).
+    //!
+    //! The TUI-render half of "not shown" lives in the tui crate
+    //! (`model::tests::collapse_into_pr_tests`,
+    //! `sidebar::tests::rebadge_attention_tests`) — only that crate can
+    //! build a `Model` — and consumes the exact `TerminalsRebadged`
+    //! burst this loop emits.
+    use super::*;
+    use lazybox_core::{SessionKey, WorkspaceKey};
+    use lazybox_ipc::{AgentState, Client, TerminalId, TerminalKind};
+    use lazybox_server::backend::{MockBackend, SessionBackend};
+    use tokio::time::timeout;
+
+    /// Per-await budget for a single expected event.
+    const DEADLINE: Duration = Duration::from_secs(3);
+    /// Whole-test budget — comfortably larger than any single
+    /// [`DEADLINE`] wait so the outer guard only fires on a true hang.
+    const TEST_DEADLINE: Duration = Duration::from_secs(15);
+
+    /// A Claude chooser screen — the PTY detector reads this as
+    /// `InputNeeded` (mirrors the spawn_handler.rs e2e fixtures).
+    const CHOOSER: &str = "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel";
+
+    /// Drain events until one is an `AgentState` for `state`; return the
+    /// session key it was broadcast under. `None` on timeout.
+    async fn agent_state_key(client: &mut Client, state: AgentState) -> Option<SessionKey> {
+        let deadline = tokio::time::Instant::now() + DEADLINE;
+        loop {
+            let remaining = deadline.checked_duration_since(tokio::time::Instant::now())?;
+            match timeout(remaining, client.recv()).await {
+                Ok(Some(Event::AgentState {
+                    session_key,
+                    state: got,
+                    ..
+                })) if got == state => return Some(session_key),
+                Ok(Some(_)) => continue,
+                _ => return None,
+            }
+        }
+    }
+
+    async fn wait_spawned(client: &mut Client) -> TerminalId {
+        let deadline = tokio::time::Instant::now() + DEADLINE;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .expect("TerminalSpawned deadline");
+            if let Ok(Some(Event::TerminalSpawned { terminal_id, .. })) =
+                timeout(remaining, client.recv()).await
+            {
+                return terminal_id;
+            }
+        }
+    }
+
+    /// A live agent terminal spawned on an issue workspace through the
+    /// real serve loop. `_tmp` is the worktree cwd, held alive for the
+    /// test's lifetime.
+    struct LiveAgent {
+        client: Client,
+        config: ServerConfig,
+        mock: MockBackend,
+        issue_key: WorkspaceKey,
+        issue_sk: SessionKey,
+        terminal_id: TerminalId,
+        backend_key: String,
+        _tmp: tempfile::TempDir,
+    }
+
+    async fn spawn_live_agent_on_issue() -> LiveAgent {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let (mut client, server) = channel::pair();
+        {
+            let cfg = config.clone();
+            tokio::spawn(async move {
+                let _ = Server::new(cfg).serve(server).await;
+            });
+        }
+        client.send(Command::Subscribe).unwrap();
+        let _snapshot = client.recv().await.expect("snapshot");
+
+        // An issue workspace carrying a session record.
+        let (issue_key, _ids) = seed_issue_with_n_sessions(&config, "o/r#71", 1).await;
+        let issue_sk: SessionKey = (&issue_key).into();
+
+        // Spawn a REAL agent terminal on the issue. `cwd: Some` keeps the
+        // spawn off the worktree-provisioning path so the test is fast
+        // and filesystem-free, while still exercising the full
+        // handle_spawn → backend → pump → terminal_meta pipeline.
+        let tmp = tempfile::tempdir().unwrap();
+        client
+            .send(Command::Spawn {
+                session_key: issue_sk.clone(),
+                session_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: Some(tmp.path().to_string_lossy().into_owned()),
+                initial_prompt: None,
+            })
+            .unwrap();
+        let terminal_id = wait_spawned(&mut client).await;
+        let backend_key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        LiveAgent {
+            client,
+            config,
+            mock,
+            issue_key,
+            issue_sk,
+            terminal_id,
+            backend_key,
+            _tmp: tmp,
+        }
+    }
+
+    /// Bring in a PR closing the issue (a live terminal stalls the silent
+    /// auto-merge) and accept the merge via the real `Shift-J` command
+    /// (`CollapseIntoPr`). Returns the PR session key once the merge has
+    /// fully committed.
+    ///
+    /// The collapse handler runs as a concurrent daemon task and emits
+    /// its burst in order: `TerminalsRebadged` (during the absorb) →
+    /// `WorkspaceUpserted(pr)` → `WorkspaceRemoved(issue)` →
+    /// `WorkspaceMerged` (after the commit). We drain to the terminal
+    /// `WorkspaceMerged` so store assertions don't race a half-finished
+    /// merge, while asserting the rebadge was seen en route.
+    async fn collapse_into_pr(live: &mut LiveAgent) -> SessionKey {
+        let pr_task = make_pr_closing("o/r#141", &["o/r#71"]);
+        let pr_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&pr_task));
+        let pr_sk: SessionKey = (&pr_key).into();
+        polling::upsert(&live.config, pr_task).await;
+
+        live.client
+            .send(Command::CollapseIntoPr {
+                issue_workspace_key: live.issue_sk.clone(),
+            })
+            .unwrap();
+
+        let mut saw_rebadge = false;
+        let deadline = tokio::time::Instant::now() + DEADLINE;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .expect("collapse burst deadline");
+            match timeout(remaining, live.client.recv()).await {
+                Ok(Some(Event::TerminalsRebadged { from, to })) => {
+                    assert_eq!(from, live.issue_sk, "rebadge must move FROM the issue");
+                    assert_eq!(to, pr_sk, "rebadge must move TO the PR");
+                    saw_rebadge = true;
+                }
+                Ok(Some(Event::WorkspaceMerged {
+                    issue_workspace_key,
+                    pr_workspace_key,
+                    ..
+                })) => {
+                    assert_eq!(SessionKey::from(&issue_workspace_key), live.issue_sk);
+                    assert_eq!(SessionKey::from(&pr_workspace_key), pr_sk);
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                _ => panic!("collapse burst did not complete with WorkspaceMerged"),
+            }
+        }
+        assert!(
+            saw_rebadge,
+            "collapse must broadcast TerminalsRebadged before WorkspaceMerged"
+        );
+        pr_sk
+    }
+
+    async fn load_workspace(config: &ServerConfig, key: &WorkspaceKey) -> lazybox_core::Workspace {
+        let record = config.store.get_workspace(key).unwrap().unwrap();
+        serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn collapse_keeps_a_live_input_needed_agent_session() {
+        timeout(TEST_DEADLINE, async {
+            let mut live = spawn_live_agent_on_issue().await;
+
+            // Park the agent on a prompt — the case that reads as "lost".
+            live.mock.emit(&live.backend_key, CHOOSER).await;
+            let asking = agent_state_key(&mut live.client, AgentState::InputNeeded)
+                .await
+                .expect("PTY chooser must raise InputNeeded");
+            assert_eq!(
+                asking, live.issue_sk,
+                "raised under the issue before collapse"
+            );
+
+            let pr_sk = collapse_into_pr(&mut live).await;
+            let pr_key = WorkspaceKey::new(pr_sk.as_str().to_string());
+
+            // ── NOT LOST (record) — the Session moved onto the PR. ──
+            let pr_ws = load_workspace(&live.config, &pr_key).await;
+            assert_eq!(
+                pr_ws.sessions.len(),
+                1,
+                "the issue's session record must survive on the PR",
+            );
+            assert!(
+                live.config
+                    .store
+                    .get_workspace(&live.issue_key)
+                    .unwrap()
+                    .is_none(),
+                "the issue row is gone",
+            );
+
+            // ── NOT LOST (PTY) — the backend session/ring-buffer lives. ──
+            assert!(
+                live.mock.list().await.unwrap().contains(&live.backend_key),
+                "the agent's PTY/ring-buffer must still exist after the merge",
+            );
+
+            // …keyed to the PR in memory…
+            assert_eq!(
+                live.config
+                    .terminal_meta
+                    .lock()
+                    .await
+                    .get(&live.terminal_id)
+                    .expect("terminal must survive the merge")
+                    .0,
+                pr_sk,
+                "terminal_meta must repoint the terminal at the PR",
+            );
+            // …and in the persisted record `recover_sessions` reads at
+            // startup (else a restart reattaches it under the deleted
+            // issue workspace and the session is lost).
+            let raw = live
+                .config
+                .store
+                .get_kv(&format!("terminal:{}", live.backend_key))
+                .unwrap()
+                .expect("persisted terminal record must survive");
+            let (persisted, _kind): (String, TerminalKind) = serde_json::from_str(&raw).unwrap();
+            assert_eq!(
+                persisted,
+                pr_sk.as_str(),
+                "persisted terminal record must follow the session to the PR",
+            );
+        })
+        .await
+        .expect("deadline");
+    }
+
+    #[tokio::test]
+    async fn every_agent_state_emitter_uses_the_live_session_after_collapse() {
+        // The #205 acceptance: no emitter may broadcast under a key
+        // captured at spawn time. After the rebadge, drive each of the
+        // three emitters and assert every one resolves the LIVE (PR)
+        // session — if any captured the issue key at spawn, the key it
+        // emits under would still be the issue and the assert fails.
+        timeout(TEST_DEADLINE, async {
+            let mut live = spawn_live_agent_on_issue().await;
+            live.mock.emit(&live.backend_key, CHOOSER).await;
+            agent_state_key(&mut live.client, AgentState::InputNeeded)
+                .await
+                .expect("InputNeeded before collapse");
+
+            let pr_sk = collapse_into_pr(&mut live).await;
+
+            // (1) Optimistic flip — user answers the prompt. `handle_write`
+            //     flips InputNeeded → Working.
+            live.client
+                .send(Command::Write {
+                    terminal_id: live.terminal_id,
+                    bytes: b"1\r".to_vec(),
+                })
+                .unwrap();
+            let flip = agent_state_key(&mut live.client, AgentState::Working)
+                .await
+                .expect("flip must emit Working");
+            assert_eq!(flip, pr_sk, "optimistic flip must use the live PR key");
+
+            // (2) PTY pump — fresh chooser output re-raises InputNeeded.
+            live.mock.emit(&live.backend_key, CHOOSER).await;
+            let pty = agent_state_key(&mut live.client, AgentState::InputNeeded)
+                .await
+                .expect("PTY pump must re-raise InputNeeded");
+            assert_eq!(
+                pty, pr_sk,
+                "PTY pump must use the live PR key (the #161 path)"
+            );
+
+            // (3) Hook ingest — a Stop lifecycle hook drives Done.
+            live.client
+                .send(Command::IngestHook {
+                    terminal_id: live.terminal_id,
+                    hook: lazybox_ipc::HookEvent {
+                        kind: lazybox_ipc::HookEventKind::Stop,
+                        session_id: Some("claude-session".into()),
+                        cwd: None,
+                        tool_name: None,
+                        notification: None,
+                    },
+                    backend_key: Some(live.backend_key.clone()),
+                })
+                .unwrap();
+            let hook = agent_state_key(&mut live.client, AgentState::Done)
+                .await
+                .expect("hook must emit Done");
+            assert_eq!(hook, pr_sk, "hook ingest must use the live PR key");
+        })
+        .await
+        .expect("deadline");
+    }
+
+    #[tokio::test]
+    async fn join_immediately_after_spawn_rebadges_the_terminal() {
+        // The spawn-then-join race (#90, previously untested): a user
+        // spawns an agent and hits `Shift-J` before touching it — the
+        // terminal carries no AgentState yet. The rebadge must still
+        // catch it, or the fresh terminal is orphaned under the deleted
+        // issue key.
+        timeout(TEST_DEADLINE, async {
+            let mut live = spawn_live_agent_on_issue().await;
+            // No InputNeeded driving — collapse straight away.
+            let pr_sk = collapse_into_pr(&mut live).await;
+
+            assert_eq!(
+                live.config
+                    .terminal_meta
+                    .lock()
+                    .await
+                    .get(&live.terminal_id)
+                    .expect("freshly-spawned terminal must survive the immediate join")
+                    .0,
+                pr_sk,
+                "the terminal must be rebadged onto the PR even with no prior state",
+            );
+            let raw = live
+                .config
+                .store
+                .get_kv(&format!("terminal:{}", live.backend_key))
+                .unwrap()
+                .expect("persisted record must survive the immediate join");
+            let (persisted, _kind): (String, TerminalKind) = serde_json::from_str(&raw).unwrap();
+            assert_eq!(persisted, pr_sk.as_str());
+        })
+        .await
+        .expect("deadline");
+    }
+}
+
 /// `delete_project` on a project with NO workspaces still removes
 /// the project record and fires `ProjectRemoved`. Covers the "user
 /// just made a local project, hasn't added a workspace yet, presses

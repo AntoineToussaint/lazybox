@@ -1745,6 +1745,92 @@ mod done_alert_tests {
     }
 }
 
+#[cfg(test)]
+mod rebadge_attention_tests {
+    //! Issue #205: combining an issue into a PR (`Shift-J`) rebadges the
+    //! issue's live terminals onto the PR. The sidebar's transient
+    //! agent-state sets are keyed by session, so a `TerminalsRebadged`
+    //! must migrate them — otherwise an agent parked on a prompt (which
+    //! the daemon never re-broadcasts) keeps its `?` pill pinned to the
+    //! deleted issue key and the PR row shows no badge, reading as lost.
+    use super::super::*;
+    use lazybox_core::WorkspaceKey;
+    use lazybox_ipc::{AgentState, Event, TerminalId};
+
+    fn agent_state(key: &SessionKey, state: AgentState) -> Event {
+        Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(1),
+            state,
+        }
+    }
+
+    #[test]
+    fn rebadge_carries_a_parked_input_needed_agent_onto_the_pr() {
+        let issue: SessionKey = (&WorkspaceKey::new("github:o/r#50")).into();
+        let pr: SessionKey = (&WorkspaceKey::new("github:o/r#51")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+
+        // Agent on the issue is parked on a prompt.
+        sb.on_event(&agent_state(&issue, AgentState::InputNeeded));
+        assert!(sb.agents_asking.contains(&issue));
+
+        // Collapse: the daemon rebadges the terminal onto the PR. No
+        // further AgentState follows — the agent is stalled.
+        sb.on_event(&Event::TerminalsRebadged {
+            from: issue.clone(),
+            to: pr.clone(),
+        });
+
+        assert!(
+            !sb.agents_asking.contains(&issue),
+            "the dead issue key must be dropped",
+        );
+        assert!(
+            sb.agents_asking.contains(&pr),
+            "the PR must inherit the asking pill so the agent stays visible",
+        );
+    }
+
+    #[test]
+    fn rebadge_migrates_working_and_done_sets_too() {
+        let issue: SessionKey = (&WorkspaceKey::new("github:o/r#60")).into();
+        let pr: SessionKey = (&WorkspaceKey::new("github:o/r#61")).into();
+
+        for state in [AgentState::Working, AgentState::Done] {
+            let mut sb = Sidebar::new(PaneId::new(1));
+            sb.on_event(&agent_state(&issue, state));
+            sb.on_event(&Event::TerminalsRebadged {
+                from: issue.clone(),
+                to: pr.clone(),
+            });
+            let set = match state {
+                AgentState::Working => &sb.agents_working,
+                AgentState::Done => &sb.agents_done,
+                _ => unreachable!(),
+            };
+            assert!(!set.contains(&issue), "{state:?}: issue key dropped");
+            assert!(set.contains(&pr), "{state:?}: PR key inherited");
+        }
+    }
+
+    #[test]
+    fn rebadge_of_an_idle_agent_does_not_flag_the_pr() {
+        // No agent state on the issue → the PR must not gain a spurious
+        // badge from the rebadge.
+        let issue: SessionKey = (&WorkspaceKey::new("github:o/r#70")).into();
+        let pr: SessionKey = (&WorkspaceKey::new("github:o/r#71")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.on_event(&Event::TerminalsRebadged {
+            from: issue,
+            to: pr.clone(),
+        });
+        assert!(!sb.agents_asking.contains(&pr));
+        assert!(!sb.agents_working.contains(&pr));
+        assert!(!sb.agents_done.contains(&pr));
+    }
+}
+
 mod getting_started_tests {
     use super::super::*;
     use super::status_pill_tests::base_task;

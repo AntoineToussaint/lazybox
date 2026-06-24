@@ -66,6 +66,9 @@ fn builtin_editors() -> Vec<EditorTemplate> {
         template("windsurf", "Windsurf", "windsurf"),
         template("fleet", "JetBrains Fleet", "fleet"),
         template("idea", "IntelliJ IDEA", "idea"),
+        // Gram: a Zed fork with AI, telemetry, and collaboration
+        // stripped out (codeberg.org/GramEditor/gram). Its CLI binary
+        // is `gram`; obscure enough that the name reads like a typo.
         template("gram", "Gram", "gram"),
     ]
 }
@@ -404,13 +407,20 @@ mod tests {
 
     #[test]
     fn gram_is_a_builtin_editor() {
-        let gram = builtin_editors()
-            .into_iter()
+        let builtins = builtin_editors();
+        let gram = builtins
+            .iter()
             .find(|e| e.id == "gram")
             .expect("gram builtin present");
         assert_eq!(gram.display, "Gram");
         assert_eq!(gram.command, "gram");
         assert_eq!(gram.args, vec!["{path}"]);
+        // "Glam" is a mishearing of Gram (the Zed fork); there is no
+        // separate `glam` editor, so the builtin stays a single entry.
+        assert!(
+            !builtins.iter().any(|e| e.id == "glam"),
+            "no separate glam entry; Glam is a mishearing of Gram"
+        );
     }
 
     #[test]

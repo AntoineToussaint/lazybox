@@ -163,7 +163,7 @@ impl<T> ResultExt<T> for Option<T> {
 /// every other client on the slowest one.
 pub const BUS_CAPACITY: usize = 1024;
 
-/// Inline-lane budget. A command in the inline lane (see [`command_lane`])
+/// Inline-lane budget. A command in the inline lane (see `command_lane`)
 /// that holds the serve loop longer than this is an architecture
 /// violation: while it runs, `tokio::select!` can service no other
 /// command and forward no bus/poll event (#34, #206). The detached lane

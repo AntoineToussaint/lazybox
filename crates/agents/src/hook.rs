@@ -77,7 +77,9 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 ///     `--dangerously-skip-permissions` spawns — the idle nudge it emits
 ///     after sitting ~60s at a ready composer ("Claude is waiting for
 ///     your input"), which is exactly the "this workspace needs me"
-///     signal the `?` indicator and `!` jump surface (#62);
+///     signal the `?` indicator and `!` jump surface (#62) — except when
+///     that nudge fires before any turn has run (see `notification_state`
+///     for the #209 startup carve-out);
 ///   - `Stop` means the agent **finished its turn** →
 ///     [`AgentState::Done`]: it ran work and has come to rest, the
 ///     "completed, take a look" signal the user wants alerting on (#80);
@@ -114,8 +116,17 @@ pub fn hook_to_state(event: &HookEvent, current: Option<AgentState>) -> Option<A
 /// ready composer. lazybox runs every agent with
 /// `--dangerously-skip-permissions`, so the permission/elicitation
 /// variants never fire in practice and the idle nudge is the only
-/// `Notification` an agent emits; all of them mean the workspace is
-/// blocked on me → `InputNeeded` (#62).
+/// `Notification` an agent emits; after a real turn it means the
+/// workspace is blocked on me → `InputNeeded` (#62).
+///
+/// The one exception is the idle nudge fired BEFORE the agent has run
+/// anything (#209). The nudge is an inactivity timeout, not a structural
+/// gate, so at a freshly-spawned composer — still at its initial
+/// `Idle`/unknown state, waiting on the work prompt or the user's first
+/// keystroke — it's premature startup chrome, not "paused waiting on me."
+/// Badging `?` then raises a false input alert at launch, so that case
+/// stays `Idle`. A real permission / elicitation dialog only ever fires
+/// mid-turn (its tool needs a submitted prompt first), so it's unaffected.
 ///
 /// We match the waiting case affirmatively against the known wording. An
 /// unrecognized notification is treated as the composer sitting ready →
@@ -128,10 +139,36 @@ fn notification_state(
     current: Option<AgentState>,
 ) -> Option<AgentState> {
     match notification {
+        Some(n) if is_idle_nudge(n) && !has_run_a_turn(current) => {
+            // Premature startup nudge: keep a never-used composer `Idle` so
+            // it doesn't badge `?` at launch — but never force-clear a gate
+            // already up (the no-change rule below).
+            (current != Some(AgentState::InputNeeded)).then_some(AgentState::Idle)
+        }
         Some(n) if waits_on_user(n) => Some(AgentState::InputNeeded),
         _ if current == Some(AgentState::InputNeeded) => None,
         _ => Some(AgentState::Idle),
     }
+}
+
+/// Whether the terminal has run at least one turn — `Working` (a turn in
+/// flight) or `Done` (a turn finished). A fresh session sits at
+/// `None`/`Idle` (the latter from `SessionStart`) until its first working
+/// hook, so this distinguishes a genuine post-turn idle nudge (raise `?`,
+/// #62) from the premature one Claude emits at a never-used composer
+/// (#209).
+fn has_run_a_turn(current: Option<AgentState>) -> bool {
+    matches!(current, Some(AgentState::Working | AgentState::Done))
+}
+
+/// The idle nudge Claude fires after the composer sits ready ~60s with no
+/// input ("Claude is waiting for your input"). Distinct from the
+/// permission / elicitation payloads [`waits_on_user`] also matches: those
+/// are live gates, this is an inactivity timeout.
+fn is_idle_nudge(notification: &str) -> bool {
+    notification
+        .to_ascii_lowercase()
+        .contains("waiting for your input")
 }
 
 /// Wording in a `Notification` payload that means Claude is blocked
@@ -304,14 +341,63 @@ mod tests {
     }
 
     #[test]
-    fn notification_idle_waiting_for_input_is_input_needed() {
+    fn notification_idle_waiting_for_input_is_input_needed_after_a_turn() {
         // Claude's idle nudge after ~60s of inactivity. lazybox spawns
         // every agent with `--dangerously-skip-permissions`, so the
         // permission/elicitation notifications never fire — this nudge is
         // the only "agent is waiting on you" signal available, and #62
-        // wants it to drive the `?` indicator on the row.
+        // wants it to drive the `?` indicator on the row. It only counts
+        // once the agent has actually run a turn (`Working`/`Done`).
         let ev = parse(
             r#"{"hook_event_name":"Notification","message":"Claude is waiting for your input"}"#,
+        );
+        assert_eq!(
+            hook_to_state(&ev, Some(AgentState::Working)),
+            Some(AgentState::InputNeeded)
+        );
+        assert_eq!(
+            hook_to_state(&ev, Some(AgentState::Done)),
+            Some(AgentState::InputNeeded)
+        );
+    }
+
+    #[test]
+    fn idle_nudge_at_startup_before_any_turn_stays_idle() {
+        // #209: the idle nudge can reach lazybox while a freshly-spawned
+        // agent is still sitting at its initial composer — before the work
+        // prompt is injected (autonomous) or the user's first keystroke
+        // (interactive). With no turn behind it the nudge is startup
+        // chrome, not a gate, so it must NOT badge `?`. A fresh terminal is
+        // `None` (no hook yet) or `Idle` (after `SessionStart`).
+        let ev = parse(
+            r#"{"hook_event_name":"Notification","message":"Claude is waiting for your input"}"#,
+        );
+        assert_eq!(hook_to_state(&ev, None), Some(AgentState::Idle));
+        assert_eq!(
+            hook_to_state(&ev, Some(AgentState::Idle)),
+            Some(AgentState::Idle)
+        );
+    }
+
+    #[test]
+    fn premature_idle_nudge_never_clears_a_live_gate() {
+        // The startup suppression must not knock down a `?` already up: an
+        // idle nudge arriving while the terminal is `InputNeeded` is a
+        // no-change, never a force-clear (same protection as an
+        // unrecognized notification).
+        let ev = parse(
+            r#"{"hook_event_name":"Notification","message":"Claude is waiting for your input"}"#,
+        );
+        assert_eq!(hook_to_state(&ev, Some(AgentState::InputNeeded)), None);
+    }
+
+    #[test]
+    fn permission_dialog_is_input_needed_regardless_of_prior_turn() {
+        // A genuine permission gate only ever fires mid-turn, but assert
+        // it's unaffected by the startup-nudge suppression even from a
+        // fresh state — it's a structural gate, not an inactivity timeout.
+        let ev = parse(
+            r#"{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash"}"#,
         );
         assert_eq!(hook_to_state(&ev, None), Some(AgentState::InputNeeded));
     }

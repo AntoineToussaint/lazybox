@@ -254,6 +254,30 @@ fn claude_idle_at_empty_input_box() {
 }
 
 #[test]
+fn claude_fresh_startup_banner_is_idle_not_input_needed() {
+    // #209: a just-launched agent that hasn't reached a real prompt must
+    // never read `InputNeeded`. The fresh-spawn screen carries the version
+    // banner (`v2.1.159` — decimals that look like `1.`/`2.` option labels)
+    // and the composer prompt glyph `❯`, sitting under the spaceless
+    // `? for shortcuts` footer. None of that is a structural prompt, so the
+    // detector must report `Idle`.
+    let agent = Claude;
+    let startup = concat!(
+        "╭─── Claude Code v2.1.159 ──────────────────────────────╮\n",
+        "│  Welcome back!                                        │\n",
+        "│  Opus 4.8 (1M context)                                │\n",
+        "╰───────────────────────────────────────────────────────╯\n",
+        "❯ Try \"fix lint errors\"\n",
+        "? for shortcuts",
+    );
+    assert_eq!(
+        agent.detect_state(startup.as_bytes()),
+        Some(AgentState::Idle),
+        "the fresh startup banner must not raise a false `?`"
+    );
+}
+
+#[test]
 fn default_agent_detect_state_is_none_so_consumers_render_idle() {
     // The trait default has no detector → None. Consumers treat the
     // absence of a signal as Idle, so an unknown agent never lies

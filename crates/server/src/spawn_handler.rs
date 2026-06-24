@@ -1233,12 +1233,15 @@ async fn resolve_or_create_session(
         tracing::warn!("worktree provisioning failed: {e}");
         // Surface the failure in the progress modal too, so a cold
         // clone that can't reach GitHub shows the error instead of the
-        // checklist hanging on a forever spinner. Checkout is the only
-        // phase that aborts provisioning (mounts/scripts are best-effort).
+        // checklist hanging on a forever spinner. The checkout sub-phases
+        // (clone/fetch/worktree-add) are the only ones that abort
+        // provisioning; mounts/scripts are best-effort. The modal freezes
+        // on whichever step is on screen, so the exact variant here only
+        // names where in the checklist the ✗ lands.
         emit_worktree_progress(
             config,
             session_key,
-            WorktreeStep::Checkout,
+            WorktreeStep::Clone,
             WorktreeStepStatus::Failed(e.to_string()),
         );
         let _ = config.bus.send(Event::provider_error_retryable(
@@ -1414,12 +1417,44 @@ async fn provision_worktree(
     session_key: &SessionKey,
 ) -> Result<(), crate::ServerError> {
     use crate::ServerError;
+    use lazybox_git_ops::CheckoutPhase;
+
+    // Mount the progress modal before the first (possibly slow) git
+    // call so the user sees provisioning start immediately rather than
+    // after key/repo resolution. The git sub-phases below advance it.
+    emit_worktree_progress(
+        config,
+        session_key,
+        WorktreeStep::Clone,
+        WorktreeStepStatus::Started,
+    );
+
     // A blank workspace (created via `n` under a project, no issue/PR
     // linked) has no task to read a repo from — but its project key
     // still encodes `owner/repo` for GitHub projects, so it gets a
     // real clone instead of the caller's empty-dir fallback.
     let task = workspace.primary_task();
-    let mgr = lazybox_git_ops::WorktreeManager::default_base();
+
+    // Map git-ops' clone/fetch/worktree-add boundaries onto
+    // `WorktreeProgress` so the long cold-clone phase shows advancing
+    // sub-progress instead of one opaque spinner.
+    let sink = {
+        let bus = config.bus.clone();
+        let session_key = session_key.clone();
+        std::sync::Arc::new(move |phase: CheckoutPhase| {
+            let step = match phase {
+                CheckoutPhase::Cloning => WorktreeStep::Clone,
+                CheckoutPhase::Fetching => WorktreeStep::Fetch,
+                CheckoutPhase::AddingWorktree => WorktreeStep::WorktreeAdd,
+            };
+            let _ = bus.send(Event::WorktreeProgress {
+                session_key: session_key.clone(),
+                step,
+                status: WorktreeStepStatus::Started,
+            });
+        })
+    };
+    let mgr = lazybox_git_ops::WorktreeManager::default_base().with_progress(sink);
     let cfg = lazybox_config::Config::load().unwrap_or_default();
 
     // The upstream `owner/repo` to clone, when the workspace has one. A
@@ -1433,12 +1468,6 @@ async fn provision_worktree(
         None => clonable_repo_from_project(config, workspace).ok(),
     };
 
-    emit_worktree_progress(
-        config,
-        session_key,
-        WorktreeStep::Checkout,
-        WorktreeStepStatus::Started,
-    );
     let (worktree, repo_key) = match repo {
         Some(repo) => {
             let (owner, name) = repo.split_once('/').ok_or_else(|| {
@@ -1493,12 +1522,6 @@ async fn provision_worktree(
             (worktree, None)
         }
     };
-    emit_worktree_progress(
-        config,
-        session_key,
-        WorktreeStep::Checkout,
-        WorktreeStepStatus::Done,
-    );
     emit_worktree_progress(
         config,
         session_key,
@@ -1863,7 +1886,7 @@ async fn ensure_worktree_present(
         emit_worktree_progress(
             config,
             session_key,
-            WorktreeStep::Checkout,
+            WorktreeStep::Clone,
             WorktreeStepStatus::Failed(e.to_string()),
         );
         let _ = config.bus.send(Event::provider_error_retryable(
@@ -5142,9 +5165,10 @@ mod tests {
             .unwrap();
         assert!(dir.join(".git").exists(), "a real git repo was created");
 
-        // The checklist-driving progress events fire in order:
-        // Checkout Started/Done then Setup Started/Done, all keyed to
-        // the spawn's session.
+        // The checklist-driving progress events fire in order. A
+        // standalone init has no clone or fetch to do, so the modal
+        // mounts on the leading Clone Started, the worktree-add phase
+        // animates, then Setup runs — all keyed to the spawn's session.
         let mut progress = Vec::new();
         while let Ok(ev) = bus_rx.try_recv() {
             if let Event::WorktreeProgress {
@@ -5160,8 +5184,8 @@ mod tests {
         assert_eq!(
             progress,
             vec![
-                (WorktreeStep::Checkout, WorktreeStepStatus::Started),
-                (WorktreeStep::Checkout, WorktreeStepStatus::Done),
+                (WorktreeStep::Clone, WorktreeStepStatus::Started),
+                (WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started),
                 (WorktreeStep::Setup, WorktreeStepStatus::Started),
                 (WorktreeStep::Setup, WorktreeStepStatus::Done),
             ],

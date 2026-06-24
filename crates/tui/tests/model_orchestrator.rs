@@ -1742,7 +1742,7 @@ fn worktree_progress_event_mounts_the_checklist_modal() {
     assert!(m.modal_stack.is_empty());
     m.handle_daemon_event(IpcEvent::WorktreeProgress {
         session_key: sk,
-        step: WorktreeStep::Checkout,
+        step: WorktreeStep::Clone,
         status: WorktreeStepStatus::Started,
     });
     assert_eq!(
@@ -1757,11 +1757,15 @@ fn progress_events_remount_in_place_without_stacking() {
     use lazybox_ipc::{WorktreeStep, WorktreeStepStatus};
     let mut m = build_model();
     let sk = SessionKey::new("github:o/r#42");
-    for status in [WorktreeStepStatus::Started, WorktreeStepStatus::Done] {
+    for step in [
+        WorktreeStep::Clone,
+        WorktreeStep::Fetch,
+        WorktreeStep::WorktreeAdd,
+    ] {
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key: sk.clone(),
-            step: WorktreeStep::Checkout,
-            status,
+            step,
+            status: WorktreeStepStatus::Started,
         });
     }
     m.handle_daemon_event(IpcEvent::WorktreeProgress {
@@ -1780,20 +1784,20 @@ fn progress_events_remount_in_place_without_stacking() {
 }
 
 #[test]
-fn terminal_spawned_holds_then_tears_down_the_progress_checklist() {
+fn terminal_spawned_mid_checklist_walks_every_step_before_dismissing() {
     use lazybox_ipc::{TerminalId, TerminalKind, WorktreeStep, WorktreeStepStatus};
     use lazybox_tui::realm::Msg;
     use lazybox_tui::realm::components::worktree_progress::MIN_STEP_DWELL;
     let mut m = build_model();
     let sk = SessionKey::new("github:o/r#42");
+    // The provision has only just started (clone kicked off) when the
+    // session goes live — `TerminalSpawned` arrives mid-checklist.
     m.handle_daemon_event(IpcEvent::WorktreeProgress {
         session_key: sk.clone(),
-        step: WorktreeStep::Setup,
-        status: WorktreeStepStatus::Done,
+        step: WorktreeStep::Clone,
+        status: WorktreeStepStatus::Started,
     });
     assert_eq!(m.modal_stack.last(), Some(&Id::WorktreeProgress));
-    // A fast spawn lands right after the burst. The checklist must NOT
-    // vanish on the spot — it's held so each step gets its dwell.
     m.handle_daemon_event(IpcEvent::TerminalSpawned {
         terminal_id: TerminalId(1),
         session_key: sk,
@@ -1802,29 +1806,38 @@ fn terminal_spawned_holds_then_tears_down_the_progress_checklist() {
     });
     assert!(
         m.modal_stack.contains(&Id::WorktreeProgress),
-        "a fast spawn must hold the checklist, not flash it away",
+        "a mid-checklist spawn must hold the checklist, not flash it away",
     );
     // Ticks past each step's dwell walk the display through, and only
-    // then does the modal tear down. Bounded so a regression that never
-    // dismisses fails instead of hanging.
+    // after every step has had its dwell does the modal tear down.
+    // Bounded so a regression that never dismisses fails instead of
+    // hanging. Count the ticks survived to prove the checklist actually
+    // advanced step-by-step rather than dismissing early.
+    let mut ticks_survived = 0;
     let mut torn_down = false;
-    for _ in 0..(STEP_COUNT_FOR_TEST + 1) {
+    for _ in 0..(STEP_COUNT_FOR_TEST + 2) {
         std::thread::sleep(MIN_STEP_DWELL + std::time::Duration::from_millis(50));
         m.update(Msg::WorktreeProgressTick);
         if !m.modal_stack.contains(&Id::WorktreeProgress) {
             torn_down = true;
             break;
         }
+        ticks_survived += 1;
     }
     assert!(
         torn_down,
         "the checklist must tear down once every step has had its dwell",
     );
+    assert!(
+        ticks_survived >= STEP_COUNT_FOR_TEST - 1,
+        "expected the display to walk all {STEP_COUNT_FOR_TEST} rows \
+         (one dwell each) before dismissing; only survived {ticks_survived} ticks",
+    );
 }
 
-/// Checklist row count, mirrored here so the bounded walk above can't
-/// spin forever.
-const STEP_COUNT_FOR_TEST: usize = 3;
+/// Checklist row count (clone, fetch, worktree-add, setup, agent),
+/// mirrored here so the bounded walk above can't spin forever.
+const STEP_COUNT_FOR_TEST: usize = 5;
 
 #[test]
 fn instant_resume_does_not_flash_the_progress_modal() {
@@ -1851,7 +1864,7 @@ fn failed_step_keeps_the_checklist_up_past_terminal_spawned() {
     let sk = SessionKey::new("github:o/r#42");
     m.handle_daemon_event(IpcEvent::WorktreeProgress {
         session_key: sk.clone(),
-        step: WorktreeStep::Checkout,
+        step: WorktreeStep::Clone,
         status: WorktreeStepStatus::Failed("remote unreachable".into()),
     });
     // The daemon's empty-dir fallback still spawns a terminal.

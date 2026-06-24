@@ -44,7 +44,7 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Stable id for a spawned terminal. Distinct from SessionKey because a
 /// single session may hold multiple terminals (agent + shell + logs).
@@ -921,8 +921,9 @@ pub enum Event {
     /// only on the provisioning path — an instant resume of an existing
     /// worktree sends none, so the TUI's progress modal never flashes
     /// for the fast path. `session_key` ties the events to the spawn
-    /// the user just triggered; the matching `TerminalSpawned` dismisses
-    /// the modal once the session is ready.
+    /// the user just triggered; the matching `TerminalSpawned` *queues*
+    /// the dismiss rather than tearing the modal down on the spot, so a
+    /// fast provision still walks every step before the modal closes.
     WorktreeProgress {
         session_key: SessionKey,
         step: WorktreeStep,
@@ -1195,11 +1196,20 @@ impl ProviderErrorKind {
 /// `Event::WorktreeProgress`. Ordered as the daemon runs them so the
 /// TUI's progress checklist can render them top-to-bottom without
 /// carrying ordering on the wire.
+///
+/// `Clone`/`Fetch`/`WorktreeAdd` are the sub-phases of what used to be a
+/// single opaque `Checkout` step — split so the long cold-clone phase
+/// animates with advancing sub-progress instead of one spinner that
+/// jumps straight to done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorktreeStep {
-    /// `git worktree add` after a (possibly cold) clone + fetch — the
-    /// slow part on a brand-new repo.
-    Checkout,
+    /// `git clone --bare` — the slow part on a brand-new repo. Skipped
+    /// (instant) when a healthy bare clone is already cached.
+    Clone,
+    /// Refreshing the remote-tracking ref before branching off it.
+    Fetch,
+    /// `git worktree add` materializing the checkout on disk.
+    WorktreeAdd,
     /// Applying configured mounts + setup scripts to the fresh tree.
     Setup,
 }

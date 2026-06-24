@@ -1501,10 +1501,9 @@ fn footer_drops_all_keys_to_pty_noise() {
     // Regression for issue #25: `all keys → PTY` was a footer entry
     // that described an implementation mode rather than an actionable
     // shortcut. The hint bar should now only carry escape hatches —
-    // leave the pane, interrupt the process. (Shift-PgUp/Dn scroll
-    // was dropped in #11 — mouse-wheel is the primary scroll path.)
-    let overrides = std::collections::BTreeMap::new();
-    let bindings = TerminalStack::contextual_bindings(&overrides, ']');
+    // leave the pane, interrupt the process. (The Shift-PgUp/Dn scroll
+    // hint was dropped in #202 — mouse-wheel is the primary scroll path.)
+    let bindings = TerminalStack::contextual_bindings(']');
     let labels: Vec<String> = bindings.iter().map(|b| b.label.to_string()).collect();
     assert!(
         !labels.iter().any(|l| l.contains("→ PTY")),
@@ -1521,12 +1520,13 @@ fn footer_drops_all_keys_to_pty_noise() {
 }
 
 #[test]
-fn footer_surfaces_leader_tile_and_scroll_escape_hatches() {
-    // Issue #170: from inside a focused terminal there was no footer
-    // hint for the way back to the sidebar, nor for tile / scroll
-    // controls. The hint bar must now carry all of them.
-    let overrides = std::collections::BTreeMap::new();
-    let bindings = TerminalStack::contextual_bindings(&overrides, ']');
+fn footer_surfaces_leader_focus_and_tile_escape_hatches() {
+    // Issue #170 / #202: from inside a focused terminal the hint bar
+    // must carry the way back to the sidebar (`]]`), the focus-mode
+    // toggle (`]]f`), the split-panes prefix (`Ctrl-w`) and the snippet
+    // leader. The `Shift-PgUp/PgDn` scroll hint is deliberately absent
+    // (#202) — scrolling is intuitive and crowded out more useful hints.
+    let bindings = TerminalStack::contextual_bindings(']');
     let labels: Vec<String> = bindings.iter().map(|b| b.label.to_string()).collect();
     let keys: Vec<String> = bindings.iter().map(|b| b.keys.to_string()).collect();
     assert!(
@@ -1535,20 +1535,28 @@ fn footer_surfaces_leader_tile_and_scroll_escape_hatches() {
     );
     assert!(keys.iter().any(|k| k == "]]"), "leave chord, got {keys:?}");
     assert!(
-        labels.iter().any(|l| l == "scroll"),
-        "scroll hint, got {labels:?}"
+        labels.iter().any(|l| l == "focus mode"),
+        "focus-mode hint, got {labels:?}"
     );
     assert!(
-        labels.iter().any(|l| l == "tiles"),
-        "tile hint, got {labels:?}"
+        keys.iter().any(|k| k == "]]f"),
+        "focus-mode chord, got {keys:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l == "split panes"),
+        "split-panes hint, got {labels:?}"
     );
     assert!(
         keys.iter().any(|k| k == "Ctrl-w"),
-        "tile prefix, got {keys:?}"
+        "split-panes prefix, got {keys:?}"
     );
     assert!(
         keys.iter().any(|k| k == "]]<key>"),
         "snippet leader, got {keys:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "scroll"),
+        "scroll hint must not surface in the footer, got {labels:?}"
     );
 }
 
@@ -1557,10 +1565,13 @@ fn footer_leader_hints_honor_the_configured_escape_char() {
     // Issue #170: a user who remapped `ui.terminal_escape_char` must
     // see the chord they actually type — `}}` / `}}<key>`, not the
     // hardcoded `]]` default.
-    let overrides = std::collections::BTreeMap::new();
-    let bindings = TerminalStack::contextual_bindings(&overrides, '}');
+    let bindings = TerminalStack::contextual_bindings('}');
     let keys: Vec<String> = bindings.iter().map(|b| b.keys.to_string()).collect();
     assert!(keys.iter().any(|k| k == "}}"), "leave chord, got {keys:?}");
+    assert!(
+        keys.iter().any(|k| k == "}}f"),
+        "focus-mode chord, got {keys:?}"
+    );
     assert!(
         keys.iter().any(|k| k == "}}<key>"),
         "snippet leader, got {keys:?}"
@@ -1580,7 +1591,7 @@ fn every_footer_hint_is_catalog_backed_or_allowlisted() {
     // the build rather than ship a footer that lies.
     use lazybox_tui_core::action::ActionDef;
     let overrides = std::collections::BTreeMap::new();
-    let bindings = TerminalStack::contextual_bindings(&overrides, ']');
+    let bindings = TerminalStack::contextual_bindings(']');
     let catalog = ActionDef::catalog(&[], &overrides);
     let mut catalog_pairs: Vec<(String, String)> = catalog
         .iter()
@@ -1590,13 +1601,17 @@ fn every_footer_hint_is_catalog_backed_or_allowlisted() {
     // `terminal_escape_char`, not the catalog default string), so vouch
     // for the rendered form rather than the `]]` catalog placeholder.
     catalog_pairs.push(("]]".to_string(), "exit to sidebar".to_string()));
+    // ToggleFocusMode rides the `]]` leader from a terminal (`]]f`)
+    // rather than its catalog default key (`.`), so vouch for the
+    // leader-rendered form while the label still tracks the catalog.
+    catalog_pairs.push(("]]f".to_string(), "focus mode".to_string()));
     // The explicit record of what's intentionally NOT catalog-backed:
     // keys forwarded straight to the PTY (`Ctrl-c` interrupt, `Ctrl-w`
-    // tile prefix) and the snippet leader (its bindings are the user's
-    // snippet library, not catalog actions).
+    // split-panes prefix) and the snippet leader (its bindings are the
+    // user's snippet library, not catalog actions).
     let allow: &[(&str, &str)] = &[
         ("Ctrl-c", "interrupt"),
-        ("Ctrl-w", "tiles"),
+        ("Ctrl-w", "split panes"),
         ("]]<key>", "snippets"),
     ];
     for b in &bindings {
@@ -1612,27 +1627,24 @@ fn every_footer_hint_is_catalog_backed_or_allowlisted() {
 }
 
 #[test]
-fn footer_leave_hint_ignores_a_leave_terminal_override() {
+fn footer_leave_hint_tracks_the_escape_char_not_an_action_override() {
     // #188: the leave chord is owned by `ui.terminal_escape_char`, not
     // the `leave_terminal` action_keys slot. Terminal-pane dispatch
     // matches only the escape char doubled and never the catalog chord,
-    // so honoring a `leave_terminal: "Esc"` rebind here would advertise
-    // a key the dispatcher ignores — the footer would say "Esc exit to
-    // sidebar" while pressing Esc does nothing. The hint must stay the
-    // escape char doubled regardless of the override.
-    let mut overrides = std::collections::BTreeMap::new();
-    overrides.insert("leave_terminal".to_string(), "Esc".to_string());
-    let bindings = TerminalStack::contextual_bindings(&overrides, ']');
+    // so the footer must always render the escape char doubled. The
+    // function takes no `overrides` map precisely because no terminal
+    // hint is action_keys-sensitive — the leave/focus/snippet chords all
+    // derive from the escape char, and `Ctrl-c`/`Ctrl-w` are literal.
+    let bindings = TerminalStack::contextual_bindings(']');
     let leave = bindings.iter().find(|b| b.label == "exit to sidebar");
     assert!(leave.is_some(), "leave-terminal binding must surface");
     assert_eq!(
         leave.unwrap().keys,
         "]]",
-        "footer must show the escape char doubled, not the ignored rebind",
+        "footer must show the escape char doubled",
     );
-    // Honoring the escape-char rebind is still correct — that field DOES
-    // drive dispatch.
-    let bindings = TerminalStack::contextual_bindings(&overrides, '}');
+    // A remapped escape char DOES drive dispatch, so the hint follows it.
+    let bindings = TerminalStack::contextual_bindings('}');
     let leave = bindings.iter().find(|b| b.label == "exit to sidebar");
     assert_eq!(leave.unwrap().keys, "}}");
 }

@@ -116,19 +116,12 @@ impl Terminals {
         self.focused = focused;
     }
 
-    /// State-aware short list for the footer hint bar. Catalog-driven
-    /// (scroll + leave-terminal) plus the hand-curated `Ctrl-c`
-    /// interrupt hint — see `TerminalStack::contextual_bindings_static`
-    /// for the per-row rationale.
-    pub fn contextual_bindings(
-        &self,
-        overrides: &std::collections::BTreeMap<String, String>,
-        escape_char: char,
-    ) -> Vec<crate::pane::Binding> {
-        crate::components::terminal_stack::TerminalStack::contextual_bindings(
-            overrides,
-            escape_char,
-        )
+    /// State-aware short list for the footer hint bar — the `]]` leave
+    /// and `]]f` focus-mode leader chords plus the hand-curated `Ctrl-c`
+    /// interrupt and `Ctrl-w` split-panes hints. See
+    /// `TerminalStack::contextual_bindings` for the per-row rationale.
+    pub fn contextual_bindings(&self, escape_char: char) -> Vec<crate::pane::Binding> {
+        crate::components::terminal_stack::TerminalStack::contextual_bindings(escape_char)
     }
 
     /// Scroll the active terminal's viewport by `delta` rows. Negative

@@ -1789,9 +1789,10 @@ impl TerminalStack {
     /// footer. The user always knows their typing reaches the inner
     /// program; what they need surfaced is *escape hatches*: leave the
     /// pane (the only way back to the sidebar once the PTY owns the
-    /// keyboard), scroll the scrollback, manage tiles, send SIGINT.
-    /// Keys are sourced from the catalog where possible so a rebind /
-    /// rename in `ActionDef` flows through automatically.
+    /// keyboard), toggle focus mode, split panes, send SIGINT. The
+    /// `Shift-PgUp/PgDn` scroll hint is deliberately omitted —
+    /// scrolling is intuitive (the mouse wheel works too) and it
+    /// crowded out more useful hints (#202).
     ///
     /// `escape_char` is the configured `ui.terminal_escape_char` (the
     /// `]` in the default `]]` leader). The leader-based hints render
@@ -1804,10 +1805,7 @@ impl TerminalStack {
     /// takes `&self` for symmetry with the other panes (Sidebar /
     /// Right both inspect state to decide what to surface), but
     /// reaches through to this stateless implementation.
-    pub fn contextual_bindings(
-        overrides: &std::collections::BTreeMap<String, String>,
-        escape_char: char,
-    ) -> Vec<crate::Binding> {
+    pub fn contextual_bindings(escape_char: char) -> Vec<crate::Binding> {
         use crate::Binding;
         use lazybox_tui_core::action::{ActionDef, ActionKind};
         use std::borrow::Cow;
@@ -1821,7 +1819,7 @@ impl TerminalStack {
         // the footer would say "Esc exit to sidebar" while Esc does
         // nothing (#188). Always render the escape char doubled.
         let leave_keys: Cow<'static, str> = Cow::Owned(leader.clone());
-        let scroll = ActionDef::for_kind(ActionKind::TerminalScroll);
+        let focus = ActionDef::for_kind(ActionKind::ToggleFocusMode);
         vec![
             // Bare `]]` (the configured escape char doubled) — the way
             // back to the sidebar once the PTY owns the keyboard. The
@@ -1831,6 +1829,15 @@ impl TerminalStack {
                 keys: leave_keys,
                 label: Cow::Borrowed(leave.label),
             },
+            // `]]f` toggles focus mode (near-fullscreen agent terminal).
+            // Like the leave chord it rides the `]]` leader rather than
+            // the catalog default key (`.`, which the PTY would eat), so
+            // the keys are hand-built from the escape char while the
+            // label tracks the catalog so a rename flows through (#202).
+            Binding {
+                keys: Cow::Owned(format!("{leader}f")),
+                label: Cow::Borrowed(focus.label),
+            },
             // `Ctrl-c` is forwarded straight to the PTY rather than
             // being a catalog action — but it's actionable knowledge
             // for the user (escape a hung process), so it stays in
@@ -1839,16 +1846,14 @@ impl TerminalStack {
                 keys: Cow::Borrowed("Ctrl-c"),
                 label: Cow::Borrowed("interrupt"),
             },
-            Binding {
-                keys: scroll.effective_keys_display(overrides),
-                label: Cow::Borrowed(scroll.label),
-            },
             // `Ctrl-w` is the tile prefix (split / focus-move / close);
             // like `Ctrl-c` it's forwarded to the dispatcher rather than
-            // a catalog action, so it's hand-curated here.
+            // a catalog action, so it's hand-curated here. Labeled
+            // "split panes" rather than "tiles" — the latter meant
+            // nothing to a user who'd never used tmux-style panes (#202).
             Binding {
                 keys: Cow::Borrowed("Ctrl-w"),
-                label: Cow::Borrowed("tiles"),
+                label: Cow::Borrowed("split panes"),
             },
             // Snippet picker entry point (issues #40, #205). The `]]`
             // leader is shared with LeaveTerminal: `]]` alone leaves,
@@ -4214,7 +4219,7 @@ mod footer_scroll_independence {
     fn render_rows(stack: &mut TerminalStack) -> Vec<String> {
         let backend = TestBackend::new(W, H);
         let mut term = Terminal::new(backend).unwrap();
-        let binds = TerminalStack::contextual_bindings(&std::collections::BTreeMap::new(), ']');
+        let binds = TerminalStack::contextual_bindings(']');
         term.draw(|f| {
             // Footer owns the last row; the panes fill everything above.
             let pane = Rect::new(0, 0, W, H - 1);
@@ -4714,7 +4719,6 @@ mod terminal_availability_tests {
     //! the pane's real behavior agrees with it.
     use super::*;
     use lazybox_tui_core::action::{self, ActionDef, ActionKind};
-    use std::collections::BTreeMap;
 
     fn stack_with_agent() -> TerminalStack {
         let sk = SessionKey::new("github:o/r#1");
@@ -4761,8 +4765,7 @@ mod terminal_availability_tests {
         // dispatch in terminal focus. The single catalog-backed binding
         // is the `]]` leave chord — the gateway back to the globals —
         // and none of the universal shortcuts may be advertised here.
-        let overrides = BTreeMap::new();
-        let bindings = TerminalStack::contextual_bindings(&overrides, ']');
+        let bindings = TerminalStack::contextual_bindings(']');
 
         let leave = ActionDef::for_kind(ActionKind::LeaveTerminal);
         assert!(

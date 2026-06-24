@@ -86,6 +86,24 @@ impl Terminals {
         self.inner.session_key_for(id)
     }
 
+    /// Terminal-slot count for a session — the baseline a non-singleton
+    /// spawn (shell) is measured against by the spawn-spinner projection.
+    pub fn terminal_count_for(&self, session_key: &SessionKey) -> usize {
+        self.inner.terminal_count_for(session_key)
+    }
+
+    /// Whether a spawn of `kind` into `session_key` has produced its
+    /// terminal yet (the spawn-spinner projection, #206).
+    pub fn spawn_satisfied(
+        &self,
+        session_key: &SessionKey,
+        kind: &lazybox_ipc::TerminalKind,
+        baseline_count: usize,
+    ) -> bool {
+        self.inner
+            .spawn_satisfied(session_key, kind, baseline_count)
+    }
+
     /// Promote `target` to the active tab (no-op if it isn't in the
     /// active session's visible set). Used by the spawn-follow pin.
     pub fn focus_terminal(&mut self, target: TerminalId) -> bool {

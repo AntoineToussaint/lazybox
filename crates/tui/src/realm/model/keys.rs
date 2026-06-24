@@ -409,13 +409,22 @@ impl<T: TerminalAdapter> Model<T> {
     /// fallback so both surface the same feedback.
     fn flush_dispatched_cmds(&mut self, cmds: Vec<IpcCommand>) {
         for cmd in &cmds {
-            if let IpcCommand::Spawn { kind, .. } = cmd {
+            if let IpcCommand::Spawn {
+                kind, session_key, ..
+            } = cmd
+            {
                 let label = match kind {
                     lazybox_ipc::TerminalKind::Shell => "shell".to_string(),
                     lazybox_ipc::TerminalKind::Agent(a) => a.to_string(),
                     other => format!("{other:?}").to_lowercase(),
                 };
-                self.status.note_spawning(label);
+                // Capture the session's current terminal count so the
+                // spinner — a projection of live terminal state — knows a
+                // fresh terminal has appeared (see
+                // `recompute_spawn_spinner`).
+                let baseline = self.terminals.terminal_count_for(session_key);
+                self.status
+                    .note_spawning(label, session_key.clone(), kind.clone(), baseline);
             }
         }
         for cmd in cmds {

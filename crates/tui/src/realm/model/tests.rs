@@ -4225,3 +4225,115 @@ mod terminal_section_dispatch_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod spawn_spinner_projection_tests {
+    //! #206: the footer spawn spinner is a projection of the live
+    //! terminal set — it clears the instant a matching terminal exists,
+    //! even when no `TerminalSpawned`/`TerminalFocusRequested` clear
+    //! event reaches the model for that spawn.
+    use super::super::*;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = lazybox_ipc::channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    #[test]
+    fn projection_clears_spinner_without_a_spawn_event() {
+        let mut m = build_model();
+        let sk = SessionKey::new("github:o/r#1");
+        // The agent terminal already exists (e.g. the spawn collapsed
+        // onto an existing runner — the "terminal already existed" stuck
+        // case the issue calls out).
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(3),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+        // Light the spinner for that same target.
+        m.status.note_spawning(
+            "claude",
+            sk.clone(),
+            TerminalKind::Agent("claude".into()),
+            1,
+        );
+        assert!(m.status.spawning.is_some());
+
+        // A NON-spawn event drives `handle_daemon_event`; there is no
+        // explicit clear path for it, yet the spinner clears because it
+        // is recomputed from the live terminal set.
+        m.handle_daemon_event(IpcEvent::PollCompleted {
+            source: "github".into(),
+            count: 0,
+        });
+        assert!(
+            m.status.spawning.is_none(),
+            "projection cleared the spinner without a matching spawn event",
+        );
+    }
+
+    #[test]
+    fn idle_tick_backstops_the_projection() {
+        let mut m = build_model();
+        let sk = SessionKey::new("github:o/r#1");
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(5),
+            session_key: sk.clone(),
+            kind: TerminalKind::Shell,
+            no_permission: false,
+        });
+        // Shell spawn whose baseline (0) is below the current count (1).
+        m.status
+            .note_spawning("shell", sk.clone(), TerminalKind::Shell, 0);
+        assert!(m.status.spawning.is_some());
+
+        // No further daemon events — the idle tick alone clears it.
+        let _ = m.polling_tick();
+        assert!(
+            m.status.spawning.is_none(),
+            "idle-tick backstop cleared the spinner",
+        );
+    }
+
+    #[test]
+    fn spinner_stays_lit_until_its_own_terminal_lands() {
+        let mut m = build_model();
+        let target = SessionKey::new("github:o/r#1");
+        m.status.note_spawning(
+            "claude",
+            target.clone(),
+            TerminalKind::Agent("claude".into()),
+            0,
+        );
+
+        // A terminal for an UNRELATED workspace must not clear our
+        // spinner (the old "any TerminalSpawned clears it" behavior).
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(8),
+            session_key: SessionKey::new("github:o/r#2"),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+        assert!(
+            m.status.spawning.is_some(),
+            "an unrelated spawn must not clear our spinner",
+        );
+
+        // Our target's terminal lands → cleared.
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(9),
+            session_key: target,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+        assert!(
+            m.status.spawning.is_none(),
+            "spinner cleared by its own terminal"
+        );
+    }
+}

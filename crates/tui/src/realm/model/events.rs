@@ -569,12 +569,16 @@ impl<T: TerminalAdapter> Model<T> {
             }
             // A terminal just appeared — auto-focus the Terminals
             // pane so the user can start typing immediately, and
-            // clear any "Spawning…" footer notice that was set when
-            // the matching Spawn command was sent.
+            // clear any legacy "Spawning…" footer notice that was set
+            // when the matching Spawn command was sent. The animated
+            // spawn *spinner* is NOT cleared here: it's a projection of
+            // the live terminal set (recomputed at the tail of this
+            // function via `recompute_spawn_spinner`), so a spawn event
+            // for an unrelated workspace can't clear the wrong spinner
+            // and a missing one can't strand it (#206).
             self.focus = PaneFocus::Terminals;
             self.set_focus_attr();
             self.status.clear_spawning_notice();
-            self.status.clear_spawning();
             self.needs_pane_sync = true;
             // Pinned spawn-follow: a `w` press recorded the workspace it
             // targeted. When that workspace's terminal finally lands —
@@ -626,6 +630,10 @@ impl<T: TerminalAdapter> Model<T> {
         } else {
             self.needs_pane_sync = true;
         }
+        // This event may have added the terminal an in-flight spawn was
+        // waiting for. Recompute the spinner from the now-current
+        // terminal set rather than trusting a single clear event (#206).
+        self.recompute_spawn_spinner();
         self.redraw = true;
     }
 
@@ -709,6 +717,26 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Clear the spawn spinner once a terminal for its target exists in
+    /// the live terminal set. The spinner is a *projection* of that set,
+    /// not a latch waiting on one `TerminalSpawned`/`TerminalFocusRequested`
+    /// to arrive: a dropped, raced, or mismatched event (rebadge after a
+    /// merge, focus redirected, terminal already existed) can no longer
+    /// strand it (#206). Called after every daemon event — any of which
+    /// can produce the awaited terminal — and on the idle tick as a
+    /// backstop. Returns true if it cleared (caller redraws).
+    pub fn recompute_spawn_spinner(&mut self) -> bool {
+        let satisfied = self.status.spawning.as_ref().is_some_and(|sp| {
+            self.terminals
+                .spawn_satisfied(&sp.session_key, &sp.kind, sp.baseline_count)
+        });
+        if satisfied {
+            self.status.clear_spawning()
+        } else {
+            false
+        }
+    }
+
     /// Drive the polling spinner + termination check from the run
     /// loop. Cheap; called every iteration. Returns Some(msg) when
     /// the polling modal wants to be torn down.
@@ -722,8 +750,15 @@ impl<T: TerminalAdapter> Model<T> {
     ///   poll is still in flight).
     pub fn polling_tick(&mut self) -> Option<Msg> {
         let msg = self.status.polling_tick();
-        let needs_redraw =
-            msg.is_some() || self.status.bg_poll.is_some() || self.status.spawning.is_some();
+        // Backstop the projection: if the spawn's terminal slipped in
+        // without a daemon event reaching `handle_daemon_event` (e.g. it
+        // already existed when the spawn was sent), the idle tick still
+        // clears the spinner.
+        let cleared_spawn = self.recompute_spawn_spinner();
+        let needs_redraw = msg.is_some()
+            || cleared_spawn
+            || self.status.bg_poll.is_some()
+            || self.status.spawning.is_some();
         if needs_redraw {
             self.redraw = true;
         }

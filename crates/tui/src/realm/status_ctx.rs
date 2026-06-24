@@ -7,6 +7,8 @@ use crate::realm::components::footer::{Notice, NoticeSeverity};
 use crate::realm::components::polling::Polling;
 use crate::realm::model::Msg;
 use chrono::{DateTime, Utc};
+use lazybox_core::SessionKey;
+use lazybox_ipc::TerminalKind;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -137,13 +139,17 @@ const BG_POLL_IDLE_GUARD: Duration = Duration::from_secs(90);
 /// 60+ second poll is normal.
 const STILL_WORKING_HINT_AFTER: Duration = Duration::from_secs(30);
 
-/// Backstop for the spawn spinner: if no `TerminalSpawned` /
-/// `TerminalFocusRequested` (and no spawn `ProviderError`) lands within
-/// this window, clear the indicator so a dropped event can't leave it
-/// spinning forever. Deliberately generous — a cold bare-clone +
-/// worktree checkout for a large repo can run well past a minute, and
-/// the whole point of the spinner is to reassure during exactly that
-/// wait, so the guard must outlast a realistic worst-case provision.
+/// Last-resort backstop for the spawn spinner. The spinner is primarily
+/// a *projection* of live terminal state — it clears the moment a
+/// terminal for the spawn's target appears (see
+/// `Model::recompute_spawn_spinner`), independent of any single event
+/// arriving — and a spawn `ProviderError` clears it on failure. This
+/// guard only covers the pathological case where neither ever happens
+/// (the spawn vanished without a terminal and without an error). It is
+/// deliberately generous — a cold bare-clone + worktree checkout for a
+/// large repo can run well past a minute, and the whole point of the
+/// spinner is to reassure during exactly that wait, so the guard must
+/// outlast a realistic worst-case provision.
 const SPAWN_SPINNER_GUARD: Duration = Duration::from_secs(120);
 
 /// Lightweight footer indicator for poll cycles AFTER the initial
@@ -194,6 +200,20 @@ pub(crate) struct Spawning {
     /// Agent / shell label, e.g. `"claude"`, `"shell"`. Rendered as
     /// `spawning claude · 3s`.
     pub label: String,
+    /// Workspace the spawn targets. Together with `kind` and
+    /// `baseline_count`, lets the spinner be a projection of the live
+    /// terminal set: it clears the instant a matching terminal exists,
+    /// regardless of whether the `TerminalSpawned` event was seen (see
+    /// `Model::recompute_spawn_spinner`).
+    pub session_key: SessionKey,
+    /// What was spawned. Singleton kinds (agents) clear when a runner of
+    /// the same identity exists in the session; non-singleton kinds
+    /// (shells) clear when the session's terminal count rises above
+    /// `baseline_count`.
+    pub kind: TerminalKind,
+    /// Terminals already in the target session when the spawn was sent.
+    /// A non-singleton spawn is satisfied once the count exceeds this.
+    pub baseline_count: usize,
     pub spinner_idx: usize,
     pub started_at: Instant,
 }
@@ -261,12 +281,24 @@ impl StatusCtx {
     }
 
     /// Light up the animated spawn indicator. `label` is the agent /
-    /// shell id (`"claude"`, `"shell"`). Replaces any prior spawn
-    /// indicator — back-to-back spawns just restart the timer, which
-    /// is the right behavior (the latest spawn is the one in flight).
-    pub fn note_spawning(&mut self, label: impl Into<String>) {
+    /// shell id (`"claude"`, `"shell"`); `session_key` + `kind` +
+    /// `baseline_count` capture the target so the spinner can be cleared
+    /// by projection once a matching terminal exists. Replaces any prior
+    /// spawn indicator — back-to-back spawns just restart the timer,
+    /// which is the right behavior (the latest spawn is the one in
+    /// flight).
+    pub fn note_spawning(
+        &mut self,
+        label: impl Into<String>,
+        session_key: SessionKey,
+        kind: TerminalKind,
+        baseline_count: usize,
+    ) {
         self.spawning = Some(Spawning {
             label: label.into(),
+            session_key,
+            kind,
+            baseline_count,
             spinner_idx: 0,
             started_at: Instant::now(),
         });
@@ -547,7 +579,12 @@ mod tests {
         let mut s = StatusCtx::new();
         assert!(s.spawning.is_none());
 
-        s.note_spawning("claude");
+        s.note_spawning(
+            "claude",
+            "test:ws".into(),
+            TerminalKind::Agent("claude".into()),
+            0,
+        );
         let sp = s.spawning.as_ref().expect("spawn indicator lit");
         assert_eq!(sp.label, "claude");
         // Fresh spawn: sub-second label has no elapsed suffix.
@@ -565,11 +602,16 @@ mod tests {
         // (latest spawn is the one actually in flight) and resets the
         // animation frame.
         let mut s = StatusCtx::new();
-        s.note_spawning("shell");
+        s.note_spawning("shell", "test:ws".into(), TerminalKind::Shell, 0);
         if let Some(sp) = s.spawning.as_mut() {
             sp.spinner_idx = 7;
         }
-        s.note_spawning("claude");
+        s.note_spawning(
+            "claude",
+            "test:ws".into(),
+            TerminalKind::Agent("claude".into()),
+            0,
+        );
         let sp = s.spawning.as_ref().unwrap();
         assert_eq!(sp.label, "claude");
         assert_eq!(sp.spinner_idx, 0, "frame counter restarts on re-spawn");
@@ -578,7 +620,12 @@ mod tests {
     #[test]
     fn spawn_label_gains_elapsed_suffix_after_a_second() {
         let mut s = StatusCtx::new();
-        s.note_spawning("claude");
+        s.note_spawning(
+            "claude",
+            "test:ws".into(),
+            TerminalKind::Agent("claude".into()),
+            0,
+        );
         // Backdate so the elapsed branch fires deterministically.
         if let Some(sp) = s.spawning.as_mut() {
             sp.started_at = Instant::now() - Duration::from_secs(3);
@@ -589,7 +636,12 @@ mod tests {
     #[test]
     fn spawn_guard_clears_after_a_dropped_terminal_spawned() {
         let mut s = StatusCtx::new();
-        s.note_spawning("claude");
+        s.note_spawning(
+            "claude",
+            "test:ws".into(),
+            TerminalKind::Agent("claude".into()),
+            0,
+        );
         // Backdate well past SPAWN_SPINNER_GUARD so the assertion
         // isn't sensitive to the exact constant.
         if let Some(sp) = s.spawning.as_mut() {
@@ -602,7 +654,12 @@ mod tests {
     #[test]
     fn spawn_guard_leaves_a_fresh_indicator_alone() {
         let mut s = StatusCtx::new();
-        s.note_spawning("claude");
+        s.note_spawning(
+            "claude",
+            "test:ws".into(),
+            TerminalKind::Agent("claude".into()),
+            0,
+        );
         assert!(
             !s.tick_spawning(),
             "a just-started spawn must keep spinning"
@@ -613,7 +670,12 @@ mod tests {
     #[test]
     fn polling_tick_advances_the_spawn_spinner() {
         let mut s = StatusCtx::new();
-        s.note_spawning("claude");
+        s.note_spawning(
+            "claude",
+            "test:ws".into(),
+            TerminalKind::Agent("claude".into()),
+            0,
+        );
         // Backdate the heartbeat so the cadence gate (80ms) opens.
         s.polling_last_tick = Instant::now() - Duration::from_millis(200);
         let before = s.spawning.as_ref().unwrap().spinner_idx;

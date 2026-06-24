@@ -163,6 +163,18 @@ impl<T> ResultExt<T> for Option<T> {
 /// every other client on the slowest one.
 pub const BUS_CAPACITY: usize = 1024;
 
+/// Inline-lane budget. A command in the inline lane (see [`command_lane`])
+/// that holds the serve loop longer than this is an architecture
+/// violation: while it runs, `tokio::select!` can service no other
+/// command and forward no bus/poll event (#34, #206). The detached lane
+/// carries everything that can touch the network, git, the filesystem,
+/// or a contended lock, so a healthy inline handler stays in the low
+/// single-digit milliseconds — the budget is generous enough never to
+/// trip on scheduler jitter, yet far below the multi-second stalls a
+/// real wedge produces. Crossing it bumps the
+/// `inline_budget_violations` metric and logs the offending command.
+pub const INLINE_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Canonical lock-acquisition order for the per-terminal maps when
 /// **co-holding** two or more. AB/BA deadlock requires two paths to
 /// each hold one lock while waiting for the other; the order below
@@ -637,621 +649,57 @@ impl Server {
                     } else {
                         tracing::info!("daemon ← {label}");
                     }
-                    // Time how long the serve loop spends INLINE on this
-                    // command. `tokio::select!` is single-task: while a
-                    // handler `.await`s (or worse, makes a synchronous
-                    // blocking call like a parking_lot store-mutex
-                    // acquire), NO other command — including the `Write`
-                    // keystrokes that drive the terminal — can be
-                    // serviced. The known-slow handlers detach via
-                    // `tokio::spawn` and return here in microseconds; a
-                    // handler that shows up SLOW below is one that's
-                    // wedging the loop (the "can't type while GitHub
-                    // syncs" class of bug — see issue #34). This is the
-                    // breadcrumb that tells us WHICH command, not just
-                    // "the app froze".
+                    // No-blocking architecture (#206). Every command is
+                    // dispatched through one lane decided structurally by
+                    // `command_lane`, never by the arm body:
+                    //   * `Shutdown` is loop control (handled below).
+                    //   * the INLINE lane is a small allow-list of
+                    //     provably-fast, order-sensitive handlers
+                    //     (keystroke `Write`, `Resize`,
+                    //     `RecordUserMessage`, `Subscribe`).
+                    //   * EVERYTHING else — and any command added later,
+                    //     which falls through to `_ => Detached` — runs on
+                    //     the `mutations` JoinSet, so it physically cannot
+                    //     hold the `select!`. A detached handler that
+                    //     stalls (network, git, a cold lock) cannot stall
+                    //     keystrokes or bus/poll forwarding — exactly the
+                    //     "frozen while syncing" bug class (#34, #206).
+                    if matches!(cmd, lazybox_ipc::Command::Shutdown) {
+                        break;
+                    }
                     let cmd_started = std::time::Instant::now();
-                    match cmd {
-                        lazybox_ipc::Command::Subscribe => {
-                            // Offload the SQLite scans (issue #34: pre-fix
-                            // `list_workspaces` + `list_projects` ran on
-                            // the daemon's IPC event-loop task, holding
-                            // up bus-event forwarding for the duration —
-                            // up to several hundred ms on a populated
-                            // store, perceived in the UI as "frozen
-                            // during sync"). `spawn_blocking` moves the
-                            // blocking parking_lot mutex acquisition +
-                            // row iteration off the runtime worker so
-                            // `select!` stays responsive to bus events
-                            // while the snapshot loads.
-                            //
-                            // Both scans share one task so the daemon
-                            // only pays the spawn/handoff cost once and
-                            // doesn't sequentially await two dispatches.
-                            // A panic inside the task (poisoned mutex,
-                            // corrupt JSON) is logged loudly — sending
-                            // an empty Snapshot silently would render a
-                            // blank sidebar with no breadcrumb in the
-                            // log.
-                            let store = self.config.store.clone();
-                            let (workspaces, projects) = match tokio::task::spawn_blocking(
-                                move || (load_workspaces(&*store), load_projects(&*store)),
-                            )
-                            .await
-                            {
-                                Ok(pair) => pair,
-                                Err(e) => {
-                                    tracing::error!(
-                                        "Subscribe snapshot load task failed: {e} — sending empty snapshot",
-                                    );
-                                    (Vec::new(), Vec::new())
-                                }
-                            };
-                            let terminals = spawn_handler::snapshot_terminals(&self.config).await;
-                            let _ = conn.tx.send(Event::Snapshot {
-                                workspaces,
-                                terminals,
-                                projects,
-                            });
-                            // Kick a fresh poll. The freshly-opened
-                            // TUI sees the store-cached snapshot
-                            // immediately above; the wake makes the
-                            // poll loop refresh it within a few
-                            // seconds instead of waiting out the
-                            // remainder of its current sleep.
-                            self.config.poll_wake.notify_one();
-                            // Replay cached viewer identities so a
-                            // reconnecting TUI can render `@me` for
-                            // the local user's bylines without
-                            // waiting for the next poll cycle.
-                            let logins = self
-                                .config
-                                .viewer_identities
-                                .lock()
-                                .expect("viewer_identities poisoned")
-                                .clone();
-                            if !logins.is_empty() {
-                                let _ =
-                                    conn.tx.send(Event::ViewerIdentities { logins });
-                            }
-                        }
-                        lazybox_ipc::Command::Spawn {
-                            session_key,
-                            session_id,
-                            kind,
-                            cwd,
-                            initial_prompt,
-                        } => {
-                            // A spawn carrying a pre-built work prompt is
-                            // an autonomous "work on this" launch (`w` /
-                            // address-comments) — the same end-state as an
-                            // `@lazybox` mention. Run it unattended (skip
-                            // permissions, subject to the
-                            // `autonomous_skip_permissions` toggle) so it
-                            // doesn't stall on the folder-trust / tool-
-                            // approval gate, which also blocks the post-
-                            // spawn prompt inject and eats the submit
-                            // keystroke. Bare interactive spawns (`c` / `x`
-                            // / `u` / `s`) carry no prompt and keep the
-                            // human-in-the-loop approval.
-                            let autonomous = spawn_handler::spawn_is_autonomous(&initial_prompt);
-                            // Detach — a spawn can provision a worktree,
-                            // which on a cold cache runs `git clone --bare`
-                            // (minutes on a big repo). Awaiting that inline
-                            // freezes every keystroke `Write` behind it.
-                            // The handler only touches Arc'd config state
-                            // and broadcasts on the bus, so ordering with
-                            // the serve loop doesn't matter.
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                spawn_handler::handle_spawn(
-                                    &cfg,
-                                    session_key,
-                                    session_id,
-                                    kind,
-                                    cwd,
-                                    initial_prompt,
-                                    autonomous,
-                                )
-                                .await;
-                            });
-                        }
-                        lazybox_ipc::Command::CreateSession { session_key, kind, label } => {
-                            // Detach — provisions a fresh worktree folder
-                            // (same clone exposure as Spawn).
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                spawn_handler::handle_create_session(
-                                    &cfg,
-                                    session_key,
-                                    kind,
-                                    label,
-                                )
-                                .await;
-                            });
-                        }
-                        lazybox_ipc::Command::Write { terminal_id, bytes } => {
-                            spawn_handler::handle_write(&self.config, terminal_id, &bytes).await;
-                        }
-                        lazybox_ipc::Command::RecordUserMessage { terminal_id, message } => {
-                            spawn_handler::handle_record_user_message(
-                                &self.config,
-                                terminal_id,
-                                &message,
-                            )
-                            .await;
-                        }
-                        lazybox_ipc::Command::InjectPrompt {
-                            terminal_id,
-                            prompt,
-                            fallback_spawn,
-                        } => {
-                            // Detach — the stale-terminal fallback
-                            // rewrites this into a full Spawn, which on
-                            // a cold cache runs `git clone --bare`
-                            // (minutes). Awaiting it inline froze every
-                            // keystroke `Write` behind it — the exact
-                            // class of stall the Spawn detach fixed.
-                            // The handler only touches Arc'd config
-                            // state, so loop ordering doesn't matter.
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                spawn_handler::handle_inject_prompt(
-                                    &cfg,
-                                    terminal_id,
-                                    &prompt,
-                                    fallback_spawn,
-                                )
-                                .await;
-                            });
-                        }
-                        lazybox_ipc::Command::Resize { terminal_id, cols, rows } => {
-                            spawn_handler::handle_resize(&self.config, terminal_id, cols, rows).await;
-                        }
-                        lazybox_ipc::Command::Close { terminal_id } => {
-                            spawn_handler::handle_close(&self.config, terminal_id).await;
-                        }
-                        lazybox_ipc::Command::IngestHook { terminal_id, hook, backend_key } => {
-                            spawn_handler::handle_ingest_hook(
-                                &self.config,
-                                terminal_id,
-                                backend_key,
-                                hook,
-                            )
-                            .await;
-                        }
-                        lazybox_ipc::Command::StartAgentRun {
-                            session_key,
-                            session_id,
-                            agent,
-                            mode,
-                            cwd,
-                            initial_input,
-                        } => {
-                            agent_runs::handle_start_agent_run(
-                                &self.config,
-                                session_key,
-                                session_id,
-                                agent,
-                                mode,
-                                cwd,
-                                initial_input,
-                            )
-                            .await;
-                        }
-                        lazybox_ipc::Command::SendAgentInput { run_id, message } => {
-                            agent_runs::handle_send_agent_input(&self.config, run_id, message)
-                                .await;
-                        }
-                        lazybox_ipc::Command::InterruptAgentRun { run_id } => {
-                            agent_runs::handle_interrupt_agent_run(&self.config, run_id).await;
-                        }
-                        lazybox_ipc::Command::DecideAgentApproval {
-                            run_id,
-                            request_id,
-                            decision,
-                        } => {
-                            agent_runs::handle_decide_agent_approval(
-                                &self.config,
-                                run_id,
-                                request_id,
-                                decision,
-                            )
-                            .await;
-                        }
-                        lazybox_ipc::Command::AnswerAgentQuestion {
-                            run_id,
-                            question_id,
-                            answer,
-                        } => {
-                            agent_runs::handle_answer_agent_question(
-                                &self.config,
-                                run_id,
-                                question_id,
-                                answer,
-                            )
-                            .await;
-                        }
-                        lazybox_ipc::Command::UpsertProviderCredential {
-                            principal_id,
-                            credential,
-                        } => {
-                            auth::handle_upsert_provider_credential(
-                                &self.config,
-                                &conn.tx,
-                                principal_id,
-                                credential,
-                            )
-                            .await;
-                        }
-                        lazybox_ipc::Command::RemoveProviderCredential {
-                            principal_id,
-                            provider_id,
-                        } => {
-                            auth::handle_remove_provider_credential(
-                                &self.config,
-                                &conn.tx,
-                                principal_id,
-                                provider_id,
-                            )
-                            .await;
-                        }
-                        lazybox_ipc::Command::ListProviderCredentials { principal_id } => {
-                            auth::handle_list_provider_credentials(
-                                &self.config,
-                                &conn.tx,
-                                principal_id,
-                            )
-                            .await;
-                        }
-                        lazybox_ipc::Command::MarkRead { session_key } => {
-                            let key = lazybox_core::WorkspaceKey::new(
-                                session_key.as_str().to_string(),
-                            );
-                            // MarkRead is the user's "I just looked
-                            // at this workspace" signal — treat it
-                            // as a focus hint too so the round-robin
-                            // sync cursor bumps even when the TUI
-                            // doesn't fire a separate
-                            // `FocusWorkspace` (older clients, the
-                            // auto-mark-on-hover path).
-                            polling::set_focused_workspace(&self.config, &key).await;
-                            polling::mark_workspace_read(&self.config, &key);
-                        }
-                        lazybox_ipc::Command::FocusWorkspace { session_key } => {
-                            let key = lazybox_core::WorkspaceKey::new(
-                                session_key.as_str().to_string(),
-                            );
-                            polling::set_focused_workspace(&self.config, &key).await;
-                        }
-                        lazybox_ipc::Command::MarkActivityRead { session_key, index } => {
-                            let key = lazybox_core::WorkspaceKey::new(
-                                session_key.as_str().to_string(),
-                            );
-                            polling::mark_activity_read(&self.config, &key, index);
-                        }
-                        lazybox_ipc::Command::UnmarkActivityRead { session_key, index } => {
-                            let key = lazybox_core::WorkspaceKey::new(
-                                session_key.as_str().to_string(),
-                            );
-                            polling::unmark_activity_read(&self.config, &key, index);
-                        }
-                        lazybox_ipc::Command::CreateWorkspace {
-                            name,
-                            project_key,
-                            spawn_agent,
-                        } => {
-                            // create_empty_workspace runs inline (cheap
-                            // store write) and returns the final key —
-                            // which may carry a `-2` collision suffix, so
-                            // the client can't predict it. When the caller
-                            // asked to land in a live session, chain the
-                            // spawn here off that returned key rather than
-                            // round-tripping through the client.
-                            let key =
-                                polling::create_empty_workspace(&self.config, &name, project_key);
-                            if let Some(agent_id) = spawn_agent {
-                                // Detach — same worktree-provision (cold
-                                // `git clone --bare`) exposure as a bare
-                                // Spawn; never block the serve loop on it.
-                                // Bare interactive spawn (no prompt) keeps
-                                // the human-in-the-loop approval gate.
-                                let cfg = self.config.clone();
-                                let session_key: lazybox_core::SessionKey = (&key).into();
-                                mutations.spawn(async move {
-                                    spawn_handler::handle_spawn(
-                                        &cfg,
-                                        session_key,
-                                        None,
-                                        lazybox_ipc::TerminalKind::Agent(agent_id),
-                                        None,
-                                        None,
-                                        false,
-                                    )
-                                    .await;
-                                });
-                            }
-                        }
-                        lazybox_ipc::Command::CreateProject { name } => {
-                            polling::create_local_project(&self.config, &name);
-                        }
-                        lazybox_ipc::Command::Snooze { session_key, until } => {
-                            let key = lazybox_core::WorkspaceKey::new(
-                                session_key.as_str().to_string(),
-                            );
-                            polling::set_snooze(&self.config, &key, Some(until));
-                        }
-                        lazybox_ipc::Command::Unsnooze { session_key } => {
-                            let key = lazybox_core::WorkspaceKey::new(
-                                session_key.as_str().to_string(),
-                            );
-                            polling::set_snooze(&self.config, &key, None);
-                        }
-                        lazybox_ipc::Command::Kill { session_key } => {
-                            // Detach — tears down worktrees (git ops +
-                            // filesystem removal) and backend sessions; a
-                            // slow disk or wedged git must not freeze the
-                            // serve loop.
-                            //
-                            // Serialized against any in-flight Spawn on
-                            // the same workspace: tearing down while a
-                            // spawn is mid-provision would let the spawn
-                            // re-create the worktree + a terminal right
-                            // after deletion. The tombstone makes a spawn
-                            // that hasn't loaded its workspace row yet
-                            // abort instead of falling back to spawning
-                            // in the daemon's own cwd.
-                            let key = lazybox_core::WorkspaceKey::new(
-                                session_key.as_str().to_string(),
-                            );
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                cfg.deleted_workspaces
-                                    .lock()
-                                    .expect("deleted_workspaces poisoned")
-                                    .insert(key.as_str().to_string());
-                                spawn_handler::await_inflight_spawns(&cfg, key.as_str()).await;
-                                polling::delete_workspace(&cfg, &key).await;
-                            });
-                        }
-                        lazybox_ipc::Command::RemoveMergedWorkspace { session_key } => {
-                            // Detach — same worktree-teardown (and same
-                            // spawn-race) exposure as Kill.
-                            let key = lazybox_core::WorkspaceKey::new(
-                                session_key.as_str().to_string(),
-                            );
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                cfg.deleted_workspaces
-                                    .lock()
-                                    .expect("deleted_workspaces poisoned")
-                                    .insert(key.as_str().to_string());
-                                spawn_handler::await_inflight_spawns(&cfg, key.as_str()).await;
-                                polling::remove_merged_workspace(&cfg, &key).await;
-                            });
-                        }
-                        lazybox_ipc::Command::DeleteProject { project_key } => {
-                            // Detach — deletes every workspace in the
-                            // project (N worktree teardowns).
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                polling::delete_project(&cfg, &project_key).await;
-                            });
-                        }
-                        lazybox_ipc::Command::CollapseIntoPr {
-                            issue_workspace_key,
-                        } => {
-                            // Detach — moves worktrees + freezes/kills
-                            // backend sessions; can shell out to git.
-                            let key = lazybox_core::WorkspaceKey::new(
-                                issue_workspace_key.as_str().to_string(),
-                            );
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                polling::handle_collapse_into_pr(&cfg, key).await;
-                            });
-                        }
-                        lazybox_ipc::Command::Refresh => {
-                            // Manual poll trigger. Wakes the long-lived
-                            // poll loop so it runs `run_one_tick`
-                            // immediately on its own task — single
-                            // source of truth for ticks, no parallel
-                            // inline spawn that could race the loop's
-                            // own next-due bookkeeping.
-                            //
-                            // Force a full sweep on that tick: a manual
-                            // refresh must feel authoritative. The
-                            // incremental notifications path can't see
-                            // an issue the user just created (GitHub
-                            // sends no self-notification), so without
-                            // this the new issue wouldn't appear until
-                            // the next scheduled sweep, up to 10 min
-                            // away (issue #180). The flag lives on the
-                            // shared notifications state, so the source
-                            // built from the cached client next tick
-                            // observes it.
-                            if let Some(client) = self
-                                .config
-                                .gh_client_cache
-                                .lock()
-                                .expect("gh_client_cache poisoned")
-                                .as_ref()
-                            {
-                                client.force_full_sweep();
-                            }
-                            self.config.poll_wake.notify_one();
-                        }
-                        lazybox_ipc::Command::PostReply { session_key, body } => {
-                            // GraphQL post — detach to keep the serve
-                            // loop responsive while the network call
-                            // is in flight.
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                polling::post_reply(&cfg, session_key, body).await;
-                            });
-                        }
-                        lazybox_ipc::Command::SetSessionLayout {
-                            session_key,
-                            session_id_raw,
-                            layout_json,
-                        } => {
-                            let key = lazybox_core::WorkspaceKey::new(
-                                session_key.as_str().to_string(),
-                            );
-                            let session_id = uuid::Uuid::parse_str(&session_id_raw)
-                                .ok()
-                                .map(lazybox_core::SessionId);
-                            let layout: Option<lazybox_core::SessionLayout> =
-                                serde_json::from_str(&layout_json).ok();
-                            if let (Some(sid), Some(lay)) = (session_id, layout) {
-                                polling::set_session_layout(&self.config, &key, sid, lay);
-                            } else {
+                    match command_lane(&cmd) {
+                        CommandLane::Inline => {
+                            dispatch_command(&self.config, &conn.tx, cmd).await;
+                            // Watchdog: an inline handler must return to
+                            // `select!` in microseconds. Past the budget it
+                            // wedged the loop — record the violation
+                            // (surfaced on `/v1/metrics`, asserted in the
+                            // serve-loop tests) and name the offender.
+                            let elapsed = cmd_started.elapsed();
+                            if elapsed >= INLINE_BUDGET {
+                                self.config.event_metrics.record_inline_budget_violation();
                                 tracing::warn!(
-                                    "SetSessionLayout: bad payload (id={:?})",
-                                    session_id_raw
+                                    command = label,
+                                    ms = elapsed.as_millis(),
+                                    "INLINE command exceeded budget — serve loop BLOCKED; \
+                                     keystroke Writes and bus/poll forwarding stalled this long"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    command = label,
+                                    ms = elapsed.as_millis(),
+                                    "daemon → handled inline"
                                 );
                             }
                         }
-                        lazybox_ipc::Command::Shutdown => break,
-                        lazybox_ipc::Command::ConfirmMerge {
-                            issue_workspace_key,
-                            pr_workspace_key,
-                            accept,
-                        } => {
-                            // GraphQL merge → detach so a slow network
-                            // can't freeze the serve loop. See the
-                            // `FetchPrDetails` comment below for the
-                            // full reasoning; the bug originally
-                            // surfaced there but every GraphQL-touching
-                            // handler has the same exposure.
+                        CommandLane::Detached => {
                             let cfg = self.config.clone();
+                            let tx = conn.tx.clone();
                             mutations.spawn(async move {
-                                polling::handle_confirm_merge(
-                                    &cfg,
-                                    issue_workspace_key,
-                                    pr_workspace_key,
-                                    accept,
-                                )
-                                .await;
+                                dispatch_command(&cfg, &tx, cmd).await;
                             });
                         }
-                        lazybox_ipc::Command::AdoptSessions {
-                            source_workspace_key,
-                            target_workspace_key,
-                        } => {
-                            // Detach — session adoption migrates worktrees
-                            // (git worktree move + freeze/resume), which
-                            // can stall on a wedged git or tmux.
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                polling::handle_adopt_sessions(
-                                    &cfg,
-                                    source_workspace_key,
-                                    target_workspace_key,
-                                )
-                                .await;
-                            });
-                        }
-                        lazybox_ipc::Command::MergePr { workspace_key } => {
-                            // Detach for the same reason as
-                            // `FetchPrDetails` — `gh pr merge` shells
-                            // out and can stall for seconds.
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                polling::handle_merge_pr(&cfg, workspace_key).await;
-                            });
-                        }
-                        lazybox_ipc::Command::FetchPrDetails { workspace_key } => {
-                            // **Bug fix**: `handle_fetch_pr_details`
-                            // runs a GraphQL HTTP call. If the network
-                            // stalls (octocrab, dropped connection,
-                            // silent rate-limit), `.await`-ing it
-                            // inline freezes the entire serve loop —
-                            // `tokio::select!` cannot pick the next
-                            // arm until the current one returns. The
-                            // user perceives this as "Spawn key does
-                            // nothing": Spawn/Write/MarkRead all
-                            // queue behind the wedged fetch.
-                            //
-                            // Spawning detaches the handler so the
-                            // serve loop is back in `select!` within
-                            // microseconds. Order doesn't matter for
-                            // this handler — it just merges activity
-                            // and broadcasts via the bus.
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                polling::handle_fetch_pr_details(&cfg, workspace_key).await;
-                            });
-                        }
-                        lazybox_ipc::Command::RequestReviewers { workspace_key, logins } => {
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                polling::handle_request_reviewers(&cfg, workspace_key, logins)
-                                    .await;
-                            });
-                        }
-                        lazybox_ipc::Command::AddAssignees { workspace_key, logins } => {
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                polling::handle_add_assignees(&cfg, workspace_key, logins).await;
-                            });
-                        }
-                        lazybox_ipc::Command::SetAssignees { workspace_key, logins } => {
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                polling::handle_set_assignees(&cfg, workspace_key, logins).await;
-                            });
-                        }
-                        lazybox_ipc::Command::SetLabels { workspace_key, names } => {
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                polling::handle_set_labels(&cfg, workspace_key, names).await;
-                            });
-                        }
-                        lazybox_ipc::Command::FetchRepoLabels { workspace_key } => {
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                polling::handle_fetch_repo_labels(&cfg, workspace_key).await;
-                            });
-                        }
-                        lazybox_ipc::Command::CleanWorktrees => {
-                            // Detach — the walk does N filesystem
-                            // ops (one `git worktree remove` per
-                            // session) and the user shouldn't wait
-                            // on the serve loop while it runs.
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                polling::handle_clean_worktrees(&cfg).await;
-                            });
-                        }
-                        lazybox_ipc::Command::InspectWorktrees => {
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                polling::handle_inspect_worktrees(&cfg).await;
-                            });
-                        }
-                        lazybox_ipc::Command::DeleteOrphanedWorktree { path, force } => {
-                            let cfg = self.config.clone();
-                            mutations.spawn(async move {
-                                polling::handle_delete_orphaned_worktree(&cfg, path, force).await;
-                            });
-                        }
-                    }
-                    // Anything that held the single serve-loop task for
-                    // more than a couple frames blocked every other
-                    // command behind it. Warn loudly with the label so
-                    // a "frozen during sync" report points straight at
-                    // the offending handler instead of a guessing game.
-                    let cmd_ms = cmd_started.elapsed().as_millis();
-                    if cmd_ms >= 50 {
-                        tracing::warn!(
-                            command = label,
-                            ms = cmd_ms,
-                            "daemon serve loop BLOCKED on inline command handler — \
-                             all other commands (incl. keystroke Writes) stalled this long"
-                        );
-                    } else {
-                        tracing::debug!(command = label, ms = cmd_ms, "daemon → handled");
                     }
                 }
                 bus = bus_rx.recv() => {
@@ -1338,6 +786,398 @@ impl Server {
             }
         }
         Ok(())
+    }
+}
+
+/// Which lane a command runs in. See [`command_lane`].
+enum CommandLane {
+    /// Runs on the serve-loop task itself. Reserved for provably-fast,
+    /// order-sensitive handlers; held to [`INLINE_BUDGET`] by a watchdog.
+    Inline,
+    /// Runs on the serve loop's `mutations` JoinSet so it can never hold
+    /// the `select!`, no matter how slow the handler gets.
+    Detached,
+}
+
+/// Decide a command's lane structurally — the single enforcement point
+/// for the no-blocking guarantee (#206). The inline allow-list is tiny
+/// and explicit; everything else, INCLUDING any command added later,
+/// falls through to `Detached`, so the safe default is "cannot wedge the
+/// loop." A handler earns the inline lane only if it is local, bounded,
+/// and order-sensitive (keystroke ordering or snapshot sequencing) —
+/// never if it can touch the network, git, the filesystem, or a
+/// contended lock.
+fn command_lane(cmd: &lazybox_ipc::Command) -> CommandLane {
+    use lazybox_ipc::Command;
+    match cmd {
+        Command::Write { .. }
+        | Command::Resize { .. }
+        | Command::RecordUserMessage { .. }
+        | Command::Subscribe => CommandLane::Inline,
+        _ => CommandLane::Detached,
+    }
+}
+
+/// Run one command to completion. The serve loop calls this two ways
+/// (see [`command_lane`]): INLINE for the fast, order-sensitive lane, or
+/// on the `mutations` JoinSet for the detached lane. The body is
+/// lane-agnostic — it just `.await`s the matching handler — so the
+/// inline-vs-detached decision lives in exactly one place
+/// (`command_lane`) instead of being re-litigated per arm. `Shutdown` is
+/// loop control and never reaches here.
+async fn dispatch_command(
+    config: &ServerConfig,
+    tx: &tokio::sync::mpsc::UnboundedSender<Event>,
+    cmd: lazybox_ipc::Command,
+) {
+    match cmd {
+        lazybox_ipc::Command::Subscribe => {
+            // Offload the SQLite scans (issue #34) onto `spawn_blocking`
+            // so the inline handler doesn't pin the runtime worker on the
+            // parking_lot mutex + row iteration. Both scans share one
+            // task to pay the spawn/handoff once. A panic inside (poisoned
+            // mutex, corrupt JSON) is logged loudly — silently sending an
+            // empty Snapshot would render a blank sidebar with no
+            // breadcrumb.
+            let store = config.store.clone();
+            let (workspaces, projects) = match tokio::task::spawn_blocking(move || {
+                (load_workspaces(&*store), load_projects(&*store))
+            })
+            .await
+            {
+                Ok(pair) => pair,
+                Err(e) => {
+                    tracing::error!(
+                        "Subscribe snapshot load task failed: {e} — sending empty snapshot",
+                    );
+                    (Vec::new(), Vec::new())
+                }
+            };
+            let terminals = spawn_handler::snapshot_terminals(config).await;
+            let _ = tx.send(Event::Snapshot {
+                workspaces,
+                terminals,
+                projects,
+            });
+            // Kick a fresh poll so the freshly-opened TUI refreshes within
+            // a few seconds instead of waiting out the current sleep.
+            config.poll_wake.notify_one();
+            // Replay cached viewer identities so a reconnecting TUI can
+            // render `@me` without waiting for the next poll cycle.
+            let logins = config
+                .viewer_identities
+                .lock()
+                .expect("viewer_identities poisoned")
+                .clone();
+            if !logins.is_empty() {
+                let _ = tx.send(Event::ViewerIdentities { logins });
+            }
+        }
+        lazybox_ipc::Command::Spawn {
+            session_key,
+            session_id,
+            kind,
+            cwd,
+            initial_prompt,
+        } => {
+            // A spawn carrying a pre-built work prompt is an autonomous
+            // "work on this" launch — run it unattended (skip permissions,
+            // subject to the `autonomous_skip_permissions` toggle) so it
+            // doesn't stall on the folder-trust / tool-approval gate. Bare
+            // interactive spawns carry no prompt and keep the
+            // human-in-the-loop approval.
+            let autonomous = spawn_handler::spawn_is_autonomous(&initial_prompt);
+            spawn_handler::handle_spawn(
+                config,
+                session_key,
+                session_id,
+                kind,
+                cwd,
+                initial_prompt,
+                autonomous,
+            )
+            .await;
+        }
+        lazybox_ipc::Command::CreateSession {
+            session_key,
+            kind,
+            label,
+        } => {
+            spawn_handler::handle_create_session(config, session_key, kind, label).await;
+        }
+        lazybox_ipc::Command::Write { terminal_id, bytes } => {
+            spawn_handler::handle_write(config, terminal_id, &bytes).await;
+        }
+        lazybox_ipc::Command::RecordUserMessage {
+            terminal_id,
+            message,
+        } => {
+            spawn_handler::handle_record_user_message(config, terminal_id, &message).await;
+        }
+        lazybox_ipc::Command::InjectPrompt {
+            terminal_id,
+            prompt,
+            fallback_spawn,
+        } => {
+            spawn_handler::handle_inject_prompt(config, terminal_id, &prompt, fallback_spawn).await;
+        }
+        lazybox_ipc::Command::Resize {
+            terminal_id,
+            cols,
+            rows,
+        } => {
+            spawn_handler::handle_resize(config, terminal_id, cols, rows).await;
+        }
+        lazybox_ipc::Command::Close { terminal_id } => {
+            spawn_handler::handle_close(config, terminal_id).await;
+        }
+        lazybox_ipc::Command::IngestHook {
+            terminal_id,
+            hook,
+            backend_key,
+        } => {
+            spawn_handler::handle_ingest_hook(config, terminal_id, backend_key, hook).await;
+        }
+        lazybox_ipc::Command::StartAgentRun {
+            session_key,
+            session_id,
+            agent,
+            mode,
+            cwd,
+            initial_input,
+        } => {
+            agent_runs::handle_start_agent_run(
+                config,
+                session_key,
+                session_id,
+                agent,
+                mode,
+                cwd,
+                initial_input,
+            )
+            .await;
+        }
+        lazybox_ipc::Command::SendAgentInput { run_id, message } => {
+            agent_runs::handle_send_agent_input(config, run_id, message).await;
+        }
+        lazybox_ipc::Command::InterruptAgentRun { run_id } => {
+            agent_runs::handle_interrupt_agent_run(config, run_id).await;
+        }
+        lazybox_ipc::Command::DecideAgentApproval {
+            run_id,
+            request_id,
+            decision,
+        } => {
+            agent_runs::handle_decide_agent_approval(config, run_id, request_id, decision).await;
+        }
+        lazybox_ipc::Command::AnswerAgentQuestion {
+            run_id,
+            question_id,
+            answer,
+        } => {
+            agent_runs::handle_answer_agent_question(config, run_id, question_id, answer).await;
+        }
+        lazybox_ipc::Command::UpsertProviderCredential {
+            principal_id,
+            credential,
+        } => {
+            auth::handle_upsert_provider_credential(config, tx, principal_id, credential).await;
+        }
+        lazybox_ipc::Command::RemoveProviderCredential {
+            principal_id,
+            provider_id,
+        } => {
+            auth::handle_remove_provider_credential(config, tx, principal_id, provider_id).await;
+        }
+        lazybox_ipc::Command::ListProviderCredentials { principal_id } => {
+            auth::handle_list_provider_credentials(config, tx, principal_id).await;
+        }
+        lazybox_ipc::Command::MarkRead { session_key } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            // MarkRead is the user's "I just looked at this" signal —
+            // treat it as a focus hint too so the round-robin sync cursor
+            // bumps even when the TUI doesn't fire a separate
+            // `FocusWorkspace`.
+            polling::set_focused_workspace(config, &key).await;
+            polling::mark_workspace_read(config, &key);
+        }
+        lazybox_ipc::Command::FocusWorkspace { session_key } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            polling::set_focused_workspace(config, &key).await;
+        }
+        lazybox_ipc::Command::MarkActivityRead { session_key, index } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            polling::mark_activity_read(config, &key, index);
+        }
+        lazybox_ipc::Command::UnmarkActivityRead { session_key, index } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            polling::unmark_activity_read(config, &key, index);
+        }
+        lazybox_ipc::Command::CreateWorkspace {
+            name,
+            project_key,
+            spawn_agent,
+        } => {
+            // create_empty_workspace returns the final key — which may
+            // carry a `-2` collision suffix the client can't predict — so
+            // chain any requested spawn off it here rather than
+            // round-tripping through the client. Bare interactive spawn
+            // (no prompt) keeps the human-in-the-loop approval gate.
+            let key = polling::create_empty_workspace(config, &name, project_key);
+            if let Some(agent_id) = spawn_agent {
+                let session_key: lazybox_core::SessionKey = (&key).into();
+                spawn_handler::handle_spawn(
+                    config,
+                    session_key,
+                    None,
+                    lazybox_ipc::TerminalKind::Agent(agent_id),
+                    None,
+                    None,
+                    false,
+                )
+                .await;
+            }
+        }
+        lazybox_ipc::Command::CreateProject { name } => {
+            polling::create_local_project(config, &name);
+        }
+        lazybox_ipc::Command::Snooze { session_key, until } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            polling::set_snooze(config, &key, Some(until));
+        }
+        lazybox_ipc::Command::Unsnooze { session_key } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            polling::set_snooze(config, &key, None);
+        }
+        lazybox_ipc::Command::Kill { session_key } => {
+            // Serialized against any in-flight Spawn on the same workspace:
+            // the tombstone makes a spawn that hasn't loaded its workspace
+            // row yet abort instead of re-creating the worktree + a
+            // terminal right after deletion.
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            config
+                .deleted_workspaces
+                .lock()
+                .expect("deleted_workspaces poisoned")
+                .insert(key.as_str().to_string());
+            spawn_handler::await_inflight_spawns(config, key.as_str()).await;
+            polling::delete_workspace(config, &key).await;
+        }
+        lazybox_ipc::Command::RemoveMergedWorkspace { session_key } => {
+            // Same worktree-teardown (and same spawn-race) exposure as Kill.
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            config
+                .deleted_workspaces
+                .lock()
+                .expect("deleted_workspaces poisoned")
+                .insert(key.as_str().to_string());
+            spawn_handler::await_inflight_spawns(config, key.as_str()).await;
+            polling::remove_merged_workspace(config, &key).await;
+        }
+        lazybox_ipc::Command::DeleteProject { project_key } => {
+            polling::delete_project(config, &project_key).await;
+        }
+        lazybox_ipc::Command::CollapseIntoPr {
+            issue_workspace_key,
+        } => {
+            let key = lazybox_core::WorkspaceKey::new(issue_workspace_key.as_str().to_string());
+            polling::handle_collapse_into_pr(config, key).await;
+        }
+        lazybox_ipc::Command::Refresh => {
+            // Manual poll trigger. Force a full sweep so a just-created
+            // issue appears now instead of next scheduled sweep (issue
+            // #180), then wake the long-lived poll loop — the single
+            // source of truth for ticks.
+            if let Some(client) = config
+                .gh_client_cache
+                .lock()
+                .expect("gh_client_cache poisoned")
+                .as_ref()
+            {
+                client.force_full_sweep();
+            }
+            config.poll_wake.notify_one();
+        }
+        lazybox_ipc::Command::PostReply { session_key, body } => {
+            polling::post_reply(config, session_key, body).await;
+        }
+        lazybox_ipc::Command::SetSessionLayout {
+            session_key,
+            session_id_raw,
+            layout_json,
+        } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            let session_id = uuid::Uuid::parse_str(&session_id_raw)
+                .ok()
+                .map(lazybox_core::SessionId);
+            let layout: Option<lazybox_core::SessionLayout> =
+                serde_json::from_str(&layout_json).ok();
+            if let (Some(sid), Some(lay)) = (session_id, layout) {
+                polling::set_session_layout(config, &key, sid, lay);
+            } else {
+                tracing::warn!("SetSessionLayout: bad payload (id={:?})", session_id_raw);
+            }
+        }
+        lazybox_ipc::Command::ConfirmMerge {
+            issue_workspace_key,
+            pr_workspace_key,
+            accept,
+        } => {
+            polling::handle_confirm_merge(config, issue_workspace_key, pr_workspace_key, accept)
+                .await;
+        }
+        lazybox_ipc::Command::AdoptSessions {
+            source_workspace_key,
+            target_workspace_key,
+        } => {
+            polling::handle_adopt_sessions(config, source_workspace_key, target_workspace_key)
+                .await;
+        }
+        lazybox_ipc::Command::MergePr { workspace_key } => {
+            polling::handle_merge_pr(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::FetchPrDetails { workspace_key } => {
+            polling::handle_fetch_pr_details(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::RequestReviewers {
+            workspace_key,
+            logins,
+        } => {
+            polling::handle_request_reviewers(config, workspace_key, logins).await;
+        }
+        lazybox_ipc::Command::AddAssignees {
+            workspace_key,
+            logins,
+        } => {
+            polling::handle_add_assignees(config, workspace_key, logins).await;
+        }
+        lazybox_ipc::Command::SetAssignees {
+            workspace_key,
+            logins,
+        } => {
+            polling::handle_set_assignees(config, workspace_key, logins).await;
+        }
+        lazybox_ipc::Command::SetLabels {
+            workspace_key,
+            names,
+        } => {
+            polling::handle_set_labels(config, workspace_key, names).await;
+        }
+        lazybox_ipc::Command::FetchRepoLabels { workspace_key } => {
+            polling::handle_fetch_repo_labels(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::CleanWorktrees => {
+            polling::handle_clean_worktrees(config).await;
+        }
+        lazybox_ipc::Command::InspectWorktrees => {
+            polling::handle_inspect_worktrees(config).await;
+        }
+        lazybox_ipc::Command::DeleteOrphanedWorktree { path, force } => {
+            polling::handle_delete_orphaned_worktree(config, path, force).await;
+        }
+        lazybox_ipc::Command::Shutdown => {
+            unreachable!("Shutdown is loop control, intercepted by the serve loop")
+        }
     }
 }
 

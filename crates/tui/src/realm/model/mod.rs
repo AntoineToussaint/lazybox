@@ -2294,10 +2294,9 @@ impl<T: TerminalAdapter> Model<T> {
         let keymap: Vec<crate::pane::Binding> = match self.focus {
             PaneFocus::Sidebar => self.sidebar.contextual_bindings(&self.action_key_overrides),
             PaneFocus::Right => self.right.contextual_bindings(&self.action_key_overrides),
-            PaneFocus::Terminals => self.terminals.contextual_bindings(
-                &self.action_key_overrides,
-                self.ui_defaults.terminal_escape_char,
-            ),
+            PaneFocus::Terminals => self
+                .terminals
+                .contextual_bindings(self.ui_defaults.terminal_escape_char),
         };
         // Universal hints appended to every pane's footer (issue #100):
         // the orientation + escape shortcuts a lost first-time user

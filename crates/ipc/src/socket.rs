@@ -9,8 +9,8 @@
 
 use crate::transport;
 use crate::{
-    Client, Command, Connection, EVENT_CHANNEL_CAPACITY, Event, EventForward, MAX_FRAME_BYTES,
-    PROTOCOL_MAGIC, PROTOCOL_VERSION,
+    BUILD_VERSION, Client, Command, Connection, EVENT_CHANNEL_CAPACITY, Event, EventForward,
+    MAX_FRAME_BYTES, PROTOCOL_MAGIC, PROTOCOL_VERSION,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::Path;
@@ -58,6 +58,26 @@ pub enum HandshakeError {
     VersionMismatch { peer: u32, ours: u32 },
 }
 
+/// What this side learned about the peer during the handshake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerInfo {
+    /// The peer's [`BUILD_VERSION`]. Equal to this side's `BUILD_VERSION`
+    /// when both were compiled from the same commit; a difference means a
+    /// stale daemon or client even though the protocol version matched.
+    pub build: String,
+}
+
+impl PeerInfo {
+    /// True when the peer was built from the same commit as this binary.
+    pub fn build_matches(&self) -> bool {
+        self.build == BUILD_VERSION
+    }
+}
+
+/// Cap on the exchanged build-version string (it's a semver + short SHA,
+/// well under this). Bounds the allocation a malformed peer can request.
+const MAX_BUILD_BYTES: usize = 256;
+
 /// Write this side's 8-byte preamble: magic + version (u32 LE).
 async fn write_preamble<W>(w: &mut W) -> std::io::Result<()>
 where
@@ -68,6 +88,41 @@ where
     preamble[4..].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
     w.write_all(&preamble).await?;
     w.flush().await
+}
+
+/// Write this side's build version: a u16 LE length followed by UTF-8
+/// bytes. Sent only after the protocol versions are confirmed to match,
+/// so a version-skewed (or pre-handshake) peer never reaches this and
+/// can't be desynced by it.
+async fn write_build<W>(w: &mut W) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let bytes = BUILD_VERSION.as_bytes();
+    let len = bytes.len().min(MAX_BUILD_BYTES);
+    w.write_all(&(len as u16).to_le_bytes()).await?;
+    w.write_all(&bytes[..len]).await?;
+    w.flush().await
+}
+
+/// Read the peer's build version written by [`write_build`].
+async fn read_build<R>(r: &mut R) -> Result<PeerInfo, HandshakeError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut len_buf = [0u8; 2];
+    r.read_exact(&mut len_buf).await?;
+    let len = u16::from_le_bytes(len_buf) as usize;
+    if len > MAX_BUILD_BYTES {
+        return Err(HandshakeError::Io(std::io::Error::other(
+            "peer build-version string exceeds the maximum length",
+        )));
+    }
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf).await?;
+    Ok(PeerInfo {
+        build: String::from_utf8_lossy(&buf).into_owned(),
+    })
 }
 
 /// Read and validate the peer's 8-byte preamble, returning its
@@ -92,7 +147,7 @@ where
 /// require a matching one back before any frames flow. Run this
 /// immediately after the transport connects — the server won't accept
 /// frames until it has seen our preamble.
-pub async fn client_handshake<R, W>(rd: &mut R, wr: &mut W) -> Result<(), HandshakeError>
+pub async fn client_handshake<R, W>(rd: &mut R, wr: &mut W) -> Result<PeerInfo, HandshakeError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -105,7 +160,10 @@ where
             ours: PROTOCOL_VERSION,
         });
     }
-    Ok(())
+    // Protocol matches; exchange build versions so a same-protocol but
+    // different-commit daemon is still detectable by the caller.
+    write_build(wr).await?;
+    read_build(rd).await
 }
 
 /// Server side of the connection handshake: read the client's
@@ -114,7 +172,7 @@ where
 /// is always answered with our own — even on version mismatch — so
 /// the client can render the clear "restart the daemon" error instead
 /// of a bincode decode failure.
-pub async fn server_handshake<R, W>(rd: &mut R, wr: &mut W) -> Result<(), HandshakeError>
+pub async fn server_handshake<R, W>(rd: &mut R, wr: &mut W) -> Result<PeerInfo, HandshakeError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -127,7 +185,8 @@ where
             ours: PROTOCOL_VERSION,
         });
     }
-    Ok(())
+    write_build(wr).await?;
+    read_build(rd).await
 }
 
 pub async fn write_frame<W, T>(w: &mut W, msg: &T) -> Result<(), FrameError>
@@ -170,14 +229,15 @@ where
 /// when the path is forwarded through `ssh -L`). Runs the protocol
 /// handshake before returning, so a version-skewed or pre-handshake
 /// daemon surfaces here as a clear error instead of garbage frames.
-/// Returns a `Client` whose send/recv map to frames on the wire.
+/// Returns a `Client` whose send/recv map to frames on the wire, plus
+/// the daemon's [`PeerInfo`] so the caller can warn on a build skew.
 /// Transport is delegated to `transport::connect` — Unix domain
 /// socket today, named pipe / TCP later.
-pub async fn connect(path: &Path) -> std::io::Result<Client> {
+pub async fn connect(path: &Path) -> std::io::Result<(Client, PeerInfo)> {
     let (mut rd, mut wr) = transport::connect(path)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    client_handshake(&mut rd, &mut wr)
+    let peer = client_handshake(&mut rd, &mut wr)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
@@ -193,7 +253,7 @@ pub async fn connect(path: &Path) -> std::io::Result<Client> {
     // Reader task: parse framed Events from the socket, push to TUI.
     tokio::spawn(reader_loop_bounded(rd, evt_tx));
 
-    Ok(Client::from_channels(cmd_tx, evt_rx))
+    Ok((Client::from_channels(cmd_tx, evt_rx), peer))
 }
 
 /// Connection-side: wrap an accepted socket as a `Connection` handle.

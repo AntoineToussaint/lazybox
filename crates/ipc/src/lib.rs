@@ -44,7 +44,19 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
+
+/// This binary's build identity: the workspace version plus the git
+/// short SHA captured at compile time (`build.rs`). Two binaries built
+/// from the same commit share this string; a stale daemon and a fresh
+/// client differ.
+///
+/// `PROTOCOL_VERSION` only changes when the wire format does, so two
+/// builds dozens of commits apart can both be protocol v5 and connect
+/// cleanly while behaving differently. The handshake exchanges this
+/// string so the client can surface a "restart the daemon" banner on a
+/// build skew the protocol version can't see.
+pub const BUILD_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("LAZYBOX_BUILD_SHA"));
 
 /// Stable id for a spawned terminal. Distinct from SessionKey because a
 /// single session may hold multiple terminals (agent + shell + logs).

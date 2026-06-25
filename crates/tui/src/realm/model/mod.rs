@@ -1584,6 +1584,22 @@ impl<T: TerminalAdapter> Model<T> {
         );
     }
 
+    /// Surface a sticky banner when the daemon we connected to was built
+    /// from a different commit than this client. The protocol handshake
+    /// only catches wire-format skew (`PROTOCOL_VERSION`); a stale daemon
+    /// on the same protocol connects silently and re-introduces
+    /// already-fixed bugs, so the operator needs to see the mismatch.
+    /// A matching build is the common case and stays quiet.
+    pub fn note_daemon_build(&mut self, daemon_build: &str) {
+        if daemon_build != lazybox_ipc::BUILD_VERSION {
+            self.flash_error(format!(
+                "build mismatch: daemon {daemon_build}, client {} — restart the daemon \
+                 (`lazybox server stop`) to pick up this build",
+                lazybox_ipc::BUILD_VERSION
+            ));
+        }
+    }
+
     /// Like `flash_error`, but tags the notice as a provider "sync
     /// failed" banner owned by `source`, so the next successful
     /// `PollCompleted` from that same provider can clear it once sync

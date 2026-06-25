@@ -106,9 +106,18 @@ impl SocketService {
                         // a different build (or a non-lazybox peer) is
                         // turned away here instead of feeding bincode
                         // garbage into `Server::serve`.
-                        if let Err(e) = socket::server_handshake(&mut rd, &mut wr).await {
-                            tracing::warn!("rejecting connection: {e}");
-                            return;
+                        match socket::server_handshake(&mut rd, &mut wr).await {
+                            Ok(peer) if !peer.build_matches() => tracing::warn!(
+                                "client build {} differs from daemon build {} — \
+                                 restart whichever is stale",
+                                peer.build,
+                                lazybox_ipc::BUILD_VERSION
+                            ),
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!("rejecting connection: {e}");
+                                return;
+                            }
                         }
                         let server = socket::serve(rd, wr);
                         let daemon = Server::new(config);

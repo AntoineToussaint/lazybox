@@ -83,6 +83,28 @@ mod effects_tests {
         m
     }
 
+    /// Connecting to a daemon built from a different commit raises a
+    /// sticky banner naming both builds — the stale-daemon skew the
+    /// protocol handshake can't see. A matching build stays silent.
+    #[test]
+    fn daemon_build_mismatch_raises_sticky_banner() {
+        use crate::realm::components::footer::NoticeSeverity;
+        let mut m = build_model();
+
+        m.note_daemon_build(lazybox_ipc::BUILD_VERSION);
+        assert!(
+            m.status.notice.is_none(),
+            "a matching daemon build must not raise a banner"
+        );
+
+        m.note_daemon_build("0.0.0+stale");
+        let n = m.status.notice.as_ref().expect("mismatch banner set");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("build mismatch"));
+        assert!(n.message.contains("0.0.0+stale"));
+        assert!(n.message.contains(lazybox_ipc::BUILD_VERSION));
+    }
+
     /// A manual-refresh sync failure paints a sticky "✗ sync failed"
     /// banner; the next successful poll (auto-cycle) from the *same*
     /// provider must clear it so a recovered sync doesn't leave the

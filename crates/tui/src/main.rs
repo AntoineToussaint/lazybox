@@ -253,7 +253,7 @@ pub async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if wants_version(&args) {
-        println!("lazybox {}", env!("CARGO_PKG_VERSION"));
+        println!("lazybox {}", lazybox_ipc::BUILD_VERSION);
         return Ok(());
     }
 
@@ -333,7 +333,7 @@ async fn hook_ingest_subcommand(args: &[String]) -> anyhow::Result<()> {
     // so the operator can see why agent state stopped updating.
     if let Ok((mut rd, mut wr)) = lazybox_ipc::transport::connect(&lifecycle::socket_path()).await {
         match socket::client_handshake(&mut rd, &mut wr).await {
-            Ok(()) => {
+            Ok(_) => {
                 let _ = socket::write_frame(&mut wr, &command).await;
             }
             Err(e) => tracing::warn!("hook-ingest handshake failed: {e}"),
@@ -476,8 +476,8 @@ async fn run_remote(
             socket_path.display()
         );
     }
-    let client = match socket::connect(socket_path).await {
-        Ok(client) => client,
+    let (client, daemon) = match socket::connect(socket_path).await {
+        Ok(pair) => pair,
         Err(e) => {
             // println, not just the bail: stderr already points at the
             // log file, and a protocol-version mismatch needs to reach
@@ -490,6 +490,7 @@ async fn run_remote(
     spawn_terminal_restore_on_signal();
     tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client)?;
+        model.note_daemon_build(&daemon.build);
         if let Some(p) = preselect {
             model = model.with_preselect(p);
         }

@@ -554,7 +554,7 @@ async fn socket_binary_terminal_output_round_trip() {
 
 mod handshake {
     use lazybox_ipc::socket::{HandshakeError, client_handshake, server_handshake};
-    use lazybox_ipc::{PROTOCOL_MAGIC, PROTOCOL_VERSION};
+    use lazybox_ipc::{BUILD_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION};
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
     fn preamble(version: u32) -> [u8; 8] {
@@ -564,16 +564,62 @@ mod handshake {
         p
     }
 
+    /// The build-version frame written after a matching preamble: u16 LE
+    /// length + UTF-8 bytes.
+    fn build_frame(s: &str) -> Vec<u8> {
+        let mut v = (s.len() as u16).to_le_bytes().to_vec();
+        v.extend_from_slice(s.as_bytes());
+        v
+    }
+
     #[tokio::test]
     async fn succeeds_when_versions_match() {
-        let (client, server) = duplex(64);
+        let (client, server) = duplex(512);
         let (mut crd, mut cwr) = tokio::io::split(client);
         let (mut srd, mut swr) = tokio::io::split(server);
         let server_task = tokio::spawn(async move { server_handshake(&mut srd, &mut swr).await });
-        client_handshake(&mut crd, &mut cwr)
+        let peer = client_handshake(&mut crd, &mut cwr)
             .await
             .expect("client handshake");
-        server_task.await.expect("join").expect("server handshake");
+        let client_seen = server_task.await.expect("join").expect("server handshake");
+        // Both sides exchange this binary's build and agree it matches.
+        assert_eq!(peer.build, BUILD_VERSION);
+        assert!(peer.build_matches());
+        assert_eq!(client_seen.build, BUILD_VERSION);
+    }
+
+    /// A peer on the same protocol but a different build connects
+    /// successfully — the skew is reported to the caller, not rejected.
+    /// This is the stale-daemon case `PROTOCOL_VERSION` can't catch.
+    #[tokio::test]
+    async fn same_protocol_different_build_connects_and_reports_skew() {
+        let (client, server) = duplex(512);
+        let (mut crd, mut cwr) = tokio::io::split(client);
+        let (mut srd, mut swr) = tokio::io::split(server);
+
+        let fake_daemon = tokio::spawn(async move {
+            let mut got = [0u8; 8];
+            srd.read_exact(&mut got).await.expect("client preamble");
+            assert_eq!(got, preamble(PROTOCOL_VERSION));
+            swr.write_all(&preamble(PROTOCOL_VERSION))
+                .await
+                .expect("reply preamble");
+            swr.write_all(&build_frame("9.9.9+deadbeef"))
+                .await
+                .expect("reply build");
+            // Drain the client's own build frame so the duplex doesn't stall.
+            let mut len = [0u8; 2];
+            srd.read_exact(&mut len).await.expect("client build len");
+            let mut buf = vec![0u8; u16::from_le_bytes(len) as usize];
+            srd.read_exact(&mut buf).await.expect("client build body");
+        });
+
+        let peer = client_handshake(&mut crd, &mut cwr)
+            .await
+            .expect("handshake must succeed on a build skew");
+        assert_eq!(peer.build, "9.9.9+deadbeef");
+        assert!(!peer.build_matches());
+        fake_daemon.await.expect("join");
     }
 
     #[tokio::test]

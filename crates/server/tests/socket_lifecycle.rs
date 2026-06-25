@@ -50,7 +50,7 @@ async fn socket_subscribe_yields_snapshot() {
     let base = TempDir::new().unwrap();
     let (sock, handle, shutdown) = spawn_service(&base).await;
 
-    let mut client = socket::connect(&sock).await.expect("connect");
+    let (mut client, _) = socket::connect(&sock).await.expect("connect");
     client.send(Command::Subscribe).expect("send subscribe");
     let evt = tokio::time::timeout(Duration::from_secs(2), client.recv())
         .await
@@ -111,7 +111,7 @@ async fn stale_socket_is_cleaned_up_on_bind() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let client = loop {
         match socket::connect(&sock).await {
-            Ok(c) => break c,
+            Ok((c, _)) => break c,
             Err(_) if tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -150,7 +150,7 @@ async fn hook_ingest_over_socket_reaches_shared_embedded_config() {
     }
 
     // The "TUI" client spawns an agent and listens on the shared bus.
-    let mut tui = socket::connect(&sock).await.expect("connect tui");
+    let (mut tui, _) = socket::connect(&sock).await.expect("connect tui");
     tui.send(Command::Subscribe).expect("subscribe");
     let _snapshot = tokio::time::timeout(Duration::from_secs(2), tui.recv())
         .await
@@ -179,7 +179,7 @@ async fn hook_ingest_over_socket_reaches_shared_embedded_config() {
 
     // A separate, short-lived connection forwards the hook — exactly
     // what the `hook-ingest` helper does: connect, one frame, done.
-    let ingest = socket::connect(&sock).await.expect("connect ingest");
+    let (ingest, _) = socket::connect(&sock).await.expect("connect ingest");
     ingest
         .send(Command::IngestHook {
             terminal_id: lazybox_ipc::TerminalId(0),

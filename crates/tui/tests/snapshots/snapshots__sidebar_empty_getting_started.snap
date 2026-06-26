@@ -1,8 +1,9 @@
 ---
 source: crates/tui/tests/snapshots.rs
+assertion_line: 260
 expression: rendered
 ---
- LAZYBOX v0.1.4  0  [7d]
+ LAZYBOX v0.1.4            0 items  7d
  f [all]  o [split]
 
  ─────────────────────────────────────

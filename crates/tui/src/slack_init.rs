@@ -379,14 +379,16 @@ pub async fn run_doctor_with<P: SlackProbe + ?Sized, I: PromptIo + ?Sized>(
     }
     io.print("✓ app token OK — Socket Mode reachable")?;
 
-    let anchor = &cfg.slack.anchor_channel;
-    let outcome =
-        ensure_anchor_channel(probe, &bot_token, anchor, io, /*write_on_join=*/ false).await?;
+    let anchor = cfg.slack.normalized_anchor_channel();
+    let outcome = ensure_anchor_channel(
+        probe, &bot_token, &anchor, io, /*write_on_join=*/ false,
+    )
+    .await?;
 
     Ok(match outcome {
         AnchorResult::Joined | AnchorResult::AlreadyMember => DoctorOutcome::Healthy,
         AnchorResult::NotVisible => DoctorOutcome::HealthyNeedsInvite {
-            anchor_channel: anchor.clone(),
+            anchor_channel: anchor,
         },
         AnchorResult::Errored => DoctorOutcome::Failed,
     })

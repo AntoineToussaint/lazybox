@@ -66,7 +66,8 @@ impl SlackProvider {
         bot_user_id: String,
         seed: HashMap<String, String>,
     ) -> Self {
-        let anchor_channel_id = seed.get(&cfg.anchor_channel).cloned();
+        let anchor_channel = cfg.normalized_anchor_channel();
+        let anchor_channel_id = seed.get(&anchor_channel).cloned();
         Self {
             api,
             cfg: ProviderCfg {
@@ -257,7 +258,8 @@ async fn run(
     // Anchor-channel hello. Best-effort — if the channel isn't
     // visible the user needs to /invite the bot. Log clearly so
     // setup is debuggable.
-    if let Some(anchor_id) = seed.get(&slack.anchor_channel).cloned() {
+    let anchor_channel = slack.normalized_anchor_channel();
+    if let Some(anchor_id) = seed.get(&anchor_channel).cloned() {
         let _ = api
             .post_message(&Message::new(
                 anchor_id,
@@ -270,7 +272,7 @@ async fn run(
             .await;
     } else {
         tracing::warn!(
-            anchor_channel = %slack.anchor_channel,
+            anchor_channel = %anchor_channel,
             "slack: anchor channel not visible; /invite @lazybox to that channel \
              so it can post bootstrap messages",
         );
@@ -593,6 +595,27 @@ mod tests {
             SlackConfig {
                 per_workspace_channels: false,
                 anchor_channel: "lazybox".into(),
+                ..SlackConfig::default()
+            },
+            "UBOT".to_string(),
+            seed,
+        );
+        let target = p.terminal_target("ws", "sess", "claude");
+        match target {
+            TerminalTarget::AnchorThread(id) => assert_eq!(id, "C-ANCHOR"),
+            other => panic!("expected AnchorThread, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_target_accepts_hash_prefixed_anchor_channel() {
+        let mut seed = HashMap::new();
+        seed.insert("lazybox".to_string(), "C-ANCHOR".to_string());
+        let p = SlackProvider::new(
+            ApiClient::new("xoxb-test".to_string()),
+            SlackConfig {
+                per_workspace_channels: false,
+                anchor_channel: "#lazybox".into(),
                 ..SlackConfig::default()
             },
             "UBOT".to_string(),

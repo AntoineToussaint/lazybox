@@ -8,10 +8,17 @@ use super::*;
 use crate::components::table::Row as TableRow;
 use crate::components::workspace_row::{WorkspaceRowCtx, build_row as build_workspace_row};
 
+fn spans_visual_width(spans: &[Span<'_>]) -> usize {
+    spans
+        .iter()
+        .map(|span| visual_width(span.content.as_ref()))
+        .sum()
+}
+
 impl Sidebar {
     pub fn render(&mut self, area: Rect, frame: &mut Frame, focused: bool) {
         // V1-style header strip:
-        //   row 0: LAZYBOX  N  ● N new  ? N input  [7d]
+        //   row 0: LAZYBOX vX.Y.Z  ● N new  ? N input        N items  7d
         //   row 1: s  filter (needs:reply ci:failed ...)
         //   row 2: N CI  N review               (omitted when both 0)
         //   row 3: ── divider ────────────────
@@ -37,34 +44,31 @@ impl Sidebar {
         let r_pad: u16 = 2;
         let inner_width = area.width.saturating_sub(l_pad + r_pad);
 
-        // Row 0 — app title + counts.
-        let mut header_spans: Vec<Span> = Vec::with_capacity(12);
-        header_spans.push(Span::styled(mailbox_label, theme.title(focused)));
+        // Row 0 — brand/mailbox on the left, attention badges in the
+        // middle, item/window summary right-aligned when there is room.
+        let mut header_left: Vec<Span> = Vec::with_capacity(4);
+        header_left.push(Span::styled(mailbox_label, theme.title(focused)));
         // Brand-tied build version, so a running instance is identifiable
         // at a glance (e.g. confirming a fix actually shipped). Only on
         // the Inbox view, where the title is the app name rather than a
         // mailbox label.
         if matches!(self.mailbox, Mailbox::Inbox) {
-            header_spans.push(Span::raw(" "));
-            header_spans.push(Span::styled(
+            header_left.push(Span::raw(" "));
+            header_left.push(Span::styled(
                 concat!("v", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(theme.text_dim),
             ));
         }
-        header_spans.push(Span::raw("  "));
-        header_spans.push(Span::styled(
-            count.to_string(),
-            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
-        ));
+
+        let mut signal_spans: Vec<Span> = Vec::with_capacity(8);
         if unread > 0 {
-            header_spans.push(Span::raw("  "));
-            header_spans.push(Span::styled(
+            signal_spans.push(Span::styled(
                 "● ",
                 Style::default()
                     .fg(theme.hover)
                     .add_modifier(Modifier::BOLD),
             ));
-            header_spans.push(Span::styled(
+            signal_spans.push(Span::styled(
                 format!("{unread} new"),
                 Style::default()
                     .fg(theme.hover)
@@ -72,18 +76,51 @@ impl Sidebar {
             ));
         }
         if input_pending > 0 {
-            header_spans.push(Span::raw("  "));
-            header_spans.push(Span::styled(
+            if !signal_spans.is_empty() {
+                signal_spans.push(Span::raw("  "));
+            }
+            signal_spans.push(Span::styled(
                 "? ",
                 Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
             ));
-            header_spans.push(Span::styled(
+            signal_spans.push(Span::styled(
                 format!("{input_pending} input"),
                 Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
             ));
         }
-        header_spans.push(Span::raw("  "));
-        header_spans.push(Span::styled("[7d]", Style::default().fg(theme.text_dim)));
+
+        let mut summary_spans: Vec<Span> = Vec::with_capacity(4);
+        summary_spans.push(Span::styled(
+            count.to_string(),
+            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+        ));
+        if inner_width >= 30 {
+            summary_spans.push(Span::styled(
+                if count == 1 { " item" } else { " items" },
+                Style::default().fg(theme.text_dim),
+            ));
+        }
+        summary_spans.push(Span::styled("  7d", Style::default().fg(theme.text_dim)));
+
+        let mut header_spans = header_left;
+        let summary_width = spans_visual_width(&summary_spans);
+        let signal_width = spans_visual_width(&signal_spans);
+        let current_width = spans_visual_width(&header_spans);
+        if !signal_spans.is_empty()
+            && inner_width as usize >= current_width + 2 + signal_width + 2 + summary_width
+        {
+            header_spans.push(Span::raw("  "));
+            header_spans.extend(signal_spans);
+        }
+        let current_width = spans_visual_width(&header_spans);
+        if inner_width as usize > current_width + summary_width {
+            let gap = inner_width as usize - current_width - summary_width;
+            header_spans.push(Span::raw(" ".repeat(gap)));
+            header_spans.extend(summary_spans);
+        } else if inner_width as usize >= current_width + 2 {
+            header_spans.push(Span::raw("  "));
+            header_spans.push(Span::styled("[7d]", Style::default().fg(theme.text_dim)));
+        }
 
         let row0 = Rect::new(area.x + l_pad, area.y, inner_width, 1.min(area.height));
         frame.render_widget(Paragraph::new(Line::from(header_spans)), row0);

@@ -122,8 +122,8 @@ and a "lazybox online" message in `#lazybox`.
 
 - **Channel limits**: free Slack tiers cap at ~9000 channels. If
   you watch hundreds of repos, set `per_workspace_channels: false`
-  and route everything through the anchor channel with thread-per-workspace
-  (use `channel_strategy: thread_per_workspace`).
+  and lazybox routes everything through the anchor channel with
+  thread-per-workspace.
 - **Channel name length**: Slack truncates at 80 chars. Lazybox
   sluggifies and clips automatically.
 - **Re-using existing channels**: lazybox looks up by name before

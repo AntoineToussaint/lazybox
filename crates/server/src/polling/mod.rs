@@ -219,6 +219,8 @@ pub struct GhSource {
     client: GhClient,
     filter: ProviderConfig,
     scopes: std::collections::BTreeSet<String>,
+    watch_repos: std::collections::BTreeSet<String>,
+    detect_needs_reply: bool,
     /// Bus handle so the source can emit `PollProgress` events
     /// during its fetch. The polling layer doesn't pass `&ServerConfig`
     /// to `TaskSource::fetch` (would couple them), so each source
@@ -346,6 +348,8 @@ impl GhSource {
             client,
             filter,
             scopes,
+            watch_repos: std::collections::BTreeSet::new(),
+            detect_needs_reply: true,
             bus,
             mention_allowed_logins,
             auto_fix,
@@ -679,9 +683,17 @@ impl GhSource {
         }
 
         self.emit_progress(format!("Got {} raw items, applying filters…", raw.len()));
-        let kept = readmit_mentioned_tasks(
-            filter_github_tasks(raw, &self.filter, &self.scopes),
-            mentioned_tasks,
+        let kept = apply_needs_reply_toggle(
+            readmit_mentioned_tasks(
+                filter_github_tasks_with_watches(
+                    raw,
+                    &self.filter,
+                    &self.scopes,
+                    &self.watch_repos,
+                ),
+                mentioned_tasks,
+            ),
+            self.detect_needs_reply,
         );
         self.emit_progress(format!("{} tasks kept after filter", kept.len()));
 
@@ -803,7 +815,10 @@ impl GhSource {
             .collect()
             .await;
 
-        let kept = filter_github_tasks(tasks, &self.filter, &self.scopes);
+        let kept = apply_needs_reply_toggle(
+            filter_github_tasks_with_watches(tasks, &self.filter, &self.scopes, &self.watch_repos),
+            self.detect_needs_reply,
+        );
         self.emit_progress(format!(
             "{} task(s) refreshed via notifications",
             kept.len()
@@ -1356,9 +1371,25 @@ pub fn filter_github_tasks(
     filter: &ProviderConfig,
     scopes: &std::collections::BTreeSet<String>,
 ) -> Vec<Task> {
+    filter_github_tasks_with_watches(tasks, filter, scopes, &std::collections::BTreeSet::new())
+}
+
+pub fn filter_github_tasks_with_watches(
+    tasks: Vec<Task>,
+    filter: &ProviderConfig,
+    scopes: &std::collections::BTreeSet<String>,
+    watch_repos: &std::collections::BTreeSet<String>,
+) -> Vec<Task> {
     tasks
         .into_iter()
         .filter(|t| {
+            if t.url.contains("/pull/")
+                && t.repo
+                    .as_deref()
+                    .is_some_and(|repo| watch_repos.contains(repo))
+            {
+                return true;
+            }
             // Combined type+role gate. Issues use `issue.*` keys, PRs
             // use `pr.*` keys. Tasks of unknown type (discussions,
             // etc.) bypass the type/role filter — they don't have a
@@ -1392,6 +1423,39 @@ pub fn filter_github_tasks(
             }
             false
         })
+        .collect()
+}
+
+fn apply_needs_reply_toggle(mut tasks: Vec<Task>, detect_needs_reply: bool) -> Vec<Task> {
+    if !detect_needs_reply {
+        for task in &mut tasks {
+            task.needs_reply = false;
+        }
+    }
+    tasks
+}
+
+pub fn github_scopes_from_filters(
+    filters: &[lazybox_config::Filter],
+) -> std::collections::BTreeSet<String> {
+    filters
+        .iter()
+        .filter_map(|filter| {
+            filter
+                .org
+                .as_ref()
+                .map(|org| format!("github:{org}"))
+                .or_else(|| filter.repo.as_ref().map(|repo| format!("github:{repo}")))
+        })
+        .collect()
+}
+
+pub fn github_watch_repos_from_filters(
+    filters: &[lazybox_config::Filter],
+) -> std::collections::BTreeSet<String> {
+    filters
+        .iter()
+        .filter_map(|filter| filter.watch.clone())
         .collect()
 }
 
@@ -1489,11 +1553,26 @@ pub async fn sources_for(
                 match client_result {
                     Ok(client) => {
                         let filter = setup.provider_config("github");
-                        let scopes = setup
+                        // Load YAML once for all runtime GitHub knobs
+                        // that are intentionally outside the setup
+                        // wizard: mention allowlist, auto-fix, and the
+                        // documented `providers.github.*` section.
+                        let cfg = lazybox_config::Config::load().ok();
+                        let github_cfg = cfg.as_ref().map(|c| &c.providers.github);
+                        let config_scopes = github_cfg
+                            .map(|g| github_scopes_from_filters(&g.filters))
+                            .unwrap_or_default();
+                        let watch_repos = github_cfg
+                            .map(|g| github_watch_repos_from_filters(&g.filters))
+                            .unwrap_or_default();
+                        let detect_needs_reply =
+                            github_cfg.map(|g| g.detect_needs_reply).unwrap_or(true);
+                        let mut scopes = setup
                             .selected_scopes
                             .get("github")
                             .cloned()
                             .unwrap_or_default();
+                        scopes.extend(config_scopes);
                         let pr_qualifiers =
                             build_pr_search_qualifiers(&filter, &scopes, client.username());
                         let issue_qualifiers =
@@ -1502,7 +1581,10 @@ pub async fn sources_for(
                         // sharing the same budget Arc — `.clone()` on
                         // the result is cheap and keeps the cache in
                         // sync with what GhSource holds.
-                        let client = client.with_filters(pr_qualifiers, issue_qualifiers);
+                        let client = client
+                            .with_filters(pr_qualifiers, issue_qualifiers)
+                            .with_watch_repos(watch_repos.iter().cloned().collect())
+                            .with_needs_reply(detect_needs_reply);
                         // Cache + announce the authenticated viewer
                         // login so the TUI can render `@me` for the
                         // local user's bylines. Diffs the cache so we
@@ -1540,10 +1622,6 @@ pub async fn sources_for(
                         // viewer", which mirrors the design doc's MVP
                         // scope (only the local lazybox user's own
                         // issues + comments count).
-                        // Load config ONCE for both the mention
-                        // allowlist and the auto-fix settings so we
-                        // don't read the YAML twice per tick.
-                        let cfg = lazybox_config::Config::load().ok();
                         let mut mention_allowed: std::collections::BTreeSet<String> = cfg
                             .as_ref()
                             .map(|c| c.mention.allowed_logins.iter().cloned().collect())
@@ -1596,6 +1674,8 @@ pub async fn sources_for(
                             client,
                             filter,
                             scopes,
+                            watch_repos,
+                            detect_needs_reply,
                             bus: bus.clone(),
                             mention_allowed_logins: mention_allowed,
                             auto_fix,

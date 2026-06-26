@@ -649,6 +649,11 @@ impl<T: TerminalAdapter> Model<T> {
         } else {
             self.needs_pane_sync = true;
         }
+        // Same projection as the spawn spinner: if the terminal stack
+        // already proves the worktree-backed session exists, queue the
+        // checklist dismissal even when the specific TerminalSpawned
+        // event was missed or replaced by a reconnect Snapshot (#219).
+        self.reconcile_worktree_progress_with_terminals();
         // This event may have added the terminal an in-flight spawn was
         // waiting for. Recompute the spinner from the now-current
         // terminal set rather than trusting a single clear event (#206).

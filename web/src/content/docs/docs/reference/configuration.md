@@ -116,7 +116,7 @@ ui:
 providers:
   github:
     poll_interval: 60        # seconds
-    detect_needs_reply: true
+    detect_needs_reply: true  # show/hide needs-reply badges
     filters:
       - org: acme
       - repo: acme/widgets
@@ -344,7 +344,7 @@ default to `true`.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `github.poll_interval` | seconds | `60` | How often the GitHub provider polls |
-| `github.detect_needs_reply` | bool | `true` | Fetch comment authors for needs-reply detection |
+| `github.detect_needs_reply` | bool | `true` | Show needs-reply badges when GitHub reports a reply is needed |
 | `github.filters` | list | `[]` | Narrow which PRs appear (empty = everything) |
 
 Each `filters` entry has exactly one of:

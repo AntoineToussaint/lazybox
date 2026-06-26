@@ -266,8 +266,9 @@ Claude `result` line finishes a *turn*; the process exiting is the *run*.
 ### What it does
 A 127.0.0.1 HTTP pass-through that the daemon points agents at (via
 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`), forwarding requests verbatim while
-recording structured telemetry — model, token counts, tool calls, latency, cost
-— keyed to a session.
+attributing model traffic to a session. It is the path for structured telemetry
+— model, token counts, tool calls, latency, and cost — as parsing and storage
+land behind the proxy.
 
 ### How to use it
 Transparent to the agent: the daemon injects the base-URL env vars when spawning

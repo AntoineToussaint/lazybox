@@ -7,7 +7,7 @@ use lazybox_ipc::{Command, Event, socket};
 use lazybox_server::ServerConfig;
 use lazybox_server::backend::SessionBackend;
 use lazybox_server::lifecycle;
-use lazybox_server::socket_service::SocketService;
+use lazybox_server::socket_service::{SocketService, SocketServiceError};
 use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -119,6 +119,41 @@ async fn stale_socket_is_cleaned_up_on_bind() {
         }
     };
     drop(client);
+
+    shutdown.notify_one();
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}
+
+#[tokio::test]
+async fn live_socket_is_not_unlinked_by_second_start() {
+    let base = TempDir::new().unwrap();
+    let (sock, handle, shutdown) = spawn_service(&base).await;
+
+    let second = SocketService::new(
+        sock.clone(),
+        base.path().join("daemon-second.pid"),
+        ServerConfig::in_memory,
+    );
+    let err = second
+        .run()
+        .await
+        .expect_err("second daemon must not start");
+    match err {
+        SocketServiceError::Bind { source, .. } => {
+            assert_eq!(source.kind(), std::io::ErrorKind::AddrInUse);
+        }
+        other => panic!("expected bind error, got {other:?}"),
+    }
+
+    let mut client = socket::connect(&sock)
+        .await
+        .expect("original daemon socket should still be reachable");
+    client.send(Command::Subscribe).expect("send subscribe");
+    let evt = tokio::time::timeout(Duration::from_secs(2), client.recv())
+        .await
+        .expect("timeout")
+        .expect("event");
+    assert!(matches!(evt, Event::Snapshot { .. }));
 
     shutdown.notify_one();
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;

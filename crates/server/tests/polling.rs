@@ -1127,6 +1127,61 @@ fn empty_filter_drops_everything() {
     assert!(kept.is_empty());
 }
 
+#[test]
+fn github_config_filters_convert_to_scopes_and_watch_repos() {
+    let filters = vec![
+        lazybox_config::Filter {
+            org: Some("acme".into()),
+            repo: None,
+            watch: None,
+        },
+        lazybox_config::Filter {
+            org: None,
+            repo: Some("widgets/core".into()),
+            watch: None,
+        },
+        lazybox_config::Filter {
+            org: None,
+            repo: None,
+            watch: Some("infra/platform".into()),
+        },
+    ];
+
+    let scopes = polling::github_scopes_from_filters(&filters);
+    assert!(scopes.contains("github:acme"));
+    assert!(scopes.contains("github:widgets/core"));
+    assert!(!scopes.contains("github:infra/platform"));
+
+    let watches = polling::github_watch_repos_from_filters(&filters);
+    assert_eq!(
+        watches,
+        std::collections::BTreeSet::from(["infra/platform".to_string()])
+    );
+}
+
+#[test]
+fn watched_repo_keeps_uninvolved_prs_past_role_and_scope_filters() {
+    let mut filter = ProviderConfig::default();
+    filter.enabled_keys.insert("pr.author".into());
+
+    let mut watched = make_repo_task("acme/infra");
+    watched.role = TaskRole::Reviewer;
+    let mut unrelated = make_repo_task("other/repo");
+    unrelated.role = TaskRole::Reviewer;
+
+    let scopes = std::collections::BTreeSet::from(["github:somewhere/else".to_string()]);
+    let watches = std::collections::BTreeSet::from(["acme/infra".to_string()]);
+    let kept = polling::filter_github_tasks_with_watches(
+        vec![watched.clone(), unrelated],
+        &filter,
+        &scopes,
+        &watches,
+    );
+
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].repo.as_deref(), Some("acme/infra"));
+}
+
 // ── Scope filter ───────────────────────────────────────────────────
 
 fn make_repo_task(repo: &str) -> Task {

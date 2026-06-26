@@ -63,8 +63,25 @@ impl SocketService {
     pub async fn run(self) -> Result<(), SocketServiceError> {
         lifecycle::ensure_runtime_dir().map_err(SocketServiceError::Dir)?;
 
-        // Clear any stale socket left by a prior crashed daemon.
-        let _ = lifecycle::cleanup_stale_socket(&self.socket);
+        // Clear a stale socket left by a prior crashed daemon, but do
+        // not unlink a socket that still has a live listener. A missing
+        // pidfile alone is not proof the daemon is dead.
+        if self.socket.exists() {
+            match transport::connect(&self.socket).await {
+                Ok((_rd, _wr)) => {
+                    return Err(SocketServiceError::Bind {
+                        path: self.socket.clone(),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::AddrInUse,
+                            "daemon socket already has a live listener",
+                        ),
+                    });
+                }
+                Err(_) => {
+                    let _ = lifecycle::cleanup_stale_socket(&self.socket);
+                }
+            }
+        }
 
         let listener = transport::Listener::bind(&self.socket)
             .await

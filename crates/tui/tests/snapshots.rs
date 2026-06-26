@@ -228,6 +228,27 @@ fn sidebar_header_shows_build_version() {
     );
 }
 
+#[test]
+fn sidebar_header_fits_narrow_width() {
+    let mut s = sidebar();
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(make_task("o/r#1", 10), fixed_time())],
+        terminals: vec![],
+        projects: vec![],
+    });
+
+    let rendered = render_to_string(&mut s, 24, 5, true);
+    let first_line = rendered.lines().next().unwrap_or_default();
+    assert!(
+        lazybox_tui::util::visual_width(first_line) <= 24,
+        "header overflowed narrow sidebar: {first_line:?}"
+    );
+    assert!(
+        first_line.contains("LAZYBOX"),
+        "narrow header lost the brand: {first_line:?}"
+    );
+}
+
 /// Issue #100: a genuinely empty inbox swaps the blank content area
 /// for a getting-started panel that names the next actions, leading
 /// with the worktree-session flow. Rendered tall enough to fit the

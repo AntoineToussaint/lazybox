@@ -16,7 +16,7 @@ slack:
   app_token: xapp-REPLACE-ME           # placeholder, not a real token
 
   # The channel where lazybox posts its top-level inbox/anchor messages.
-  anchor_channel: "#lazybox"
+  anchor_channel: lazybox
 
   # When true, each workspace gets its own dedicated channel so conversation
   # about one task stays together. When false, everything threads under the

@@ -159,11 +159,11 @@ pub struct UiSection {
     /// before the daemon auto-marks it read. None = 1 second (the
     /// historical default). Yazi-ish: long enough to scan past,
     /// short enough that the user feels in control.
-    #[serde(with = "duration_secs_opt", default)]
+    #[serde(with = "duration_human_opt", default)]
     pub auto_mark_delay: Option<Duration>,
     /// How long the first `q` stays armed waiting for the second
     /// tap. None = 800 ms.
-    #[serde(with = "duration_secs_opt", default)]
+    #[serde(with = "duration_human_opt", default)]
     pub quit_double_tap_window: Option<Duration>,
     /// Two consecutive presses of this character return focus from
     /// the terminal pane back to the sidebar (tmux-style prefix).
@@ -176,10 +176,10 @@ pub struct UiSection {
     /// height (in rows) when `b` toggles it open. None = 8.
     pub task_body_max_rows: Option<u16>,
     /// `z` snooze duration. None = 4 hours.
-    #[serde(with = "duration_secs_opt", default)]
+    #[serde(with = "duration_human_opt", default)]
     pub short_snooze: Option<Duration>,
     /// `Shift-Z` long-snooze duration. None = ~1 year (365 days).
-    #[serde(with = "duration_secs_opt", default)]
+    #[serde(with = "duration_human_opt", default)]
     pub long_snooze: Option<Duration>,
     /// Where the lazybox client writes its log file. None =
     /// `/tmp/lazybox.log`. Future: respect `$XDG_STATE_HOME` /
@@ -850,7 +850,9 @@ pub struct GithubConfig {
     /// Org/repo filters. Only PRs matching these appear in the inbox.
     /// Empty = show everything.
     pub filters: Vec<Filter>,
-    /// Whether to fetch comment authors for needs-reply detection.
+    /// Whether to surface GitHub's needs-reply signal in the inbox.
+    /// When disabled, fetched tasks are kept but their `needs_reply`
+    /// flag is suppressed.
     pub detect_needs_reply: bool,
 }
 
@@ -999,6 +1001,16 @@ pub struct SlackConfig {
     pub allowed_users: Vec<String>,
 }
 
+impl SlackConfig {
+    pub fn normalized_anchor_channel(&self) -> String {
+        normalize_slack_channel_name(&self.anchor_channel)
+    }
+}
+
+pub fn normalize_slack_channel_name(raw: &str) -> String {
+    raw.trim().trim_start_matches('#').to_string()
+}
+
 fn default_anchor_channel() -> String {
     "lazybox".into()
 }
@@ -1025,28 +1037,42 @@ mod duration_secs {
     }
 }
 
-/// Optional-Duration variant: accepts a `"30s"`-style YAML value or
-/// the absence of the key. Used by `UiSection` for timing knobs
-/// whose default lives in the consumer (so the helper here is just
-/// "wire the string ↔ Duration").
-mod duration_secs_opt {
+/// Optional-Duration variant for user-facing UI knobs. Accepts human
+/// strings such as `"800ms"`, `"4h"`, and `"365d"`, while preserving
+/// backward-compatible bare numbers as seconds.
+mod duration_human_opt {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::time::Duration;
 
     pub fn serialize<S: Serializer>(d: &Option<Duration>, s: S) -> Result<S::Ok, S::Error> {
         match d {
-            Some(d) => s.serialize_str(&format!("{}s", d.as_secs())),
+            Some(d) => {
+                s.serialize_str(&humantime_serde::re::humantime::format_duration(*d).to_string())
+            }
             None => s.serialize_none(),
         }
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-        let s: Option<String> = Option::deserialize(d)?;
-        match s {
-            Some(s) => {
-                let trimmed = s.trim_end_matches('s');
-                let secs: u64 = trimmed.parse().map_err(serde::de::Error::custom)?;
-                Ok(Some(Duration::from_secs(secs)))
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            String(String),
+            Seconds(u64),
+        }
+
+        let value: Option<Wire> = Option::deserialize(d)?;
+        match value {
+            Some(Wire::Seconds(secs)) => Ok(Some(Duration::from_secs(secs))),
+            Some(Wire::String(raw)) => {
+                let trimmed = raw.trim();
+                if trimmed.chars().all(|c| c.is_ascii_digit()) {
+                    let secs: u64 = trimmed.parse().map_err(serde::de::Error::custom)?;
+                    return Ok(Some(Duration::from_secs(secs)));
+                }
+                humantime_serde::re::humantime::parse_duration(trimmed)
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
             }
             None => Ok(None),
         }
@@ -1292,6 +1318,17 @@ repos:
     }
 
     #[test]
+    fn slack_anchor_channel_normalizes_hash_prefix() {
+        let cfg: Config =
+            serde_yaml::from_str("slack:\n  anchor_channel: \" #lazybox \"\n").expect("parse");
+        assert_eq!(cfg.slack.normalized_anchor_channel(), "lazybox");
+        assert_eq!(
+            normalize_slack_channel_name("lazybox-inbox"),
+            "lazybox-inbox"
+        );
+    }
+
+    #[test]
     fn auto_fix_defaults_to_off_when_section_absent() {
         let cfg: Config = serde_yaml::from_str("{}").expect("parse");
         assert!(!cfg.auto_fix.enabled, "auto-fix must be opt-in");
@@ -1379,5 +1416,34 @@ auto_fix:
         assert_eq!(r.short_snooze, Duration::from_secs(15 * 60));
         assert_eq!(r.long_snooze, Duration::from_secs(7 * 24 * 3600));
         assert_eq!(r.log_path, std::path::PathBuf::from("/var/log/lazybox.log"));
+    }
+
+    #[test]
+    fn ui_durations_accept_human_and_legacy_second_values() {
+        let yaml = r#"
+ui:
+  auto_mark_delay: 800ms
+  quit_double_tap_window: "2s"
+  short_snooze: 4h
+  long_snooze: 365d
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse human durations");
+        let ui = cfg.ui.resolved();
+        assert_eq!(ui.auto_mark_delay, Duration::from_millis(800));
+        assert_eq!(ui.quit_double_tap_window, Duration::from_secs(2));
+        assert_eq!(ui.short_snooze, Duration::from_secs(4 * 60 * 60));
+        assert_eq!(ui.long_snooze, Duration::from_secs(365 * 24 * 60 * 60));
+
+        let legacy: Config = serde_yaml::from_str(
+            r#"
+ui:
+  short_snooze: 14400
+  long_snooze: "31536000"
+"#,
+        )
+        .expect("parse legacy seconds");
+        let ui = legacy.ui.resolved();
+        assert_eq!(ui.short_snooze, Duration::from_secs(14_400));
+        assert_eq!(ui.long_snooze, Duration::from_secs(31_536_000));
     }
 }

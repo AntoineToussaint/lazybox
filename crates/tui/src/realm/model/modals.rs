@@ -1021,6 +1021,25 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Backstop for #219: `TerminalSpawned` is the normal completion
+    /// signal, but snapshots/reconnects or lagged event streams can
+    /// prove the same fact by showing a live terminal for the
+    /// checklist's session. Queue the same graceful dismissal from that
+    /// projected state so the modal cannot remain stuck on clone after
+    /// the work actually completed.
+    pub(super) fn reconcile_worktree_progress_with_terminals(&mut self) {
+        let Some(session_key) = self.worktree_progress.as_ref().and_then(|state| {
+            if !state.failed() && self.terminals.terminal_count_for(&state.session_key) > 0 {
+                Some(state.session_key.clone())
+            } else {
+                None
+            }
+        }) else {
+            return;
+        };
+        self.queue_worktree_progress_dismiss(&session_key);
+    }
+
     /// Walk the displayed checklist one step toward the daemon's truth
     /// (gated by the min-dwell) and re-mount the modal if it changed.
     /// Tears the modal down once a queued dismiss has been fully shown.

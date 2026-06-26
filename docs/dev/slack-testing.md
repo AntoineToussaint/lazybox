@@ -192,9 +192,9 @@ in each test channel, then in `#lazybox`:
 
 - **One lazybox per Slack workspace.** Two lazybox instances will both create
   channels + both respond to mentions. Use one lazybox per Slack workspace.
-- **No threading yet.** Each event posts as a top-level message. The
-  `channel_strategy: thread_per_workspace` flag in `docs/slack-setup.md` is
-  reserved for a later commit.
+- **Threaded anchor mode is coarse.** With `per_workspace_channels: false`,
+  lazybox routes workspace traffic under anchor-channel threads instead of
+  creating dedicated channels.
 - **No rate-limit backoff.** Slack tier-3 endpoints (post + create) cap at
   ~50 req/min. Lazybox fires one per Asking transition or first-seen
   workspace, so you'd need a lot of new workspaces in a minute to hit it.

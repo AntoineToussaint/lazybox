@@ -255,15 +255,12 @@ fn save_persisted_yaml(
     // the next launch.
     cfg.setup.wizard_completed = true;
 
-    let serialized = serde_yaml::to_string(&cfg).context("config.yaml serialize failed")?;
-
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // Atomic-ish write: tmp + rename.
-    let tmp = path.with_extension("yaml.tmp");
-    std::fs::write(&tmp, serialized).context("config.yaml write tmp failed")?;
-    std::fs::rename(&tmp, path).context("config.yaml rename failed")?;
+    // Use the config crate's write path so setup/settings saves keep
+    // secret-bearing YAML owner-only, matching `Config::save()`.
+    lazybox_config::Config::save_to(&cfg, path).context("config.yaml write failed")?;
     Ok(backed_up)
 }
 

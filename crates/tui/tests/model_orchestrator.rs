@@ -1835,6 +1835,59 @@ fn terminal_spawned_mid_checklist_walks_every_step_before_dismissing() {
     );
 }
 
+#[test]
+fn snapshot_terminal_backstops_worktree_progress_dismissal() {
+    use lazybox_ipc::{
+        TerminalId, TerminalKind, TerminalSnapshot, WorktreeStep, WorktreeStepStatus,
+    };
+    use lazybox_tui::realm::Msg;
+    use lazybox_tui::realm::components::worktree_progress::MIN_STEP_DWELL;
+    let mut m = build_model();
+    let sk = SessionKey::new("github:o/r#42");
+
+    m.handle_daemon_event(IpcEvent::WorktreeProgress {
+        session_key: sk.clone(),
+        step: WorktreeStep::Clone,
+        status: WorktreeStepStatus::Started,
+    });
+    assert_eq!(m.modal_stack.last(), Some(&Id::WorktreeProgress));
+
+    // Simulate a lag/reconnect path where the terminal is visible in
+    // the live snapshot, but the specific TerminalSpawned completion
+    // event never reaches this client.
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![],
+        terminals: vec![TerminalSnapshot {
+            terminal_id: TerminalId(1),
+            session_key: sk,
+            kind: TerminalKind::Agent("claude".into()),
+            replay: Vec::new(),
+            last_seq: 0,
+            no_permission: false,
+            last_user_message: None,
+        }],
+        projects: vec![],
+    });
+    assert!(
+        m.modal_stack.contains(&Id::WorktreeProgress),
+        "snapshot queues dismissal but still walks the checklist"
+    );
+
+    let mut torn_down = false;
+    for _ in 0..(STEP_COUNT_FOR_TEST + 2) {
+        std::thread::sleep(MIN_STEP_DWELL + std::time::Duration::from_millis(50));
+        m.update(Msg::WorktreeProgressTick);
+        if !m.modal_stack.contains(&Id::WorktreeProgress) {
+            torn_down = true;
+            break;
+        }
+    }
+    assert!(
+        torn_down,
+        "snapshot-visible terminal must eventually dismiss the checklist"
+    );
+}
+
 /// Checklist row count (clone, fetch, worktree-add, setup, agent),
 /// mirrored here so the bounded walk above can't spin forever.
 const STEP_COUNT_FOR_TEST: usize = 5;

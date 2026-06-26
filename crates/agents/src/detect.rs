@@ -30,6 +30,26 @@ use lazybox_ipc::AgentState;
 /// Order doesn't matter — substring search.
 pub const YN_PROMPT_PATTERNS: &[&str] = &["[y/n]", "(y/n)", "[Y/n]", "[y/N]"];
 
+/// Phrases the Codex TUI renders ONLY inside a blocking approval / consent
+/// modal — never in the idle composer or streamed chat. Matched against the
+/// space-free buffer (see [`compact_lower`]) so the cursor-positioned status
+/// bar, which arrives with its inter-word gaps stripped, still matches.
+/// Lowercase; compared against the lowercased buffer.
+///
+/// Coverage, by modal (captured from a real `codex` 0.142 session):
+///   - command approval → "Would you like to run the following command?"
+///   - file-edit approval → "Would you like to make the following edits?"
+///     (both collapse to the "would you like to" stem)
+///   - any approval modal → "Press enter to confirm or esc to cancel"
+///   - directory-trust gate → "Do you trust the contents of this directory?"
+///     / "Press enter to continue"
+pub const CODEX_PROMPT_PHRASES: &[&str] = &[
+    "would you like to",
+    "press enter to confirm",
+    "press enter to continue",
+    "do you trust the contents",
+];
+
 /// Standalone phrases that are unambiguously Claude blocking on user
 /// input — no chat context realistically produces them, so matching one
 /// is enough confidence to flag `InputNeeded`. Lowercase; matched
@@ -1035,6 +1055,165 @@ fn skip_string_terminated(bytes: &[u8], mut i: usize) -> usize {
         }
     }
     i
+}
+
+/// How far back the Codex bare-`[y/n]` fallback scans for a bottom-of-
+/// screen prompt. Mirrors the `builtins::PROMPT_TAIL_WINDOW` the simple-
+/// pattern agents use: their markers carry no recency anchor, so bounding
+/// the scan to the visible-screen tail is what lets an answered prompt stop
+/// matching once fresh output arrives.
+const CODEX_PROMPT_TAIL_WINDOW: usize = 2 * 1024;
+
+/// Codex's three observable states, in one detector — the per-agent
+/// equivalent of [`claude_state`]. Codex renders INLINE (no alt-screen), so
+/// the daemon's append-only detect window ends with whatever Codex last
+/// repainted; recency is therefore the byte offset of each marker, exactly
+/// as for Claude.
+///
+/// - **`InputNeeded`** — a live approval / consent modal. Two signals, both
+///   gated on recency so an ANSWERED modal still lingering in the window
+///   stops matching once Codex repaints below it: a
+///   [`CODEX_PROMPT_PHRASES`] phrase, or the chooser shape `› 1.` (the
+///   selection arrow `›` sitting directly on a numbered option). Plus the
+///   bare `[y/n]` / `approve?` family scanned in the bottom-of-screen zone
+///   for prompts that carry no Codex chrome.
+/// - **`Working`** — Codex paints a live status line while busy:
+///   `• Working (3s · esc to interrupt)`. The `esc to interrupt` hint is the
+///   reliable pulser (same token Claude uses), recognised only when it's
+///   more recent than the resting composer footer so a finished turn's stale
+///   status line reads `Idle`, not forever-busy.
+/// - **`Idle`** — composer at rest, or plain non-interactive output.
+///
+/// Always `Some(_)`, like [`claude_state`], so the daemon can diff against
+/// the cached state to notice every transition.
+pub fn codex_state(recent_output: &[u8]) -> Option<AgentState> {
+    let s = strip_ansi_lossy(recent_output);
+    Some(codex_state_of(&s, &compact_lower(&s), None))
+}
+
+/// Chunk-aware variant of [`codex_state`] — the per-agent equivalent of
+/// [`claude_state_chunked`]. `last_chunk_start` is the byte offset within
+/// `recent_output` where the most recent PTY chunk begins. A tmux/full-
+/// screen repaint can deliver a live approval modal and an earlier status
+/// line in one chunk; the hint keeps the work anchor from suppressing a
+/// prompt that arrived in the same repaint.
+pub fn codex_state_chunked(recent_output: &[u8], last_chunk_start: usize) -> Option<AgentState> {
+    let mark = last_chunk_start.min(recent_output.len());
+    let (s, s_mark) = strip_ansi_lossy_marked(recent_output, mark);
+    let (compact, compact_mark) = compact_lower_marked(&s, s_mark);
+    Some(codex_state_of(&s, &compact, Some(compact_mark)))
+}
+
+/// Whether Codex is ready to receive a pasted prompt: the composer footer is
+/// drawn AND no approval / trust modal is up. Like [`claude_ready_for_prompt`],
+/// derived from the shared state model — "composer visible and not asking" —
+/// rather than re-deriving the markers. Lets the spawn-time injector land the
+/// work prompt the moment Codex is idle instead of riding the settle timer,
+/// and never into a directory-trust gate.
+pub fn codex_ready_for_prompt(recent_output: &[u8]) -> bool {
+    let s = strip_ansi_lossy(recent_output);
+    let compact = compact_lower(&s);
+    codex_state_of(&s, &compact, None) == AgentState::Idle && codex_footer_pos(&compact).is_some()
+}
+
+/// Classify Codex's state from the stripped buffer `s` and its space-free
+/// form `compact`. `last_chunk_start` is the chunk-boundary hint in
+/// `compact`'s offset space (`None` keeps the pure positional rules).
+fn codex_state_of(s: &str, compact: &str, last_chunk_start: Option<usize>) -> AgentState {
+    let footer_pos = codex_footer_pos(compact);
+    let work_pos = codex_working_pos(compact);
+    let prompt_pos = codex_prompt_pos(compact);
+
+    // Same-chunk rule (see [`claude_state_chunked`]): on a full repaint the
+    // approval modal and an earlier status line land in ONE chunk; the work
+    // anchor must not then suppress a prompt that arrived in the same paint.
+    // `None` (no hint) keeps the pure positional ordering.
+    let work_against = |marker: Option<usize>| -> Option<usize> {
+        match (marker, work_pos, last_chunk_start) {
+            (Some(m), Some(w), Some(cs)) if m >= cs && w >= cs => None,
+            _ => work_pos,
+        }
+    };
+
+    // A live approval / consent modal is the bottom-most marker — more recent
+    // than the resting footer and any status line painted above it.
+    if marker_at_least_as_recent(prompt_pos, footer_pos.max(work_against(prompt_pos))) {
+        return AgentState::InputNeeded;
+    }
+
+    // Bare yes/no family at the bottom of the screen — Codex prompts (or a
+    // GenericCli-style bare prompt) that carry no distinctive chrome. Scoped
+    // to the visible tail so a `[y/n]` echoed earlier in scrollback doesn't
+    // false-fire.
+    let prompt_zone = last_nonempty_lines(recent_tail(s, CODEX_PROMPT_TAIL_WINDOW), 5);
+    if contains_any(&prompt_zone, YN_PROMPT_PATTERNS) || prompt_zone.contains("approve?") {
+        return AgentState::InputNeeded;
+    }
+
+    // Working: the live `esc to interrupt` status line, more recent than the
+    // resting composer footer. Deliberately positional with NO same-chunk
+    // relaxation — a finished turn repaints its composer footer BELOW the now-
+    // stale status line, and "never falsely busy" outranks catching the very
+    // first frame after submit (the spinner re-paints the hint within a frame
+    // or two, and the daemon's working hysteresis bridges the gap).
+    if work_pos.is_some_and(|wp| footer_pos.is_none_or(|fp| wp > fp)) {
+        return AgentState::Working;
+    }
+
+    AgentState::Idle
+}
+
+/// Byte offset of the most recent Codex composer footer in `compact` — the
+/// `<model> <effort> · <cwd>` status line Codex draws beneath the input box
+/// at rest and while streaming. Anchored on the middle-dot separator (U+00B7,
+/// distinct from the U+2022 bullet the status line uses) immediately followed
+/// by the cwd path (`·/…` or `·~…`). It's the recency anchor that evicts a
+/// finished turn's stale `esc to interrupt` and that proves the composer is
+/// drawn for the readiness check.
+fn codex_footer_pos(compact: &str) -> Option<usize> {
+    [compact.rfind("\u{b7}/"), compact.rfind("\u{b7}~")]
+        .into_iter()
+        .flatten()
+        .max()
+}
+
+/// Byte offset of Codex's most recent live "working" status line in `compact`
+/// — the `esc to interrupt` hint on a status-bar-shaped line (reusing
+/// [`is_interrupt_status_line`], which rejects prose that merely mentions the
+/// phrase). Codex renders `• Working (3s · esc to interrupt)` only while busy.
+fn codex_working_pos(compact: &str) -> Option<usize> {
+    last_line_pos(compact, is_interrupt_status_line).and(compact.rfind("esctointerrupt"))
+}
+
+/// Byte offset of the most recent Codex approval-modal marker in `compact` —
+/// a [`CODEX_PROMPT_PHRASES`] phrase or the chooser shape `› <digit>`. The
+/// `max` is the recency anchor compared against the composer footer and work
+/// status line in [`codex_state_of`].
+fn codex_prompt_pos(compact: &str) -> Option<usize> {
+    [
+        last_compact_match_pos(compact, CODEX_PROMPT_PHRASES),
+        codex_arrow_option_pos(compact),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+}
+
+/// Byte offset of the most recent Codex selection arrow sitting directly on a
+/// numbered option — `›1.` / `›1)` in the space-free buffer (rendered
+/// `› 1. Yes` on screen). The idle composer's placeholder is `›` followed by
+/// prompt text (a letter), so requiring a digit after the arrow keeps it from
+/// matching a resting composer. `›` is U+203A — Codex's chooser arrow, not
+/// Claude's `❯`.
+fn codex_arrow_option_pos(compact: &str) -> Option<usize> {
+    compact.match_indices('\u{203a}').rev().find_map(|(i, _)| {
+        let mut chars = compact[i + '\u{203a}'.len_utf8()..].chars();
+        matches!(
+            (chars.next(), chars.next()),
+            (Some(d), Some(p)) if d.is_ascii_digit() && (p == '.' || p == ')')
+        )
+        .then_some(i)
+    })
 }
 
 #[cfg(test)]

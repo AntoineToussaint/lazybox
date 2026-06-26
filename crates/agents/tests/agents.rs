@@ -175,16 +175,115 @@ fn default_agent_inject_submit_is_none() {
 
 #[test]
 fn codex_detects_yn_prompt() {
-    // Codex prompts the user with `[y/n]` for tool approvals. The
-    // detector flags those as InputNeeded; everything else is Idle
-    // (no Codex "working" pulser is recognised yet, so we never
-    // falsely report Working).
+    // Codex prompts the user with `[y/n]` for bare tool approvals. The
+    // detector flags those as InputNeeded; quiet text with no working
+    // status line and no prompt is Idle.
     let agent = Codex;
     assert_eq!(
         agent.detect_state(b"run rm -rf? [y/n]"),
         Some(AgentState::InputNeeded)
     );
     assert_eq!(agent.detect_state(b"hello world"), Some(AgentState::Idle));
+}
+
+#[test]
+fn codex_detects_working_status_line() {
+    // Codex paints a live status line while busy:
+    // `• Working (3s · esc to interrupt)`. The `esc to interrupt` hint is
+    // the per-agent "working" pulser the sidebar spinner keys off — the
+    // gap the issue (#225) was filed for, where a busy Codex looked idle.
+    let agent = Codex;
+    let buf = "• Working (3s · esc to interrupt)";
+    assert_eq!(
+        agent.detect_state(buf.as_bytes()),
+        Some(AgentState::Working),
+    );
+}
+
+#[test]
+fn codex_stale_working_under_composer_footer_is_idle() {
+    // A finished turn repaints the composer footer (`gpt-5.5 xhigh ·
+    // /repo`) BELOW the now-stale `esc to interrupt`. The more-recent
+    // footer wins → Idle, not a forever-busy false positive.
+    let agent = Codex;
+    let buf = "• Working (12s · esc to interrupt)\n\
+               • Done.\n\
+               › Try something\n\
+               gpt-5.5 xhigh · /repo";
+    assert_eq!(agent.detect_state(buf.as_bytes()), Some(AgentState::Idle));
+    // And with the composer drawn and no modal up, Codex is ready for a
+    // pasted prompt.
+    assert!(agent.detect_ready_for_prompt(buf.as_bytes()));
+}
+
+#[test]
+fn codex_detects_approval_modal_phrases() {
+    // Codex's real approval / consent modals carry distinctive chrome
+    // beyond `[y/n]`. Each must read InputNeeded.
+    let agent = Codex;
+    for buf in [
+        // command approval
+        "Would you like to run the following command?\n\
+         › 1. Yes, proceed (y)\n  2. No (esc)\nPress enter to confirm or esc to cancel",
+        // file-edit approval (shared "would you like to" stem)
+        "Would you like to make the following edits?\n\
+         › 1. Yes, proceed (y)\n  2. No (esc)\nPress enter to confirm or esc to cancel",
+        // directory-trust gate
+        "Do you trust the contents of this directory?\n\
+         › 1. Yes, continue\n  2. No, quit\nPress enter to continue",
+    ] {
+        assert_eq!(
+            agent.detect_state(buf.as_bytes()),
+            Some(AgentState::InputNeeded),
+            "approval modal must fire InputNeeded: {buf:?}",
+        );
+        assert!(
+            !agent.detect_ready_for_prompt(buf.as_bytes()),
+            "a live modal must veto the ready signal: {buf:?}",
+        );
+    }
+}
+
+#[test]
+fn codex_chooser_arrow_on_numbered_option_fires() {
+    // The `› 1.` chooser shape (selection arrow directly on a numbered
+    // option) is a live modal even without a recognised phrase — a
+    // custom-label chooser whose question scrolled out of the window.
+    let agent = Codex;
+    let buf = "Pick an option\n› 1. Rewrite\n  2. Patch\n  3. Skip";
+    assert_eq!(
+        agent.detect_state(buf.as_bytes()),
+        Some(AgentState::InputNeeded),
+    );
+    // The resting composer placeholder is `›` + prompt TEXT, not `› <digit>`,
+    // so it must NOT read as a chooser.
+    let idle = "› Improve documentation in @filename\ngpt-5.5 xhigh · /repo";
+    assert_eq!(agent.detect_state(idle.as_bytes()), Some(AgentState::Idle));
+}
+
+#[test]
+fn codex_answered_modal_then_working_is_not_input_needed() {
+    // After the user answers a modal, Codex resumes work: the approval
+    // chrome lingers in the append-only buffer but the live status line is
+    // repainted below it. The more-recent work anchor wins → Working, not a
+    // stuck InputNeeded.
+    let agent = Codex;
+    let buf = "Would you like to run the following command?\n\
+               › 1. Yes, proceed (y)\n  2. No (esc)\nPress enter to confirm or esc to cancel\n\
+               • Running (1s · esc to interrupt)";
+    assert_eq!(
+        agent.detect_state(buf.as_bytes()),
+        Some(AgentState::Working)
+    );
+}
+
+#[test]
+fn codex_requires_ready_is_false_without_authoritative_gate_flip() {
+    // Codex now has a readiness detector, but the spawn-time injector is
+    // NOT gated hard on it (the ready signal only races the settle timer):
+    // a false-negative on some composer variant must not stall every
+    // inject to the hard deadline.
+    assert!(!Codex.inject_requires_ready());
 }
 
 #[test]

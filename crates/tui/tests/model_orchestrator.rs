@@ -1840,8 +1840,6 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
     use lazybox_ipc::{
         TerminalId, TerminalKind, TerminalSnapshot, WorktreeStep, WorktreeStepStatus,
     };
-    use lazybox_tui::realm::Msg;
-    use lazybox_tui::realm::components::worktree_progress::MIN_STEP_DWELL;
     let mut m = build_model();
     let sk = SessionKey::new("github:o/r#42");
 
@@ -1854,7 +1852,10 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
 
     // Simulate a lag/reconnect path where the terminal is visible in
     // the live snapshot, but the specific TerminalSpawned completion
-    // event never reaches this client.
+    // event never reaches this client. The snapshot is authoritative
+    // proof the work finished, so it tears a possibly-stuck checklist
+    // down on the spot (#219) rather than walking a checklist whose
+    // progress events were themselves dropped.
     m.handle_daemon_event(IpcEvent::Snapshot {
         workspaces: vec![],
         terminals: vec![TerminalSnapshot {
@@ -1869,28 +1870,14 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
         projects: vec![],
     });
     assert!(
-        m.modal_stack.contains(&Id::WorktreeProgress),
-        "snapshot queues dismissal but still walks the checklist"
-    );
-
-    let mut torn_down = false;
-    for _ in 0..(STEP_COUNT_FOR_TEST + 2) {
-        std::thread::sleep(MIN_STEP_DWELL + std::time::Duration::from_millis(50));
-        m.update(Msg::WorktreeProgressTick);
-        if !m.modal_stack.contains(&Id::WorktreeProgress) {
-            torn_down = true;
-            break;
-        }
-    }
-    assert!(
-        torn_down,
-        "snapshot-visible terminal must eventually dismiss the checklist"
+        !m.modal_stack.contains(&Id::WorktreeProgress),
+        "a snapshot showing the live terminal must dismiss the checklist",
     );
 }
 
-/// Checklist row count (clone, fetch, worktree-add, setup, agent),
-/// mirrored here so the bounded walk above can't spin forever.
-const STEP_COUNT_FOR_TEST: usize = 5;
+/// Checklist row count (prepare, worktree-add, setup, agent), mirrored
+/// here so the bounded walk above can't spin forever.
+const STEP_COUNT_FOR_TEST: usize = 4;
 
 #[test]
 fn instant_resume_does_not_flash_the_progress_modal() {

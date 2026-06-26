@@ -210,7 +210,7 @@ impl<T: TerminalAdapter> Model<T> {
         // worktree-provisioning checklist, AND the per-stage
         // `WorktreeProgress` updates that would have advanced it. If
         // those were dropped, the checklist hangs forever on whatever
-        // step it last saw (typically "Cloning repository") even though
+        // step it last saw (typically "Preparing worktree") even though
         // the spawn finished. The snapshot is authoritative: if it shows
         // the checklist's session already has a live terminal, the work
         // is done — tear the stuck modal down. A failed checklist is left

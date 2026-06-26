@@ -1421,11 +1421,15 @@ async fn provision_worktree(
 
     // Mount the progress modal before the first (possibly slow) git
     // call so the user sees provisioning start immediately rather than
-    // after key/repo resolution. The git sub-phases below advance it.
+    // after key/repo resolution. `Fetch` is the always-present first
+    // sub-phase of "preparing the worktree"; an actual cold clone (when
+    // one is needed) arrives as a later `Clone` and upgrades the row's
+    // label. Mounting on `Fetch` rather than `Clone` keeps the warm,
+    // worktree-add-only path from ever implying a per-workspace clone.
     emit_worktree_progress(
         config,
         session_key,
-        WorktreeStep::Clone,
+        WorktreeStep::Fetch,
         WorktreeStepStatus::Started,
     );
 

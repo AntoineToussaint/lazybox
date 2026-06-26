@@ -10,7 +10,7 @@ pub mod detect;
 pub mod hook;
 pub mod hook_settings;
 
-pub use agent::{Agent, PromptShape, Registry, SpawnCtx};
+pub use agent::{Agent, LlmProvider, PromptShape, Registry, SpawnCtx};
 pub use lazybox_ipc::AgentState;
 
 /// Look up a built-in agent by id, or fall back to a `GenericCli`

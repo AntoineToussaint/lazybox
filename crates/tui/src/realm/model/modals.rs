@@ -467,6 +467,64 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::SnoozeDuration, modal);
     }
 
+    /// Mount the LLM-gateway provider picker (Settings → "Configure LLM
+    /// gateway"). Lists the two upstreams with their current URL (or
+    /// "not set"), plus a trailing "Clear all" row when any URL is set.
+    /// Row order is fixed so `handle_choice_picked` can resolve the
+    /// index without a side list: 0 = Anthropic, 1 = OpenAI, 2 = clear.
+    pub(crate) fn mount_gateway_provider_picker(&mut self) {
+        use crate::realm::components::choice::Choice;
+
+        if matches!(self.modal_stack.last(), Some(Id::LlmGatewayProvider)) {
+            return;
+        }
+        let cfg = lazybox_config::Config::load().unwrap_or_default();
+        let g = &cfg.agent.llm_gateway;
+        let shown = |u: &Option<String>| match u.as_deref().map(str::trim) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => "not set".to_string(),
+        };
+        let any_set = g.anthropic.as_deref().is_some_and(|s| !s.trim().is_empty())
+            || g.openai.as_deref().is_some_and(|s| !s.trim().is_empty());
+        let mut labels = vec![
+            format!("Anthropic (Claude) · {}", shown(&g.anthropic)),
+            format!("OpenAI (Codex / Cursor) · {}", shown(&g.openai)),
+        ];
+        if any_set {
+            labels.push("Clear all gateway URLs".to_string());
+        }
+        let modal = Choice::single("Configure gateway for…", labels)
+            .title("LLM gateway")
+            .label(|s: &String| s.clone());
+        self.mount_modal(Id::LlmGatewayProvider, modal);
+    }
+
+    /// Mount the URL input for the gateway provider stashed in
+    /// `pending_gateway_provider`, pre-filled with the current value.
+    /// Submit → `handle_input_submitted` writes
+    /// `agent.llm_gateway.<provider>` to YAML.
+    pub(crate) fn mount_gateway_url_input(&mut self, provider: &'static str) {
+        use crate::realm::components::input::Input;
+
+        let cfg = lazybox_config::Config::load().unwrap_or_default();
+        let current = match provider {
+            "anthropic" => cfg.agent.llm_gateway.anthropic.clone(),
+            _ => cfg.agent.llm_gateway.openai.clone(),
+        }
+        .unwrap_or_default();
+        let label = if provider == "anthropic" {
+            "Anthropic (Claude)"
+        } else {
+            "OpenAI (Codex / Cursor)"
+        };
+        self.pending_gateway_provider = Some(provider);
+        let modal = Input::new(format!("{label} gateway base URL"))
+            .title("LLM gateway")
+            .placeholder("e.g. http://gateway.internal/anthropic")
+            .with_input(current);
+        self.mount_modal(Id::LlmGatewayUrl, modal);
+    }
+
     /// Build the candidate-logins list for the picker. Source set
     /// is the workspace's known people: existing reviewers,
     /// assignees, activity authors. Excludes the local user

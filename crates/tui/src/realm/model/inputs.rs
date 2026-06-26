@@ -116,6 +116,25 @@ impl<T: TerminalAdapter> Model<T> {
                     cmds.push(IpcCommand::CreateProject { name });
                 }
             }
+            Some(Id::LlmGatewayUrl) => {
+                let url = text.trim().to_string();
+                if let Some(provider) = self.pending_gateway_provider.take() {
+                    let value = (!url.is_empty()).then_some(url.clone());
+                    let saved = lazybox_config::Config::save_with(|c| match provider {
+                        "anthropic" => c.agent.llm_gateway.anthropic = value.clone(),
+                        _ => c.agent.llm_gateway.openai = value.clone(),
+                    });
+                    let label = if provider == "anthropic" {
+                        "Anthropic"
+                    } else {
+                        "OpenAI"
+                    };
+                    match saved {
+                        Ok(()) => self.flash_info(format!("{label} gateway set to {url}")),
+                        Err(e) => self.flash_info(format!("couldn't save config: {e}")),
+                    }
+                }
+            }
             // RequestReviewers / AddAssignees used to go through an
             // Input modal but were migrated to a `Choice::multi`
             // picker — see `mount_request_reviewers` /
@@ -366,6 +385,30 @@ impl<T: TerminalAdapter> Model<T> {
                     format!("{}d", mins / 60 / 24)
                 };
                 self.flash_info(format!("snoozed for {label}"));
+            }
+            return cmds;
+        }
+        // LLM-gateway provider picker (Id::LlmGatewayProvider). Fixed
+        // row order: 0 = Anthropic, 1 = OpenAI, 2 = clear-all (only
+        // present when something is set, so an index past the two
+        // providers always means "clear"). Provider rows mount the URL
+        // input; the clear row wipes both URLs straight to YAML.
+        if matches!(self.modal_stack.last(), Some(Id::LlmGatewayProvider)) {
+            let pick = picks.first().copied();
+            self.pop_modal();
+            match pick {
+                Some(0) => self.mount_gateway_url_input("anthropic"),
+                Some(1) => self.mount_gateway_url_input("openai"),
+                Some(_) => match lazybox_config::Config::save_with(|c| {
+                    c.agent.llm_gateway.anthropic = None;
+                    c.agent.llm_gateway.openai = None;
+                }) {
+                    Ok(()) => {
+                        self.flash_info("LLM gateway cleared — agents talk to the vendor directly")
+                    }
+                    Err(e) => self.flash_info(format!("couldn't save config: {e}")),
+                },
+                None => {}
             }
             return cmds;
         }

@@ -538,6 +538,9 @@ pub struct AgentSection {
     /// Flip on via Settings → "Skip permission prompts" to run your
     /// own Claude sessions unattended.
     pub skip_permissions: bool,
+    /// Per-provider LLM gateway base URLs. See [`LlmGatewayConfig`].
+    #[serde(default)]
+    pub llm_gateway: LlmGatewayConfig,
 }
 
 impl Default for AgentSection {
@@ -546,8 +549,50 @@ impl Default for AgentSection {
             config: lazybox_core::AgentConfig::default(),
             autonomous_skip_permissions: true,
             skip_permissions: false,
+            llm_gateway: LlmGatewayConfig::default(),
         }
     }
+}
+
+/// `agent.llm_gateway:` block — point lazybox-spawned agents at an
+/// internal LLM gateway (cost tracking, key management, model routing,
+/// on-prem) instead of talking to Anthropic / OpenAI directly.
+///
+/// Provider-aware: at spawn time lazybox resolves the agent's upstream
+/// (Claude → Anthropic, Codex / Cursor → OpenAI) and injects the
+/// matching base-URL env var — `ANTHROPIC_BASE_URL` for Anthropic,
+/// `OPENAI_BASE_URL` for OpenAI — into the agent process. Unset
+/// providers inject nothing, so the agent reaches the vendor directly.
+///
+/// A per-repo `repos.<owner/name>.env` entry for the same base-URL var
+/// still wins, so a single repo can override or opt out of the global
+/// gateway.
+///
+/// ```yaml
+/// agent:
+///   llm_gateway:
+///     anthropic: "http://gateway.internal/anthropic"
+///     openai:    "http://gateway.internal/openai"
+/// ```
+///
+/// Auth (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) is intentionally NOT
+/// managed here — set it via the process environment or
+/// `repos.<owner/name>.env` so secrets don't have to live in this file.
+///
+/// Relationship to `llm-proxy`: the gateway sets the agent's base URL
+/// directly. The local telemetry proxy is not wired into the main spawn
+/// path today, so there is nothing to chain; when it is, its upstream
+/// should be set to the gateway URL so proxy → gateway preserves
+/// telemetry.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LlmGatewayConfig {
+    /// Base URL for Anthropic-speaking agents (Claude). Injected as
+    /// `ANTHROPIC_BASE_URL`. `None` → no injection.
+    pub anthropic: Option<String>,
+    /// Base URL for OpenAI-speaking agents (Codex, Cursor). Injected
+    /// as `OPENAI_BASE_URL`. `None` → no injection.
+    pub openai: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1217,6 +1262,58 @@ repos:
         assert!(
             reparsed.agent.skip_permissions,
             "opting interactive sessions into skip mode survives a round-trip"
+        );
+    }
+
+    /// The LLM gateway is unset on a fresh config (agents talk to the
+    /// vendor directly) and per-provider URLs survive a save/load
+    /// round-trip — the persistence half of the `,` settings editor.
+    #[test]
+    fn llm_gateway_defaults_unset_and_round_trips() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(
+            cfg.agent.llm_gateway.anthropic.is_none(),
+            "no anthropic gateway on a fresh config"
+        );
+        assert!(
+            cfg.agent.llm_gateway.openai.is_none(),
+            "no openai gateway on a fresh config"
+        );
+
+        let yaml = r#"
+agent:
+  llm_gateway:
+    anthropic: "http://gateway.internal/anthropic"
+    openai: "http://gateway.internal/openai"
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(
+            cfg.agent.llm_gateway.anthropic.as_deref(),
+            Some("http://gateway.internal/anthropic")
+        );
+        assert_eq!(
+            cfg.agent.llm_gateway.openai.as_deref(),
+            Some("http://gateway.internal/openai")
+        );
+        // A gateway set for only one provider leaves the other unset.
+        let one: Config =
+            serde_yaml::from_str("agent:\n  llm_gateway:\n    anthropic: http://gw/a\n")
+                .expect("parse");
+        assert_eq!(
+            one.agent.llm_gateway.anthropic.as_deref(),
+            Some("http://gw/a")
+        );
+        assert!(one.agent.llm_gateway.openai.is_none());
+
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(
+            reparsed.agent.llm_gateway.anthropic,
+            cfg.agent.llm_gateway.anthropic
+        );
+        assert_eq!(
+            reparsed.agent.llm_gateway.openai,
+            cfg.agent.llm_gateway.openai
         );
     }
 

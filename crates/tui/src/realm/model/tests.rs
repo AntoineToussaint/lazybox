@@ -4443,3 +4443,140 @@ mod spawn_spinner_projection_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod worktree_progress_recovery_tests {
+    //! Issue #219 — the "Setting up workspace" checklist hung forever on
+    //! "Cloning repository". A broadcast-lag recovery `Snapshot` stands
+    //! in for the events the client missed, which can include both the
+    //! per-stage `WorktreeProgress` updates AND the one-shot
+    //! `TerminalSpawned` that dismisses the modal. With all of those
+    //! dropped, the checklist never advanced past its first step and
+    //! never closed, even though the spawn had completed. The snapshot
+    //! reconciliation tears the stuck modal down once it shows the
+    //! session's terminal is live.
+    use super::super::{Id, Model};
+    use chrono::Utc;
+    use lazybox_core::{Workspace, WorkspaceKey};
+    use lazybox_ipc::{
+        Event as IpcEvent, TerminalId, TerminalKind, TerminalSnapshot, WorktreeStep,
+        WorktreeStepStatus, channel,
+    };
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn terminal_snapshot(session_key: lazybox_core::SessionKey) -> TerminalSnapshot {
+        TerminalSnapshot {
+            terminal_id: TerminalId(7),
+            session_key,
+            kind: TerminalKind::Agent("claude".into()),
+            replay: Vec::new(),
+            last_seq: 0,
+            no_permission: false,
+            last_user_message: None,
+        }
+    }
+
+    #[test]
+    fn lag_recovery_snapshot_dismisses_stuck_checklist() {
+        let mut m = build_model();
+        let key = WorkspaceKey::new("github:mind-build/mind#1");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![Workspace::empty(key.clone(), "main", Utc::now())],
+            terminals: vec![],
+            projects: vec![],
+        });
+
+        // Provisioning starts — the checklist mounts on "Cloning
+        // repository". Then the client lags: the fetch/worktree-add/setup
+        // updates and the `TerminalSpawned` are all dropped.
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: session_key.clone(),
+            step: WorktreeStep::Clone,
+            status: WorktreeStepStatus::Started,
+        });
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "checklist must be up after the first progress event",
+        );
+
+        // The recovery snapshot the daemon sends in place of the missed
+        // events shows the spawn finished: the session now has a live
+        // terminal.
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![Workspace::empty(key.clone(), "main", Utc::now())],
+            terminals: vec![terminal_snapshot(session_key.clone())],
+            projects: vec![],
+        });
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress),
+            "a recovery snapshot showing the live terminal must dismiss the stuck checklist",
+        );
+        assert!(
+            m.worktree_progress.is_none(),
+            "checklist state must be cleared once dismissed",
+        );
+    }
+
+    #[test]
+    fn snapshot_without_the_session_terminal_leaves_checklist_up() {
+        let mut m = build_model();
+        let key = WorkspaceKey::new("github:mind-build/mind#1");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        let other: lazybox_core::SessionKey =
+            (&WorkspaceKey::new("github:mind-build/mind#2")).into();
+
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key,
+            step: WorktreeStep::Clone,
+            status: WorktreeStepStatus::Started,
+        });
+
+        // A snapshot whose live terminals are for OTHER sessions says
+        // nothing about this spawn — the checklist must stay up.
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![Workspace::empty(key, "main", Utc::now())],
+            terminals: vec![terminal_snapshot(other)],
+            projects: vec![],
+        });
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "an unrelated snapshot must not tear down an in-flight checklist",
+        );
+    }
+
+    #[test]
+    fn snapshot_does_not_dismiss_a_failed_checklist() {
+        let mut m = build_model();
+        let key = WorkspaceKey::new("github:mind-build/mind#1");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: session_key.clone(),
+            step: WorktreeStep::Clone,
+            status: WorktreeStepStatus::Started,
+        });
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: session_key.clone(),
+            step: WorktreeStep::Clone,
+            status: WorktreeStepStatus::Failed("fatal: could not read from remote".into()),
+        });
+
+        // Even with a live terminal in the snapshot, a checklist frozen on
+        // an error stays up so the user can read it and press Esc.
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![Workspace::empty(key, "main", Utc::now())],
+            terminals: vec![terminal_snapshot(session_key)],
+            projects: vec![],
+        });
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "a failed checklist must survive a recovery snapshot",
+        );
+    }
+}

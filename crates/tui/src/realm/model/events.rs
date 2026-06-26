@@ -204,6 +204,25 @@ impl<T: TerminalAdapter> Model<T> {
             self.sidebar.apply_projects(self.projects.clone());
         }
 
+        // A broadcast-lag recovery `Snapshot` stands in for the events
+        // the client missed — which can include the one-shot
+        // `TerminalSpawned` that dismisses an in-flight
+        // worktree-provisioning checklist, AND the per-stage
+        // `WorktreeProgress` updates that would have advanced it. If
+        // those were dropped, the checklist hangs forever on whatever
+        // step it last saw (typically "Cloning repository") even though
+        // the spawn finished. The snapshot is authoritative: if it shows
+        // the checklist's session already has a live terminal, the work
+        // is done — tear the stuck modal down. A failed checklist is left
+        // up so the user can still read its error.
+        if let IpcEvent::Snapshot { terminals, .. } = &event
+            && let Some(state) = self.worktree_progress.as_ref()
+            && !state.failed()
+            && terminals.iter().any(|t| t.session_key == state.session_key)
+        {
+            self.force_dismiss_worktree_progress();
+        }
+
         let is_snapshot = matches!(&event, IpcEvent::Snapshot { .. });
         let is_spawn = matches!(
             &event,

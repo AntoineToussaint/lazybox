@@ -1881,9 +1881,9 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
     );
 }
 
-/// Checklist row count (clone, fetch, worktree-add, setup, agent),
-/// mirrored here so the bounded walk above can't spin forever.
-const STEP_COUNT_FOR_TEST: usize = 5;
+/// Checklist row count (prepare, worktree-add, setup, agent), mirrored
+/// here so the bounded walk above can't spin forever.
+const STEP_COUNT_FOR_TEST: usize = 4;
 
 #[test]
 fn instant_resume_does_not_flash_the_progress_modal() {

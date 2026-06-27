@@ -595,6 +595,72 @@ pub struct LlmGatewayConfig {
     pub openai: Option<String>,
 }
 
+/// Which upstream slot of [`LlmGatewayConfig`] a URL belongs to. Mirrors
+/// `lazybox_agents::LlmProvider`, but lives here because `config` is a
+/// lower-level crate that cannot depend on `agents`; the server bridges
+/// the two enums at spawn time. Modelling the choice as an enum (rather
+/// than passing `"anthropic"` / `"openai"` strings around the editor)
+/// means a typo can't silently route a URL to the wrong provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayProvider {
+    Anthropic,
+    OpenAI,
+}
+
+impl GatewayProvider {
+    /// Both providers in fixed order — drives the settings picker rows
+    /// and `configured_count`.
+    pub const ALL: [GatewayProvider; 2] = [GatewayProvider::Anthropic, GatewayProvider::OpenAI];
+
+    /// Human-facing name for pickers, inputs, and flash messages.
+    pub fn display_label(self) -> &'static str {
+        match self {
+            GatewayProvider::Anthropic => "Anthropic (Claude)",
+            GatewayProvider::OpenAI => "OpenAI (Codex / Cursor)",
+        }
+    }
+}
+
+impl LlmGatewayConfig {
+    /// The configured base URL for `provider`, normalized: surrounding
+    /// whitespace trimmed and a blank string treated as unset. This is
+    /// the single definition of "meaningfully set" — the spawn-time
+    /// injection, the settings picker, and the row-count label all read
+    /// through it so they can't disagree.
+    pub fn url_for(&self, provider: GatewayProvider) -> Option<&str> {
+        let raw = match provider {
+            GatewayProvider::Anthropic => self.anthropic.as_deref(),
+            GatewayProvider::OpenAI => self.openai.as_deref(),
+        };
+        raw.map(str::trim).filter(|s| !s.is_empty())
+    }
+
+    /// Overwrite `provider`'s slot. A `None` or blank/whitespace-only
+    /// URL clears it, keeping the "blank == unset" invariant on write as
+    /// well as read.
+    pub fn set(&mut self, provider: GatewayProvider, url: Option<String>) {
+        let normalized = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+        match provider {
+            GatewayProvider::Anthropic => self.anthropic = normalized,
+            GatewayProvider::OpenAI => self.openai = normalized,
+        }
+    }
+
+    /// How many providers have a gateway URL set — drives the
+    /// settings-row label (`off` / `N set`).
+    pub fn configured_count(&self) -> usize {
+        GatewayProvider::ALL
+            .into_iter()
+            .filter(|&p| self.url_for(p).is_some())
+            .count()
+    }
+
+    /// Whether any provider has a gateway URL set.
+    pub fn is_configured(&self) -> bool {
+        self.configured_count() > 0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShellSection {
@@ -1315,6 +1381,39 @@ agent:
             reparsed.agent.llm_gateway.openai,
             cfg.agent.llm_gateway.openai
         );
+    }
+
+    /// `url_for` / `set` / `configured_count` own the "blank == unset"
+    /// invariant so every caller (spawn injection, settings picker,
+    /// row-count label) reads one definition of "configured".
+    #[test]
+    fn llm_gateway_helpers_normalize_and_count() {
+        use super::GatewayProvider::{Anthropic, OpenAI};
+
+        let mut g = LlmGatewayConfig::default();
+        assert_eq!(g.configured_count(), 0);
+        assert!(!g.is_configured());
+        assert_eq!(g.url_for(Anthropic), None);
+
+        // A whitespace-padded URL is trimmed on read and on write, and a
+        // blank string is treated as unset rather than a real value.
+        g.set(Anthropic, Some("  http://gw/a  ".into()));
+        assert_eq!(g.url_for(Anthropic), Some("http://gw/a"));
+        assert_eq!(g.anthropic.as_deref(), Some("http://gw/a"));
+        assert_eq!(g.configured_count(), 1);
+        assert!(g.is_configured());
+
+        g.set(OpenAI, Some("http://gw/o".into()));
+        assert_eq!(g.configured_count(), 2);
+
+        // Blank / None clear the slot.
+        g.set(OpenAI, Some("   ".into()));
+        assert_eq!(g.url_for(OpenAI), None);
+        assert_eq!(g.openai, None);
+        assert_eq!(g.configured_count(), 1);
+
+        g.set(Anthropic, None);
+        assert!(!g.is_configured());
     }
 
     /// The feature-tour "seen" flag defaults to false (so a fresh

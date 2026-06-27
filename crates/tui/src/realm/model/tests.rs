@@ -332,6 +332,39 @@ mod effects_tests {
         assert!(m.new_workspace_repo_choices.is_empty());
     }
 
+    /// The LLM-gateway provider picker resolves its rows by *fixed
+    /// index* — 0 = Anthropic, 1 = OpenAI — and stashes which provider
+    /// the follow-up URL input edits. This freezes that index→provider
+    /// contract: reordering the rows (or `GatewayProvider::ALL`) without
+    /// updating `handle_choice_picked` would route a URL to the wrong
+    /// provider, which this test catches. Disk-free — picking a provider
+    /// row only mounts the input and stashes state; nothing is saved.
+    #[test]
+    fn gateway_provider_picker_resolves_row_index_to_provider() {
+        use lazybox_config::GatewayProvider;
+        for (row, expected) in [
+            (0usize, GatewayProvider::Anthropic),
+            (1, GatewayProvider::OpenAI),
+        ] {
+            let mut m = build_model();
+            m.mount_gateway_provider_picker();
+            assert_eq!(m.modal_stack.last(), Some(&Id::LlmGatewayProvider));
+
+            let cmds = m.handle_choice_picked(vec![row]);
+            assert!(cmds.is_empty(), "picking a provider sends no IPC");
+            assert_eq!(
+                m.modal_stack.last(),
+                Some(&Id::LlmGatewayUrl),
+                "row {row} mounts the URL input"
+            );
+            assert_eq!(
+                m.pending_gateway_provider,
+                Some(expected),
+                "row {row} stashes {expected:?} for the URL input to write"
+            );
+        }
+    }
+
     /// Empty / whitespace-only input is dropped silently.
     #[test]
     fn input_submitted_with_empty_text_returns_no_commands() {

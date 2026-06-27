@@ -513,11 +513,10 @@ pub struct Model<T: TerminalAdapter> {
     /// turn the picked index into a `Command::Snooze`.
     pending_snooze_workspace: Option<lazybox_core::SessionKey>,
     /// LLM-gateway provider whose URL the `LlmGatewayUrl` input is
-    /// editing — `"anthropic"` or `"openai"`. Stashed when a row in the
-    /// `LlmGatewayProvider` picker is chosen; read by
-    /// `handle_input_submitted` to know which `agent.llm_gateway.<provider>`
-    /// field to write.
-    pending_gateway_provider: Option<&'static str>,
+    /// editing. Stashed when a row in the `LlmGatewayProvider` picker is
+    /// chosen; read by `handle_input_submitted` to know which
+    /// `agent.llm_gateway.<provider>` field to write.
+    pending_gateway_provider: Option<lazybox_config::GatewayProvider>,
     /// The duration each picker option maps to. Order MUST match
     /// the labels rendered in `mount_snooze_picker`.
     snooze_choices: Vec<std::time::Duration>,
@@ -2076,13 +2075,7 @@ impl<T: TerminalAdapter> Model<T> {
         actions.push(SettingsAction::EditSnippets);
         actions.push(SettingsAction::EditTheme);
         let gateway_configured = lazybox_config::Config::load()
-            .map(|c| {
-                let g = &c.agent.llm_gateway;
-                [&g.anthropic, &g.openai]
-                    .iter()
-                    .filter(|u| u.as_deref().is_some_and(|s| !s.trim().is_empty()))
-                    .count()
-            })
+            .map(|c| c.agent.llm_gateway.configured_count())
             .unwrap_or(0);
         actions.push(SettingsAction::EditLlmGateway {
             configured: gateway_configured,

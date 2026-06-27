@@ -120,16 +120,14 @@ impl<T: TerminalAdapter> Model<T> {
                 let url = text.trim().to_string();
                 if let Some(provider) = self.pending_gateway_provider.take() {
                     let value = (!url.is_empty()).then_some(url.clone());
-                    let saved = lazybox_config::Config::save_with(|c| match provider {
-                        "anthropic" => c.agent.llm_gateway.anthropic = value.clone(),
-                        _ => c.agent.llm_gateway.openai = value.clone(),
+                    let saved = lazybox_config::Config::save_with(|c| {
+                        c.agent.llm_gateway.set(provider, value.clone());
                     });
-                    let label = if provider == "anthropic" {
-                        "Anthropic"
-                    } else {
-                        "OpenAI"
-                    };
+                    let label = provider.display_label();
                     match saved {
+                        Ok(()) if url.is_empty() => {
+                            self.flash_info(format!("{label} gateway cleared"))
+                        }
                         Ok(()) => self.flash_info(format!("{label} gateway set to {url}")),
                         Err(e) => self.flash_info(format!("couldn't save config: {e}")),
                     }
@@ -394,14 +392,16 @@ impl<T: TerminalAdapter> Model<T> {
         // providers always means "clear"). Provider rows mount the URL
         // input; the clear row wipes both URLs straight to YAML.
         if matches!(self.modal_stack.last(), Some(Id::LlmGatewayProvider)) {
+            use lazybox_config::GatewayProvider;
             let pick = picks.first().copied();
             self.pop_modal();
             match pick {
-                Some(0) => self.mount_gateway_url_input("anthropic"),
-                Some(1) => self.mount_gateway_url_input("openai"),
+                Some(0) => self.mount_gateway_url_input(GatewayProvider::Anthropic),
+                Some(1) => self.mount_gateway_url_input(GatewayProvider::OpenAI),
                 Some(_) => match lazybox_config::Config::save_with(|c| {
-                    c.agent.llm_gateway.anthropic = None;
-                    c.agent.llm_gateway.openai = None;
+                    for p in GatewayProvider::ALL {
+                        c.agent.llm_gateway.set(p, None);
+                    }
                 }) {
                     Ok(()) => {
                         self.flash_info("LLM gateway cleared — agents talk to the vendor directly")

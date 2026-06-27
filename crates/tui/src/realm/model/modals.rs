@@ -474,23 +474,27 @@ impl<T: TerminalAdapter> Model<T> {
     /// index without a side list: 0 = Anthropic, 1 = OpenAI, 2 = clear.
     pub(crate) fn mount_gateway_provider_picker(&mut self) {
         use crate::realm::components::choice::Choice;
+        use lazybox_config::GatewayProvider;
 
         if matches!(self.modal_stack.last(), Some(Id::LlmGatewayProvider)) {
             return;
         }
         let cfg = lazybox_config::Config::load().unwrap_or_default();
         let g = &cfg.agent.llm_gateway;
-        let shown = |u: &Option<String>| match u.as_deref().map(str::trim) {
-            Some(s) if !s.is_empty() => s.to_string(),
-            _ => "not set".to_string(),
-        };
-        let any_set = g.anthropic.as_deref().is_some_and(|s| !s.trim().is_empty())
-            || g.openai.as_deref().is_some_and(|s| !s.trim().is_empty());
-        let mut labels = vec![
-            format!("Anthropic (Claude) · {}", shown(&g.anthropic)),
-            format!("OpenAI (Codex / Cursor) · {}", shown(&g.openai)),
-        ];
-        if any_set {
+        // Row order matches `GatewayProvider::ALL`, the contract
+        // `handle_choice_picked` relies on to map index → provider
+        // (0 = Anthropic, 1 = OpenAI); a trailing clear row follows.
+        let mut labels: Vec<String> = GatewayProvider::ALL
+            .into_iter()
+            .map(|p| {
+                format!(
+                    "{} · {}",
+                    p.display_label(),
+                    g.url_for(p).unwrap_or("not set")
+                )
+            })
+            .collect();
+        if g.is_configured() {
             labels.push("Clear all gateway URLs".to_string());
         }
         let modal = Choice::single("Configure gateway for…", labels)
@@ -503,20 +507,17 @@ impl<T: TerminalAdapter> Model<T> {
     /// `pending_gateway_provider`, pre-filled with the current value.
     /// Submit → `handle_input_submitted` writes
     /// `agent.llm_gateway.<provider>` to YAML.
-    pub(crate) fn mount_gateway_url_input(&mut self, provider: &'static str) {
+    pub(crate) fn mount_gateway_url_input(&mut self, provider: lazybox_config::GatewayProvider) {
         use crate::realm::components::input::Input;
 
         let cfg = lazybox_config::Config::load().unwrap_or_default();
-        let current = match provider {
-            "anthropic" => cfg.agent.llm_gateway.anthropic.clone(),
-            _ => cfg.agent.llm_gateway.openai.clone(),
-        }
-        .unwrap_or_default();
-        let label = if provider == "anthropic" {
-            "Anthropic (Claude)"
-        } else {
-            "OpenAI (Codex / Cursor)"
-        };
+        let current = cfg
+            .agent
+            .llm_gateway
+            .url_for(provider)
+            .unwrap_or_default()
+            .to_string();
+        let label = provider.display_label();
         self.pending_gateway_provider = Some(provider);
         let modal = Input::new(format!("{label} gateway base URL"))
             .title("LLM gateway")

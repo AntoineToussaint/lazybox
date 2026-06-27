@@ -1864,14 +1864,24 @@ pub(crate) fn gateway_env_for_agent(
     let Some(provider) = agent.and_then(|a| a.llm_provider()) else {
         return Vec::new();
     };
-    let url = match provider {
-        lazybox_agents::LlmProvider::Anthropic => cfg.agent.llm_gateway.anthropic.as_deref(),
-        lazybox_agents::LlmProvider::OpenAI => cfg.agent.llm_gateway.openai.as_deref(),
-    };
-    url.map(str::trim)
-        .filter(|u| !u.is_empty())
+    // `agents::LlmProvider` (what the CLI speaks + its env var) and
+    // `config::GatewayProvider` (which YAML slot holds the URL) are
+    // separate enums only because `config` can't depend on `agents`;
+    // bridge them here. The "blank == unset" rule lives in `url_for`.
+    cfg.agent
+        .llm_gateway
+        .url_for(gateway_slot_for(provider))
         .map(|u| vec![(provider.base_url_env().to_string(), u.to_string())])
         .unwrap_or_default()
+}
+
+/// Map an agent's upstream provider to its [`lazybox_config::GatewayProvider`]
+/// YAML slot.
+fn gateway_slot_for(provider: lazybox_agents::LlmProvider) -> lazybox_config::GatewayProvider {
+    match provider {
+        lazybox_agents::LlmProvider::Anthropic => lazybox_config::GatewayProvider::Anthropic,
+        lazybox_agents::LlmProvider::OpenAI => lazybox_config::GatewayProvider::OpenAI,
+    }
 }
 
 /// Pure-data lookup so tests don't need a real YAML on disk.

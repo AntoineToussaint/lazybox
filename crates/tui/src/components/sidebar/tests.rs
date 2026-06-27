@@ -1887,3 +1887,91 @@ mod getting_started_tests {
         assert!(!sb.is_getting_started());
     }
 }
+
+mod work_target_agent_tests {
+    use super::super::*;
+
+    fn ws_key(s: &str) -> SessionKey {
+        (&lazybox_core::WorkspaceKey::new(s)).into()
+    }
+
+    fn spawn_agent(sb: &mut Sidebar, tid: u64, ws: &SessionKey, agent: &str) {
+        sb.running_terminals.insert(
+            TerminalId(tid),
+            (ws.clone(), TerminalKind::Agent(agent.to_string())),
+        );
+    }
+
+    #[test]
+    fn no_running_agent_falls_back_to_default() {
+        let sb = Sidebar::new(PaneId::new(1));
+        let ws = ws_key("github:o/r#1");
+        assert_eq!(sb.work_target_agent(&ws, "claude"), "claude");
+        assert!(sb.running_agent_ids(&ws).is_empty());
+    }
+
+    #[test]
+    fn single_running_agent_wins_over_default() {
+        // The core bug fix: only Codex is running, so bare `w` targets
+        // Codex (which `rewrite_spawn_to_inject` then injects into)
+        // instead of spawning the default Claude.
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let ws = ws_key("github:o/r#1");
+        spawn_agent(&mut sb, 1, &ws, "codex");
+        assert_eq!(sb.work_target_agent(&ws, "claude"), "codex");
+        assert_eq!(sb.running_agent_ids(&ws), vec!["codex".to_string()]);
+    }
+
+    #[test]
+    fn default_agent_wins_when_among_several() {
+        // Tie-break: with several different agents running, prefer the
+        // default if it's one of them.
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let ws = ws_key("github:o/r#1");
+        spawn_agent(&mut sb, 1, &ws, "codex");
+        spawn_agent(&mut sb, 2, &ws, "claude");
+        assert_eq!(sb.work_target_agent(&ws, "claude"), "claude");
+    }
+
+    #[test]
+    fn multiple_non_default_agents_fall_back_to_default() {
+        // Tie-break: several non-default agents and no default running →
+        // the bare `w` outcome stays predictable (the default, a fresh
+        // spawn). The scoped `w c` / `w x` chords pick a specific one.
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let ws = ws_key("github:o/r#1");
+        spawn_agent(&mut sb, 1, &ws, "codex");
+        spawn_agent(&mut sb, 2, &ws, "cursor");
+        assert_eq!(sb.work_target_agent(&ws, "claude"), "claude");
+    }
+
+    #[test]
+    fn running_agent_in_another_workspace_is_ignored() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let ws = ws_key("github:o/r#1");
+        let other = ws_key("github:o/r#2");
+        spawn_agent(&mut sb, 1, &other, "codex");
+        assert_eq!(sb.work_target_agent(&ws, "claude"), "claude");
+        assert!(sb.running_agent_ids(&ws).is_empty());
+    }
+
+    #[test]
+    fn shell_terminals_are_not_agents() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let ws = ws_key("github:o/r#1");
+        sb.running_terminals
+            .insert(TerminalId(1), (ws.clone(), TerminalKind::Shell));
+        assert_eq!(sb.work_target_agent(&ws, "claude"), "claude");
+        assert!(sb.running_agent_ids(&ws).is_empty());
+    }
+
+    #[test]
+    fn duplicate_agent_terminals_dedupe_to_one_id() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let ws = ws_key("github:o/r#1");
+        spawn_agent(&mut sb, 1, &ws, "codex");
+        spawn_agent(&mut sb, 2, &ws, "codex");
+        assert_eq!(sb.running_agent_ids(&ws), vec!["codex".to_string()]);
+        assert_eq!(sb.work_target_agent(&ws, "claude"), "codex");
+    }
+}

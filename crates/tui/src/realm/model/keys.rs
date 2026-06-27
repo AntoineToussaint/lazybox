@@ -59,17 +59,19 @@ impl<T: TerminalAdapter> Model<T> {
         // hardcoded group table.
         if let Some(prefix) = self.leader.take() {
             self.redraw = true;
+            // Taking the leader resolves the `w` timed leader one way or
+            // another (a scoped chord below, an Esc cancel, or a
+            // fall-through) — so the bare-Work idle timeout no longer
+            // applies.
+            self.work_leader_at = None;
             let action = key_event_to_stroke(realm_key_to_crossterm(&key))
                 .and_then(|stroke| find_action_for_seq(&prefix, &stroke, self.focus, &self.catalog))
                 .and_then(action_from_entry);
             if let Some(action) = action {
                 self.q_latch.disarm();
-                let mut cmds = self.dispatch_action(&action);
+                let cmds = self.dispatch_action(&action);
+                self.flush_dispatched_cmds(cmds);
                 self.sync_panes();
-                for cmd in cmds.drain(..) {
-                    let rewritten = self.rewrite_spawn_to_inject(cmd);
-                    self.send_cmd(rewritten);
-                }
                 return;
             }
             // The key matched no in-group action. `Esc` is the explicit
@@ -347,6 +349,24 @@ impl<T: TerminalAdapter> Model<T> {
         {
             let action =
                 find_action_for_stroke(&stroke, rfocus, &self.catalog).and_then(action_from_entry);
+            // `w` is BOTH a direct action (Work) AND a leader prefix for
+            // the scoped `w c` / `w x` chords (issue #224). When scoped
+            // variants exist, arm a *timed* leader instead of firing
+            // immediately: an agent key within the window picks that
+            // agent; otherwise bare Work fires on the idle tick
+            // (`tick_work_leader`). The which-key popup comes for free
+            // from `self.leader`. With no scoped variants the leader has
+            // nothing to offer, so Work fires instantly below.
+            if matches!(action, Some(lazybox_tui_core::action::Action::Work))
+                && self.focus != PaneFocus::Terminals
+                && !seq_continuations(&stroke, rfocus, &self.catalog).is_empty()
+            {
+                self.q_latch.disarm();
+                self.leader.arm(stroke);
+                self.work_leader_at = Some(std::time::Instant::now());
+                self.redraw = true;
+                return;
+            }
             if let Some(action) = action {
                 // Any catalog dispatch counts as "non-quit key" so
                 // the q q chord resets.
@@ -407,7 +427,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// then rewrite spawn-into-running-agent to `InjectPrompt` and
     /// send. Shared by the catalog-dispatch path and the per-pane
     /// fallback so both surface the same feedback.
-    fn flush_dispatched_cmds(&mut self, cmds: Vec<IpcCommand>) {
+    pub(super) fn flush_dispatched_cmds(&mut self, cmds: Vec<IpcCommand>) {
         for cmd in &cmds {
             if let IpcCommand::Spawn {
                 kind, session_key, ..
@@ -474,6 +494,14 @@ impl<T: TerminalAdapter> Model<T> {
     /// #205 leader chord.
     pub fn terminal_leader_pending(&self) -> bool {
         self.terminal_leader_at.is_some()
+    }
+
+    /// Whether the timed `w` leader is currently armed (issue #224) —
+    /// pressing `w` arms it until a scoped agent key (`w c` / `w x`)
+    /// completes the chord or the idle tick fires bare `Work`. Test /
+    /// inspection hook.
+    pub fn work_leader_pending(&self) -> bool {
+        self.work_leader_at.is_some()
     }
 
     /// Sidebar / right / activity split percentages — exposed so tests
@@ -1074,6 +1102,12 @@ fn action_from_entry(
             .param
             .as_ref()
             .map(|Param::Agent(id)| Action::SpawnAgent(id.clone()));
+    }
+    if entry.kind == ActionKind::WorkWith {
+        return entry
+            .param
+            .as_ref()
+            .map(|Param::Agent(id)| Action::WorkWith(id.clone()));
     }
     action_from_kind(entry.kind)
 }

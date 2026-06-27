@@ -51,6 +51,12 @@ pub enum Action {
     /// Spawn the default agent (claude) on the focused workspace,
     /// optionally with a pre-built "work on this" prompt.
     Work,
+    /// "Work on this" scoped to a specific agent id — the `w c` / `w x`
+    /// / `w u` leader chords. Builds the same contextual prompt as
+    /// [`Action::Work`] but forces the chosen agent (injecting if it's
+    /// already running, else spawning it). The id is dynamic because
+    /// the agent registry is config-driven.
+    WorkWith(String),
     /// Spawn a specific agent by id (claude / codex / cursor / …).
     /// The id is dynamic because the agent registry is config-driven.
     SpawnAgent(String),
@@ -233,6 +239,7 @@ pub enum ActionKind {
     // Workspace
     OpenWorkspace,
     Work,
+    WorkWith,
     SpawnAgent,
     SpawnShell,
     OpenEditor,
@@ -328,6 +335,7 @@ impl Action {
         match self {
             Action::OpenWorkspace => ActionKind::OpenWorkspace,
             Action::Work => ActionKind::Work,
+            Action::WorkWith(_) => ActionKind::WorkWith,
             Action::SpawnAgent(_) => ActionKind::SpawnAgent,
             Action::SpawnShell => ActionKind::SpawnShell,
             Action::OpenEditor => ActionKind::OpenEditor,
@@ -379,6 +387,7 @@ impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Action::SpawnAgent(id) => write!(f, "spawn {id}"),
+            Action::WorkWith(id) => write!(f, "work in {id}"),
             other => f.write_str(ActionDef::for_kind(other.kind()).label),
         }
     }
@@ -512,6 +521,16 @@ impl ActionDef {
                 default_keys: "w",
                 label: "work on this",
                 describe: "Spawn the default agent with a contextual work prompt (fix CI, address review, implement issue, …).",
+                section: Section::Workspace,
+            },
+            ActionKind::WorkWith => &Self {
+                kind: ActionKind::WorkWith,
+                // Default binding is per-agent (`w c` / `w x` / `w u`),
+                // generated in `catalog()`; this placeholder gives the
+                // help panel a row. No parseable chord of its own.
+                default_keys: "w c / w x / w u",
+                label: "work in agent",
+                describe: "Work on this with a specific agent (claude / codex / cursor / …): same contextual prompt as `w`, but forced to the chosen agent — injecting if it's already running, else spawning it.",
                 section: Section::Workspace,
             },
             ActionKind::SpawnAgent => &Self {
@@ -770,6 +789,7 @@ impl ActionDef {
             // Workspace
             ActionKind::OpenWorkspace,
             ActionKind::Work,
+            ActionKind::WorkWith,
             ActionKind::SpawnAgent,
             ActionKind::SpawnShell,
             ActionKind::OpenEditor,
@@ -1223,6 +1243,7 @@ impl ActionKind {
         match self {
             ActionKind::OpenWorkspace => "open_workspace",
             ActionKind::Work => "work",
+            ActionKind::WorkWith => "work_with",
             ActionKind::SpawnAgent => "spawn_agent",
             ActionKind::SpawnShell => "spawn_shell",
             ActionKind::OpenEditor => "open_editor",
@@ -1384,9 +1405,9 @@ impl ActionDef {
     ) -> Vec<CatalogEntry> {
         let mut out: Vec<CatalogEntry> = Vec::new();
         for def in ActionDef::all() {
-            // The static SpawnAgent row is a placeholder for the
-            // generated per-agent rows below — drop it.
-            if def.kind == ActionKind::SpawnAgent {
+            // The static SpawnAgent / WorkWith rows are placeholders for
+            // the generated per-agent rows below — drop them.
+            if matches!(def.kind, ActionKind::SpawnAgent | ActionKind::WorkWith) {
                 continue;
             }
             out.push(CatalogEntry {
@@ -1445,6 +1466,42 @@ impl ActionDef {
                 keys_display,
                 config_key,
             });
+        }
+        // Scoped "work on this" rows: `<work-leader> <agent-key>` (e.g.
+        // `w c` / `w x` / `w u`). The leader is whatever `work` resolves
+        // to (honoring a remap), and the second key is the agent's own
+        // default shortcut — so the scoped chord tracks both the `work`
+        // and the agent bindings. Generated only for agents that have a
+        // default single-letter key; agents without a convention still
+        // get the bare `w` default-agent path.
+        let work = ActionDef::for_kind(ActionKind::WorkWith);
+        let work_leader: Option<KeyStroke> = ActionDef::for_kind(ActionKind::Work)
+            .effective_chords(overrides)
+            .into_iter()
+            .find_map(|c| match c {
+                Chord::Key(k) => Some(k),
+                Chord::Seq(_) => None,
+            });
+        if let Some(leader) = work_leader {
+            for id in agents {
+                let Some(key) = agent_default_key(id) else {
+                    continue;
+                };
+                let second = KeyStroke::new(false, false, false, ChordCode::Char(key));
+                let seq = Chord::Seq(vec![leader, second]);
+                let keys_display =
+                    std::borrow::Cow::Owned(format!("{} {}", leader.display(), second.display()));
+                out.push(CatalogEntry {
+                    kind: ActionKind::WorkWith,
+                    param: Some(Param::Agent(id.clone())),
+                    section: work.section,
+                    label: std::borrow::Cow::Owned(format!("work in {id}")),
+                    describe: work.describe,
+                    chords: vec![seq],
+                    keys_display,
+                    config_key: format!("work_with.{id}"),
+                });
+            }
         }
         out
     }
@@ -1521,7 +1578,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
             intent::resolve_merge(workspace),
             intent::Intent::MergePr { .. },
         ),
-        ActionKind::Work => intent::classify_work(workspace, &[]).is_some(),
+        ActionKind::Work | ActionKind::WorkWith => intent::classify_work(workspace, &[]).is_some(),
         ActionKind::OpenEditor => matches!(
             intent::resolve_open_editor(workspace),
             intent::Intent::OpenEditor,
@@ -1908,6 +1965,7 @@ mod tests {
         // Presentation-only `default_keys` — no parseable chord.
         let presentation = [
             "c / x / u",
+            "w c / w x / w u",
             "g/G",
             "↑/↓",
             "→/←",
@@ -2096,6 +2154,68 @@ mod tests {
             .find(|e| e.param == Some(Param::Agent("aider".into())))
             .expect("aider row");
         assert!(aider.chords.is_empty(), "aider has no default key");
+    }
+
+    #[test]
+    fn catalog_generates_scoped_work_chords_per_agent() {
+        // Issue #224: `w c` / `w x` / `w u` scoped "work on this" rows.
+        use std::collections::BTreeMap;
+        let agents: Vec<String> = ["claude", "codex", "cursor", "aider"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let catalog = ActionDef::catalog(&agents, &BTreeMap::new());
+
+        let work_rows: Vec<&CatalogEntry> = catalog
+            .iter()
+            .filter(|e| e.kind == ActionKind::WorkWith)
+            .collect();
+        // One row per agent WITH a default key — `aider` has no
+        // convention, so it gets no scoped chord (bare `w` still
+        // reaches the default-agent path).
+        assert_eq!(work_rows.len(), 3, "one scoped row per known agent");
+
+        let w = KeyStroke::new(false, false, false, ChordCode::Char('w'));
+        let codex = work_rows
+            .iter()
+            .find(|e| e.param == Some(Param::Agent("codex".into())))
+            .expect("codex work row");
+        assert_eq!(codex.config_key, "work_with.codex");
+        assert_eq!(
+            codex.chords,
+            vec![Chord::Seq(vec![
+                w,
+                KeyStroke::new(false, false, false, ChordCode::Char('x')),
+            ])],
+            "codex scoped work chord is `w x`",
+        );
+        assert!(
+            !work_rows
+                .iter()
+                .any(|e| e.param == Some(Param::Agent("aider".into()))),
+            "an agent with no default key gets no scoped work chord",
+        );
+    }
+
+    #[test]
+    fn scoped_work_leader_follows_a_work_remap() {
+        // The scoped chords' leader tracks the `work` binding, so a
+        // remap of `w` moves `w c` → `g c` too.
+        use std::collections::BTreeMap;
+        let mut overrides = BTreeMap::new();
+        overrides.insert("work".to_string(), "g".to_string());
+        let catalog = ActionDef::catalog(&["claude".to_string()], &overrides);
+        let claude = catalog
+            .iter()
+            .find(|e| e.kind == ActionKind::WorkWith)
+            .expect("claude work row");
+        assert_eq!(
+            claude.chords,
+            vec![Chord::Seq(vec![
+                KeyStroke::new(false, false, false, ChordCode::Char('g')),
+                KeyStroke::new(false, false, false, ChordCode::Char('c')),
+            ])],
+        );
     }
 
     #[test]

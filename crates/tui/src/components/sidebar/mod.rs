@@ -599,6 +599,47 @@ impl Sidebar {
         None
     }
 
+    /// Distinct agent ids with a running terminal in `workspace_key`.
+    /// The order is unspecified (it walks a hash map), but the only
+    /// consumer ([`Self::work_target_agent`]) keys off the *set*, never
+    /// the order.
+    pub fn running_agent_ids(&self, workspace_key: &SessionKey) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        for (sk, kind) in self.running_terminals.values() {
+            if sk != workspace_key {
+                continue;
+            }
+            if let TerminalKind::Agent(id) = kind
+                && !ids.contains(id)
+            {
+                ids.push(id.clone());
+            }
+        }
+        ids
+    }
+
+    /// Pick the agent `w` ("work on this") should target for a
+    /// workspace. An agent already running here wins over the default
+    /// so `w` continues the existing conversation (e.g. an open Codex
+    /// session) instead of always spawning a fresh default agent —
+    /// `rewrite_spawn_to_inject` then injects into it because the
+    /// resolved agent id matches the running one.
+    ///
+    /// Tie-break when several DIFFERENT agents run at once: prefer the
+    /// default if it's among them, otherwise fall back to the default
+    /// (a fresh spawn) so the outcome stays predictable. The scoped
+    /// `w c` / `w x` chords are how the user targets a specific one.
+    pub fn work_target_agent(&self, workspace_key: &SessionKey, default_agent: &str) -> String {
+        let running = self.running_agent_ids(workspace_key);
+        if running.iter().any(|id| id == default_agent) {
+            return default_agent.to_string();
+        }
+        match running.as_slice() {
+            [only] => only.clone(),
+            _ => default_agent.to_string(),
+        }
+    }
+
     /// Optimistic local update: flip a task to `Merged` so the
     /// status pill changes immediately, before the next poll cycle
     /// catches up with GitHub's response. Called when `Event::PrMerged`

@@ -2411,6 +2411,140 @@ mod merge_focus_follow_tests {
             notice.message,
         );
     }
+
+    /// Issue #224: bare `w` on a workspace whose only running agent is
+    /// Codex must target Codex — not always spawn the default Claude.
+    #[test]
+    fn bare_w_targets_the_running_agent_over_default() {
+        use lazybox_ipc::{Command, TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+
+        // Only a Codex agent is running on this workspace.
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(3),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+        });
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let cmds = m.dispatch_action(&Action::Work);
+        let agent = cmds.iter().find_map(|c| match c {
+            Command::Spawn {
+                kind: TerminalKind::Agent(id),
+                ..
+            } => Some(id.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            agent.as_deref(),
+            Some("codex"),
+            "bare `w` targets the running Codex, not the default Claude",
+        );
+    }
+
+    /// Issue #224: the scoped `w x` chord forces Codex, injecting the
+    /// contextual work prompt into the already-running Codex session
+    /// (rather than spawning a fresh one).
+    #[test]
+    fn scoped_w_x_injects_into_running_codex() {
+        use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY, TerminalId, TerminalKind};
+        use tokio::sync::mpsc;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(5),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+        });
+        // `TerminalSpawned` auto-focuses the terminal pane; return to the
+        // sidebar (cursor on the PR) so the catalog resolves `w`.
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        while cmd_rx.try_recv().is_ok() {} // drop setup traffic
+
+        // `w` arms the timed leader; `x` completes `w x` → work in Codex.
+        m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
+        assert!(m.work_leader_pending(), "`w` arms the scoped-work leader");
+        m.dispatch_key(KeyEvent::new(Key::Char('x'), KeyModifiers::NONE));
+        assert!(!m.work_leader_pending(), "`x` resolves the leader");
+
+        let inject = std::iter::from_fn(|| cmd_rx.try_recv().ok())
+            .find(|c| matches!(c, Command::InjectPrompt { .. }));
+        assert!(
+            inject.is_some(),
+            "`w x` injects the work prompt into the running Codex",
+        );
+    }
+
+    /// Issue #224: with no follow-up key, the `w` leader times out on the
+    /// idle tick and fires bare `Work` against the running-or-default
+    /// agent — so bare `w` still works without pressing a scoped key.
+    #[test]
+    fn w_leader_times_out_to_bare_work() {
+        use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY, TerminalId, TerminalKind};
+        use tokio::sync::mpsc;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
+
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(8),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+        });
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        while cmd_rx.try_recv().is_ok() {} // drop setup traffic
+
+        m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
+        assert!(m.work_leader_pending(), "`w` arms the leader");
+
+        // Window elapsed (1ms) → the idle tick fires bare Work, which
+        // injects into the running Codex.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        m.tick_work_leader();
+        assert!(!m.work_leader_pending(), "idle tick resolves the leader");
+
+        let inject = std::iter::from_fn(|| cmd_rx.try_recv().ok())
+            .find(|c| matches!(c, Command::InjectPrompt { .. }));
+        assert!(
+            inject.is_some(),
+            "bare `w` (leader timeout) injects work into the running Codex",
+        );
+    }
 }
 
 #[cfg(test)]

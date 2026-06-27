@@ -729,6 +729,28 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Fire bare `Work` once the `w` leader has sat idle for
+    /// `ui_defaults.escape_window` with no follow-up key (issue #224).
+    /// This is the bare-`w` path: the user pressed `w` and didn't pick a
+    /// scoped agent (`w c` / `w x`), so we honor "work on this" against
+    /// the running-or-default agent. A scoped chord, an Esc cancel, or
+    /// any other key clears `work_leader_at` in the key handler before
+    /// this fires. Called once per run-loop iteration (the loop ticks
+    /// ~every 16ms even while idle), so it fires within a frame of the
+    /// window elapsing.
+    pub fn tick_work_leader(&mut self) {
+        if let Some(armed_at) = self.work_leader_at
+            && armed_at.elapsed() >= self.ui_defaults.escape_window
+        {
+            self.work_leader_at = None;
+            self.leader.disarm();
+            let cmds = self.dispatch_action(&lazybox_tui_core::action::Action::Work);
+            self.flush_dispatched_cmds(cmds);
+            self.sync_panes();
+            self.redraw = true;
+        }
+    }
+
     /// Advance the sidebar's "working" spinner. Called once per run-
     /// loop iteration; the sidebar itself rate-limits the frame
     /// advance (so this is a cheap no-op most ticks) and only reports

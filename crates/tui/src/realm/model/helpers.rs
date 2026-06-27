@@ -1095,6 +1095,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         model.tick_right();
         model.tick_working();
         model.tick_terminal_leader();
+        model.tick_work_leader();
         timings.ticks = ticks_start.elapsed();
 
         // 3. Process tuirealm-side messages (timer ticks for Loading,

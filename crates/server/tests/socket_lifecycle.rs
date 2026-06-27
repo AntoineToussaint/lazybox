@@ -145,7 +145,7 @@ async fn live_socket_is_not_unlinked_by_second_start() {
         other => panic!("expected bind error, got {other:?}"),
     }
 
-    let mut client = socket::connect(&sock)
+    let (mut client, _) = socket::connect(&sock)
         .await
         .expect("original daemon socket should still be reachable");
     client.send(Command::Subscribe).expect("send subscribe");

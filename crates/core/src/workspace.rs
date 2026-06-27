@@ -515,6 +515,24 @@ impl Workspace {
             .collect::<String>();
         format!("workspace-{suffix}")
     }
+
+    /// Repo/project qualifier prepended to the on-disk worktree path so
+    /// two workspaces that slug to the same name in different repos
+    /// can't land in one directory. Derived from the stable project key
+    /// (recovered from the primary task's repo for back-compat records
+    /// that predate projects), so it survives renames and branch
+    /// changes — neither touches the project a workspace lives under.
+    ///
+    /// `None` only for a fully repo-less, project-less workspace, which
+    /// keeps the legacy flat `<root>/<slug>` path.
+    pub fn worktree_scope(&self) -> Option<String> {
+        let key = self
+            .project_key
+            .clone()
+            .or_else(|| self.primary_task().and_then(project_key_for_task))?;
+        let slug = crate::slug::slugify(key.as_str());
+        (!slug.is_empty()).then_some(slug)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1919,5 +1937,60 @@ mod tests {
                 "{slug} has uppercase outside the PR- anchor",
             );
         }
+    }
+
+    // ── Worktree scope (#223) ─────────────────────────────────────
+    //
+    // The slug alone is not unique across repos: a workspace named
+    // "Issues" in two different repos slugs identically. `worktree_scope`
+    // is the repo/project qualifier that keeps their on-disk worktrees
+    // in separate directories. It must stay stable across renames and
+    // branch changes so the worktree doesn't orphan when either moves.
+
+    fn named_ws_in_repo(name: &str, project: crate::ProjectKey) -> Workspace {
+        let mut w = Workspace::empty(
+            crate::WorkspaceKey::new(format!("local:{name}")),
+            "main",
+            now(),
+        );
+        w.name = name.into();
+        w.project_key = Some(project);
+        w
+    }
+
+    #[test]
+    fn same_name_in_different_repos_gets_distinct_scopes() {
+        let a = named_ws_in_repo("Issues", crate::ProjectKey::github("ownerA", "repoA"));
+        let b = named_ws_in_repo("Issues", crate::ProjectKey::github("ownerB", "repoB"));
+        // Same slug — the collision the bug rode in on.
+        assert_eq!(a.worktree_slug(), b.worktree_slug());
+        // Distinct scopes keep them off the same directory.
+        assert_ne!(a.worktree_scope(), b.worktree_scope());
+        assert_eq!(a.worktree_scope().as_deref(), Some("github-ownera-repoa"));
+    }
+
+    #[test]
+    fn scope_is_stable_across_rename_and_branch_change() {
+        let mut w = named_ws_in_repo("Issues", crate::ProjectKey::github("owner", "repo"));
+        let before = w.worktree_scope();
+        w.name = "Renamed".into();
+        w.branch = "different-branch".into();
+        assert_eq!(w.worktree_scope(), before);
+    }
+
+    #[test]
+    fn scope_recovers_from_task_when_project_key_absent() {
+        // Back-compat record predating projects: no `project_key`, but
+        // the primary task still carries the repo to scope on.
+        let mut w = Workspace::from_task(pr("o/r#1"), now());
+        w.project_key = None;
+        assert_eq!(w.worktree_scope().as_deref(), Some("github-o-r"));
+    }
+
+    #[test]
+    fn scope_is_none_for_repoless_projectless_workspace() {
+        let mut w = Workspace::empty(crate::WorkspaceKey::new("scratch"), "main", now());
+        w.name = "Scratch".into();
+        assert_eq!(w.worktree_scope(), None);
     }
 }

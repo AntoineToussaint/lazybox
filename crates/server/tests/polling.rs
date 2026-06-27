@@ -607,7 +607,7 @@ async fn migrate_path_only_when_dir_missing() {
         lazybox_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
     assert!(moved, "stale path detected → migrated record");
 
-    let expected = lazybox_server::spawn_handler::worktree_root().join(ws.worktree_slug());
+    let expected = lazybox_server::spawn_handler::worktree_path_for_session(&ws, 0);
     assert_eq!(
         ws.sessions[0].worktree_path, expected,
         "session path now matches the slug-derived path"
@@ -619,7 +619,7 @@ async fn migrate_no_op_when_path_already_matches() {
     let config = ServerConfig::in_memory();
     let task = make_task("o/r#22");
     let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
-    let expected = lazybox_server::spawn_handler::worktree_root().join(ws.worktree_slug());
+    let expected = lazybox_server::spawn_handler::worktree_path_for_session(&ws, 0);
     let session = WorkspaceSession::new(
         ws.key.clone(),
         lazybox_core::SessionKind::Shell,
@@ -669,7 +669,7 @@ async fn migrate_picks_up_pr_title_rename() {
         // Use a path that DOES match the original slug so we can
         // assert it changes after the rename — same fallback the
         // production spawn handler uses.
-        lazybox_server::spawn_handler::worktree_root().join(ws.worktree_slug()),
+        lazybox_server::spawn_handler::worktree_path_for_session(&ws, 0),
         Utc::now(),
     );
     let original_slug = ws.worktree_slug();
@@ -695,7 +695,11 @@ async fn migrate_picks_up_pr_title_rename() {
         lazybox_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
     assert!(moved, "rename must trigger migration");
 
-    let expected = lazybox_server::spawn_handler::worktree_root().join(&renamed_slug);
+    let expected = lazybox_server::spawn_handler::worktree_path_for_session(&ws, 0);
+    assert!(
+        expected.ends_with(&renamed_slug),
+        "expected path uses the renamed slug",
+    );
     assert_eq!(
         ws.sessions[0].worktree_path, expected,
         "session path follows the new slug after migration",

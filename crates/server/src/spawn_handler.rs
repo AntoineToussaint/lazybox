@@ -2280,16 +2280,26 @@ pub fn worktree_root() -> PathBuf {
 }
 
 /// Compose the on-disk path for the Nth session of a workspace.
-/// `index = 0` → `<root>/<slug>` (no suffix, cleanest case).
-/// `index = N` → `<root>/<slug>-{N+1}` so the second session is
+/// `index = 0` → `<root>/<scope>/<slug>` (no suffix, cleanest case).
+/// `index = N` → `<root>/<scope>/<slug>-{N+1}` so the second session is
 /// `slug-2`, third is `slug-3`, …  Matches the user mental model
 /// where session-counter starts at "no number".
-fn worktree_path_for_session(workspace: &Workspace, index: usize) -> PathBuf {
+///
+/// `<scope>` is the workspace's repo/project qualifier (#223): without
+/// it, two workspaces that slug identically in different repos (e.g.
+/// "Issues" in `ownerA/repoA` and `ownerB/repoB`) collide on the same
+/// directory and cross-contaminate. A repo-less, project-less workspace
+/// has no scope and keeps the flat `<root>/<slug>` path.
+pub fn worktree_path_for_session(workspace: &Workspace, index: usize) -> PathBuf {
     let mut name = workspace.worktree_slug();
     if index > 0 {
         name.push_str(&format!("-{}", index + 1));
     }
-    worktree_root().join(name)
+    let root = worktree_root();
+    match workspace.worktree_scope() {
+        Some(scope) => root.join(scope).join(name),
+        None => root.join(name),
+    }
 }
 
 /// Explicit session creation. Always provisions a fresh worktree
@@ -5145,6 +5155,49 @@ mod tests {
         let config = ServerConfig::in_memory();
         let ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
         assert!(clonable_repo_from_project(&config, &ws).is_err());
+    }
+
+    /// Regression for #223: two workspaces with the same name in
+    /// different repos must resolve to different worktree directories.
+    /// Before the fix, both produced `<root>/issues` and collided.
+    #[test]
+    fn worktree_path_is_scoped_by_repo() {
+        let named = |name: &str, project: lazybox_core::ProjectKey| {
+            let mut ws = Workspace::empty(
+                WorkspaceKey::new(format!("local:{name}")),
+                "main",
+                Utc::now(),
+            );
+            ws.name = name.into();
+            ws.project_key = Some(project);
+            ws
+        };
+        let a = named(
+            "Issues",
+            lazybox_core::ProjectKey::github("ownerA", "repoA"),
+        );
+        let b = named(
+            "Issues",
+            lazybox_core::ProjectKey::github("ownerB", "repoB"),
+        );
+
+        let path_a = worktree_path_for_session(&a, 0);
+        let path_b = worktree_path_for_session(&b, 0);
+        assert_ne!(path_a, path_b);
+        assert_eq!(
+            path_a,
+            worktree_root().join("github-ownera-repoa").join("issues")
+        );
+        assert_eq!(
+            path_b,
+            worktree_root().join("github-ownerb-repob").join("issues")
+        );
+
+        // Second session keeps the `-2` suffix under the same scope.
+        assert_eq!(
+            worktree_path_for_session(&a, 1),
+            worktree_root().join("github-ownera-repoa").join("issues-2"),
+        );
     }
 
     /// End-to-end through `provision_worktree`: a blank workspace under

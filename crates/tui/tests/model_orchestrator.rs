@@ -1840,8 +1840,6 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
     use lazybox_ipc::{
         TerminalId, TerminalKind, TerminalSnapshot, WorktreeStep, WorktreeStepStatus,
     };
-    use lazybox_tui::realm::Msg;
-    use lazybox_tui::realm::components::worktree_progress::MIN_STEP_DWELL;
     let mut m = build_model();
     let sk = SessionKey::new("github:o/r#42");
 
@@ -1868,23 +1866,13 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
         }],
         projects: vec![],
     });
+    // The snapshot is authoritative: a live terminal for the
+    // checklist's session means provisioning finished, so the stuck
+    // checklist is torn down at once — it can't wait for the missed
+    // per-step events to walk it to the end (#219/#221).
     assert!(
-        m.modal_stack.contains(&Id::WorktreeProgress),
-        "snapshot queues dismissal but still walks the checklist"
-    );
-
-    let mut torn_down = false;
-    for _ in 0..(STEP_COUNT_FOR_TEST + 2) {
-        std::thread::sleep(MIN_STEP_DWELL + std::time::Duration::from_millis(50));
-        m.update(Msg::WorktreeProgressTick);
-        if !m.modal_stack.contains(&Id::WorktreeProgress) {
-            torn_down = true;
-            break;
-        }
-    }
-    assert!(
-        torn_down,
-        "snapshot-visible terminal must eventually dismiss the checklist"
+        !m.modal_stack.contains(&Id::WorktreeProgress),
+        "snapshot with a live terminal force-dismisses the stuck checklist"
     );
 }
 

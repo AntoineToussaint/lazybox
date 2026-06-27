@@ -1,6 +1,13 @@
 //! `WorktreeProgress` — spinner + step checklist shown while a first
-//! `w`/`c`/`s` on a fresh workspace provisions its worktree (cold
-//! clone / fetch / `git worktree add` / mounts / scripts).
+//! `w`/`c`/`s` on a fresh workspace provisions its worktree (refresh the
+//! base ref / `git worktree add` / mounts / scripts, plus a one-time
+//! `git clone --bare` the very first time a repo is used).
+//!
+//! lazybox clones a repo's bare mirror exactly once and then does a
+//! `git worktree add` per workspace — it never re-clones. So the first
+//! checklist row reads "Preparing worktree" for the common (warm) case
+//! and only upgrades to "Cloning repository (one-time)" when a genuine
+//! cold clone is actually running, never implying a per-workspace clone.
 //!
 //! Unlike [`super::loading::Loading`], this modal is NOT channel-driven:
 //! progress arrives as `Event::WorktreeProgress` over IPC, which the
@@ -49,9 +56,35 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 /// checklist faster than the eye can read it.
 pub const MIN_STEP_DWELL: Duration = Duration::from_millis(500);
 
-/// Number of checklist rows: clone, fetch, worktree-add, setup, agent
-/// launch.
-const STEP_COUNT: u8 = 5;
+/// The checklist rows, in display order. The discriminant IS the
+/// `target`/`shown` frontier index for that row — naming the rows here
+/// is what keeps [`WorktreeProgressState::apply`]'s advance arithmetic
+/// and [`WorktreeProgressState::steps`]'s label order from drifting
+/// apart (they used to be hand-synced magic numbers). [`ROWS`] lists
+/// them in order; `row_indices_match_discriminants` pins the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum Row {
+    /// An optional one-time `git clone --bare` plus the always-present
+    /// base-ref fetch — both fold into this single "Preparing worktree"
+    /// row, so a warm provision never lights up a clone row.
+    Prepare = 0,
+    /// `git worktree add` materializing the checkout on disk.
+    WorktreeAdd = 1,
+    /// Applying configured mounts + setup scripts.
+    Setup = 2,
+    /// Handing off to the agent / shell.
+    Agent = 3,
+}
+
+/// The rows in display order. Indexed positionally by [`steps`] and the
+/// renderer; each entry's discriminant equals its index (asserted in
+/// tests) so positional and `Row`-keyed access agree.
+const ROWS: [Row; STEP_COUNT as usize] = [Row::Prepare, Row::WorktreeAdd, Row::Setup, Row::Agent];
+
+/// Number of checklist rows: prepare (clone-if-needed + fetch base),
+/// worktree-add, setup, agent launch.
+const STEP_COUNT: u8 = Row::Agent as u8 + 1;
 
 /// `target`/`shown` value meaning "all steps complete, ready to dismiss"
 /// — one past the last real step.
@@ -76,8 +109,9 @@ pub enum StepState {
 /// advances in place.
 ///
 /// The display lags the daemon on purpose. `target` is how far the
-/// daemon has actually gotten (0 = clone, 1 = fetch, 2 = worktree-add,
-/// 3 = setup, 4 = agent, `READY` = the session is live); `shown` is how
+/// daemon has actually gotten (0 = preparing the worktree, i.e. an
+/// optional one-time clone plus the base-ref fetch, 1 = worktree-add,
+/// 2 = setup, 3 = agent, `READY` = the session is live); `shown` is how
 /// far the checklist has been *revealed* to the user. [`Self::tick`]
 /// walks `shown` toward `target` at no more than one step per
 /// [`MIN_STEP_DWELL`], so a fast provision still shows every step
@@ -85,6 +119,12 @@ pub enum StepState {
 #[derive(Debug, Clone)]
 pub struct WorktreeProgressState {
     pub session_key: SessionKey,
+    /// A genuine cold clone is running. Set when a `Clone` step arrives,
+    /// which the daemon only emits on a real first-time `git clone
+    /// --bare` (a cached bare clone is reused silently). Upgrades the
+    /// first row's label from "Preparing worktree" to the one-time clone
+    /// message — the warm path never claims to be cloning.
+    cold_clone: bool,
     /// Daemon truth: the highest stage reached (`0..=READY`).
     target: u8,
     /// Displayed frontier: the stage currently shown as `Active`
@@ -104,6 +144,7 @@ impl WorktreeProgressState {
     pub fn new(session_key: SessionKey) -> Self {
         Self {
             session_key,
+            cold_clone: false,
             target: 0,
             shown: 0,
             shown_since: Instant::now(),
@@ -123,9 +164,10 @@ impl WorktreeProgressState {
     /// `target`. The display catches up later via [`Self::tick`]. Each
     /// step's `Started` advances `target` to that step's row, so the
     /// previous step checks off and this one becomes the in-flight
-    /// spinner. `Clone` is row 0 where `target` already starts, so it
-    /// stays in-flight until `Fetch` truly begins rather than flashing a
-    /// dead "nothing active" frame.
+    /// spinner. `Clone` and `Fetch` both belong to row 0 ("Preparing
+    /// worktree") — the clone is an optional one-time prelude to the
+    /// always-present base fetch — so neither advances `target`; `Clone`
+    /// only flips the row's label to the one-time clone message.
     pub fn apply(&mut self, step: WorktreeStep, status: WorktreeStepStatus) {
         match (step, status) {
             // A failure freezes the checklist on whatever row is on
@@ -133,15 +175,30 @@ impl WorktreeProgressState {
             // which sub-phase aborted, and the error text carries the
             // real detail regardless.
             (_, WorktreeStepStatus::Failed(e)) => self.fail_current(e),
-            (WorktreeStep::Clone, _) => {}
-            (WorktreeStep::Fetch, _) => self.target = self.target.max(1),
-            (WorktreeStep::WorktreeAdd, _) => self.target = self.target.max(2),
-            (WorktreeStep::Setup, WorktreeStepStatus::Started) => {
-                self.target = self.target.max(3);
-            }
-            (WorktreeStep::Setup, WorktreeStepStatus::Done) => {
-                self.target = self.target.max(4);
-            }
+            (WorktreeStep::Clone, _) => self.cold_clone = true,
+            (WorktreeStep::Fetch, _) => {}
+            (WorktreeStep::WorktreeAdd, _) => self.advance_to(Row::WorktreeAdd),
+            (WorktreeStep::Setup, WorktreeStepStatus::Started) => self.advance_to(Row::Setup),
+            // Setup done means the daemon is now launching the agent, so
+            // the in-flight frontier is the agent row.
+            (WorktreeStep::Setup, WorktreeStepStatus::Done) => self.advance_to(Row::Agent),
+        }
+    }
+
+    /// Advance the daemon-truth frontier to `row`. Monotonic — a later
+    /// out-of-order event can never rewind the checklist.
+    fn advance_to(&mut self, row: Row) {
+        self.target = self.target.max(row as u8);
+    }
+
+    /// The label for `row`, cold/warm-aware on the first row only.
+    fn label(&self, row: Row) -> &'static str {
+        match row {
+            Row::Prepare if self.cold_clone => "Cloning repository (one-time)",
+            Row::Prepare => "Preparing worktree",
+            Row::WorktreeAdd => "Creating worktree",
+            Row::Setup => "Setting up",
+            Row::Agent => "Starting agent",
         }
     }
 
@@ -184,15 +241,8 @@ impl WorktreeProgressState {
     }
 
     fn steps(&self) -> [(&'static str, StepState); STEP_COUNT as usize] {
-        const LABELS: [&str; STEP_COUNT as usize] = [
-            "Cloning repository",
-            "Fetching changes",
-            "Creating worktree",
-            "Setting up",
-            "Starting agent",
-        ];
         let mut out = [("", StepState::Pending); STEP_COUNT as usize];
-        for (i, label) in LABELS.iter().enumerate() {
+        for (i, &row) in ROWS.iter().enumerate() {
             let idx = i as u8;
             let state = match self.failed_step {
                 Some(f) if idx == f => StepState::Failed,
@@ -202,7 +252,7 @@ impl WorktreeProgressState {
                 None if idx == self.shown => StepState::Active,
                 None => StepState::Pending,
             };
-            out[i] = (*label, state);
+            out[i] = (self.label(row), state);
         }
         out
     }
@@ -344,14 +394,30 @@ mod tests {
         WorktreeProgressState::new(SessionKey::new("github:acme/widget#42"))
     }
 
+    /// `apply()` advances `target` by `Row as u8` while `steps()` indexes
+    /// `ROWS` positionally — the two only agree if each row's discriminant
+    /// equals its slot. Pin that so a future reorder can't silently put
+    /// the spinner on the wrong row.
     #[test]
-    fn clone_in_flight_shows_spinner_and_pending_rows() {
+    fn row_indices_match_discriminants() {
+        assert_eq!(ROWS.len(), STEP_COUNT as usize);
+        for (i, &row) in ROWS.iter().enumerate() {
+            assert_eq!(
+                row as u8, i as u8,
+                "ROWS[{i}] discriminant must equal its index"
+            );
+        }
+    }
+
+    #[test]
+    fn cold_clone_labels_the_first_row_as_a_one_time_step() {
         let mut st = state();
+        // A real cold clone is the only thing that emits `Clone`.
         st.apply(WorktreeStep::Clone, WorktreeStepStatus::Started);
         let mut comp = WorktreeProgress::from_state(&st);
         let out = render(&mut comp, 70, 12);
         assert!(out.contains("Setting up workspace"), "{out}");
-        assert!(out.contains("Cloning repository"), "{out}");
+        assert!(out.contains("Cloning repository (one-time)"), "{out}");
         assert!(out.contains("Creating worktree"), "{out}");
         assert!(out.contains("Starting agent"), "{out}");
         // Later steps still pending → hollow bullet.
@@ -359,27 +425,52 @@ mod tests {
         assert!(out.contains("Esc cancel"), "{out}");
     }
 
+    /// The warm path (a bare clone already exists, so only `git worktree
+    /// add` runs) must never claim to be cloning — it walks straight from
+    /// the daemon's mount `Fetch` to the worktree add.
+    #[test]
+    fn warm_provision_never_says_cloning() {
+        let mut st = state();
+        // Mirrors the daemon's mount event for a repo whose bare clone is
+        // already cached: `Fetch`, never `Clone`.
+        st.apply(WorktreeStep::Fetch, WorktreeStepStatus::Started);
+        let out = render(&mut WorktreeProgress::from_state(&st), 70, 12);
+        assert!(out.contains("Preparing worktree"), "{out}");
+        assert!(
+            !out.to_lowercase().contains("clon"),
+            "warm provision must not imply a clone: {out}",
+        );
+        // A following worktree-add still advances the checklist normally.
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
+        let t0 = Instant::now();
+        st.shown_since = t0;
+        assert!(st.tick(t0 + MIN_STEP_DWELL));
+        let out = render(&mut WorktreeProgress::from_state(&st), 70, 12);
+        assert!(out.contains("Creating worktree"), "{out}");
+    }
+
     #[test]
     fn sub_steps_check_off_earlier_rows_in_order() {
         let mut st = state();
-        // Cold-clone provision walks clone → fetch → worktree-add → setup.
+        // Cold-clone provision walks clone → fetch (both row 0) →
+        // worktree-add → setup.
         st.apply(WorktreeStep::Clone, WorktreeStepStatus::Started);
         st.apply(WorktreeStep::Fetch, WorktreeStepStatus::Started);
         st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
         st.apply(WorktreeStep::Setup, WorktreeStepStatus::Started);
         st.apply(WorktreeStep::Setup, WorktreeStepStatus::Done);
         assert!(!st.failed());
-        // Daemon truth says the agent is launching (target == 4), but the
+        // Daemon truth says the agent is launching (target == 3), but the
         // display only checks earlier steps off once they've dwelt.
         let t0 = Instant::now();
         st.shown_since = t0;
-        for n in 1..=4 {
+        for n in 1..=3 {
             assert!(st.tick(t0 + MIN_STEP_DWELL * n));
         }
         let mut comp = WorktreeProgress::from_state(&st);
         let out = render(&mut comp, 70, 12);
-        // Four completed steps render check marks; the agent row spins.
-        assert_eq!(out.matches('✓').count(), 4, "{out}");
+        // Three completed steps render check marks; the agent row spins.
+        assert_eq!(out.matches('✓').count(), 3, "{out}");
     }
 
     /// The regression: with provisioning faster than the dwell, every
@@ -421,11 +512,7 @@ mod tests {
             assert!(!st.ready_to_dismiss(), "dismissed at step {step}: {out}");
             assert!(st.tick(t0 + MIN_STEP_DWELL * u32::from(step + 1)));
         }
-        assert_eq!(
-            active_seen,
-            vec![0, 1, 2, 3, 4],
-            "every step shown in order"
-        );
+        assert_eq!(active_seen, vec![0, 1, 2, 3], "every step shown in order");
         assert!(
             st.ready_to_dismiss(),
             "never dismissed after walking checklist"
@@ -440,13 +527,15 @@ mod tests {
         let t0 = Instant::now();
         st.shown_since = t0;
         st.apply(WorktreeStep::Clone, WorktreeStepStatus::Started);
-        // The clone takes seconds: the display stays on it (no later step
-        // is revealed) however many ticks fire.
+        st.apply(WorktreeStep::Fetch, WorktreeStepStatus::Started);
+        // Clone + fetch share the "Preparing worktree" row: the display
+        // stays on it (no later step is revealed) however many ticks
+        // fire while those phases run.
         assert!(!st.tick(t0 + MIN_STEP_DWELL * 10));
         assert_eq!(st.shown, 0);
-        // Fetch finally starts — now the display is free to advance, and
-        // does so immediately (the dwell long since elapsed).
-        st.apply(WorktreeStep::Fetch, WorktreeStepStatus::Started);
+        // The worktree add finally starts — now the display is free to
+        // advance, and does so immediately (the dwell long since elapsed).
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
         assert!(st.tick(t0 + MIN_STEP_DWELL * 11));
         assert_eq!(st.shown, 1);
     }

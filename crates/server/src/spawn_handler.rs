@@ -1421,11 +1421,15 @@ async fn provision_worktree(
 
     // Mount the progress modal before the first (possibly slow) git
     // call so the user sees provisioning start immediately rather than
-    // after key/repo resolution. The git sub-phases below advance it.
+    // after key/repo resolution. `Fetch` is the always-present first
+    // sub-phase of "preparing the worktree"; an actual cold clone (when
+    // one is needed) arrives as a later `Clone` and upgrades the row's
+    // label. Mounting on `Fetch` rather than `Clone` keeps the warm,
+    // worktree-add-only path from ever implying a per-workspace clone.
     emit_worktree_progress(
         config,
         session_key,
-        WorktreeStep::Clone,
+        WorktreeStep::Fetch,
         WorktreeStepStatus::Started,
     );
 
@@ -5220,7 +5224,8 @@ mod tests {
 
         // The checklist-driving progress events fire in order. A
         // standalone init has no clone or fetch to do, so the modal
-        // mounts on the leading Clone Started, the worktree-add phase
+        // mounts on the leading Fetch Started (never a Clone row, which
+        // would imply a per-workspace clone), the worktree-add phase
         // animates, then Setup runs — all keyed to the spawn's session.
         let mut progress = Vec::new();
         while let Ok(ev) = bus_rx.try_recv() {
@@ -5237,7 +5242,7 @@ mod tests {
         assert_eq!(
             progress,
             vec![
-                (WorktreeStep::Clone, WorktreeStepStatus::Started),
+                (WorktreeStep::Fetch, WorktreeStepStatus::Started),
                 (WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started),
                 (WorktreeStep::Setup, WorktreeStepStatus::Started),
                 (WorktreeStep::Setup, WorktreeStepStatus::Done),

@@ -1869,6 +1869,10 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
         }],
         projects: vec![],
     });
+    // The snapshot is authoritative: a live terminal for the
+    // checklist's session means provisioning finished, so the stuck
+    // checklist is torn down at once — it can't wait for the missed
+    // per-step events to walk it to the end (#219/#221).
     assert!(
         !m.modal_stack.contains(&Id::WorktreeProgress),
         "a snapshot showing the live terminal must dismiss the checklist",

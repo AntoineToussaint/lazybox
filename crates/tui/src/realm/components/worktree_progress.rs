@@ -56,9 +56,35 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 /// checklist faster than the eye can read it.
 pub const MIN_STEP_DWELL: Duration = Duration::from_millis(500);
 
+/// The checklist rows, in display order. The discriminant IS the
+/// `target`/`shown` frontier index for that row — naming the rows here
+/// is what keeps [`WorktreeProgressState::apply`]'s advance arithmetic
+/// and [`WorktreeProgressState::steps`]'s label order from drifting
+/// apart (they used to be hand-synced magic numbers). [`ROWS`] lists
+/// them in order; `row_indices_match_discriminants` pins the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum Row {
+    /// An optional one-time `git clone --bare` plus the always-present
+    /// base-ref fetch — both fold into this single "Preparing worktree"
+    /// row, so a warm provision never lights up a clone row.
+    Prepare = 0,
+    /// `git worktree add` materializing the checkout on disk.
+    WorktreeAdd = 1,
+    /// Applying configured mounts + setup scripts.
+    Setup = 2,
+    /// Handing off to the agent / shell.
+    Agent = 3,
+}
+
+/// The rows in display order. Indexed positionally by [`steps`] and the
+/// renderer; each entry's discriminant equals its index (asserted in
+/// tests) so positional and `Row`-keyed access agree.
+const ROWS: [Row; STEP_COUNT as usize] = [Row::Prepare, Row::WorktreeAdd, Row::Setup, Row::Agent];
+
 /// Number of checklist rows: prepare (clone-if-needed + fetch base),
 /// worktree-add, setup, agent launch.
-const STEP_COUNT: u8 = 4;
+const STEP_COUNT: u8 = Row::Agent as u8 + 1;
 
 /// `target`/`shown` value meaning "all steps complete, ready to dismiss"
 /// — one past the last real step.
@@ -151,13 +177,28 @@ impl WorktreeProgressState {
             (_, WorktreeStepStatus::Failed(e)) => self.fail_current(e),
             (WorktreeStep::Clone, _) => self.cold_clone = true,
             (WorktreeStep::Fetch, _) => {}
-            (WorktreeStep::WorktreeAdd, _) => self.target = self.target.max(1),
-            (WorktreeStep::Setup, WorktreeStepStatus::Started) => {
-                self.target = self.target.max(2);
-            }
-            (WorktreeStep::Setup, WorktreeStepStatus::Done) => {
-                self.target = self.target.max(3);
-            }
+            (WorktreeStep::WorktreeAdd, _) => self.advance_to(Row::WorktreeAdd),
+            (WorktreeStep::Setup, WorktreeStepStatus::Started) => self.advance_to(Row::Setup),
+            // Setup done means the daemon is now launching the agent, so
+            // the in-flight frontier is the agent row.
+            (WorktreeStep::Setup, WorktreeStepStatus::Done) => self.advance_to(Row::Agent),
+        }
+    }
+
+    /// Advance the daemon-truth frontier to `row`. Monotonic — a later
+    /// out-of-order event can never rewind the checklist.
+    fn advance_to(&mut self, row: Row) {
+        self.target = self.target.max(row as u8);
+    }
+
+    /// The label for `row`, cold/warm-aware on the first row only.
+    fn label(&self, row: Row) -> &'static str {
+        match row {
+            Row::Prepare if self.cold_clone => "Cloning repository (one-time)",
+            Row::Prepare => "Preparing worktree",
+            Row::WorktreeAdd => "Creating worktree",
+            Row::Setup => "Setting up",
+            Row::Agent => "Starting agent",
         }
     }
 
@@ -200,18 +241,8 @@ impl WorktreeProgressState {
     }
 
     fn steps(&self) -> [(&'static str, StepState); STEP_COUNT as usize] {
-        // First row is cold/warm-aware: a one-time bare clone vs. the
-        // common worktree-add-on-an-existing-clone path. It never reads
-        // "clone" unless a real clone is actually in flight.
-        let prepare: &'static str = if self.cold_clone {
-            "Cloning repository (one-time)"
-        } else {
-            "Preparing worktree"
-        };
-        let labels: [&str; STEP_COUNT as usize] =
-            [prepare, "Creating worktree", "Setting up", "Starting agent"];
         let mut out = [("", StepState::Pending); STEP_COUNT as usize];
-        for (i, label) in labels.iter().enumerate() {
+        for (i, &row) in ROWS.iter().enumerate() {
             let idx = i as u8;
             let state = match self.failed_step {
                 Some(f) if idx == f => StepState::Failed,
@@ -221,7 +252,7 @@ impl WorktreeProgressState {
                 None if idx == self.shown => StepState::Active,
                 None => StepState::Pending,
             };
-            out[i] = (*label, state);
+            out[i] = (self.label(row), state);
         }
         out
     }
@@ -361,6 +392,21 @@ mod tests {
 
     fn state() -> WorktreeProgressState {
         WorktreeProgressState::new(SessionKey::new("github:acme/widget#42"))
+    }
+
+    /// `apply()` advances `target` by `Row as u8` while `steps()` indexes
+    /// `ROWS` positionally — the two only agree if each row's discriminant
+    /// equals its slot. Pin that so a future reorder can't silently put
+    /// the spinner on the wrong row.
+    #[test]
+    fn row_indices_match_discriminants() {
+        assert_eq!(ROWS.len(), STEP_COUNT as usize);
+        for (i, &row) in ROWS.iter().enumerate() {
+            assert_eq!(
+                row as u8, i as u8,
+                "ROWS[{i}] discriminant must equal its index"
+            );
+        }
     }
 
     #[test]

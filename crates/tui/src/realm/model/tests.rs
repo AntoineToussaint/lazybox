@@ -332,37 +332,18 @@ mod effects_tests {
         assert!(m.new_workspace_repo_choices.is_empty());
     }
 
-    /// The LLM-gateway provider picker resolves its rows by *fixed
-    /// index* — 0 = Anthropic, 1 = OpenAI — and stashes which provider
-    /// the follow-up URL input edits. This freezes that index→provider
-    /// contract: reordering the rows (or `GatewayProvider::ALL`) without
-    /// updating `handle_choice_picked` would route a URL to the wrong
-    /// provider, which this test catches. Disk-free — picking a provider
-    /// row only mounts the input and stashes state; nothing is saved.
+    /// The "Configure LLM gateway" settings action routes straight to
+    /// the single global URL input — no provider picker, no wizard
+    /// runner. Freezes that routing (a regression that dropped the early
+    /// return would fall through to the cached-inputs wizard path and
+    /// warn instead of mounting). Disk-free: mounting only reads config
+    /// for the pre-fill; nothing is saved.
     #[test]
-    fn gateway_provider_picker_resolves_row_index_to_provider() {
-        use lazybox_config::GatewayProvider;
-        for (row, expected) in [
-            (0usize, GatewayProvider::Anthropic),
-            (1, GatewayProvider::OpenAI),
-        ] {
-            let mut m = build_model();
-            m.mount_gateway_provider_picker();
-            assert_eq!(m.modal_stack.last(), Some(&Id::LlmGatewayProvider));
-
-            let cmds = m.handle_choice_picked(vec![row]);
-            assert!(cmds.is_empty(), "picking a provider sends no IPC");
-            assert_eq!(
-                m.modal_stack.last(),
-                Some(&Id::LlmGatewayUrl),
-                "row {row} mounts the URL input"
-            );
-            assert_eq!(
-                m.pending_gateway_provider,
-                Some(expected),
-                "row {row} stashes {expected:?} for the URL input to write"
-            );
-        }
+    fn edit_llm_gateway_action_mounts_the_url_input() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let mut m = build_model();
+        m.dispatch_settings_action(SettingsAction::EditLlmGateway { set: false });
+        assert_eq!(m.modal_stack.last(), Some(&Id::LlmGatewayUrl));
     }
 
     /// Empty / whitespace-only input is dropped silently.

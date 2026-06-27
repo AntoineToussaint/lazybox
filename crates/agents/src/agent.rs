@@ -30,9 +30,9 @@ pub struct SpawnCtx {
 }
 
 /// The upstream LLM API an agent speaks to. Used to pick the base-URL
-/// env var when the user configures an LLM gateway (`agent.llm_gateway`)
-/// — Anthropic agents get `ANTHROPIC_BASE_URL`, OpenAI agents get
-/// `OPENAI_BASE_URL`.
+/// env var when the user configures a global LLM gateway
+/// (`agent.llm_gateway_url`) — Anthropic agents get `ANTHROPIC_BASE_URL`,
+/// OpenAI agents get `OPENAI_BASE_URL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmProvider {
     Anthropic,

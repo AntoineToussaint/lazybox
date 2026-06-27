@@ -139,15 +139,9 @@ pub enum Id {
     /// `Msg::ChoicePicked` reads it + the picked Duration and
     /// dispatches `Command::Snooze`.
     SnoozeDuration,
-    /// Provider picker for the "Configure LLM gateway" settings action.
-    /// Single-pick `Choice` listing Anthropic / OpenAI (+ a clear-all
-    /// row when any URL is set). `Msg::ChoicePicked` stashes the chosen
-    /// provider in `pending_gateway_provider` and mounts `LlmGatewayUrl`,
-    /// or clears both URLs.
-    LlmGatewayProvider,
-    /// Single-line URL input for the provider chosen in
-    /// `LlmGatewayProvider`. Submit → write `agent.llm_gateway.<provider>`
-    /// to YAML. The target provider lives in `pending_gateway_provider`.
+    /// Single-line URL input for the "Configure LLM gateway" settings
+    /// action. Submit → write the global `agent.llm_gateway_url` to YAML
+    /// (empty input clears it).
     LlmGatewayUrl,
     /// Right-click context menu over a sidebar workspace row.
     /// Single-pick `Choice` modal whose items are the workspace's
@@ -512,11 +506,6 @@ pub struct Model<T: TerminalAdapter> {
     /// result. `Msg::ChoicePicked` reads this + `snooze_choices` to
     /// turn the picked index into a `Command::Snooze`.
     pending_snooze_workspace: Option<lazybox_core::SessionKey>,
-    /// LLM-gateway provider whose URL the `LlmGatewayUrl` input is
-    /// editing. Stashed when a row in the `LlmGatewayProvider` picker is
-    /// chosen; read by `handle_input_submitted` to know which
-    /// `agent.llm_gateway.<provider>` field to write.
-    pending_gateway_provider: Option<lazybox_config::GatewayProvider>,
     /// The duration each picker option maps to. Order MUST match
     /// the labels rendered in `mount_snooze_picker`.
     snooze_choices: Vec<std::time::Duration>,
@@ -903,7 +892,6 @@ impl<T: TerminalAdapter> Model<T> {
             pending_labels_request: None,
             labels_choices: Vec::new(),
             pending_snooze_workspace: None,
-            pending_gateway_provider: None,
             snooze_choices: Vec::new(),
             pending_removal_prompts: std::collections::VecDeque::new(),
             active_removal_prompt: None,
@@ -2074,12 +2062,10 @@ impl<T: TerminalAdapter> Model<T> {
         });
         actions.push(SettingsAction::EditSnippets);
         actions.push(SettingsAction::EditTheme);
-        let gateway_configured = lazybox_config::Config::load()
-            .map(|c| c.agent.llm_gateway.configured_count())
-            .unwrap_or(0);
-        actions.push(SettingsAction::EditLlmGateway {
-            configured: gateway_configured,
-        });
+        let gateway_set = lazybox_config::Config::load()
+            .map(|c| c.agent.gateway_url().is_some())
+            .unwrap_or(false);
+        actions.push(SettingsAction::EditLlmGateway { set: gateway_set });
         actions.push(SettingsAction::InspectWorktrees);
         actions.push(SettingsAction::CleanWorktrees);
         actions.push(SettingsAction::FullSetup);
@@ -2117,10 +2103,10 @@ impl<T: TerminalAdapter> Model<T> {
             self.mount_theme_picker();
             return;
         }
-        // LLM gateway editor is a provider picker → URL input that writes
-        // straight to YAML — no wizard runner, no cached detection inputs.
+        // LLM gateway editor is a single URL input that writes straight
+        // to YAML — no wizard runner, no cached detection inputs.
         if matches!(action, SettingsAction::EditLlmGateway { .. }) {
-            self.mount_gateway_provider_picker();
+            self.mount_gateway_url_input();
             return;
         }
         let Some((report, sources)) = self.setup.inputs.clone() else {

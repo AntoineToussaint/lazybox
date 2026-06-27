@@ -54,11 +54,10 @@ pub enum SettingsAction {
     /// Open the live-preview theme picker (same modal as the `t`
     /// shortcut). Persists the choice to `ui.theme`.
     EditTheme,
-    /// Configure the per-provider LLM gateway base URLs
-    /// (`agent.llm_gateway`). Opens a provider picker → URL input;
-    /// persists to `~/.lazybox/config.yaml`. `configured` carries how
-    /// many providers currently have a URL set, for the label.
-    EditLlmGateway { configured: usize },
+    /// Configure the global LLM gateway base URL (`agent.llm_gateway_url`).
+    /// Opens a single URL input; persists to `~/.lazybox/config.yaml`.
+    /// `set` is whether a URL is currently configured, for the label.
+    EditLlmGateway { set: bool },
     /// Bail out and run the full splash → providers → agents → … wizard.
     FullSetup,
     /// Admin: wipe every worktree whose session has no live
@@ -85,12 +84,9 @@ impl SettingsAction {
             ),
             Self::EditSnippets => "Edit snippets (]]<key> shortcuts)".into(),
             Self::EditTheme => "Change theme (live preview)".into(),
-            Self::EditLlmGateway { configured } => format!(
+            Self::EditLlmGateway { set } => format!(
                 "Configure LLM gateway · {}",
-                match configured {
-                    0 => "off".to_string(),
-                    n => format!("{n} set"),
-                }
+                if *set { "on" } else { "off" }
             ),
             Self::FullSetup => "Run the full setup wizard".into(),
             Self::CleanWorktrees => "Clean worktrees (free disk, keep inbox)".into(),
@@ -168,16 +164,16 @@ mod tests {
     use super::SettingsAction;
 
     #[test]
-    fn llm_gateway_label_reflects_configured_count() {
+    fn llm_gateway_label_reflects_set_state() {
         assert!(
-            SettingsAction::EditLlmGateway { configured: 0 }
+            SettingsAction::EditLlmGateway { set: false }
                 .label()
                 .ends_with("off")
         );
         assert!(
-            SettingsAction::EditLlmGateway { configured: 2 }
+            SettingsAction::EditLlmGateway { set: true }
                 .label()
-                .ends_with("2 set")
+                .ends_with("on")
         );
     }
 

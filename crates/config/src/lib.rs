@@ -538,9 +538,9 @@ pub struct AgentSection {
     /// Flip on via Settings → "Skip permission prompts" to run your
     /// own Claude sessions unattended.
     pub skip_permissions: bool,
-    /// Per-provider LLM gateway base URLs. See [`LlmGatewayConfig`].
+    /// Global LLM-gateway base URL. See [`AgentSection::gateway_url`].
     #[serde(default)]
-    pub llm_gateway: LlmGatewayConfig,
+    pub llm_gateway_url: Option<String>,
 }
 
 impl Default for AgentSection {
@@ -549,115 +549,41 @@ impl Default for AgentSection {
             config: lazybox_core::AgentConfig::default(),
             autonomous_skip_permissions: true,
             skip_permissions: false,
-            llm_gateway: LlmGatewayConfig::default(),
+            llm_gateway_url: None,
         }
     }
 }
 
-/// `agent.llm_gateway:` block — point lazybox-spawned agents at an
-/// internal LLM gateway (cost tracking, key management, model routing,
-/// on-prem) instead of talking to Anthropic / OpenAI directly.
-///
-/// Provider-aware: at spawn time lazybox resolves the agent's upstream
-/// (Claude → Anthropic, Codex / Cursor → OpenAI) and injects the
-/// matching base-URL env var — `ANTHROPIC_BASE_URL` for Anthropic,
-/// `OPENAI_BASE_URL` for OpenAI — into the agent process. Unset
-/// providers inject nothing, so the agent reaches the vendor directly.
-///
-/// A per-repo `repos.<owner/name>.env` entry for the same base-URL var
-/// still wins, so a single repo can override or opt out of the global
-/// gateway.
-///
-/// ```yaml
-/// agent:
-///   llm_gateway:
-///     anthropic: "http://gateway.internal/anthropic"
-///     openai:    "http://gateway.internal/openai"
-/// ```
-///
-/// Auth (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) is intentionally NOT
-/// managed here — set it via the process environment or
-/// `repos.<owner/name>.env` so secrets don't have to live in this file.
-///
-/// Relationship to `llm-proxy`: the gateway sets the agent's base URL
-/// directly. The local telemetry proxy is not wired into the main spawn
-/// path today, so there is nothing to chain; when it is, its upstream
-/// should be set to the gateway URL so proxy → gateway preserves
-/// telemetry.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct LlmGatewayConfig {
-    /// Base URL for Anthropic-speaking agents (Claude). Injected as
-    /// `ANTHROPIC_BASE_URL`. `None` → no injection.
-    pub anthropic: Option<String>,
-    /// Base URL for OpenAI-speaking agents (Codex, Cursor). Injected
-    /// as `OPENAI_BASE_URL`. `None` → no injection.
-    pub openai: Option<String>,
-}
-
-/// Which upstream slot of [`LlmGatewayConfig`] a URL belongs to. Mirrors
-/// `lazybox_agents::LlmProvider`, but lives here because `config` is a
-/// lower-level crate that cannot depend on `agents`; the server bridges
-/// the two enums at spawn time. Modelling the choice as an enum (rather
-/// than passing `"anthropic"` / `"openai"` strings around the editor)
-/// means a typo can't silently route a URL to the wrong provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GatewayProvider {
-    Anthropic,
-    OpenAI,
-}
-
-impl GatewayProvider {
-    /// Both providers in fixed order — drives the settings picker rows
-    /// and `configured_count`.
-    pub const ALL: [GatewayProvider; 2] = [GatewayProvider::Anthropic, GatewayProvider::OpenAI];
-
-    /// Human-facing name for pickers, inputs, and flash messages.
-    pub fn display_label(self) -> &'static str {
-        match self {
-            GatewayProvider::Anthropic => "Anthropic (Claude)",
-            GatewayProvider::OpenAI => "OpenAI (Codex / Cursor)",
-        }
-    }
-}
-
-impl LlmGatewayConfig {
-    /// The configured base URL for `provider`, normalized: surrounding
-    /// whitespace trimmed and a blank string treated as unset. This is
-    /// the single definition of "meaningfully set" — the spawn-time
-    /// injection, the settings picker, and the row-count label all read
+impl AgentSection {
+    /// The configured global LLM-gateway base URL, normalized: surrounding
+    /// whitespace trimmed and a blank string treated as unset. This is the
+    /// single definition of "gateway configured" — the spawn-time
+    /// injection, the settings label, and the editor pre-fill all read
     /// through it so they can't disagree.
-    pub fn url_for(&self, provider: GatewayProvider) -> Option<&str> {
-        let raw = match provider {
-            GatewayProvider::Anthropic => self.anthropic.as_deref(),
-            GatewayProvider::OpenAI => self.openai.as_deref(),
-        };
-        raw.map(str::trim).filter(|s| !s.is_empty())
-    }
-
-    /// Overwrite `provider`'s slot. A `None` or blank/whitespace-only
-    /// URL clears it, keeping the "blank == unset" invariant on write as
-    /// well as read.
-    pub fn set(&mut self, provider: GatewayProvider, url: Option<String>) {
-        let normalized = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
-        match provider {
-            GatewayProvider::Anthropic => self.anthropic = normalized,
-            GatewayProvider::OpenAI => self.openai = normalized,
-        }
-    }
-
-    /// How many providers have a gateway URL set — drives the
-    /// settings-row label (`off` / `N set`).
-    pub fn configured_count(&self) -> usize {
-        GatewayProvider::ALL
-            .into_iter()
-            .filter(|&p| self.url_for(p).is_some())
-            .count()
-    }
-
-    /// Whether any provider has a gateway URL set.
-    pub fn is_configured(&self) -> bool {
-        self.configured_count() > 0
+    ///
+    /// When set, lazybox points every spawned agent at this URL by
+    /// injecting it into the base-URL env var the agent's CLI reads
+    /// (`ANTHROPIC_BASE_URL` for Claude, `OPENAI_BASE_URL` for Codex /
+    /// Cursor) — one global gateway, fronting whichever upstream the
+    /// agent speaks. `None` → no injection, so the agent reaches the
+    /// vendor directly.
+    ///
+    /// A per-repo `repos.<owner/name>.env` entry for the same base-URL var
+    /// still wins, so a single repo can override or opt out of the gateway.
+    ///
+    /// ```yaml
+    /// agent:
+    ///   llm_gateway_url: "http://gateway.internal"
+    /// ```
+    ///
+    /// Auth (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) is intentionally NOT
+    /// managed here — set it via the process environment or
+    /// `repos.<owner/name>.env` so secrets don't have to live in this file.
+    pub fn gateway_url(&self) -> Option<&str> {
+        self.llm_gateway_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -1332,88 +1258,44 @@ repos:
     }
 
     /// The LLM gateway is unset on a fresh config (agents talk to the
-    /// vendor directly) and per-provider URLs survive a save/load
+    /// vendor directly) and the global URL survives a save/load
     /// round-trip — the persistence half of the `,` settings editor.
     #[test]
     fn llm_gateway_defaults_unset_and_round_trips() {
         let cfg: Config = serde_yaml::from_str("{}").expect("parse");
         assert!(
-            cfg.agent.llm_gateway.anthropic.is_none(),
-            "no anthropic gateway on a fresh config"
+            cfg.agent.llm_gateway_url.is_none(),
+            "no gateway on a fresh config"
         );
-        assert!(
-            cfg.agent.llm_gateway.openai.is_none(),
-            "no openai gateway on a fresh config"
-        );
+        assert_eq!(cfg.agent.gateway_url(), None);
 
-        let yaml = r#"
-agent:
-  llm_gateway:
-    anthropic: "http://gateway.internal/anthropic"
-    openai: "http://gateway.internal/openai"
-"#;
+        let yaml = "agent:\n  llm_gateway_url: \"http://gateway.internal\"\n";
         let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
-        assert_eq!(
-            cfg.agent.llm_gateway.anthropic.as_deref(),
-            Some("http://gateway.internal/anthropic")
-        );
-        assert_eq!(
-            cfg.agent.llm_gateway.openai.as_deref(),
-            Some("http://gateway.internal/openai")
-        );
-        // A gateway set for only one provider leaves the other unset.
-        let one: Config =
-            serde_yaml::from_str("agent:\n  llm_gateway:\n    anthropic: http://gw/a\n")
-                .expect("parse");
-        assert_eq!(
-            one.agent.llm_gateway.anthropic.as_deref(),
-            Some("http://gw/a")
-        );
-        assert!(one.agent.llm_gateway.openai.is_none());
+        assert_eq!(cfg.agent.gateway_url(), Some("http://gateway.internal"));
 
         let written = serde_yaml::to_string(&cfg).expect("serialize");
         let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
-        assert_eq!(
-            reparsed.agent.llm_gateway.anthropic,
-            cfg.agent.llm_gateway.anthropic
-        );
-        assert_eq!(
-            reparsed.agent.llm_gateway.openai,
-            cfg.agent.llm_gateway.openai
-        );
+        assert_eq!(reparsed.agent.llm_gateway_url, cfg.agent.llm_gateway_url);
     }
 
-    /// `url_for` / `set` / `configured_count` own the "blank == unset"
-    /// invariant so every caller (spawn injection, settings picker,
-    /// row-count label) reads one definition of "configured".
+    /// `gateway_url` owns the "blank == unset" invariant so every caller
+    /// (spawn injection, settings label, editor pre-fill) reads one
+    /// definition of "configured".
     #[test]
-    fn llm_gateway_helpers_normalize_and_count() {
-        use super::GatewayProvider::{Anthropic, OpenAI};
+    fn gateway_url_normalizes_blank_and_whitespace() {
+        let mut agent = AgentSection::default();
+        assert_eq!(agent.gateway_url(), None);
 
-        let mut g = LlmGatewayConfig::default();
-        assert_eq!(g.configured_count(), 0);
-        assert!(!g.is_configured());
-        assert_eq!(g.url_for(Anthropic), None);
+        // A whitespace-padded URL is trimmed on read.
+        agent.llm_gateway_url = Some("  http://gw  ".into());
+        assert_eq!(agent.gateway_url(), Some("http://gw"));
 
-        // A whitespace-padded URL is trimmed on read and on write, and a
-        // blank string is treated as unset rather than a real value.
-        g.set(Anthropic, Some("  http://gw/a  ".into()));
-        assert_eq!(g.url_for(Anthropic), Some("http://gw/a"));
-        assert_eq!(g.anthropic.as_deref(), Some("http://gw/a"));
-        assert_eq!(g.configured_count(), 1);
-        assert!(g.is_configured());
+        // A blank / whitespace-only string reads as unset.
+        agent.llm_gateway_url = Some("   ".into());
+        assert_eq!(agent.gateway_url(), None);
 
-        g.set(OpenAI, Some("http://gw/o".into()));
-        assert_eq!(g.configured_count(), 2);
-
-        // Blank / None clear the slot.
-        g.set(OpenAI, Some("   ".into()));
-        assert_eq!(g.url_for(OpenAI), None);
-        assert_eq!(g.openai, None);
-        assert_eq!(g.configured_count(), 1);
-
-        g.set(Anthropic, None);
-        assert!(!g.is_configured());
+        agent.llm_gateway_url = Some(String::new());
+        assert_eq!(agent.gateway_url(), None);
     }
 
     /// The feature-tour "seen" flag defaults to false (so a fresh

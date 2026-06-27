@@ -1849,13 +1849,13 @@ fn should_suppress_working_exit(
         && since_last_working.is_some_and(|e| e < hysteresis)
 }
 
-/// Base-URL env var for a configured LLM gateway, resolved for the
-/// agent being spawned. Looks up the agent's upstream provider (Claude →
-/// Anthropic, Codex / Cursor → OpenAI) and, when `agent.llm_gateway.<provider>`
-/// is set, returns the matching base-URL var (`ANTHROPIC_BASE_URL` /
-/// `OPENAI_BASE_URL`). Empty for non-agent spawns (shells, log tails),
-/// agents with no inferable provider (`GenericCli`), or when no gateway
-/// URL is configured for the agent's provider. Pure so tests don't need
+/// Base-URL env var pointing the agent at the global LLM gateway, if one
+/// is configured. The gateway URL (`agent.llm_gateway_url`) is global;
+/// the agent's upstream provider only picks *which* base-URL var carries
+/// it (Claude → `ANTHROPIC_BASE_URL`, Codex / Cursor → `OPENAI_BASE_URL`),
+/// so one gateway fronts whichever upstream the agent speaks. Empty for
+/// non-agent spawns (shells, log tails), agents with no inferable provider
+/// (`GenericCli`), or when no gateway URL is set. Pure so tests don't need
 /// a real YAML on disk.
 pub(crate) fn gateway_env_for_agent(
     cfg: &lazybox_config::Config,
@@ -1864,24 +1864,11 @@ pub(crate) fn gateway_env_for_agent(
     let Some(provider) = agent.and_then(|a| a.llm_provider()) else {
         return Vec::new();
     };
-    // `agents::LlmProvider` (what the CLI speaks + its env var) and
-    // `config::GatewayProvider` (which YAML slot holds the URL) are
-    // separate enums only because `config` can't depend on `agents`;
-    // bridge them here. The "blank == unset" rule lives in `url_for`.
+    // The "blank == unset" rule lives in `gateway_url`.
     cfg.agent
-        .llm_gateway
-        .url_for(gateway_slot_for(provider))
+        .gateway_url()
         .map(|u| vec![(provider.base_url_env().to_string(), u.to_string())])
         .unwrap_or_default()
-}
-
-/// Map an agent's upstream provider to its [`lazybox_config::GatewayProvider`]
-/// YAML slot.
-fn gateway_slot_for(provider: lazybox_agents::LlmProvider) -> lazybox_config::GatewayProvider {
-    match provider {
-        lazybox_agents::LlmProvider::Anthropic => lazybox_config::GatewayProvider::Anthropic,
-        lazybox_agents::LlmProvider::OpenAI => lazybox_config::GatewayProvider::OpenAI,
-    }
 }
 
 /// Pure-data lookup so tests don't need a real YAML on disk.
@@ -3793,56 +3780,61 @@ mod tests {
     }
 
     #[test]
-    fn gateway_env_injects_provider_base_url_per_agent() {
+    fn gateway_env_routes_global_url_into_each_provider_var() {
+        // One global gateway URL; the agent's provider only picks which
+        // base-URL var carries it.
         let mut cfg = lazybox_config::Config::default();
-        cfg.agent.llm_gateway.anthropic = Some("http://gw/anthropic".into());
-        cfg.agent.llm_gateway.openai = Some("http://gw/openai".into());
+        cfg.agent.llm_gateway_url = Some("http://gateway.internal".into());
 
         let claude = lazybox_agents::agent::builtins::Claude;
         assert_eq!(
             gateway_env_for_agent(&cfg, Some(&claude)),
             vec![(
                 "ANTHROPIC_BASE_URL".to_string(),
-                "http://gw/anthropic".to_string()
+                "http://gateway.internal".to_string()
             )]
         );
-        let codex = lazybox_agents::agent::builtins::Codex;
-        assert_eq!(
-            gateway_env_for_agent(&cfg, Some(&codex)),
-            vec![(
-                "OPENAI_BASE_URL".to_string(),
-                "http://gw/openai".to_string()
-            )]
-        );
-        let cursor = lazybox_agents::agent::builtins::Cursor;
-        assert_eq!(
-            gateway_env_for_agent(&cfg, Some(&cursor)),
-            vec![(
-                "OPENAI_BASE_URL".to_string(),
-                "http://gw/openai".to_string()
-            )]
-        );
+        // Codex and Cursor both speak OpenAI → same global URL, OpenAI var.
+        for agent in [
+            &lazybox_agents::agent::builtins::Codex as &dyn lazybox_agents::Agent,
+            &lazybox_agents::agent::builtins::Cursor,
+        ] {
+            assert_eq!(
+                gateway_env_for_agent(&cfg, Some(agent)),
+                vec![(
+                    "OPENAI_BASE_URL".to_string(),
+                    "http://gateway.internal".to_string()
+                )]
+            );
+        }
     }
 
     #[test]
-    fn gateway_env_empty_when_provider_unset_or_no_agent() {
-        let mut cfg = lazybox_config::Config::default();
-        // Only Anthropic configured — an OpenAI agent injects nothing.
-        cfg.agent.llm_gateway.anthropic = Some("http://gw/anthropic".into());
-        let codex = lazybox_agents::agent::builtins::Codex;
-        assert!(gateway_env_for_agent(&cfg, Some(&codex)).is_empty());
-
-        // No gateway configured at all → nothing for any agent.
+    fn gateway_env_empty_when_unset_or_no_agent() {
+        // No gateway configured → nothing for any agent.
         let bare = lazybox_config::Config::default();
         let claude = lazybox_agents::agent::builtins::Claude;
         assert!(gateway_env_for_agent(&bare, Some(&claude)).is_empty());
 
+        let mut cfg = lazybox_config::Config::default();
+        cfg.agent.llm_gateway_url = Some("http://gateway.internal".into());
+
         // Non-agent spawn (shell / log tail) passes `None`.
         assert!(gateway_env_for_agent(&cfg, None).is_empty());
 
+        // A GenericCli agent has no inferable provider → no injection.
+        let generic = lazybox_agents::agent::builtins::GenericCli {
+            id: "custom",
+            display_name: "Custom",
+            spawn_cmd: vec!["custom".into()],
+            resume_cmd: None,
+            asking_patterns: vec![],
+        };
+        assert!(gateway_env_for_agent(&cfg, Some(&generic)).is_empty());
+
         // A whitespace-only URL is treated as unset.
         let mut blank = lazybox_config::Config::default();
-        blank.agent.llm_gateway.anthropic = Some("   ".into());
+        blank.agent.llm_gateway_url = Some("   ".into());
         assert!(gateway_env_for_agent(&blank, Some(&claude)).is_empty());
     }
 

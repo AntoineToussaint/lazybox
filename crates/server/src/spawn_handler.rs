@@ -5171,7 +5171,8 @@ mod tests {
 
         // The checklist-driving progress events fire in order. A
         // standalone init has no clone or fetch to do, so the modal
-        // mounts on the leading Clone Started, the worktree-add phase
+        // mounts on the leading Fetch Started (never a Clone row, which
+        // would imply a per-workspace clone), the worktree-add phase
         // animates, then Setup runs — all keyed to the spawn's session.
         let mut progress = Vec::new();
         while let Ok(ev) = bus_rx.try_recv() {
@@ -5188,7 +5189,7 @@ mod tests {
         assert_eq!(
             progress,
             vec![
-                (WorktreeStep::Clone, WorktreeStepStatus::Started),
+                (WorktreeStep::Fetch, WorktreeStepStatus::Started),
                 (WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started),
                 (WorktreeStep::Setup, WorktreeStepStatus::Started),
                 (WorktreeStep::Setup, WorktreeStepStatus::Done),

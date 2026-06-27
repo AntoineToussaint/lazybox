@@ -32,7 +32,7 @@ pub const YN_PROMPT_PATTERNS: &[&str] = &["[y/n]", "(y/n)", "[Y/n]", "[y/N]"];
 
 /// Phrases the Codex TUI renders ONLY inside a blocking approval / consent
 /// modal — never in the idle composer or streamed chat. Matched against the
-/// space-free buffer (see [`compact_lower`]) so the cursor-positioned status
+/// space-free buffer (see `compact_lower`) so the cursor-positioned status
 /// bar, which arrives with its inter-word gaps stripped, still matches.
 /// Lowercase; compared against the lowercased buffer.
 ///

@@ -288,12 +288,8 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
     // work anchor arrived inside the most recent chunk, the work anchor
     // must not suppress the dialog. `None` (no chunk hint) keeps the
     // pure positional ordering rule.
-    let work_anchor_against = |marker: Option<usize>| -> Option<usize> {
-        match (marker, work_pos, last_chunk_start) {
-            (Some(m), Some(w), Some(cs)) if m >= cs && w >= cs => None,
-            _ => work_pos,
-        }
-    };
+    let work_anchor_against =
+        |marker: Option<usize>| work_anchor_for(marker, work_pos, last_chunk_start);
 
     // A live chooser / permission dialog REPLACES the input box, so its
     // markers are the bottom-most thing on screen. When the composer
@@ -489,7 +485,8 @@ pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
     // recognises every one of those shapes. Use `classify` directly (not
     // `claude_state_of`) so the spawn-time injector's readiness polling
     // doesn't double-emit the decision trace on every chunk.
-    if classify(&s, &compact, None).state == AgentState::InputNeeded {
+    let decision = classify(&s, &compact, None);
+    if decision.state == AgentState::InputNeeded {
         return false;
     }
     // Folder-trust prompts don't always render as a numbered chooser
@@ -503,7 +500,11 @@ pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
     // The composer must actually be on screen. The boot banner is also
     // `Idle`, so requiring a composer footer marker excludes it — we
     // don't want to paste into the banner before the input box exists.
-    input_box_visible(&compact)
+    // `idle_pos` is exactly that footer offset (`idle_box_pos`: `Tab to
+    // amend` / `? for shortcuts` / bypass `shift+tab to cycle`) the
+    // classifier already computed above, so reuse it rather than re-scan
+    // the buffer for the same three markers on this per-chunk hot path.
+    decision.idle_pos.is_some()
 }
 
 /// Whether a `Working` reading carries on-screen proof the agent moved
@@ -542,24 +543,6 @@ fn dialog_marker_pos(compact: &str) -> Option<usize> {
     .into_iter()
     .flatten()
     .max()
-}
-
-/// Whether Claude's input box (composer) footer is on screen. Claude
-/// draws one of these footers ONLY once it's done streaming and waiting
-/// at the prompt: the long form `Esc to cancel · Tab to amend · …`, the
-/// short newer form `? for shortcuts`, or — in any non-default
-/// permission mode — the mode indicator `… on (shift+tab to cycle)`.
-/// Lazybox spawns every agent with `--dangerously-skip-permissions`, so
-/// that last form (`bypass permissions on (shift+tab to cycle)`) is the
-/// footer it actually sees; `? for shortcuts` is never drawn in that
-/// mode. Any of the three is proof the composer is drawn. `compact` is
-/// the space-free buffer (see [`compact_lower`]) because the live footer
-/// is painted by absolute cursor position and arrives spaceless
-/// (`?forshortcuts`, `shift+tabtocycle`).
-fn input_box_visible(compact: &str) -> bool {
-    compact.contains("tabtoamend")
-        || compact.contains("?forshortcuts")
-        || compact.contains("shift+tabtocycle")
 }
 
 /// Lowercased copy of `s` with ASCII spaces removed. tmux/Claude render
@@ -653,6 +636,25 @@ fn compact_tail(compact: &str) -> &str {
 /// window even though the turn has finished and the composer is redrawn.
 fn marker_at_least_as_recent(marker_pos: Option<usize>, idle_pos: Option<usize>) -> bool {
     marker_pos.is_some_and(|mp| idle_pos.is_none_or(|ip| mp >= ip))
+}
+
+/// The same-chunk rule shared by both detectors' classifiers. tmux full
+/// repaints paint the screen top-to-bottom, so a live dialog and the bottom
+/// status bar can land in ONE chunk with the work anchor LAST — position
+/// alone would then read the dialog as already answered. When BOTH the prompt
+/// `marker` and the `work_pos` anchor arrived inside the most recent chunk
+/// (offset `>= last_chunk_start`), return `None` so the work anchor can't
+/// suppress the dialog. `None` chunk hint (or either offset absent) keeps the
+/// pure positional ordering by returning `work_pos` unchanged.
+fn work_anchor_for(
+    marker: Option<usize>,
+    work_pos: Option<usize>,
+    last_chunk_start: Option<usize>,
+) -> Option<usize> {
+    match (marker, work_pos, last_chunk_start) {
+        (Some(m), Some(w), Some(cs)) if m >= cs && w >= cs => None,
+        _ => work_pos,
+    }
 }
 
 /// Detect Claude's ASCII selection-arrow at ANY numbered option:
@@ -1113,27 +1115,39 @@ pub fn codex_state_chunked(recent_output: &[u8], last_chunk_start: usize) -> Opt
 pub fn codex_ready_for_prompt(recent_output: &[u8]) -> bool {
     let s = strip_ansi_lossy(recent_output);
     let compact = compact_lower(&s);
-    codex_state_of(&s, &compact, None) == AgentState::Idle && codex_footer_pos(&compact).is_some()
+    // Compute the composer-footer offset once and feed it to BOTH the
+    // readiness gate (is the composer drawn at all?) and the state decision.
+    // This runs on every chunk while the spawn-time injector polls for
+    // readiness, so sharing the offset avoids a second `rfind` scan for the
+    // footer that `codex_state_of` would otherwise repeat internally.
+    let footer_pos = codex_footer_pos(&compact);
+    footer_pos.is_some() && codex_state_from(&s, &compact, None, footer_pos) == AgentState::Idle
 }
 
 /// Classify Codex's state from the stripped buffer `s` and its space-free
 /// form `compact`. `last_chunk_start` is the chunk-boundary hint in
 /// `compact`'s offset space (`None` keeps the pure positional rules).
 fn codex_state_of(s: &str, compact: &str, last_chunk_start: Option<usize>) -> AgentState {
-    let footer_pos = codex_footer_pos(compact);
+    codex_state_from(s, compact, last_chunk_start, codex_footer_pos(compact))
+}
+
+/// [`codex_state_of`] with the composer-footer offset supplied by the caller.
+/// The readiness check ([`codex_ready_for_prompt`]) already computes it, so
+/// threading it in lets that per-chunk hot path avoid a second `rfind` pass
+/// over the buffer for the same footer.
+fn codex_state_from(
+    s: &str,
+    compact: &str,
+    last_chunk_start: Option<usize>,
+    footer_pos: Option<usize>,
+) -> AgentState {
     let work_pos = codex_working_pos(compact);
     let prompt_pos = codex_prompt_pos(compact);
 
-    // Same-chunk rule (see [`claude_state_chunked`]): on a full repaint the
+    // Same-chunk rule (see [`work_anchor_for`]): on a full repaint the
     // approval modal and an earlier status line land in ONE chunk; the work
     // anchor must not then suppress a prompt that arrived in the same paint.
-    // `None` (no hint) keeps the pure positional ordering.
-    let work_against = |marker: Option<usize>| -> Option<usize> {
-        match (marker, work_pos, last_chunk_start) {
-            (Some(m), Some(w), Some(cs)) if m >= cs && w >= cs => None,
-            _ => work_pos,
-        }
-    };
+    let work_against = |marker: Option<usize>| work_anchor_for(marker, work_pos, last_chunk_start);
 
     // A live approval / consent modal is the bottom-most marker — more recent
     // than the resting footer and any status line painted above it.
@@ -1170,6 +1184,11 @@ fn codex_state_of(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Ag
 /// by the cwd path (`·/…` or `·~…`). It's the recency anchor that evicts a
 /// finished turn's stale `esc to interrupt` and that proves the composer is
 /// drawn for the readiness check.
+///
+/// Assumes a Unix-shaped cwd — an absolute `/…` or home-relative `~…` path,
+/// which every lazybox worktree is (`~/.lazybox/v2/worktrees/…`). A footer
+/// whose cwd rendered without that leading `/`/`~` would miss this anchor; no
+/// such case exists on the macOS/Linux hosts lazybox targets.
 fn codex_footer_pos(compact: &str) -> Option<usize> {
     [compact.rfind("\u{b7}/"), compact.rfind("\u{b7}~")]
         .into_iter()

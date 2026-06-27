@@ -1871,7 +1871,7 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
     });
     assert!(
         !m.modal_stack.contains(&Id::WorktreeProgress),
-        "a snapshot showing the live terminal must dismiss the checklist",
+        "snapshot with a live terminal force-dismisses the stuck checklist"
     );
 }
 

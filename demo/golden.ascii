@@ -10,6 +10,7 @@
   g l | Shift-L   labels            g o | Shift-O   open in browser    r               reply
   Shift+A         adopt sessions    Shift+J         join into PR       Shift+X         archive
   c               spawn claude      x               spawn codex        u               spawn cursor
+  w c             work in claude    w x             work in codex      w u             work in cursor
   f               filter            o               sort               Shift+S         mailbox
   /               search            Enter           toggle section     →/←             expand/collapse
   g               top               Shift+G         bottom             d               description

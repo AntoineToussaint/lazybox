@@ -1820,4 +1820,53 @@ mod tests {
         let tail = compact_tail(&multi);
         assert!(tail.len() <= 200);
     }
+
+    #[test]
+    fn work_anchor_for_suppresses_only_same_chunk_anchor() {
+        // Both the prompt marker and the work anchor landed in the most
+        // recent chunk (offset >= start) → the work anchor is nulled so a
+        // same-repaint status line can't out-rank the live prompt.
+        assert_eq!(work_anchor_for(Some(10), Some(20), Some(5)), None);
+        // The marker predates the chunk boundary → positional rule stands,
+        // the work anchor is returned unchanged.
+        assert_eq!(work_anchor_for(Some(3), Some(20), Some(5)), Some(20));
+        // No chunk hint → always positional.
+        assert_eq!(work_anchor_for(Some(10), Some(20), None), Some(20));
+        // No work anchor at all → nothing to return regardless of the hint.
+        assert_eq!(work_anchor_for(Some(10), None, Some(5)), None);
+    }
+
+    #[test]
+    fn codex_footer_pos_anchors_on_middle_dot_then_path() {
+        // The `<model> <effort> · <cwd>` composer footer, compacted: the
+        // U+00B7 separator immediately followed by an absolute or home path.
+        assert!(codex_footer_pos("gpt-5.5xhigh·/repo").is_some());
+        assert!(codex_footer_pos("gpt-5.5xhigh·~/proj").is_some());
+        // A U+00B7 used as a status-line separator (`· esc to interrupt`)
+        // carries no path after it, so it is NOT a footer.
+        assert_eq!(codex_footer_pos("•running(1s·esctointerrupt)"), None);
+        // Recency: the most recent footer wins.
+        let two = "·/old\nwork\n·/new";
+        assert_eq!(codex_footer_pos(two), two.rfind("·/new"));
+    }
+
+    #[test]
+    fn codex_arrow_option_pos_requires_digit_after_arrow() {
+        // `› 1.` / `› 2.` chooser shape (compacted `›1.`) → a live chooser.
+        assert!(codex_arrow_option_pos("›1.yes\n›2.no").is_some());
+        // The resting composer placeholder is `›` + prompt TEXT (a letter),
+        // not `› <digit>`, so it must NOT read as a chooser.
+        assert_eq!(codex_arrow_option_pos("›improvedocumentation"), None);
+        // Most recent arrow-on-digit wins.
+        let s = "›1.a\n›2.b";
+        assert_eq!(codex_arrow_option_pos(s), s.rfind("›2."));
+    }
+
+    #[test]
+    fn codex_working_pos_ignores_prose_mentioning_interrupt() {
+        // Status-bar shape: the hint is followed by `)` → a live status line.
+        assert!(codex_working_pos("•running(1s·esctointerrupt)").is_some());
+        // Prose continuing with a letter after the hint is not a status line.
+        assert_eq!(codex_working_pos("pressesctointerruptmewhileiwork"), None);
+    }
 }

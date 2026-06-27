@@ -278,6 +278,31 @@ fn codex_answered_modal_then_working_is_not_input_needed() {
 }
 
 #[test]
+fn codex_same_chunk_repaint_keeps_live_modal_over_status_preview() {
+    // The flip side of the test above. A tmux full-screen repaint delivers
+    // the SAME bytes — a live approval modal AND an earlier `esc to
+    // interrupt` status line — in ONE chunk, status line last. Position
+    // alone would read the modal as already-answered (Working); the
+    // same-chunk rule must keep it live. Mirrors Claude's
+    // `same_chunk_full_repaint_keeps_dialog_over_statusbar`.
+    let agent = Codex;
+    let buf = "Would you like to run the following command?\n\
+               › 1. Yes, proceed (y)\n  2. No (esc)\nPress enter to confirm or esc to cancel\n\
+               • Running (1s · esc to interrupt)";
+    // Positional (no chunk hint): the work line is most recent → Working.
+    assert_eq!(
+        agent.detect_state(buf.as_bytes()),
+        Some(AgentState::Working)
+    );
+    // Whole buffer arrived in one repaint (`last_chunk_start = 0`): the
+    // status line can't suppress the modal → InputNeeded.
+    assert_eq!(
+        agent.detect_state_chunked(buf.as_bytes(), 0),
+        Some(AgentState::InputNeeded),
+    );
+}
+
+#[test]
 fn codex_requires_ready_is_false_without_authoritative_gate_flip() {
     // Codex now has a readiness detector, but the spawn-time injector is
     // NOT gated hard on it (the ready signal only races the settle timer):

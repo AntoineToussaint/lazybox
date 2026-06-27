@@ -2290,7 +2290,7 @@ pub fn worktree_root() -> PathBuf {
 /// "Issues" in `ownerA/repoA` and `ownerB/repoB`) collide on the same
 /// directory and cross-contaminate. A repo-less, project-less workspace
 /// has no scope and keeps the flat `<root>/<slug>` path.
-fn worktree_path_for_session(workspace: &Workspace, index: usize) -> PathBuf {
+pub fn worktree_path_for_session(workspace: &Workspace, index: usize) -> PathBuf {
     let mut name = workspace.worktree_slug();
     if index > 0 {
         name.push_str(&format!("-{}", index + 1));

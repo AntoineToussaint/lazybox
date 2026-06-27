@@ -2545,6 +2545,87 @@ mod merge_focus_follow_tests {
             "bare `w` (leader timeout) injects work into the running Codex",
         );
     }
+
+    /// Issue #224 hardening: a mouse click cancels the armed `w` leader,
+    /// so its idle-tick timeout can't fire a stray `Work` after the user
+    /// clicked away.
+    #[test]
+    fn mouse_click_cancels_the_work_leader() {
+        use crossterm::event::{KeyModifiers as CtMods, MouseButton, MouseEvent, MouseEventKind};
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+        use tuirealm::ratatui::layout::Rect;
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
+        assert!(m.work_leader_pending(), "`w` arms the leader");
+
+        m.dispatch_mouse_in(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 1,
+                row: 1,
+                modifiers: CtMods::NONE,
+            },
+            Rect::new(0, 0, 120, 40),
+        );
+        assert!(
+            !m.work_leader_pending(),
+            "a mouse click must cancel the armed work leader",
+        );
+    }
+
+    /// Issue #224 hardening: if a modal mounts (via a daemon event)
+    /// while the `w` leader is armed, the idle-tick timeout cancels the
+    /// leader instead of firing `Work` behind the modal.
+    #[test]
+    fn work_leader_timeout_does_not_fire_behind_a_modal() {
+        use lazybox_core::WorkspaceKey;
+        use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY};
+        use tokio::sync::mpsc;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
+
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        while cmd_rx.try_recv().is_ok() {}
+
+        m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
+        assert!(m.work_leader_pending(), "`w` arms the leader");
+
+        // A modal mounts from a daemon event — no keystroke clears the
+        // leader, so the idle tick must.
+        m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
+            workspace_key: WorkspaceKey::new("github:owner/repo#9"),
+            label: "owner/repo#9".into(),
+            title: None,
+            active_terminal_count: 1,
+        });
+        assert!(!m.modal_stack.is_empty(), "a modal is up");
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        m.tick_work_leader();
+
+        assert!(!m.work_leader_pending(), "the timeout clears the leader");
+        let spawned = std::iter::from_fn(|| cmd_rx.try_recv().ok())
+            .any(|c| matches!(c, Command::Spawn { .. } | Command::InjectPrompt { .. }));
+        assert!(!spawned, "bare `Work` must not fire behind a modal",);
+    }
 }
 
 #[cfg(test)]

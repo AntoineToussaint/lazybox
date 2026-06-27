@@ -739,16 +739,27 @@ impl<T: TerminalAdapter> Model<T> {
     /// ~every 16ms even while idle), so it fires within a frame of the
     /// window elapsing.
     pub fn tick_work_leader(&mut self) {
-        if let Some(armed_at) = self.work_leader_at
-            && armed_at.elapsed() >= self.ui_defaults.escape_window
-        {
-            self.work_leader_at = None;
-            self.leader.disarm();
-            let cmds = self.dispatch_action(&lazybox_tui_core::action::Action::Work);
-            self.flush_dispatched_cmds(cmds);
-            self.sync_panes();
-            self.redraw = true;
+        let Some(armed_at) = self.work_leader_at else {
+            return;
+        };
+        if armed_at.elapsed() < self.ui_defaults.escape_window {
+            return;
         }
+        // The window elapsed — the leader resolves now, either way.
+        self.work_leader_at = None;
+        self.leader.disarm();
+        self.redraw = true;
+        // Don't fire bare `Work` if the user's context moved on after
+        // pressing `w`: a modal opened, or focus left for the terminal
+        // (e.g. a spawn landed). Mouse clicks cancel the leader at the
+        // event itself (see `handle_mouse`). Firing here would spawn /
+        // inject against whatever happens to be selected — a surprise.
+        if !self.modal_stack.is_empty() || self.focus == PaneFocus::Terminals {
+            return;
+        }
+        let cmds = self.dispatch_action(&lazybox_tui_core::action::Action::Work);
+        self.flush_dispatched_cmds(cmds);
+        self.sync_panes();
     }
 
     /// Advance the sidebar's "working" spinner. Called once per run-

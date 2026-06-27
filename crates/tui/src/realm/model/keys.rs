@@ -349,21 +349,29 @@ impl<T: TerminalAdapter> Model<T> {
         {
             let action =
                 find_action_for_stroke(&stroke, rfocus, &self.catalog).and_then(action_from_entry);
-            // `w` is BOTH a direct action (Work) AND a leader prefix for
-            // the scoped `w c` / `w x` chords (issue #224). When scoped
-            // variants exist, arm a *timed* leader instead of firing
-            // immediately: an agent key within the window picks that
-            // agent; otherwise bare Work fires on the idle tick
-            // (`tick_work_leader`). The which-key popup comes for free
-            // from `self.leader`. With no scoped variants the leader has
-            // nothing to offer, so Work fires instantly below.
-            if matches!(action, Some(lazybox_tui_core::action::Action::Work))
-                && self.focus != PaneFocus::Terminals
-                && !seq_continuations(&stroke, rfocus, &self.catalog).is_empty()
-            {
+            // Does this keystroke open a leader group? Any catalog entry
+            // with a `Seq` starting with it (reachable from this focus)
+            // makes it a leader. Most leaders (`g`) have no direct action
+            // of their own. `w` is the exception (issue #224): it's BOTH
+            // a direct action (Work) AND the prefix for the scoped
+            // `w c` / `w x` chords — so it arms a *timed* leader (an
+            // agent key picks that agent; otherwise bare Work fires on
+            // the idle tick, `tick_work_leader`). The which-key popup
+            // comes for free from `self.leader`. Leader-arming is never
+            // done from an empty terminal pane: completion keys off the
+            // real focus, which is Terminals there.
+            let is_work = matches!(action, Some(lazybox_tui_core::action::Action::Work));
+            let opens_leader = self.focus != PaneFocus::Terminals
+                && (action.is_none() || is_work)
+                && !seq_continuations(&stroke, rfocus, &self.catalog).is_empty();
+            if opens_leader {
                 self.q_latch.disarm();
                 self.leader.arm(stroke);
-                self.work_leader_at = Some(std::time::Instant::now());
+                // The `w` leader fires its direct action on timeout; pure
+                // leaders just wait for the next key.
+                if is_work {
+                    self.work_leader_at = Some(std::time::Instant::now());
+                }
                 self.redraw = true;
                 return;
             }
@@ -376,21 +384,6 @@ impl<T: TerminalAdapter> Model<T> {
                 // handled the key, the pane shouldn't see it.
                 self.flush_dispatched_cmds(dispatched);
                 self.sync_panes();
-                self.redraw = true;
-                return;
-            }
-            // No single-key action — does this keystroke open a leader
-            // group? If any catalog entry has a `Seq` starting with it
-            // (reachable from this focus), arm the leader and show the
-            // which-key popup. Purely catalog-driven: new leader groups
-            // are data, not a `keys.rs` edit. Not armed from an empty
-            // terminal pane (the leader completion keys off the real
-            // focus, which is Terminals there).
-            if self.focus != PaneFocus::Terminals
-                && !seq_continuations(&stroke, rfocus, &self.catalog).is_empty()
-            {
-                self.q_latch.disarm();
-                self.leader.arm(stroke);
                 self.redraw = true;
                 return;
             }
@@ -502,6 +495,20 @@ impl<T: TerminalAdapter> Model<T> {
     /// inspection hook.
     pub fn work_leader_pending(&self) -> bool {
         self.work_leader_at.is_some()
+    }
+
+    /// Cancel any armed leader chord — the `g` github group or the timed
+    /// `w` leader (#224). Called on mouse interaction: a click is an
+    /// unambiguous "I'm doing something else" signal, and without this
+    /// the `w` leader's idle-tick timeout would fire a stray `Work`
+    /// after the user clicked away. Keystrokes resolve the leader
+    /// through the completion block instead, so they don't need this.
+    pub(super) fn cancel_leader_chords(&mut self) {
+        if self.leader.is_armed() || self.work_leader_at.is_some() {
+            self.redraw = true;
+        }
+        self.leader.disarm();
+        self.work_leader_at = None;
     }
 
     /// Sidebar / right / activity split percentages — exposed so tests
@@ -725,6 +732,7 @@ impl<T: TerminalAdapter> Model<T> {
         match m.kind {
             MouseEventKind::Down(button) => {
                 self.q_latch.disarm();
+                self.cancel_leader_chords();
                 // Tab-strip click on the terminal pane top row →
                 // switch active tab. Checked BEFORE the
                 // "forward to inner program" path because the tab

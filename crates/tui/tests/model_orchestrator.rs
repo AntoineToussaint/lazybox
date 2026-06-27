@@ -1840,8 +1840,6 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
     use lazybox_ipc::{
         TerminalId, TerminalKind, TerminalSnapshot, WorktreeStep, WorktreeStepStatus,
     };
-    use lazybox_tui::realm::Msg;
-    use lazybox_tui::realm::components::worktree_progress::MIN_STEP_DWELL;
     let mut m = build_model();
     let sk = SessionKey::new("github:o/r#42");
 
@@ -1854,7 +1852,12 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
 
     // Simulate a lag/reconnect path where the terminal is visible in
     // the live snapshot, but the specific TerminalSpawned completion
-    // event never reaches this client.
+    // event never reaches this client. The same snapshot also stands in
+    // for the per-stage WorktreeProgress updates that would have walked
+    // the checklist forward — with those gone there is nothing left to
+    // dwell on, so a snapshot whose terminal proves the session is live
+    // tears the stuck checklist down immediately rather than hanging on
+    // "Cloning repository" forever (#219/#221).
     m.handle_daemon_event(IpcEvent::Snapshot {
         workspaces: vec![],
         terminals: vec![TerminalSnapshot {
@@ -1869,22 +1872,8 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
         projects: vec![],
     });
     assert!(
-        m.modal_stack.contains(&Id::WorktreeProgress),
-        "snapshot queues dismissal but still walks the checklist"
-    );
-
-    let mut torn_down = false;
-    for _ in 0..(STEP_COUNT_FOR_TEST + 2) {
-        std::thread::sleep(MIN_STEP_DWELL + std::time::Duration::from_millis(50));
-        m.update(Msg::WorktreeProgressTick);
-        if !m.modal_stack.contains(&Id::WorktreeProgress) {
-            torn_down = true;
-            break;
-        }
-    }
-    assert!(
-        torn_down,
-        "snapshot-visible terminal must eventually dismiss the checklist"
+        !m.modal_stack.contains(&Id::WorktreeProgress),
+        "a lag-recovery snapshot with a live terminal must tear the stuck checklist down immediately"
     );
 }
 

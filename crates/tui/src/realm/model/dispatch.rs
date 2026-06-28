@@ -248,51 +248,24 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::Work => {
-                // Polymorphic spawn driven by `classify_work`:
-                // PR-with-failing-CI gets "fix CI", issue gets
-                // "implement issue", PR with open review threads
-                // gets "address review", … Resolver returns
-                // SpawnAgent with the right prompt, the dispatcher
-                // just translates to IpcCommand.
-                //
-                // The activity selection lives in the right pane, but
-                // `w` must honor it from any focus — otherwise pressing
-                // `w` after multi-selecting silently ignores the
-                // selection when the sidebar (or terminal) has focus.
-                // Reading it here is sound because `set_workspace`
-                // clears the selection whenever the workspace key
-                // changes, so the right pane's indices always belong
-                // to the sidebar's currently-selected workspace.
+                // Bare `w` targets whatever agent is already running on
+                // this workspace (so it injects into an existing Codex /
+                // Cursor session instead of always spawning the default),
+                // falling back to the default agent when none is running.
+                // The scoped `w c` / `w x` chords (Action::WorkWith) force
+                // a specific agent.
                 let default_agent = self.sidebar.default_agent().to_string();
-                let workspace = self.sidebar.selected_workspace();
-                let selected = self.right.selected_activity_indices();
-                let intent = crate::intent::resolve_work(workspace, &selected, &default_agent);
-                if let crate::intent::Intent::SpawnAgent {
-                    workspace_key,
-                    agent_id,
-                    prompt,
-                } = intent
-                {
-                    // Pin the follow target to the workspace `w` fired on
-                    // so the spawned agent's terminal is what focus lands
-                    // on, even if a slow first-time worktree provision lets
-                    // the cursor wander before the `TerminalSpawned`
-                    // arrives (consumed in the spawn-event handler).
-                    self.spawn_follow_to = Some((&workspace_key).into());
-                    cmds.push(IpcCommand::Spawn {
-                        session_key: (&workspace_key).into(),
-                        session_id,
-                        kind: lazybox_ipc::TerminalKind::Agent(agent_id),
-                        cwd: None,
-                        initial_prompt: prompt,
-                    });
-                    self.right.clear_activity_selection();
-                } else {
-                    // `w` had nothing actionable to spawn (no PR, issue,
-                    // or selected comments). Surface that instead of
-                    // silently swallowing the keystroke.
-                    self.flash_hint("nothing to work on here");
-                }
+                let target_agent = match self.sidebar.selected_workspace_key().cloned() {
+                    Some(sk) => self.sidebar.work_target_agent(&sk, &default_agent),
+                    None => default_agent,
+                };
+                self.push_work_spawn(&target_agent, session_id, &mut cmds);
+            }
+            Action::WorkWith(agent_id) => {
+                // Scoped `w <agent>`: same contextual prompt as bare `w`,
+                // but forced to the chosen agent. `rewrite_spawn_to_inject`
+                // injects when that agent is already running, else spawns.
+                self.push_work_spawn(agent_id, session_id, &mut cmds);
             }
             Action::OpenEditor => {
                 // `open_editor` is the orchestrator's existing
@@ -640,6 +613,54 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
         cmds
+    }
+
+    /// Resolve a "work on this" spawn for `agent_id` and queue it.
+    /// Shared by bare `w` ([`Action::Work`]) and the scoped `w c` / `w x`
+    /// chords ([`Action::WorkWith`]): both build the same contextual
+    /// prompt via [`crate::intent::resolve_work`] and differ only in how
+    /// the target agent is chosen. The queued `Spawn` carries the prompt
+    /// so `rewrite_spawn_to_inject` can fold it into an existing terminal.
+    ///
+    /// The activity selection lives in the right pane, but `w` must honor
+    /// it from any focus — reading it here is sound because `set_workspace`
+    /// clears the selection whenever the workspace key changes, so the
+    /// right pane's indices always belong to the selected workspace.
+    fn push_work_spawn(
+        &mut self,
+        agent_id: &str,
+        session_id: Option<lazybox_core::SessionId>,
+        cmds: &mut Vec<IpcCommand>,
+    ) {
+        let workspace = self.sidebar.selected_workspace();
+        let selected = self.right.selected_activity_indices();
+        let intent = crate::intent::resolve_work(workspace, &selected, agent_id);
+        if let crate::intent::Intent::SpawnAgent {
+            workspace_key,
+            agent_id,
+            prompt,
+        } = intent
+        {
+            // Pin the follow target to the workspace `w` fired on so the
+            // spawned agent's terminal is what focus lands on, even if a
+            // slow first-time worktree provision lets the cursor wander
+            // before the `TerminalSpawned` arrives (consumed in the
+            // spawn-event handler).
+            self.spawn_follow_to = Some((&workspace_key).into());
+            cmds.push(IpcCommand::Spawn {
+                session_key: (&workspace_key).into(),
+                session_id,
+                kind: lazybox_ipc::TerminalKind::Agent(agent_id),
+                cwd: None,
+                initial_prompt: prompt,
+            });
+            self.right.clear_activity_selection();
+        } else {
+            // Nothing actionable to spawn (no PR, issue, or selected
+            // comments). Surface that instead of silently swallowing
+            // the keystroke.
+            self.flash_hint("nothing to work on here");
+        }
     }
 
     /// Enter or leave focus mode (issue #156). Entering requires a

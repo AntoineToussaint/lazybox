@@ -466,6 +466,15 @@ pub struct Model<T: TerminalAdapter> {
     /// `ui_defaults.escape_window` the pane leaves on the idle tick
     /// (`tick_terminal_leader`). `None` when not armed.
     terminal_leader_at: Option<std::time::Instant>,
+    /// `w` leader armed-at instant (issue #224). Unlike the github `g`
+    /// group, `w` is BOTH a direct action (work on the running-or-default
+    /// agent) and a leader prefix for the scoped `w c` / `w x` chords —
+    /// so pressing `w` arms a *timed* leader: an agent key within
+    /// `ui_defaults.escape_window` picks that agent (via `self.leader`),
+    /// otherwise bare `Work` fires on the idle tick (`tick_work_leader`).
+    /// `None` when not armed. Kept in lockstep with `self.leader`: armed
+    /// together, cleared together.
+    work_leader_at: Option<std::time::Instant>,
     /// Pending `--workspace` / `--session` preselect from the CLI.
     /// Applied after the daemon's first Snapshot — by then the
     /// sidebar has the full workspace list and `focus_workspace_key`
@@ -876,6 +885,7 @@ impl<T: TerminalAdapter> Model<T> {
             leader: crate::confirm_latch::LeaderLatch::new(),
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
             terminal_leader_at: None,
+            work_leader_at: None,
             last_click: None,
             terminal_user_typed_since_focus: false,
             pending_refresh_ack: false,

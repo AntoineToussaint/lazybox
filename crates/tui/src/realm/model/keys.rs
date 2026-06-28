@@ -59,17 +59,19 @@ impl<T: TerminalAdapter> Model<T> {
         // hardcoded group table.
         if let Some(prefix) = self.leader.take() {
             self.redraw = true;
+            // Taking the leader resolves the `w` timed leader one way or
+            // another (a scoped chord below, an Esc cancel, or a
+            // fall-through) — so the bare-Work idle timeout no longer
+            // applies.
+            self.work_leader_at = None;
             let action = key_event_to_stroke(realm_key_to_crossterm(&key))
                 .and_then(|stroke| find_action_for_seq(&prefix, &stroke, self.focus, &self.catalog))
                 .and_then(action_from_entry);
             if let Some(action) = action {
                 self.q_latch.disarm();
-                let mut cmds = self.dispatch_action(&action);
+                let cmds = self.dispatch_action(&action);
+                self.flush_dispatched_cmds(cmds);
                 self.sync_panes();
-                for cmd in cmds.drain(..) {
-                    let rewritten = self.rewrite_spawn_to_inject(cmd);
-                    self.send_cmd(rewritten);
-                }
                 return;
             }
             // The key matched no in-group action. `Esc` is the explicit
@@ -347,6 +349,32 @@ impl<T: TerminalAdapter> Model<T> {
         {
             let action =
                 find_action_for_stroke(&stroke, rfocus, &self.catalog).and_then(action_from_entry);
+            // Does this keystroke open a leader group? Any catalog entry
+            // with a `Seq` starting with it (reachable from this focus)
+            // makes it a leader. Most leaders (`g`) have no direct action
+            // of their own. `w` is the exception (issue #224): it's BOTH
+            // a direct action (Work) AND the prefix for the scoped
+            // `w c` / `w x` chords — so it arms a *timed* leader (an
+            // agent key picks that agent; otherwise bare Work fires on
+            // the idle tick, `tick_work_leader`). The which-key popup
+            // comes for free from `self.leader`. Leader-arming is never
+            // done from an empty terminal pane: completion keys off the
+            // real focus, which is Terminals there.
+            let is_work = matches!(action, Some(lazybox_tui_core::action::Action::Work));
+            let opens_leader = self.focus != PaneFocus::Terminals
+                && (action.is_none() || is_work)
+                && !seq_continuations(&stroke, rfocus, &self.catalog).is_empty();
+            if opens_leader {
+                self.q_latch.disarm();
+                self.leader.arm(stroke);
+                // The `w` leader fires its direct action on timeout; pure
+                // leaders just wait for the next key.
+                if is_work {
+                    self.work_leader_at = Some(std::time::Instant::now());
+                }
+                self.redraw = true;
+                return;
+            }
             if let Some(action) = action {
                 // Any catalog dispatch counts as "non-quit key" so
                 // the q q chord resets.
@@ -356,21 +384,6 @@ impl<T: TerminalAdapter> Model<T> {
                 // handled the key, the pane shouldn't see it.
                 self.flush_dispatched_cmds(dispatched);
                 self.sync_panes();
-                self.redraw = true;
-                return;
-            }
-            // No single-key action — does this keystroke open a leader
-            // group? If any catalog entry has a `Seq` starting with it
-            // (reachable from this focus), arm the leader and show the
-            // which-key popup. Purely catalog-driven: new leader groups
-            // are data, not a `keys.rs` edit. Not armed from an empty
-            // terminal pane (the leader completion keys off the real
-            // focus, which is Terminals there).
-            if self.focus != PaneFocus::Terminals
-                && !seq_continuations(&stroke, rfocus, &self.catalog).is_empty()
-            {
-                self.q_latch.disarm();
-                self.leader.arm(stroke);
                 self.redraw = true;
                 return;
             }
@@ -407,7 +420,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// then rewrite spawn-into-running-agent to `InjectPrompt` and
     /// send. Shared by the catalog-dispatch path and the per-pane
     /// fallback so both surface the same feedback.
-    fn flush_dispatched_cmds(&mut self, cmds: Vec<IpcCommand>) {
+    pub(super) fn flush_dispatched_cmds(&mut self, cmds: Vec<IpcCommand>) {
         for cmd in &cmds {
             if let IpcCommand::Spawn {
                 kind, session_key, ..
@@ -474,6 +487,28 @@ impl<T: TerminalAdapter> Model<T> {
     /// #205 leader chord.
     pub fn terminal_leader_pending(&self) -> bool {
         self.terminal_leader_at.is_some()
+    }
+
+    /// Whether the timed `w` leader is currently armed (issue #224) —
+    /// pressing `w` arms it until a scoped agent key (`w c` / `w x`)
+    /// completes the chord or the idle tick fires bare `Work`. Test /
+    /// inspection hook.
+    pub fn work_leader_pending(&self) -> bool {
+        self.work_leader_at.is_some()
+    }
+
+    /// Cancel any armed leader chord — the `g` github group or the timed
+    /// `w` leader (#224). Called on mouse interaction: a click is an
+    /// unambiguous "I'm doing something else" signal, and without this
+    /// the `w` leader's idle-tick timeout would fire a stray `Work`
+    /// after the user clicked away. Keystrokes resolve the leader
+    /// through the completion block instead, so they don't need this.
+    pub(super) fn cancel_leader_chords(&mut self) {
+        if self.leader.is_armed() || self.work_leader_at.is_some() {
+            self.redraw = true;
+        }
+        self.leader.disarm();
+        self.work_leader_at = None;
     }
 
     /// Sidebar / right / activity split percentages — exposed so tests
@@ -697,6 +732,7 @@ impl<T: TerminalAdapter> Model<T> {
         match m.kind {
             MouseEventKind::Down(button) => {
                 self.q_latch.disarm();
+                self.cancel_leader_chords();
                 // Tab-strip click on the terminal pane top row →
                 // switch active tab. Checked BEFORE the
                 // "forward to inner program" path because the tab
@@ -1074,6 +1110,12 @@ fn action_from_entry(
             .param
             .as_ref()
             .map(|Param::Agent(id)| Action::SpawnAgent(id.clone()));
+    }
+    if entry.kind == ActionKind::WorkWith {
+        return entry
+            .param
+            .as_ref()
+            .map(|Param::Agent(id)| Action::WorkWith(id.clone()));
     }
     action_from_kind(entry.kind)
 }

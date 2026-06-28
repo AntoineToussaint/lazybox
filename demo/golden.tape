@@ -27,7 +27,13 @@ Output "demo/golden.ascii"
 
 Set FontSize 16
 Set Width 1200
-Set Height 720
+# Tall enough that the whole `?` help overlay fits on one frame — the
+# bottom row (`]]<key>  snippets`) is the `Wait+Screen` sentinel below,
+# so it must be on screen for the render to settle. The keybinding table
+# grew (issue #224 added the `w c` / `w x` / `w u` scoped-work group), so
+# 720 clipped the last rows; height only reveals more of the overlay and
+# never changes the table's byte content (that's width/content-driven).
+Set Height 1000
 Set Theme "Catppuccin Mocha"
 
 Hide

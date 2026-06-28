@@ -37,11 +37,12 @@ impl Sidebar {
         let ci_failing = self.ci_failing_count();
         let review_pending = self.review_pending_count();
 
-        // Right inset reserves the scroll-indicator column (drawn at
-        // `area.width - 2`) plus a one-cell edge margin; the content
-        // ends flush against the indicator with no extra dead gutter.
+        // Right inset reserves only the scroll-indicator column (drawn
+        // at `area.width - 1`); there's no extra edge margin stacked on
+        // top of it, so the scrollbar is the sole right-edge gutter and
+        // content runs right up to it (issue #231).
         let l_pad: u16 = 1;
-        let r_pad: u16 = 2;
+        let r_pad: u16 = 1;
         let inner_width = area.width.saturating_sub(l_pad + r_pad);
 
         // Row 0 — brand/mailbox on the left, attention badges in the
@@ -324,18 +325,16 @@ impl Sidebar {
                     } else {
                         None
                     };
-                    // Cursor caret on the left mirrors workspace rows so
-                    // the user can see the cursor parked on a header
-                    // (otherwise navigating onto a header looks like a
-                    // dropped key — Space-to-toggle wouldn't be
-                    // discoverable).
-                    let caret = if is_cursor { "▸ " } else { "  " };
+                    // Root of the tree, so it carries no selection
+                    // caret: the disclosure glyph sits in the shared
+                    // left gutter and the cursor is shown by the
+                    // row-background fill below. That keeps top-level
+                    // rows nearly flush with the pane edge (issue #231).
                     let glyph_style = match row_bg {
                         Some(bg) => bg,
                         None => Style::default().fg(theme.text_dim),
                     };
                     let mut spans: Vec<Span> = vec![
-                        Span::styled(caret.to_string(), glyph_style),
                         Span::styled(format!("{glyph} "), glyph_style),
                         Span::styled(
                             format!("{} {}", icons::REPO, name),
@@ -378,7 +377,15 @@ impl Sidebar {
                             ));
                         }
                     }
-                    let _ = row_budget;
+                    // Without a caret, the cursor reads purely from the
+                    // row-background fill, so extend it across the whole
+                    // row rather than leaving it hugging the text.
+                    if let Some(bg) = row_bg {
+                        let used = spans_visual_width(&spans);
+                        if used < row_budget {
+                            spans.push(Span::styled(" ".repeat(row_budget - used), bg));
+                        }
+                    }
                     Line::from(spans)
                 }
                 VisibleRow::KindHeader(kind) => {
@@ -395,7 +402,7 @@ impl Sidebar {
                     } else {
                         None
                     };
-                    let caret = if is_cursor { "▸ " } else { "  " };
+                    let caret = if is_cursor { "▸" } else { " " };
                     let color = match kind {
                         WorkspaceKind::Pr => theme.success,
                         WorkspaceKind::Issue => theme.hover,
@@ -435,8 +442,9 @@ impl Sidebar {
                     session_id,
                 } => {
                     // Per-session sub-row, only emitted when the
-                    // workspace has 2+ sessions. Indent further under
-                    // the workspace row and show the session name.
+                    // workspace has 2+ sessions. One indent step deeper
+                    // than the workspace row (shared caret gutter + a
+                    // 2-col nesting step) before the session name.
                     let name = self
                         .workspaces
                         .get(workspace)
@@ -451,7 +459,7 @@ impl Sidebar {
                     } else {
                         Style::default().fg(theme.text_dim)
                     };
-                    let prefix = if is_cursor { "    ▸ " } else { "      " };
+                    let prefix = if is_cursor { "▸  " } else { "   " };
                     let name_budget = row_budget.saturating_sub(visual_width(prefix));
                     let name_text = truncate_ellipsis(name, name_budget);
                     let used = visual_width(prefix) + visual_width(&name_text);
@@ -499,7 +507,7 @@ impl Sidebar {
         crate::components::scrollbar::render_vertical(
             frame,
             Rect::new(
-                area.x + area.width.saturating_sub(2),
+                area.x + area.width.saturating_sub(1),
                 inner.y,
                 1,
                 inner.height,

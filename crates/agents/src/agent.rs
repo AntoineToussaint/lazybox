@@ -29,6 +29,27 @@ pub struct SpawnCtx {
     pub hook_settings_path: Option<PathBuf>,
 }
 
+/// The upstream LLM API an agent speaks to. Used to pick the base-URL
+/// env var when the user configures a global LLM gateway
+/// (`agent.llm_gateway_url`) — Anthropic agents get `ANTHROPIC_BASE_URL`,
+/// OpenAI agents get `OPENAI_BASE_URL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmProvider {
+    Anthropic,
+    OpenAI,
+}
+
+impl LlmProvider {
+    /// The base-URL environment variable each agent CLI reads to point
+    /// itself at a non-default endpoint.
+    pub fn base_url_env(&self) -> &'static str {
+        match self {
+            LlmProvider::Anthropic => "ANTHROPIC_BASE_URL",
+            LlmProvider::OpenAI => "OPENAI_BASE_URL",
+        }
+    }
+}
+
 /// Shape of the prompt behind an `InputNeeded` reading: whether a bare
 /// chooser keystroke (`1`-`9`, `y`, `n`, Esc) is a complete answer. The
 /// daemon records this alongside the cached state so the optimistic
@@ -49,6 +70,14 @@ pub trait Agent: Send + Sync {
 
     /// Human-readable display name.
     fn display_name(&self) -> &'static str;
+
+    /// Which upstream LLM API this agent speaks. Drives base-URL env
+    /// injection when an LLM gateway is configured. The default `None`
+    /// covers agents whose upstream lazybox can't infer (a `GenericCli`
+    /// pointed at an arbitrary command) — they get no gateway injection.
+    fn llm_provider(&self) -> Option<LlmProvider> {
+        None
+    }
 
     /// Command + args to spawn a fresh session.
     fn spawn(&self, ctx: &SpawnCtx) -> Vec<String>;
@@ -298,6 +327,9 @@ pub mod builtins {
         fn display_name(&self) -> &'static str {
             "Claude Code"
         }
+        fn llm_provider(&self) -> Option<LlmProvider> {
+            Some(LlmProvider::Anthropic)
+        }
         fn spawn(&self, ctx: &SpawnCtx) -> Vec<String> {
             let mut argv = vec!["claude".into()];
             if ctx.skip_permissions {
@@ -426,6 +458,9 @@ pub mod builtins {
         fn display_name(&self) -> &'static str {
             "Codex"
         }
+        fn llm_provider(&self) -> Option<LlmProvider> {
+            Some(LlmProvider::OpenAI)
+        }
         fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
             vec!["codex".into()]
         }
@@ -467,6 +502,9 @@ pub mod builtins {
         }
         fn display_name(&self) -> &'static str {
             "Cursor Agent"
+        }
+        fn llm_provider(&self) -> Option<LlmProvider> {
+            Some(LlmProvider::OpenAI)
         }
         fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
             vec!["cursor-agent".into()]
@@ -540,9 +578,40 @@ pub mod builtins {
 #[cfg(test)]
 mod tests {
     use super::builtins::Claude;
-    use super::{Agent, SpawnCtx};
+    use super::{Agent, LlmProvider, SpawnCtx};
 
     const SKIP_FLAG: &str = "--dangerously-skip-permissions";
+
+    #[test]
+    fn builtin_agents_map_to_their_llm_provider() {
+        assert_eq!(Claude.llm_provider(), Some(LlmProvider::Anthropic));
+        assert_eq!(
+            super::builtins::Codex.llm_provider(),
+            Some(LlmProvider::OpenAI)
+        );
+        assert_eq!(
+            super::builtins::Cursor.llm_provider(),
+            Some(LlmProvider::OpenAI)
+        );
+    }
+
+    #[test]
+    fn generic_cli_has_no_inferable_provider() {
+        let agent = super::builtins::GenericCli {
+            id: "custom",
+            display_name: "Custom",
+            spawn_cmd: vec!["custom".into()],
+            resume_cmd: None,
+            asking_patterns: vec![],
+        };
+        assert_eq!(agent.llm_provider(), None);
+    }
+
+    #[test]
+    fn provider_base_url_env_names() {
+        assert_eq!(LlmProvider::Anthropic.base_url_env(), "ANTHROPIC_BASE_URL");
+        assert_eq!(LlmProvider::OpenAI.base_url_env(), "OPENAI_BASE_URL");
+    }
 
     #[test]
     fn claude_spawn_carries_skip_flag_only_when_opted_in() {

@@ -116,6 +116,23 @@ impl<T: TerminalAdapter> Model<T> {
                     cmds.push(IpcCommand::CreateProject { name });
                 }
             }
+            Some(Id::LlmGatewayUrl) => {
+                let url = text.trim().to_string();
+                // Empty input clears the gateway; `gateway_url` already
+                // normalizes blank → unset, but store `None` so the YAML
+                // key drops out entirely rather than persisting "".
+                let value = (!url.is_empty()).then_some(url.clone());
+                let saved = lazybox_config::Config::save_with(|c| {
+                    c.agent.llm_gateway_url = value.clone();
+                });
+                match saved {
+                    Ok(()) if url.is_empty() => {
+                        self.flash_info("LLM gateway cleared — agents talk to the vendor directly")
+                    }
+                    Ok(()) => self.flash_info(format!("LLM gateway set to {url}")),
+                    Err(e) => self.flash_info(format!("couldn't save config: {e}")),
+                }
+            }
             // RequestReviewers / AddAssignees used to go through an
             // Input modal but were migrated to a `Choice::multi`
             // picker — see `mount_request_reviewers` /

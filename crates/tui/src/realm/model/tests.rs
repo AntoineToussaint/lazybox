@@ -332,6 +332,20 @@ mod effects_tests {
         assert!(m.new_workspace_repo_choices.is_empty());
     }
 
+    /// The "Configure LLM gateway" settings action routes straight to
+    /// the single global URL input — no provider picker, no wizard
+    /// runner. Freezes that routing (a regression that dropped the early
+    /// return would fall through to the cached-inputs wizard path and
+    /// warn instead of mounting). Disk-free: mounting only reads config
+    /// for the pre-fill; nothing is saved.
+    #[test]
+    fn edit_llm_gateway_action_mounts_the_url_input() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let mut m = build_model();
+        m.dispatch_settings_action(SettingsAction::EditLlmGateway { set: false });
+        assert_eq!(m.modal_stack.last(), Some(&Id::LlmGatewayUrl));
+    }
+
     /// Empty / whitespace-only input is dropped silently.
     #[test]
     fn input_submitted_with_empty_text_returns_no_commands() {
@@ -2410,6 +2424,221 @@ mod merge_focus_follow_tests {
             "explicit feedback instead of a silent no-op: {:?}",
             notice.message,
         );
+    }
+
+    /// Issue #224: bare `w` on a workspace whose only running agent is
+    /// Codex must target Codex — not always spawn the default Claude.
+    #[test]
+    fn bare_w_targets_the_running_agent_over_default() {
+        use lazybox_ipc::{Command, TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+
+        // Only a Codex agent is running on this workspace.
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(3),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+        });
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let cmds = m.dispatch_action(&Action::Work);
+        let agent = cmds.iter().find_map(|c| match c {
+            Command::Spawn {
+                kind: TerminalKind::Agent(id),
+                ..
+            } => Some(id.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            agent.as_deref(),
+            Some("codex"),
+            "bare `w` targets the running Codex, not the default Claude",
+        );
+    }
+
+    /// Issue #224: the scoped `w x` chord forces Codex, injecting the
+    /// contextual work prompt into the already-running Codex session
+    /// (rather than spawning a fresh one).
+    #[test]
+    fn scoped_w_x_injects_into_running_codex() {
+        use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY, TerminalId, TerminalKind};
+        use tokio::sync::mpsc;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(5),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+        });
+        // `TerminalSpawned` auto-focuses the terminal pane; return to the
+        // sidebar (cursor on the PR) so the catalog resolves `w`.
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        while cmd_rx.try_recv().is_ok() {} // drop setup traffic
+
+        // `w` arms the timed leader; `x` completes `w x` → work in Codex.
+        m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
+        assert!(m.work_leader_pending(), "`w` arms the scoped-work leader");
+        m.dispatch_key(KeyEvent::new(Key::Char('x'), KeyModifiers::NONE));
+        assert!(!m.work_leader_pending(), "`x` resolves the leader");
+
+        let inject = std::iter::from_fn(|| cmd_rx.try_recv().ok())
+            .find(|c| matches!(c, Command::InjectPrompt { .. }));
+        assert!(
+            inject.is_some(),
+            "`w x` injects the work prompt into the running Codex",
+        );
+    }
+
+    /// Issue #224: with no follow-up key, the `w` leader times out on the
+    /// idle tick and fires bare `Work` against the running-or-default
+    /// agent — so bare `w` still works without pressing a scoped key.
+    #[test]
+    fn w_leader_times_out_to_bare_work() {
+        use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY, TerminalId, TerminalKind};
+        use tokio::sync::mpsc;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
+
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(8),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+        });
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        while cmd_rx.try_recv().is_ok() {} // drop setup traffic
+
+        m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
+        assert!(m.work_leader_pending(), "`w` arms the leader");
+
+        // Window elapsed (1ms) → the idle tick fires bare Work, which
+        // injects into the running Codex.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        m.tick_work_leader();
+        assert!(!m.work_leader_pending(), "idle tick resolves the leader");
+
+        let inject = std::iter::from_fn(|| cmd_rx.try_recv().ok())
+            .find(|c| matches!(c, Command::InjectPrompt { .. }));
+        assert!(
+            inject.is_some(),
+            "bare `w` (leader timeout) injects work into the running Codex",
+        );
+    }
+
+    /// Issue #224 hardening: a mouse click cancels the armed `w` leader,
+    /// so its idle-tick timeout can't fire a stray `Work` after the user
+    /// clicked away.
+    #[test]
+    fn mouse_click_cancels_the_work_leader() {
+        use crossterm::event::{KeyModifiers as CtMods, MouseButton, MouseEvent, MouseEventKind};
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+        use tuirealm::ratatui::layout::Rect;
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
+        assert!(m.work_leader_pending(), "`w` arms the leader");
+
+        m.dispatch_mouse_in(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 1,
+                row: 1,
+                modifiers: CtMods::NONE,
+            },
+            Rect::new(0, 0, 120, 40),
+        );
+        assert!(
+            !m.work_leader_pending(),
+            "a mouse click must cancel the armed work leader",
+        );
+    }
+
+    /// Issue #224 hardening: if a modal mounts (via a daemon event)
+    /// while the `w` leader is armed, the idle-tick timeout cancels the
+    /// leader instead of firing `Work` behind the modal.
+    #[test]
+    fn work_leader_timeout_does_not_fire_behind_a_modal() {
+        use lazybox_core::WorkspaceKey;
+        use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY};
+        use tokio::sync::mpsc;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
+
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        while cmd_rx.try_recv().is_ok() {}
+
+        m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
+        assert!(m.work_leader_pending(), "`w` arms the leader");
+
+        // A modal mounts from a daemon event — no keystroke clears the
+        // leader, so the idle tick must.
+        m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
+            workspace_key: WorkspaceKey::new("github:owner/repo#9"),
+            label: "owner/repo#9".into(),
+            title: None,
+            active_terminal_count: 1,
+        });
+        assert!(!m.modal_stack.is_empty(), "a modal is up");
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        m.tick_work_leader();
+
+        assert!(!m.work_leader_pending(), "the timeout clears the leader");
+        let spawned = std::iter::from_fn(|| cmd_rx.try_recv().ok())
+            .any(|c| matches!(c, Command::Spawn { .. } | Command::InjectPrompt { .. }));
+        assert!(!spawned, "bare `Work` must not fire behind a modal",);
     }
 }
 

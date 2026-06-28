@@ -210,7 +210,7 @@ impl<T: TerminalAdapter> Model<T> {
         // worktree-provisioning checklist, AND the per-stage
         // `WorktreeProgress` updates that would have advanced it. If
         // those were dropped, the checklist hangs forever on whatever
-        // step it last saw (typically "Cloning repository") even though
+        // step it last saw (typically "Preparing worktree") even though
         // the spawn finished. The snapshot is authoritative: if it shows
         // the checklist's session already has a live terminal, the work
         // is done — tear the stuck modal down. A failed checklist is left
@@ -727,6 +727,39 @@ impl<T: TerminalAdapter> Model<T> {
                 self.escape_latch.disarm();
             }
         }
+    }
+
+    /// Fire bare `Work` once the `w` leader has sat idle for
+    /// `ui_defaults.escape_window` with no follow-up key (issue #224).
+    /// This is the bare-`w` path: the user pressed `w` and didn't pick a
+    /// scoped agent (`w c` / `w x`), so we honor "work on this" against
+    /// the running-or-default agent. A scoped chord, an Esc cancel, or
+    /// any other key clears `work_leader_at` in the key handler before
+    /// this fires. Called once per run-loop iteration (the loop ticks
+    /// ~every 16ms even while idle), so it fires within a frame of the
+    /// window elapsing.
+    pub fn tick_work_leader(&mut self) {
+        let Some(armed_at) = self.work_leader_at else {
+            return;
+        };
+        if armed_at.elapsed() < self.ui_defaults.escape_window {
+            return;
+        }
+        // The window elapsed — the leader resolves now, either way.
+        self.work_leader_at = None;
+        self.leader.disarm();
+        self.redraw = true;
+        // Don't fire bare `Work` if the user's context moved on after
+        // pressing `w`: a modal opened, or focus left for the terminal
+        // (e.g. a spawn landed). Mouse clicks cancel the leader at the
+        // event itself (see `handle_mouse`). Firing here would spawn /
+        // inject against whatever happens to be selected — a surprise.
+        if !self.modal_stack.is_empty() || self.focus == PaneFocus::Terminals {
+            return;
+        }
+        let cmds = self.dispatch_action(&lazybox_tui_core::action::Action::Work);
+        self.flush_dispatched_cmds(cmds);
+        self.sync_panes();
     }
 
     /// Advance the sidebar's "working" spinner. Called once per run-

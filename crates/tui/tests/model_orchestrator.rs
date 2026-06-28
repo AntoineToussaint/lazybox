@@ -28,6 +28,19 @@ fn key(code: Key) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+/// Press bare `w` and drive the timed work-leader (#224) to its
+/// idle-tick timeout, so `Work` fires against the running-or-default
+/// agent. `w` now arms a leader (for the scoped `w c` / `w x` chords);
+/// with no agent key following, the bare action resolves on the idle
+/// tick — exactly the keyboard path a user gets when they press `w`
+/// alone. The sleep clears the default `escape_window` (~600ms).
+fn press_bare_w(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+    m.dispatch_key(key(Key::Char('w')));
+    assert!(m.work_leader_pending(), "`w` arms the work leader");
+    std::thread::sleep(std::time::Duration::from_millis(650));
+    m.tick_work_leader();
+}
+
 fn key_with(code: Key, mods: KeyModifiers) -> KeyEvent {
     KeyEvent::new(code, mods)
 }
@@ -872,8 +885,8 @@ fn w_on_issue_with_running_claude_injects_implement_prompt() {
         m.dispatch_key(key(Key::Tab));
     }
 
-    // Press `w`.
-    m.dispatch_key(key(Key::Char('w')));
+    // Press `w` (bare → running-or-default agent).
+    press_bare_w(&mut m);
 
     // Drain and look for the inject (NOT a duplicate spawn).
     let mut commands: Vec<Command> = Vec::new();
@@ -955,7 +968,7 @@ fn w_on_issue_from_right_pane_also_injects() {
         m.dispatch_key(key(Key::Tab));
     }
 
-    m.dispatch_key(key(Key::Char('w')));
+    press_bare_w(&mut m);
 
     let mut commands: Vec<Command> = Vec::new();
     while let Ok(cmd) = server.rx.try_recv() {
@@ -1021,8 +1034,8 @@ fn sidebar_w_honors_activity_selection() {
         m.dispatch_key(key(Key::Tab));
     }
 
-    // Press `w` from the sidebar.
-    m.dispatch_key(key(Key::Char('w')));
+    // Press `w` from the sidebar (bare → default agent here).
+    press_bare_w(&mut m);
 
     let mut commands: Vec<Command> = Vec::new();
     while let Ok(cmd) = server.rx.try_recv() {
@@ -1852,10 +1865,12 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
 
     // Simulate a lag/reconnect path where the terminal is visible in
     // the live snapshot, but the specific TerminalSpawned completion
-    // event never reaches this client. The snapshot is authoritative
-    // proof the work finished, so it tears a possibly-stuck checklist
-    // down on the spot (#219) rather than walking a checklist whose
-    // progress events were themselves dropped.
+    // event never reaches this client. The same snapshot also stands in
+    // for the per-stage WorktreeProgress updates that would have walked
+    // the checklist forward — with those gone there is nothing left to
+    // dwell on, so a snapshot whose terminal proves the session is live
+    // tears the stuck checklist down immediately rather than hanging on
+    // "Cloning repository" forever (#219/#221).
     m.handle_daemon_event(IpcEvent::Snapshot {
         workspaces: vec![],
         terminals: vec![TerminalSnapshot {
@@ -1871,13 +1886,13 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
     });
     assert!(
         !m.modal_stack.contains(&Id::WorktreeProgress),
-        "snapshot with a live terminal force-dismisses the stuck checklist"
+        "a lag-recovery snapshot with a live terminal must tear the stuck checklist down immediately"
     );
 }
 
-/// Checklist row count (clone, fetch, worktree-add, setup, agent),
-/// mirrored here so the bounded walk above can't spin forever.
-const STEP_COUNT_FOR_TEST: usize = 5;
+/// Checklist row count (prepare, worktree-add, setup, agent), mirrored
+/// here so the bounded walk above can't spin forever.
+const STEP_COUNT_FOR_TEST: usize = 4;
 
 #[test]
 fn instant_resume_does_not_flash_the_progress_modal() {

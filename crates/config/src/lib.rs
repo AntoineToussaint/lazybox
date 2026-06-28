@@ -538,6 +538,9 @@ pub struct AgentSection {
     /// Flip on via Settings → "Skip permission prompts" to run your
     /// own Claude sessions unattended.
     pub skip_permissions: bool,
+    /// Global LLM-gateway base URL. See [`AgentSection::gateway_url`].
+    #[serde(default)]
+    pub llm_gateway_url: Option<String>,
 }
 
 impl Default for AgentSection {
@@ -546,7 +549,41 @@ impl Default for AgentSection {
             config: lazybox_core::AgentConfig::default(),
             autonomous_skip_permissions: true,
             skip_permissions: false,
+            llm_gateway_url: None,
         }
+    }
+}
+
+impl AgentSection {
+    /// The configured global LLM-gateway base URL, normalized: surrounding
+    /// whitespace trimmed and a blank string treated as unset. This is the
+    /// single definition of "gateway configured" — the spawn-time
+    /// injection, the settings label, and the editor pre-fill all read
+    /// through it so they can't disagree.
+    ///
+    /// When set, lazybox points every spawned agent at this URL by
+    /// injecting it into the base-URL env var the agent's CLI reads
+    /// (`ANTHROPIC_BASE_URL` for Claude, `OPENAI_BASE_URL` for Codex /
+    /// Cursor) — one global gateway, fronting whichever upstream the
+    /// agent speaks. `None` → no injection, so the agent reaches the
+    /// vendor directly.
+    ///
+    /// A per-repo `repos.<owner/name>.env` entry for the same base-URL var
+    /// still wins, so a single repo can override or opt out of the gateway.
+    ///
+    /// ```yaml
+    /// agent:
+    ///   llm_gateway_url: "http://gateway.internal"
+    /// ```
+    ///
+    /// Auth (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) is intentionally NOT
+    /// managed here — set it via the process environment or
+    /// `repos.<owner/name>.env` so secrets don't have to live in this file.
+    pub fn gateway_url(&self) -> Option<&str> {
+        self.llm_gateway_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -1218,6 +1255,47 @@ repos:
             reparsed.agent.skip_permissions,
             "opting interactive sessions into skip mode survives a round-trip"
         );
+    }
+
+    /// The LLM gateway is unset on a fresh config (agents talk to the
+    /// vendor directly) and the global URL survives a save/load
+    /// round-trip — the persistence half of the `,` settings editor.
+    #[test]
+    fn llm_gateway_defaults_unset_and_round_trips() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(
+            cfg.agent.llm_gateway_url.is_none(),
+            "no gateway on a fresh config"
+        );
+        assert_eq!(cfg.agent.gateway_url(), None);
+
+        let yaml = "agent:\n  llm_gateway_url: \"http://gateway.internal\"\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.agent.gateway_url(), Some("http://gateway.internal"));
+
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(reparsed.agent.llm_gateway_url, cfg.agent.llm_gateway_url);
+    }
+
+    /// `gateway_url` owns the "blank == unset" invariant so every caller
+    /// (spawn injection, settings label, editor pre-fill) reads one
+    /// definition of "configured".
+    #[test]
+    fn gateway_url_normalizes_blank_and_whitespace() {
+        let mut agent = AgentSection::default();
+        assert_eq!(agent.gateway_url(), None);
+
+        // A whitespace-padded URL is trimmed on read.
+        agent.llm_gateway_url = Some("  http://gw  ".into());
+        assert_eq!(agent.gateway_url(), Some("http://gw"));
+
+        // A blank / whitespace-only string reads as unset.
+        agent.llm_gateway_url = Some("   ".into());
+        assert_eq!(agent.gateway_url(), None);
+
+        agent.llm_gateway_url = Some(String::new());
+        assert_eq!(agent.gateway_url(), None);
     }
 
     /// The feature-tour "seen" flag defaults to false (so a fresh

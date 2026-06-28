@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     /// Display name (e.g., "Claude Code").
+    #[serde(default = "default_name")]
     pub name: String,
     /// Command to spawn (e.g., "claude").
+    #[serde(default = "default_command")]
     pub command: String,
     /// Additional args for first launch.
     #[serde(default)]
@@ -20,6 +22,14 @@ pub struct AgentConfig {
     /// Used for notification detection.
     #[serde(default = "default_asking_patterns")]
     pub asking_patterns: Vec<String>,
+}
+
+fn default_name() -> String {
+    "Claude Code".into()
+}
+
+fn default_command() -> String {
+    "claude".into()
 }
 
 fn default_asking_patterns() -> Vec<String> {

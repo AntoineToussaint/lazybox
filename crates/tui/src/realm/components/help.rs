@@ -469,6 +469,42 @@ mod tests {
         }
     }
 
+    /// The scoped `w c` / `w x` / `w u` work chords (#224) form their
+    /// own `w` leader block in the help panel, built from the catalog
+    /// exactly like the `g` github group — so they surface in the
+    /// which-key popup the same way.
+    #[test]
+    fn leader_section_lists_the_scoped_work_chords_from_the_catalog() {
+        use lazybox_tui_core::action::ActionDef;
+        let agents = [
+            "claude".to_string(),
+            "codex".to_string(),
+            "cursor".to_string(),
+        ];
+        let catalog = ActionDef::catalog(&agents, &std::collections::BTreeMap::new());
+        let help = Help::from_catalog(&catalog, ']');
+        let w = help
+            .leaders
+            .iter()
+            .find(|lg| lg.heading.contains("press w"))
+            .expect("w leader block missing from help panel");
+        let rows: Vec<(String, String)> = w
+            .chords
+            .iter()
+            .map(|b| (b.keys.to_string(), b.label.to_string()))
+            .collect();
+        for (chord, label) in [
+            ("w c", "work in claude"),
+            ("w x", "work in codex"),
+            ("w u", "work in cursor"),
+        ] {
+            assert!(
+                rows.iter().any(|(k, l)| k == chord && l == label),
+                "w leader block missing {chord} → {label}; got {rows:?}",
+            );
+        }
+    }
+
     /// The aliases line carries each action's full key display, so the
     /// legacy Shift-* aliases stay visible alongside the leader chord —
     /// derived from the same catalog key displays.

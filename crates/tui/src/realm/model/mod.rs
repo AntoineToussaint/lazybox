@@ -139,6 +139,10 @@ pub enum Id {
     /// `Msg::ChoicePicked` reads it + the picked Duration and
     /// dispatches `Command::Snooze`.
     SnoozeDuration,
+    /// Single-line URL input for the "Configure LLM gateway" settings
+    /// action. Submit → write the global `agent.llm_gateway_url` to YAML
+    /// (empty input clears it).
+    LlmGatewayUrl,
     /// Right-click context menu over a sidebar workspace row.
     /// Single-pick `Choice` modal whose items are the workspace's
     /// available actions (spawn claude / shell / mark read /
@@ -462,6 +466,15 @@ pub struct Model<T: TerminalAdapter> {
     /// `ui_defaults.escape_window` the pane leaves on the idle tick
     /// (`tick_terminal_leader`). `None` when not armed.
     terminal_leader_at: Option<std::time::Instant>,
+    /// `w` leader armed-at instant (issue #224). Unlike the github `g`
+    /// group, `w` is BOTH a direct action (work on the running-or-default
+    /// agent) and a leader prefix for the scoped `w c` / `w x` chords —
+    /// so pressing `w` arms a *timed* leader: an agent key within
+    /// `ui_defaults.escape_window` picks that agent (via `self.leader`),
+    /// otherwise bare `Work` fires on the idle tick (`tick_work_leader`).
+    /// `None` when not armed. Kept in lockstep with `self.leader`: armed
+    /// together, cleared together.
+    work_leader_at: Option<std::time::Instant>,
     /// Pending `--workspace` / `--session` preselect from the CLI.
     /// Applied after the daemon's first Snapshot — by then the
     /// sidebar has the full workspace list and `focus_workspace_key`
@@ -872,6 +885,7 @@ impl<T: TerminalAdapter> Model<T> {
             leader: crate::confirm_latch::LeaderLatch::new(),
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
             terminal_leader_at: None,
+            work_leader_at: None,
             last_click: None,
             terminal_user_typed_since_focus: false,
             pending_refresh_ack: false,
@@ -2058,6 +2072,10 @@ impl<T: TerminalAdapter> Model<T> {
         });
         actions.push(SettingsAction::EditSnippets);
         actions.push(SettingsAction::EditTheme);
+        let gateway_set = lazybox_config::Config::load()
+            .map(|c| c.agent.gateway_url().is_some())
+            .unwrap_or(false);
+        actions.push(SettingsAction::EditLlmGateway { set: gateway_set });
         actions.push(SettingsAction::InspectWorktrees);
         actions.push(SettingsAction::CleanWorktrees);
         actions.push(SettingsAction::FullSetup);
@@ -2095,6 +2113,12 @@ impl<T: TerminalAdapter> Model<T> {
             self.mount_theme_picker();
             return;
         }
+        // LLM gateway editor is a single URL input that writes straight
+        // to YAML — no wizard runner, no cached detection inputs.
+        if matches!(action, SettingsAction::EditLlmGateway { .. }) {
+            self.mount_gateway_url_input();
+            return;
+        }
         let Some((report, sources)) = self.setup.inputs.clone() else {
             tracing::warn!("dispatch_settings_action: no cached inputs");
             return;
@@ -2122,6 +2146,7 @@ impl<T: TerminalAdapter> Model<T> {
             // Handled by the early returns above; listed for exhaustiveness.
             SettingsAction::EditSnippets => return,
             SettingsAction::EditTheme => return,
+            SettingsAction::EditLlmGateway { .. } => return,
         };
         // Pre-seed the accumulator from persisted state so partial
         // flows don't drop the user's other-provider config.

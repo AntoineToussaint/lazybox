@@ -187,6 +187,17 @@ impl Sidebar {
         self.inner.default_agent()
     }
 
+    /// Agent `w` should target on `workspace_key`: an agent already
+    /// running there (so `w` injects into it) wins over `default_agent`.
+    /// See [`crate::components::sidebar::Sidebar::work_target_agent`].
+    pub fn work_target_agent(
+        &self,
+        workspace_key: &lazybox_core::SessionKey,
+        default_agent: &str,
+    ) -> String {
+        self.inner.work_target_agent(workspace_key, default_agent)
+    }
+
     /// Selected session id, if the cursor is on a session sub-row of
     /// a workspace. `None` when the cursor is on a top-level
     /// workspace row OR when the workspace has no sessions yet.

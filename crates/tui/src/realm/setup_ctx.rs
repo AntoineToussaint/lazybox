@@ -54,6 +54,10 @@ pub enum SettingsAction {
     /// Open the live-preview theme picker (same modal as the `t`
     /// shortcut). Persists the choice to `ui.theme`.
     EditTheme,
+    /// Configure the global LLM gateway base URL (`agent.llm_gateway_url`).
+    /// Opens a single URL input; persists to `~/.lazybox/config.yaml`.
+    /// `set` is whether a URL is currently configured, for the label.
+    EditLlmGateway { set: bool },
     /// Bail out and run the full splash → providers → agents → … wizard.
     FullSetup,
     /// Admin: wipe every worktree whose session has no live
@@ -80,6 +84,10 @@ impl SettingsAction {
             ),
             Self::EditSnippets => "Edit snippets (]]<key> shortcuts)".into(),
             Self::EditTheme => "Change theme (live preview)".into(),
+            Self::EditLlmGateway { set } => format!(
+                "Configure LLM gateway · {}",
+                if *set { "on" } else { "off" }
+            ),
             Self::FullSetup => "Run the full setup wizard".into(),
             Self::CleanWorktrees => "Clean worktrees (free disk, keep inbox)".into(),
             Self::InspectWorktrees => "Inspect worktrees…".into(),
@@ -154,6 +162,20 @@ impl SetupCtx {
 #[cfg(test)]
 mod tests {
     use super::SettingsAction;
+
+    #[test]
+    fn llm_gateway_label_reflects_set_state() {
+        assert!(
+            SettingsAction::EditLlmGateway { set: false }
+                .label()
+                .ends_with("off")
+        );
+        assert!(
+            SettingsAction::EditLlmGateway { set: true }
+                .label()
+                .ends_with("on")
+        );
+    }
 
     #[test]
     fn skip_permissions_label_reflects_state() {

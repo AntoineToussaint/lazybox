@@ -139,6 +139,10 @@ pub enum Id {
     /// `Msg::ChoicePicked` reads it + the picked Duration and
     /// dispatches `Command::Snooze`.
     SnoozeDuration,
+    /// Single-line URL input for the "Configure LLM gateway" settings
+    /// action. Submit → write the global `agent.llm_gateway_url` to YAML
+    /// (empty input clears it).
+    LlmGatewayUrl,
     /// Right-click context menu over a sidebar workspace row.
     /// Single-pick `Choice` modal whose items are the workspace's
     /// available actions (spawn claude / shell / mark read /
@@ -2058,6 +2062,10 @@ impl<T: TerminalAdapter> Model<T> {
         });
         actions.push(SettingsAction::EditSnippets);
         actions.push(SettingsAction::EditTheme);
+        let gateway_set = lazybox_config::Config::load()
+            .map(|c| c.agent.gateway_url().is_some())
+            .unwrap_or(false);
+        actions.push(SettingsAction::EditLlmGateway { set: gateway_set });
         actions.push(SettingsAction::InspectWorktrees);
         actions.push(SettingsAction::CleanWorktrees);
         actions.push(SettingsAction::FullSetup);
@@ -2095,6 +2103,12 @@ impl<T: TerminalAdapter> Model<T> {
             self.mount_theme_picker();
             return;
         }
+        // LLM gateway editor is a single URL input that writes straight
+        // to YAML — no wizard runner, no cached detection inputs.
+        if matches!(action, SettingsAction::EditLlmGateway { .. }) {
+            self.mount_gateway_url_input();
+            return;
+        }
         let Some((report, sources)) = self.setup.inputs.clone() else {
             tracing::warn!("dispatch_settings_action: no cached inputs");
             return;
@@ -2122,6 +2136,7 @@ impl<T: TerminalAdapter> Model<T> {
             // Handled by the early returns above; listed for exhaustiveness.
             SettingsAction::EditSnippets => return,
             SettingsAction::EditTheme => return,
+            SettingsAction::EditLlmGateway { .. } => return,
         };
         // Pre-seed the accumulator from persisted state so partial
         // flows don't drop the user's other-provider config.

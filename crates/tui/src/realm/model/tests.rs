@@ -332,6 +332,20 @@ mod effects_tests {
         assert!(m.new_workspace_repo_choices.is_empty());
     }
 
+    /// The "Configure LLM gateway" settings action routes straight to
+    /// the single global URL input — no provider picker, no wizard
+    /// runner. Freezes that routing (a regression that dropped the early
+    /// return would fall through to the cached-inputs wizard path and
+    /// warn instead of mounting). Disk-free: mounting only reads config
+    /// for the pre-fill; nothing is saved.
+    #[test]
+    fn edit_llm_gateway_action_mounts_the_url_input() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let mut m = build_model();
+        m.dispatch_settings_action(SettingsAction::EditLlmGateway { set: false });
+        assert_eq!(m.modal_stack.last(), Some(&Id::LlmGatewayUrl));
+    }
+
     /// Empty / whitespace-only input is dropped silently.
     #[test]
     fn input_submitted_with_empty_text_returns_no_commands() {

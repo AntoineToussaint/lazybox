@@ -1852,10 +1852,12 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
 
     // Simulate a lag/reconnect path where the terminal is visible in
     // the live snapshot, but the specific TerminalSpawned completion
-    // event never reaches this client. The snapshot is authoritative
-    // proof the work finished, so it tears a possibly-stuck checklist
-    // down on the spot (#219) rather than walking a checklist whose
-    // progress events were themselves dropped.
+    // event never reaches this client. The same snapshot also stands in
+    // for the per-stage WorktreeProgress updates that would have walked
+    // the checklist forward — with those gone there is nothing left to
+    // dwell on, so a snapshot whose terminal proves the session is live
+    // tears the stuck checklist down immediately rather than hanging on
+    // "Cloning repository" forever (#219/#221).
     m.handle_daemon_event(IpcEvent::Snapshot {
         workspaces: vec![],
         terminals: vec![TerminalSnapshot {
@@ -1875,7 +1877,7 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
     // per-step events to walk it to the end (#219/#221).
     assert!(
         !m.modal_stack.contains(&Id::WorktreeProgress),
-        "a snapshot showing the live terminal must dismiss the checklist",
+        "a lag-recovery snapshot with a live terminal must tear the stuck checklist down immediately"
     );
 }
 

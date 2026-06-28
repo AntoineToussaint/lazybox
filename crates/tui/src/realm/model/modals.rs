@@ -467,6 +467,25 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::SnoozeDuration, modal);
     }
 
+    /// Mount the single global LLM-gateway URL input (Settings →
+    /// "Configure LLM gateway"), pre-filled with the current value.
+    /// Submit → `handle_input_submitted` writes `agent.llm_gateway_url`
+    /// to YAML; an empty submission clears it.
+    pub(crate) fn mount_gateway_url_input(&mut self) {
+        use crate::realm::components::input::Input;
+
+        if matches!(self.modal_stack.last(), Some(Id::LlmGatewayUrl)) {
+            return;
+        }
+        let cfg = lazybox_config::Config::load().unwrap_or_default();
+        let current = cfg.agent.gateway_url().unwrap_or_default().to_string();
+        let modal = Input::new("LLM gateway base URL")
+            .title("LLM gateway")
+            .placeholder("e.g. http://gateway.internal (empty to disable)")
+            .with_input(current);
+        self.mount_modal(Id::LlmGatewayUrl, modal);
+    }
+
     /// Build the candidate-logins list for the picker. Source set
     /// is the workspace's known people: existing reviewers,
     /// assignees, activity authors. Excludes the local user

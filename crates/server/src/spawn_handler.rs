@@ -529,10 +529,23 @@ pub async fn handle_spawn(
     // Per-repo env injection: look up the workspace's primary task
     // repo, read `repos.<owner/name>.env` from YAML, fan it into
     // the spawn. Missing config or workspace = empty env, no error.
-    // Then pin a per-worktree `CARGO_TARGET_DIR` so concurrent cargo
-    // builds across sessions don't block on a shared target lock.
-    let env =
-        with_worktree_cargo_target(collect_repo_env(config, &session_key), cwd_path.as_deref());
+    // Then layer the global LLM-gateway base URL for the agent's
+    // provider, but only for keys the per-repo env didn't already set —
+    // an explicit per-repo `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`
+    // overrides (or opts out of) the global gateway. Finally pin a
+    // per-worktree `CARGO_TARGET_DIR` so concurrent cargo builds across
+    // sessions don't block on a shared target lock.
+    let agent_for_env = match &kind {
+        TerminalKind::Agent(id) => config.agents.get(id),
+        _ => None,
+    };
+    let mut env = collect_repo_env(config, &session_key);
+    for (k, v) in gateway_env_for_agent(&cfg, agent_for_env.as_deref()) {
+        if !env.iter().any(|(ek, _)| ek == &k) {
+            env.push((k, v));
+        }
+    }
+    let env = with_worktree_cargo_target(env, cwd_path.as_deref());
     tracing::info!(
         ?argv,
         cwd_path = ?cwd_path,
@@ -1838,6 +1851,28 @@ fn should_suppress_working_exit(
         && new_state == lazybox_ipc::AgentState::Idle
         && !ready_for_prompt
         && since_last_working.is_some_and(|e| e < hysteresis)
+}
+
+/// Base-URL env var pointing the agent at the global LLM gateway, if one
+/// is configured. The gateway URL (`agent.llm_gateway_url`) is global;
+/// the agent's upstream provider only picks *which* base-URL var carries
+/// it (Claude → `ANTHROPIC_BASE_URL`, Codex / Cursor → `OPENAI_BASE_URL`),
+/// so one gateway fronts whichever upstream the agent speaks. Empty for
+/// non-agent spawns (shells, log tails), agents with no inferable provider
+/// (`GenericCli`), or when no gateway URL is set. Pure so tests don't need
+/// a real YAML on disk.
+pub(crate) fn gateway_env_for_agent(
+    cfg: &lazybox_config::Config,
+    agent: Option<&dyn lazybox_agents::Agent>,
+) -> Vec<(String, String)> {
+    let Some(provider) = agent.and_then(|a| a.llm_provider()) else {
+        return Vec::new();
+    };
+    // The "blank == unset" rule lives in `gateway_url`.
+    cfg.agent
+        .gateway_url()
+        .map(|u| vec![(provider.base_url_env().to_string(), u.to_string())])
+        .unwrap_or_default()
 }
 
 /// Pure-data lookup so tests don't need a real YAML on disk.
@@ -3756,6 +3791,65 @@ mod tests {
     fn env_for_repo_returns_empty_when_repo_not_configured() {
         let cfg = lazybox_config::Config::default();
         assert!(env_for_repo(&cfg, "no/such-repo").is_empty());
+    }
+
+    #[test]
+    fn gateway_env_routes_global_url_into_each_provider_var() {
+        // One global gateway URL; the agent's provider only picks which
+        // base-URL var carries it.
+        let mut cfg = lazybox_config::Config::default();
+        cfg.agent.llm_gateway_url = Some("http://gateway.internal".into());
+
+        let claude = lazybox_agents::agent::builtins::Claude;
+        assert_eq!(
+            gateway_env_for_agent(&cfg, Some(&claude)),
+            vec![(
+                "ANTHROPIC_BASE_URL".to_string(),
+                "http://gateway.internal".to_string()
+            )]
+        );
+        // Codex and Cursor both speak OpenAI → same global URL, OpenAI var.
+        for agent in [
+            &lazybox_agents::agent::builtins::Codex as &dyn lazybox_agents::Agent,
+            &lazybox_agents::agent::builtins::Cursor,
+        ] {
+            assert_eq!(
+                gateway_env_for_agent(&cfg, Some(agent)),
+                vec![(
+                    "OPENAI_BASE_URL".to_string(),
+                    "http://gateway.internal".to_string()
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn gateway_env_empty_when_unset_or_no_agent() {
+        // No gateway configured → nothing for any agent.
+        let bare = lazybox_config::Config::default();
+        let claude = lazybox_agents::agent::builtins::Claude;
+        assert!(gateway_env_for_agent(&bare, Some(&claude)).is_empty());
+
+        let mut cfg = lazybox_config::Config::default();
+        cfg.agent.llm_gateway_url = Some("http://gateway.internal".into());
+
+        // Non-agent spawn (shell / log tail) passes `None`.
+        assert!(gateway_env_for_agent(&cfg, None).is_empty());
+
+        // A GenericCli agent has no inferable provider → no injection.
+        let generic = lazybox_agents::agent::builtins::GenericCli {
+            id: "custom",
+            display_name: "Custom",
+            spawn_cmd: vec!["custom".into()],
+            resume_cmd: None,
+            asking_patterns: vec![],
+        };
+        assert!(gateway_env_for_agent(&cfg, Some(&generic)).is_empty());
+
+        // A whitespace-only URL is treated as unset.
+        let mut blank = lazybox_config::Config::default();
+        blank.agent.llm_gateway_url = Some("   ".into());
+        assert!(gateway_env_for_agent(&blank, Some(&claude)).is_empty());
     }
 
     #[test]

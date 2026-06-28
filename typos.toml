@@ -40,4 +40,7 @@ extend-exclude = [
     # The vendored libghostty crates carry upstream comments/names.
     "crates/libghostty-vt/**",
     "crates/libghostty-vt-sys/**",
+    # Binary PTY captures: raw terminal byte streams (ANSI cursor moves
+    # concatenated with text, e.g. `␛[3;3HThe` → "Hthe") are not prose.
+    "**/*.bin",
 ]

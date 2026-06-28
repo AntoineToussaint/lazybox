@@ -465,24 +465,31 @@ pub mod builtins {
             vec!["codex".into()]
         }
 
-        /// Codex CLI uses the standard `[y/n]` family plus a custom
-        /// `approve?` phrasing. Declarative — both groups flow
-        /// through the shared `super::detect` helpers so a new
-        /// Codex prompt phrasing just appends to the slice.
+        /// Codex Code's three observable states. Delegates to the pure
+        /// [`crate::detect::codex_state`] — its live `• Working
+        /// (… esc to interrupt)` status line (`Working`), its approval /
+        /// consent modals and the bare `[y/n]` family (`InputNeeded`),
+        /// and the resting composer (`Idle`) — so the logic is
+        /// exercisable against captured real PTY bytes.
         fn detect_state(&self, recent_output: &[u8]) -> Option<AgentState> {
-            let s = detect::strip_ansi_lossy(recent_output);
-            let tail = detect::recent_tail(&s, PROMPT_TAIL_WINDOW);
-            // Only the bottom of the screen — where a live prompt parks —
-            // so a `[y/n]` echoed earlier in output doesn't false-fire.
-            let prompt_zone = detect::last_nonempty_lines(tail, 5);
-            if detect::contains_any(&prompt_zone, detect::YN_PROMPT_PATTERNS)
-                || detect::contains_any(&prompt_zone, &["approve?"])
-            {
-                return Some(AgentState::InputNeeded);
-            }
-            // No Codex "working" pulser is recognised yet, so fall back
-            // to `Idle` rather than `Working` — never falsely busy.
-            Some(AgentState::Idle)
+            detect::codex_state(recent_output)
+        }
+
+        /// Chunk-aware detection — threads the daemon's chunk-boundary
+        /// hint so a full-screen repaint (approval modal + an earlier
+        /// status line in one chunk) keeps the modal live.
+        fn detect_state_chunked(
+            &self,
+            recent_output: &[u8],
+            last_chunk_start: usize,
+        ) -> Option<AgentState> {
+            detect::codex_state_chunked(recent_output, last_chunk_start)
+        }
+
+        /// Whether Codex's composer is drawn and no approval / trust
+        /// modal is up. Delegates to [`crate::detect::codex_ready_for_prompt`].
+        fn detect_ready_for_prompt(&self, recent_output: &[u8]) -> bool {
+            detect::codex_ready_for_prompt(recent_output)
         }
     }
 

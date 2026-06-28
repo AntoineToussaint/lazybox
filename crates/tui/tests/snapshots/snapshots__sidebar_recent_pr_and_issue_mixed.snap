@@ -1,14 +1,13 @@
 ---
 source: crates/tui/tests/snapshots.rs
-assertion_line: 194
 expression: rendered
 ---
- LAZYBOX v0.1.4            3 items  7d
+ LAZYBOX v0.1.4             3 items  7d
  f [all]  o [recent]
 
- ─────────────────────────────────────
+ ──────────────────────────────────────
 
-   ▾  owner/repo
- ▸ ⇄ 10 A   task: o/r#10            5m
-   ○ 11 A   task: o/r#11           30m
-   ○ 12 A   task: o/r#12            1h
+ ▾  owner/repo
+ ▸⇄ 10 A   task: o/r#10              5m
+  ○ 11 A   task: o/r#11             30m
+  ○ 12 A   task: o/r#12              1h

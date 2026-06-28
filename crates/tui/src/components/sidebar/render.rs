@@ -15,6 +15,19 @@ fn spans_visual_width(spans: &[Span<'_>]) -> usize {
         .sum()
 }
 
+/// Extend a cursor row's highlight to the right edge: pad with blank
+/// cells in the row-background `style` so the selection fill spans the
+/// full `row_budget` instead of hugging the text. Width is measured
+/// from the spans themselves, so the fill stays correct regardless of
+/// what glyphs the row carries. Caller guards on the row being the
+/// cursor; non-cursor rows have no background to extend.
+fn extend_cursor_fill(spans: &mut Vec<Span<'_>>, row_budget: usize, style: Style) {
+    let used = spans_visual_width(spans);
+    if used < row_budget {
+        spans.push(Span::styled(" ".repeat(row_budget - used), style));
+    }
+}
+
 impl Sidebar {
     pub fn render(&mut self, area: Rect, frame: &mut Frame, focused: bool) {
         // V1-style header strip:
@@ -381,10 +394,7 @@ impl Sidebar {
                     // row-background fill, so extend it across the whole
                     // row rather than leaving it hugging the text.
                     if let Some(bg) = row_bg {
-                        let used = spans_visual_width(&spans);
-                        if used < row_budget {
-                            spans.push(Span::styled(" ".repeat(row_budget - used), bg));
-                        }
+                        extend_cursor_fill(&mut spans, row_budget, bg);
                     }
                     Line::from(spans)
                 }
@@ -425,11 +435,7 @@ impl Sidebar {
                         ),
                     ];
                     if let Some(bg) = row_bg {
-                        // caret + "X " marker + label.
-                        let used = caret.chars().count() + 2 + label.chars().count();
-                        if used < row_budget {
-                            spans.push(Span::styled(" ".repeat(row_budget - used), bg));
-                        }
+                        extend_cursor_fill(&mut spans, row_budget, bg);
                     }
                     Line::from(spans)
                 }
@@ -462,11 +468,10 @@ impl Sidebar {
                     let prefix = if is_cursor { "▸  " } else { "   " };
                     let name_budget = row_budget.saturating_sub(visual_width(prefix));
                     let name_text = truncate_ellipsis(name, name_budget);
-                    let used = visual_width(prefix) + visual_width(&name_text);
                     let mut spans =
                         vec![Span::styled(prefix, style), Span::styled(name_text, style)];
-                    if is_cursor && used < row_budget {
-                        spans.push(Span::styled(" ".repeat(row_budget - used), style));
+                    if is_cursor {
+                        extend_cursor_fill(&mut spans, row_budget, style);
                     }
                     Line::from(spans)
                 }

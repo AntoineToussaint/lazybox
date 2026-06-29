@@ -20,6 +20,30 @@ make run                       # same as cargo run -p lazybox-tui
 
 Logs go to `/tmp/lazybox.log`. State persisted in `~/.lazybox/v2/state.db`.
 
+### Staying current (outdated-build guard)
+
+A uniformly-stale build — daemon *and* client compiled from the same
+old commit — passes every wire check silently and reproduces
+already-fixed bugs. To catch it, the build bakes its commit
+(`LAZYBOX_BUILD_GIT_SHA`) and source checkout
+(`LAZYBOX_BUILD_SOURCE_DIR`) in `crates/ipc/build.rs`; at startup
+`crates/tui/src/build_guard.rs` counts `<sha>..origin/main` and, when
+non-zero, paints a persistent `⚠ N behind · update & restart` warning
+in the sidebar header (plus a startup banner). The check reads the
+local `origin/main` ref (no network), so refresh it first when in
+doubt:
+
+```bash
+git fetch origin main      # update origin/main, then:
+git pull --ff-only         # one-command update path
+cargo run -p lazybox-tui  # rebuild + restart picks up the new build
+```
+
+The running build version is always visible in the sidebar header
+(`lazybox --version` prints it too). Released binaries built outside a
+git checkout have no source ref to compare against, so the guard is a
+no-op there — comparing against the latest release tag is future work.
+
 ## Architecture
 
 17 crates organized as a client/daemon split with shared library crates. The

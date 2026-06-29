@@ -58,6 +58,20 @@ pub const PROTOCOL_VERSION: u32 = 5;
 /// build skew the protocol version can't see.
 pub const BUILD_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("LAZYBOX_BUILD_SHA"));
 
+/// The build commit, suffix-free (no `-dirty`), or `"unknown"` when
+/// built outside a git checkout. Distinct from the SHA baked into
+/// [`BUILD_VERSION`] (which carries the dirty marker) because the
+/// staleness guard feeds it to `git rev-list` as a revision, where the
+/// suffix would make it unresolvable.
+pub const BUILD_GIT_SHA: &str = env!("LAZYBOX_BUILD_GIT_SHA");
+
+/// Absolute path of the git checkout this binary was built from, or
+/// empty when built outside one (a release tarball). The staleness
+/// guard runs `git -C <this> rev-list --count <BUILD_GIT_SHA>..origin/main`
+/// to count how far behind `main` the running build is; an empty value
+/// disables the check rather than guessing.
+pub const BUILD_SOURCE_DIR: &str = env!("LAZYBOX_BUILD_SOURCE_DIR");
+
 /// Stable id for a spawned terminal. Distinct from SessionKey because a
 /// single session may hold multiple terminals (agent + shell + logs).
 ///

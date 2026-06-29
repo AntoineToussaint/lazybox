@@ -2158,61 +2158,28 @@ pub(crate) async fn await_inflight_spawns(config: &ServerConfig, workspace_key: 
     }
 }
 
-/// Freeze every backend session belonging to `session_id`. Returns
-/// the keys we froze so the caller can `resume` them after the
-/// worktree move. With tmux the freeze detaches clients so the
-/// inner shell can't read input mid-rename and print stale `pwd`;
-/// other backends no-op cleanly.
-///
-/// Scoped to one session via the `terminal_sessions` map so an
-/// unrelated workspace's runners don't pause for our migration.
-async fn freeze_runners_in_session(
-    config: &crate::ServerConfig,
-    session_id: lazybox_core::SessionId,
-) -> Vec<String> {
-    // Lock-order: `terminals` before `terminal_sessions` per
-    // `crate::TERMINAL_MAP_LOCK_ORDER`. This used to acquire them in
-    // the opposite order, which inverted against every other call
-    // site and created an AB/BA deadlock window if a pump-cleanup
-    // path interleaved between the two acquires.
-    let term_map = config.terminals.lock().await;
-    let owners = config.terminal_sessions.lock().await;
-    let keys: Vec<String> = owners
-        .iter()
-        .filter(|(_, sid)| **sid == session_id)
-        .filter_map(|(tid, _)| term_map.get(tid).cloned())
-        .collect();
-    drop(owners);
-    drop(term_map);
-    for k in &keys {
-        let _ = config.backend.freeze(k).await;
-    }
-    keys
-}
-
-/// PR-attach migration. Walks every session in `workspace`, checks
-/// whether its persisted `worktree_path` matches what the current
-/// slug would generate, and `git worktree move`s the mismatches.
-/// Mutates `workspace` in place — the caller is responsible for
-/// persistence + broadcast.
+/// PR-attach path reconciliation. Walks every session in `workspace`
+/// and, for any whose persisted `worktree_path` no longer matches what
+/// the current slug would generate, decides what to do — but it never
+/// relocates a live worktree. Mutates `workspace` in place; the caller
+/// owns persistence + broadcast.
 ///
 /// Running synchronously inside `polling::upsert` (rather than
 /// fire-and-forget) closes the race window where consumers could
-/// briefly see a stale `worktree_path` between attach + migration.
+/// briefly see a stale `worktree_path` between attach + reconciliation.
 ///
-/// Live PTY processes inside the worktree keep their open dir handle
-/// across the rename — POSIX `rename(2)` on a directory is atomic
-/// and doesn't disturb existing inode references. Their `pwd` will
-/// briefly print the old absolute path until they `cd .`. With the
-/// tmux backend, `freeze_runners_in_session` detaches clients so
-/// the inner shell can't even observe the rename mid-flight.
+/// When a real worktree already exists on disk the session REUSES it in
+/// place: we keep the existing `worktree_path` and do not `git worktree
+/// move` it to chase the new slug. Renaming a live worktree yanks the
+/// working directory out from under any agent/shell running inside it —
+/// the long-standing "session lost on merge" bug (#78/#161/#167) that an
+/// issue→PR absorb (the slug-changing case that reaches this branch)
+/// triggered every time. Only sessions with no worktree yet (or a
+/// non-worktree leftover) get their record rewritten to the slug path.
 ///
-/// Returns whether any session was actually migrated. No-op when
-/// every session already lives at the right place (most polls).
-pub async fn migrate_session_paths_if_needed(
-    config: &crate::ServerConfig,
-    workspace: &mut Workspace,
-) -> bool {
+/// Returns whether any session record was actually rewritten. No-op
+/// when every session already lives at the right place (most polls).
+pub async fn migrate_session_paths_if_needed(workspace: &mut Workspace) -> bool {
     let mut moved_any = false;
     // Sort sessions by created_at so the index assignment matches
     // what `worktree_path_for_session` expects (first = no suffix,
@@ -2252,59 +2219,22 @@ pub async fn migrate_session_paths_if_needed(
             moved_any = true;
             continue;
         }
-        // Real move via git. Need owner + repo to find the bare clone.
-        let Some(task) = workspace.primary_task() else {
-            continue;
-        };
-        let Some(repo) = task.repo.as_deref() else {
-            continue;
-        };
-        let Some((owner, name)) = repo.split_once('/') else {
-            continue;
-        };
-        let mgr = lazybox_git_ops::WorktreeManager::default_base();
-        let bare = mgr.bare_path(owner, name);
-        if let Some(parent) = expected.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-
-        // Freeze just this session's backend keys (not every backend
-        // session in the process). The narrower scope means a busy
-        // workspace's other sessions don't pause for an unrelated
-        // migration.
-        let session_id = workspace.sessions[sess_idx].id;
-        let frozen_keys = freeze_runners_in_session(config, session_id).await;
-
-        let result = mgr.move_worktree(&bare, &actual, &expected).await;
-
-        for k in &frozen_keys {
-            let _ = config.backend.resume(k).await;
-        }
-
-        match result {
-            Ok(()) => {
-                tracing::info!(
-                    "migrated worktree {} → {}",
-                    actual.display(),
-                    expected.display()
-                );
-                workspace.sessions[sess_idx].worktree_path = expected;
-                moved_any = true;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "git worktree move {} → {} failed: {e}",
-                    actual.display(),
-                    expected.display()
-                );
-                let _ = config
-                    .bus
-                    .send(lazybox_ipc::Event::provider_error_retryable(
-                        "worktree",
-                        format!("PR-attach migration failed: {e}"),
-                    ));
-            }
-        }
+        // A real, live worktree exists at `actual`. REUSE IT IN PLACE —
+        // keep the existing path and do NOT `git worktree move` it to
+        // match the new slug. This branch only fires when the slug
+        // changed under an existing worktree: an issue→PR absorb (the
+        // session was just moved onto the PR workspace) or an upstream
+        // PR-title edit. Renaming the directory there would pull the
+        // working directory out from under any agent/shell running inside
+        // it, destroying the very session a merge is meant to preserve —
+        // the "session lost on merge" bug (#78/#161/#167). The persisted
+        // `worktree_path` is authoritative for every spawn, so a folder
+        // name that lags the current slug is purely cosmetic.
+        tracing::debug!(
+            "session {} reuses existing worktree {} in place (slug changed)",
+            workspace.sessions[sess_idx].id,
+            actual.display()
+        );
     }
 
     moved_any

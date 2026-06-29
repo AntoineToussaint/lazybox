@@ -1280,8 +1280,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// Mount the read-only snippets browser (`]`, or the Settings
     /// palette). Lists the whole merged library — key, origin,
     /// description, body — so a user can discover what's available
-    /// without already knowing a `]]<key>` shortcut (#237). The
-    /// built-in set is always present, so this is never empty.
+    /// without already knowing a `]]<key>` shortcut (#237). Built-ins
+    /// are normally present so it's rarely empty; the browser renders a
+    /// placeholder if it's opened before snippets finish loading.
     pub(crate) fn mount_snippet_browser(&mut self) {
         use crate::realm::components::snippet_browser::{BrowserRow, SnippetBrowser};
         if matches!(self.modal_stack.last(), Some(Id::SnippetBrowser)) {

@@ -29,13 +29,15 @@ use tuirealm::state::State;
 
 /// One browser row — a snippet rendered in full. Unlike the picker's
 /// `PickerRow` (which keeps only a one-line body preview), the browser
-/// shows the whole body, so it owns the full text.
-#[derive(Clone, Debug)]
+/// shows the whole body, so it owns the full text. Fields are private:
+/// the only consumer is this module's renderer, and `new` is the sole
+/// way the model builds one.
+#[derive(Debug)]
 pub struct BrowserRow {
-    pub key: String,
-    pub description: String,
-    pub body: String,
-    pub origin: SnippetOrigin,
+    key: String,
+    description: String,
+    body: String,
+    origin: SnippetOrigin,
 }
 
 impl BrowserRow {

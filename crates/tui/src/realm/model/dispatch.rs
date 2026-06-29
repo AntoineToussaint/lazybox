@@ -452,6 +452,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenThemePicker => {
                 self.mount_theme_picker();
             }
+            Action::OpenSnippets => {
+                self.mount_snippet_browser();
+            }
             Action::JumpToWorkspace => {
                 self.mount_jump_picker();
             }

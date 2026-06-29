@@ -2043,6 +2043,23 @@ mod modal_input_responsiveness_tests {
         assert!(m.theme_choices.is_empty(), "choices are released");
     }
 
+    /// `]` opens the read-only snippets browser from the sidebar
+    /// (catalog → dispatch → mount), and Esc pops it. The browser is a
+    /// global, so it fires with no workspace selected — the discovery
+    /// entry point issue #237 asks for outside the `]]` terminal leader.
+    #[test]
+    fn bracket_opens_and_closes_snippet_browser() {
+        let mut m = build_model();
+        m.apply_snippets(lazybox_config::Snippets::builtin());
+
+        assert!(m.top_modal().is_none(), "no modal before ]");
+        m.dispatch_key(KeyEvent::new(Key::Char(']'), KeyModifiers::NONE));
+        assert_eq!(m.top_modal(), Some(&Id::SnippetBrowser));
+
+        m.dispatch_modal_key(key(Key::Esc));
+        assert!(m.top_modal().is_none(), "Esc closes the snippets browser");
+    }
+
     /// The redraw window is one-shot per keystroke window: once its
     /// deadline elapses, `modal_redraw_pending` reports false and clears
     /// itself so an idle modal stops re-rendering.

@@ -4,8 +4,9 @@
 //! `]]<key>` (you had to already know the key) and the terminal-leader
 //! popup, which never functions as a browsable list. This modal lists
 //! every merged snippet — key, origin, description, and the full body —
-//! so a user can see what's available and what each one expands to,
-//! reachable from any pane via `]` and from the `?` help.
+//! so a user can see what's available and what each one expands to.
+//! Reachable from any pane via `]`, the `,` Settings palette, and listed
+//! in the `?` help.
 //!
 //! Deliberately read-only: editing snippets stays "edit the YAML file"
 //! by design (see `docs/snippets.md`). `e` is the bridge to that —
@@ -13,6 +14,7 @@
 //! configured editor (`Msg::OpenSnippetsFile`). Navigation keys scroll;
 //! any other key dismisses.
 
+use crate::components::comment_render::wrap_one;
 use crate::realm::{Msg, UserEvent};
 use lazybox_config::{Snippet, SnippetOrigin};
 use tuirealm::command::{Cmd, CmdResult};
@@ -66,17 +68,21 @@ impl SnippetBrowser {
         }
     }
 
-    /// The scrollable body as styled lines. Re-derived each render so
-    /// theme + width changes are picked up.
-    fn body_lines(&self, theme: &crate::theme::Theme) -> Vec<Line<'static>> {
-        let mut lines: Vec<Line<'static>> = Vec::new();
+    /// The scrollable body, wrapped to `width` cells. Pre-wrapped (not
+    /// `Paragraph::wrap`) so the scroll offset — which ratatui counts in
+    /// pre-wrap lines — stays in step with what's drawn. Re-derived each
+    /// render so theme + width changes are picked up. Pure given
+    /// `(theme, width)`, so tests can assert wrapping without a frame.
+    fn body_lines(&self, theme: &crate::theme::Theme, width: u16) -> Vec<Line<'static>> {
+        let dim = Style::default().fg(theme.text_dim);
         if self.rows.is_empty() {
-            lines.push(Line::from(Span::styled(
+            let line = Line::from(Span::styled(
                 "No snippets configured — add some to ~/.lazybox/snippets.yaml.",
-                Style::default().fg(theme.text_dim),
-            )));
-            return lines;
+                dim,
+            ));
+            return wrap_one(line, width);
         }
+        let mut lines: Vec<Line<'static>> = Vec::new();
         for (i, r) in self.rows.iter().enumerate() {
             if i > 0 {
                 lines.push(Line::raw(""));
@@ -103,14 +109,13 @@ impl SnippetBrowser {
                     Style::default().fg(theme.text_dim).italic(),
                 ));
             }
-            lines.push(Line::from(head));
-            // Body, indented, one display line per source line so a
-            // multi-line snippet reads as written.
+            lines.extend(wrap_one(Line::from(head), width));
+            // Body, indented two cells so it reads as one block under
+            // its key; long lines wrap (continuations re-indented) and
+            // embedded newlines are preserved.
             for b in r.body.lines() {
-                lines.push(Line::from(Span::styled(
-                    format!("    {b}"),
-                    Style::default().fg(theme.text_dim),
-                )));
+                let body_line = Line::from(Span::styled(b.to_string(), dim));
+                lines.extend(indent_wrapped(body_line, width, dim));
             }
         }
         lines
@@ -119,6 +124,23 @@ impl SnippetBrowser {
     fn max_scroll(&self, total_lines: u16) -> u16 {
         total_lines.saturating_sub(self.body_height.max(1))
     }
+}
+
+/// Wrap `line` to fit `width` with a hanging two-cell indent: every
+/// produced row (the first and any wrap continuations) is prefixed so
+/// the whole body block sits under its heading.
+fn indent_wrapped(line: Line<'static>, width: u16, style: Style) -> Vec<Line<'static>> {
+    const INDENT: &str = "  ";
+    let inner = width.saturating_sub(INDENT.len() as u16).max(1);
+    wrap_one(line, inner)
+        .into_iter()
+        .map(|l| {
+            let mut spans = Vec::with_capacity(l.spans.len() + 1);
+            spans.push(Span::styled(INDENT, style));
+            spans.extend(l.spans);
+            Line::from(spans)
+        })
+        .collect()
 }
 
 impl Component for SnippetBrowser {
@@ -157,17 +179,22 @@ impl Component for SnippetBrowser {
         };
         self.body_height = body_area.height.max(1);
 
-        let lines = self.body_lines(theme);
+        let lines = self.body_lines(theme, body_area.width);
         let max = self.max_scroll(lines.len() as u16);
         if self.scroll > max {
             self.scroll = max;
         }
         frame.render_widget(Paragraph::new(lines).scroll((self.scroll, 0)), body_area);
+
+        // Hint reflects whether there's more below, so the user knows to
+        // scroll instead of assuming the list ends at the fold.
+        let hint = if self.scroll < max {
+            "↑/↓ scroll (more below) · e edit YAML · any other key to close"
+        } else {
+            "↑/↓ scroll · e edit YAML · any other key to close"
+        };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "↑/↓ scroll · e edit YAML · any other key to close",
-                theme.hint(),
-            ))),
+            Paragraph::new(Line::from(Span::styled(hint, theme.hint()))),
             hint_area,
         );
     }
@@ -302,6 +329,50 @@ mod tests {
         let mut comp = SnippetBrowser::new(vec![]);
         let out = render(&mut comp, 80, 12);
         assert!(out.contains("No snippets configured"), "{out}");
+    }
+
+    #[test]
+    fn long_body_wraps_and_continuations_stay_indented() {
+        let long = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
+        let comp = SnippetBrowser::new(vec![BrowserRow::new(
+            "rev",
+            &Snippet {
+                description: "Review".into(),
+                body: long.into(),
+                origin: SnippetOrigin::Global,
+            },
+        )]);
+        let theme = crate::theme::current();
+        // 30 cells: the heading (`]rev  Review  [global]`) fits on one
+        // line, but the long single-line body is forced to wrap.
+        let width = 30u16;
+        let lines = comp.body_lines(theme, width);
+        let body: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .filter(|s| !s.starts_with("]rev")) // drop the heading row
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+        assert!(body.len() > 1, "a long body must wrap: {body:?}");
+        assert!(
+            body.iter().all(|l| l.starts_with("  ")),
+            "every wrapped body row keeps the hanging indent: {body:?}",
+        );
+        // No drawn row exceeds the viewport, so nothing clips off-screen.
+        assert!(
+            lines.iter().all(|l| l
+                .spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>()
+                <= width as usize),
+            "no line wider than the viewport",
+        );
     }
 
     #[test]

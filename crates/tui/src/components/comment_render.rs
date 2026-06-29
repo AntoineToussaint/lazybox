@@ -472,7 +472,11 @@ fn find_pair(chars: &[char], start: usize, c0: char, c1: char) -> Option<usize> 
 ///
 /// `width = 0` short-circuits to "don't wrap" so unit tests can
 /// inspect the unwrapped span list.
-fn wrap_one(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
+///
+/// `pub(crate)` because scrollable modals (e.g. the snippets browser)
+/// must pre-wrap their lines: ratatui's `Paragraph::scroll` counts
+/// pre-wrap lines, so pairing it with `.wrap()` mis-clamps the scroll.
+pub(crate) fn wrap_one(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
     if width == 0 {
         return vec![line];
     }

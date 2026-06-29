@@ -18,7 +18,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::sync::{Mutex, Notify, broadcast, oneshot};
+use tokio::sync::{Mutex, Notify, broadcast, watch};
 
 /// Ring-buffer capacity for per-terminal output replay.
 ///
@@ -109,8 +109,11 @@ pub struct DaemonPty {
     /// based purely on dropping senders, so this is the actual
     /// "finished" signal for async tasks.
     finished_notify: Arc<Notify>,
-    /// Filled exactly once when the child exits.
-    exit_rx: Arc<Mutex<Option<oneshot::Receiver<Option<i32>>>>>,
+    /// Holds the child's exit code once the watcher thread observes it
+    /// (`None` until then). A `watch` rather than a `oneshot` so
+    /// `wait_exit` is repeatable and safe to call concurrently — the
+    /// tmux backend relies on calling it more than once.
+    exit_watch: watch::Receiver<Option<Option<i32>>>,
     /// Latest assigned seq. Reader thread increments.
     last_seq: Arc<AtomicU64>,
     /// Captured at spawn time so `kill()` can SIGTERM the child even
@@ -329,9 +332,10 @@ impl DaemonPty {
             })
             .map_err(|e| PtyError::Spawn(e.to_string()))?;
 
-        // Exit watcher — blocking `wait` on another thread, forwards
-        // the exit code through a oneshot so the daemon loop can await.
-        let (exit_tx, exit_rx) = oneshot::channel::<Option<i32>>();
+        // Exit watcher — blocking `wait` on another thread, publishes
+        // the exit code on a watch channel so any number of awaiters
+        // (and repeated calls) can observe it.
+        let (exit_tx, exit_watch) = watch::channel::<Option<Option<i32>>>(None);
         std::thread::Builder::new()
             .name("lazybox-server-exit".into())
             .spawn(move || {
@@ -342,7 +346,7 @@ impl DaemonPty {
                         None
                     }
                 };
-                let _ = exit_tx.send(code);
+                let _ = exit_tx.send(Some(code));
             })
             .map_err(|e| PtyError::Spawn(e.to_string()))?;
 
@@ -353,7 +357,7 @@ impl DaemonPty {
             ring,
             finished,
             finished_notify,
-            exit_rx: Arc::new(Mutex::new(Some(exit_rx))),
+            exit_watch,
             last_seq,
             child_pid,
         })
@@ -397,9 +401,17 @@ impl DaemonPty {
     }
 
     /// Fire up a subscription: the current ring snapshot + a live feed.
+    ///
+    /// Subscribe to the broadcast BEFORE snapshotting the ring. The
+    /// reader thread pushes to the ring then broadcasts (outside the ring
+    /// lock), so snapshotting first leaves a window where a chunk is
+    /// broadcast after our snapshot but before our receiver exists —
+    /// lost from both replay and live. Subscribing first instead lets a
+    /// chunk appear in both; `last_seq` is the replay high-water mark, so
+    /// the consumer drops live chunks with `seq <= last_seq`.
     pub async fn subscribe(&self) -> Subscription {
-        let (replay, last_seq) = self.snapshot_only().await;
         let live = self.output_tx.subscribe();
+        let (replay, last_seq) = self.snapshot_only().await;
         Subscription {
             replay,
             last_seq,
@@ -451,15 +463,20 @@ impl DaemonPty {
     }
 
     /// Await the child's exit code. Returns None if the exit was
-    /// unobservable (rare — `child.wait` error). Can only be called
-    /// once per PTY; subsequent calls return None.
+    /// unobservable (rare — `child.wait` error). Repeatable and safe to
+    /// call concurrently: the code is published on a watch channel and
+    /// retained, so every caller (and every repeat) sees the same value.
     pub async fn wait_exit(&self) -> Option<i32> {
-        // Take the receiver out under the lock, then drop the guard
-        // BEFORE awaiting the child's exit — holding the mutex across
-        // that await would block every concurrent `wait_exit` caller
-        // for the child's whole lifetime.
-        let rx = self.exit_rx.lock().await.take()?;
-        rx.await.ok().flatten()
+        let mut rx = self.exit_watch.clone();
+        loop {
+            if let Some(code) = *rx.borrow_and_update() {
+                return code;
+            }
+            if rx.changed().await.is_err() {
+                // Watcher thread gone without publishing — unobservable.
+                return None;
+            }
+        }
     }
 
     /// Total bytes ever emitted by the PTY reader — NOT just what's
@@ -637,5 +654,69 @@ mod ring_tests {
         assert_eq!(r.total_written, 3);
         r.push(b"defghijk");
         assert_eq!(r.total_written, 11); // wraps; total still tracks real count
+    }
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::*;
+
+    fn small() -> PtySize {
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_exit_returns_cached_code_on_repeat() {
+        let pty = DaemonPty::spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "exit 7".to_string(),
+            ],
+            small(),
+            None,
+            Vec::new(),
+        )
+        .expect("spawn");
+
+        let first = pty.wait_exit().await;
+        assert_eq!(first, Some(7));
+        // The tmux backend calls this more than once; a oneshot used to
+        // make every call after the first return None.
+        assert_eq!(pty.wait_exit().await, first);
+        assert_eq!(pty.wait_exit().await, first);
+    }
+
+    #[tokio::test]
+    async fn concurrent_wait_exit_all_observe_the_code() {
+        let pty = std::sync::Arc::new(
+            DaemonPty::spawn(
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "exit 3".to_string(),
+                ],
+                small(),
+                None,
+                Vec::new(),
+            )
+            .expect("spawn"),
+        );
+
+        let a = {
+            let p = pty.clone();
+            tokio::spawn(async move { p.wait_exit().await })
+        };
+        let b = {
+            let p = pty.clone();
+            tokio::spawn(async move { p.wait_exit().await })
+        };
+        assert_eq!(a.await.unwrap(), Some(3));
+        assert_eq!(b.await.unwrap(), Some(3));
     }
 }

@@ -193,7 +193,16 @@ pub async fn serve_listener(
     listener: TcpListener,
 ) -> Result<(), GatewayError> {
     loop {
-        let (stream, _) = listener.accept().await?;
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            // A transient accept error (e.g. EMFILE under fd pressure)
+            // must not tear down the whole listener — log and keep
+            // serving, matching the Unix-socket service loop.
+            Err(error) => {
+                tracing::warn!("api gateway accept failed: {error}");
+                continue;
+            }
+        };
         let config = config.clone();
         let options = options.clone();
         tokio::spawn(async move {

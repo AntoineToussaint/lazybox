@@ -41,6 +41,30 @@ relative-time bucket gap) and the usual tech-debt/test-gap tail.
 5. **Non-adjacent dedup double-absorbs** a closing issue — `server`.
 6. **Slack socket reconnect loop never terminates** on consumer drop — `slack-provider`.
 
+## Status — BUG fixes landed in this PR
+
+All **BUG**-severity findings below are fixed here except one (regression
+tests added where a harness exists):
+
+- ✅ Phantom-terminal leak — both pump sites tear down + emit `TerminalExited` on subscribe-error (`spawn_handler.rs`).
+- ✅ Lost-output window — `DaemonPty::subscribe` now subscribes before snapshotting; consumers drop live chunks with `seq <= last_seq` (`pty.rs`, `spawn_handler.rs`).
+- ✅ `wait_exit` repeatable — `DaemonPty` publishes the exit code on a `watch` channel instead of a consumed `oneshot`, fixing the tmux `None`-on-second-call bug (`pty.rs`; tests added).
+- ✅ Non-adjacent dedup — order-preserving `HashSet` dedup of `closes_issues` (`polling/mod.rs`).
+- ✅ JSON-API accept loop — logs + continues on transient accept errors (`api_gateway.rs`).
+- ✅ Double `AgentRunFinished` — the `runs` map entry is now the single token for the terminal event; the driver removes it before emitting (`agent_runs.rs`).
+- ✅ Slack reconnect loop — `run_once` returns a distinct `ConsumerGone` outcome and `run_forever` stops (`slack-provider/socket.rs`).
+- ✅ `time_ago_at` 0y gap — months branch gated on `days < 365` (`core/time.rs`; tests added).
+- ✅ RGB FFI tag — `StyleColor::Rgb` now emits `RGB` (`libghostty-vt/style.rs`; tests added).
+- ✅ `Formatter` dangling pointer — selection pointer taken from a named local (`libghostty-vt/fmt.rs`).
+- ✅ Stale projects on reconnect — `Snapshot` prunes vanished daemon projects, keeps synthesized placeholders (`tui/events.rs`; tests added).
+- ⏸️ **Deferred:** `llm-proxy` full-body buffering. The proxy is currently dead code (zero non-test callers) and a correct streaming fix must coexist with the telemetry path, which needs the whole body — i.e. it depends on the dead-code/wiring decision (see tech-debt below). Left as a follow-up rather than reworking an unwired module speculatively.
+
+Daemon-internal fixes (phantom-terminal, dedup, accept loop, agent-run
+race) have no unit tests: the crate has no `ServerConfig` test harness
+and the affected functions had none originally. They are verified by
+`cargo test`/`clippy` compiling clean and by inspection; building that
+harness is follow-up work.
+
 ---
 
 ## BUG

@@ -1757,6 +1757,36 @@ mod rebadge_attention_tests {
     use lazybox_core::WorkspaceKey;
     use lazybox_ipc::{AgentState, Event, TerminalId};
 
+    #[test]
+    fn rebadge_repoints_the_runner_badge_onto_the_pr() {
+        // #241: the agent-count badge (`N C`) reads `running_terminals`,
+        // keyed by session. A rebadge must move the terminal there too,
+        // or the PR row shows no badge while the deleted issue key keeps it.
+        let issue: SessionKey = (&WorkspaceKey::new("github:o/r#80")).into();
+        let pr: SessionKey = (&WorkspaceKey::new("github:o/r#81")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.running_terminals.insert(
+            TerminalId(1),
+            (issue.clone(), TerminalKind::Agent("claude".to_string())),
+        );
+
+        sb.on_event(&Event::TerminalsRebadged {
+            from: issue.clone(),
+            to: pr.clone(),
+        });
+
+        assert_eq!(
+            sb.runner_badges(&issue),
+            vec![],
+            "the absorbed issue row must lose the badge",
+        );
+        assert_eq!(
+            sb.runner_badges(&pr),
+            vec![('C', 1)],
+            "the PR row must inherit the `1 C` runner badge",
+        );
+    }
+
     fn agent_state(key: &SessionKey, state: AgentState) -> Event {
         Event::AgentState {
             session_key: key.clone(),

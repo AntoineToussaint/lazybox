@@ -65,9 +65,6 @@ struct MockSession {
     exit_code: Option<i32>,
     /// Waiters parked in `wait_exit()`.
     exit_waiters: Vec<oneshot::Sender<Option<i32>>>,
-    /// Whether `freeze` was called (last call wins). Visible to tests
-    /// asserting the migration-freeze path runs.
-    frozen: bool,
 }
 
 impl MockBackend {
@@ -162,13 +159,6 @@ impl MockBackend {
         map.get(key).and_then(|s| s.cwd.clone())
     }
 
-    /// True if `freeze()` was called for this session and `resume()`
-    /// hasn't been called since.
-    pub async fn is_frozen(&self, key: &str) -> bool {
-        let map = self.inner.sessions.lock().await;
-        map.get(key).map(|s| s.frozen).unwrap_or(false)
-    }
-
     /// Make every subsequent `spawn()` sleep for `delay` before
     /// registering the session — a stand-in for slow worktree
     /// provisioning / agent boot in race tests.
@@ -229,7 +219,6 @@ impl SessionBackend for MockBackend {
                 subscribers: Vec::new(),
                 exit_code: None,
                 exit_waiters: Vec::new(),
-                frozen: false,
             };
             self.inner
                 .sessions
@@ -368,32 +357,6 @@ impl SessionBackend for MockBackend {
             rx.await.ok().flatten()
         })
     }
-
-    fn freeze<'a>(
-        &'a self,
-        key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
-        Box::pin(async move {
-            let mut map = self.inner.sessions.lock().await;
-            if let Some(session) = map.get_mut(key) {
-                session.frozen = true;
-            }
-            Ok(())
-        })
-    }
-
-    fn resume<'a>(
-        &'a self,
-        key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
-        Box::pin(async move {
-            let mut map = self.inner.sessions.lock().await;
-            if let Some(session) = map.get_mut(key) {
-                session.frozen = false;
-            }
-            Ok(())
-        })
-    }
 }
 
 #[cfg(test)]
@@ -528,20 +491,6 @@ mod tests {
             b.kill(&k).await.unwrap();
             // Missing key also fine.
             b.kill("nope").await.unwrap();
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn freeze_resume_toggle_observable() {
-        run(async {
-            let b = MockBackend::new();
-            let k = b.spawn(&argv("x"), None, &[], "t").await.unwrap();
-            assert!(!b.is_frozen(&k).await);
-            b.freeze(&k).await.unwrap();
-            assert!(b.is_frozen(&k).await);
-            b.resume(&k).await.unwrap();
-            assert!(!b.is_frozen(&k).await);
         })
         .await;
     }

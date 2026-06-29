@@ -783,51 +783,6 @@ impl SessionBackend for TmuxBackend {
             pty.wait_exit().await
         })
     }
-
-    fn freeze<'a>(
-        &'a self,
-        key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
-        Box::pin(async move {
-            // Detach every client from this tmux session. Inner
-            // processes (claude, shell, …) keep running paused on
-            // their next read since nothing's reading their stdin;
-            // we'll re-attach in `resume`. Best-effort: silently
-            // succeed if tmux complains (no clients to detach is a
-            // success state for our purpose).
-            let fut = tokio::process::Command::new("tmux")
-                .arg("-L")
-                .arg(&self.socket)
-                .arg("detach-client")
-                .arg("-s")
-                .arg(key)
-                .arg("-a")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .output();
-            if tokio::time::timeout(TMUX_TIMEOUT, fut).await.is_err() {
-                return Err(BackendError::Other(format!(
-                    "tmux detach-client -s {key} timed out after {}s",
-                    TMUX_TIMEOUT.as_secs()
-                )));
-            }
-            Ok(())
-        })
-    }
-
-    fn resume<'a>(
-        &'a self,
-        _key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
-        // Re-attach happens implicitly on the next subscribe — lazybox
-        // already has the per-client `attach-session` flow wired in
-        // `subscribe`. So `resume` is a deliberate no-op: the caller
-        // either re-subscribes (live client) or leaves the session
-        // detached for later attach.
-        Box::pin(async { Ok(()) })
-    }
 }
 
 #[cfg(test)]

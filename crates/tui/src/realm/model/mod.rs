@@ -210,6 +210,13 @@ pub enum Id {
     /// `ui.theme`, Esc restores the theme stashed in
     /// `theme_picker_prev`. Names live in `theme_choices`.
     ThemePicker,
+    /// Read-only snippets browser (`]`, or the `,` Settings palette).
+    /// Scrollable list of the merged snippet library — key, origin,
+    /// description, body — so snippets are discoverable outside the
+    /// `]]<key>` terminal leader (#237). `e` opens the YAML for editing
+    /// (`Msg::OpenSnippetsFile`); any other non-scroll key dismisses.
+    /// See `realm::components::snippet_browser`.
+    SnippetBrowser,
 }
 
 /// Why a workspace-removal confirm prompt is being shown. Both
@@ -274,6 +281,9 @@ pub enum Msg {
     ChoicePicked(Vec<usize>),
     ChoiceRefresh,
     ChoiceBack,
+    /// `e` pressed in the snippets browser — close it and open the
+    /// global snippets YAML in the user's editor (#237).
+    OpenSnippetsFile,
     LoadingResolved(PayloadCarrier),
     /// Spinner heartbeat from the `WorktreeProgress` modal. Carries no
     /// data — its only job is to be a non-empty message so the run loop
@@ -1267,6 +1277,25 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::SnippetPicker, picker);
     }
 
+    /// Mount the read-only snippets browser (`]`, or the Settings
+    /// palette). Lists the whole merged library — key, origin,
+    /// description, body — so a user can discover what's available
+    /// without already knowing a `]]<key>` shortcut (#237). Built-ins
+    /// are normally present so it's rarely empty; the browser renders a
+    /// placeholder if it's opened before snippets finish loading.
+    pub(crate) fn mount_snippet_browser(&mut self) {
+        use crate::realm::components::snippet_browser::{BrowserRow, SnippetBrowser};
+        if matches!(self.modal_stack.last(), Some(Id::SnippetBrowser)) {
+            return;
+        }
+        let rows: Vec<BrowserRow> = self
+            .snippets
+            .all()
+            .map(|(k, v)| BrowserRow::new(k, v))
+            .collect();
+        self.mount_modal(Id::SnippetBrowser, SnippetBrowser::new(rows));
+    }
+
     /// Mount the fuzzy workspace switcher (`JumpToWorkspace`). Rows are
     /// every tracked workspace across repos, attention-needing ones
     /// first; the parallel session keys are stashed in `jump_choices`
@@ -2124,10 +2153,10 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
-        // Editing snippets opens a file — no wizard runner, no cached
-        // detection inputs needed.
+        // Snippets open the read-only browser — discoverable, and `e`
+        // there opens the YAML. No wizard runner, no cached inputs.
         if matches!(action, SettingsAction::EditSnippets) {
-            self.open_snippets_file();
+            self.mount_snippet_browser();
             return;
         }
         // Theme picker is its own live-preview modal — not a wizard step.
@@ -2604,6 +2633,14 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::ModalDismissed => {
                 let cmds = self.handle_modal_dismissed();
                 self.dispatch_cmds(cmds);
+            }
+            Msg::OpenSnippetsFile => {
+                // `e` in the browser: drop the modal, then open the YAML
+                // so the editor takes over a clean screen.
+                if matches!(self.modal_stack.last(), Some(Id::SnippetBrowser)) {
+                    self.pop_modal();
+                }
+                self.open_snippets_file();
             }
             // The component's `on(Tick)` already advanced the spinner;
             // here we walk the displayed checklist toward the daemon's

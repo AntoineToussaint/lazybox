@@ -1158,6 +1158,7 @@ fn action_from_kind(
         ActionKind::OpenSyncStatus => Action::OpenSyncStatus,
         ActionKind::OpenSettings => Action::OpenSettings,
         ActionKind::OpenThemePicker => Action::OpenThemePicker,
+        ActionKind::OpenSnippets => Action::OpenSnippets,
         ActionKind::JumpToWorkspace => Action::JumpToWorkspace,
         ActionKind::JumpToAsking => Action::JumpToAsking,
         ActionKind::JumpToFailingCi => Action::JumpToFailingCi,

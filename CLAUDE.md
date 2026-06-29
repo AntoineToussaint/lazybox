@@ -180,6 +180,7 @@ keymap (`default`, `vim`); explicit `ui.action_keys` layers on top.
 The footer hint bar reads each pane's `contextual_bindings()`.
 
 **Global**: `Tab` cycle panes, `?` help, `q q` quit, `,` settings,
+`]` browse snippets (read-only catalog; `e` there opens the YAML),
 `Shift-R` refresh, `Shift-T` tour, `Shift-D` sync status, `` ` ``
 open the fuzzy jump-to-workspace picker (all repos; from inside an
 agent use `]]` then `` ` ``), `!` jump to agent-asking workspace,

@@ -46,10 +46,11 @@ pub enum SettingsAction {
     /// sessions launch with `--dangerously-skip-permissions`. Carries
     /// the current value so the dispatcher knows which way to flip.
     ToggleSkipPermissions { enabled: bool },
-    /// Open `<lazybox_home>/snippets.yaml` in the configured editor,
-    /// seeding a commented template first when the file is absent.
-    /// Snippets are file-owned (no in-app editor by design), so this
-    /// just gets the user to the file.
+    /// Open the read-only snippets browser (same modal as the `]`
+    /// shortcut). Lists the merged library so it's discoverable; `e`
+    /// inside the browser opens `<lazybox_home>/snippets.yaml` in the
+    /// editor, since snippets stay file-owned (no in-app editor by
+    /// design).
     EditSnippets,
     /// Open the live-preview theme picker (same modal as the `t`
     /// shortcut). Persists the choice to `ui.theme`.
@@ -82,7 +83,7 @@ impl SettingsAction {
                 "Skip permission prompts for your sessions · {}",
                 if *enabled { "on" } else { "off" }
             ),
-            Self::EditSnippets => "Edit snippets (]]<key> shortcuts)".into(),
+            Self::EditSnippets => "Browse snippets (]]<key> shortcuts)".into(),
             Self::EditTheme => "Change theme (live preview)".into(),
             Self::EditLlmGateway { set } => format!(
                 "Configure LLM gateway · {}",

@@ -9,10 +9,14 @@ Enter."
 
 Snippets are **plain YAML files** you own and keep in version control
 or your dotfiles. There is no in-app editor by design: creating,
-editing, and deleting a snippet all mean editing a file (the Settings
-palette has an **Edit snippets** entry that opens the file for you).
-This page documents that full lifecycle — create, list/use, edit,
-delete — plus the file format and the picker reference.
+editing, and deleting a snippet all mean editing a file. Discovery,
+though, lives in the app: a read-only **snippets browser** (press `]`
+from the sidebar / activity panes, or pick **Browse snippets** from the
+`,` Settings palette) lists every snippet — key, origin, description,
+and body — so you can see what's available without already knowing a
+key. Press `e` in the browser to jump to the YAML file.
+This page documents that full lifecycle — create, browse, list/use,
+edit, delete — plus the file format and the picker reference.
 
 lazybox ships a few **built-in** snippets so a fresh install has
 something to expand out of the box — `rev` (review the diff), `pr`
@@ -62,6 +66,17 @@ The `description` is an optional one-line label shown in the picker;
 
 Snippets are loaded once, at startup. After editing a file, **restart
 lazybox** (or relaunch it) to pick up the change.
+
+### Browse
+
+The **snippets browser** is the answer to "what's even available?" —
+a read-only modal listing every merged snippet with its key, origin
+tag, description, and full body. Open it with `]` from the sidebar or
+activity pane, or via **Settings → Browse snippets**; it's also in the
+`?` help under the global shortcuts. `↑`/`↓` scroll, `e` opens the
+global YAML file in your editor, and any other key closes it. Unlike
+the terminal `]]` leader it needs no focused session and you don't
+have to know a key first.
 
 ### List & use
 

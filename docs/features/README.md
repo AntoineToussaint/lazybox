@@ -46,7 +46,7 @@ Every feature is documented as a section with the same shape:
 | [Inbox & sync](inbox-and-sync.md) | The reactive inbox, polling loop, refresh, sync status, filters, sort, read/unread, snooze |
 | [Providers](providers.md) | `TaskProvider`/`ScopeSource` traits, GitHub, Linear, Slack mirror |
 | [Workspaces & worktrees](workspaces-and-worktrees.md) | Workspace model, worktree manager, new/merge/archive/adopt/collapse, editors, per-repo overrides, persistence |
-| [Terminals & agents](terminals-and-agents.md) | Embedded terminal, agent spawn, Work command, autonomous sessions, state detection, structured runtime, LLM proxy, snippets |
+| [Terminals & agents](terminals-and-agents.md) | Embedded terminal, agent spawn, Work command, autonomous sessions, state detection, structured runtime, LLM gateway, snippets |
 | [TUI & UX](tui-and-ux.md) | Three-pane layout, key/chord system, help, settings wizard, activity feed, reply, mouse, modals, notifications |
 | [Daemon, deployment & build](daemon-and-deployment.md) | Client/daemon split, standalone daemon, remote connect, JSON API, run modes, auth chain, config reference, build |
 
@@ -100,7 +100,7 @@ Status is best-effort as of this catalog's first pass; correct it as you audit.
 | [Autonomous sessions](terminals-and-agents.md#autonomous-sessions) | beta | `server`, `agents` |
 | [Agent state detection](terminals-and-agents.md#agent-state-detection) | beta | `agents` |
 | [Structured agent runtime](terminals-and-agents.md#structured-agent-runtime) | experimental | `server`, `ipc` |
-| [LLM proxy](terminals-and-agents.md#llm-proxy) | experimental | `llm-proxy`, `server` |
+| [LLM gateway](terminals-and-agents.md#llm-gateway) | shipped | `server`, `agents`, `config` |
 | [Snippets](terminals-and-agents.md#snippets) | stable | `config`, `tui` |
 | [Terminal interaction model](terminals-and-agents.md#terminal-interaction-model) | stable | `tui` |
 

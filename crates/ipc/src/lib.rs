@@ -22,11 +22,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub mod channel;
-pub mod proxy;
 pub mod socket;
 pub mod transport;
-
-pub use proxy::{ApiProvider, ProxyRecord, ToolCall};
 
 pub const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 
@@ -1104,11 +1101,6 @@ pub enum Event {
         #[serde(default)]
         error: Option<String>,
     },
-    /// Structured telemetry from the LLM proxy: one record per
-    /// request/response the agent made through the daemon-injected
-    /// HTTP proxy. Clients use this to populate the Cost/Tokens tile
-    /// and the tool-call activity timeline.
-    ProxyRecord(ProxyRecord),
     AgentRunStarted {
         run_id: AgentRunId,
         session_key: SessionKey,

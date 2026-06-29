@@ -101,7 +101,6 @@ crates/
 ├── linear-provider/  Linear issues via GraphQL
 ├── ipc/              wire types + framing + transport (channel + socket)
 ├── agents/           Agent trait + Claude/Codex/Cursor/GenericCli + SessionWrapper
-├── llm-proxy/        127.0.0.1 pass-through recording structured agent telemetry
 ├── server/           PTY lifecycle, polling, agent runs, JSON API gateway
 └── tui/              the `lazybox` binary — component tree + key/event dispatch
 ```
@@ -244,6 +243,17 @@ All existing tokens (`needs:reply`, `ci:failed`, `role:author`,
 `is:unread`, etc.) still work and compose with AND.
 
 ## LLM proxy — structured telemetry from agents
+
+> **Superseded / not shipped.** The in-process HTTP proxy described
+> below was never wired into the running daemon and the `llm-proxy`
+> crate has been removed. What ships today (#222) is the simpler half of
+> the idea: the daemon injects a per-provider base-URL env var
+> (`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` ← `agent.llm_gateway_url`)
+> so a spawned agent points at the operator's *own* gateway. lazybox
+> itself does no proxying and records no telemetry from agent API
+> traffic. The structured-telemetry design below is kept for reference;
+> reviving it would start from `agent.llm_gateway_url` wiring in
+> `crates/server/src/spawn_handler.rs` (`gateway_env_for_agent`).
 
 Parsing PTY output to understand what an agent is doing is brittle
 (it worked well enough for "working vs asking", but we hit the ceiling

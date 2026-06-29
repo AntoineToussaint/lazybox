@@ -57,7 +57,7 @@ tests added where a harness exists):
 - ✅ RGB FFI tag — `StyleColor::Rgb` now emits `RGB` (`libghostty-vt/style.rs`; tests added).
 - ✅ `Formatter` dangling pointer — selection pointer taken from a named local (`libghostty-vt/fmt.rs`).
 - ✅ Stale projects on reconnect — `Snapshot` prunes vanished daemon projects, keeps synthesized placeholders (`tui/events.rs`; tests added).
-- ⏸️ **Deferred:** `llm-proxy` full-body buffering. The proxy is currently dead code (zero non-test callers) and a correct streaming fix must coexist with the telemetry path, which needs the whole body — i.e. it depends on the dead-code/wiring decision (see tech-debt below). Left as a follow-up rather than reworking an unwired module speculatively.
+- ✅ **`llm-proxy` removed entirely.** The streaming/full-body issue was in code that never ran: the live LLM-gateway feature is pure base-URL env-var injection (`gateway_env_for_agent`), with no in-process proxy. The `llm-proxy` crate, `server/src/agent_spawn.rs`, the orphaned `ipc::proxy` types, and the `Event::ProxyRecord` variant are deleted; `CLAUDE.md` / `DESIGN.md` / feature docs updated to describe the env-injection mechanism.
 
 Daemon-internal fixes (phantom-terminal, dedup, accept loop, agent-run
 race) have no unit tests: the crate has no `ServerConfig` test harness
@@ -83,7 +83,7 @@ harness is follow-up work.
 
 - **Double `AgentRunFinished` on completion/interrupt race** — `server/src/agent_runs.rs:115` vs `:162-172`. Natural completion sends `AgentRunFinished{error:None}` and *then* removes its handle; an interrupt in that gap aborts the finishing task and emits a second `AgentRunFinished{error:"interrupted"}` for the same run. *Fix:* remove the handle before sending the final event, or only emit on interrupt when it actually transitioned a still-running run.
 
-- **`llm-proxy` buffers the whole response, defeating SSE streaming** — `llm-proxy/src/server.rs:342-346` (verified). `response.bytes().await` fully buffers the upstream body before returning `Full<Bytes>`; an agent pointed at this proxy would receive nothing until the turn completes, contradicting the module's "byte-for-byte pass-through, no timeout so streams aren't severed" docs. Currently **latent** because the proxy is unwired (see tech-debt below). *Fix:* stream via `reqwest::Response::bytes_stream` → a streaming hyper body. (Fix the wiring/dead-code question first.)
+- ~~**`llm-proxy` buffers the whole response, defeating SSE streaming**~~ — `llm-proxy/src/server.rs:342-346`. Moot: the in-process proxy was never wired (the live gateway is env-var injection only), so this was dead code. **Resolved by deleting the `llm-proxy` crate** rather than fixing — see the status section above.
 
 ### Providers
 
@@ -122,7 +122,7 @@ poisoned-but-consistent state, so the uniform fix is
 
 ### Dead / superseded code
 
-- **`llm-proxy` + `server/src/agent_spawn.rs` are effectively dead** (verified) — `spawn_with_proxy` / `AgentSpawn` / `AgentSpawnConfig` / `ProxyServer` have zero non-test callers; the live gateway path is env-only (`spawn_handler::gateway_env_for_agent` pointing the base-URL var at `agent.llm_gateway_url`). `pricing.rs` (`rate_per_mtok`/`estimate_cost`) is only called by its own tests. *Fix:* delete the superseded surface, or wire it back in (and fix the streaming BUG above first). This decision gates whether the `llm-proxy` streaming bug is worth fixing.
+- ✅ **`llm-proxy` + `server/src/agent_spawn.rs` were dead — now removed.** `spawn_with_proxy` / `AgentSpawn` / `AgentSpawnConfig` / `ProxyServer` had zero non-test callers; the live gateway path is env-only (`spawn_handler::gateway_env_for_agent` pointing the base-URL var at `agent.llm_gateway_url`). Deleted the `llm-proxy` crate, `agent_spawn.rs`, the now-orphaned `ipc::proxy` types + `Event::ProxyRecord`, and the unused `humantime-serde` dep; updated `CLAUDE.md` (17→16 crates) / `DESIGN.md` / feature docs.
 - **Dead public API in `core`** — `core/src/config.rs:251` (`KV_KEY_LAYOUT`), `:242` (`KV_KEY_THEME`), `:265-302` (`PaneLayout` + `DEFAULT`/`clamp`/`nudge`), all `pub` and re-exported from `lib.rs:24` with zero workspace consumers (the TUI does its own splitter math in `tui/src/realm/layout.rs`; theme persistence goes through `ui.theme`). `KV_KEY_THEME`'s doc ("Cycled with the `T` global keybind; persisted") is stale. *Fix:* delete, or wire up.
 - **Linear dead-code import shim** — `linear-provider/src/graphql.rs:236-241` `_activity_kind_imported` exists only to suppress an unused-import warning for `ActivityKind`. *Fix:* drop the unused import.
 - **Unused `lazybox-core` dependency** — `slack-provider/Cargo.toml:11` declares `lazybox-core` but only `lazybox_auth` is used in `src/`. Not a rule violation, just dead weight. *Fix:* remove the line.

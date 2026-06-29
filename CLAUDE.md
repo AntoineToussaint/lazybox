@@ -46,7 +46,7 @@ no-op there — comparing against the latest release tag is future work.
 
 ## Architecture
 
-17 crates organized as a client/daemon split with shared library crates. The
+16 crates organized as a client/daemon split with shared library crates. The
 core library crates (core, auth, store) must NEVER depend on each
 other.
 
@@ -71,8 +71,8 @@ crates/
   ipc/             # Wire types (Command/Event), framing, transport traits
                    #   (in-process channel and Unix-socket variants).
   agents/          # Agent trait + Claude/Codex/Cursor/GenericCli built-ins.
-  llm-proxy/       # 127.0.0.1 HTTP pass-through that records structured
-                   #   telemetry (tokens, tool calls, cost) from agent traffic.
+                   #   Also: per-provider LLM-gateway base-URL env injection
+                   #   (ANTHROPIC_BASE_URL / OPENAI_BASE_URL ← agent.llm_gateway_url).
   server/          # Server library: PTY lifecycle, ring buffers, provider
                    #   polling, agent runs, JSON API gateway.
 

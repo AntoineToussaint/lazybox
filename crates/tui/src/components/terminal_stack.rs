@@ -776,10 +776,12 @@ struct TerminalVt {
     cell_iter: vt::render::CellIterator<'static>,
     cols: u16,
     rows: u16,
-    /// Per-terminal render cache. `GhosttyTerminal::render` writes
-    /// every dirty cell to BOTH `buf` and this shadow, then on the
-    /// next frame copies clean rows straight from here — skipping
-    /// the per-cell FFI walk for unchanged rows.
+    /// Per-terminal scratch buffer backing `GhosttyTerminal`'s
+    /// per-row FFI-error fallback (the last good content for a row
+    /// whose cell iterator transiently fails). It is NOT a render
+    /// fast path: libghostty's dirty flags can't be trusted to skip
+    /// redraws (see `GhosttyTerminal` docs / #239), so the widget
+    /// walks every cell every frame.
     shadow: Option<ratatui::buffer::Buffer>,
     _not_send: std::marker::PhantomData<*mut ()>,
 }

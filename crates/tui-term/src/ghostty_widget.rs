@@ -1,43 +1,46 @@
 //! Ratatui widget that renders a libghostty-vt terminal.
 //!
-//! # Dirty-state caching
+//! # Why we don't trust libghostty's dirty flags
 //!
-//! Naive render: walk every cell every frame. For a 200×60 terminal
-//! that's ~12_000 cells × 4 FFI calls per cell — ~48k FFI hits per
-//! frame. Scroll bursts make claude code re-render 10–30 times per
-//! gesture, so the cell walk dominates the perceived "scroll feels
-//! sluggish."
+//! libghostty exposes dirty tracking at two layers — a snapshot-level
+//! `Clean`/`Partial`/`Full` flag and a per-row `row.dirty()` flag —
+//! and this widget used to skip work based on both: blit a cached
+//! `shadow` buffer on `Clean`, copy individual `clean` rows from it on
+//! `Partial`. Both layers proved **unsound** as a redraw-skip signal
+//! against a viewport-indexed cache.
 //!
-//! libghostty exposes two layers of dirty tracking we exploit:
+//! The flags report whether a *logical* row's content changed, not
+//! whether the *viewport position* it occupies still shows the same
+//! thing. A scroll-region (`DECSTBM`) or reverse-index scroll shifts
+//! unchanged rows to new viewport positions without dirtying them —
+//! and under that churn libghostty even reports the whole snapshot
+//! `Clean` while cells the VT moved actually differ from the previous
+//! frame. The `shadow` is indexed by viewport position, so any skip
+//! based on these flags replays whatever previously sat at that
+//! position: stale glyphs and styles the VT never put there. That is
+//! issue #239 — Codex scrolls a region every spinner frame and the
+//! embedded terminal filled with ghost cells and misplaced text.
 //!
-//! 1. **`snapshot.dirty()`** — `Clean` / `Partial` / `Full`. When
-//!    `Clean`, the entire viewport is byte-identical to the previous
-//!    render — we can skip the cell walk entirely and copy the
-//!    cached `shadow` into ratatui's buffer.
-//! 2. **`row.dirty()`** — per-row flag. In `Partial`, most rows are
-//!    unchanged; only the ones libghostty touched need the cell
-//!    walk. Clean rows copy from the shadow.
+//! So we walk every cell of every row, every frame. Rendering is
+//! event-driven (a redraw fires on real output / input), so the walk
+//! runs when there is plausibly something to draw, and an optimized
+//! VT build (#68) makes a full viewport walk cheap. The `shadow` is
+//! retained only to back the per-row FFI-error fallback — it is no
+//! longer a render fast path.
 //!
-//! The shadow is a `ratatui::buffer::Buffer` we own per terminal
-//! slot. Cursor highlight is NOT baked into the shadow — we apply
-//! it as a `REVERSED` modifier to the final buffer after copying,
-//! so a cursor move between frames doesn't leave a "ghost" cursor
-//! at the previous position.
+//! Cursor highlight is NOT baked into the shadow — we apply it as a
+//! `REVERSED` modifier to the final buffer at the end of render, so a
+//! cursor move between frames doesn't leave a "ghost" cursor at the
+//! previous position.
 //!
-//! # Dirty-flag lifecycle (load-bearing)
+//! # Dirty-flag lifecycle
 //!
-//! libghostty's contract is explicit: **`update()` updates dirty
-//! flags, the caller must unset them after rendering, and setting
-//! one layer doesn't unset the other.** The earlier version of this
-//! widget skipped both — flags accumulated `Full` forever and the
-//! fast path never fired. After every successful render we:
-//!
-//! - Call `row.set_dirty(false)` on each row we walked.
-//! - Call `snapshot.set_dirty(Clean)` at the end.
-//!
-//! Skip either and you lose the entire optimization on the next
-//! frame; skip both and a future schema change could surface as
-//! "renderer is mysteriously slow."
+//! libghostty's contract is that the caller unsets dirty flags after
+//! rendering (`update()` only sets them). We honor it even though we
+//! no longer read the flags to skip work: after rendering we call
+//! `row.set_dirty(false)` on every row and `snapshot.set_dirty(Clean)`
+//! at the end, so libghostty's internal dirty state doesn't accumulate
+//! unbounded across frames.
 
 use libghostty_vt::render::{CellIterator, Dirty, RowIterator, Snapshot};
 use libghostty_vt::style::Underline;
@@ -104,9 +107,13 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
                 || self.snapshot.cursor_blinking().unwrap_or(false)
         });
 
-        // Shadow state. Resize / first-render = no usable shadow,
-        // so we treat every row as dirty regardless of libghostty's
-        // per-row flag.
+        // Shadow buffer. No longer a render fast path — see module
+        // docs: libghostty's dirty flags can't be trusted to skip work
+        // (region scrolls under-report all the way to `Clean`). The
+        // shadow now only backs the per-row FFI-error fallback below,
+        // holding the last good content for a row whose cell iterator
+        // transiently fails. Reset it on resize so the fallback never
+        // replays content sized for a different rect.
         let shadow_needs_init = match self.shadow.as_ref() {
             Some(b) => b.area != area,
             None => true,
@@ -118,18 +125,6 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
             .shadow
             .as_mut()
             .expect("shadow set above when needs_init");
-
-        // Snapshot-level dirty: `Clean` means every cell matches
-        // the last `RenderState::update` — we can blit the shadow
-        // unchanged and skip the whole FFI dance.
-        let snapshot_dirty = self.snapshot.dirty().unwrap_or(Dirty::Full);
-        if !shadow_needs_init && snapshot_dirty == Dirty::Clean {
-            blit_shadow(shadow, buf, area);
-            apply_cursor_highlight(buf, area, cursor_pos);
-            // Nothing to reset — flags were already Clean.
-            return;
-        }
-        let force_all_rows = shadow_needs_init || snapshot_dirty == Dirty::Full;
 
         let mut row_iter = match self.row_iter.update(self.snapshot) {
             Ok(r) => r,
@@ -146,14 +141,11 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
             if y >= area.height {
                 break;
             }
-            let row_dirty = force_all_rows || row.dirty().unwrap_or(true);
-            if !row_dirty {
-                copy_row_from_shadow(shadow, buf, area, y);
-                y += 1;
-                continue;
-            }
 
-            // Dirty row → cell-walk, write to BOTH shadow and buf.
+            // Every row is walked — `row.dirty()` is deliberately not
+            // consulted to skip rows (see module docs: it's unsound
+            // against the viewport-indexed shadow under scroll). Walk
+            // the cells, writing to BOTH shadow and buf.
             let mut cell_iter = match self.cell_iter.update(row) {
                 Ok(c) => c,
                 Err(_) => {
@@ -304,8 +296,6 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
     }
 }
 
-/// Copy the entire shadow buffer onto the live buf. Used when the
-/// snapshot reports `Dirty::Clean` — fastest possible "render."
 /// True when `text` is "visually empty" for the purpose of
 /// suppressing underline / strikethrough. Catches every Unicode
 /// whitespace codepoint via `char::is_whitespace` (covers ASCII
@@ -325,19 +315,9 @@ fn is_blank_glyph(text: &str) -> bool {
     })
 }
 
-fn blit_shadow(shadow: &Buffer, buf: &mut Buffer, area: Rect) {
-    for y in 0..area.height {
-        for x in 0..area.width {
-            let px = area.x + x;
-            let py = area.y + y;
-            buf[(px, py)] = shadow[(px, py)].clone();
-        }
-    }
-}
-
-/// Copy one row from the shadow into the live buf. Used when the
-/// snapshot is `Dirty::Partial` and this row's `row.dirty()` is
-/// false — we have a known-good cached render.
+/// Copy one row from the shadow into the live buf. Used only as the
+/// per-row fallback when a cell iterator transiently fails — the
+/// shadow still holds the last good content for that row.
 fn copy_row_from_shadow(shadow: &Buffer, buf: &mut Buffer, area: Rect, y: u16) {
     let py = area.y + y;
     for x in 0..area.width {
@@ -415,6 +395,225 @@ mod tests {
 
         fn current_dirty(&mut self) -> Result<Dirty, libghostty_vt::Error> {
             self.render_state.update(&self.terminal).unwrap().dirty()
+        }
+
+        /// Ground-truth render: a full cell walk against a throwaway
+        /// shadow, so no state carries between frames. Comparing the
+        /// persistent-shadow `render` against this pins that the widget
+        /// reproduces the VT's current viewport exactly — never replays
+        /// stale cached content.
+        fn render_fresh(&mut self, area: Rect) -> Buffer {
+            let snapshot = self.render_state.update(&self.terminal).unwrap();
+            let mut shadow = None;
+            let widget = GhosttyTerminal::new(
+                &snapshot,
+                &mut self.row_iter,
+                &mut self.cell_iter,
+                &mut shadow,
+            );
+            let mut buf = Buffer::empty(area);
+            widget.render(area, &mut buf);
+            buf
+        }
+    }
+
+    #[test]
+    fn cached_render_matches_full_walk_under_scroll_churn() {
+        let mut cached = Harness::new(20, 5);
+        let mut truth = Harness::new(20, 5);
+        let area = Rect::new(0, 0, 20, 5);
+
+        for i in 0..40 {
+            let chunk = format!("line {i} content\r\n");
+            cached.terminal.vt_write(chunk.as_bytes());
+            truth.terminal.vt_write(chunk.as_bytes());
+
+            let c = cached.render(area);
+            let t = truth.render_fresh(area);
+            assert_eq!(c, t, "cached render diverged from full walk at write {i}");
+        }
+    }
+
+    /// Simulate what the host terminal actually shows after ratatui
+    /// flushes `buf`: walk cells left-to-right, emitting each symbol and
+    /// skipping the columns it covers per `unicode-width` (the same logic
+    /// ratatui's `BufferDiff` uses to position writes).
+    fn host_rendered_row(buf: &Buffer, y: u16, width: u16) -> String {
+        use ratatui::buffer::CellWidth;
+        let mut out = String::new();
+        let mut skip = 0u16;
+        for x in 0..width {
+            let cell = &buf[(x, y)];
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            out.push_str(cell.symbol());
+            skip = cell.cell_width().saturating_sub(1);
+        }
+        out
+    }
+
+    /// Ghostty's intended visible row: honour the VT's own wide flags
+    /// (a `Wide` base glyph owns two columns; its `SpacerTail` is not
+    /// drawn) independent of `unicode-width`.
+    fn ghostty_intended_row(h: &mut Harness, y: u16, width: u16) -> String {
+        use libghostty_vt::screen::CellWide;
+        let snapshot = h.render_state.update(&h.terminal).unwrap();
+        let mut ri = RowIterator::new().unwrap();
+        let mut rows = ri.update(&snapshot).unwrap();
+        let mut row_y = 0u16;
+        let mut out = String::new();
+        while let Some(row) = rows.next() {
+            if row_y == y {
+                let mut ci = CellIterator::new().unwrap();
+                let mut cells = ci.update(row).unwrap();
+                let mut cols = 0u16;
+                while let Some(cell) = cells.next() {
+                    if cols >= width {
+                        break;
+                    }
+                    let wide = cell.wide().unwrap_or(CellWide::Narrow);
+                    match wide {
+                        CellWide::SpacerTail => {}
+                        _ => {
+                            let glen = cell.graphemes_len().unwrap_or(0);
+                            if glen == 0 {
+                                out.push(' ');
+                            } else {
+                                let mut g = vec!['\0'; glen];
+                                let _ = cell.graphemes_buf(&mut g);
+                                for c in g {
+                                    out.push(c);
+                                }
+                            }
+                        }
+                    }
+                    cols += 1;
+                }
+                break;
+            }
+            row_y += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn replay_real_agent_fixtures_no_corruption() {
+        let fixtures_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../agents/tests/fixtures");
+        let names = [
+            "claude_real_working_statusbar.bin",
+            "claude_real_bypass_idle.bin",
+            "claude_startup_repaint.bin",
+            "codex_real_working.bin",
+            "codex_real_edit_approval.bin",
+            "codex_real_command_approval.bin",
+            "codex_real_idle.bin",
+        ];
+        for name in names {
+            let bytes = match std::fs::read(format!("{fixtures_dir}/{name}")) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let mut cached = Harness::new(80, 24);
+            let mut truth = Harness::new(80, 24);
+            let area = Rect::new(0, 0, 80, 24);
+            for chunk in bytes.chunks(64) {
+                cached.terminal.vt_write(chunk);
+                truth.terminal.vt_write(chunk);
+                let c = cached.render(area);
+                let t = truth.render_fresh(area);
+                assert_eq!(c, t, "{name}: cached render diverged from full walk");
+            }
+            // Final frame must match ghostty's intended columns exactly —
+            // no width/column drift, no ghost cells.
+            let frame = cached.render(area);
+            for y in 0..24u16 {
+                let host = host_rendered_row(&frame, y, 80);
+                let intent = ghostty_intended_row(&mut cached, y, 80);
+                assert_eq!(
+                    host.trim_end(),
+                    intent.trim_end(),
+                    "{name} row {y}: host render diverges from ghostty intent",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn host_render_matches_ghostty_intent_for_emoji_and_wide() {
+        let mut h = Harness::new(24, 6);
+        let area = Rect::new(0, 0, 24, 6);
+        // Mix of glyphs an agent emits: emoji (some VS16-presented),
+        // CJK, box drawing, spinner braille, plus trailing real text
+        // whose column position is corrupted if a width disagreement
+        // hides the cell after a "wide" glyph.
+        let lines = [
+            "AB 🎉 CD\r\n",
+            "EF 你好 GH\r\n",
+            "ok ✓ warn ⚠ x\r\n",
+            "spin ⠋⠙⠹ end\r\n",
+            "tag 🚀 PR #28 z\r\n",
+        ];
+        for line in lines {
+            h.terminal.vt_write(line.as_bytes());
+        }
+        let _ = h.render(area);
+        for y in 0..5u16 {
+            let host = host_rendered_row(&h.render(area), y, 24);
+            let intent = ghostty_intended_row(&mut h, y, 24);
+            assert_eq!(
+                host.trim_end(),
+                intent.trim_end(),
+                "row {y}: host render diverges from ghostty's intended columns",
+            );
+        }
+    }
+
+    #[test]
+    fn cached_render_matches_full_walk_with_erase_and_scroll_region() {
+        let mut cached = Harness::new(20, 6);
+        let mut truth = Harness::new(20, 6);
+        let area = Rect::new(0, 0, 20, 6);
+        // Ink-style sticky-footer churn: scroll region, cursor moves,
+        // erase-line / erase-display, insert/delete-line.
+        let ops = [
+            "\x1b[2J\x1b[Hheader\r\n",
+            "\x1b[3;6r\x1b[3;1Hbody line\r\n",
+            "\x1b[5;1H\x1b[2Kfooter ⠋\r\n",
+            "\x1b[3;1H\x1b[Lnew top\r\n",
+            "\x1b[4;1H\x1b[Mdeleted\r\n",
+            "\x1b[6;1Hmore output here\r\n",
+            "\x1b[5;1H\x1b[2Kfooter ⠙ tick\r\n",
+            "\x1b[2J\x1b[Hreset frame\r\n",
+        ];
+        for (i, op) in ops.iter().cycle().take(40).enumerate() {
+            cached.terminal.vt_write(op.as_bytes());
+            truth.terminal.vt_write(op.as_bytes());
+            let c = cached.render(area);
+            let t = truth.render_fresh(area);
+            assert_eq!(c, t, "cached diverged at erase/scroll-region op {i}");
+        }
+    }
+
+    #[test]
+    fn cached_render_matches_full_walk_with_wide_chars() {
+        let mut cached = Harness::new(20, 5);
+        let mut truth = Harness::new(20, 5);
+        let area = Rect::new(0, 0, 20, 5);
+
+        let lines = [
+            "héllo 你好 wörld\r\n",
+            "spin ⠋ 你好世界\r\n",
+            "emoji 🎉 done 🚀\r\n",
+            "\x1b[2;1H\x1b[2Koverwrite 你\r\n",
+        ];
+        for (i, line) in lines.iter().cycle().take(40).enumerate() {
+            cached.terminal.vt_write(line.as_bytes());
+            truth.terminal.vt_write(line.as_bytes());
+            let c = cached.render(area);
+            let t = truth.render_fresh(area);
+            assert_eq!(c, t, "cached render diverged at wide-char write {i}");
         }
     }
 

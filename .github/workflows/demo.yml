@@ -129,12 +129,16 @@ jobs:
         # neither of which means the UI changed.
         #
         # Instead extract the last COMPLETE keybinding table from the fresh
-        # render and diff just that. The tape's `Wait+Screen /snippets/`
-        # guarantees the final frame's table is fully painted, so a complete
-        # block always exists; the table content only changes when the UI or a
+        # render and diff just that. We anchor the table's END on the bottom
+        # row's `exit to sidebar` cell (the `]]` leave binding), which is
+        # unique — unlike `snippets`, which now labels both the global `]`
+        # browser row and the terminal `]]<key>` leader row, so anchoring on
+        # it would stop mid-table. The tape's `Wait+Screen` still guarantees
+        # the overlay is fully painted before capture, so a complete block
+        # always exists; the table content only changes when the UI or a
         # keybinding actually changes, which is exactly what this guards.
         run: |
-          awk '/  Tab .* cycle panes/{c=1;b=""} c{b=b $0 ORS} c&&/snippets/{last=b;c=0} END{printf "%s",last}' \
+          awk '/  Tab .* cycle panes/{c=1;b=""} c{b=b $0 ORS} c&&/exit to sidebar/{last=b;c=0} END{printf "%s",last}' \
             demo/golden.ascii > demo/golden.ascii.table
           if [ ! -s demo/golden.ascii.table ]; then
             echo "::error::No complete keybinding table found in the rendered overlay — the render did not settle. Re-run the job."
@@ -147,7 +151,7 @@ jobs:
             echo "scrollback; extract the table with the same awk this check uses):"
             echo "  cargo build -p lazybox-tui   # or: make build"
             echo "  PATH=\"\$PWD/target/debug:\$PATH\" vhs demo/golden.tape && PATH=\"\$PWD/target/debug:\$PATH\" vhs demo/lazybox.tape"
-            echo "  awk '/  Tab .* cycle panes/{c=1;b=\"\"} c{b=b \$0 ORS} c&&/snippets/{last=b;c=0} END{printf \"%s\",last}' demo/golden.ascii > t && mv t demo/golden.ascii"
+            echo "  awk '/  Tab .* cycle panes/{c=1;b=\"\"} c{b=b \$0 ORS} c&&/exit to sidebar/{last=b;c=0} END{printf \"%s\",last}' demo/golden.ascii > t && mv t demo/golden.ascii"
             echo "  git add demo/golden.ascii demo/lazybox.gif demo/lazybox.mp4 demo/lazybox.png && git commit"
             exit 1
           fi

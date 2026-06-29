@@ -20,7 +20,7 @@
 #   cargo build -p lazybox-tui
 #   PATH="$PWD/target/debug:$PATH" vhs demo/golden.tape
 #   # then extract the table (same awk the workflow uses) into golden.ascii:
-#   awk '/  Tab .* cycle panes/{c=1;b=""} c{b=b $0 ORS} c&&/snippets/{last=b;c=0} END{printf "%s",last}' \
+#   awk '/  Tab .* cycle panes/{c=1;b=""} c{b=b $0 ORS} c&&/exit to sidebar/{last=b;c=0} END{printf "%s",last}' \
 #     demo/golden.ascii > demo/golden.ascii.tmp && mv demo/golden.ascii.tmp demo/golden.ascii
 
 Output "demo/golden.ascii"
@@ -28,8 +28,8 @@ Output "demo/golden.ascii"
 Set FontSize 16
 Set Width 1200
 # Tall enough that the whole `?` help overlay fits on one frame — the
-# bottom row (`]]<key>  snippets`) is the `Wait+Screen` sentinel below,
-# so it must be on screen for the render to settle. The keybinding table
+# bottom row (`]]  exit to sidebar`) carries the `Wait+Screen` sentinel
+# below, so it must be on screen for the render to settle. The keybinding table
 # grew (issue #224 added the `w c` / `w x` / `w u` scoped-work group), so
 # 720 clipped the last rows; height only reveals more of the overlay and
 # never changes the table's byte content (that's width/content-driven).
@@ -48,15 +48,18 @@ Sleep 4s
 Show
 
 # Open the keybinding help overlay, then block on `Wait+Screen` until the
-# overlay's LAST row is actually on screen: `snippets` is the final cell of
-# the bottom-right keybinding (`]]<key>  snippets`), so once it appears the
-# whole table above it has been painted. This guarantees the final captured
-# frame contains a complete table for the workflow to extract — a fixed
-# Sleep only moves WHEN the frame is grabbed and can't guarantee it lands on
-# a fully-painted overlay (the historical flake: the grab landed mid-paint
-# and the table was truncated mid-row with the rest blanked; the sleep was
-# bumped 1.5s → 3s → 6s and still raced). The generous timeout absorbs slow
-# boots; the trailing Sleep lets the frame settle before capture.
+# overlay's LAST row is actually on screen: `exit to sidebar` is the bottom
+# row's left cell (`]]  exit to sidebar`), so once it appears the whole table
+# above it has been painted. We key on `exit to sidebar` rather than
+# `snippets` because `snippets` now labels two rows (the global `]` browser
+# and the terminal `]]<key>` leader) — the workflow's table extraction anchors
+# on the same unique `exit to sidebar` marker. This guarantees the final
+# captured frame contains a complete table for the workflow to extract — a
+# fixed Sleep only moves WHEN the frame is grabbed and can't guarantee it
+# lands on a fully-painted overlay (the historical flake: the grab landed
+# mid-paint and the table was truncated mid-row with the rest blanked; the
+# sleep was bumped 1.5s → 3s → 6s and still raced). The generous timeout
+# absorbs slow boots; the trailing Sleep lets the frame settle before capture.
 Type "?"
-Wait+Screen@30s /snippets/
+Wait+Screen@30s /exit to sidebar/
 Sleep 1s

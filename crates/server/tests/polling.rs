@@ -758,6 +758,63 @@ async fn migrate_reuses_live_worktree_in_place_on_slug_change() {
         "the worktree directory is left untouched on disk"
     );
 }
+#[tokio::test]
+async fn migrate_reuses_both_worktrees_when_pr_absorbs_an_issue_session() {
+    // The real issue→PR shape: the PR workspace already owns a session
+    // (its own worktree at the base slug) and then absorbs the issue's
+    // live session. Sorted by `created_at`, the absorbed (older) issue
+    // session takes slot 0 — whose slug-derived path is the base slug
+    // the PR's own session already occupies. The OLD git-move code would
+    // have tried to relocate the issue worktree onto that occupied dir
+    // (collision) and shuffle the PR worktree to `-2`, yanking CWD out
+    // from under both agents. Reuse-in-place must leave BOTH untouched.
+    use lazybox_core::WorkspaceSession;
+
+    let issue_wt = tempfile::tempdir().unwrap();
+    std::fs::create_dir(issue_wt.path().join(".git")).unwrap();
+    let issue_path = issue_wt.path().to_path_buf();
+
+    let pr_wt = tempfile::tempdir().unwrap();
+    std::fs::create_dir(pr_wt.path().join(".git")).unwrap();
+    let pr_path = pr_wt.path().to_path_buf();
+
+    let mut task = make_task("o/r#9100");
+    task.title = "Absorb the issue".into();
+    let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
+
+    // Older session first (the issue's, moved onto the PR), then the
+    // PR's own. Distinct timestamps fix the slot order deterministically.
+    let t0 = Utc::now();
+    let absorbed = WorkspaceSession::new(
+        ws.key.clone(),
+        lazybox_core::SessionKind::Shell,
+        issue_path.clone(),
+        t0,
+    );
+    let pr_own = WorkspaceSession::new(
+        ws.key.clone(),
+        lazybox_core::SessionKind::Shell,
+        pr_path.clone(),
+        t0 + chrono::Duration::seconds(1),
+    );
+    let absorbed_id = ws.add_session(absorbed);
+    let pr_own_id = ws.add_session(pr_own);
+
+    let moved = lazybox_server::spawn_handler::migrate_session_paths_if_needed(&mut ws).await;
+
+    assert!(!moved, "two live worktrees are both reused in place");
+    assert_eq!(
+        ws.find_session(absorbed_id).unwrap().worktree_path,
+        issue_path,
+        "absorbed issue session keeps its own worktree (no collision)"
+    );
+    assert_eq!(
+        ws.find_session(pr_own_id).unwrap().worktree_path,
+        pr_path,
+        "PR's own session keeps its worktree (not shuffled to -2)"
+    );
+    assert!(issue_path.exists() && pr_path.exists());
+}
 // ── Create empty workspace (n key flow) ──────────────────────────────
 
 #[tokio::test]

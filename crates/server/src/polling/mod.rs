@@ -3391,7 +3391,11 @@ async fn merge_closing_issue_workspaces(
         "merge: scanning closes_issues for collapse candidates"
     );
 
-    closed_ids.dedup();
+    // `closes_issues` unions GraphQL refs with body-text parses, so
+    // duplicate ids aren't necessarily adjacent — `Vec::dedup` alone
+    // would let a non-adjacent repeat fold the same issue twice.
+    let mut seen = std::collections::HashSet::new();
+    closed_ids.retain(|id| seen.insert(id.clone()));
 
     for issue_id in closed_ids {
         let issue_key = issue_id_to_workspace_key(&issue_id);

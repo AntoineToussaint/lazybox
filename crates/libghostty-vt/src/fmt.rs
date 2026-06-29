@@ -61,17 +61,21 @@ impl<'t, 'alloc: 'cb, 'cb: 't> Formatter<'t, 'alloc, 'cb> {
         opts: FormatterOptions,
     ) -> Result<Self> {
         let mut raw: ffi::Formatter = std::ptr::null_mut();
+        // `selection` must outlive the FFI call below: take the pointer
+        // from this named local, not from a `match` arm binding (which
+        // would drop before `ghostty_formatter_terminal_new` reads it).
         let selection = opts.selection.map(Into::into);
+        let selection_ptr = match &selection {
+            Some(s) => std::ptr::from_ref(s),
+            None => std::ptr::null(),
+        };
 
         let opts = ffi::FormatterTerminalOptions {
             emit: opts.format.into(),
             trim: opts.trim,
             extra: ffi::FormatterTerminalExtra::default(),
             unwrap: opts.unwrap,
-            selection: match selection {
-                Some(s) => &raw const s,
-                None => std::ptr::null(),
-            },
+            selection: selection_ptr,
             ..ffi::sized!(ffi::FormatterTerminalOptions)
         };
 

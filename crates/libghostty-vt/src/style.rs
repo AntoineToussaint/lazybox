@@ -201,7 +201,7 @@ impl From<StyleColor> for ffi::StyleColor {
                 value: ffi::StyleColorValue { palette },
             },
             StyleColor::Rgb(rgb) => Self {
-                tag: ffi::StyleColorTag::NONE,
+                tag: ffi::StyleColorTag::RGB,
                 value: ffi::StyleColorValue { rgb: rgb.into() },
             },
         }
@@ -219,5 +219,34 @@ impl From<RgbColor> for ffi::ColorRgb {
     fn from(value: RgbColor) -> Self {
         let RgbColor { r, g, b } = value;
         Self { r, g, b }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn style_color_round_trips_through_ffi() {
+        for color in [
+            StyleColor::None,
+            StyleColor::Palette(PaletteIndex(7)),
+            StyleColor::Rgb(RgbColor {
+                r: 10,
+                g: 20,
+                b: 30,
+            }),
+        ] {
+            let raw: ffi::StyleColor = color.into();
+            // RGB previously serialized with the NONE tag, so it
+            // round-tripped back as `StyleColor::None`.
+            assert_eq!(StyleColor::try_from(raw).unwrap(), color);
+        }
+    }
+
+    #[test]
+    fn rgb_color_keeps_rgb_tag() {
+        let raw: ffi::StyleColor = StyleColor::Rgb(RgbColor { r: 1, g: 2, b: 3 }).into();
+        assert_eq!(raw.tag, ffi::StyleColorTag::RGB);
     }
 }

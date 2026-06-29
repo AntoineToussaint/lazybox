@@ -133,7 +133,7 @@ fine to leave.
 Thirteen `#[allow(dead_code)]`: `gh-provider/src/graphql.rs` (5×, several
 "captured for debug — not yet used"), `linear-provider/src/graphql.rs:238`,
 `tui/components/right_pane/card.rs:7`, `tui/realm/model/helpers.rs` (2×),
-`tui/realm/model/mod.rs:383`, `llm-proxy/src/server.rs:128`,
+`tui/realm/model/mod.rs:383`,
 `server/src/api_gateway.rs:406`. **Fix:** per item — wire it up or delete it;
 none should stay dead with a blanket allow.
 

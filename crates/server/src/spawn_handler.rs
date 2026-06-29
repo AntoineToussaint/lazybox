@@ -705,179 +705,195 @@ pub async fn handle_spawn(
         tracing::error!("handle_spawn: bus.send(TerminalSpawned) failed: {e}");
     }
     tokio::spawn(async move {
-        let mut sub = match backend.subscribe(&key_for_pump).await {
-            Ok(s) => s,
+        let sub = match backend.subscribe(&key_for_pump).await {
+            Ok(s) => Some(s),
             Err(e) => {
                 tracing::warn!("backend subscribe {key_for_pump}: {e}");
-                return;
+                None
             }
         };
-        // Per-terminal rolling buffer for state detection. Bumped
-        // from 4 KiB to 32 KiB after a real bug: Claude's status-
-        // bar updates (token counter / elapsed-time ticker) emit
-        // tiny chunks that — with a small buffer — pushed the
-        // "Esc to cancel · Tab to amend" footer out of scope.
-        // detect_state then returned Active on the next chunk, the
-        // pill flickered off, and the user couldn't tell Claude
-        // still needed input. 32 KiB spans many minutes of status
-        // ticks.
-        const STATE_BUF_CAP: usize = 32 * 1024;
-        let mut state_buf: Vec<u8> = Vec::with_capacity(STATE_BUF_CAP);
-        // Hysteresis: timestamp of the last InputNeeded detection.
-        // When detect_state leaves InputNeeded (to Working or Idle)
-        // and the previous state was InputNeeded, we ONLY honor the
-        // transition if it's been long enough since we last saw the
-        // prompt patterns — gives the buffer time to capture genuine
-        // new output (user typed a response, Claude is now streaming
-        // back), rather than treating a ticker chunk that scrolled the
-        // prompt out of buffer as "agent done." The faster, expected
-        // Working↔Idle flips are NOT damped — only leaving the sticky
-        // "needs input" state is.
-        let mut last_input_needed_at: Option<std::time::Instant> = None;
-        const INPUT_NEEDED_HYSTERESIS: std::time::Duration = std::time::Duration::from_secs(8);
-        // Hysteresis for the other transient edge: leaving `Working`.
-        // Claude paints its live status line (the spinner / token
-        // counter) ONLY while busy, but it vanishes for a chunk whenever
-        // the agent prints output between spinner frames or the terminal
-        // does a full repaint — momentarily leaving the PTY detector with
-        // no working anchor and no idle composer either, an ambiguous
-        // Idle. Without damping, that single frame flips a genuinely-busy
-        // agent to Idle and back, breaking the sidebar working indicator
-        // and `!` jump. Only the AMBIGUOUS exit is damped — a real
-        // end-of-turn draws the composer footer, which reads as an
-        // affirmative idle and is honored immediately. Shorter than the
-        // InputNeeded window: the spinner reappears within a frame or two.
-        let mut last_working_at: Option<std::time::Instant> = None;
-        const WORKING_HYSTERESIS: std::time::Duration = std::time::Duration::from_secs(5);
+        // Run the pump only when subscribe succeeded; either way fall
+        // through to the teardown below. A subscribe failure here lands
+        // *after* TerminalSpawned was broadcast, so skipping teardown
+        // would leave a phantom terminal entry that satisfies the
+        // singleton guard forever and blocks respawn (`w`/`c`/`x`).
+        let exit_code = async {
+            let mut sub = sub?;
+            // Per-terminal rolling buffer for state detection. Bumped
+            // from 4 KiB to 32 KiB after a real bug: Claude's status-
+            // bar updates (token counter / elapsed-time ticker) emit
+            // tiny chunks that — with a small buffer — pushed the
+            // "Esc to cancel · Tab to amend" footer out of scope.
+            // detect_state then returned Active on the next chunk, the
+            // pill flickered off, and the user couldn't tell Claude
+            // still needed input. 32 KiB spans many minutes of status
+            // ticks.
+            const STATE_BUF_CAP: usize = 32 * 1024;
+            let mut state_buf: Vec<u8> = Vec::with_capacity(STATE_BUF_CAP);
+            // Hysteresis: timestamp of the last InputNeeded detection.
+            // When detect_state leaves InputNeeded (to Working or Idle)
+            // and the previous state was InputNeeded, we ONLY honor the
+            // transition if it's been long enough since we last saw the
+            // prompt patterns — gives the buffer time to capture genuine
+            // new output (user typed a response, Claude is now streaming
+            // back), rather than treating a ticker chunk that scrolled the
+            // prompt out of buffer as "agent done." The faster, expected
+            // Working↔Idle flips are NOT damped — only leaving the sticky
+            // "needs input" state is.
+            let mut last_input_needed_at: Option<std::time::Instant> = None;
+            const INPUT_NEEDED_HYSTERESIS: std::time::Duration = std::time::Duration::from_secs(8);
+            // Hysteresis for the other transient edge: leaving `Working`.
+            // Claude paints its live status line (the spinner / token
+            // counter) ONLY while busy, but it vanishes for a chunk whenever
+            // the agent prints output between spinner frames or the terminal
+            // does a full repaint — momentarily leaving the PTY detector with
+            // no working anchor and no idle composer either, an ambiguous
+            // Idle. Without damping, that single frame flips a genuinely-busy
+            // agent to Idle and back, breaking the sidebar working indicator
+            // and `!` jump. Only the AMBIGUOUS exit is damped — a real
+            // end-of-turn draws the composer footer, which reads as an
+            // affirmative idle and is honored immediately. Shorter than the
+            // InputNeeded window: the spinner reappears within a frame or two.
+            let mut last_working_at: Option<std::time::Instant> = None;
+            const WORKING_HYSTERESIS: std::time::Duration = std::time::Duration::from_secs(5);
 
-        // Notify the initial-prompt injector exactly once when the
-        // first byte of output arrives. `notify_one` STORES a permit
-        // if no one is waiting yet, so we don't race the inject task's
-        // `.notified()` registration — the permit is consumed when
-        // the inject task starts waiting, even if pump runs first.
-        let mut signaled_first_output = false;
-        // `detect_ready_for_prompt` is the tight "agent's input box
-        // is drawn AND no permission gate is up" signal. Fire it
-        // ONCE — extra notifications are harmless but redundant
-        // (`Notify` permits stack). The inject task only needs to
-        // know "we reached ready at least once."
-        let mut signaled_ready = false;
-        let check_ready =
-            |state_buf: &Vec<u8>, signaled: &mut bool, signal: &tokio::sync::Notify| {
-                if *signaled {
-                    return;
-                }
-                let Some(agent) = agent_for_pump.as_ref() else {
-                    return;
+            // Notify the initial-prompt injector exactly once when the
+            // first byte of output arrives. `notify_one` STORES a permit
+            // if no one is waiting yet, so we don't race the inject task's
+            // `.notified()` registration — the permit is consumed when
+            // the inject task starts waiting, even if pump runs first.
+            let mut signaled_first_output = false;
+            // `detect_ready_for_prompt` is the tight "agent's input box
+            // is drawn AND no permission gate is up" signal. Fire it
+            // ONCE — extra notifications are harmless but redundant
+            // (`Notify` permits stack). The inject task only needs to
+            // know "we reached ready at least once."
+            let mut signaled_ready = false;
+            let check_ready =
+                |state_buf: &Vec<u8>, signaled: &mut bool, signal: &tokio::sync::Notify| {
+                    if *signaled {
+                        return;
+                    }
+                    let Some(agent) = agent_for_pump.as_ref() else {
+                        return;
+                    };
+                    // Same DETECT_WINDOW the pump's state detector uses —
+                    // covers the visible-screen tail without scanning
+                    // long-stale boot output.
+                    const DETECT_WINDOW: usize = 16 * 1024;
+                    let tail = &state_buf[state_buf.len().saturating_sub(DETECT_WINDOW)..];
+                    if agent.detect_ready_for_prompt(tail) {
+                        // `notify_one` STORES a permit when no waiter is
+                        // registered yet; `notify_waiters` is edge-triggered
+                        // and a ready signal fired before the inject task
+                        // started waiting was lost forever, riding the
+                        // inject path to its hard deadline.
+                        signal.notify_one();
+                        *signaled = true;
+                    }
                 };
-                // Same DETECT_WINDOW the pump's state detector uses —
-                // covers the visible-screen tail without scanning
-                // long-stale boot output.
-                const DETECT_WINDOW: usize = 16 * 1024;
-                let tail = &state_buf[state_buf.len().saturating_sub(DETECT_WINDOW)..];
-                if agent.detect_ready_for_prompt(tail) {
-                    // `notify_one` STORES a permit when no waiter is
-                    // registered yet; `notify_waiters` is edge-triggered
-                    // and a ready signal fired before the inject task
-                    // started waiting was lost forever, riding the
-                    // inject path to its hard deadline.
-                    signal.notify_one();
-                    *signaled = true;
-                }
-            };
-        if !sub.replay.is_empty() {
-            maybe_emit_state_change(
-                agent_for_pump.as_ref(),
-                &mut state_buf,
-                &sub.replay,
-                &agent_states_map,
-                &bus,
-                id_for_pump,
-                &session_key_for_pump,
-                &terminal_meta_map,
-                &mut last_input_needed_at,
-                INPUT_NEEDED_HYSTERESIS,
-                &mut last_working_at,
-                WORKING_HYSTERESIS,
-                &hook_driven_map,
-                &input_shapes_map,
-            )
-            .await;
-            let _ = bus.send(Event::TerminalOutput {
-                terminal_id: id_for_pump,
-                bytes: sub.replay.clone(),
-                seq: sub.last_seq,
-            });
-            // Permit-storing, like the live first-output path below — a
-            // replay that lands before the inject task registers its
-            // waiter must not be lost.
-            first_output_signal_for_pump.notify_one();
-            signaled_first_output = true;
-            check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
-        }
-        while let Some(chunk) = sub.live.recv().await {
-            // The user just answered an InputNeeded prompt (Enter while
-            // the `?` pill was up). Drop the accumulated detection
-            // buffer so the just-answered prompt's markers can't
-            // re-fire InputNeeded on this fresh chunk. See the
-            // `agent_detect_resets` field doc for why this is safe — a
-            // prompt that's genuinely still up gets re-rendered and
-            // re-detected from the post-answer output.
-            //
-            // Only agent terminals are ever inserted into the set (the
-            // optimistic flip in `handle_write` gates on InputNeeded,
-            // which shells never reach), so skip the per-chunk lock
-            // entirely for shells. Bind the `remove` result before the
-            // `if` so the MutexGuard drops at the `;` rather than being
-            // held across the body — the temporary-lifetime footgun the
-            // `TERMINAL_MAP_LOCK_ORDER` note warns about (harmless today
-            // with no await in the body, a latent deadlock the moment
-            // one is added).
-            if agent_for_pump.is_some() {
-                let answered = agent_detect_resets_map.lock().await.remove(&id_for_pump);
-                if answered {
-                    state_buf.clear();
-                    last_input_needed_at = None;
-                    tracing::debug!(
-                        terminal_id = ?id_for_pump,
-                        "user answered prompt; clearing agent-state detection buffer",
-                    );
-                }
-            }
-            maybe_emit_state_change(
-                agent_for_pump.as_ref(),
-                &mut state_buf,
-                &chunk.bytes,
-                &agent_states_map,
-                &bus,
-                id_for_pump,
-                &session_key_for_pump,
-                &terminal_meta_map,
-                &mut last_input_needed_at,
-                INPUT_NEEDED_HYSTERESIS,
-                &mut last_working_at,
-                WORKING_HYSTERESIS,
-                &hook_driven_map,
-                &input_shapes_map,
-            )
-            .await;
-            if !signaled_first_output {
+            if !sub.replay.is_empty() {
+                maybe_emit_state_change(
+                    agent_for_pump.as_ref(),
+                    &mut state_buf,
+                    &sub.replay,
+                    &agent_states_map,
+                    &bus,
+                    id_for_pump,
+                    &session_key_for_pump,
+                    &terminal_meta_map,
+                    &mut last_input_needed_at,
+                    INPUT_NEEDED_HYSTERESIS,
+                    &mut last_working_at,
+                    WORKING_HYSTERESIS,
+                    &hook_driven_map,
+                    &input_shapes_map,
+                )
+                .await;
+                let _ = bus.send(Event::TerminalOutput {
+                    terminal_id: id_for_pump,
+                    bytes: sub.replay.clone(),
+                    seq: sub.last_seq,
+                });
+                // Permit-storing, like the live first-output path below — a
+                // replay that lands before the inject task registers its
+                // waiter must not be lost.
                 first_output_signal_for_pump.notify_one();
                 signaled_first_output = true;
-                tracing::info!(
-                    terminal_id = ?id_for_pump,
-                    elapsed_ms = t0_for_pump.elapsed().as_millis(),
-                    "handle_spawn: first PTY output",
-                );
+                check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
             }
-            check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
-            let _ = bus.send(Event::TerminalOutput {
-                terminal_id: id_for_pump,
-                bytes: chunk.bytes,
-                seq: chunk.seq,
-            });
+            while let Some(chunk) = sub.live.recv().await {
+                // `subscribe` subscribes before snapshotting, so a live
+                // chunk already covered by the replay (seq within the
+                // snapshot's high-water mark) must be dropped to avoid
+                // re-feeding the detector and re-emitting bytes.
+                if chunk.seq <= sub.last_seq {
+                    continue;
+                }
+                // The user just answered an InputNeeded prompt (Enter while
+                // the `?` pill was up). Drop the accumulated detection
+                // buffer so the just-answered prompt's markers can't
+                // re-fire InputNeeded on this fresh chunk. See the
+                // `agent_detect_resets` field doc for why this is safe — a
+                // prompt that's genuinely still up gets re-rendered and
+                // re-detected from the post-answer output.
+                //
+                // Only agent terminals are ever inserted into the set (the
+                // optimistic flip in `handle_write` gates on InputNeeded,
+                // which shells never reach), so skip the per-chunk lock
+                // entirely for shells. Bind the `remove` result before the
+                // `if` so the MutexGuard drops at the `;` rather than being
+                // held across the body — the temporary-lifetime footgun the
+                // `TERMINAL_MAP_LOCK_ORDER` note warns about (harmless today
+                // with no await in the body, a latent deadlock the moment
+                // one is added).
+                if agent_for_pump.is_some() {
+                    let answered = agent_detect_resets_map.lock().await.remove(&id_for_pump);
+                    if answered {
+                        state_buf.clear();
+                        last_input_needed_at = None;
+                        tracing::debug!(
+                            terminal_id = ?id_for_pump,
+                            "user answered prompt; clearing agent-state detection buffer",
+                        );
+                    }
+                }
+                maybe_emit_state_change(
+                    agent_for_pump.as_ref(),
+                    &mut state_buf,
+                    &chunk.bytes,
+                    &agent_states_map,
+                    &bus,
+                    id_for_pump,
+                    &session_key_for_pump,
+                    &terminal_meta_map,
+                    &mut last_input_needed_at,
+                    INPUT_NEEDED_HYSTERESIS,
+                    &mut last_working_at,
+                    WORKING_HYSTERESIS,
+                    &hook_driven_map,
+                    &input_shapes_map,
+                )
+                .await;
+                if !signaled_first_output {
+                    first_output_signal_for_pump.notify_one();
+                    signaled_first_output = true;
+                    tracing::info!(
+                        terminal_id = ?id_for_pump,
+                        elapsed_ms = t0_for_pump.elapsed().as_millis(),
+                        "handle_spawn: first PTY output",
+                    );
+                }
+                check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
+                let _ = bus.send(Event::TerminalOutput {
+                    terminal_id: id_for_pump,
+                    bytes: chunk.bytes,
+                    seq: chunk.seq,
+                });
+            }
+            backend.wait_exit(&key_for_pump).await
         }
-        let exit_code = backend.wait_exit(&key_for_pump).await;
+        .await;
         let _ = bus.send(Event::TerminalExited {
             terminal_id: id_for_pump,
             exit_code,
@@ -3374,28 +3390,37 @@ pub async fn recover_sessions(config: &ServerConfig) {
             no_permission,
         });
         tokio::spawn(async move {
-            let mut sub = match backend.subscribe(&key_for_pump).await {
-                Ok(s) => s,
+            let exit_code = match backend.subscribe(&key_for_pump).await {
+                Ok(mut sub) => {
+                    if !sub.replay.is_empty() {
+                        let _ = bus.send(Event::TerminalOutput {
+                            terminal_id,
+                            bytes: sub.replay.clone(),
+                            seq: sub.last_seq,
+                        });
+                    }
+                    while let Some(chunk) = sub.live.recv().await {
+                        // Drop live chunks already covered by the replay
+                        // (see `DaemonPty::subscribe`).
+                        if chunk.seq <= sub.last_seq {
+                            continue;
+                        }
+                        let _ = bus.send(Event::TerminalOutput {
+                            terminal_id,
+                            bytes: chunk.bytes,
+                            seq: chunk.seq,
+                        });
+                    }
+                    backend.wait_exit(&key_for_pump).await
+                }
+                // Subscribe failed *after* TerminalSpawned was broadcast.
+                // Fall through to teardown so the phantom entry doesn't
+                // satisfy the singleton guard forever and block respawn.
                 Err(e) => {
                     tracing::warn!("recover subscribe {key_for_pump}: {e}");
-                    return;
+                    None
                 }
             };
-            if !sub.replay.is_empty() {
-                let _ = bus.send(Event::TerminalOutput {
-                    terminal_id,
-                    bytes: sub.replay.clone(),
-                    seq: sub.last_seq,
-                });
-            }
-            while let Some(chunk) = sub.live.recv().await {
-                let _ = bus.send(Event::TerminalOutput {
-                    terminal_id,
-                    bytes: chunk.bytes,
-                    seq: chunk.seq,
-                });
-            }
-            let exit_code = backend.wait_exit(&key_for_pump).await;
             let _ = bus.send(Event::TerminalExited {
                 terminal_id,
                 exit_code,

@@ -197,6 +197,16 @@ impl<T: TerminalAdapter> Model<T> {
         // equivalent rows are processed below, so the first render
         // already has both layers.
         if let IpcEvent::Snapshot { projects, .. } = &event {
+            // The snapshot is authoritative for daemon-known projects, so
+            // drop any that vanished while the client was disconnected
+            // (out-of-process / SSH). Keep locally-synthesized projects —
+            // they never appear in the snapshot and are reconciled by the
+            // workspace sync.
+            let snapshot_keys: std::collections::HashSet<_> =
+                projects.iter().map(|p| p.key.clone()).collect();
+            let synthesized = &self.synthesized_projects;
+            self.projects
+                .retain(|k, _| snapshot_keys.contains(k) || synthesized.contains(k));
             for p in projects {
                 self.projects.insert(p.key.clone(), p.clone());
                 self.synthesized_projects.remove(&p.key);

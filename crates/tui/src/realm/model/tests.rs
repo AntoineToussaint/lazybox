@@ -1904,6 +1904,52 @@ mod subscribed_projects_tests {
             "whole-org discovered project must survive refresh"
         );
     }
+
+    /// A reconnect `Snapshot` is authoritative for daemon projects: one
+    /// deleted while the client was disconnected must be pruned, not
+    /// linger as a ghost header.
+    #[test]
+    fn reconnect_snapshot_prunes_vanished_project() {
+        let mut m = build_model();
+        let pk = ProjectKey::github("acme", "widget");
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![],
+            terminals: vec![],
+            projects: vec![Project::new(pk.clone(), "acme/widget", chrono::Utc::now())],
+        });
+        assert!(m.projects.contains_key(&pk), "snapshot seeds the project");
+
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![],
+            terminals: vec![],
+            projects: vec![],
+        });
+        assert!(
+            !m.projects.contains_key(&pk),
+            "project absent from the reconnect snapshot must be pruned"
+        );
+    }
+
+    /// Locally-synthesized placeholders never appear in the snapshot, so
+    /// pruning must spare them.
+    #[test]
+    fn reconnect_snapshot_keeps_synthesized_placeholder() {
+        let mut m = build_model();
+        let pk = ProjectKey::github("acme", "widget");
+        m.setup.persisted = Some(persisted_with_scopes(&["github:acme/widget"]));
+        m.refresh_subscribed_projects();
+        assert!(m.projects.contains_key(&pk), "placeholder synthesized");
+
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![],
+            terminals: vec![],
+            projects: vec![],
+        });
+        assert!(
+            m.projects.contains_key(&pk),
+            "synthesized placeholder must survive a reconnect snapshot"
+        );
+    }
 }
 
 #[cfg(test)]

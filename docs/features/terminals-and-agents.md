@@ -5,7 +5,7 @@ coding agent (Claude Code, Codex, Cursor, or a generic CLI) inside its git
 worktree. This is lazybox's highest-churn area — agent state detection and the
 structured runtime are where focused testing pays off most.
 
-See [`DESIGN.md` § Agent abstraction / LLM proxy](../../DESIGN.md),
+See [`DESIGN.md` § Agent abstraction / LLM gateway](../../DESIGN.md),
 [`ROADMAP.md` §1–3](../../ROADMAP.md), and
 [Workspaces & worktrees](workspaces-and-worktrees.md) for the worktree a
 session runs in.
@@ -210,7 +210,7 @@ back the fixtures in `tests/detect_fixtures.rs`.
 - [ ] `Shift-F` jumps to the next PR with failing/mixed CI.
 
 ### Known sharp edges
-- Detection is heuristic over rendered terminal bytes; novel agent UIs or themes can fool it. The structured runtime + LLM proxy are the longer-term replacement.
+- Detection is heuristic over rendered terminal bytes; novel agent UIs or themes can fool it. The structured runtime is the longer-term replacement.
 - Codex/Cursor pattern sets are narrower than Claude's and miss custom prompt phrasings.
 
 ---
@@ -251,47 +251,49 @@ Claude `result` line finishes a *turn*; the process exiting is the *run*.
 
 ### Known sharp edges
 - Foundation only (ROADMAP §1–3): structured runs aren't persisted yet, so a reconnecting client can't rediscover an active run.
-- Token/cost accounting from the stream isn't fully wired here (see LLM proxy).
+- Token/cost accounting from the stream isn't fully wired here yet.
 - Only `StreamJson` mode is handled; `Terminal` mode goes through the [terminal path](#embedded-terminal).
 
 ---
 
-## LLM proxy
+## LLM gateway
 
-**Status:** experimental
-**Crate(s):** `llm-proxy`, `server` (wiring), `ipc` (`ProxyRecord`)
-**Config / flags:** `proxy.record_bodies`, redact lists (per `DESIGN.md`)
+**Status:** shipped
+**Crate(s):** `server` (`gateway_env_for_agent`), `agents` (`LlmProvider`), `config` (`agent.llm_gateway_url`)
+**Config / flags:** `agent.llm_gateway_url` (global), per-repo `env` overrides
 **Key bindings:** —
 
 ### What it does
-A 127.0.0.1 HTTP pass-through that the daemon points agents at (via
-`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`), forwarding requests verbatim while
-attributing model traffic to a session. It is the path for structured telemetry
-— model, token counts, tool calls, latency, and cost — as parsing and storage
-land behind the proxy.
+Points a spawned agent at an operator-provided LLM gateway by injecting a single
+base-URL env var — `ANTHROPIC_BASE_URL` for Anthropic agents (Claude),
+`OPENAI_BASE_URL` for OpenAI agents (Codex / Cursor). lazybox does **no
+proxying itself**: there is no in-process HTTP server and no telemetry capture
+from agent API traffic — the agent talks to the configured gateway directly.
+
+> An earlier design ran an in-process 127.0.0.1 telemetry proxy (the `llm-proxy`
+> crate); it was never wired up and has been removed. See the superseded section
+> in `DESIGN.md` if structured telemetry is revived.
 
 ### How to use it
-Transparent to the agent: the daemon injects the base-URL env vars when spawning
-and tags requests with an `X-Lazybox-Session` header. No user action.
+Set `agent.llm_gateway_url` in `~/.lazybox/config.yaml`. It's transparent to the
+agent — the daemon adds the env var at spawn time. A per-repo `env` entry still
+wins, so a repo can override or opt out.
 
 ### How it works (brief)
-`ProxyServer` (`crates/llm-proxy/src/server.rs`) binds an ephemeral 127.0.0.1
-port and forwards to the real upstream byte-for-byte. Session attribution comes
-from the injected header; a redact list strips configured headers / JSON paths.
-Records use the `ProxyRecord` wire type (`crates/ipc/src/proxy.rs`). It forwards
-the agent's `Authorization` header verbatim — the daemon never sees the user's
-key.
+`gateway_env_for_agent` (`crates/server/src/spawn_handler.rs`) maps the agent's
+`LlmProvider` to the right base-URL env var (`LlmProvider::base_url_env`) and
+sets it to `agent.gateway_url()`. Returns nothing for non-agent spawns, agents
+with no inferable provider (`GenericCli`), or when no gateway URL is set.
 
 ### Test checklist
-- [ ] A spawned agent's API traffic flows through the proxy (base-URL env injected).
-- [ ] Requests are forwarded verbatim and responses are unmodified (observability only).
-- [ ] The session header attributes records to the right session.
-- [ ] Redacted headers/JSON paths are stripped from stored records.
-- [ ] Only 127.0.0.1 is bound — never the network.
+- [x] A spawned Anthropic agent gets `ANTHROPIC_BASE_URL`; OpenAI agents get `OPENAI_BASE_URL`.
+- [x] No env var is injected when `agent.llm_gateway_url` is unset.
+- [x] A per-repo `env` override takes precedence over the global gateway.
+- [x] `GenericCli` / non-agent spawns get nothing.
 
 ### Known sharp edges
-- Transport is wired, but SSE parsing for token counts/cost and durable storage of records aren't fully landed yet — treat counters as not-yet-trustworthy.
-- An agent that ignores the base-URL env vars simply isn't recorded (graceful degrade).
+- It only sets a base-URL env var; the gateway itself (routing, auth, telemetry) lives outside lazybox.
+- An agent that ignores the base-URL env var, or whose provider can't be inferred (`GenericCli`), simply talks to its default upstream.
 
 ---
 

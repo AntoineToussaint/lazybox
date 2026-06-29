@@ -14,7 +14,6 @@ members = [
     "crates/server",
     "crates/agents",
     "crates/linear-provider",
-    "crates/llm-proxy",
     "crates/tui-core",
     "crates/tui",
     # Vendored from https://github.com/Uzaaft/libghostty-rs (commit
@@ -120,7 +119,6 @@ lazybox-tui-core    = { path = "crates/tui-core" }
 # ── Daemon-side crates ─────────────────────────────────────────────────
 lazybox-ipc       = { path = "crates/ipc" }
 lazybox-agents    = { path = "crates/agents" }
-lazybox-llm-proxy = { path = "crates/llm-proxy" }
 
 # ── Third-party ────────────────────────────────────────────────────────
 tokio              = { version = "1", features = ["full"] }

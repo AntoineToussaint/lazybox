@@ -27,7 +27,6 @@
 )]
 
 pub mod agent_runs;
-pub mod agent_spawn;
 pub mod agent_stream;
 pub mod api_gateway;
 pub mod auth;

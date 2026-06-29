@@ -84,6 +84,16 @@ pub struct SocketModeClient {
     http: reqwest::Client,
 }
 
+/// Why a single socket session ended, so `run_forever` can tell a
+/// reconnectable close apart from a permanent shutdown.
+#[derive(Debug, PartialEq, Eq)]
+enum RunOutcome {
+    /// Socket closed by the peer/timeout — reconnect.
+    Closed,
+    /// The event receiver was dropped — stop the loop.
+    ConsumerGone,
+}
+
 impl SocketModeClient {
     pub fn new(app_token: impl Into<String>) -> Self {
         Self {
@@ -155,7 +165,11 @@ impl SocketModeClient {
         loop {
             let started = Instant::now();
             match self.run_once(&tx).await {
-                Ok(()) => {
+                Ok(RunOutcome::ConsumerGone) => {
+                    tracing::info!("slack: event consumer dropped, stopping socket loop");
+                    return;
+                }
+                Ok(RunOutcome::Closed) => {
                     let delay = clean_close.next_delay(started.elapsed());
                     tracing::info!("slack: socket closed cleanly, reconnecting in {delay:?}");
                     tokio::time::sleep(delay).await;
@@ -171,7 +185,7 @@ impl SocketModeClient {
         }
     }
 
-    async fn run_once(&self, tx: &mpsc::Sender<InboundEvent>) -> Result<(), SlackError> {
+    async fn run_once(&self, tx: &mpsc::Sender<InboundEvent>) -> Result<RunOutcome, SlackError> {
         // Slack pings every few seconds; a healthy socket never goes
         // quiet for anywhere near this long. Going 90s without ANY
         // frame means the connection is half-open (peer gone, TCP
@@ -225,12 +239,14 @@ impl SocketModeClient {
             }
             for event in envelope.into_inbound() {
                 if tx.send(event).await.is_err() {
-                    // Consumer dropped — shut down.
-                    return Ok(());
+                    // Consumer dropped — stop the whole loop rather than
+                    // reconnecting (a clean `Closed` would just reopen
+                    // the socket forever).
+                    return Ok(RunOutcome::ConsumerGone);
                 }
             }
         }
-        Ok(())
+        Ok(RunOutcome::Closed)
     }
 }
 

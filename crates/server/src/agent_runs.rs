@@ -111,8 +111,20 @@ pub async fn handle_start_agent_run(
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(async move {
         let _ = ready_rx.await;
-        drive_claude_stream(run_id, io, input_rx, bus.clone()).await;
-        runs.lock().await.remove(&run_id);
+        let outcome = drive_claude_stream(run_id, io, input_rx, bus.clone()).await;
+        // The handle in `runs` is the single token for the terminal
+        // event: whoever removes it owns the `AgentRunFinished`. If
+        // `handle_interrupt_agent_run` removed it first it already sent
+        // "interrupted", so we stay silent to avoid a duplicate.
+        if runs.lock().await.remove(&run_id).is_some()
+            && let DriveOutcome::Completed { exit_code } = outcome
+        {
+            let _ = bus.send(Event::AgentRunFinished {
+                run_id,
+                exit_code,
+                error: None,
+            });
+        }
     });
     let abort = task.abort_handle();
 
@@ -240,12 +252,22 @@ async fn resolve_cwd(
     workspace.default_session().map(|s| s.worktree_path.clone())
 }
 
+/// How `drive_claude_stream` ended, so the spawning task can decide
+/// whether to emit the terminal `AgentRunFinished` event.
+enum DriveOutcome {
+    /// Agent stdout reached EOF — the run completed; emit the event.
+    Completed { exit_code: Option<i32> },
+    /// stdout errored (already reported via `provider_error`) — no
+    /// terminal event.
+    Errored,
+}
+
 async fn drive_claude_stream(
     run_id: AgentRunId,
     io: AgentStreamIo,
     mut input_rx: mpsc::UnboundedReceiver<AgentInputMessage>,
     bus: tokio::sync::broadcast::Sender<Event>,
-) {
+) -> DriveOutcome {
     let AgentStreamIo {
         mut stdin,
         stdout,
@@ -284,19 +306,14 @@ async fn drive_claude_stream(
                         }
                     },
                     Ok(None) => {
-                        let _ = bus.send(Event::AgentRunFinished {
-                            run_id,
-                            exit_code: wait.await,
-                            error: None,
-                        });
-                        break;
+                        return DriveOutcome::Completed { exit_code: wait.await };
                     },
                     Err(e) => {
                         let _ = bus.send(Event::provider_error_retryable(
                             "agent_run:stdout",
                             e.to_string(),
                         ));
-                        break;
+                        return DriveOutcome::Errored;
                     }
                 }
             }

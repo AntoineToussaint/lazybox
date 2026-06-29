@@ -15,10 +15,6 @@ thiserror           = { workspace = true }
 tokio               = { workspace = true }
 chrono              = { workspace = true }
 tracing             = { workspace = true }
-# Wire types for Event::ProxyRecord use Duration with humantime
-# serialization. Lives here (not pulled in via lazybox-llm-proxy) so
-# the protocol crate doesn't depend on the proxy implementation.
-humantime-serde     = "1"
 
 [dev-dependencies]
 tokio      = { workspace = true, features = ["full", "test-util"] }

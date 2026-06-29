@@ -105,6 +105,24 @@ mod effects_tests {
         assert!(n.message.contains(lazybox_ipc::BUILD_VERSION));
     }
 
+    /// A build that trails `main` raises the persistent outdated-build
+    /// warning: a sticky footer banner naming the fix *and* the sidebar
+    /// flag the header repaints every frame. This is the uniformly-stale
+    /// install the daemon/client mismatch check can't see (#234).
+    #[test]
+    fn outdated_build_raises_persistent_warning() {
+        use crate::realm::components::footer::NoticeSeverity;
+        let mut m = build_model();
+
+        m.note_outdated_build(89);
+
+        let n = m.status.notice.as_ref().expect("outdated banner set");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("89"));
+        assert!(n.message.contains("update & restart"));
+        assert_eq!(m.sidebar.outdated_commits_behind(), Some(89));
+    }
+
     /// A manual-refresh sync failure paints a sticky "✗ sync failed"
     /// banner; the next successful poll (auto-cycle) from the *same*
     /// provider must clear it so a recovered sync doesn't leave the

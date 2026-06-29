@@ -3546,7 +3546,7 @@ async fn commit_merge(
     mut pr_ws: Workspace,
     pending: Vec<PendingIssueMerge>,
 ) {
-    crate::spawn_handler::migrate_session_paths_if_needed(config, &mut pr_ws).await;
+    crate::spawn_handler::migrate_session_paths_if_needed(&mut pr_ws).await;
     let pr_key = pr_ws.key.clone();
     commit_upsert(config, &pr_key, pr_ws);
     finalize_issue_merges(config, &pr_key, pending);
@@ -3750,7 +3750,7 @@ pub async fn handle_adopt_sessions(
     }
     rebadge_terminals(config, &source_session_key, &target_session_key).await;
 
-    crate::spawn_handler::migrate_session_paths_if_needed(config, &mut target_ws).await;
+    crate::spawn_handler::migrate_session_paths_if_needed(&mut target_ws).await;
 
     tracing::info!(
         source_workspace = %source_key,

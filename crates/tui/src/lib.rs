@@ -25,6 +25,7 @@
     clippy::needless_late_init
 )]
 
+pub mod build_guard;
 pub mod components;
 pub mod lazybox_theme;
 pub mod pane;

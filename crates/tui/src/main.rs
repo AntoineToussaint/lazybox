@@ -491,6 +491,7 @@ async fn run_remote(
     tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client)?;
         model.note_daemon_build(&daemon.build);
+        model.check_build_freshness();
         if let Some(p) = preselect {
             model = model.with_preselect(p);
         }
@@ -757,6 +758,9 @@ async fn run_embedded_realm(
             // hasn't been seen (e.g. an upgrade into this feature).
             model.maybe_mount_tour();
         }
+        // Warn if this build trails `main` — the uniformly-stale install
+        // that no daemon/client mismatch catches (issue #234).
+        model.check_build_freshness();
         lazybox_tui::realm::model::run_loop_with_model(model)
     })
     .await

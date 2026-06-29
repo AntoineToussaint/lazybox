@@ -161,6 +161,16 @@ impl Sidebar {
         self.focused = focused;
     }
 
+    /// Record how many commits this build trails `main` so the header
+    /// paints the persistent outdated-build warning (#234).
+    pub fn set_outdated_build(&mut self, commits_behind: Option<u32>) {
+        self.inner.set_outdated_build(commits_behind);
+    }
+
+    pub fn outdated_commits_behind(&self) -> Option<u32> {
+        self.inner.outdated_commits_behind()
+    }
+
     /// True while the `/` search bar is capturing keystrokes. The
     /// orchestrator checks this before its normal key routing so a
     /// query can swallow keys that would otherwise fire shortcuts.

@@ -1614,6 +1614,28 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Compare the running build against `origin/main` and, when behind,
+    /// raise the persistent "outdated build" warning. This catches the
+    /// blind spot [`Self::note_daemon_build`] can't: a *uniformly* stale
+    /// install where daemon and client are the same old build, so no
+    /// mismatch fires while already-fixed bugs quietly reappear. Best
+    /// effort — a current build, a released binary, or an unanswerable
+    /// git query all leave the UI quiet. Called once at startup.
+    pub fn check_build_freshness(&mut self) {
+        if let Some(behind) = crate::build_guard::commits_behind() {
+            self.note_outdated_build(behind);
+        }
+    }
+
+    /// Surface a stale build `behind` commits back: a header warning the
+    /// sidebar repaints every frame (so it never scrolls away) plus a
+    /// startup banner for immediacy. Split from [`Self::check_build_freshness`]
+    /// so the banner logic is testable without a git checkout.
+    pub fn note_outdated_build(&mut self, behind: u32) {
+        self.sidebar.set_outdated_build(Some(behind));
+        self.flash_error(crate::build_guard::outdated_message(behind));
+    }
+
     /// Like `flash_error`, but tags the notice as a provider "sync
     /// failed" banner owned by `source`, so the next successful
     /// `PollCompleted` from that same provider can clear it once sync

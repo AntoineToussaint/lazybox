@@ -167,25 +167,4 @@ pub trait SessionBackend: Send + Sync + 'static {
         &'a self,
         key: &'a str,
     ) -> Pin<Box<dyn Future<Output = Option<i32>> + Send + 'a>>;
-
-    /// Pause client I/O on the session. The PTY processes keep
-    /// running but their input is suspended; useful as a guard while
-    /// the daemon reshuffles the worktree filesystem (PR-attach
-    /// migration). Default impl is a no-op for backends without a
-    /// natural pause primitive (raw-pty); tmux overrides to
-    /// `tmux detach-client -a -s <session>`.
-    fn freeze<'a>(
-        &'a self,
-        _key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
-        Box::pin(async { Ok(()) })
-    }
-
-    /// Reverse of `freeze`. Default no-op.
-    fn resume<'a>(
-        &'a self,
-        _key: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
-        Box::pin(async { Ok(()) })
-    }
 }

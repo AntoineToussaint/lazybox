@@ -191,9 +191,9 @@ pub const INLINE_BUDGET: std::time::Duration = std::time::Duration::from_millis(
 /// (e.g. `handle_spawn` inserts meta before terminals so a snapshot
 /// reader never sees a terminals entry without a matching meta).
 ///
-/// The only co-holding site today is
-/// `spawn_handler::freeze_runners_in_session`; that's why this
-/// constant exists, as a discoverable name future callers can grep.
+/// Any co-holding site (one that locks two of these maps at once)
+/// must follow this order; the constant exists as a discoverable name
+/// future callers can grep when they add one.
 pub const TERMINAL_MAP_LOCK_ORDER: &str =
     "terminals → terminal_meta → terminal_sessions → agent_states";
 

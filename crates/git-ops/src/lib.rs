@@ -757,40 +757,9 @@ impl WorktreeManager {
         Ok(result)
     }
 
-    /// Remove a worktree.
-    /// Move a worktree from `old` to `new`. Wraps `git worktree move`,
-    /// which atomically renames the worktree directory and updates
-    /// git's internal pointer in `<bare>/worktrees/<name>/gitdir`.
-    /// Used by lazybox's PR-attach migration: when a workspace gains a
-    /// PR mid-flight, the slug changes from "fix-login" to
-    /// "PR-1234-fix-login" and we need to relocate without reclone.
-    ///
-    /// `bare_path` is the bare repo (`<base>/repos/<owner>/<repo>.git`)
-    /// the worktree belongs to — `git worktree move` operates from
-    /// inside the bare clone's tree.
-    pub async fn move_worktree(
-        &self,
-        bare_path: &Path,
-        old: &Path,
-        new: &Path,
-    ) -> Result<(), GitError> {
-        let lock = repo_lock(bare_path);
-        let _guard = lock.lock().await;
-        run_git_in(
-            bare_path,
-            &[
-                "worktree",
-                "move",
-                &old.to_string_lossy(),
-                &new.to_string_lossy(),
-            ],
-        )
-        .await?;
-        Ok(())
-    }
-
     /// The bare-clone path for `owner/repo` under this manager's base.
-    /// Public so callers (lazybox-server) can pass it to `move_worktree`.
+    /// Public so callers (lazybox-server) can locate a repo's bare clone
+    /// — e.g. the merged-worktree cleanup inspector.
     pub fn bare_path(&self, owner: &str, repo: &str) -> PathBuf {
         self.bare_clone_path(owner, repo)
     }

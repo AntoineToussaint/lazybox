@@ -592,7 +592,6 @@ async fn mark_workspace_read_no_op_when_workspace_missing() {
 #[tokio::test]
 async fn migrate_path_only_when_dir_missing() {
     use lazybox_core::WorkspaceSession;
-    let config = ServerConfig::in_memory();
     let task = make_task("o/r#11");
     let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
     let session = WorkspaceSession::new(
@@ -603,8 +602,7 @@ async fn migrate_path_only_when_dir_missing() {
     );
     ws.add_session(session);
 
-    let moved =
-        lazybox_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
+    let moved = lazybox_server::spawn_handler::migrate_session_paths_if_needed(&mut ws).await;
     assert!(moved, "stale path detected → migrated record");
 
     let expected = lazybox_server::spawn_handler::worktree_path_for_session(&ws, 0);
@@ -616,7 +614,6 @@ async fn migrate_path_only_when_dir_missing() {
 #[tokio::test]
 async fn migrate_no_op_when_path_already_matches() {
     use lazybox_core::WorkspaceSession;
-    let config = ServerConfig::in_memory();
     let task = make_task("o/r#22");
     let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
     let expected = lazybox_server::spawn_handler::worktree_path_for_session(&ws, 0);
@@ -628,18 +625,15 @@ async fn migrate_no_op_when_path_already_matches() {
     );
     ws.add_session(session);
 
-    let moved =
-        lazybox_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
+    let moved = lazybox_server::spawn_handler::migrate_session_paths_if_needed(&mut ws).await;
     assert!(!moved, "path already matches → migration is a no-op");
     assert_eq!(ws.sessions[0].worktree_path, expected);
 }
 #[tokio::test]
 async fn migrate_handles_zero_sessions() {
-    let config = ServerConfig::in_memory();
     let task = make_task("o/r#33");
     let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
-    let moved =
-        lazybox_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
+    let moved = lazybox_server::spawn_handler::migrate_session_paths_if_needed(&mut ws).await;
     assert!(!moved, "no sessions → nothing to migrate");
 }
 #[tokio::test]
@@ -654,11 +648,9 @@ async fn migrate_picks_up_pr_title_rename() {
     // bogus path on the session record). Migration must rewrite
     // the record to the new slug-derived path.
     //
-    // The real git-worktree-move branch isn't covered here because
-    // it requires a real bare clone — different test file's job.
+    // When the old folder DOES exist on disk the worktree is reused in
+    // place instead — see `migrate_reuses_live_worktree_in_place_on_slug_change`.
     use lazybox_core::WorkspaceSession;
-    let config = ServerConfig::in_memory();
-
     // Build the workspace with the ORIGINAL title.
     let mut task = make_task("o/r#7413");
     task.title = "Initial draft".into();
@@ -691,8 +683,7 @@ async fn migrate_picks_up_pr_title_rename() {
     );
     assert!(renamed_slug.starts_with("PR-7413-"));
 
-    let moved =
-        lazybox_server::spawn_handler::migrate_session_paths_if_needed(&config, &mut ws).await;
+    let moved = lazybox_server::spawn_handler::migrate_session_paths_if_needed(&mut ws).await;
     assert!(moved, "rename must trigger migration");
 
     let expected = lazybox_server::spawn_handler::worktree_path_for_session(&ws, 0);
@@ -708,6 +699,121 @@ async fn migrate_picks_up_pr_title_rename() {
         ws.sessions[0].worktree_path, original_path,
         "session path actually changed (not a no-op)",
     );
+}
+#[tokio::test]
+async fn migrate_reuses_live_worktree_in_place_on_slug_change() {
+    // The issue→PR absorb (and an upstream PR-title edit) leaves a
+    // session attached to a workspace whose slug differs from the
+    // directory its worktree already lives in. A real, on-disk worktree
+    // must be REUSED IN PLACE — never `git worktree move`d to chase the
+    // new slug. Renaming it would pull the working directory out from
+    // under the agent/shell running inside and lose the session: the
+    // long-standing "session lost on merge" bug (#78/#161/#167). This is
+    // the regression guard for that.
+    use lazybox_core::WorkspaceSession;
+
+    // A real worktree on disk is just a directory containing a `.git`
+    // entry — all `migrate_session_paths_if_needed` inspects to tell a
+    // live worktree from a stale record or a V1 leftover.
+    let live = tempfile::tempdir().unwrap();
+    std::fs::create_dir(live.path().join(".git")).unwrap();
+    let live_path = live.path().to_path_buf();
+
+    // Workspace under its ORIGINAL title, session pointed at the
+    // worktree that already exists on disk.
+    let mut task = make_task("o/r#9001");
+    task.title = "Initial draft".into();
+    let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
+    let session = WorkspaceSession::new(
+        ws.key.clone(),
+        lazybox_core::SessionKind::Shell,
+        live_path.clone(),
+        Utc::now(),
+    );
+    ws.add_session(session);
+
+    // Slug changes under the live worktree (title edited upstream), so
+    // the slug-derived path no longer matches the on-disk one.
+    let mut renamed = make_task("o/r#9001");
+    renamed.title = "Reuse the worktree in place".into();
+    ws.attach_task(renamed);
+    let slug_path = lazybox_server::spawn_handler::worktree_path_for_session(&ws, 0);
+    assert_ne!(
+        slug_path, live_path,
+        "fixture must make the slug path differ from the live worktree"
+    );
+
+    let moved = lazybox_server::spawn_handler::migrate_session_paths_if_needed(&mut ws).await;
+
+    assert!(
+        !moved,
+        "a live worktree is reused in place — no record rewrite"
+    );
+    assert_eq!(
+        ws.sessions[0].worktree_path, live_path,
+        "session keeps its existing worktree, not the slug-derived path"
+    );
+    assert!(
+        live_path.exists(),
+        "the worktree directory is left untouched on disk"
+    );
+}
+#[tokio::test]
+async fn migrate_reuses_both_worktrees_when_pr_absorbs_an_issue_session() {
+    // The real issue→PR shape: the PR workspace already owns a session
+    // (its own worktree at the base slug) and then absorbs the issue's
+    // live session. Sorted by `created_at`, the absorbed (older) issue
+    // session takes slot 0 — whose slug-derived path is the base slug
+    // the PR's own session already occupies. The OLD git-move code would
+    // have tried to relocate the issue worktree onto that occupied dir
+    // (collision) and shuffle the PR worktree to `-2`, yanking CWD out
+    // from under both agents. Reuse-in-place must leave BOTH untouched.
+    use lazybox_core::WorkspaceSession;
+
+    let issue_wt = tempfile::tempdir().unwrap();
+    std::fs::create_dir(issue_wt.path().join(".git")).unwrap();
+    let issue_path = issue_wt.path().to_path_buf();
+
+    let pr_wt = tempfile::tempdir().unwrap();
+    std::fs::create_dir(pr_wt.path().join(".git")).unwrap();
+    let pr_path = pr_wt.path().to_path_buf();
+
+    let mut task = make_task("o/r#9100");
+    task.title = "Absorb the issue".into();
+    let mut ws = lazybox_core::Workspace::from_task(task, Utc::now());
+
+    // Older session first (the issue's, moved onto the PR), then the
+    // PR's own. Distinct timestamps fix the slot order deterministically.
+    let t0 = Utc::now();
+    let absorbed = WorkspaceSession::new(
+        ws.key.clone(),
+        lazybox_core::SessionKind::Shell,
+        issue_path.clone(),
+        t0,
+    );
+    let pr_own = WorkspaceSession::new(
+        ws.key.clone(),
+        lazybox_core::SessionKind::Shell,
+        pr_path.clone(),
+        t0 + chrono::Duration::seconds(1),
+    );
+    let absorbed_id = ws.add_session(absorbed);
+    let pr_own_id = ws.add_session(pr_own);
+
+    let moved = lazybox_server::spawn_handler::migrate_session_paths_if_needed(&mut ws).await;
+
+    assert!(!moved, "two live worktrees are both reused in place");
+    assert_eq!(
+        ws.find_session(absorbed_id).unwrap().worktree_path,
+        issue_path,
+        "absorbed issue session keeps its own worktree (no collision)"
+    );
+    assert_eq!(
+        ws.find_session(pr_own_id).unwrap().worktree_path,
+        pr_path,
+        "PR's own session keeps its worktree (not shuffled to -2)"
+    );
+    assert!(issue_path.exists() && pr_path.exists());
 }
 // ── Create empty workspace (n key flow) ──────────────────────────────
 

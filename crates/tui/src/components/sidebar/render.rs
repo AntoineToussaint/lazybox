@@ -73,6 +73,19 @@ impl Sidebar {
                 Style::default().fg(theme.text_dim),
             ));
         }
+        // Persistent outdated-build warning, shown on every mailbox so a
+        // uniformly-stale install can't quietly reproduce already-fixed
+        // bugs. Painted into the always-on header (never scrolls away)
+        // rather than a transient footer flash.
+        if let Some(behind) = self.outdated_commits_behind {
+            header_left.push(Span::raw("  "));
+            header_left.push(Span::styled(
+                format!("⚠ {behind} behind · update & restart"),
+                Style::default()
+                    .fg(theme.error)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
 
         let mut signal_spans: Vec<Span> = Vec::with_capacity(8);
         if unread > 0 {

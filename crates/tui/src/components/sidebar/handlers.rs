@@ -390,6 +390,18 @@ impl Sidebar {
                 // produces — so without this its `?` pill stays pinned
                 // to the deleted issue key and the PR row shows no
                 // badge, reading as a lost session (#205).
+                // Re-point every live terminal owned by `from` onto `to`.
+                // The runner badge (`N C`), the agent-reuse lookups, and
+                // the `]]<digit>` jump all derive from `running_terminals`
+                // keyed by session — without this the moved agent's badge
+                // stays pinned to the deleted issue key and never appears
+                // on the PR row until an unrelated event forces a rebuild
+                // (#241).
+                for (sk, _) in self.running_terminals.values_mut() {
+                    if sk == from {
+                        *sk = to.clone();
+                    }
+                }
                 let asking =
                     crate::agent_attention::rebadge_attention(&mut self.agents_asking, from, to);
                 crate::agent_attention::rebadge_attention(&mut self.agents_working, from, to);

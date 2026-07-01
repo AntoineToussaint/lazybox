@@ -18,16 +18,23 @@
 //!   rev:
 //!     description: Review current diff
 //!     body: |
-//!       Please review the current diff for correctness bugs and
-//!       obvious cleanups. Focus on the changes only, not the
-//!       surrounding code.
+//!       Review the current diff for correctness bugs. Report findings
+//!       ranked by severity, each with a file:line anchor. Look only at
+//!       the changed lines; if it's clean, say so.
 //!   pr:
 //!     description: Open a PR with summary + test plan
 //!     body: |
-//!       Please open a PR for the current branch. Use a concise
-//!       title. Body should include a Summary section (1-3 bullets)
-//!       and a Test plan section as a checklist.
+//!       Open a PR for the current branch with gh. Concise title; body
+//!       with a Summary (1-3 bullets on why) and a Test plan checklist
+//!       of what you verified. Print the PR URL when done.
 //! ```
+//!
+//! The shipped built-in bodies ([`Snippets::builtin`]) follow one
+//! deliberate house style: imperative and addressed to the agent, a
+//! checkable deliverable stated up front, best-practice discipline
+//! encoded inline (root-cause before fixing, no behavior change on a
+//! refactor), and an escape hatch ("if it's clean, say so"). See
+//! `docs/snippets.md` for the full house style.
 //!
 //! At runtime the TUI loads both and feeds the merged set into the
 //! snippet picker mounted by the terminal pane on `]<key>`.
@@ -158,8 +165,14 @@ impl Snippets {
                 entry(
                     "Review",
                     "Review the current diff",
-                    "Please review the current diff for correctness bugs and obvious \
-                     cleanups. Focus on the changes only, not the surrounding code.",
+                    "Review the current diff (`git diff` against the base branch) for \
+                     correctness bugs: logic errors, off-by-one mistakes, missing error \
+                     handling, broken edge cases, and anything that wouldn't survive a \
+                     careful review. Report findings as a list ranked by severity, each \
+                     with a `file:line` anchor and a one-line explanation of what breaks \
+                     and when. Look only at the changed lines and the code they directly \
+                     touch, not the whole file. If the diff is clean, say so plainly \
+                     rather than inventing nits.",
                 ),
             ),
             (
@@ -170,11 +183,14 @@ impl Snippets {
                 entry(
                     "Review",
                     "Deep review: design, edge cases, failure modes",
-                    "Review the current diff deeply. Beyond surface bugs, evaluate the \
-                     design: are the abstractions right, what edge cases and error paths \
-                     are unhandled, and how could this break under concurrency, partial \
-                     failure, or unexpected input? List concrete findings ranked by \
-                     severity.",
+                    "Review the current diff deeply, past surface bugs. First evaluate \
+                     the design: are the abstractions and boundaries right, is there a \
+                     simpler shape, and does it fit the surrounding code? Then stress the \
+                     change — enumerate the edge cases, error paths, and concurrency / \
+                     partial-failure / bad-input scenarios that aren't handled. Report \
+                     findings as a list ranked by severity with `file:line` anchors, \
+                     separating \"will break\" from \"worth reconsidering\". If the design \
+                     is sound, say so and name the one thing you'd still keep an eye on.",
                 ),
             ),
             (
@@ -184,7 +200,10 @@ impl Snippets {
                     "Nitpick pass: naming, comments, style",
                     "Do a nitpick pass over the current diff: naming, comment quality, \
                      dead code, inconsistent style, and anything that would slow a \
-                     reviewer down. Keep suggestions small and mechanical.",
+                     reviewer down. Keep every suggestion small, mechanical, and \
+                     behavior-preserving, each with a `file:line` anchor. This is polish \
+                     only — if you spot an actual correctness or design problem, flag it \
+                     separately rather than burying it as a nit.",
                 ),
             ),
             (
@@ -192,10 +211,13 @@ impl Snippets {
                 entry(
                     "Review",
                     "Self-review before pushing",
-                    "Before I push, self-review this branch as if you were a skeptical \
-                     reviewer seeing it for the first time. Call out anything that isn't \
-                     obviously correct, any missing tests, and anything I'd be asked to \
-                     change in review.",
+                    "Self-review this branch as a skeptical reviewer seeing it for the \
+                     first time. Read the full diff against the base branch, then call \
+                     out anything that isn't obviously correct, any missing or weak \
+                     tests, any leftover debug code or stray TODOs, and anything you'd be \
+                     asked to change in review. List concrete items with `file:line` \
+                     anchors so I can fix them before pushing. If it's genuinely ready, \
+                     say so.",
                 ),
             ),
             // ── Git & PR ────────────────────────────────────────────
@@ -204,9 +226,12 @@ impl Snippets {
                 entry(
                     "Git & PR",
                     "Open a PR (summary + test plan)",
-                    "Please open a PR for the current branch. Use a concise title. The \
-                     body should include a Summary section (1-3 bullets) and a Test plan \
-                     section as a checklist.",
+                    "Open a PR for the current branch with `gh`. Push first if the branch \
+                     isn't up to date, then write a concise, specific title and a body \
+                     with a `## Summary` section (1-3 bullets on *why*, not a diff recap) \
+                     and a `## Test plan` checklist of what you actually verified. Base \
+                     all of it on the real commits and diff, not a guess. Print the PR \
+                     URL when it's open.",
                 ),
             ),
             (
@@ -214,8 +239,10 @@ impl Snippets {
                 entry(
                     "Git & PR",
                     "Mark the PR ready for review",
-                    "Mark the current pull request as ready for review by running \
-                     `gh pr ready`.",
+                    "Mark the current pull request as ready for review with \
+                     `gh pr ready`. First confirm it actually is ready: the diff is \
+                     clean, tests and CI pass, and the description matches what changed. \
+                     If anything's off, tell me instead of flipping it.",
                 ),
             ),
             (
@@ -223,9 +250,11 @@ impl Snippets {
                 entry(
                     "Git & PR",
                     "Commit staged changes with a good message",
-                    "Commit the staged changes. Write a concise, imperative commit \
-                     subject (<=50 chars) and, if the change isn't trivial, a body \
-                     explaining the why. Don't commit unrelated changes.",
+                    "Commit the staged changes only. Write an imperative subject \
+                     (<=50 chars) and, unless the change is trivial, a body explaining \
+                     the *why* rather than restating the *what*. Don't stage or commit \
+                     unrelated edits — if the working tree has changes outside this \
+                     change, leave them alone and say so.",
                 ),
             ),
             (
@@ -235,7 +264,9 @@ impl Snippets {
                     "Amend the last commit",
                     "Fold the current working changes into the previous commit with \
                      `git commit --amend`, keeping the existing message unless it no \
-                     longer fits.",
+                     longer describes the result. Only do this when the previous commit \
+                     hasn't landed on a shared branch (an unmerged PR branch is fine) — \
+                     flag it if that isn't the case rather than rewriting shared history.",
                 ),
             ),
             (
@@ -243,9 +274,11 @@ impl Snippets {
                 entry(
                     "Git & PR",
                     "Rebase onto the base branch",
-                    "Rebase this branch onto the latest base branch. Fetch first, replay \
-                     cleanly, and resolve any conflicts conservatively — preserve intent \
-                     on both sides and flag anything ambiguous.",
+                    "Rebase this branch onto the latest base branch. Fetch first \
+                     (`git fetch`), replay cleanly, and resolve any conflicts \
+                     conservatively — preserve the intent of both sides, never drop a \
+                     change just to clear markers, and flag anything ambiguous for me. \
+                     When done, confirm the branch still builds and tests pass.",
                 ),
             ),
             (
@@ -254,8 +287,10 @@ impl Snippets {
                     "Git & PR",
                     "Squash the branch into clean commits",
                     "Squash this branch's commits into a small number of logically \
-                     coherent commits with clear messages. Don't collapse genuinely \
-                     independent changes into one.",
+                     coherent commits with clear messages. Group by concept, not by \
+                     chronology, and don't collapse genuinely independent changes into \
+                     one. The final tree must be identical to the current one — verify \
+                     with `git diff` before and after.",
                 ),
             ),
             (
@@ -263,9 +298,11 @@ impl Snippets {
                 entry(
                     "Git & PR",
                     "Resolve merge conflicts",
-                    "Resolve the current merge conflicts. For each hunk, explain which \
-                     side you kept and why, and make sure the merged result actually \
-                     compiles and passes tests rather than just resolving markers.",
+                    "Resolve the current merge conflicts. For each hunk, work out what \
+                     both sides intended and keep a result that honors both, not just \
+                     whichever is easier to paste. Explain per file which side you kept \
+                     and why, then confirm the merged result actually builds and passes \
+                     tests rather than just clearing the markers.",
                 ),
             ),
             // ── Testing ─────────────────────────────────────────────
@@ -275,7 +312,10 @@ impl Snippets {
                     "Testing",
                     "Run the test suite and fix failures",
                     "Run the project's test suite. If anything fails, fix the root cause \
-                     (not the test) and re-run until green. Report what failed and why.",
+                     in the code — not the test, and not by loosening an assertion — then \
+                     re-run until green. Report what failed, why, and what you changed. \
+                     If a test is genuinely wrong, say so explicitly and explain before \
+                     you touch it.",
                 ),
             ),
             (
@@ -283,9 +323,11 @@ impl Snippets {
                 entry(
                     "Testing",
                     "TDD: failing test first, then implement",
-                    "Work test-first: write a failing test that captures the desired \
-                     behavior, confirm it fails for the right reason, then implement the \
-                     minimal change to make it pass. Refactor once green.",
+                    "Work test-first. Write a failing test that captures the desired \
+                     behavior, run it, and confirm it fails for the *right* reason (not a \
+                     typo or missing import). Then implement the minimal change to make \
+                     it pass, re-run to confirm green, and refactor with the test as your \
+                     guard. Show me the test before the implementation.",
                 ),
             ),
             (
@@ -293,9 +335,11 @@ impl Snippets {
                 entry(
                     "Testing",
                     "Add tests for uncovered branches",
-                    "Identify the important untested branches in the code I just touched \
-                     and add focused tests for them — error paths and edge cases first, \
-                     not just the happy path.",
+                    "Find the important untested branches in the code I just touched — \
+                     error paths, edge cases, and boundary conditions first, not just the \
+                     happy path. Add focused tests that would actually fail if the \
+                     behavior regressed, run them to confirm they pass, and tell me which \
+                     branches you deliberately left uncovered and why.",
                 ),
             ),
             (
@@ -304,8 +348,11 @@ impl Snippets {
                     "Testing",
                     "Write a failing test that reproduces the bug",
                     "Write a minimal automated test that reproduces the bug I'm about to \
-                     describe. It should fail on the current code for the same reason the \
-                     bug occurs, so it becomes the regression guard once fixed.",
+                     describe. Trace the real code path first so the test exercises the \
+                     actual failure, then confirm it fails on the current code for the \
+                     same reason the bug occurs — that red test is the regression guard. \
+                     Don't fix the bug yet; just prove it with a failing test and show me \
+                     the failure output.",
                 ),
             ),
             // ── Debugging ───────────────────────────────────────────
@@ -315,8 +362,11 @@ impl Snippets {
                     "Debugging",
                     "Root-cause the failure",
                     "Investigate the failure I'm about to describe. Find the root cause \
-                     before proposing a fix — trace the actual code path, don't guess. \
-                     Explain the mechanism, then fix it and add a regression test.",
+                     before proposing any fix — trace the actual code path and confirm \
+                     the mechanism, don't guess or pattern-match. Once you can explain \
+                     exactly why it happens, write a failing regression test, then fix \
+                     the underlying cause (never the symptom) and confirm the test goes \
+                     green. Report the mechanism, the fix, and why it's the real cause.",
                 ),
             ),
             (
@@ -325,8 +375,10 @@ impl Snippets {
                     "Debugging",
                     "git bisect to find the offending commit",
                     "Use `git bisect` to find the commit that introduced the regression. \
-                     Identify a known-good and known-bad revision, script the check if \
-                     possible, and report the first bad commit with an explanation.",
+                     Establish a known-good and known-bad revision, script the check as a \
+                     one-liner where you can so the bisect runs automatically, and report \
+                     the first bad commit with its diff and an explanation of how it \
+                     caused the failure. Reset the bisect state when you're done.",
                 ),
             ),
             (
@@ -334,9 +386,12 @@ impl Snippets {
                 entry(
                     "Debugging",
                     "Add logging to narrow it down",
-                    "Add targeted logging/tracing around the suspect code path to narrow \
-                     down where behavior diverges from expectation. Keep the \
-                     instrumentation removable and report what it reveals.",
+                    "Add targeted logging around the suspect code path to narrow where \
+                     behavior diverges from expectation — log the inputs, the branch \
+                     taken, and the key values at each step, not everything. Run it, read \
+                     what it reveals, and report where reality first differs from what \
+                     you expected. Keep the instrumentation easy to remove once we've \
+                     found it.",
                 ),
             ),
             (
@@ -344,9 +399,11 @@ impl Snippets {
                 entry(
                     "Debugging",
                     "Explain this error / stack trace",
-                    "Explain the error or stack trace I'm about to paste: what it means, \
-                     the most likely cause given this codebase, and the concrete next \
-                     step to confirm and fix it.",
+                    "Explain the error or stack trace I'm about to paste: what it \
+                     actually means, the most likely cause given *this* codebase (trace \
+                     it to the real line, don't speak in generalities), and the single \
+                     concrete next step to confirm and fix it. If more than one cause is \
+                     plausible, rank them and say how to tell them apart.",
                 ),
             ),
             // ── Refactor ────────────────────────────────────────────
@@ -355,9 +412,12 @@ impl Snippets {
                 entry(
                     "Refactor",
                     "Refactor for clarity, no behavior change",
-                    "Refactor the code I point you at for clarity and simplicity without \
-                     changing behavior. Keep the diff reviewable, and make sure the tests \
-                     still pass to prove behavior is unchanged.",
+                    "Refactor the code I point you at for clarity and simplicity with no \
+                     behavior change. Keep the diff small and reviewable — one coherent \
+                     transformation, not a rewrite. Prove behavior is unchanged by \
+                     running the existing tests before and after; if coverage there is \
+                     thin, add a characterization test first. Don't fix bugs or change \
+                     APIs along the way — flag those separately instead.",
                 ),
             ),
             (
@@ -365,9 +425,11 @@ impl Snippets {
                 entry(
                     "Refactor",
                     "Rename a symbol across the repo",
-                    "Rename the symbol I specify consistently across the whole repo, \
-                     including docs, tests, and comments. Verify nothing else \
-                     accidentally matched and that it still builds.",
+                    "Rename the symbol I specify consistently across the whole repo — \
+                     code, tests, docs, and comments. Lean on the compiler or language \
+                     tooling to catch call sites rather than a blind find-replace, verify \
+                     nothing unrelated matched the same string, and confirm it still \
+                     builds and tests pass. No behavior change beyond the rename.",
                 ),
             ),
             (
@@ -375,9 +437,12 @@ impl Snippets {
                 entry(
                     "Refactor",
                     "Extract a function / module",
-                    "Extract the highlighted logic into a well-named function (or module) \
-                     with a clear signature. Update all call sites and keep behavior \
-                     identical.",
+                    "Extract the logic I point you at into a well-named function or \
+                     module with a clear signature and no hidden coupling to its old \
+                     context. Update every call site, keep behavior identical, and \
+                     confirm with the existing tests. Keep the diff reviewable — this is \
+                     a move, not a rewrite; flag any behavior change you're tempted to \
+                     make instead of quietly doing it.",
                 ),
             ),
             (
@@ -385,9 +450,11 @@ impl Snippets {
                 entry(
                     "Refactor",
                     "Remove duplication",
-                    "Find the near-duplicate logic in the code I point you at and unify \
-                     it behind a single implementation — but only where the duplication \
-                     is genuinely the same concept, not coincidentally similar.",
+                    "Unify the near-duplicate logic I point you at behind a single \
+                     implementation — but only where it's genuinely the same concept, not \
+                     coincidentally similar code that will diverge later. Preserve \
+                     behavior exactly, update all call sites, and confirm with tests. If \
+                     some copies differ in ways that matter, say so and leave them alone.",
                 ),
             ),
             // ── Performance ─────────────────────────────────────────
@@ -396,10 +463,11 @@ impl Snippets {
                 entry(
                     "Performance",
                     "Profile and optimize the hot path",
-                    "Profile the hot path I describe, find where the time actually goes, \
-                     and optimize the biggest wins first. Confirm the improvement with a \
-                     measurement, and don't sacrifice correctness or clarity for micro-\
-                     gains.",
+                    "Profile the hot path I describe and find where the time *actually* \
+                     goes — measure, don't assume. Optimize the biggest win first, \
+                     confirm the improvement with a before/after measurement, and stop \
+                     when the gains stop mattering. Don't trade correctness or \
+                     readability for micro-gains, and keep the existing tests green.",
                 ),
             ),
             (
@@ -408,8 +476,10 @@ impl Snippets {
                     "Performance",
                     "Add a benchmark",
                     "Add a benchmark that captures the performance characteristic we care \
-                     about here, so future changes can be measured against it. Report the \
-                     current baseline numbers.",
+                     about here, using the project's existing benchmarking setup if there \
+                     is one. Make it representative and repeatable, run it, and report the \
+                     current baseline numbers so future changes can be measured against \
+                     it.",
                 ),
             ),
             (
@@ -417,9 +487,11 @@ impl Snippets {
                 entry(
                     "Performance",
                     "Reduce allocations in the hot path",
-                    "Look for avoidable allocations and copies in the hot path and remove \
-                     them (reuse buffers, borrow instead of clone, avoid intermediate \
-                     collections) — only where it measurably helps and stays readable.",
+                    "Find avoidable allocations and copies in the hot path I point you at \
+                     — reuse buffers, borrow instead of clone, drop intermediate \
+                     collections — and remove them only where a measurement shows it \
+                     helps and the code stays readable. Confirm the win with a \
+                     before/after benchmark and keep the tests green.",
                 ),
             ),
             // ── Security ────────────────────────────────────────────
@@ -429,9 +501,11 @@ impl Snippets {
                     "Security",
                     "Security review of the diff",
                     "Review the current diff for security issues: injection, missing \
-                     authz checks, unsafe deserialization, path traversal, secret \
-                     handling, and unchecked input at trust boundaries. Report concrete \
-                     findings.",
+                     authz/authn checks, unsafe deserialization, path traversal, secret \
+                     handling, SSRF, and unchecked input crossing a trust boundary. For \
+                     each finding give the `file:line`, the concrete exploit path, and \
+                     the fix, ranked by exploitability. If the diff introduces no \
+                     security-relevant change, say so rather than padding the list.",
                 ),
             ),
             (
@@ -440,8 +514,10 @@ impl Snippets {
                     "Security",
                     "Audit and update dependencies",
                     "Audit the project's dependencies for known vulnerabilities and \
-                     unmaintained packages. Propose safe upgrades, call out breaking \
-                     changes, and don't bump anything without checking the changelog.",
+                     unmaintained packages using the ecosystem's audit tool. Propose safe \
+                     upgrades, call out breaking changes from each changelog, and don't \
+                     bump anything without checking what changed. Report findings by \
+                     severity with the fixed version for each.",
                 ),
             ),
             (
@@ -451,9 +527,12 @@ impl Snippets {
                 entry(
                     "Security",
                     "Scan for leaked secrets",
-                    "Scan the diff (and recent history if relevant) for accidentally \
-                     committed secrets — API keys, tokens, private keys, passwords. If \
-                     any are found, flag them clearly and advise on rotation.",
+                    "Scan the diff — and recent history if relevant — for accidentally \
+                     committed secrets: API keys, tokens, private keys, passwords, \
+                     connection strings. For anything found, flag it clearly with \
+                     `file:line`, treat it as already compromised, and advise on rotation \
+                     and scrubbing it from history. Don't echo the full secret value \
+                     back.",
                 ),
             ),
             // ── Docs ────────────────────────────────────────────────
@@ -462,9 +541,11 @@ impl Snippets {
                 entry(
                     "Docs",
                     "Document public APIs",
-                    "Add or improve documentation for the public APIs I touched: what \
-                     each does, its parameters and return, invariants, and a short usage \
-                     example where it helps. Match the surrounding doc style.",
+                    "Document the public APIs I touched: what each does, its parameters \
+                     and return, invariants and failure modes, and a short usage example \
+                     where it earns its place. Match the surrounding doc style and \
+                     tooling exactly. Skip the trivial and self-evident — document the \
+                     *why*, not the obvious *what*.",
                 ),
             ),
             (
@@ -473,7 +554,9 @@ impl Snippets {
                     "Docs",
                     "Update the README",
                     "Update the README to reflect the change I just made — usage, flags, \
-                     examples, and anything now stale. Keep it accurate and concise.",
+                     examples, and anything now stale or wrong. Verify each command or \
+                     example actually works rather than assuming, keep it accurate and \
+                     concise, and don't rewrite sections that are still correct.",
                 ),
             ),
             (
@@ -482,8 +565,10 @@ impl Snippets {
                     "Docs",
                     "Write an ADR for this decision",
                     "Write a short Architecture Decision Record for the decision we just \
-                     made: context, the options considered, the decision, and its \
-                     consequences. Follow any existing ADR format in the repo.",
+                     made: the context and forces, the options considered with their \
+                     trade-offs, the decision, and its consequences (good and bad). \
+                     Follow any existing ADR format and numbering in the repo. Be honest \
+                     about what we're giving up, not just why we're right.",
                 ),
             ),
             // ── Chores ──────────────────────────────────────────────
@@ -493,8 +578,10 @@ impl Snippets {
                     "Chores",
                     "Fix lint and formatting",
                     "Run the project's linter and formatter, then fix every warning and \
-                     formatting issue in the code I touched. Don't suppress warnings — \
-                     address them.",
+                     formatting issue in the code I touched — address the underlying \
+                     cause, never suppress or `allow` it away without a clear reason. \
+                     Re-run to confirm clean, and don't drag unrelated reformatting into \
+                     the diff.",
                 ),
             ),
             (
@@ -502,9 +589,10 @@ impl Snippets {
                 entry(
                     "Chores",
                     "Diagnose and fix failing CI",
-                    "The CI is failing. Pull the failing job's logs, find the real cause, \
-                     and fix it locally. Re-run the equivalent checks here to confirm \
-                     before pushing.",
+                    "CI is failing. Pull the failing job's logs (`gh run view \
+                     --log-failed`), find the real cause rather than the surface error, \
+                     and fix it locally. Re-run the equivalent check here to confirm it \
+                     passes before pushing, and report what was actually broken.",
                 ),
             ),
             (
@@ -513,9 +601,10 @@ impl Snippets {
                     "Chores",
                     "Remove dead code and unused deps",
                     "Find and remove dead code, unused imports, and unused dependencies \
-                     in the area I point you at. Verify nothing that looked unused is \
-                     actually referenced (reflection, macros, feature gates) before \
-                     deleting.",
+                     in the area I point you at. Before deleting each one, verify it's \
+                     truly unreferenced — check for reflection, macros, feature gates, \
+                     and dynamic dispatch that a static search misses. Confirm it still \
+                     builds and tests pass, and keep the deletions in a reviewable diff.",
                 ),
             ),
         ]);
@@ -788,6 +877,35 @@ snippets:
             b.all().all(|(_, s)| !s.category.is_empty()),
             "every built-in snippet carries a category",
         );
+    }
+
+    /// Built-in bodies encode real instructions, not one-line labels
+    /// (#247). Every body clears a floor length so the set can't
+    /// regress back to "please review the diff" one-liners.
+    #[test]
+    fn builtin_bodies_are_substantial() {
+        for (key, s) in Snippets::builtin().all() {
+            assert!(
+                s.body.len() >= 150,
+                "built-in `{key}` body is too thin ({} chars) — snippet bodies \
+                 should encode real, structured instructions",
+                s.body.len(),
+            );
+        }
+    }
+
+    /// The high-traffic review/security bodies ask for structured,
+    /// checkable output — `file:line` anchors — per the house style.
+    #[test]
+    fn flagship_bodies_request_anchored_findings() {
+        let b = Snippets::builtin();
+        for key in ["rev", "deepreview", "sec", "selfrev"] {
+            let body = &b.get(key).expect("flagship snippet ships built-in").body;
+            assert!(
+                body.contains("file:line"),
+                "built-in `{key}` should ask for `file:line`-anchored findings",
+            );
+        }
     }
 
     /// No built-in key may be a strict prefix of another. The picker's

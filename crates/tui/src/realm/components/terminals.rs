@@ -80,6 +80,12 @@ impl Terminals {
         self.inner.active_terminal_id()
     }
 
+    /// Whether the tracked terminal runs an agent (vs a plain shell) —
+    /// drives whether snippet submission uses the daemon inject path.
+    pub fn terminal_is_agent(&self, id: TerminalId) -> bool {
+        self.inner.terminal_is_agent(id)
+    }
+
     /// The session a tracked terminal belongs to. Used by the spawn-
     /// follow pin to recover the workspace for a `TerminalFocusRequested`.
     pub fn session_key_for(&self, id: TerminalId) -> Option<&SessionKey> {

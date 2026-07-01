@@ -172,12 +172,12 @@ impl<T: TerminalAdapter> Model<T> {
 
     fn choice_picked_inner(&mut self, picks: Vec<usize>) -> Vec<IpcCommand> {
         let mut cmds = Vec::new();
-        // Snippet picker — pick → write the snippet body to the
-        // active terminal, encoded so the agent submits in one shot
-        // (see `encode_snippet_for_pty`). The "expand AND submit"
-        // combo is the whole point of the feature: the user gets to
-        // the agent's input in a single keystroke chord, no
-        // intermediate "review then send" step.
+        // Snippet picker — pick → send the snippet body to the active
+        // terminal AND submit it in one shot. The "expand AND submit"
+        // combo is the whole point of the feature: the user gets the
+        // prompt to the agent's input in a single keystroke chord, no
+        // intermediate "review then send" step. How the submit lands
+        // depends on the terminal — see the agent vs shell split below.
         if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
             let key = picks
                 .first()
@@ -201,18 +201,38 @@ impl<T: TerminalAdapter> Model<T> {
                 self.flash_info("no active terminal — open a session first");
                 return cmds;
             };
-            let bytes = encode_snippet_for_pty(&snippet.body);
-            // Mirror the snippet into the recap tracker — it's a full
-            // command submitted in one shot, so without this the
-            // pinned "you ▸ …" line would keep showing the previous
-            // message.
-            let committed = self.terminals.record_pty_write(terminal_id, &bytes);
-            cmds.push(IpcCommand::Write { terminal_id, bytes });
-            if let Some(message) = committed {
-                cmds.push(IpcCommand::RecordUserMessage {
+            // An agent terminal gets the daemon's settle-gated inject
+            // path — the SAME one `w` uses: the body is pasted, then
+            // Enter is sent as a separate keystroke once the paste's
+            // repaint quiesces. A single write with a trailing `\r`
+            // (`encode_snippet_for_pty`) is not enough: Claude batches
+            // the burst as a paste and swallows the `\r` as a soft
+            // newline, so the snippet expands but never submits (#246).
+            // A plain shell has no paste debounce, so the direct
+            // `body + \r` write submits cleanly there.
+            if self.terminals.terminal_is_agent(terminal_id) {
+                // Mirror the snippet into the recap tracker — the daemon
+                // performs the actual PTY write, so without this the
+                // pinned "you ▸ …" line would keep showing the previous
+                // message. Feed the raw body + a submit `\r` (embedded
+                // newlines stay `\n`, i.e. soft breaks) so the whole
+                // body commits as one recap message.
+                let mut recap = snippet.body.clone().into_bytes();
+                recap.push(b'\r');
+                if let Some(message) = self.terminals.record_pty_write(terminal_id, &recap) {
+                    cmds.push(IpcCommand::RecordUserMessage {
+                        terminal_id,
+                        message,
+                    });
+                }
+                cmds.push(IpcCommand::InjectPrompt {
                     terminal_id,
-                    message,
+                    prompt: snippet.body.clone(),
+                    fallback_spawn: None,
                 });
+            } else {
+                let bytes = encode_snippet_for_pty(&snippet.body);
+                cmds.push(IpcCommand::Write { terminal_id, bytes });
             }
             self.flash_info(format!("sent snippet ]{key}"));
             return cmds;
@@ -841,17 +861,24 @@ impl<T: TerminalAdapter> Model<T> {
     }
 }
 
-/// Encode a snippet body for the agent's PTY. Single-line bodies are
-/// raw text plus a trailing `\r` (Enter / submit). Multi-line bodies
-/// are wrapped in a bracketed-paste pair (`ESC[200~ … ESC[201~`) with
-/// embedded newlines rewritten to `\r`, and the submit `\r` placed
-/// *outside* the closing marker.
+/// Encode a snippet body for a **non-agent** terminal's PTY (a plain
+/// shell). Single-line bodies are raw text plus a trailing `\r` (Enter
+/// / submit). Multi-line bodies are wrapped in a bracketed-paste pair
+/// (`ESC[200~ … ESC[201~`) with embedded newlines rewritten to `\r`,
+/// and the submit `\r` placed *outside* the closing marker — so the
+/// encoded bytes always end in a submit `\r` outside any paste wrapper.
 ///
-/// Without the wrapper, a multi-line burst trips the agent's paste
+/// Without the wrapper, a multi-line burst trips a shell's paste
 /// auto-detection: the trailing `\r` lands inside the paste window and
 /// is buffered as a literal newline rather than submitting. Bracketing
-/// the body makes the agent treat it as one paste, so the `\r` after
-/// `ESC[201~` reads as a clean submit.
+/// the body makes it one paste, so the `\r` after `ESC[201~` reads as a
+/// clean submit.
+///
+/// Agent terminals (Claude / Codex / Cursor) do NOT use this — they go
+/// through `Command::InjectPrompt`, where the daemon sends the paste
+/// and the submit `\r` as separate writes gated on the paste's repaint
+/// settling, the only way to make the submit reliable across agents
+/// whose input areas debounce pasted bursts (#246).
 pub(super) fn encode_snippet_for_pty(body: &str) -> Vec<u8> {
     if !body.contains('\n') {
         let mut bytes = Vec::with_capacity(body.len() + 1);

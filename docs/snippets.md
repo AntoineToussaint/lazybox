@@ -176,12 +176,21 @@ snippets:
 
 ## Behaviour & gotchas
 
-- **Submission.** The body is sent **verbatim** to the active
-  terminal's PTY, followed by a single carriage return (`\r`) that
-  submits it. This works for every agent lazybox ships (Claude Code,
-  Codex, Cursor) and for a plain shell. A multi-line `body` is sent as
-  one block; only the trailing `\r` submits, so embedded newlines stay
-  part of the prompt.
+- **Submission.** The body is sent **verbatim** to the active terminal
+  and submitted in one action — no extra keystroke. How the submit is
+  delivered depends on the terminal:
+  - **Agent terminals** (Claude Code, Codex, Cursor) go through the same
+    settle-gated inject path `w` uses: the body is pasted, then Enter is
+    sent as a **separate** keystroke once the paste's repaint quiesces.
+    A single write with a trailing `\r` is unreliable here — an agent
+    that debounces the pasted burst can swallow the `\r` as a soft
+    newline, so the prompt expands but never submits. Splitting the
+    submit off makes it land cleanly for every shipped agent.
+  - **Plain shells** get the body plus a trailing carriage return (`\r`)
+    written directly; a shell has no paste debounce, so that submits
+    immediately. Multi-line bodies are wrapped in a bracketed paste so
+    the submit `\r` lands outside the paste, never buffered as a literal
+    newline.
 - **No active terminal.** If you trigger a snippet with no session
   terminal focused, nothing is sent and lazybox flashes a hint to open a
   session first.

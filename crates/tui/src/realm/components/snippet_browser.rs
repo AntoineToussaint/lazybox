@@ -268,6 +268,7 @@ mod tests {
                 "pr",
                 &Snippet {
                     description: "Open a PR".into(),
+                    category: "Git & PR".into(),
                     body: "Please open a PR for the current branch.".into(),
                     origin: SnippetOrigin::BuiltIn,
                 },
@@ -276,6 +277,7 @@ mod tests {
                 "rev",
                 &Snippet {
                     description: "Review diff".into(),
+                    category: "Review".into(),
                     body: "Review the current diff\nfor correctness bugs.".into(),
                     origin: SnippetOrigin::Global,
                 },
@@ -340,6 +342,7 @@ mod tests {
             "rev",
             &Snippet {
                 description: "Review".into(),
+                category: "Review".into(),
                 body: long.into(),
                 origin: SnippetOrigin::Global,
             },

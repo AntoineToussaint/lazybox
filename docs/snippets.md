@@ -20,10 +20,10 @@ edit, delete — plus the file format and the picker reference.
 
 lazybox ships a **broad, categorized built-in library** (~35 prompts)
 so a fresh install has plenty to expand out of the box — review
-(`rev`, `revdeep`, `nit`), git & PR (`pr`, `ready`, `commit`,
+(`rev`, `deepreview`, `nit`), git & PR (`pr`, `ready`, `commit`,
 `rebase`, `squash`), testing (`test`, `tdd`, `repro`), debugging
 (`bug`, `bisect`, `trace`), refactor (`refac`, `rename`, `extract`),
-performance (`perf`, `bench`), security (`sec`, `deps`, `secrets`),
+performance (`perf`, `bench`), security (`sec`, `deps`, `leaks`),
 docs (`doc`, `readme`, `adr`), and chores (`lint`, `ci`, `clean`).
 Anything you define with the same key transparently overrides the
 built-in; you never have to start from an empty library.

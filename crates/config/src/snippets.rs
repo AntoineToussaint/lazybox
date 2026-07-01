@@ -163,7 +163,10 @@ impl Snippets {
                 ),
             ),
             (
-                "revdeep".to_string(),
+                // Not `revdeep`: a built-in key must never be a strict
+                // prefix of another (`rev`), or the `]]rev` exact-key
+                // auto-submit stops firing (two keys share the prefix).
+                "deepreview".to_string(),
                 entry(
                     "Review",
                     "Deep review: design, edge cases, failure modes",
@@ -442,7 +445,9 @@ impl Snippets {
                 ),
             ),
             (
-                "secrets".to_string(),
+                // Not `secrets`: would make `sec` a strict prefix of it
+                // and break `sec`'s exact-key auto-submit (see `deepreview`).
+                "leaks".to_string(),
                 entry(
                     "Security",
                     "Scan for leaked secrets",
@@ -783,6 +788,25 @@ snippets:
             b.all().all(|(_, s)| !s.category.is_empty()),
             "every built-in snippet carries a category",
         );
+    }
+
+    /// No built-in key may be a strict prefix of another. The picker's
+    /// `]]rev`-style fast path auto-submits only when the typed key is
+    /// the *sole* key with that prefix, so a colliding pair (e.g.
+    /// `rev` + `revdeep`) would silently kill the shorter key's
+    /// auto-submit — the headline acceptance criterion.
+    #[test]
+    fn no_builtin_key_is_a_prefix_of_another() {
+        let b = Snippets::builtin();
+        let keys: Vec<&str> = b.all().map(|(k, _)| k).collect();
+        for &a in &keys {
+            for &c in &keys {
+                assert!(
+                    a == c || !c.starts_with(a),
+                    "built-in key `{a}` is a prefix of `{c}` — breaks `]]{a}` auto-submit",
+                );
+            }
+        }
     }
 
     #[test]

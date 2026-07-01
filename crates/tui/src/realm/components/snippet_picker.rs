@@ -709,14 +709,29 @@ mod tests {
         assert_eq!(picker.cursor, Some(0));
     }
 
+    /// Acceptance criterion: against the *real* built-in library,
+    /// `]]rev` still auto-submits (regression guard for the case where
+    /// a longer built-in key shares the `rev` prefix).
+    #[test]
+    fn builtin_rev_auto_submits() {
+        let s = lazybox_config::Snippets::builtin();
+        let rows: Vec<PickerRow> = s.all().map(|(k, v)| PickerRow::new(k, v)).collect();
+        let mut picker = SnippetPicker::new(rows, String::new());
+        assert!(picker.on_key(&ke('r')).is_none());
+        assert!(picker.on_key(&ke('e')).is_none());
+        match picker.on_key(&ke('v')) {
+            Some(Msg::ChoicePicked(v)) => assert_eq!(picker.rows[v[0]].key, "rev"),
+            other => panic!("expected `]]rev` to auto-submit, got {other:?}"),
+        }
+    }
+
     #[test]
     fn typing_filters_and_recovers_on_backspace() {
         let mut picker = SnippetPicker::new(make_rows(), String::new());
         let out = picker.on_key(&ke('r'));
         assert!(out.is_none(), "no auto-submit on incomplete key");
-        // `r` matches key `rev`, and the description "Open PR"/"Pre-deploy"
-        // don't contain `r`? "Pre-deploy" and "Open PR" both contain 'r'.
-        // Just assert `rev` is present.
+        // `r` matches `rev` by key (plus others by description); the
+        // exact-key auto-submit hasn't fired, so `rev` is just visible.
         assert!(
             picker
                 .visible_indices

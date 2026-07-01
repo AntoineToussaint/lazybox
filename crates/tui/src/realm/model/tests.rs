@@ -852,6 +852,171 @@ snippets:
         );
     }
 
+    /// Build a model with workspace `github:o/r#1` selected and a
+    /// single live terminal of `kind` on screen, its snippet library
+    /// loaded, and the picker primed to resolve row 0 → `snippet_key`.
+    /// This is the exact pre-submit state BOTH snippet trigger paths
+    /// (the `]]<key>` auto-submit and the picker's Enter) funnel into
+    /// `handle_choice_picked`.
+    fn model_with_active_terminal_and_snippet(
+        label: &str,
+        snippets_yaml: &str,
+        snippet_key: &str,
+        kind: lazybox_ipc::TerminalKind,
+    ) -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        use lazybox_ipc::{Event as IpcEvent, TerminalId};
+        let mut m = build_model();
+        m.snippets = snippets_from_yaml(label, snippets_yaml);
+        let ws_key = WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&ws_key).into();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![lazybox_core::Workspace::empty(
+                ws_key,
+                "main",
+                chrono::Utc::now(),
+            )],
+            terminals: vec![],
+            projects: vec![],
+        });
+        assert!(
+            m.sidebar.focus_workspace_key(&session_key),
+            "seeded workspace should be selectable",
+        );
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key,
+            kind,
+            no_permission: false,
+        });
+        assert_eq!(
+            m.terminals.active_terminal_id(),
+            Some(TerminalId(1)),
+            "the spawned terminal must be on screen",
+        );
+        m.snippet_choices = vec![snippet_key.to_string()];
+        m.modal_stack.push(Id::SnippetPicker);
+        m
+    }
+
+    /// Picking a snippet while an AGENT terminal is on screen routes
+    /// through `InjectPrompt` — the daemon's settle-gated paste+submit
+    /// path — carrying the body verbatim, NOT a raw `Write` with a
+    /// crammed trailing `\r`. That split is what makes the submit land
+    /// reliably across agents that debounce a pasted burst (#246).
+    #[test]
+    fn snippet_into_agent_terminal_routes_through_inject_prompt() {
+        let mut m = model_with_active_terminal_and_snippet(
+            "agent-single",
+            r#"
+snippets:
+  rev:
+    description: Review
+    body: review the diff
+"#,
+            "rev",
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+        );
+        let cmds = m.handle_choice_picked(vec![0]);
+        match cmds
+            .iter()
+            .find(|c| matches!(c, IpcCommand::InjectPrompt { .. }))
+        {
+            Some(IpcCommand::InjectPrompt {
+                terminal_id,
+                prompt,
+                fallback_spawn,
+            }) => {
+                assert_eq!(prompt, "review the diff", "body injected verbatim");
+                assert_eq!(*terminal_id, lazybox_ipc::TerminalId(1));
+                assert!(
+                    fallback_spawn.is_none(),
+                    "the terminal is live — no spawn fallback needed",
+                );
+            }
+            _ => panic!("agent snippet must inject, got {cmds:?}"),
+        }
+        assert!(
+            !cmds.iter().any(|c| matches!(c, IpcCommand::Write { .. })),
+            "the agent path must not ALSO raw-write the body",
+        );
+        // The recap tracker still pins the snippet as the latest
+        // "you ▸ …" message even though the daemon does the PTY write.
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::RecordUserMessage { message, .. } if message == "review the diff"
+            )),
+            "snippet must be recorded as the latest user message, got {cmds:?}",
+        );
+    }
+
+    /// A multi-line body injects verbatim too — the embedded newlines
+    /// reach the agent as-is, and the reliable submit is the daemon's
+    /// separate Enter, so nothing in the TUI has to pre-rewrite the
+    /// body into a bracketed paste (that's the shell-only encoding).
+    #[test]
+    fn snippet_into_agent_terminal_injects_multiline_body_verbatim() {
+        let mut m = model_with_active_terminal_and_snippet(
+            "agent-multi",
+            "\nsnippets:\n  pr:\n    description: PR\n    body: |\n      first line\n      second line\n",
+            "pr",
+            lazybox_ipc::TerminalKind::Agent("codex".into()),
+        );
+        let cmds = m.handle_choice_picked(vec![0]);
+        match cmds
+            .iter()
+            .find(|c| matches!(c, IpcCommand::InjectPrompt { .. }))
+        {
+            Some(IpcCommand::InjectPrompt { prompt, .. }) => {
+                // The `|` block scalar keeps its trailing newline — the
+                // body reaches the agent exactly as authored.
+                assert_eq!(
+                    prompt, "first line\nsecond line\n",
+                    "multi-line body verbatim"
+                );
+            }
+            _ => panic!("agent snippet must inject, got {cmds:?}"),
+        }
+    }
+
+    /// Picking a snippet while a plain SHELL is on screen writes the
+    /// `encode_snippet_for_pty` bytes directly — a shell has no paste
+    /// debounce, so `body + \r` submits cleanly and the inject path
+    /// (which no-ops on non-agent terminals) is skipped.
+    #[test]
+    fn snippet_into_shell_terminal_writes_encoded_bytes() {
+        let mut m = model_with_active_terminal_and_snippet(
+            "shell",
+            r#"
+snippets:
+  ls:
+    description: List
+    body: ls -la
+"#,
+            "ls",
+            lazybox_ipc::TerminalKind::Shell,
+        );
+        let cmds = m.handle_choice_picked(vec![0]);
+        let bytes = cmds
+            .iter()
+            .find_map(|c| match c {
+                IpcCommand::Write { bytes, .. } => Some(bytes.clone()),
+                _ => None,
+            })
+            .expect("shell snippet must raw-write the encoded body");
+        assert_eq!(
+            bytes,
+            super::super::inputs::encode_snippet_for_pty("ls -la")
+        );
+        assert!(bytes.ends_with(b"\r"), "shell write ends in a submit CR");
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
+            "the shell path must not use the agent inject path",
+        );
+    }
+
     /// apply_snippets seeds the model collection. Sanity check
     /// that the lookup path resolves.
     #[test]
@@ -1049,6 +1214,37 @@ snippets:
             bytes.ends_with(b"\x1b[201~\r"),
             "submit CR must land after the close marker, not inside the paste"
         );
+    }
+
+    /// The invariant #246 hardens for the shell encoding: WHATEVER the
+    /// body, the encoded bytes end in a submit `\r`, and that `\r` sits
+    /// OUTSIDE any bracketed-paste wrapper — never buffered inside the
+    /// paste window as a literal newline. Covers single-line,
+    /// multi-line, empty, and a body that already ends in a newline.
+    #[test]
+    fn encode_snippet_always_ends_in_submit_cr_outside_paste() {
+        for body in ["one line", "first\nsecond", "a\nb\nc", "", "trailing\n"] {
+            let bytes = super::super::inputs::encode_snippet_for_pty(body);
+            assert_eq!(
+                bytes.last(),
+                Some(&b'\r'),
+                "body {body:?} must end in a submit CR",
+            );
+            // If the body was bracketed, the close marker must come
+            // before the final CR — i.e. the submit is outside the
+            // paste. A body with no wrapper trivially satisfies this.
+            if bytes.windows(6).any(|w| w == b"\x1b[200~") {
+                let close = bytes
+                    .windows(6)
+                    .rposition(|w| w == b"\x1b[201~")
+                    .expect("an opened paste must close");
+                assert_eq!(
+                    close + 6,
+                    bytes.len() - 1,
+                    "the submit CR is the only byte after ESC[201~ for body {body:?}",
+                );
+            }
+        }
     }
 }
 

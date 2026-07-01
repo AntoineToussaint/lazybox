@@ -1018,6 +1018,16 @@ impl TerminalStack {
         self.visible_terminals().get(self.active_tab_idx).copied()
     }
 
+    /// Whether the tracked terminal runs an agent (Claude / Codex /
+    /// Cursor) as opposed to a plain shell or log tail. Snippet
+    /// submission routes agents through the daemon's settle-gated
+    /// inject path and shells through a direct write.
+    pub fn terminal_is_agent(&self, id: TerminalId) -> bool {
+        self.terminals
+            .get(&id)
+            .is_some_and(|slot| matches!(slot.kind, TerminalKind::Agent(_)))
+    }
+
     /// The session a tracked terminal belongs to. Used by the spawn-
     /// follow pin to recover the workspace for a `TerminalFocusRequested`
     /// (which carries only the terminal id).

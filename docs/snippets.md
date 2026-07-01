@@ -156,6 +156,57 @@ the most specific definition. A project can override a shared shortcut
 (e.g. a project-specific `rev`) without touching your personal
 library, and either file can override a built-in.
 
+## House style for bodies
+
+The point of a snippet is that `]]rev` should produce a *noticeably
+better* agent run than typing "please review the diff." A body is a
+carefully-tuned instruction, not a label. The shipped built-in library
+follows one deliberate style, and your own snippets will be sharper if
+they do too:
+
+- **Imperative, addressed to the agent.** "Review the current diff…",
+  "Reproduce the bug…" — not "Can you please…". One voice across the
+  whole set.
+- **State the deliverable up front, and make it checkable.** Ask for
+  ranked findings with `file:line` anchors, a failing test, a PR URL —
+  something concrete you can verify — rather than free prose.
+- **Encode the discipline, not just the task.** Root-cause before
+  fixing, no symptom-masking, no behavior change on a refactor, prove
+  it with tests. The prompt is where you bake in how a strong engineer
+  would actually approach the work.
+- **Lean on the worktree.** Snippets run inside a git worktree with
+  `git`, `gh`, and the project's checks available. Tell the agent to
+  run the tests, pull the CI logs (`gh run view --log-failed`), open
+  the PR — don't describe the work abstractly.
+- **Give an escape hatch.** "If the diff is clean, say so" beats an
+  agent that invents nits to look busy.
+- **Keep it to a tight paragraph.** A few sentences of dense
+  instruction. Long enough to be specific, short enough to read at a
+  glance in the preview pane.
+
+A body that follows the style, for reference — the built-in `rev`:
+
+```yaml
+snippets:
+  rev:
+    description: Review the current diff
+    category: Review
+    body: |
+      Review the current diff (`git diff` against the base branch) for
+      correctness bugs: logic errors, off-by-one mistakes, missing error
+      handling, broken edge cases, and anything that wouldn't survive a
+      careful review. Report findings as a list ranked by severity, each
+      with a `file:line` anchor and a one-line explanation of what breaks
+      and when. Look only at the changed lines and the code they directly
+      touch, not the whole file. If the diff is clean, say so plainly
+      rather than inventing nits.
+```
+
+> **Not yet supported:** placeholder / variable interpolation in bodies
+> (e.g. injecting the selected file or a typed argument). Bodies are
+> sent verbatim today; parameterized snippets are a possible future
+> feature, tracked separately.
+
 ## Snippet format
 
 ```yaml

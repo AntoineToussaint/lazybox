@@ -219,8 +219,9 @@ read, `z` undo mark-read, `r` reply.
 escape sequence) is a leader: bare `]]` returns to the sidebar (on the
 idle tick), `]]f` toggles focus mode, `]]<digit>` jumps to the Nth
 agent workspace, and `]]<key>` opens the snippet picker (see
-[`docs/snippets.md`](docs/snippets.md)) — fuzzy-filters by snippet
-key, auto-submits when the filter uniquely matches. The `]]` leader
+[`docs/snippets.md`](docs/snippets.md)) — a category-grouped list with
+a live body-preview pane, filtering on key+description+category, that
+auto-submits when the typed key uniquely matches. The `]]` leader
 popup lists the agent roster (digits), `` ` `` (jump to any
 workspace via the fuzzy picker) and `f` above the snippet keys.
 Digits, `` ` `` and `f` are reserved by the leader, shadowing any

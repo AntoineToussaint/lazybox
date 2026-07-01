@@ -18,11 +18,15 @@ key. Press `e` in the browser to jump to the YAML file.
 This page documents that full lifecycle — create, browse, list/use,
 edit, delete — plus the file format and the picker reference.
 
-lazybox ships a few **built-in** snippets so a fresh install has
-something to expand out of the box — `rev` (review the diff), `pr`
-(open a PR), and `ready` (mark the PR ready for review via
-`gh pr ready`). Anything you define with the same key transparently
-overrides the built-in; you never have to start from an empty library.
+lazybox ships a **broad, categorized built-in library** (~35 prompts)
+so a fresh install has plenty to expand out of the box — review
+(`rev`, `revdeep`, `nit`), git & PR (`pr`, `ready`, `commit`,
+`rebase`, `squash`), testing (`test`, `tdd`, `repro`), debugging
+(`bug`, `bisect`, `trace`), refactor (`refac`, `rename`, `extract`),
+performance (`perf`, `bench`), security (`sec`, `deps`, `secrets`),
+docs (`doc`, `readme`, `adr`), and chores (`lint`, `ci`, `clean`).
+Anything you define with the same key transparently overrides the
+built-in; you never have to start from an empty library.
 
 ## Quick start
 
@@ -103,11 +107,23 @@ chord that leaves the terminal pane. With the terminal focused:
   markdown. Only the doubled `]]` is intercepted.
 
 The picker is a small overlay; the terminal stays focused underneath.
-Each row shows the snippet key, its description, an `origin` tag
-(`built-in`, `global`, or `repo` — see
-[precedence](#file-locations--precedence)), and a preview of the body.
-Filtering matches snippet **keys** (the text after `]]`),
-case-insensitively.
+Rows are **grouped under category headers** (Review, Git & PR,
+Testing, …), each row showing a category-colored tag, the snippet key,
+and its description; the header line shows the visible/total count. A
+**live preview pane** on the right renders the highlighted snippet's
+full (wrapped) body, its category, and its `origin`
+(`built-in` / `global` / `repo` — see
+[precedence](#file-locations--precedence)) so you see exactly what
+will be sent before it auto-submits. The list **scrolls** to keep the
+cursor in view as you move.
+
+Filtering is case-insensitive and matches the snippet **key**, its
+**description**, and its **category** — so you can find a snippet by
+what it *does*, not only by a key you already know. The `]]rev`
+exact-key fast path is preserved: when what you type after the leader
+is the *only* snippet key that starts with it and equals it exactly,
+the body auto-submits immediately, regardless of any description-only
+matches.
 
 ### Edit
 
@@ -129,7 +145,7 @@ are optional; a missing file simply contributes nothing.
 
 | Scope          | Path                          | Use it for                                        |
 | -------------- | ----------------------------- | ------------------------------------------------- |
-| **Built-in**   | _(shipped with lazybox)_        | A starter library (`rev`, `pr`, `ready`).         |
+| **Built-in**   | _(shipped with lazybox)_        | A broad, categorized starter library (~35 prompts). |
 | **Global**     | `~/.lazybox/snippets.yaml`      | Your personal library, shared across all repos.   |
 | **Repo-local** | `<repo>/.lazybox/snippets.yaml` | Project-specific prompts, checked into the repo.   |
 
@@ -146,6 +162,7 @@ library, and either file can override a built-in.
 snippets:
   <key>:
     description: <optional one-line label>
+    category: <optional grouping label>
     body: |
       <text sent to the agent>
 ```
@@ -154,6 +171,7 @@ snippets:
 | ------------- | -------- | -------------------------------------------------------------- |
 | `<key>`       | yes      | The shortcut typed after the `]]` leader. Case-sensitive.      |
 | `description` | no       | One-line label shown in the picker. Defaults to empty.         |
+| `category`    | no       | Group header + colored tag in the picker (e.g. `Review`, `Git & PR`). Free-form; defaults to empty, which files under a trailing **Other** group. |
 | `body`        | yes      | Sent verbatim to the agent. May span multiple lines.           |
 
 ## Behaviour & gotchas
@@ -171,10 +189,10 @@ snippets:
   leader if a second `]` immediately follows. `]` + any other key is
   sent to the agent verbatim, so brackets in code and markdown reach
   the agent unharmed. The doubled `]]` is the only intercepted form.
-- **The built-in set is always present**, so the `]]` leader always
-  has at least `rev` / `pr` / `ready` to offer. (If you somehow have
-  no snippets at all, `]]` simply leaves the pane immediately, with no
-  idle wait.)
+- **The built-in library is always present**, so the `]]` leader
+  always has a broad, categorized set to offer even before you write
+  your own. (If you somehow have no snippets at all, `]]` simply
+  leaves the pane immediately, with no idle wait.)
 - **Reload.** Files are read once at startup. Restart lazybox after
   creating, editing, or deleting a snippet.
 - **Malformed YAML.** A file that fails to parse is skipped with a

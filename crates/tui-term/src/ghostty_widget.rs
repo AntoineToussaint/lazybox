@@ -415,6 +415,47 @@ mod tests {
             widget.render(area, &mut buf);
             buf
         }
+
+        /// Stronger ground truth than `render_fresh`: renders through a
+        /// BRAND-NEW render state as well as a throwaway shadow. A fresh
+        /// render state's first update copies the whole viewport from the
+        /// terminal regardless of the (untrustworthy) dirty flags, so it
+        /// can carry no stale incremental content at *either* layer — the
+        /// widget shadow or libghostty's own per-render-state buffer.
+        /// `render` / `render_fresh` both reuse the persistent render
+        /// state, so they can't catch staleness that lives one layer below
+        /// the widget.
+        fn render_via_fresh_state(&mut self, area: Rect) -> Buffer {
+            let mut fresh_state = RenderState::new().unwrap();
+            let snapshot = fresh_state.update(&self.terminal).unwrap();
+            let mut shadow = None;
+            let widget = GhosttyTerminal::new(
+                &snapshot,
+                &mut self.row_iter,
+                &mut self.cell_iter,
+                &mut shadow,
+            );
+            let mut buf = Buffer::empty(area);
+            widget.render(area, &mut buf);
+            buf
+        }
+
+        /// Read the dirty state libghostty reports for the pending
+        /// changes, then honour the reset contract exactly as `render`
+        /// does (clear per-row + snapshot flags). The subsequent `render`
+        /// therefore sees already-synced content and still full-walks it —
+        /// which is the behaviour under test.
+        fn peek_dirty(&mut self) -> Dirty {
+            let snapshot = self.render_state.update(&self.terminal).unwrap();
+            let dirty = snapshot.dirty().unwrap();
+            let mut ri = RowIterator::new().unwrap();
+            let mut rows = ri.update(&snapshot).unwrap();
+            while let Some(row) = rows.next() {
+                let _ = row.set_dirty(false);
+            }
+            let _ = snapshot.set_dirty(Dirty::Clean);
+            dirty
+        }
     }
 
     #[test]
@@ -594,6 +635,61 @@ mod tests {
             let t = truth.render_fresh(area);
             assert_eq!(c, t, "cached diverged at erase/scroll-region op {i}");
         }
+    }
+
+    /// #257 regression: an agent orchestration UI (a live multi-line
+    /// subagent status list with spinners, on the alternate screen, driven
+    /// by scroll-region and reverse-index churn) makes libghostty
+    /// under-report dirtiness — reporting a frame `Clean`/`Partial` even
+    /// though moved cells differ from the prior frame (#239). The reported
+    /// symptom was a mostly-black viewport with a few orphaned status
+    /// fragments: the pre-#242 fast path copied the stale (blank) shadow
+    /// for those under-reported rows.
+    ///
+    /// This pins the always-full-walk fix against that exact scenario, and
+    /// does so with a stronger reference than the other cached-vs-fresh
+    /// tests: `render_via_fresh_state` walks a BRAND-NEW render state, so a
+    /// match proves the widget reproduces the live viewport even if
+    /// staleness were to live one layer below the widget, in libghostty's
+    /// own incremental render-state buffer. `saw_underreport` asserts the
+    /// stream genuinely exercises the hazard, so the test can't pass
+    /// vacuously.
+    #[test]
+    fn orchestration_churn_renders_full_walk_not_stale_shadow() {
+        let mut h = Harness::new(48, 12);
+        let area = Rect::new(0, 0, 48, 12);
+        // Alt-screen; a header; then a scroll-region status list whose rows
+        // are rewritten with spinners and shifted via reverse index (ESC M)
+        // each frame; plus a footer rewrite — the shape of the #257 UI.
+        let ops = [
+            "\x1b[?1049h\x1b[2J\x1b[H",
+            "* Orchestrating…\r\n",
+            "\x1b[2;10r",
+            "\x1b[2;1H\x1b[2K  agent 1  ⠋  6  52s\r\n",
+            "\x1b[3;1H\x1b[2K  agent 2  ⠙  7  12s\r\n",
+            "\x1b[4;1H\x1b[2K  agent 3  ⠹  3  4s\r\n",
+            "\x1b[2;1H\x1bM",
+            "\x1b[2;1H\x1b[2K  agent 0  ⠸  9  1s\r\n",
+            "\x1b[11;1H\x1b[K] exit for ? · q q",
+        ];
+        let mut saw_underreport = false;
+        for (i, op) in ops.iter().cycle().take(60).enumerate() {
+            h.terminal.vt_write(op.as_bytes());
+            if h.peek_dirty() != Dirty::Full {
+                saw_underreport = true;
+            }
+            let cached = h.render(area);
+            let truth = h.render_via_fresh_state(area);
+            assert_eq!(
+                cached, truth,
+                "cached widget render diverged from a fresh-state full walk at op {i}",
+            );
+        }
+        assert!(
+            saw_underreport,
+            "orchestration stream never made libghostty under-report dirty — \
+             the regression test would pass vacuously",
+        );
     }
 
     #[test]

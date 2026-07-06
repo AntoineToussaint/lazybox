@@ -697,7 +697,7 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// A mouse press while a *dismissable* modal (a read-only or
     /// progress overlay, never a destructive confirm — see
-    /// [`Id::dismissable_by_outside_click`]) is up closes it, exactly
+    /// `Id::dismissable_by_outside_click`) is up closes it, exactly
     /// like Esc, and then lets the click do its normal thing. So
     /// clicking a sidebar workspace while the worktree-provisioning
     /// checklist is up both dismisses the checklist and selects that

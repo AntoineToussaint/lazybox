@@ -18,9 +18,11 @@ key. Press `e` in the browser to jump to the YAML file.
 This page documents that full lifecycle — create, browse, list/use,
 edit, delete — plus the file format and the picker reference.
 
-lazybox ships a **broad, categorized built-in library** (~35 prompts)
+lazybox ships a **broad, categorized built-in library** (~38 prompts)
 so a fresh install has plenty to expand out of the box — review
-(`rev`, `deepreview`, `nit`), git & PR (`pr`, `ready`, `commit`,
+(`rev`, `deepreview`, `nit`, plus the dedicated suite `audit` for a
+full pre-ship pass, `arch` for a staff-engineer design review, and
+`hotpath` for a performance review), git & PR (`pr`, `ready`, `commit`,
 `rebase`, `squash`), testing (`test`, `tdd`, `repro`), debugging
 (`bug`, `bisect`, `trace`), refactor (`refac`, `rename`, `extract`),
 performance (`perf`, `bench`), security (`sec`, `deps`, `leaks`),
@@ -93,15 +95,18 @@ chord that leaves the terminal pane. With the terminal focused:
   the fast path for snippets you know by name.
 - **`]]<text>`** — otherwise (the text is a partial key, or more than
   one snippet key starts with it) the **snippet picker** opens,
-  pre-filtered by what you typed. Keep typing to narrow, use `↑`/`↓`
-  to move, and press `Enter` to send the highlighted row. `Esc` (or
-  `Ctrl-C`) cancels without sending.
-- **`]]` then nothing** — bare double-bracket still exits the terminal
-  pane back to the sidebar. When a snippet library is present, the
-  leader stays armed for a moment (a which-key popup lists the keys);
-  if you don't pick one within the escape window
-  (`terminal.escape_window_ms`, default 600 ms) the pane leaves.
-  `Esc` under the leader cancels and keeps you in the terminal.
+  pre-filtered by what you typed. The picker is a real, dwellable modal:
+  it stays open until you send or cancel — no timer, PTY output, or
+  focus change closes it. Keep typing to narrow, use `↑`/`↓` to move,
+  and press `Enter` to send the highlighted row. `Esc` (or `Ctrl-C`)
+  cancels without sending.
+- **`]]]`** — a third press of the escape char exits the terminal pane
+  back to the sidebar. The leader is *non-timed* (#252): after `]]` it
+  waits for your next key (a which-key popup lists the options) rather
+  than leaving on an idle timer, so pausing to read the popup or think
+  about which snippet to type never drops you to the sidebar
+  mid-decision. `Esc` under the leader cancels and keeps you in the
+  terminal.
 - **A lone `]`** — a single `]` followed by any non-`]` key is sent to
   the agent verbatim, so `]` is typeable in code, arrays, and
   markdown. Only the doubled `]]` is intercepted.

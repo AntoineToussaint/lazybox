@@ -216,16 +216,18 @@ selection, `d` toggle PR/issue description, `m` mark the focused row
 read, `z` undo mark-read, `r` reply.
 
 **TerminalStack**: all keys forward to the PTY. `]]` (configurable
-escape sequence) is a leader: bare `]]` returns to the sidebar (on the
-idle tick), `]]f` toggles focus mode, `]]<digit>` jumps to the Nth
-agent workspace, and `]]<key>` opens the snippet picker (see
+escape sequence) is a *non-timed* leader (#252): `]]]` (a third press)
+returns to the sidebar, `]]f` toggles focus mode, `]]<digit>` jumps to
+the Nth agent workspace, and `]]<key>` opens the snippet picker (see
 [`docs/snippets.md`](docs/snippets.md)) — a category-grouped list with
 a live body-preview pane, filtering on key+description+category, that
 auto-submits when the typed key uniquely matches. The `]]` leader
 popup lists the agent roster (digits), `` ` `` (jump to any
 workspace via the fuzzy picker) and `f` above the snippet keys.
 Digits, `` ` `` and `f` are reserved by the leader, shadowing any
-snippet bound to them. A lone `]` followed by any non-`]` key is sent to the agent
+snippet bound to them. The leader is non-timed, so it waits for the
+next key rather than leaving on an idle timer — browsing snippets never
+races an exit. A lone `]` followed by any non-`]` key is sent to the agent
 verbatim. `Ctrl-c`
 is forwarded as an interrupt. `Ctrl-w` is the tile prefix:
 `Ctrl-w |` / `Ctrl-w -` split, `Ctrl-w <arrow>` moves tile focus,

@@ -468,14 +468,17 @@ pub struct Model<T: TerminalAdapter> {
     terminal_selection: Option<((u16, u16), (u16, u16))>,
     /// `]]` escape from the terminal pane: first press of the escape
     /// char arms; a second within the window arms the `]]` *leader*
-    /// (see `terminal_leader_at`) instead of forwarding to the PTY.
+    /// (see `terminal_leader_armed`) instead of forwarding to the PTY.
     escape_latch: crate::confirm_latch::DoubleTapLatch,
-    /// `]]` leader armed-at instant. Set when `]]` completes with a
-    /// snippet library present: the *next* key selects a binding
-    /// (snippet) or cancels; if no key arrives within
-    /// `ui_defaults.escape_window` the pane leaves on the idle tick
-    /// (`tick_terminal_leader`). `None` when not armed.
-    terminal_leader_at: Option<std::time::Instant>,
+    /// Whether the `]]` leader is armed. Set when `]]` completes; the
+    /// *next* key selects a binding — a snippet key opens the picker, a
+    /// digit / `f` / `` ` `` jumps, a third escape char (`]]]`) leaves to
+    /// the sidebar, and Esc cancels back to the terminal. Deliberately
+    /// NOT timed (#252): a timed leave raced the user typing a snippet
+    /// key, so browsing snippets could silently drop them to the sidebar.
+    /// Cleared by the completing key, or on an abandonment signal (a
+    /// mouse click, via `cancel_leader_chords`).
+    terminal_leader_armed: bool,
     /// `w` leader armed-at instant (issue #224). Unlike the github `g`
     /// group, `w` is BOTH a direct action (work on the running-or-default
     /// agent) and a leader prefix for the scoped `w c` / `w x` chords —
@@ -894,7 +897,7 @@ impl<T: TerminalAdapter> Model<T> {
             q_latch: crate::confirm_latch::DoubleTapLatch::new(),
             leader: crate::confirm_latch::LeaderLatch::new(),
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
-            terminal_leader_at: None,
+            terminal_leader_armed: false,
             work_leader_at: None,
             last_click: None,
             terminal_user_typed_since_focus: false,
@@ -2390,7 +2393,7 @@ impl<T: TerminalAdapter> Model<T> {
         };
         // Snippet rows for the `]]` leader popup — built only while the
         // leader is armed so the steady-state render pays nothing.
-        let snippet_leader_rows: Vec<(String, String)> = if self.terminal_leader_at.is_some() {
+        let snippet_leader_rows: Vec<(String, String)> = if self.terminal_leader_armed {
             self.snippets
                 .all()
                 .map(|(k, s)| (k.to_string(), s.description.clone()))
@@ -2402,7 +2405,7 @@ impl<T: TerminalAdapter> Model<T> {
         // workspace name (sidebar order), plus the `f` focus-mode row.
         // Shown above the snippets so the heads-down user can pick a
         // jump target by number. Built only while the leader is armed.
-        let agent_leader_rows: Vec<(String, String)> = if self.terminal_leader_at.is_some() {
+        let agent_leader_rows: Vec<(String, String)> = if self.terminal_leader_armed {
             let mut rows: Vec<(String, String)> = self
                 .sidebar
                 .agent_workspace_keys()
@@ -2445,9 +2448,9 @@ impl<T: TerminalAdapter> Model<T> {
             };
             // Inside focus mode the PTY owns the keyboard, so the
             // reachable controls are all `]]` leader chords: `]]<digit>`
-            // jumps to another agent, `]]` exits back to the sidebar.
+            // jumps to another agent, `]]]` exits back to the sidebar.
             let esc = self.ui_defaults.terminal_escape_char;
-            let hint = format!("{esc}{esc}<n> jump · {esc}{esc} exit");
+            let hint = format!("{esc}{esc}<n> jump · {esc}{esc}{esc} exit");
             (title, self.sidebar.attention_summary(), hint)
         } else {
             (String::new(), Default::default(), String::new())
@@ -2519,7 +2522,7 @@ impl<T: TerminalAdapter> Model<T> {
             // Which-key popup for the armed terminal `]]` leader
             // (#205): the agent-jump roster (`]]<digit>`, `]]f`) on top
             // of the snippet keys reachable as `]]<key>`.
-            if self.terminal_leader_at.is_some() {
+            if self.terminal_leader_armed {
                 crate::realm::components::which_key::render_terminal_leader(
                     f,
                     area,

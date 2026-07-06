@@ -83,44 +83,54 @@ impl<T: TerminalAdapter> Model<T> {
                 return;
             }
         }
-        // ── Terminal `]]` leader (issue #205) ───────────────────────
+        // ── Terminal `]]` leader (issues #205, #252) ────────────────
         // Once `]]` arms the leader, THIS key selects a binding under
         // it and never reaches the PTY:
         //   - a printable char opens the snippet picker pre-filtered
         //     by that char (auto-submits on a unique match);
-        //   - the escape char, Esc, or anything else cancels back into
-        //     the terminal so the user can keep typing;
-        //   - no key at all → the idle tick leaves the pane (see
-        //     `tick_terminal_leader`).
-        // The snippet library is the leader's binding set, mirroring
-        // how the sidebar group-leader above resolves an `ActionGroup`.
-        if self.terminal_leader_at.take().is_some() {
+        //   - a third escape char (`]]]`) leaves the pane to the
+        //     sidebar — the explicit exit;
+        //   - Esc (or any non-printable) cancels back into the terminal
+        //     so the user can keep typing.
+        // The leader is NOT timed (#252): a timed idle-leave used to
+        // race the user typing a snippet key, silently dropping them to
+        // the sidebar mid-decision, so browsing snippets could never
+        // dwell. It now waits for THIS key. The snippet library is the
+        // leader's binding set, mirroring how the sidebar group-leader
+        // above resolves an `ActionGroup`.
+        if std::mem::take(&mut self.terminal_leader_armed) {
             self.redraw = true;
             if let Key::Char(c) = key.code
                 && key.modifiers.is_empty()
                 && !c.is_control()
-                && c != self.ui_defaults.terminal_escape_char
             {
                 // Reserved leader keys win over the snippet picker:
+                //   - `]]]` (the escape char again) is the explicit
+                //     "leave to sidebar" — the non-timed replacement for
+                //     the old idle-tick leave (#252);
                 //   - `]]<1..9>` jumps the view straight to the Nth
                 //     agent workspace (sidebar order, top-down) — the
                 //     numbered replacement for the old `F3` cycle;
                 //   - `]]f` toggles focus mode without leaving the PTY,
                 //     replacing the old `F2`.
-                // Both shadow snippets bound to those keys (digits and
-                // `f`), which is the documented trade-off for keeping
-                // the jumps reachable heads-down. `` ` `` is reserved
-                // the same way: it opens the fuzzy workspace switcher,
-                // so "jump to any workspace" works without first
-                // leaving the agent (issue #171).
-                match c {
-                    '1'..='9' => {
-                        let n = c.to_digit(10).unwrap_or(0) as usize;
-                        self.jump_to_agent_workspace(n);
+                // Digits and `f` shadow snippets bound to those keys,
+                // which is the documented trade-off for keeping the
+                // jumps reachable heads-down. `` ` `` is reserved the
+                // same way: it opens the fuzzy workspace switcher, so
+                // "jump to any workspace" works without first leaving
+                // the agent (issue #171).
+                if c == self.ui_defaults.terminal_escape_char {
+                    self.leave_terminal_to_sidebar();
+                } else {
+                    match c {
+                        '1'..='9' => {
+                            let n = c.to_digit(10).unwrap_or(0) as usize;
+                            self.jump_to_agent_workspace(n);
+                        }
+                        'f' => self.toggle_focus_mode(),
+                        '`' => self.mount_jump_picker(),
+                        _ => self.mount_snippet_picker(c.to_string()),
                     }
-                    'f' => self.toggle_focus_mode(),
-                    '`' => self.mount_jump_picker(),
-                    _ => self.mount_snippet_picker(c.to_string()),
                 }
             }
             return;
@@ -292,12 +302,12 @@ impl<T: TerminalAdapter> Model<T> {
                 // Second `]` within the window completes `]]`: arm the
                 // leader so the next key can invoke a binding
                 // (`]]<key>`). The leader always has something to offer
-                // now — `]]f` toggles focus mode and `]]<digit>` jumps
-                // to an agent even with no snippets configured — so it
-                // arms unconditionally; the pane still leaves on the
-                // idle tick if no key follows (see `tick_terminal_leader`).
-                // (Previously a snippet-less `]]` left instantly.)
-                self.terminal_leader_at = Some(std::time::Instant::now());
+                // — `]]f` toggles focus mode and `]]<digit>` jumps to an
+                // agent even with no snippets configured — so it arms
+                // unconditionally. It is non-timed (#252): it waits for
+                // the next key rather than leaving on an idle tick, so
+                // `]]]` is now the explicit exit to the sidebar.
+                self.terminal_leader_armed = true;
                 self.redraw = true;
                 return;
             }
@@ -486,7 +496,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// which-key popup in `view`; also a test/inspection hook for the
     /// #205 leader chord.
     pub fn terminal_leader_pending(&self) -> bool {
-        self.terminal_leader_at.is_some()
+        self.terminal_leader_armed
     }
 
     /// Whether the timed `w` leader is currently armed (issue #224) —
@@ -497,18 +507,22 @@ impl<T: TerminalAdapter> Model<T> {
         self.work_leader_at.is_some()
     }
 
-    /// Cancel any armed leader chord — the `g` github group or the timed
-    /// `w` leader (#224). Called on mouse interaction: a click is an
-    /// unambiguous "I'm doing something else" signal, and without this
-    /// the `w` leader's idle-tick timeout would fire a stray `Work`
-    /// after the user clicked away. Keystrokes resolve the leader
-    /// through the completion block instead, so they don't need this.
+    /// Cancel any armed leader chord — the `g` github group, the timed
+    /// `w` leader (#224), or the non-timed terminal `]]` leader (#252).
+    /// Called on mouse interaction: a click is an unambiguous "I'm doing
+    /// something else" signal. Without it the `w` leader's idle-tick
+    /// timeout would fire a stray `Work` after the user clicked away,
+    /// and the non-timed `]]` leader would stay armed and swallow the
+    /// user's next terminal keystroke as a snippet trigger. Keystrokes
+    /// resolve each leader through its completion block instead, so they
+    /// don't need this.
     pub(super) fn cancel_leader_chords(&mut self) {
-        if self.leader.is_armed() || self.work_leader_at.is_some() {
+        if self.leader.is_armed() || self.work_leader_at.is_some() || self.terminal_leader_armed {
             self.redraw = true;
         }
         self.leader.disarm();
         self.work_leader_at = None;
+        self.terminal_leader_armed = false;
     }
 
     /// Sidebar / right / activity split percentages — exposed so tests

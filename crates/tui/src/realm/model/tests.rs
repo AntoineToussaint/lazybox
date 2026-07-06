@@ -1177,20 +1177,56 @@ snippets:
         assert_eq!(m.focus(), PaneFocus::Terminals);
     }
 
-    /// An armed leader with no follow-up key leaves the pane once the
-    /// escape window elapses (the idle tick). Uses a 1ms window so the
-    /// test doesn't sleep the default 600ms.
+    /// The `]]` leader is non-timed (#252): an armed leader with no
+    /// follow-up key stays armed across idle ticks and never leaves on
+    /// its own, so a user reading the popup and deciding which snippet
+    /// to type is never yanked to the sidebar mid-decision. `]]]` is the
+    /// explicit exit (see `triple_bracket_leaves_to_sidebar`).
     #[test]
-    fn idle_leader_leaves_on_tick_after_window() {
+    fn idle_leader_stays_armed_and_never_leaves_on_tick() {
         let mut m = model_in_terminal_with_snippets("leader-idle");
-        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
         m.dispatch_key(esc_key());
         m.dispatch_key(esc_key());
         assert!(m.terminal_leader_pending());
+        // Ticking — however long the pane sits idle — must not leave.
         std::thread::sleep(std::time::Duration::from_millis(3));
         m.tick_terminal_leader();
-        assert!(!m.terminal_leader_pending(), "window elapsed → disarmed");
-        assert_eq!(m.focus(), PaneFocus::Sidebar, "idle leader leaves the pane");
+        assert!(m.terminal_leader_pending(), "non-timed leader stays armed");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "idle leader never leaves");
+    }
+
+    /// `]]]` — a third press of the escape char under the armed leader —
+    /// is the explicit exit to the sidebar, replacing the old idle-tick
+    /// leave (#252).
+    #[test]
+    fn triple_bracket_leaves_to_sidebar() {
+        let mut m = model_in_terminal_with_snippets("leader-triple");
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+        m.dispatch_key(esc_key());
+        assert!(!m.terminal_leader_pending(), "`]]]` consumes the leader");
+        assert_eq!(m.focus(), PaneFocus::Sidebar, "`]]]` leaves to the sidebar");
+        assert!(m.top_modal().is_none(), "no picker mounted on exit");
+    }
+
+    /// A snippet key after `]]` still opens the picker even when a long
+    /// time passes between the leader and the key — the race that made
+    /// the picker "flash and vanish" is gone because the leader no
+    /// longer times out (#252).
+    #[test]
+    fn leader_then_delayed_char_still_opens_picker() {
+        let mut m = model_in_terminal_with_snippets("leader-delay");
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        // Simulate an idle gap (PTY output flooding, a thoughtful user):
+        // ticks fire but must not disarm the leader.
+        for _ in 0..5 {
+            m.tick_terminal_leader();
+        }
+        assert!(m.terminal_leader_pending(), "leader survived the idle gap");
+        m.dispatch_key(RealmKey::new(Key::Char('r'), RealmMods::NONE));
+        assert!(matches!(m.top_modal(), Some(Id::SnippetPicker)));
     }
 
     /// A single-line snippet body is sent raw plus a trailing `\r`.
@@ -4501,11 +4537,12 @@ mod focus_mode_tests {
         assert!(!m.focus_mode, "no terminal → no focus mode");
     }
 
-    /// Bare `]]` arms the leader; with no follow key the pane leaves on
-    /// the idle tick — and in focus mode that must also drop focus mode,
-    /// since the sidebar it returns to is hidden while focus mode is on.
+    /// `]]]` exits the terminal to the sidebar — and in focus mode that
+    /// must also drop focus mode, since the sidebar it returns to is
+    /// hidden while focus mode is on (#252, replacing the old idle-tick
+    /// leave).
     #[test]
-    fn bracket_idle_leave_exits_focus_mode() {
+    fn bracket_exit_exits_focus_mode() {
         let mut m = build_model();
         let ws = workspace_with_agent("owner/repo#1");
         let key = SessionKey::from(&ws.key);
@@ -4515,18 +4552,59 @@ mod focus_mode_tests {
         m.set_focus_attr();
         m.focus_mode = true;
 
-        // `]]` arms the leader (no immediate leave now that the leader
-        // always has bindings to offer); with no follow key the idle
-        // tick leaves the pane once the escape window lapses.
+        // `]]` arms the non-timed leader; a third `]` is the explicit exit.
         m.dispatch_key(char_key(']'));
         m.dispatch_key(char_key(']'));
-        assert!(m.terminal_leader_at.is_some(), "`]]` arms the leader");
-        // Force the idle window past, then tick — Instant can't be
-        // fast-forwarded, so backdate the arm timestamp instead.
-        m.terminal_leader_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(60));
-        m.tick_terminal_leader();
-        assert!(!m.focus_mode, "idle `]]` exits focus mode");
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+        m.dispatch_key(char_key(']'));
+        assert!(!m.focus_mode, "`]]]` exits focus mode");
         assert_eq!(m.focus(), PaneFocus::Sidebar);
+    }
+
+    /// Once the snippet picker is mounted, nothing in the daemon-event
+    /// stream may auto-close it (#252): a flood of PTY output, an agent
+    /// state change, a spawn that steals pane focus, and the idle tick
+    /// all fire, and the picker stays on top the whole time. This is the
+    /// "flash for ~0.1s and vanish" the issue is about — proven immune.
+    #[test]
+    fn snippet_picker_survives_daemon_output_and_focus_steal() {
+        let mut m = build_model();
+        let ws = workspace_with_agent("owner/repo#1");
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        spawn_terminal(&mut m, &key);
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        m.apply_snippets(lazybox_config::Snippets::builtin());
+
+        m.mount_snippet_picker("r".to_string());
+        assert!(
+            matches!(m.top_modal(), Some(Id::SnippetPicker)),
+            "picker up"
+        );
+
+        // Agent spews output, changes state, a spawn lands (which steals
+        // focus to the terminal), and the run loop keeps ticking.
+        for seq in 0..20 {
+            m.handle_daemon_event(IpcEvent::TerminalOutput {
+                terminal_id: TerminalId(1),
+                bytes: b"codex spinner churn...\r\n".to_vec(),
+                seq,
+            });
+            m.tick_terminal_leader();
+        }
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(2),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+        m.tick_terminal_leader();
+
+        assert!(
+            matches!(m.top_modal(), Some(Id::SnippetPicker)),
+            "no daemon event or tick may close the picker",
+        );
     }
 
     /// `]]<digit>` moves the displayed terminal to the Nth agent
@@ -4773,14 +4851,13 @@ mod terminal_section_dispatch_tests {
         );
     }
 
-    /// The escape char doubled leaves even with the `leave_terminal`
+    /// The escape char tripled leaves even with the `leave_terminal`
     /// override present — proving `ui.terminal_escape_char` is the chord
-    /// owner. Uses a 1ms window so the idle tick fires without sleeping
-    /// the default escape window.
+    /// owner. `]]` arms the non-timed leader and the third press is the
+    /// explicit exit (#252).
     #[test]
-    fn escape_char_doubled_leaves_regardless_of_override() {
+    fn escape_char_tripled_leaves_regardless_of_override() {
         let mut m = model_in_live_terminal();
-        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
         let mut ov = std::collections::BTreeMap::new();
         ov.insert("leave_terminal".to_string(), "Esc".to_string());
         m.apply_action_key_overrides(ov);
@@ -4791,12 +4868,11 @@ mod terminal_section_dispatch_tests {
             m.terminal_leader_pending(),
             "the escape char doubled arms the leader"
         );
-        std::thread::sleep(std::time::Duration::from_millis(3));
-        m.tick_terminal_leader();
+        m.dispatch_key(esc_char(&m));
         assert_eq!(
             m.focus(),
             PaneFocus::Sidebar,
-            "escape char doubled is the way out, override or not",
+            "escape char tripled is the way out, override or not",
         );
     }
 

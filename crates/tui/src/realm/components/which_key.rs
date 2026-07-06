@@ -166,11 +166,11 @@ pub fn render_quit_hint(frame: &mut Frame, area: Rect, quit_keys: &str) {
 const LEADER_MAX_ROWS: usize = 8;
 
 /// Render the which-key popup for the armed terminal `]]` leader
-/// (issue #205). Lists the agent-jump roster (`]]<digit>` → workspace,
-/// `]]f` → focus mode) on top of the snippet keys reachable as
-/// `]]<key>`, plus a hint that an idle window leaves the pane. Visual
-/// twin of [`render`], but the binding set is the agent roster + the
-/// snippet library, so it takes the rows directly.
+/// (issues #205, #252). Lists the agent-jump roster (`]]<digit>` →
+/// workspace, `]]f` → focus mode) on top of the snippet keys reachable
+/// as `]]<key>`, plus a hint that a third escape char exits and Esc
+/// cancels. Visual twin of [`render`], but the binding set is the agent
+/// roster + the snippet library, so it takes the rows directly.
 pub fn render_terminal_leader(
     frame: &mut Frame,
     area: Rect,
@@ -266,11 +266,14 @@ pub fn render_terminal_leader(
             );
         }
     }
-    // Footer hint on the bottom row of the panel.
+    // Footer hint on the bottom row of the panel. `]]]` (the escape
+    // char a third time) is the explicit exit; Esc cancels back to the
+    // terminal. The leader is non-timed (#252), so nothing leaves on
+    // its own.
     let hint_y = panel.y + panel.height.saturating_sub(1);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " Esc cancel · idle leaves ",
+            format!(" {escape_char} exit · Esc cancel "),
             Style::default().bg(theme.surface).fg(theme.text_dim),
         ))),
         Rect {

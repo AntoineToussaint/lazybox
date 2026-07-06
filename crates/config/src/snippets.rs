@@ -220,6 +220,63 @@ impl Snippets {
                      say so.",
                 ),
             ),
+            (
+                "audit".to_string(),
+                entry(
+                    "Review",
+                    "Full pre-ship review: correctness, design, security, perf, tests",
+                    "Give the current diff (`git diff` against the base branch) the full \
+                     pre-ship review, one lens at a time. Correctness: logic errors, \
+                     off-by-one, unhandled errors and edge cases. Design: are the \
+                     boundaries and abstractions right, does it fit the surrounding code, \
+                     is there a simpler shape. Security: untrusted input crossing a trust \
+                     boundary, authz, injection, secret handling. Performance: \
+                     allocations or I/O added to a hot path, N+1s, accidental \
+                     quadratics. Tests: do they actually exercise the new behavior and \
+                     its failure paths. For each finding, trace the real code path and \
+                     give a concrete failure scenario — the input or state that produces \
+                     the wrong result — with a `file:line` anchor, ranked by severity. If \
+                     a lens is clean, say so in one line rather than padding the list.",
+                ),
+            ),
+            (
+                "arch".to_string(),
+                entry(
+                    "Review",
+                    "Design & architecture review (staff-engineer lens)",
+                    "Review this change the way a staff engineer would — past line-level \
+                     bugs, at the design. Does the change belong in this layer, or is it \
+                     in the wrong place? Are the module boundaries, data flow, and \
+                     ownership right, or does it add coupling that will bite later? Is \
+                     there a materially simpler shape that does the same job? What's the \
+                     blast radius, and the rollback story if it's wrong? Judge it against \
+                     the patterns already in this codebase, not an ideal in the abstract. \
+                     End with a one-word verdict — ship, reshape, or rethink — and the \
+                     two or three highest-leverage changes, each with a `file:line` \
+                     anchor and the reasoning. If the design is sound, say so and name \
+                     the one risk you'd keep watching.",
+                ),
+            ),
+            (
+                // Not `perfrev`: `perf` is already a built-in key, and a
+                // key with `perf` as a strict prefix breaks `]]perf`'s
+                // exact-key auto-submit (see `deepreview`).
+                "hotpath".to_string(),
+                entry(
+                    "Review",
+                    "Performance review of the diff",
+                    "Review the current diff for performance regressions, not micro-nits. \
+                     Walk the changed code on its hot path and look for allocations or \
+                     clones added inside a loop, N+1 queries or repeated I/O, an \
+                     accidental O(n²) from a nested scan, eager work that could be \
+                     deferred, and blocking calls or locks added to a latency-sensitive \
+                     path. For each, give the `file:line`, the input scale at which it \
+                     starts to hurt, and the concrete cost — measured or estimated, not \
+                     hand-waved — ranked by impact. Suggest a fix only where the win is \
+                     real and the code stays readable. If the diff has no hot-path \
+                     impact, say so plainly instead of inventing concerns.",
+                ),
+            ),
             // ── Git & PR ────────────────────────────────────────────
             (
                 "pr".to_string(),
@@ -627,8 +684,11 @@ impl Snippets {
          \x20   description: Review current diff\n\
          \x20   category: Review\n\
          \x20   body: |\n\
-         \x20     Please review the current diff for correctness bugs and\n\
-         \x20     obvious cleanups. Focus on the changes only.\n"
+         \x20     Review the current diff for correctness bugs — logic errors,\n\
+         \x20     off-by-one mistakes, missing error handling, broken edge cases.\n\
+         \x20     Report findings ranked by severity, each with a file:line anchor\n\
+         \x20     and a one-line note on what breaks and when. Look only at the\n\
+         \x20     changed lines; if it's clean, say so instead of inventing nits.\n"
     }
 
     /// Default global path: `<lazybox_home>/snippets.yaml`.
@@ -899,12 +959,36 @@ snippets:
     #[test]
     fn flagship_bodies_request_anchored_findings() {
         let b = Snippets::builtin();
-        for key in ["rev", "deepreview", "sec", "selfrev"] {
+        for key in [
+            "rev",
+            "deepreview",
+            "sec",
+            "selfrev",
+            "audit",
+            "arch",
+            "hotpath",
+        ] {
             let body = &b.get(key).expect("flagship snippet ships built-in").body;
             assert!(
                 body.contains("file:line"),
                 "built-in `{key}` should ask for `file:line`-anchored findings",
             );
+        }
+    }
+
+    /// The dedicated review suite (#252) ships as distinct built-in
+    /// lenses in the Review category — a comprehensive `audit`, a
+    /// staff-engineer `arch` design pass, and a `hotpath` performance
+    /// review — so a user can reach each without hand-writing the prompt.
+    #[test]
+    fn builtin_ships_review_suite() {
+        let b = Snippets::builtin();
+        for key in ["audit", "arch", "hotpath"] {
+            let s = b
+                .get(key)
+                .unwrap_or_else(|| panic!("`{key}` ships built-in"));
+            assert_eq!(s.category, "Review", "`{key}` is a Review-category lens");
+            assert_eq!(s.origin, SnippetOrigin::BuiltIn);
         }
     }
 

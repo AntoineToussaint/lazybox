@@ -472,14 +472,17 @@ pub struct Model<T: TerminalAdapter> {
     terminal_selection: Option<((u16, u16), (u16, u16))>,
     /// `]]` escape from the terminal pane: first press of the escape
     /// char arms; a second within the window arms the `]]` *leader*
-    /// (see `terminal_leader_at`) instead of forwarding to the PTY.
+    /// (see `terminal_leader_armed`) instead of forwarding to the PTY.
     escape_latch: crate::confirm_latch::DoubleTapLatch,
-    /// `]]` leader armed-at instant. Set when `]]` completes with a
-    /// snippet library present: the *next* key selects a binding
-    /// (snippet) or cancels; if no key arrives within
-    /// `ui_defaults.escape_window` the pane leaves on the idle tick
-    /// (`tick_terminal_leader`). `None` when not armed.
-    terminal_leader_at: Option<std::time::Instant>,
+    /// Whether the `]]` leader is armed. Set when `]]` completes; the
+    /// *next* key selects a binding — a snippet key opens the picker, a
+    /// digit / `f` / `` ` `` jumps, a third escape char (`]]]`) leaves to
+    /// the sidebar, and Esc cancels back to the terminal. Deliberately
+    /// NOT timed (#252): a timed leave raced the user typing a snippet
+    /// key, so browsing snippets could silently drop them to the sidebar.
+    /// Cleared by the completing key, or on an abandonment signal (a
+    /// mouse click, via `cancel_leader_chords`).
+    terminal_leader_armed: bool,
     /// `w` leader armed-at instant (issue #224). Unlike the github `g`
     /// group, `w` is BOTH a direct action (work on the running-or-default
     /// agent) and a leader prefix for the scoped `w c` / `w x` chords —
@@ -729,6 +732,12 @@ pub struct Model<T: TerminalAdapter> {
     /// mount/unmount. Storing keys (not full rows) avoids cloning
     /// the snippet body twice on every picker mount.
     pub(crate) snippet_choices: Vec<String>,
+    /// Snippet keys sent this session, most-recent first (capped at
+    /// `RECENT_SNIPPETS_MAX`). Passed to each picker as its "Recent"
+    /// group so a repeated snippet is one `]]s` + `Enter` away (#252).
+    /// Session-scoped — deliberately not persisted; it tracks the
+    /// current work session's rhythm, not a durable preference.
+    pub(crate) recent_snippets: Vec<String>,
     /// Session keys backing the active `JumpPicker`, in the same order
     /// as its rows — `Msg::ChoicePicked(idx)` resolves to a key here.
     /// Cleared on mount/unmount.
@@ -844,6 +853,11 @@ use crate::realm::status_ctx::StatusCtx;
 /// no `Msg`. See `Model::forward_modal_event`.
 const MODAL_REDRAW_WINDOW: Duration = Duration::from_millis(120);
 
+/// How many recently-used snippets the picker's "Recent" group holds
+/// (#252). Small enough to stay a shortcut list, not a second library —
+/// the group is a fast lane for the handful of snippets in active use.
+const RECENT_SNIPPETS_MAX: usize = 5;
+
 /// How long the footer must sit idle (no modal, no notice) after
 /// startup before a feature tip (#115) is allowed to surface. Long
 /// enough that the first-run tour and the initial-poll spinner clear
@@ -905,7 +919,7 @@ impl<T: TerminalAdapter> Model<T> {
             q_latch: crate::confirm_latch::DoubleTapLatch::new(),
             leader: crate::confirm_latch::LeaderLatch::new(),
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
-            terminal_leader_at: None,
+            terminal_leader_armed: false,
             work_leader_at: None,
             last_click: None,
             terminal_user_typed_since_focus: false,
@@ -967,6 +981,7 @@ impl<T: TerminalAdapter> Model<T> {
             pending_focus_terminal: None,
             snippets: lazybox_config::Snippets::default(),
             snippet_choices: Vec::new(),
+            recent_snippets: Vec::new(),
             jump_choices: Vec::new(),
             theme_choices: Vec::new(),
             theme_picker_prev: None,
@@ -1285,8 +1300,18 @@ impl<T: TerminalAdapter> Model<T> {
             keys.push(k.to_string());
         }
         self.snippet_choices = keys;
-        let picker = SnippetPicker::new(rows, initial_filter);
+        let picker =
+            SnippetPicker::new(rows, initial_filter).with_recent(self.recent_snippets.clone());
         self.mount_modal(Id::SnippetPicker, picker);
+    }
+
+    /// Record a snippet key as just-used: move it to the front of the
+    /// session MRU list (`recent_snippets`), de-duplicating and capping
+    /// the list. Drives the picker's "Recent" group (#252).
+    pub(crate) fn record_recent_snippet(&mut self, key: String) {
+        self.recent_snippets.retain(|k| k != &key);
+        self.recent_snippets.insert(0, key);
+        self.recent_snippets.truncate(RECENT_SNIPPETS_MAX);
     }
 
     /// Mount the read-only snippets browser (`]`, or the Settings
@@ -2400,35 +2425,36 @@ impl<T: TerminalAdapter> Model<T> {
         } else {
             Vec::new()
         };
-        // Snippet rows for the `]]` leader popup — built only while the
-        // leader is armed so the steady-state render pays nothing.
-        let snippet_leader_rows: Vec<(String, String)> = if self.terminal_leader_at.is_some() {
-            self.snippets
-                .all()
-                .map(|(k, s)| (k.to_string(), s.description.clone()))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        // Agent-jump roster for the `]]` leader popup: `1..9` → agent
-        // workspace name (sidebar order), plus the `f` focus-mode row.
-        // Shown above the snippets so the heads-down user can pick a
-        // jump target by number. Built only while the leader is armed.
-        let agent_leader_rows: Vec<(String, String)> = if self.terminal_leader_at.is_some() {
-            let mut rows: Vec<(String, String)> = self
-                .sidebar
-                .agent_workspace_keys()
-                .into_iter()
-                .take(9)
-                .enumerate()
-                .filter_map(|(i, k)| {
-                    self.sidebar
-                        .workspace_by_key(&k)
-                        .map(|w| ((i + 1).to_string(), w.name.clone()))
-                })
-                .collect();
-            rows.push(("`".to_string(), "jump to workspace".to_string()));
-            rows.push(("f".to_string(), "focus mode".to_string()));
+        // Command menu for the `]]` leader popup (#252): the fixed
+        // commands (`s` snippets, `f` focus, `q` exit, `` ` `` jump)
+        // FIRST so they're always visible, then the agent-jump roster
+        // (`1..9` → agent workspace name, sidebar order). Ordering
+        // matters — the popup caps its rows (`LEADER_MAX_ROWS`) and
+        // truncates the tail into "+N more", so a user with many agent
+        // workspaces must still see the exit / snippet commands rather
+        // than have them pushed off the bottom. A small mnemonic menu
+        // rather than the whole snippet library — snippets live one
+        // level down, behind `]]s`. Built only while the leader is armed
+        // so the steady-state render pays nothing.
+        let leader_menu_rows: Vec<(String, String)> = if self.terminal_leader_armed {
+            let mut rows: Vec<(String, String)> = vec![
+                ("s".to_string(), "snippets".to_string()),
+                ("f".to_string(), "focus mode".to_string()),
+                ("q".to_string(), "exit to sidebar".to_string()),
+                ("`".to_string(), "jump to workspace".to_string()),
+            ];
+            rows.extend(
+                self.sidebar
+                    .agent_workspace_keys()
+                    .into_iter()
+                    .take(9)
+                    .enumerate()
+                    .filter_map(|(i, k)| {
+                        self.sidebar
+                            .workspace_by_key(&k)
+                            .map(|w| ((i + 1).to_string(), w.name.clone()))
+                    }),
+            );
             rows
         } else {
             Vec::new()
@@ -2457,9 +2483,9 @@ impl<T: TerminalAdapter> Model<T> {
             };
             // Inside focus mode the PTY owns the keyboard, so the
             // reachable controls are all `]]` leader chords: `]]<digit>`
-            // jumps to another agent, `]]` exits back to the sidebar.
+            // jumps to another agent, `]]q` exits back to the sidebar.
             let esc = self.ui_defaults.terminal_escape_char;
-            let hint = format!("{esc}{esc}<n> jump · {esc}{esc} exit");
+            let hint = format!("{esc}{esc}<n> jump · {esc}{esc}q exit");
             (title, self.sidebar.attention_summary(), hint)
         } else {
             (String::new(), Default::default(), String::new())
@@ -2528,16 +2554,16 @@ impl<T: TerminalAdapter> Model<T> {
             if let Some(prefix) = self.leader.pending().copied() {
                 crate::realm::components::which_key::render(f, area, prefix, &leader_rows);
             }
-            // Which-key popup for the armed terminal `]]` leader
-            // (#205): the agent-jump roster (`]]<digit>`, `]]f`) on top
-            // of the snippet keys reachable as `]]<key>`.
-            if self.terminal_leader_at.is_some() {
+            // Which-key popup for the armed terminal `]]` leader (#205,
+            // #252): the agent-jump roster (`]]<digit>`) on top of the
+            // fixed command menu (`]]s` snippets, `]]f` focus, `]]q`
+            // exit, `` ]]` `` jump).
+            if self.terminal_leader_armed {
                 crate::realm::components::which_key::render_terminal_leader(
                     f,
                     area,
                     self.ui_defaults.terminal_escape_char,
-                    &agent_leader_rows,
-                    &snippet_leader_rows,
+                    &leader_menu_rows,
                 );
             }
             // After the first press of the `q q` quit chord, surface a

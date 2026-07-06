@@ -746,21 +746,14 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
-    /// Leave the terminal pane once the armed `]]` leader has sat
-    /// idle for `ui_defaults.escape_window` with no follow-up key.
-    /// This is what makes bare `]]` (leader armed, no binding key)
-    /// resolve to "exit to sidebar": the user pressed `]]` and didn't
-    /// pick a snippet, so we honor the leave. Called once per run-loop
-    /// iteration (the loop ticks ~every 16ms even while idle), so the
-    /// leave fires within a frame of the window elapsing.
+    /// Resolve a lone held `]` once its chord window lapses. The `]]`
+    /// leader itself is non-timed now (#252) — it waits for the next
+    /// key rather than leaving on an idle tick, so browsing snippets
+    /// never races an "exit to sidebar" — so this only handles the
+    /// *first* `]` of a would-be chord that never got a second press.
+    /// Called once per run-loop iteration (the loop ticks ~every 16ms
+    /// even while idle).
     pub fn tick_terminal_leader(&mut self) {
-        if let Some(armed_at) = self.terminal_leader_at
-            && armed_at.elapsed() >= self.ui_defaults.escape_window
-        {
-            self.terminal_leader_at = None;
-            self.leave_terminal_to_sidebar();
-            self.redraw = true;
-        }
         // A lone `]` that armed the chord but never saw a second press
         // (or any following key) would otherwise sit held indefinitely.
         // Once the chord window lapses, resolve it:

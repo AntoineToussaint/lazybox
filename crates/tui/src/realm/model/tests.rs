@@ -1039,6 +1039,49 @@ snippets:
         );
     }
 
+    /// Sending a snippet records it in the session MRU so the picker's
+    /// "Recent" group can float it to the top next time (#252). A shell
+    /// terminal keeps the setup simple.
+    #[test]
+    fn sending_a_snippet_records_it_in_recent() {
+        let mut m = model_with_active_terminal_and_snippet(
+            "recent",
+            "\nsnippets:\n  ls:\n    description: List\n    body: ls -la\n",
+            "ls",
+            lazybox_ipc::TerminalKind::Shell,
+        );
+        assert!(m.recent_snippets.is_empty(), "nothing sent yet");
+        let _ = m.handle_choice_picked(vec![0]);
+        assert_eq!(
+            m.recent_snippets,
+            vec!["ls".to_string()],
+            "MRU records the send"
+        );
+    }
+
+    /// The session MRU is most-recent-first, de-duplicated, and capped.
+    #[test]
+    fn recent_snippets_mru_dedups_and_caps() {
+        let mut m = build_model();
+        for k in ["a", "b", "c"] {
+            m.record_recent_snippet(k.to_string());
+        }
+        assert_eq!(m.recent_snippets, vec!["c", "b", "a"], "most-recent first");
+        // Re-using an entry moves it to the front without duplicating.
+        m.record_recent_snippet("a".to_string());
+        assert_eq!(m.recent_snippets, vec!["a", "c", "b"]);
+        // The list is capped — oldest entries fall off the end.
+        for k in ["d", "e", "f", "g"] {
+            m.record_recent_snippet(k.to_string());
+        }
+        assert_eq!(m.recent_snippets.len(), 5, "capped at RECENT_SNIPPETS_MAX");
+        assert_eq!(m.recent_snippets[0], "g", "newest at the front");
+        assert!(
+            !m.recent_snippets.contains(&"b".to_string()),
+            "oldest dropped"
+        );
+    }
+
     /// apply_snippets seeds the model collection. Sanity check
     /// that the lookup path resolves.
     #[test]
@@ -1161,16 +1204,29 @@ snippets:
         assert_eq!(m.focus(), PaneFocus::Terminals, "leader doesn't leave yet");
     }
 
-    /// `]]<printable>` opens the snippet picker pre-filtered by the
-    /// follow-up char, and disarms the leader.
+    /// `]]s` opens the snippet picker and disarms the leader (#252).
     #[test]
-    fn leader_then_char_opens_snippet_picker() {
+    fn leader_s_opens_snippet_picker() {
         let mut m = model_in_terminal_with_snippets("leader-char");
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        m.dispatch_key(RealmKey::new(Key::Char('s'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        assert!(matches!(m.top_modal(), Some(Id::SnippetPicker)));
+    }
+
+    /// `]]<unbound>` — a key that isn't a leader command — cancels back
+    /// to the terminal without opening the picker or leaving (#252). Only
+    /// `s`/`f`/`q`/digit/`` ` `` are commands now.
+    #[test]
+    fn leader_then_unbound_key_cancels_back_to_terminal() {
+        let mut m = model_in_terminal_with_snippets("leader-unbound");
         m.dispatch_key(esc_key());
         m.dispatch_key(esc_key());
         m.dispatch_key(RealmKey::new(Key::Char('r'), RealmMods::NONE));
         assert!(!m.terminal_leader_pending(), "leader consumed");
-        assert!(matches!(m.top_modal(), Some(Id::SnippetPicker)));
+        assert!(m.top_modal().is_none(), "unbound `]]r` opens no picker");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "stays in the terminal");
     }
 
     /// `]]` then `Esc` cancels the leader back into the terminal —
@@ -1199,20 +1255,54 @@ snippets:
         assert_eq!(m.focus(), PaneFocus::Terminals);
     }
 
-    /// An armed leader with no follow-up key leaves the pane once the
-    /// escape window elapses (the idle tick). Uses a 1ms window so the
-    /// test doesn't sleep the default 600ms.
+    /// The `]]` leader is non-timed (#252): an armed leader with no
+    /// follow-up key stays armed across idle ticks and never leaves on
+    /// its own, so a user reading the popup and deciding which command
+    /// to press is never yanked to the sidebar mid-decision. `]]q` is
+    /// the explicit exit (see `leader_q_leaves_to_sidebar`).
     #[test]
-    fn idle_leader_leaves_on_tick_after_window() {
+    fn idle_leader_stays_armed_and_never_leaves_on_tick() {
         let mut m = model_in_terminal_with_snippets("leader-idle");
-        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
         m.dispatch_key(esc_key());
         m.dispatch_key(esc_key());
         assert!(m.terminal_leader_pending());
+        // Ticking — however long the pane sits idle — must not leave.
         std::thread::sleep(std::time::Duration::from_millis(3));
         m.tick_terminal_leader();
-        assert!(!m.terminal_leader_pending(), "window elapsed → disarmed");
-        assert_eq!(m.focus(), PaneFocus::Sidebar, "idle leader leaves the pane");
+        assert!(m.terminal_leader_pending(), "non-timed leader stays armed");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "idle leader never leaves");
+    }
+
+    /// `]]q` is the explicit exit to the sidebar, replacing the old
+    /// idle-tick leave (#252).
+    #[test]
+    fn leader_q_leaves_to_sidebar() {
+        let mut m = model_in_terminal_with_snippets("leader-quit");
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+        m.dispatch_key(RealmKey::new(Key::Char('q'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "`]]q` consumes the leader");
+        assert_eq!(m.focus(), PaneFocus::Sidebar, "`]]q` leaves to the sidebar");
+        assert!(m.top_modal().is_none(), "no picker mounted on exit");
+    }
+
+    /// `]]s` still opens the picker even when a long time passes between
+    /// the leader and the `s` — the race that made the picker "flash and
+    /// vanish" is gone because the leader no longer times out (#252).
+    #[test]
+    fn leader_then_delayed_s_still_opens_picker() {
+        let mut m = model_in_terminal_with_snippets("leader-delay");
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        // Simulate an idle gap (PTY output flooding, a thoughtful user):
+        // ticks fire but must not disarm the leader.
+        for _ in 0..5 {
+            m.tick_terminal_leader();
+        }
+        assert!(m.terminal_leader_pending(), "leader survived the idle gap");
+        m.dispatch_key(RealmKey::new(Key::Char('s'), RealmMods::NONE));
+        assert!(matches!(m.top_modal(), Some(Id::SnippetPicker)));
     }
 
     /// A single-line snippet body is sent raw plus a trailing `\r`.
@@ -4523,11 +4613,12 @@ mod focus_mode_tests {
         assert!(!m.focus_mode, "no terminal → no focus mode");
     }
 
-    /// Bare `]]` arms the leader; with no follow key the pane leaves on
-    /// the idle tick — and in focus mode that must also drop focus mode,
-    /// since the sidebar it returns to is hidden while focus mode is on.
+    /// `]]q` exits the terminal to the sidebar — and in focus mode that
+    /// must also drop focus mode, since the sidebar it returns to is
+    /// hidden while focus mode is on (#252, replacing the old idle-tick
+    /// leave).
     #[test]
-    fn bracket_idle_leave_exits_focus_mode() {
+    fn leader_q_exits_focus_mode() {
         let mut m = build_model();
         let ws = workspace_with_agent("owner/repo#1");
         let key = SessionKey::from(&ws.key);
@@ -4537,18 +4628,59 @@ mod focus_mode_tests {
         m.set_focus_attr();
         m.focus_mode = true;
 
-        // `]]` arms the leader (no immediate leave now that the leader
-        // always has bindings to offer); with no follow key the idle
-        // tick leaves the pane once the escape window lapses.
+        // `]]` arms the non-timed leader; `q` is the exit command.
         m.dispatch_key(char_key(']'));
         m.dispatch_key(char_key(']'));
-        assert!(m.terminal_leader_at.is_some(), "`]]` arms the leader");
-        // Force the idle window past, then tick — Instant can't be
-        // fast-forwarded, so backdate the arm timestamp instead.
-        m.terminal_leader_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(60));
-        m.tick_terminal_leader();
-        assert!(!m.focus_mode, "idle `]]` exits focus mode");
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+        m.dispatch_key(char_key('q'));
+        assert!(!m.focus_mode, "`]]q` exits focus mode");
         assert_eq!(m.focus(), PaneFocus::Sidebar);
+    }
+
+    /// Once the snippet picker is mounted, nothing in the daemon-event
+    /// stream may auto-close it (#252): a flood of PTY output, an agent
+    /// state change, a spawn that steals pane focus, and the idle tick
+    /// all fire, and the picker stays on top the whole time. This is the
+    /// "flash for ~0.1s and vanish" the issue is about — proven immune.
+    #[test]
+    fn snippet_picker_survives_daemon_output_and_focus_steal() {
+        let mut m = build_model();
+        let ws = workspace_with_agent("owner/repo#1");
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        spawn_terminal(&mut m, &key);
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        m.apply_snippets(lazybox_config::Snippets::builtin());
+
+        m.mount_snippet_picker("r".to_string());
+        assert!(
+            matches!(m.top_modal(), Some(Id::SnippetPicker)),
+            "picker up"
+        );
+
+        // Agent spews output, changes state, a spawn lands (which steals
+        // focus to the terminal), and the run loop keeps ticking.
+        for seq in 0..20 {
+            m.handle_daemon_event(IpcEvent::TerminalOutput {
+                terminal_id: TerminalId(1),
+                bytes: b"codex spinner churn...\r\n".to_vec(),
+                seq,
+            });
+            m.tick_terminal_leader();
+        }
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(2),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+        m.tick_terminal_leader();
+
+        assert!(
+            matches!(m.top_modal(), Some(Id::SnippetPicker)),
+            "no daemon event or tick may close the picker",
+        );
     }
 
     /// `]]<digit>` moves the displayed terminal to the Nth agent
@@ -4795,14 +4927,13 @@ mod terminal_section_dispatch_tests {
         );
     }
 
-    /// The escape char doubled leaves even with the `leave_terminal`
-    /// override present — proving `ui.terminal_escape_char` is the chord
-    /// owner. Uses a 1ms window so the idle tick fires without sleeping
-    /// the default escape window.
+    /// `]]q` leaves even with the `leave_terminal` override present —
+    /// proving `ui.terminal_escape_char` (not the action_keys slot) owns
+    /// the chord. `]]` arms the non-timed leader and `q` is its exit
+    /// command (#252).
     #[test]
-    fn escape_char_doubled_leaves_regardless_of_override() {
+    fn leader_q_leaves_regardless_of_override() {
         let mut m = model_in_live_terminal();
-        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
         let mut ov = std::collections::BTreeMap::new();
         ov.insert("leave_terminal".to_string(), "Esc".to_string());
         m.apply_action_key_overrides(ov);
@@ -4813,12 +4944,11 @@ mod terminal_section_dispatch_tests {
             m.terminal_leader_pending(),
             "the escape char doubled arms the leader"
         );
-        std::thread::sleep(std::time::Duration::from_millis(3));
-        m.tick_terminal_leader();
+        m.dispatch_key(RealmKey::new(Key::Char('q'), RealmMods::NONE));
         assert_eq!(
             m.focus(),
             PaneFocus::Sidebar,
-            "escape char doubled is the way out, override or not",
+            "`]]q` is the way out, override or not",
         );
     }
 

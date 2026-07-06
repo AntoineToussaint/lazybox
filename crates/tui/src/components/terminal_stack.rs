@@ -1856,18 +1856,20 @@ impl TerminalStack {
         let leader = format!("{escape_char}{escape_char}");
         // The leave chord is owned by `ui.terminal_escape_char`, NOT the
         // `leave_terminal` action_keys slot. Terminal-pane dispatch
-        // (`model::keys`) matches only the configured escape char doubled
-        // and never the catalog chord, so honoring a `leave_terminal`
+        // (`model::keys`) matches only the configured escape char and
+        // never the catalog chord, so honoring a `leave_terminal`
         // override here would advertise a key the dispatcher ignores —
         // the footer would say "Esc exit to sidebar" while Esc does
-        // nothing (#188). Always render the escape char doubled.
-        let leave_keys: Cow<'static, str> = Cow::Owned(leader.clone());
+        // nothing (#188). Render the escape char doubled + `q` (`]]q`):
+        // the `]]` leader is non-timed now (#252) and `q` is its exit
+        // command, replacing the old idle-timeout leave.
+        let leave_keys: Cow<'static, str> = Cow::Owned(format!("{leader}q"));
         let focus = ActionDef::for_kind(ActionKind::ToggleFocusMode);
         vec![
-            // Bare `]]` (the configured escape char doubled) — the way
-            // back to the sidebar once the PTY owns the keyboard. The
-            // issue (#170) was that this had no footer hint, so the
-            // route back to focus was invisible from inside Claude Code.
+            // `]]q` (the escape char doubled, then `q`) — the way back to
+            // the sidebar once the PTY owns the keyboard. The issue
+            // (#170) was that this had no footer hint, so the route back
+            // to focus was invisible from inside Claude Code.
             Binding {
                 keys: leave_keys,
                 label: Cow::Borrowed(leave.label),
@@ -1898,14 +1900,13 @@ impl TerminalStack {
                 keys: Cow::Borrowed("Ctrl-w"),
                 label: Cow::Borrowed("split panes"),
             },
-            // Snippet picker entry point (issues #40, #205). The `]]`
-            // leader is shared with LeaveTerminal: `]]` alone leaves,
-            // `]]<key>` opens the picker pre-filled with the typed
-            // char (a full key auto-submits its body to the agent).
-            // Routing the picker under the leader frees a lone `]` to
-            // reach the agent verbatim.
+            // Snippet picker entry point (issues #40, #205, #252). `]]s`
+            // opens the picker; typing a full key there auto-submits its
+            // body to the agent (the `]]srev` fast path). Routing the
+            // picker under the leader frees a lone `]` to reach the agent
+            // verbatim.
             Binding {
-                keys: Cow::Owned(format!("{leader}<key>")),
+                keys: Cow::Owned(format!("{leader}s")),
                 label: Cow::Borrowed("snippets"),
             },
         ]

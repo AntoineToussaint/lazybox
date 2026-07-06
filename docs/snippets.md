@@ -18,9 +18,11 @@ key. Press `e` in the browser to jump to the YAML file.
 This page documents that full lifecycle — create, browse, list/use,
 edit, delete — plus the file format and the picker reference.
 
-lazybox ships a **broad, categorized built-in library** (~35 prompts)
+lazybox ships a **broad, categorized built-in library** (~38 prompts)
 so a fresh install has plenty to expand out of the box — review
-(`rev`, `deepreview`, `nit`), git & PR (`pr`, `ready`, `commit`,
+(`rev`, `deepreview`, `nit`, plus the dedicated suite `audit` for a
+full pre-ship pass, `arch` for a staff-engineer design review, and
+`hotpath` for a performance review), git & PR (`pr`, `ready`, `commit`,
 `rebase`, `squash`), testing (`test`, `tdd`, `repro`), debugging
 (`bug`, `bisect`, `trace`), refactor (`refac`, `rename`, `extract`),
 performance (`perf`, `bench`), security (`sec`, `deps`, `leaks`),
@@ -84,27 +86,38 @@ have to know a key first.
 
 ### List & use
 
-Snippets live under the **`]]` leader** — the same double-bracket
-chord that leaves the terminal pane. With the terminal focused:
+Snippets live under the **`]]` leader** — the double-bracket chord that
+opens a small command menu from a focused terminal (a which-key popup
+lists it). The commands:
 
-- **`]]rev`** — when what you type after the leader exactly equals a
-  snippet key (here `rev`) and it's the only snippet whose key starts
-  with that text, the body is sent and submitted immediately. This is
-  the fast path for snippets you know by name.
-- **`]]<text>`** — otherwise (the text is a partial key, or more than
-  one snippet key starts with it) the **snippet picker** opens,
-  pre-filtered by what you typed. Keep typing to narrow, use `↑`/`↓`
-  to move, and press `Enter` to send the highlighted row. `Esc` (or
-  `Ctrl-C`) cancels without sending.
-- **`]]` then nothing** — bare double-bracket still exits the terminal
-  pane back to the sidebar. When a snippet library is present, the
-  leader stays armed for a moment (a which-key popup lists the keys);
-  if you don't pick one within the escape window
-  (`terminal.escape_window_ms`, default 600 ms) the pane leaves.
-  `Esc` under the leader cancels and keeps you in the terminal.
+- **`]]s`** — opens the **snippet picker**, a real, dwellable modal: it
+  stays open until you send or cancel — no timer, PTY output, or focus
+  change closes it. Keep typing to filter, use `↑`/`↓` to move, and
+  press `Enter` to send the highlighted row. `Esc` (or `Ctrl-C`)
+  cancels without sending.
+- **`]]srev`** — the fast path: when what you type in the picker exactly
+  equals a snippet key (here `rev`) and it's the only snippet whose key
+  starts with that text, the body is **sent and submitted immediately,
+  no `Enter`** — and no second look. If you author a snippet whose body
+  drives something irreversible, keep that in mind: the exact-key path
+  skips the preview dwell (it only fires on a unique, unambiguous key).
+- **Recent first.** Snippets you've sent this session float into a
+  **Recent** group at the top of the picker, most-recent first, with the
+  cursor on the last one — so repeating a snippet is `]]s` then `Enter`.
+  Start typing and the Recent group steps aside (a filter means "find",
+  not "repeat"). The list is session-scoped.
+- **`]]q`** — exits the terminal pane back to the sidebar. **`]]f`**
+  toggles focus mode, **`]]<digit>`** jumps to the Nth agent workspace,
+  and **`` ]]` ``** opens the fuzzy workspace switcher.
+- The leader is *non-timed* (#252): after `]]` it waits for the command
+  key rather than leaving on an idle timer, so pausing to read the popup
+  never drops you to the sidebar mid-decision. `Esc` or any unbound key
+  cancels back to the terminal.
 - **A lone `]`** — a single `]` followed by any non-`]` key is sent to
   the agent verbatim, so `]` is typeable in code, arrays, and
-  markdown. Only the doubled `]]` is intercepted.
+  markdown. Only the doubled `]]` is intercepted. To type a literal
+  `]]` into an agent (nested arrays, some markdown), remap the prefix
+  with `ui.terminal_escape_char` to a character you don't type, e.g. `}`.
 
 The picker is a small overlay; the terminal stays focused underneath.
 Rows are **grouped under category headers** (Review, Git & PR,

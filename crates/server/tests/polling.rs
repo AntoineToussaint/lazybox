@@ -4411,6 +4411,90 @@ async fn tick_dispatches_auto_fix_action_spawns_agent() {
 }
 
 #[tokio::test]
+async fn tick_auto_fix_refunds_attempt_when_agent_stalls_on_env_gate() {
+    // A spawn that wedges on an environment gate (an unauthenticated MCP
+    // server / a startup interstitial) reports InputNeeded before ever
+    // working — it never attempted the fix. The recorded attempt must be
+    // refunded so a broken spawn env can't silently drain the PR's budget
+    // and trip the "backing off — needs a human" notice (#256).
+    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let mut bus_rx = config.bus.subscribe();
+
+    let task = make_task("o/r#256");
+    let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
+    let action = polling::ProviderAction::AutoFixPr {
+        session_key: session_key.clone(),
+        agent_id: "claude".to_string(),
+        prompt: Some("Fix the failing CI".to_string()),
+        repo: "o/r".to_string(),
+        pr_number: 256,
+        kind: lazybox_core::AutoFixKind::CiFailure,
+        settings: lazybox_core::AutoFixSettings {
+            enabled: true,
+            ..Default::default()
+        },
+        reason: "auto-fix (fixing CI) on o/r#256".to_string(),
+    };
+    let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
+        name: "github".into(),
+        tasks: vec![task],
+        actions: std::sync::Mutex::new(vec![action]),
+    });
+    polling::tick(&config, &[source]).await;
+
+    let kv_key = format!("autofix:{}:ci", session_key.as_str());
+    let attempts = |config: &ServerConfig| -> u32 {
+        config
+            .store
+            .get_kv(&kv_key)
+            .unwrap()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v["attempts"].as_u64())
+            .unwrap_or(0) as u32
+    };
+    assert_eq!(attempts(&config), 1, "the spawn records one attempt");
+
+    // Resolve the spawned terminal from the TerminalSpawned broadcast.
+    let mut terminal_id = None;
+    while let Ok(evt) = bus_rx.try_recv() {
+        if let Event::TerminalSpawned {
+            terminal_id: tid,
+            session_key: sk,
+            ..
+        } = evt
+            && sk == session_key
+        {
+            terminal_id = Some(tid);
+        }
+    }
+    let terminal_id = terminal_id.expect("auto-fix spawned a terminal");
+
+    // The agent wedges: InputNeeded with no prior Working reading.
+    config
+        .bus
+        .send(Event::AgentState {
+            session_key: session_key.clone(),
+            terminal_id,
+            state: lazybox_ipc::AgentState::InputNeeded,
+        })
+        .unwrap();
+
+    // The detached watchdog refunds the attempt. Poll (bounded) since it
+    // runs on its own task.
+    let refunded = tokio::time::timeout(Duration::from_secs(5), async {
+        while attempts(&config) != 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        refunded.is_ok(),
+        "env-gate stall must refund the attempt; still {} recorded",
+        attempts(&config)
+    );
+}
+
+#[tokio::test]
 async fn tick_auto_fix_respects_exhausted_budget() {
     // `max_attempts: 0` means the very first dispatch is already over
     // budget — the dispatcher must NOT spawn. Proves the stateful

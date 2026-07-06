@@ -1022,6 +1022,14 @@ async fn dispatch_action(
                             );
                         }
                     }
+                    // Watch this spawn for an environment stall so a
+                    // broken spawn env doesn't burn the attempt we just
+                    // recorded. Subscribed BEFORE the spawn so the first
+                    // state transition can't be missed between spawn and
+                    // subscription.
+                    let stall_events = config.bus.subscribe();
+                    let stall_session = session_key.clone();
+                    let stall_kind = term_kind.clone();
                     crate::spawn_handler::handle_spawn(
                         config,
                         session_key,
@@ -1037,10 +1045,91 @@ async fn dispatch_action(
                         true,
                     )
                     .await;
+                    watch_autofix_env_stall(
+                        config.clone(),
+                        stall_events,
+                        stall_session,
+                        stall_kind,
+                        kind,
+                    );
                 }
             }
         }
     }
+}
+
+/// How long to watch an auto-fix spawn for an environment stall before
+/// giving up and assuming it's doing real work. Comfortably covers
+/// Claude's cold-start banner + the settle-gated prompt inject; a genuine
+/// stall reports `InputNeeded` within a second or two of the gate
+/// rendering, well inside this.
+const AUTOFIX_STALL_WATCH: Duration = Duration::from_secs(90);
+
+/// After an auto-fix spawn, watch the agent's first observable state so a
+/// broken spawn *environment* doesn't silently burn the attempt just
+/// recorded (issue #256). A `Working`/`Done` reading means the injected
+/// fix prompt landed and the agent is actually working — keep the
+/// attempt. An `InputNeeded` reading BEFORE any work means the agent is
+/// wedged on a startup gate it can't clear (an unauthenticated MCP
+/// server, a residual interstitial): it never got to attempt the fix, so
+/// refund. Autonomous spawns run `--dangerously-skip-permissions`, so a
+/// pre-work `InputNeeded` is an environment gate, not a tool-approval
+/// prompt. The gate itself already surfaces for attention through the
+/// normal `InputNeeded` alert path; this only protects the budget.
+///
+/// Detached (spawns its own task) and bounded by [`AUTOFIX_STALL_WATCH`]
+/// and terminal liveness. `events` must be subscribed by the caller
+/// BEFORE the spawn so the first transition can't be missed.
+fn watch_autofix_env_stall(
+    config: ServerConfig,
+    mut events: tokio::sync::broadcast::Receiver<Event>,
+    session_key: lazybox_core::SessionKey,
+    term_kind: lazybox_ipc::TerminalKind,
+    autofix_kind: AutoFixKind,
+) {
+    use lazybox_ipc::AgentState;
+    tokio::spawn(async move {
+        // handle_spawn inserts the terminal maps before returning, so the
+        // singleton it just created is already resolvable.
+        let Some(tid) =
+            crate::spawn_handler::find_existing_singleton(&config, &session_key, &term_kind).await
+        else {
+            return;
+        };
+        let watch = async {
+            loop {
+                match events.recv().await {
+                    Ok(Event::AgentState {
+                        terminal_id, state, ..
+                    }) if terminal_id == tid => match state {
+                        // Did real work — the fix attempt is legitimate.
+                        AgentState::Working | AgentState::Done => return false,
+                        // Wedged before working — an environment gate.
+                        AgentState::InputNeeded => return true,
+                        // Fresh composer, not yet working — keep watching.
+                        AgentState::Idle => {}
+                    },
+                    Ok(Event::TerminalExited { terminal_id, .. }) if terminal_id == tid => {
+                        return false;
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+                }
+            }
+        };
+        if matches!(
+            tokio::time::timeout(AUTOFIX_STALL_WATCH, watch).await,
+            Ok(true)
+        ) {
+            autofix::refund_attempt(config.store.as_ref(), session_key.as_str(), autofix_kind);
+            tracing::warn!(
+                %session_key,
+                ?autofix_kind,
+                "auto-fix: agent stalled on an environment gate before working — refunded the attempt"
+            );
+        }
+    });
 }
 
 impl TaskSource for GhSource {

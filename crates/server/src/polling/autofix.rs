@@ -161,6 +161,36 @@ pub fn check_and_record(
     }
 }
 
+/// Give an attempt back to `(session_key, kind)` when the spawned fix
+/// agent never got to work — it stalled on an *environment* gate (an
+/// unauthenticated MCP server, a startup interstitial) rather than a real
+/// fix attempt (issue #256). Without this an env gate the agent can't
+/// clear would silently drain the PR's budget and then trip the
+/// "backing off — needs a human" notice, blaming the fix logic for what
+/// is really a broken spawn environment.
+///
+/// Decrements the in-window counter (never below zero) and clears the
+/// `exhausted_notified` latch so a later genuine exhaustion still
+/// notifies. When the refund empties the window it resets the record to
+/// pristine (no lingering `window_start`/cooldown), so the PR starts
+/// clean once the gate is cleared. A missing or already-empty record is a
+/// no-op. Best-effort and idempotent enough for the one-refund-per-spawn
+/// caller.
+pub fn refund_attempt(store: &dyn Store, session_key: &str, kind: AutoFixKind) {
+    let key = record_key(session_key, kind);
+    let mut rec = load(store, &key);
+    if rec.attempts == 0 {
+        return;
+    }
+    rec.attempts -= 1;
+    rec.exhausted_notified = false;
+    if rec.attempts == 0 {
+        rec.window_start = None;
+        rec.last_attempt = None;
+    }
+    persist(store, &key, &rec);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +304,97 @@ mod tests {
         // and writes nothing to the store.
         let d = check_and_record(&store, "ws", AutoFixKind::CiFailure, &s, t0());
         assert_eq!(d, AttemptDecision::Exhausted { notify: false });
+        assert_eq!(store.get_kv("autofix:ws:ci").unwrap(), None);
+    }
+
+    #[test]
+    fn refund_gives_back_an_env_stalled_attempt() {
+        let store = MemoryStore::new();
+        let s = settings();
+        // Two recorded attempts (past the cooldown).
+        check_and_record(&store, "ws", AutoFixKind::CiFailure, &s, t0());
+        let d = check_and_record(
+            &store,
+            "ws",
+            AutoFixKind::CiFailure,
+            &s,
+            t0() + chrono::Duration::hours(2),
+        );
+        assert_eq!(d, AttemptDecision::Proceed { attempt: 2, max: 3 });
+
+        // The second spawn stalled on an env gate — refund it. The next
+        // attempt takes the number back, not 3.
+        refund_attempt(&store, "ws", AutoFixKind::CiFailure);
+        let d = check_and_record(
+            &store,
+            "ws",
+            AutoFixKind::CiFailure,
+            &s,
+            t0() + chrono::Duration::hours(4),
+        );
+        assert_eq!(d, AttemptDecision::Proceed { attempt: 2, max: 3 });
+    }
+
+    #[test]
+    fn refund_to_zero_resets_record_and_clears_cooldown() {
+        let store = MemoryStore::new();
+        let s = settings();
+        check_and_record(&store, "ws", AutoFixKind::CiFailure, &s, t0());
+        refund_attempt(&store, "ws", AutoFixKind::CiFailure);
+        // Emptied → pristine: the very next sweep proceeds immediately
+        // (no lingering cooldown from the refunded attempt) at attempt 1.
+        let d = check_and_record(
+            &store,
+            "ws",
+            AutoFixKind::CiFailure,
+            &s,
+            t0() + chrono::Duration::minutes(1),
+        );
+        assert_eq!(d, AttemptDecision::Proceed { attempt: 1, max: 3 });
+    }
+
+    #[test]
+    fn refund_reopens_budget_after_exhaustion() {
+        let store = MemoryStore::new();
+        let s = settings();
+        for i in 0..3 {
+            check_and_record(
+                &store,
+                "ws",
+                AutoFixKind::CiFailure,
+                &s,
+                t0() + chrono::Duration::hours(i * 2),
+            );
+        }
+        // Exhausted + notified.
+        assert_eq!(
+            check_and_record(
+                &store,
+                "ws",
+                AutoFixKind::CiFailure,
+                &s,
+                t0() + chrono::Duration::hours(7)
+            ),
+            AttemptDecision::Exhausted { notify: true }
+        );
+        // The third spawn was an env stall — refund it. Budget reopens,
+        // and a genuine future exhaustion still notifies (latch cleared).
+        refund_attempt(&store, "ws", AutoFixKind::CiFailure);
+        let d = check_and_record(
+            &store,
+            "ws",
+            AutoFixKind::CiFailure,
+            &s,
+            t0() + chrono::Duration::hours(9),
+        );
+        assert_eq!(d, AttemptDecision::Proceed { attempt: 3, max: 3 });
+    }
+
+    #[test]
+    fn refund_on_empty_record_is_a_noop() {
+        let store = MemoryStore::new();
+        refund_attempt(&store, "ws", AutoFixKind::CiFailure);
+        // Nothing recorded, nothing written.
         assert_eq!(store.get_kv("autofix:ws:ci").unwrap(), None);
     }
 

@@ -12,13 +12,25 @@
 //!   per-project under `projects.<absolute-path>.hasTrustDialogAccepted`.
 //! - **Onboarding** — the first-run setup flow, gated by the top-level
 //!   `hasCompletedOnboarding` flag.
+//! - **Promotional overage consent** — the "Fable 5 is back" style
+//!   startup interstitial that asks the user to opt into premium-model
+//!   overage. Answered state lives per-organization under
+//!   `fableOverageConsentV2.<org-uuid>`; the org UUID is read back out of
+//!   the config's own `oauthAccount.organizationUuid`. We seed it
+//!   **declined** (`false`): a background fix agent should never be opted
+//!   into overage spend, and a present entry — either value — is what
+//!   stops the prompt rendering. Only seeded when the entry is absent, so
+//!   a real user consent is never overwritten. This is a known-gate
+//!   allowlist, like trust/onboarding: a differently-keyed future promo
+//!   will need its own entry (and until then is caught at runtime — see
+//!   below).
 //!
-//! Seeding both before launch makes Claude treat the worktree as trusted
-//! and onboarding as done, so it drops straight to a ready composer. MCP
-//! auth prompts and promotional interstitials are the same category of
-//! blocker but aren't config-seedable (an MCP gate is suppressed at spawn
-//! with `--strict-mcp-config`; a promo that still slips through is caught
-//! by [`crate::detect`] surfacing it as `InputNeeded`).
+//! Seeding these before launch makes Claude treat the worktree as
+//! trusted, onboarding as done, and the promo as answered, so it drops
+//! straight to a ready composer. The MCP-auth gate isn't config-seedable
+//! and is suppressed at spawn with `--strict-mcp-config`; anything that
+//! still slips through is caught by [`crate::detect`] surfacing it as
+//! `InputNeeded` rather than the run dying silently.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -38,13 +50,15 @@ pub fn seed_unattended_env(worktree: &Path) -> io::Result<()> {
 }
 
 /// Read-modify-write `config_path`, setting
-/// `projects[worktree].hasTrustDialogAccepted = true` and the top-level
-/// `hasCompletedOnboarding = true` while preserving every other field.
-/// Writes atomically (temp + rename) so a concurrent Claude reader never
-/// observes a torn file, and skips the write entirely when both are
-/// already set (no needless rewrite, no clobbering a concurrent Claude
-/// update). A missing config is created with a minimal structure; an
-/// unparseable one is left untouched (returns `Err`).
+/// `projects[worktree].hasTrustDialogAccepted = true`, the top-level
+/// `hasCompletedOnboarding = true`, and (when the config names an
+/// organization) a declined `fableOverageConsentV2[org] = false` — all
+/// while preserving every other field. Writes atomically (temp + rename)
+/// so a concurrent Claude reader never observes a torn file, and skips
+/// the write entirely when every gate is already answered (no needless
+/// rewrite, no clobbering a concurrent Claude update). A missing config
+/// is created with a minimal structure; an unparseable one is left
+/// untouched (returns `Err`).
 fn seed_unattended_env_in(config_path: &Path, worktree: &Path) -> io::Result<()> {
     let mut root: Value = match std::fs::read_to_string(config_path) {
         Ok(text) => serde_json::from_str(&text)
@@ -61,6 +75,24 @@ fn seed_unattended_env_in(config_path: &Path, worktree: &Path) -> io::Result<()>
     })?;
 
     let onboarding_done = obj.get("hasCompletedOnboarding") == Some(&Value::Bool(true));
+
+    // The promo interstitial's consent is keyed by the account's
+    // organization UUID, which the config carries in `oauthAccount`.
+    // Read it (owned, so no borrow lingers into the mutation below); a
+    // config with no signed-in account has no org to key, so there's
+    // nothing to seed and the gate is treated as "answered".
+    let org_uuid = obj
+        .get("oauthAccount")
+        .and_then(|a| a.get("organizationUuid"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let promo_done = match &org_uuid {
+        Some(org) => obj
+            .get("fableOverageConsentV2")
+            .and_then(|c| c.get(org))
+            .is_some(),
+        None => true,
+    };
 
     let projects = obj
         .entry("projects")
@@ -86,11 +118,26 @@ fn seed_unattended_env_in(config_path: &Path, worktree: &Path) -> io::Result<()>
         })?;
 
     let trust_done = entry.get("hasTrustDialogAccepted") == Some(&Value::Bool(true));
-    if trust_done && onboarding_done {
+    if trust_done && onboarding_done && promo_done {
         return Ok(());
     }
     entry.insert("hasTrustDialogAccepted".into(), Value::Bool(true));
     obj.insert("hasCompletedOnboarding".into(), Value::Bool(true));
+    if let Some(org) = org_uuid
+        && !promo_done
+    {
+        obj.entry("fableOverageConsentV2")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "claude.json `fableOverageConsentV2` is not an object",
+                )
+            })?
+            .entry(org)
+            .or_insert(Value::Bool(false));
+    }
 
     let serialized = serde_json::to_vec_pretty(&root)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -130,6 +177,56 @@ mod tests {
     fn onboarded(config: &Path) -> bool {
         let v: Value = serde_json::from_str(&std::fs::read_to_string(config).unwrap()).unwrap();
         v["hasCompletedOnboarding"] == Value::Bool(true)
+    }
+
+    fn consent(config: &Path, org: &str) -> Value {
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(config).unwrap()).unwrap();
+        v["fableOverageConsentV2"][org].clone()
+    }
+
+    #[test]
+    fn declines_promo_consent_for_the_signed_in_org() {
+        let dir = scratch("promo");
+        let config = dir.join(".claude.json");
+        std::fs::write(&config, r#"{"oauthAccount":{"organizationUuid":"org-1"}}"#).unwrap();
+
+        seed_unattended_env_in(&config, Path::new("/tmp/wt-p")).unwrap();
+
+        // Declined (false) so the background agent isn't opted into
+        // overage spend; the entry's presence is what dismisses the promo.
+        assert_eq!(consent(&config, "org-1"), Value::Bool(false));
+        assert!(onboarded(&config));
+    }
+
+    #[test]
+    fn never_overwrites_an_existing_promo_consent() {
+        let dir = scratch("promo-existing");
+        let config = dir.join(".claude.json");
+        // The user already consented (true) interactively.
+        std::fs::write(
+            &config,
+            r#"{"oauthAccount":{"organizationUuid":"org-1"},"fableOverageConsentV2":{"org-1":true}}"#,
+        )
+        .unwrap();
+
+        seed_unattended_env_in(&config, Path::new("/tmp/wt-q")).unwrap();
+
+        // Their consent stands untouched.
+        assert_eq!(consent(&config, "org-1"), Value::Bool(true));
+    }
+
+    #[test]
+    fn no_promo_key_created_without_a_signed_in_org() {
+        let dir = scratch("promo-no-org");
+        let config = dir.join(".claude.json");
+        let _ = std::fs::remove_file(&config);
+
+        seed_unattended_env_in(&config, Path::new("/tmp/wt-r")).unwrap();
+
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        // No org to key → no consent map fabricated.
+        assert_eq!(v.get("fableOverageConsentV2"), None);
+        assert!(trusted(&config, "/tmp/wt-r"));
     }
 
     #[test]

@@ -109,6 +109,12 @@ mod effects_tests {
     /// warning: a sticky footer banner naming the fix *and* the sidebar
     /// flag the header repaints every frame. This is the uniformly-stale
     /// install the daemon/client mismatch check can't see (#234).
+    ///
+    /// Drives `note_outdated_build` directly to exercise the banner
+    /// render machinery; the provenance gate that decides *whether* to
+    /// reach it lives one layer up in `check_build_freshness`, covered by
+    /// [`check_build_freshness_quiet_on_dev_build`] and
+    /// `build_guard::dev_builds_never_nudge`.
     #[test]
     fn outdated_build_raises_persistent_warning() {
         use crate::realm::components::footer::NoticeSeverity;
@@ -121,6 +127,21 @@ mod effects_tests {
         assert!(n.message.contains("89"));
         assert!(n.message.contains("update & restart"));
         assert_eq!(m.sidebar.outdated_commits_behind(), Some(89));
+    }
+
+    /// The provenance gate: on a dev/source build `check_build_freshness`
+    /// must leave the UI quiet no matter how far the checkout trails
+    /// `main`, because "update & restart" only fits an installer-managed
+    /// release binary (#251). The test binary is itself a dev build, so
+    /// this asserts the real startup path stays silent.
+    #[test]
+    fn check_build_freshness_quiet_on_dev_build() {
+        let mut m = build_model();
+
+        m.check_build_freshness();
+
+        assert!(m.status.notice.is_none(), "dev build must not nudge");
+        assert_eq!(m.sidebar.outdated_commits_behind(), None);
     }
 
     /// A manual-refresh sync failure paints a sticky "✗ sync failed"

@@ -69,6 +69,16 @@ pub const BUILD_GIT_SHA: &str = env!("LAZYBOX_BUILD_GIT_SHA");
 /// disables the check rather than guessing.
 pub const BUILD_SOURCE_DIR: &str = env!("LAZYBOX_BUILD_SOURCE_DIR");
 
+/// Whether this binary is an installer-managed release build (cargo-dist,
+/// which compiles with `--profile dist`) rather than a dev/source build
+/// (`cargo run`, `cargo build`, `cargo test`). The outdated-build nudge
+/// and its "update & restart" affordance only make sense for a binary an
+/// installer can swap in place; a source build is updated with `git pull
+/// && cargo build`, so the guard is gated on this and a source build is
+/// instead tagged `(dev)` in the header. A build we can't confidently
+/// attribute to the release flow is treated as dev.
+pub const IS_RELEASE_BUILD: bool = matches!(env!("LAZYBOX_RELEASE_BUILD").as_bytes(), [b'1', ..]);
+
 /// Stable id for a spawned terminal. Distinct from SessionKey because a
 /// single session may hold multiple terminals (agent + shell + logs).
 ///

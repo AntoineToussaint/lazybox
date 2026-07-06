@@ -422,6 +422,31 @@ impl<T: TerminalAdapter> Model<T> {
                     cmds.push(IpcCommand::MergePr { workspace_key });
                 }
             }
+            Action::ToggleAutoMerge => {
+                let workspace = self.sidebar.selected_workspace().cloned();
+                match crate::intent::resolve_toggle_auto_merge(workspace.as_ref()) {
+                    crate::intent::Intent::SetAutoMergeOnGreen {
+                        workspace_key,
+                        enabled,
+                    } => {
+                        let name = workspace
+                            .as_ref()
+                            .map(|w| w.name.clone())
+                            .unwrap_or_default();
+                        if enabled {
+                            self.flash_info(format!("auto-merge on green: armed for {name}"));
+                        } else {
+                            self.flash_info(format!("auto-merge on green: off for {name}"));
+                        }
+                        cmds.push(IpcCommand::SetAutoMergeOnGreen {
+                            session_key: lazybox_core::SessionKey::from(&workspace_key),
+                            enabled,
+                        });
+                    }
+                    crate::intent::Intent::Notice(msg) => self.flash_info(msg),
+                    _ => {}
+                }
+            }
             Action::Refresh => {
                 cmds.push(IpcCommand::Refresh);
                 // Pre-arm the bg_poll indicator so the user gets

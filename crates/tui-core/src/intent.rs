@@ -67,6 +67,13 @@ pub enum Intent {
     /// workspace's PR. Two-press confirm latch is the model's job;
     /// this Intent is the fire-side payload.
     MergePr { workspace_key: WorkspaceKey },
+    /// Flip the workspace's "auto-merge on green" arm and persist it.
+    /// `enabled` is the new state (the resolver reads the current flag
+    /// and inverts it). The model ships `Command::SetAutoMergeOnGreen`.
+    SetAutoMergeOnGreen {
+        workspace_key: WorkspaceKey,
+        enabled: bool,
+    },
     /// Kill every running terminal under the workspace + remove
     /// the row. Two-press confirm at the model layer.
     KillWorkspace { session_key: SessionKey },
@@ -438,6 +445,59 @@ pub fn merge_block_reason(pr: &lazybox_core::Task) -> Option<&'static str> {
         return Some("the branch has merge conflicts");
     }
     None
+}
+
+/// Resolve the "auto-merge on green" toggle. Flips the workspace's
+/// persisted arm. Only meaningful on a workspace that has a PR — an
+/// issue-only or empty workspace has nothing to merge, so we surface
+/// a `Notice` instead of arming a flag that could never fire. The
+/// `Author`-scope / CI / conflict guards live in [`should_auto_merge`]
+/// (the trigger), not here — arming is cheap and reversible; the guards
+/// gate the actual fire.
+pub fn resolve_toggle_auto_merge(workspace: Option<&Workspace>) -> Intent {
+    let Some(ws) = workspace else {
+        return Intent::NoOp;
+    };
+    if ws.pr.is_none() {
+        return Intent::Notice("auto-merge on green applies to a PR".into());
+    }
+    Intent::SetAutoMergeOnGreen {
+        workspace_key: ws.key.clone(),
+        enabled: !ws.auto_merge_on_green,
+    }
+}
+
+/// Should the client auto-fire a merge for this workspace *right now*?
+///
+/// This is the client-side "auto-merge on green" trigger. It is
+/// deliberately **stricter** than [`resolve_merge`] (the manual `g m`
+/// gate), because auto-merge acts with no keypress:
+///
+/// 1. The workspace must be armed (`auto_merge_on_green`).
+/// 2. Your **own** PR only (`TaskRole::Author`) — lazybox never
+///    auto-merges someone else's PR, even if it's green.
+/// 3. CI must be positively **green** (`CiStatus::Success`). Unlike the
+///    manual gate, `CiStatus::None` (a PR with no checks configured)
+///    does NOT qualify — we don't silently land a PR that never ran CI.
+/// 4. Everything the manual gate blocks on still blocks
+///    ([`merge_block_reason`]): the PR must be open (drafts, merged and
+///    closed PRs are out), no changes-requested review, no conflict.
+///
+/// Nothing here that `g m` wouldn't also merge — this is a subset.
+pub fn should_auto_merge(workspace: &Workspace) -> bool {
+    if !workspace.auto_merge_on_green {
+        return false;
+    }
+    let Some(pr) = workspace.pr.as_ref() else {
+        return false;
+    };
+    if pr.role != lazybox_core::TaskRole::Author {
+        return false;
+    }
+    if pr.ci != lazybox_core::CiStatus::Success {
+        return false;
+    }
+    merge_block_reason(pr).is_none()
 }
 
 /// Resolve `Shift-X` (kill workspace). Always available when a
@@ -1050,6 +1110,116 @@ mod tests {
     fn merge_on_issue_is_noop() {
         let ws = issue("o/r#42");
         assert_eq!(resolve_merge(Some(&ws)), Intent::NoOp);
+    }
+
+    // ── Auto-merge toggle + trigger ──────────────────────────────
+
+    #[test]
+    fn toggle_auto_merge_flips_the_arm() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
+        assert!(!ws.auto_merge_on_green);
+        match resolve_toggle_auto_merge(Some(&ws)) {
+            Intent::SetAutoMergeOnGreen {
+                workspace_key,
+                enabled,
+            } => {
+                assert_eq!(workspace_key, ws.key);
+                assert!(enabled, "arming a disarmed workspace enables it");
+            }
+            other => panic!("expected SetAutoMergeOnGreen, got {other:?}"),
+        }
+        ws.auto_merge_on_green = true;
+        match resolve_toggle_auto_merge(Some(&ws)) {
+            Intent::SetAutoMergeOnGreen { enabled, .. } => {
+                assert!(!enabled, "toggling an armed workspace disarms it");
+            }
+            other => panic!("expected SetAutoMergeOnGreen, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toggle_auto_merge_on_issue_surfaces_notice() {
+        let ws = issue("o/r#42");
+        match resolve_toggle_auto_merge(Some(&ws)) {
+            Intent::Notice(msg) => assert!(msg.contains("PR"), "{msg}"),
+            other => panic!("expected Notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toggle_auto_merge_no_workspace_is_noop() {
+        assert_eq!(resolve_toggle_auto_merge(None), Intent::NoOp);
+    }
+
+    #[test]
+    fn should_auto_merge_only_when_armed() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        assert!(!should_auto_merge(&ws), "disarmed workspace never fires");
+        ws.auto_merge_on_green = true;
+        assert!(should_auto_merge(&ws), "armed + green + own PR fires");
+    }
+
+    #[test]
+    fn should_auto_merge_requires_own_pr() {
+        // Never auto-merge someone else's PR, even armed + green.
+        for role in [TaskRole::Reviewer, TaskRole::Assignee, TaskRole::Mentioned] {
+            let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+            ws.pr.as_mut().unwrap().role = role;
+            ws.auto_merge_on_green = true;
+            assert!(!should_auto_merge(&ws), "role {role:?} must not auto-merge");
+        }
+    }
+
+    #[test]
+    fn should_auto_merge_requires_green_not_none() {
+        // Manual `g m` treats CiStatus::None as mergeable, but
+        // auto-merge must NOT land a PR that never ran CI.
+        let mut ws = pr("o/r#1", CiStatus::None, ReviewStatus::Approved);
+        ws.auto_merge_on_green = true;
+        assert!(
+            !should_auto_merge(&ws),
+            "no-CI PR must not auto-merge even though `g m` would allow it"
+        );
+        // Sanity: the manual gate DOES allow this one.
+        assert_eq!(merge_block_reason(ws.pr.as_ref().unwrap()), None);
+    }
+
+    #[test]
+    fn should_auto_merge_honors_every_manual_block() {
+        // Anything the manual gate blocks, auto-merge blocks too.
+        let mut armed_conflict = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
+        armed_conflict.auto_merge_on_green = true;
+        armed_conflict.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
+        assert!(!should_auto_merge(&armed_conflict), "conflict blocks");
+
+        let mut armed_changes = pr("o/r#1", CiStatus::Success, ReviewStatus::ChangesRequested);
+        armed_changes.auto_merge_on_green = true;
+        assert!(
+            !should_auto_merge(&armed_changes),
+            "changes-requested blocks"
+        );
+
+        let mut armed_failing = pr("o/r#1", CiStatus::Failure, ReviewStatus::Approved);
+        armed_failing.auto_merge_on_green = true;
+        assert!(!should_auto_merge(&armed_failing), "red CI blocks");
+    }
+
+    #[test]
+    fn should_auto_merge_never_fires_on_draft() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        ws.auto_merge_on_green = true;
+        ws.pr.as_mut().unwrap().state = TaskState::Draft;
+        assert!(!should_auto_merge(&ws), "draft PRs never auto-merge");
+    }
+
+    #[test]
+    fn should_auto_merge_never_fires_on_issue() {
+        let mut ws = issue("o/r#42");
+        ws.auto_merge_on_green = true;
+        assert!(
+            !should_auto_merge(&ws),
+            "issue workspaces have no PR to merge"
+        );
     }
 
     // ── Kill ─────────────────────────────────────────────────────

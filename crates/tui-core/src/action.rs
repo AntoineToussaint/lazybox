@@ -83,6 +83,11 @@ pub enum Action {
     /// surfaces for provider workspaces that have a merge concept
     /// (today: github PRs).
     MergePr,
+    /// Toggle the workspace's "auto-merge on green" arm. When armed,
+    /// the client auto-fires a merge the moment this workspace's own
+    /// PR becomes merge-ready. Distinct from GitHub's native
+    /// auto-merge; acts only while lazybox is running.
+    ToggleAutoMerge,
     /// Move every session from the focused workspace to another.
     AdoptSessions,
     /// Manually fold an issue workspace into the PR workspace that
@@ -254,6 +259,7 @@ pub enum ActionKind {
     LongSnooze,
     Archive,
     MergePr,
+    ToggleAutoMerge,
     AdoptSessions,
     CollapseIntoPr,
     RequestReviewers,
@@ -351,6 +357,7 @@ impl Action {
             Action::LongSnooze => ActionKind::LongSnooze,
             Action::Archive => ActionKind::Archive,
             Action::MergePr => ActionKind::MergePr,
+            Action::ToggleAutoMerge => ActionKind::ToggleAutoMerge,
             Action::AdoptSessions => ActionKind::AdoptSessions,
             Action::CollapseIntoPr => ActionKind::CollapseIntoPr,
             Action::RequestReviewers => ActionKind::RequestReviewers,
@@ -620,6 +627,13 @@ impl ActionDef {
                 describe: "Merge the PR (only when CI green + approved + no conflicts).",
                 section: Section::Workspace,
             },
+            ActionKind::ToggleAutoMerge => &Self {
+                kind: ActionKind::ToggleAutoMerge,
+                default_keys: "g g",
+                label: "auto-merge",
+                describe: "Toggle \"auto-merge on green\": arm the workspace so lazybox merges your PR automatically once CI goes green (own PR, no conflicts, no changes requested). Fires only while lazybox is running.",
+                section: Section::Workspace,
+            },
             ActionKind::AdoptSessions => &Self {
                 kind: ActionKind::AdoptSessions,
                 default_keys: "Shift-A",
@@ -817,6 +831,7 @@ impl ActionDef {
             ActionKind::NewProject,
             ActionKind::NewWorkspace,
             ActionKind::MergePr,
+            ActionKind::ToggleAutoMerge,
             ActionKind::RequestReviewers,
             ActionKind::AddAssignees,
             ActionKind::ManageLabels,
@@ -1268,6 +1283,7 @@ impl ActionKind {
             ActionKind::LongSnooze => "long_snooze",
             ActionKind::Archive => "archive",
             ActionKind::MergePr => "merge_pr",
+            ActionKind::ToggleAutoMerge => "toggle_auto_merge",
             ActionKind::AdoptSessions => "adopt_sessions",
             ActionKind::CollapseIntoPr => "collapse_into_pr",
             ActionKind::RequestReviewers => "request_reviewers",
@@ -1593,6 +1609,11 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
             intent::resolve_merge(workspace),
             intent::Intent::MergePr { .. },
         ),
+        // Arming applies to a PR (armed or not — it toggles). Gate on
+        // the workspace having a PR so `g g` only surfaces where it
+        // can do something; the resolver Notices on non-PR workspaces
+        // if the user presses it anyway.
+        ActionKind::ToggleAutoMerge => workspace.map(|w| w.pr.is_some()).unwrap_or(false),
         ActionKind::Work | ActionKind::WorkWith => intent::classify_work(workspace, &[]).is_some(),
         ActionKind::OpenEditor => matches!(
             intent::resolve_open_editor(workspace),
@@ -2068,6 +2089,7 @@ mod tests {
         let g = KeyStroke::new(false, false, false, ChordCode::Char('g'));
         let github = [
             ActionKind::MergePr,
+            ActionKind::ToggleAutoMerge,
             ActionKind::RequestReviewers,
             ActionKind::AddAssignees,
             ActionKind::ManageLabels,

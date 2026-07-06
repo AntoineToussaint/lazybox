@@ -615,6 +615,7 @@ impl Server {
                         lazybox_ipc::Command::ConfirmMerge { .. } => "ConfirmMerge",
                         lazybox_ipc::Command::Snooze { .. } => "Snooze",
                         lazybox_ipc::Command::Unsnooze { .. } => "Unsnooze",
+                        lazybox_ipc::Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
                         lazybox_ipc::Command::Kill { .. } => "Kill",
                         lazybox_ipc::Command::RemoveMergedWorkspace { .. } => "RemoveMergedWorkspace",
                         lazybox_ipc::Command::DeleteProject { .. } => "DeleteProject",
@@ -1047,6 +1048,13 @@ async fn dispatch_command(
         lazybox_ipc::Command::Unsnooze { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             polling::set_snooze(config, &key, None);
+        }
+        lazybox_ipc::Command::SetAutoMergeOnGreen {
+            session_key,
+            enabled,
+        } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            polling::set_auto_merge_on_green(config, &key, enabled);
         }
         lazybox_ipc::Command::Kill { session_key } => {
             // Serialized against any in-flight Spawn on the same workspace:

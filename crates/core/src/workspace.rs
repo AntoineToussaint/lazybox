@@ -137,6 +137,16 @@ pub struct Workspace {
     pub read_indices: HashSet<usize>,
     #[serde(default)]
     pub snoozed_until: Option<DateTime<Utc>>,
+    /// Per-workspace "auto-merge on green" arm. When `true`, the
+    /// client auto-fires a merge the moment this workspace's own PR
+    /// becomes merge-ready (green CI, no conflict, no changes
+    /// requested). User-toggled, persisted in the workspace JSON blob
+    /// alongside [`Workspace::snoozed_until`]. Distinct from the PR's
+    /// `Task::auto_merge_enabled` — that's GitHub's native server-side
+    /// "merge when ready"; this is lazybox's client-side arm that only
+    /// acts while lazybox is running.
+    #[serde(default)]
+    pub auto_merge_on_green: bool,
     pub created_at: DateTime<Utc>,
     pub last_viewed_at: Option<DateTime<Utc>>,
 }
@@ -160,6 +170,7 @@ impl Workspace {
             seen_count: 0,
             read_indices: HashSet::new(),
             snoozed_until: None,
+            auto_merge_on_green: false,
             created_at: now,
             last_viewed_at: None,
         }

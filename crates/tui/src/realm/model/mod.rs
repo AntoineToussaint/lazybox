@@ -593,6 +593,13 @@ pub struct Model<T: TerminalAdapter> {
     /// Cleared when a workspace is removed (`Event::WorkspaceRemoved`)
     /// so a re-added workspace gets a fresh fetch.
     pr_details_fetched: std::collections::HashSet<lazybox_core::WorkspaceKey>,
+    /// Workspace keys we've already auto-fired `Command::MergePr` for
+    /// this arming. The persisted `auto_merge_on_green` flag is the
+    /// arm; this transient set is the one-shot latch that stops us
+    /// re-dispatching every poll while the merge is in flight. Cleared
+    /// when the PR leaves the merge-ready state (so a fresh green
+    /// re-fires after a failed race) and on `Event::WorkspaceRemoved`.
+    auto_merge_fired: std::collections::HashSet<lazybox_core::WorkspaceKey>,
     /// Last `SessionKey` we sent a `Command::FocusWorkspace` for.
     /// Single source of truth for "did the cursor leave the previous
     /// workspace?". `sync_panes` reads it after every key/mouse
@@ -925,6 +932,7 @@ impl<T: TerminalAdapter> Model<T> {
             status: StatusCtx::new(),
             ui_defaults: lazybox_config::UiDefaults::default(),
             pr_details_fetched: std::collections::HashSet::new(),
+            auto_merge_fired: std::collections::HashSet::new(),
             last_focused_session_key: None,
             needs_pane_sync: false,
             workspace_focus: std::collections::HashMap::new(),

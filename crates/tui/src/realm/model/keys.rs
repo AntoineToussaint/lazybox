@@ -1138,6 +1138,7 @@ fn action_from_kind(
         ActionKind::NewWorkspace => Action::NewWorkspace,
         ActionKind::NewProject => Action::NewProject,
         ActionKind::MergePr => Action::MergePr,
+        ActionKind::ToggleAutoMerge => Action::ToggleAutoMerge,
         ActionKind::Archive => Action::Archive,
         ActionKind::ToggleSnooze => Action::ToggleSnooze,
         ActionKind::LongSnooze => Action::LongSnooze,

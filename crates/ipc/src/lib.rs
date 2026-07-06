@@ -610,6 +610,15 @@ pub enum Command {
     Unsnooze {
         session_key: SessionKey,
     },
+    /// Set the workspace's client-side "auto-merge on green" arm. When
+    /// armed, the TUI auto-fires `MergePr` once the workspace's own PR
+    /// becomes merge-ready. The daemon just persists the flag on the
+    /// `Workspace` (like `Snooze`) and re-broadcasts; the merge decision
+    /// and dispatch stay client-side.
+    SetAutoMergeOnGreen {
+        session_key: SessionKey,
+        enabled: bool,
+    },
     /// Post a top-level reply to the workspace's primary task. Today
     /// this maps to "create an issue/PR comment" on GitHub; future
     /// providers (Linear, etc.) wire their own send path. The daemon

@@ -4121,6 +4121,18 @@ pub fn set_snooze(config: &ServerConfig, key: &WorkspaceKey, until: Option<chron
     commit_upsert(config, key, workspace);
 }
 
+/// Persist the workspace's "auto-merge on green" arm. Mirrors
+/// [`set_snooze`]: load, flip the field, commit (which persists the
+/// JSON blob and broadcasts `WorkspaceUpserted` so every TUI sees the
+/// new arm state). The merge decision itself stays client-side.
+pub fn set_auto_merge_on_green(config: &ServerConfig, key: &WorkspaceKey, enabled: bool) {
+    let Some(mut workspace) = load_workspace(config, key) else {
+        return;
+    };
+    workspace.auto_merge_on_green = enabled;
+    commit_upsert(config, key, workspace);
+}
+
 /// Delete a workspace + all its sessions from the store. Broadcasts
 /// `WorkspaceRemoved` so every connected TUI prunes its sidebar row.
 /// Used by the sidebar's `Shift-X` two-press kill flow.

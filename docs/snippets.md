@@ -86,27 +86,26 @@ have to know a key first.
 
 ### List & use
 
-Snippets live under the **`]]` leader** — the same double-bracket
-chord that leaves the terminal pane. With the terminal focused:
+Snippets live under the **`]]` leader** — the double-bracket chord that
+opens a small command menu from a focused terminal (a which-key popup
+lists it). The commands:
 
-- **`]]rev`** — when what you type after the leader exactly equals a
-  snippet key (here `rev`) and it's the only snippet whose key starts
-  with that text, the body is sent and submitted immediately. This is
-  the fast path for snippets you know by name.
-- **`]]<text>`** — otherwise (the text is a partial key, or more than
-  one snippet key starts with it) the **snippet picker** opens,
-  pre-filtered by what you typed. The picker is a real, dwellable modal:
-  it stays open until you send or cancel — no timer, PTY output, or
-  focus change closes it. Keep typing to narrow, use `↑`/`↓` to move,
-  and press `Enter` to send the highlighted row. `Esc` (or `Ctrl-C`)
+- **`]]s`** — opens the **snippet picker**, a real, dwellable modal: it
+  stays open until you send or cancel — no timer, PTY output, or focus
+  change closes it. Keep typing to filter, use `↑`/`↓` to move, and
+  press `Enter` to send the highlighted row. `Esc` (or `Ctrl-C`)
   cancels without sending.
-- **`]]]`** — a third press of the escape char exits the terminal pane
-  back to the sidebar. The leader is *non-timed* (#252): after `]]` it
-  waits for your next key (a which-key popup lists the options) rather
-  than leaving on an idle timer, so pausing to read the popup or think
-  about which snippet to type never drops you to the sidebar
-  mid-decision. `Esc` under the leader cancels and keeps you in the
-  terminal.
+- **`]]srev`** — the fast path: when what you type in the picker exactly
+  equals a snippet key (here `rev`) and it's the only snippet whose key
+  starts with that text, the body is sent and submitted immediately, no
+  `Enter` needed.
+- **`]]q`** — exits the terminal pane back to the sidebar. **`]]f`**
+  toggles focus mode, **`]]<digit>`** jumps to the Nth agent workspace,
+  and **`` ]]` ``** opens the fuzzy workspace switcher.
+- The leader is *non-timed* (#252): after `]]` it waits for the command
+  key rather than leaving on an idle timer, so pausing to read the popup
+  never drops you to the sidebar mid-decision. `Esc` or any unbound key
+  cancels back to the terminal.
 - **A lone `]`** — a single `]` followed by any non-`]` key is sent to
   the agent verbatim, so `]` is typeable in code, arrays, and
   markdown. Only the doubled `]]` is intercepted.

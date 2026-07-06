@@ -1533,7 +1533,7 @@ fn footer_surfaces_leader_focus_and_tile_escape_hatches() {
         labels.iter().any(|l| l == "exit to sidebar"),
         "the way back to focus must be advertised, got {labels:?}",
     );
-    assert!(keys.iter().any(|k| k == "]]]"), "leave chord, got {keys:?}");
+    assert!(keys.iter().any(|k| k == "]]q"), "leave chord, got {keys:?}");
     assert!(
         labels.iter().any(|l| l == "focus mode"),
         "focus-mode hint, got {labels:?}"
@@ -1551,7 +1551,7 @@ fn footer_surfaces_leader_focus_and_tile_escape_hatches() {
         "split-panes prefix, got {keys:?}"
     );
     assert!(
-        keys.iter().any(|k| k == "]]<key>"),
+        keys.iter().any(|k| k == "]]s"),
         "snippet leader, got {keys:?}"
     );
     assert!(
@@ -1563,17 +1563,17 @@ fn footer_surfaces_leader_focus_and_tile_escape_hatches() {
 #[test]
 fn footer_leader_hints_honor_the_configured_escape_char() {
     // Issue #170: a user who remapped `ui.terminal_escape_char` must
-    // see the chord they actually type — `}}}` / `}}<key>`, not the
+    // see the chord they actually type — `}}q` / `}}s`, not the
     // hardcoded `]]` default.
     let bindings = TerminalStack::contextual_bindings('}');
     let keys: Vec<String> = bindings.iter().map(|b| b.keys.to_string()).collect();
-    assert!(keys.iter().any(|k| k == "}}}"), "leave chord, got {keys:?}");
+    assert!(keys.iter().any(|k| k == "}}q"), "leave chord, got {keys:?}");
     assert!(
         keys.iter().any(|k| k == "}}f"),
         "focus-mode chord, got {keys:?}"
     );
     assert!(
-        keys.iter().any(|k| k == "}}<key>"),
+        keys.iter().any(|k| k == "}}s"),
         "snippet leader, got {keys:?}"
     );
     assert!(
@@ -1597,11 +1597,11 @@ fn every_footer_hint_is_catalog_backed_or_allowlisted() {
         .iter()
         .map(|e| (e.keys_display.to_string(), e.label.to_string()))
         .collect();
-    // LeaveTerminal's display is the escape char tripled (owned by
+    // LeaveTerminal's display is the escape char doubled + `q` (owned by
     // `terminal_escape_char`, not the catalog default string; the `]]`
-    // leader is non-timed and `]]]` is the explicit exit, #252), so
-    // vouch for the rendered form rather than the catalog placeholder.
-    catalog_pairs.push(("]]]".to_string(), "exit to sidebar".to_string()));
+    // leader is non-timed and `]]q` is the exit command, #252), so vouch
+    // for the rendered form rather than the catalog placeholder.
+    catalog_pairs.push(("]]q".to_string(), "exit to sidebar".to_string()));
     // ToggleFocusMode rides the `]]` leader from a terminal (`]]f`)
     // rather than its catalog default key (`.`), so vouch for the
     // leader-rendered form while the label still tracks the catalog.
@@ -1613,7 +1613,7 @@ fn every_footer_hint_is_catalog_backed_or_allowlisted() {
     let allow: &[(&str, &str)] = &[
         ("Ctrl-c", "interrupt"),
         ("Ctrl-w", "split panes"),
-        ("]]<key>", "snippets"),
+        ("]]s", "snippets"),
     ];
     for b in &bindings {
         let keys = b.keys.to_string();
@@ -1632,22 +1632,21 @@ fn footer_leave_hint_tracks_the_escape_char_not_an_action_override() {
     // #188: the leave chord is owned by `ui.terminal_escape_char`, not
     // the `leave_terminal` action_keys slot. Terminal-pane dispatch
     // matches only the escape char and never the catalog chord, so the
-    // footer must always render the escape char — tripled (`]]]`), since
-    // the `]]` leader is non-timed and the third press is the exit
-    // (#252). The function takes no `overrides` map precisely because no
-    // terminal hint is action_keys-sensitive — the leave/focus/snippet
-    // chords all derive from the escape char, and `Ctrl-c`/`Ctrl-w` are
-    // literal.
+    // footer must always render the escape char doubled + the `q` exit
+    // command (`]]q`), since the `]]` leader is non-timed (#252). The
+    // function takes no `overrides` map precisely because no terminal
+    // hint is action_keys-sensitive — the leave/focus/snippet chords all
+    // derive from the escape char, and `Ctrl-c`/`Ctrl-w` are literal.
     let bindings = TerminalStack::contextual_bindings(']');
     let leave = bindings.iter().find(|b| b.label == "exit to sidebar");
     assert!(leave.is_some(), "leave-terminal binding must surface");
     assert_eq!(
         leave.unwrap().keys,
-        "]]]",
-        "footer must show the escape char tripled",
+        "]]q",
+        "footer must show the escape char doubled + q",
     );
     // A remapped escape char DOES drive dispatch, so the hint follows it.
     let bindings = TerminalStack::contextual_bindings('}');
     let leave = bindings.iter().find(|b| b.label == "exit to sidebar");
-    assert_eq!(leave.unwrap().keys, "}}}");
+    assert_eq!(leave.unwrap().keys, "}}q");
 }

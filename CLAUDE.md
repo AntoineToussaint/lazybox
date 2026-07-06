@@ -187,7 +187,7 @@ agent use `]]` then `` ` ``), `!` jump to agent-asking workspace,
 `Shift-F` jump to failing CI, `Shift-P` toggle
 the activity pane (auto-hidden when the workspace has no activity), `.`
 toggle focus mode (near-fullscreen agent terminal behind a slim event
-header; from inside a terminal use `]]f`, and `]]` also exits),
+header; from inside a terminal use `]]f`, and `]]q` exits),
 `]]<digit>` jump the focused terminal straight to the Nth agent
 workspace (sidebar order; the number rides a badge on each agent row
 and the `]]` leader popup), `Shift-arrows` resize splitters, `F8` /
@@ -216,19 +216,18 @@ selection, `d` toggle PR/issue description, `m` mark the focused row
 read, `z` undo mark-read, `r` reply.
 
 **TerminalStack**: all keys forward to the PTY. `]]` (configurable
-escape sequence) is a *non-timed* leader (#252): `]]]` (a third press)
-returns to the sidebar, `]]f` toggles focus mode, `]]<digit>` jumps to
-the Nth agent workspace, and `]]<key>` opens the snippet picker (see
-[`docs/snippets.md`](docs/snippets.md)) — a category-grouped list with
+escape sequence) is a *non-timed* leader (#252) that opens a small
+command menu (which-key popup): `]]s` opens the snippet picker, `]]f`
+toggles focus mode, `]]q` exits to the sidebar, `]]<digit>` jumps to
+the Nth agent workspace, and `` ]]` `` opens the fuzzy workspace
+switcher. The snippet picker (see
+[`docs/snippets.md`](docs/snippets.md)) is a category-grouped list with
 a live body-preview pane, filtering on key+description+category, that
-auto-submits when the typed key uniquely matches. The `]]` leader
-popup lists the agent roster (digits), `` ` `` (jump to any
-workspace via the fuzzy picker) and `f` above the snippet keys.
-Digits, `` ` `` and `f` are reserved by the leader, shadowing any
-snippet bound to them. The leader is non-timed, so it waits for the
-next key rather than leaving on an idle timer — browsing snippets never
-races an exit. A lone `]` followed by any non-`]` key is sent to the agent
-verbatim. `Ctrl-c`
+auto-submits when the typed key uniquely matches (`]]srev`). The leader
+is non-timed, so after `]]` it waits for the command key rather than
+leaving on an idle timer — browsing snippets never races an exit; `Esc`
+or any unbound key cancels back to the terminal. A lone `]` followed by
+any non-`]` key is sent to the agent verbatim. `Ctrl-c`
 is forwarded as an interrupt. `Ctrl-w` is the tile prefix:
 `Ctrl-w |` / `Ctrl-w -` split, `Ctrl-w <arrow>` moves tile focus,
 `Ctrl-w q` closes the focused tile. `Shift-PgUp/PgDn` scroll the

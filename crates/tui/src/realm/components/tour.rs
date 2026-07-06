@@ -134,7 +134,7 @@ const STEPS: &[TourStep] = &[
             "Shift-M/V/G/L/O keys still work as direct aliases.",
             "",
             "? shows the keymap, , Settings, t themes, q q quits. In",
-            "a terminal keys go to the agent — press ]]] to return first.",
+            "a terminal keys go to the agent — press ]]q to return first.",
             "",
             "t opens the theme picker: light + dark, live preview,",
             "and your pick persists across restarts.",

@@ -166,22 +166,18 @@ pub fn render_quit_hint(frame: &mut Frame, area: Rect, quit_keys: &str) {
 const LEADER_MAX_ROWS: usize = 8;
 
 /// Render the which-key popup for the armed terminal `]]` leader
-/// (issues #205, #252). Lists the agent-jump roster (`]]<digit>` →
-/// workspace, `]]f` → focus mode) on top of the snippet keys reachable
-/// as `]]<key>`, plus a hint that a third escape char exits and Esc
-/// cancels. Visual twin of [`render`], but the binding set is the agent
-/// roster + the snippet library, so it takes the rows directly.
+/// (issues #205, #252). Lists the leader's command menu — the agent-jump
+/// roster (`]]<digit>` → workspace) on top of the fixed commands (`]]s`
+/// snippets, `]]f` focus, `]]q` exit, `` ]]` `` jump) — plus a hint that
+/// Esc cancels. Visual twin of [`render`], but the binding set is the
+/// leader menu, so it takes the rows directly.
 pub fn render_terminal_leader(
     frame: &mut Frame,
     area: Rect,
     escape_char: char,
-    agents: &[(String, String)],
-    snippets: &[(String, String)],
+    rows: &[(String, String)],
 ) {
     let theme = crate::theme::current();
-    // Agent jumps come first — they're why a heads-down user armed the
-    // leader — then the snippet library. One flat list, capped together.
-    let rows: Vec<(String, String)> = agents.iter().chain(snippets.iter()).cloned().collect();
     let shown = rows.len().min(LEADER_MAX_ROWS);
     let overflow = rows.len() - shown;
     let extra_rows = if overflow > 0 { 1 } else { 0 };
@@ -202,13 +198,8 @@ pub fn render_terminal_leader(
     frame.render_widget(Clear, panel);
     frame.render_widget(Block::default().style(bg), panel);
 
-    let title_kind = if snippets.is_empty() {
-        "jump"
-    } else {
-        "jump · snippets"
-    };
     let title = Line::from(Span::styled(
-        format!(" {escape_char}{escape_char} · {title_kind} "),
+        format!(" {escape_char}{escape_char} "),
         Style::default()
             .bg(theme.surface)
             .fg(theme.text_dim)
@@ -266,14 +257,13 @@ pub fn render_terminal_leader(
             );
         }
     }
-    // Footer hint on the bottom row of the panel. `]]]` (the escape
-    // char a third time) is the explicit exit; Esc cancels back to the
-    // terminal. The leader is non-timed (#252), so nothing leaves on
-    // its own.
+    // Footer hint on the bottom row of the panel. The commands (incl.
+    // `q` exit) are listed above; Esc cancels back to the terminal. The
+    // leader is non-timed (#252), so nothing leaves on its own.
     let hint_y = panel.y + panel.height.saturating_sub(1);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            format!(" {escape_char} exit · Esc cancel "),
+            " Esc cancel ".to_string(),
             Style::default().bg(theme.surface).fg(theme.text_dim),
         ))),
         Rect {

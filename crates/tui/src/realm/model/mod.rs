@@ -2391,21 +2391,14 @@ impl<T: TerminalAdapter> Model<T> {
         } else {
             Vec::new()
         };
-        // Snippet rows for the `]]` leader popup — built only while the
-        // leader is armed so the steady-state render pays nothing.
-        let snippet_leader_rows: Vec<(String, String)> = if self.terminal_leader_armed {
-            self.snippets
-                .all()
-                .map(|(k, s)| (k.to_string(), s.description.clone()))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        // Agent-jump roster for the `]]` leader popup: `1..9` → agent
-        // workspace name (sidebar order), plus the `f` focus-mode row.
-        // Shown above the snippets so the heads-down user can pick a
-        // jump target by number. Built only while the leader is armed.
-        let agent_leader_rows: Vec<(String, String)> = if self.terminal_leader_armed {
+        // Command menu for the `]]` leader popup (#252): the agent-jump
+        // roster (`1..9` → agent workspace name, sidebar order) on top,
+        // then the fixed commands `` ` `` jump, `s` snippets, `f` focus,
+        // `q` exit. A small mnemonic menu rather than the whole snippet
+        // library — snippets live one level down, behind `]]s`. Built
+        // only while the leader is armed so the steady-state render pays
+        // nothing.
+        let leader_menu_rows: Vec<(String, String)> = if self.terminal_leader_armed {
             let mut rows: Vec<(String, String)> = self
                 .sidebar
                 .agent_workspace_keys()
@@ -2419,7 +2412,9 @@ impl<T: TerminalAdapter> Model<T> {
                 })
                 .collect();
             rows.push(("`".to_string(), "jump to workspace".to_string()));
+            rows.push(("s".to_string(), "snippets".to_string()));
             rows.push(("f".to_string(), "focus mode".to_string()));
+            rows.push(("q".to_string(), "exit to sidebar".to_string()));
             rows
         } else {
             Vec::new()
@@ -2448,9 +2443,9 @@ impl<T: TerminalAdapter> Model<T> {
             };
             // Inside focus mode the PTY owns the keyboard, so the
             // reachable controls are all `]]` leader chords: `]]<digit>`
-            // jumps to another agent, `]]]` exits back to the sidebar.
+            // jumps to another agent, `]]q` exits back to the sidebar.
             let esc = self.ui_defaults.terminal_escape_char;
-            let hint = format!("{esc}{esc}<n> jump · {esc}{esc}{esc} exit");
+            let hint = format!("{esc}{esc}<n> jump · {esc}{esc}q exit");
             (title, self.sidebar.attention_summary(), hint)
         } else {
             (String::new(), Default::default(), String::new())
@@ -2519,16 +2514,16 @@ impl<T: TerminalAdapter> Model<T> {
             if let Some(prefix) = self.leader.pending().copied() {
                 crate::realm::components::which_key::render(f, area, prefix, &leader_rows);
             }
-            // Which-key popup for the armed terminal `]]` leader
-            // (#205): the agent-jump roster (`]]<digit>`, `]]f`) on top
-            // of the snippet keys reachable as `]]<key>`.
+            // Which-key popup for the armed terminal `]]` leader (#205,
+            // #252): the agent-jump roster (`]]<digit>`) on top of the
+            // fixed command menu (`]]s` snippets, `]]f` focus, `]]q`
+            // exit, `` ]]` `` jump).
             if self.terminal_leader_armed {
                 crate::realm::components::which_key::render_terminal_leader(
                     f,
                     area,
                     self.ui_defaults.terminal_escape_char,
-                    &agent_leader_rows,
-                    &snippet_leader_rows,
+                    &leader_menu_rows,
                 );
             }
             // After the first press of the `q q` quit chord, surface a

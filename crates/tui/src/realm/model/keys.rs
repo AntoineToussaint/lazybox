@@ -84,53 +84,44 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
         // ── Terminal `]]` leader (issues #205, #252) ────────────────
-        // Once `]]` arms the leader, THIS key selects a binding under
-        // it and never reaches the PTY:
-        //   - a printable char opens the snippet picker pre-filtered
-        //     by that char (auto-submits on a unique match);
-        //   - a third escape char (`]]]`) leaves the pane to the
-        //     sidebar — the explicit exit;
-        //   - Esc (or any non-printable) cancels back into the terminal
-        //     so the user can keep typing.
+        // Once `]]` arms the leader, THIS key picks a command from a
+        // small, fixed menu — each a single mnemonic, tmux-prefix style —
+        // and never reaches the PTY:
+        //   - `]]s` opens the snippet picker (typing a full key there
+        //     still auto-submits — the `]]srev` fast path);
+        //   - `]]f` toggles focus mode without leaving the PTY;
+        //   - `]]q` exits the terminal back to the sidebar;
+        //   - `]]<1..9>` jumps the view straight to the Nth agent
+        //     workspace (sidebar order, top-down);
+        //   - `` ]]` `` opens the fuzzy workspace switcher (issue #171);
+        //   - Esc or any unbound key cancels back into the terminal so
+        //     the user can keep typing.
         // The leader is NOT timed (#252): a timed idle-leave used to
-        // race the user typing a snippet key, silently dropping them to
-        // the sidebar mid-decision, so browsing snippets could never
-        // dwell. It now waits for THIS key. The snippet library is the
-        // leader's binding set, mirroring how the sidebar group-leader
-        // above resolves an `ActionGroup`.
+        // race the follow-up key, silently dropping the user to the
+        // sidebar mid-decision. It now waits for THIS key. A fixed
+        // command menu (rather than binding every snippet key straight
+        // to the leader) means nothing shadows a snippet and the exit is
+        // a plain mnemonic, not a triple-tap.
         if std::mem::take(&mut self.terminal_leader_armed) {
             self.redraw = true;
             if let Key::Char(c) = key.code
                 && key.modifiers.is_empty()
                 && !c.is_control()
             {
-                // Reserved leader keys win over the snippet picker:
-                //   - `]]]` (the escape char again) is the explicit
-                //     "leave to sidebar" — the non-timed replacement for
-                //     the old idle-tick leave (#252);
-                //   - `]]<1..9>` jumps the view straight to the Nth
-                //     agent workspace (sidebar order, top-down) — the
-                //     numbered replacement for the old `F3` cycle;
-                //   - `]]f` toggles focus mode without leaving the PTY,
-                //     replacing the old `F2`.
-                // Digits and `f` shadow snippets bound to those keys,
-                // which is the documented trade-off for keeping the
-                // jumps reachable heads-down. `` ` `` is reserved the
-                // same way: it opens the fuzzy workspace switcher, so
-                // "jump to any workspace" works without first leaving
-                // the agent (issue #171).
-                if c == self.ui_defaults.terminal_escape_char {
-                    self.leave_terminal_to_sidebar();
-                } else {
-                    match c {
-                        '1'..='9' => {
-                            let n = c.to_digit(10).unwrap_or(0) as usize;
-                            self.jump_to_agent_workspace(n);
-                        }
-                        'f' => self.toggle_focus_mode(),
-                        '`' => self.mount_jump_picker(),
-                        _ => self.mount_snippet_picker(c.to_string()),
+                match c {
+                    '1'..='9' => {
+                        let n = c.to_digit(10).unwrap_or(0) as usize;
+                        self.jump_to_agent_workspace(n);
                     }
+                    's' => self.mount_snippet_picker(String::new()),
+                    'f' => self.toggle_focus_mode(),
+                    'q' => self.leave_terminal_to_sidebar(),
+                    '`' => self.mount_jump_picker(),
+                    // Any other key is not a leader command — cancel back
+                    // to the terminal (the key is consumed, not forwarded,
+                    // matching the tmux-prefix "unbound key does nothing"
+                    // convention).
+                    _ => {}
                 }
             }
             return;
@@ -300,13 +291,12 @@ impl<T: TerminalAdapter> Model<T> {
             let was_armed = self.escape_latch.is_armed();
             if self.escape_latch.tap(self.ui_defaults.escape_window) {
                 // Second `]` within the window completes `]]`: arm the
-                // leader so the next key can invoke a binding
-                // (`]]<key>`). The leader always has something to offer
-                // — `]]f` toggles focus mode and `]]<digit>` jumps to an
-                // agent even with no snippets configured — so it arms
-                // unconditionally. It is non-timed (#252): it waits for
-                // the next key rather than leaving on an idle tick, so
-                // `]]]` is now the explicit exit to the sidebar.
+                // leader so the next key picks a command (`]]s` snippets,
+                // `]]f` focus, `]]q` exit, `]]<digit>` jump). It arms
+                // unconditionally — the menu always has something to
+                // offer. Non-timed (#252): it waits for the next key
+                // rather than leaving on an idle tick, so browsing never
+                // races the exit.
                 self.terminal_leader_armed = true;
                 self.redraw = true;
                 return;

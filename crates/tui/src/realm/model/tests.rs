@@ -1139,16 +1139,29 @@ snippets:
         assert_eq!(m.focus(), PaneFocus::Terminals, "leader doesn't leave yet");
     }
 
-    /// `]]<printable>` opens the snippet picker pre-filtered by the
-    /// follow-up char, and disarms the leader.
+    /// `]]s` opens the snippet picker and disarms the leader (#252).
     #[test]
-    fn leader_then_char_opens_snippet_picker() {
+    fn leader_s_opens_snippet_picker() {
         let mut m = model_in_terminal_with_snippets("leader-char");
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        m.dispatch_key(RealmKey::new(Key::Char('s'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        assert!(matches!(m.top_modal(), Some(Id::SnippetPicker)));
+    }
+
+    /// `]]<unbound>` — a key that isn't a leader command — cancels back
+    /// to the terminal without opening the picker or leaving (#252). Only
+    /// `s`/`f`/`q`/digit/`` ` `` are commands now.
+    #[test]
+    fn leader_then_unbound_key_cancels_back_to_terminal() {
+        let mut m = model_in_terminal_with_snippets("leader-unbound");
         m.dispatch_key(esc_key());
         m.dispatch_key(esc_key());
         m.dispatch_key(RealmKey::new(Key::Char('r'), RealmMods::NONE));
         assert!(!m.terminal_leader_pending(), "leader consumed");
-        assert!(matches!(m.top_modal(), Some(Id::SnippetPicker)));
+        assert!(m.top_modal().is_none(), "unbound `]]r` opens no picker");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "stays in the terminal");
     }
 
     /// `]]` then `Esc` cancels the leader back into the terminal —
@@ -1179,9 +1192,9 @@ snippets:
 
     /// The `]]` leader is non-timed (#252): an armed leader with no
     /// follow-up key stays armed across idle ticks and never leaves on
-    /// its own, so a user reading the popup and deciding which snippet
-    /// to type is never yanked to the sidebar mid-decision. `]]]` is the
-    /// explicit exit (see `triple_bracket_leaves_to_sidebar`).
+    /// its own, so a user reading the popup and deciding which command
+    /// to press is never yanked to the sidebar mid-decision. `]]q` is
+    /// the explicit exit (see `leader_q_leaves_to_sidebar`).
     #[test]
     fn idle_leader_stays_armed_and_never_leaves_on_tick() {
         let mut m = model_in_terminal_with_snippets("leader-idle");
@@ -1195,27 +1208,25 @@ snippets:
         assert_eq!(m.focus(), PaneFocus::Terminals, "idle leader never leaves");
     }
 
-    /// `]]]` — a third press of the escape char under the armed leader —
-    /// is the explicit exit to the sidebar, replacing the old idle-tick
-    /// leave (#252).
+    /// `]]q` is the explicit exit to the sidebar, replacing the old
+    /// idle-tick leave (#252).
     #[test]
-    fn triple_bracket_leaves_to_sidebar() {
-        let mut m = model_in_terminal_with_snippets("leader-triple");
+    fn leader_q_leaves_to_sidebar() {
+        let mut m = model_in_terminal_with_snippets("leader-quit");
         m.dispatch_key(esc_key());
         m.dispatch_key(esc_key());
         assert!(m.terminal_leader_pending(), "`]]` arms the leader");
-        m.dispatch_key(esc_key());
-        assert!(!m.terminal_leader_pending(), "`]]]` consumes the leader");
-        assert_eq!(m.focus(), PaneFocus::Sidebar, "`]]]` leaves to the sidebar");
+        m.dispatch_key(RealmKey::new(Key::Char('q'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "`]]q` consumes the leader");
+        assert_eq!(m.focus(), PaneFocus::Sidebar, "`]]q` leaves to the sidebar");
         assert!(m.top_modal().is_none(), "no picker mounted on exit");
     }
 
-    /// A snippet key after `]]` still opens the picker even when a long
-    /// time passes between the leader and the key — the race that made
-    /// the picker "flash and vanish" is gone because the leader no
-    /// longer times out (#252).
+    /// `]]s` still opens the picker even when a long time passes between
+    /// the leader and the `s` — the race that made the picker "flash and
+    /// vanish" is gone because the leader no longer times out (#252).
     #[test]
-    fn leader_then_delayed_char_still_opens_picker() {
+    fn leader_then_delayed_s_still_opens_picker() {
         let mut m = model_in_terminal_with_snippets("leader-delay");
         m.dispatch_key(esc_key());
         m.dispatch_key(esc_key());
@@ -1225,7 +1236,7 @@ snippets:
             m.tick_terminal_leader();
         }
         assert!(m.terminal_leader_pending(), "leader survived the idle gap");
-        m.dispatch_key(RealmKey::new(Key::Char('r'), RealmMods::NONE));
+        m.dispatch_key(RealmKey::new(Key::Char('s'), RealmMods::NONE));
         assert!(matches!(m.top_modal(), Some(Id::SnippetPicker)));
     }
 
@@ -4537,12 +4548,12 @@ mod focus_mode_tests {
         assert!(!m.focus_mode, "no terminal → no focus mode");
     }
 
-    /// `]]]` exits the terminal to the sidebar — and in focus mode that
+    /// `]]q` exits the terminal to the sidebar — and in focus mode that
     /// must also drop focus mode, since the sidebar it returns to is
     /// hidden while focus mode is on (#252, replacing the old idle-tick
     /// leave).
     #[test]
-    fn bracket_exit_exits_focus_mode() {
+    fn leader_q_exits_focus_mode() {
         let mut m = build_model();
         let ws = workspace_with_agent("owner/repo#1");
         let key = SessionKey::from(&ws.key);
@@ -4552,12 +4563,12 @@ mod focus_mode_tests {
         m.set_focus_attr();
         m.focus_mode = true;
 
-        // `]]` arms the non-timed leader; a third `]` is the explicit exit.
+        // `]]` arms the non-timed leader; `q` is the exit command.
         m.dispatch_key(char_key(']'));
         m.dispatch_key(char_key(']'));
         assert!(m.terminal_leader_pending(), "`]]` arms the leader");
-        m.dispatch_key(char_key(']'));
-        assert!(!m.focus_mode, "`]]]` exits focus mode");
+        m.dispatch_key(char_key('q'));
+        assert!(!m.focus_mode, "`]]q` exits focus mode");
         assert_eq!(m.focus(), PaneFocus::Sidebar);
     }
 
@@ -4851,12 +4862,12 @@ mod terminal_section_dispatch_tests {
         );
     }
 
-    /// The escape char tripled leaves even with the `leave_terminal`
-    /// override present — proving `ui.terminal_escape_char` is the chord
-    /// owner. `]]` arms the non-timed leader and the third press is the
-    /// explicit exit (#252).
+    /// `]]q` leaves even with the `leave_terminal` override present —
+    /// proving `ui.terminal_escape_char` (not the action_keys slot) owns
+    /// the chord. `]]` arms the non-timed leader and `q` is its exit
+    /// command (#252).
     #[test]
-    fn escape_char_tripled_leaves_regardless_of_override() {
+    fn leader_q_leaves_regardless_of_override() {
         let mut m = model_in_live_terminal();
         let mut ov = std::collections::BTreeMap::new();
         ov.insert("leave_terminal".to_string(), "Esc".to_string());
@@ -4868,11 +4879,11 @@ mod terminal_section_dispatch_tests {
             m.terminal_leader_pending(),
             "the escape char doubled arms the leader"
         );
-        m.dispatch_key(esc_char(&m));
+        m.dispatch_key(RealmKey::new(Key::Char('q'), RealmMods::NONE));
         assert_eq!(
             m.focus(),
             PaneFocus::Sidebar,
-            "escape char tripled is the way out, override or not",
+            "`]]q` is the way out, override or not",
         );
     }
 

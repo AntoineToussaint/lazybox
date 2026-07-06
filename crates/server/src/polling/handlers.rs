@@ -865,8 +865,10 @@ pub(crate) async fn delete_orphaned_worktree_with(
     }
 }
 
-/// React to a PR transitioning open→merged. Called once per merge
-/// from the upsert path — see [`super::merged_transition_pr_number`].
+/// React to a workspace's primary task reaching a terminal state — a
+/// PR merging or an issue closing. Called once per transition from the
+/// upsert path — see [`super::merged_transition_pr_number`] /
+/// [`super::closed_issue_transition`].
 ///
 /// Two paths, chosen by `worktree.auto_cleanup_merged` (loaded fresh
 /// so the toggle takes effect without a restart):
@@ -875,33 +877,39 @@ pub(crate) async fn delete_orphaned_worktree_with(
 /// - **off** (default) — inspect the backing worktree(s) and emit
 ///   [`Event::MergedPrRemovable`] so the TUI prompts the user. Their
 ///   "yes" returns as `Command::RemoveMergedWorkspace`.
-pub async fn on_merged_pr(config: &ServerConfig, key: &WorkspaceKey, pr_number: u64) {
+pub async fn on_terminal_transition(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    cleanup: super::TerminalCleanup,
+) {
     let mgr = lazybox_git_ops::WorktreeManager::default_base();
     let auto = lazybox_config::Config::load()
         .map(|c| c.worktree.auto_cleanup_merged)
         .unwrap_or(false);
     if auto {
-        cleanup_merged_worktrees_with(config, &mgr, key, pr_number).await;
+        cleanup_merged_worktrees_with(config, &mgr, key, cleanup).await;
     } else {
-        prompt_merged_pr_removal_with(config, &mgr, key).await;
+        prompt_merged_pr_removal_with(config, &mgr, key, cleanup.removal_state()).await;
     }
 }
 
-/// Inspect a merged PR workspace's backing worktrees and emit
+/// Inspect a terminal-state workspace's backing worktrees and emit
 /// [`Event::MergedPrRemovable`] so the TUI can prompt. Read-only — no
 /// deletion happens until the user confirms (which comes back as
 /// `Command::RemoveMergedWorkspace`). `has_local_work` is set when any
 /// session worktree has uncommitted or unpushed work, so the modal can
-/// warn before the force-delete.
+/// warn before the force-delete. `terminal_state` (merged PR vs closed
+/// issue) only steers the confirm-modal wording.
 ///
 /// No-op for a session-less workspace: there's no worktree to delete
 /// and no terminal to kill, so the only thing removal would do is drop
-/// the merged tracking row — which the user can do with `Shift-X`
-/// without being nagged.
+/// the tracking row — which the user can do with `Shift-X` without
+/// being nagged.
 pub(crate) async fn prompt_merged_pr_removal_with(
     config: &ServerConfig,
     mgr: &lazybox_git_ops::WorktreeManager,
     key: &WorkspaceKey,
+    terminal_state: lazybox_ipc::RemovableTerminalState,
 ) {
     let Some(workspace) = load_workspace(config, key) else {
         return;
@@ -934,11 +942,13 @@ pub(crate) async fn prompt_merged_pr_removal_with(
         workspace = %key,
         active = active_terminal_count,
         has_local_work,
-        "merged PR — prompting for workspace + worktree removal"
+        ?terminal_state,
+        "terminal state — prompting for workspace + worktree removal"
     );
     let _ = config.bus.send(Event::MergedPrRemovable {
         workspace_key: key.clone(),
         label,
+        terminal_state,
         active_terminal_count,
         has_local_work,
     });
@@ -1064,7 +1074,7 @@ async fn live_workspace_keys(config: &ServerConfig) -> std::collections::HashSet
 }
 
 /// Silent worktree reaper for the opt-in `auto_cleanup_merged` path —
-/// the cleanup half of [`on_merged_pr`]. Explicit manager
+/// the cleanup half of [`on_terminal_transition`]. Explicit manager
 /// (tempdir-rooted in tests) and no config gate so the caller decides
 /// when cleanup runs.
 ///
@@ -1078,7 +1088,7 @@ pub(crate) async fn cleanup_merged_worktrees_with(
     config: &ServerConfig,
     mgr: &lazybox_git_ops::WorktreeManager,
     key: &WorkspaceKey,
-    pr_number: u64,
+    cleanup: super::TerminalCleanup,
 ) {
     let Some(mut workspace) = load_workspace(config, key) else {
         return;
@@ -1172,7 +1182,7 @@ pub(crate) async fn cleanup_merged_worktrees_with(
         };
         let _ = config.bus.send(Event::Notification {
             title: "lazybox".into(),
-            body: format!("Cleaned up {removed} {noun} for merged PR #{pr_number}"),
+            body: format!("Cleaned up {removed} {noun} for {}", cleanup.describe()),
         });
     }
 }
@@ -1886,7 +1896,13 @@ mod inspect_tests {
         let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
-        cleanup_merged_worktrees_with(&config, &mgr, &key, 1).await;
+        cleanup_merged_worktrees_with(
+            &config,
+            &mgr,
+            &key,
+            crate::polling::TerminalCleanup::MergedPr(1),
+        )
+        .await;
 
         let evt = drain_until(&mut rx, |e| matches!(e, Event::Notification { .. })).await;
         let Event::Notification { body, .. } = evt else {
@@ -1916,7 +1932,13 @@ mod inspect_tests {
         let config = fresh_config(store);
         let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
 
-        cleanup_merged_worktrees_with(&config, &mgr, &key, 1).await;
+        cleanup_merged_worktrees_with(
+            &config,
+            &mgr,
+            &key,
+            crate::polling::TerminalCleanup::MergedPr(1),
+        )
+        .await;
 
         assert!(wt.exists(), "dirty worktree must be preserved");
         let reloaded = load_workspace(&config, &key).expect("workspace");
@@ -1947,7 +1969,13 @@ mod inspect_tests {
         let config = fresh_config(store);
         let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
 
-        cleanup_merged_worktrees_with(&config, &mgr, &key, 1).await;
+        cleanup_merged_worktrees_with(
+            &config,
+            &mgr,
+            &key,
+            crate::polling::TerminalCleanup::MergedPr(1),
+        )
+        .await;
 
         assert!(
             !real.exists(),
@@ -1978,7 +2006,13 @@ mod inspect_tests {
         );
         let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
 
-        cleanup_merged_worktrees_with(&config, &mgr, &key, 1).await;
+        cleanup_merged_worktrees_with(
+            &config,
+            &mgr,
+            &key,
+            crate::polling::TerminalCleanup::MergedPr(1),
+        )
+        .await;
 
         assert!(
             wt.exists(),
@@ -2073,7 +2107,13 @@ mod inspect_tests {
             .insert(lazybox_ipc::TerminalId(1), sid);
         let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
 
-        cleanup_merged_worktrees_with(&config, &mgr, &key, 1).await;
+        cleanup_merged_worktrees_with(
+            &config,
+            &mgr,
+            &key,
+            crate::polling::TerminalCleanup::MergedPr(1),
+        )
+        .await;
 
         assert!(wt.exists(), "live session's worktree must be preserved");
         let reloaded = load_workspace(&config, &key).expect("workspace");
@@ -2095,7 +2135,13 @@ mod inspect_tests {
         let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
-        prompt_merged_pr_removal_with(&config, &mgr, &key).await;
+        prompt_merged_pr_removal_with(
+            &config,
+            &mgr,
+            &key,
+            lazybox_ipc::RemovableTerminalState::Merged,
+        )
+        .await;
 
         let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
         let Event::MergedPrRemovable {
@@ -2129,13 +2175,50 @@ mod inspect_tests {
         let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
-        prompt_merged_pr_removal_with(&config, &mgr, &key).await;
+        prompt_merged_pr_removal_with(
+            &config,
+            &mgr,
+            &key,
+            lazybox_ipc::RemovableTerminalState::Merged,
+        )
+        .await;
 
         let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
         let Event::MergedPrRemovable { has_local_work, .. } = evt else {
             unreachable!()
         };
         assert!(has_local_work, "dirty worktree must warn before delete");
+    }
+
+    /// A closed **issue** with a session/worktree emits the same
+    /// `MergedPrRemovable` prompt as a merged PR, but tags
+    /// `terminal_state = Closed` so the modal copy reads "closed" (#250).
+    #[tokio::test]
+    async fn prompt_emits_closed_terminal_state_for_issue() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "issue", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        prompt_merged_pr_removal_with(
+            &config,
+            &mgr,
+            &key,
+            lazybox_ipc::RemovableTerminalState::Closed,
+        )
+        .await;
+
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        let Event::MergedPrRemovable { terminal_state, .. } = evt else {
+            unreachable!()
+        };
+        assert_eq!(terminal_state, lazybox_ipc::RemovableTerminalState::Closed);
+        assert!(wt.exists(), "prompt must not delete anything");
     }
 
     /// On confirm, `remove_merged_workspace_with` deletes the worktree

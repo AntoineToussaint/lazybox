@@ -351,25 +351,31 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
-        // The daemon detected a PR merge and wants the user to decide
-        // whether to remove the workspace + delete its worktree. Queue
-        // it onto the shared removal-prompt machinery (reason
-        // `Merged`), deduped against any already-active/queued prompt.
+        // The daemon detected a PR merge or an issue close and wants the
+        // user to decide whether to remove the workspace + delete its
+        // worktree. Queue it onto the shared removal-prompt machinery
+        // (reason `Merged` / `Closed`, which differ only in copy),
+        // deduped against any already-active/queued prompt.
         if let IpcEvent::MergedPrRemovable {
             workspace_key,
             label,
+            terminal_state,
             active_terminal_count,
             has_local_work,
         } = &event
         {
             if !self.removal_already_pending(workspace_key) {
+                let reason = match terminal_state {
+                    lazybox_ipc::RemovableTerminalState::Merged => super::RemovalReason::Merged,
+                    lazybox_ipc::RemovableTerminalState::Closed => super::RemovalReason::Closed,
+                };
                 self.pending_removal_prompts
                     .push_back(super::RemovalPrompt {
                         workspace_key: workspace_key.clone(),
                         label: label.clone(),
                         title: None,
                         terminal_count: *active_terminal_count,
-                        reason: super::RemovalReason::Merged,
+                        reason,
                         has_local_work: *has_local_work,
                     });
                 self.maybe_mount_next_removal_prompt();

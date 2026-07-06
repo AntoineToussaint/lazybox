@@ -2993,12 +2993,13 @@ async fn upsert_with_context(config: &ServerConfig, ctx: &mut UpsertContext, tas
 /// "route to PR workspace" path can reuse the same write/broadcast
 /// behaviour without duplicating it.
 async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, task: Task) {
-    // 0. MERGE DETECTION: cheap pre-check (no IO) gates the store
-    //    read — only a PR observed as Merged can trigger cleanup. We
-    //    snapshot the previous state here, before `prepare_upsert`
-    //    overwrites it, so we only act on the open→merged *transition*
-    //    and not on every subsequent tick of an already-merged PR.
-    let merged_pr_to_clean = if task.is_pr() && task.state == lazybox_core::TaskState::Merged {
+    // 0. TERMINAL-STATE DETECTION: cheap pre-check (no IO) gates the
+    //    store read — only a PR observed Merged or an issue observed
+    //    Closed can trigger cleanup. We snapshot the previous state
+    //    here, before `prepare_upsert` overwrites it, so we only act on
+    //    the open→terminal *transition* and not on every subsequent tick
+    //    of an already-merged PR / already-closed issue.
+    let terminal_cleanup = if task.is_pr() && task.state == lazybox_core::TaskState::Merged {
         let prev = load_workspace(config, key);
         // A merged PR we have no workspace for is a recently-merged
         // sweep result (`is:merged` last 7d) for a PR the user never
@@ -3019,7 +3020,15 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
             );
             return;
         }
-        merged_transition_pr_number(prev.as_ref(), &task)
+        merged_transition_pr_number(prev.as_ref(), &task).map(TerminalCleanup::MergedPr)
+    } else if !task.is_pr() && task.state == lazybox_core::TaskState::Closed {
+        // An issue observed Closed. Unlike the merged-PR sweep, closed
+        // issues only reach here via the notifications-driven single
+        // fetch (`fetch_single_issue`), so a missing predecessor just
+        // means "nothing to clean" — `closed_issue_transition` declines
+        // and the row upserts normally without a cleanup prompt.
+        let prev = load_workspace(config, key);
+        closed_issue_transition(prev.as_ref(), &task).map(TerminalCleanup::ClosedIssue)
     } else {
         None
     };
@@ -3039,19 +3048,46 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
     //    can't strand the moved sessions in neither stored workspace.
     commit_merge(config, workspace, pending_merges).await;
 
-    // 3. MERGED: the PR just merged → either reap its safe-to-delete
-    //    worktrees silently (when `worktree.auto_cleanup_merged` is
-    //    on) or prompt the user to remove the workspace + worktree
-    //    (the default). Runs after the commit so it re-reads the
-    //    freshly persisted session set.
-    if let Some(pr_number) = merged_pr_to_clean {
-        handlers::on_merged_pr(config, key, pr_number).await;
+    // 3. TERMINAL: the PR merged or the issue closed → either reap its
+    //    safe-to-delete worktrees silently (when
+    //    `worktree.auto_cleanup_merged` is on) or prompt the user to
+    //    remove the workspace + worktree (the default). Runs after the
+    //    commit so it re-reads the freshly persisted session set.
+    if let Some(cleanup) = terminal_cleanup {
+        handlers::on_terminal_transition(config, key, cleanup).await;
     }
 }
 
-/// PR number parsed off a task id (`owner/repo#123` → `123`). Mirrors
-/// the `#`-split [`Workspace::worktree_slug`] uses. `None` for issues
-/// or any id whose suffix isn't a number.
+/// A workspace's primary task just reached a terminal state that makes
+/// its sessions + worktree cleanup candidates. Carries the task number
+/// so the auto-cleanup notice can name the item.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum TerminalCleanup {
+    MergedPr(u64),
+    ClosedIssue(u64),
+}
+
+impl TerminalCleanup {
+    /// Which terminal state the modal copy should name.
+    pub(super) fn removal_state(self) -> lazybox_ipc::RemovableTerminalState {
+        match self {
+            Self::MergedPr(_) => lazybox_ipc::RemovableTerminalState::Merged,
+            Self::ClosedIssue(_) => lazybox_ipc::RemovableTerminalState::Closed,
+        }
+    }
+
+    /// Human phrase for the silent auto-cleanup notification.
+    pub(super) fn describe(self) -> String {
+        match self {
+            Self::MergedPr(n) => format!("merged PR #{n}"),
+            Self::ClosedIssue(n) => format!("closed issue #{n}"),
+        }
+    }
+}
+
+/// Task number parsed off a task id (`owner/repo#123` → `123`). Mirrors
+/// the `#`-split [`Workspace::worktree_slug`] uses. `None` for any id
+/// whose suffix isn't a number.
 fn pr_number_from_task(task: &Task) -> Option<u64> {
     task.id
         .key
@@ -3077,6 +3113,27 @@ fn merged_transition_pr_number(prev: Option<&Workspace>, task: &Task) -> Option<
     }
     let prev_state = prev.and_then(|w| w.task_by_id(&task.id))?.state;
     if prev_state == lazybox_core::TaskState::Merged {
+        return None;
+    }
+    pr_number_from_task(task)
+}
+
+/// Decide whether `task` represents an issue that *just* transitioned
+/// into the closed state, returning its number when so.
+///
+/// Same one-shot contract as [`merged_transition_pr_number`]: it
+/// requires a known predecessor that was **not** already closed (a
+/// genuine open→closed flip), so once the closed state is persisted the
+/// next observation sees `prev` already closed and skips — cleanup is
+/// offered exactly once per close. A closed issue we have no prior
+/// workspace for has no sessions to reap, so firing would prompt about
+/// nothing.
+fn closed_issue_transition(prev: Option<&Workspace>, task: &Task) -> Option<u64> {
+    if task.is_pr() || task.state != lazybox_core::TaskState::Closed {
+        return None;
+    }
+    let prev_state = prev.and_then(|w| w.task_by_id(&task.id))?.state;
+    if prev_state == lazybox_core::TaskState::Closed {
         return None;
     }
     pr_number_from_task(task)
@@ -4494,6 +4551,48 @@ mod merge_detection_tests {
             TaskState::Merged,
         );
         assert_eq!(merged_transition_pr_number(None, &issue), None);
+    }
+
+    fn issue(key: &str, state: TaskState) -> Task {
+        task("github", key, "https://github.com/o/r/issues/7", state)
+    }
+
+    #[test]
+    fn fresh_issue_close_with_open_predecessor_fires() {
+        let prev = Workspace::from_task(issue("o/r#7", TaskState::Open), Utc::now());
+        let incoming = issue("o/r#7", TaskState::Closed);
+        assert_eq!(closed_issue_transition(Some(&prev), &incoming), Some(7));
+    }
+
+    #[test]
+    fn issue_close_without_predecessor_does_not_fire() {
+        // Never tracked → no session/worktree to clean; prompting would
+        // ask about nothing.
+        let incoming = issue("o/r#7", TaskState::Closed);
+        assert_eq!(closed_issue_transition(None, &incoming), None);
+    }
+
+    #[test]
+    fn already_closed_issue_predecessor_does_not_refire() {
+        let prev = Workspace::from_task(issue("o/r#7", TaskState::Closed), Utc::now());
+        let incoming = issue("o/r#7", TaskState::Closed);
+        assert_eq!(closed_issue_transition(Some(&prev), &incoming), None);
+    }
+
+    #[test]
+    fn open_issue_never_fires_close_cleanup() {
+        let prev = Workspace::from_task(issue("o/r#7", TaskState::Open), Utc::now());
+        let incoming = issue("o/r#7", TaskState::Open);
+        assert_eq!(closed_issue_transition(Some(&prev), &incoming), None);
+    }
+
+    #[test]
+    fn closed_pr_does_not_trip_issue_cleanup() {
+        // A PR (not an issue) reaching Closed must go through the PR
+        // path, never `closed_issue_transition`.
+        let prev = Workspace::from_task(pr("o/r#7", TaskState::Open), Utc::now());
+        let incoming = pr("o/r#7", TaskState::Closed);
+        assert_eq!(closed_issue_transition(Some(&prev), &incoming), None);
     }
 }
 

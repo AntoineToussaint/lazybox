@@ -786,6 +786,16 @@ pub enum Command {
     },
 }
 
+/// The terminal state a removable workspace's primary task reached,
+/// so the confirm modal can word its prompt correctly: a PR is
+/// "merged", an issue is "closed". Both dispatch the same
+/// `Command::RemoveMergedWorkspace` on "yes".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemovableTerminalState {
+    Merged,
+    Closed,
+}
+
 /// Connection → TUI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
@@ -902,14 +912,15 @@ pub enum Event {
         workspace_key: lazybox_core::WorkspaceKey,
         pr_label: String,
     },
-    /// A PR just transitioned open→merged and its workspace is a
-    /// candidate for removal. Emitted once per merge (the upsert path
-    /// only acts on the open→merged transition, so a re-poll of an
-    /// already-merged PR doesn't re-fire). The daemon has inspected
-    /// the backing worktree(s); the TUI prompts the user — reusing
-    /// the removal-confirm modal — and, on yes, replies with
+    /// A workspace's primary task just reached a terminal state (a PR
+    /// merged, or an issue closed) and its workspace is a candidate for
+    /// removal. Emitted once per transition (the upsert path only acts
+    /// on the open→terminal flip, so a re-poll of an already-merged PR
+    /// or already-closed issue doesn't re-fire). The daemon has
+    /// inspected the backing worktree(s); the TUI prompts the user —
+    /// reusing the removal-confirm modal — and, on yes, replies with
     /// `Command::RemoveMergedWorkspace`. On no it does nothing and the
-    /// merge won't re-prompt (the transition is already persisted).
+    /// transition won't re-prompt (it's already persisted).
     ///
     /// Suppressed when `worktree.auto_cleanup_merged` is enabled — that
     /// opt-in path reaps safe worktrees silently instead.
@@ -917,6 +928,9 @@ pub enum Event {
         workspace_key: lazybox_core::WorkspaceKey,
         /// Compact `owner/repo#N` form for the confirm modal copy.
         label: String,
+        /// Whether the task merged (PR) or closed (issue), so the modal
+        /// copy words its prompt correctly.
+        terminal_state: RemovableTerminalState,
         /// Live terminals that removal would kill. Quoted back so the
         /// user knows what they'd lose.
         active_terminal_count: usize,

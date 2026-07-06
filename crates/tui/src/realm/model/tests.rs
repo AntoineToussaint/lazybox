@@ -421,6 +421,7 @@ mod effects_tests {
         let ev = || IpcEvent::MergedPrRemovable {
             workspace_key: WorkspaceKey::new("github:o/r#1"),
             label: "o/r#1".into(),
+            terminal_state: lazybox_ipc::RemovableTerminalState::Merged,
             active_terminal_count: 0,
             has_local_work: false,
         };

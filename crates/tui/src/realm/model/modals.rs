@@ -116,10 +116,12 @@ fn out_of_scope_copy(prompt: &super::RemovalPrompt) -> String {
     }
 }
 
-/// Confirm copy for a merged PR. Always names the worktree deletion;
-/// appends a warning when there are live terminals or local
-/// (uncommitted/unpushed) work, since "yes" force-deletes regardless.
-fn merged_removal_copy(prompt: &super::RemovalPrompt) -> String {
+/// Confirm copy for a workspace whose task reached a terminal state —
+/// `verb` is "merged" (PR) or "closed" (issue). Always names the
+/// worktree deletion; appends a warning when there are live terminals
+/// or local (uncommitted/unpushed) work, since "yes" force-deletes
+/// regardless.
+fn terminal_removal_copy(prompt: &super::RemovalPrompt, verb: &str) -> String {
     let label = &prompt.label;
     let mut warnings: Vec<String> = Vec::new();
     if prompt.terminal_count > 0 {
@@ -129,10 +131,10 @@ fn merged_removal_copy(prompt: &super::RemovalPrompt) -> String {
         warnings.push("uncommitted or unpushed work".to_string());
     }
     if warnings.is_empty() {
-        format!("{label} was merged — remove workspace and delete its worktree?")
+        format!("{label} was {verb} — remove workspace and delete its worktree?")
     } else {
         format!(
-            "{label} was merged — remove workspace and delete its worktree? \
+            "{label} was {verb} — remove workspace and delete its worktree? \
              Warning: it has {} that will be lost.",
             warnings.join(" and "),
         )
@@ -645,7 +647,8 @@ impl<T: TerminalAdapter> Model<T> {
         };
         let copy = match prompt.reason {
             RemovalReason::OutOfScope => out_of_scope_copy(&prompt),
-            RemovalReason::Merged => merged_removal_copy(&prompt),
+            RemovalReason::Merged => terminal_removal_copy(&prompt, "merged"),
+            RemovalReason::Closed => terminal_removal_copy(&prompt, "closed"),
         };
         let modal = Confirm::new(copy).default_no();
         self.active_removal_prompt = Some((prompt.workspace_key, prompt.reason));
@@ -1162,10 +1165,21 @@ mod tests {
     /// Clean merge with no live terminals → a plain ask, no warning.
     #[test]
     fn merged_copy_clean_has_no_warning() {
-        let copy = merged_removal_copy(&merged_prompt(0, false));
+        let copy = terminal_removal_copy(&merged_prompt(0, false), "merged");
         assert_eq!(
             copy,
             "o/r#7 was merged — remove workspace and delete its worktree?"
+        );
+    }
+
+    /// The closed-issue path shares the copy builder but names the
+    /// "closed" verb so the modal reads correctly for issues.
+    #[test]
+    fn closed_copy_names_closed_verb() {
+        let copy = terminal_removal_copy(&merged_prompt(0, false), "closed");
+        assert_eq!(
+            copy,
+            "o/r#7 was closed — remove workspace and delete its worktree?"
         );
     }
 
@@ -1173,7 +1187,7 @@ mod tests {
     /// "will be lost" warning so the user knows what `yes` destroys.
     #[test]
     fn merged_copy_warns_about_terminals_and_local_work() {
-        let copy = merged_removal_copy(&merged_prompt(2, true));
+        let copy = terminal_removal_copy(&merged_prompt(2, true), "merged");
         assert!(copy.contains("2 running terminals"), "got: {copy}");
         assert!(copy.contains("uncommitted or unpushed work"), "got: {copy}");
         assert!(copy.contains("will be lost"), "got: {copy}");

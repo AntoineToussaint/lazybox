@@ -679,10 +679,10 @@ impl<T: TerminalAdapter> Model<T> {
                 {
                     let session_key: lazybox_core::SessionKey = (&workspace_key).into();
                     // Out-of-scope: drop the row + kill terminals (worktree
-                    // left on disk). Merged: also delete the worktree.
+                    // left on disk). Merged/Closed: also delete the worktree.
                     cmds.push(match reason {
                         super::RemovalReason::OutOfScope => IpcCommand::Kill { session_key },
-                        super::RemovalReason::Merged => {
+                        super::RemovalReason::Merged | super::RemovalReason::Closed => {
                             IpcCommand::RemoveMergedWorkspace { session_key }
                         }
                     });

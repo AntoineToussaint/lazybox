@@ -1324,6 +1324,10 @@ fn dispatch_event<T: TerminalAdapter>(model: &mut Model<T>, event: crossterm::ev
         crossterm::event::Event::Mouse(m) => {
             if model.modal_stack.is_empty() {
                 model.handle_mouse(m);
+            } else if model.dismiss_modal_on_outside_click(m) {
+                // A non-blocking overlay was up: the press closed it and
+                // then did its normal thing (focus a pane, select a
+                // workspace). Nothing left to forward.
             } else if let Some(realm_mouse) = crossterm_mouse_to_realm(m) {
                 // A modal owns input — route button presses to it so
                 // its buttons respond to clicks. Only presses are

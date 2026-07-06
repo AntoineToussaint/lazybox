@@ -219,6 +219,28 @@ pub enum Id {
     SnippetBrowser,
 }
 
+impl Id {
+    /// Whether a click *outside* this modal should close it (same as
+    /// Esc) and let the click fall through to its normal action.
+    ///
+    /// True for the read-only / progress overlays that shouldn't trap
+    /// the user — the worktree-provisioning checklist, sync status,
+    /// help, and the snippet picker/browser. Deliberately false for the
+    /// destructive confirms (archive, merged-workspace removal, orphan
+    /// deletes, …): a stray click must never dismiss or trigger data
+    /// loss, so those keep owning input until the user answers.
+    pub(crate) fn dismissable_by_outside_click(&self) -> bool {
+        matches!(
+            self,
+            Id::WorktreeProgress
+                | Id::SyncStatus
+                | Id::Help
+                | Id::SnippetPicker
+                | Id::SnippetBrowser
+        )
+    }
+}
+
 /// Why a workspace-removal confirm prompt is being shown. Both
 /// reasons share the `Id::RemoveOutOfScope` modal + the
 /// `pending_removal_prompts` queue but differ in copy and in which

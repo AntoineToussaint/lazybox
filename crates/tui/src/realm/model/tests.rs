@@ -4952,15 +4952,19 @@ mod spawn_spinner_projection_tests {
 
 #[cfg(test)]
 mod worktree_progress_recovery_tests {
-    //! Issue #219 — the "Setting up workspace" checklist hung forever on
-    //! "Cloning repository". A broadcast-lag recovery `Snapshot` stands
-    //! in for the events the client missed, which can include both the
-    //! per-stage `WorktreeProgress` updates AND the one-shot
-    //! `TerminalSpawned` that dismisses the modal. With all of those
-    //! dropped, the checklist never advanced past its first step and
-    //! never closed, even though the spawn had completed. The snapshot
-    //! reconciliation tears the stuck modal down once it shows the
-    //! session's terminal is live.
+    //! Issue #219 / #253 — the "Setting up workspace" checklist hung
+    //! forever on "Cloning repository". A broadcast-lag recovery
+    //! `Snapshot` stands in for the events the client missed, which can
+    //! include both the per-stage `WorktreeProgress` updates AND the
+    //! one-shot `TerminalSpawned` that dismisses the modal. With all of
+    //! those dropped, the checklist never advanced past its first step
+    //! and never closed, even though the spawn had completed.
+    //!
+    //! The snapshot reconciliation proves the spawn finished (the
+    //! session's terminal is live) and *queues* a graceful dismiss —
+    //! per #253 it no longer tears the modal down on the spot, so the
+    //! checklist still walks its remaining stages for their minimum
+    //! dwell instead of flashing a single half-step before vanishing.
     use super::super::{Id, Model};
     use chrono::Utc;
     use lazybox_core::{Workspace, WorkspaceKey};
@@ -4968,6 +4972,7 @@ mod worktree_progress_recovery_tests {
         Event as IpcEvent, TerminalId, TerminalKind, TerminalSnapshot, WorktreeStep,
         WorktreeStepStatus, channel,
     };
+    use std::time::{Duration, Instant};
     use tuirealm::ratatui::layout::Size;
 
     fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
@@ -4988,7 +4993,7 @@ mod worktree_progress_recovery_tests {
     }
 
     #[test]
-    fn lag_recovery_snapshot_dismisses_stuck_checklist() {
+    fn lag_recovery_snapshot_queues_graceful_dismiss_not_an_abrupt_teardown() {
         let mut m = build_model();
         let key = WorkspaceKey::new("github:mind-build/mind#1");
         let session_key: lazybox_core::SessionKey = (&key).into();
@@ -5013,19 +5018,72 @@ mod worktree_progress_recovery_tests {
 
         // The recovery snapshot the daemon sends in place of the missed
         // events shows the spawn finished: the session now has a live
-        // terminal.
+        // terminal. Per #253 this must NOT tear the modal down on the
+        // spot — it queues a graceful dismiss so the stages still walk.
         m.handle_daemon_event(IpcEvent::Snapshot {
             workspaces: vec![Workspace::empty(key.clone(), "main", Utc::now())],
             terminals: vec![terminal_snapshot(session_key.clone())],
             projects: vec![],
         });
         assert!(
-            !m.modal_stack.contains(&Id::WorktreeProgress),
-            "a recovery snapshot showing the live terminal must dismiss the stuck checklist",
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "checklist must stay up to walk its stages, not vanish mid-flight",
+        );
+        let state = m
+            .worktree_progress
+            .as_ref()
+            .expect("checklist state retained until the walk finishes");
+        assert!(
+            state.dismiss_queued(),
+            "the live-terminal snapshot must queue a graceful dismiss",
+        );
+    }
+
+    /// After the recovery snapshot queues the dismiss, the display walks
+    /// every remaining stage (one per min-dwell) and only then tears the
+    /// modal down — the #253 fix for "only ever shows one step".
+    #[test]
+    fn lag_recovery_snapshot_walks_stages_then_dismisses() {
+        let mut m = build_model();
+        let key = WorkspaceKey::new("github:mind-build/mind#1");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: session_key.clone(),
+            step: WorktreeStep::Clone,
+            status: WorktreeStepStatus::Started,
+        });
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![Workspace::empty(key, "main", Utc::now())],
+            terminals: vec![terminal_snapshot(session_key)],
+            projects: vec![],
+        });
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "checklist still up immediately after the snapshot",
+        );
+
+        // Drive the min-dwell walk with a monotonically advancing clock
+        // (each tick well past the 500ms dwell) instead of sleeping. The
+        // modal survives the first few steps and closes only once the
+        // whole checklist has been shown.
+        let base = Instant::now();
+        let mut dismissed_at = None;
+        for step in 1..=8u32 {
+            m.advance_worktree_progress_at(base + Duration::from_secs(u64::from(step)));
+            if !m.modal_stack.contains(&Id::WorktreeProgress) {
+                dismissed_at = Some(step);
+                break;
+            }
+        }
+        let dismissed_at = dismissed_at.expect("checklist must eventually dismiss after the walk");
+        assert!(
+            dismissed_at >= 4,
+            "must walk all four stages before dismissing, closed after only {dismissed_at}",
         );
         assert!(
             m.worktree_progress.is_none(),
-            "checklist state must be cleared once dismissed",
+            "checklist state cleared once the walk completes",
         );
     }
 
@@ -5084,5 +5142,171 @@ mod worktree_progress_recovery_tests {
             m.modal_stack.contains(&Id::WorktreeProgress),
             "a failed checklist must survive a recovery snapshot",
         );
+    }
+}
+
+#[cfg(test)]
+mod click_outside_modal_dismiss_tests {
+    //! Issue #253 — a *dismissable* modal (a read-only / progress
+    //! overlay, never a destructive confirm) must not trap the user: a
+    //! press outside it closes it exactly like Esc AND lets the click do
+    //! its normal thing, so clicking a sidebar workspace both dismisses
+    //! the worktree-provisioning checklist and selects that workspace in
+    //! one action. Destructive confirms keep owning input so a stray
+    //! click can't skip or trigger data loss.
+    use super::super::{Id, Model, PaneFocus};
+    use chrono::Utc;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
+    use lazybox_ipc::{Event as IpcEvent, WorktreeStep, WorktreeStepStatus, channel};
+    use tuirealm::ratatui::layout::{Rect, Size};
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn empty_ws(key: &str) -> Workspace {
+        Workspace::empty(WorkspaceKey::new(key), "main", Utc::now())
+    }
+
+    fn key_of(key: &str) -> SessionKey {
+        (&WorkspaceKey::new(key)).into()
+    }
+
+    fn left_down(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Screen row a click must land on to select `key` (mirrors the
+    /// sidebar's 5-line header; scroll is zero for the seeded rows).
+    fn row_of(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        sidebar_rect: Rect,
+        key: &SessionKey,
+    ) -> u16 {
+        assert!(
+            m.__test_sidebar_mut().focus_workspace_key(key),
+            "workspace {key:?} should be in the sidebar",
+        );
+        sidebar_rect.y + 5 + m.sidebar().cursor() as u16
+    }
+
+    /// The headline repro: with the provisioning checklist up, clicking a
+    /// different workspace closes it and selects that workspace at once.
+    #[test]
+    fn clicking_a_workspace_dismisses_progress_and_selects_it() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![empty_ws("github:o/r#1"), empty_ws("github:o/r#2")],
+            terminals: vec![],
+            projects: vec![],
+        });
+        let a = key_of("github:o/r#1");
+        let b = key_of("github:o/r#2");
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _, _) = m.effective_pane_rects(area);
+        let row_b = row_of(&mut m, sidebar_rect, &b);
+        // Park the selection on WS-A so the click has to move it.
+        assert!(m.__test_sidebar_mut().focus_workspace_key(&a));
+
+        // The provisioning checklist for WS-A mounts.
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: a.clone(),
+            step: WorktreeStep::Fetch,
+            status: WorktreeStepStatus::Started,
+        });
+        assert!(m.modal_stack.contains(&Id::WorktreeProgress));
+
+        m.layout.last_area = area;
+        let handled = m.dismiss_modal_on_outside_click(left_down(sidebar_rect.x + 1, row_b));
+
+        assert!(handled, "the press on a dismissable overlay was handled");
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress),
+            "the checklist closed on the outside click",
+        );
+        assert!(
+            m.worktree_progress.is_none(),
+            "checklist state cleared, same as an Esc dismiss",
+        );
+        assert_eq!(
+            m.sidebar().selected_workspace_key(),
+            Some(&b),
+            "the same click also selected the clicked workspace",
+        );
+    }
+
+    /// A destructive confirm must ignore the outside click — it keeps
+    /// owning input so a stray click can't dismiss or trigger data loss.
+    #[test]
+    fn destructive_confirm_ignores_outside_click() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![empty_ws("github:o/r#1")],
+            terminals: vec![],
+            projects: vec![],
+        });
+        m.mount_clean_worktrees_confirm();
+        assert!(m.modal_stack.contains(&Id::CleanWorktreesConfirm));
+
+        m.layout.last_area = Rect::new(0, 0, 120, 40);
+        let handled = m.dismiss_modal_on_outside_click(left_down(1, 6));
+
+        assert!(!handled, "a blocking confirm does not click-dismiss");
+        assert!(
+            m.modal_stack.contains(&Id::CleanWorktreesConfirm),
+            "the confirm stays up, still owning input",
+        );
+    }
+
+    /// Scroll over a dismissable overlay is NOT a dismiss gesture — only
+    /// presses are, so the sync-status window still scrolls on the wheel.
+    #[test]
+    fn wheel_over_dismissable_overlay_is_not_a_dismiss() {
+        let mut m = build_model();
+        m.mount_sync_status();
+        assert!(m.modal_stack.contains(&Id::SyncStatus));
+
+        m.layout.last_area = Rect::new(0, 0, 120, 40);
+        let wheel = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 60,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(
+            !m.dismiss_modal_on_outside_click(wheel),
+            "a scroll must fall through to the modal, not dismiss it",
+        );
+        assert!(m.modal_stack.contains(&Id::SyncStatus));
+    }
+
+    /// Focus doesn't matter to the classification — help is dismissable
+    /// regardless of which pane the click lands in.
+    #[test]
+    fn help_overlay_dismisses_on_outside_click() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![empty_ws("github:o/r#1")],
+            terminals: vec![],
+            projects: vec![],
+        });
+        m.mount_help();
+        assert!(m.modal_stack.contains(&Id::Help));
+
+        m.layout.last_area = Rect::new(0, 0, 120, 40);
+        assert!(m.dismiss_modal_on_outside_click(left_down(1, 6)));
+        assert!(
+            !m.modal_stack.contains(&Id::Help),
+            "help closes on an outside press",
+        );
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
     }
 }

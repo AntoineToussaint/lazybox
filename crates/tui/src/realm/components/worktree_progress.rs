@@ -160,6 +160,13 @@ impl WorktreeProgressState {
         self.error.is_some()
     }
 
+    /// A completion signal (`TerminalSpawned` or a lag-recovery
+    /// `Snapshot`) has queued a dismiss; the modal stays up until the
+    /// display has walked every remaining step for its dwell.
+    pub fn dismiss_queued(&self) -> bool {
+        self.dismiss_queued
+    }
+
     /// Fold one daemon progress transition into the checklist's
     /// `target`. The display catches up later via [`Self::tick`]. Each
     /// step's `Started` advances `target` to that step's row, so the

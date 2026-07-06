@@ -1064,10 +1064,17 @@ impl<T: TerminalAdapter> Model<T> {
     /// Tears the modal down once a queued dismiss has been fully shown.
     /// Driven by the per-tick `Msg::WorktreeProgressTick`.
     pub(super) fn advance_worktree_progress(&mut self) {
+        self.advance_worktree_progress_at(std::time::Instant::now());
+    }
+
+    /// [`Self::advance_worktree_progress`] with an injectable clock so
+    /// tests can drive the min-dwell walk deterministically instead of
+    /// sleeping. Production always passes `Instant::now()`.
+    pub(super) fn advance_worktree_progress_at(&mut self, now: std::time::Instant) {
         use crate::realm::components::worktree_progress::WorktreeProgress;
         let (changed, dismiss) = match self.worktree_progress.as_mut() {
             Some(state) => {
-                let changed = state.tick(std::time::Instant::now());
+                let changed = state.tick(now);
                 (changed, state.ready_to_dismiss())
             }
             None => return,

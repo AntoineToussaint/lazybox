@@ -20,16 +20,18 @@
 //!   the handler resolves idx → key with a single index.
 //! - `Msg::ModalDismissed` — Esc or Ctrl-C.
 //!
-//! Open-with-filter UX: the model arms a one-keystroke latch on
-//! `]` inside the terminal pane (sibling to the existing `]]`
-//! escape latch). When the next key is a printable char, the
-//! model mounts this picker with `initial_filter = that char` so
-//! `]rev` flows as `]` → mount → filter=`r` → filter=`re` →
-//! filter=`rev`. If the filter equals a snippet KEY exactly and
-//! that key is the only snippet whose key starts with the filter,
-//! the picker auto-submits — the `]rev` fast path from the issue.
-//! Filtering the *display* also matches description/category text,
-//! but that broader set never gates the exact-key auto-submit.
+//! Entry + fast path (#252): the terminal `]]` leader opens this
+//! picker on `]]s`, mounted with an empty filter. Typing extends the
+//! filter; if it equals a snippet KEY exactly AND that key is the only
+//! snippet whose key starts with the filter, the picker auto-submits —
+//! so `]]srev` sends `rev` with no `Enter`. Filtering the *display*
+//! also matches description/category text, but that broader set never
+//! gates the exact-key auto-submit.
+//!
+//! Recent group (#252): [`SnippetPicker::with_recent`] seeds a
+//! most-recently-used key list; on an empty filter those snippets show
+//! in a "Recent" group at the top (cursor on the newest), so repeating
+//! one is `]]s` + `Enter`. Any filter text steps the group aside.
 
 use crate::components::comment_render::wrap_one;
 use crate::realm::Msg;

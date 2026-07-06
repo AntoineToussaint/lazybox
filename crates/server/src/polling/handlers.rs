@@ -866,8 +866,9 @@ pub(crate) async fn delete_orphaned_worktree_with(
 }
 
 /// React to a workspace's primary task reaching a terminal state — a
-/// PR merging or an issue closing. Called once per transition from the
-/// upsert path — see [`super::merged_transition_pr_number`] /
+/// PR merging or an issue closing. Called once per merge/close
+/// transition from the upsert path — see
+/// [`super::merged_transition_pr_number`] /
 /// [`super::closed_issue_transition`].
 ///
 /// Two paths, chosen by `worktree.auto_cleanup_merged` (loaded fresh

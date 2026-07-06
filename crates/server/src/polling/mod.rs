@@ -3027,8 +3027,19 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
         // fetch (`fetch_single_issue`), so a missing predecessor just
         // means "nothing to clean" — `closed_issue_transition` declines
         // and the row upserts normally without a cleanup prompt.
-        let prev = load_workspace(config, key);
-        closed_issue_transition(prev.as_ref(), &task).map(TerminalCleanup::ClosedIssue)
+        //
+        // But when a PR claims this issue ("Closes #N"), that PR's own
+        // merge prompt owns the cleanup after the issue row collapses
+        // into it. Firing here too would race the collapse and surface
+        // a second, stale prompt for the soon-to-be-absorbed issue row
+        // (the two prompts key on different workspaces, so the TUI's
+        // per-key dedupe can't merge them). Defer to the PR path.
+        if pr_workspace_claiming_issue(config, &task.id).is_some() {
+            None
+        } else {
+            let prev = load_workspace(config, key);
+            closed_issue_transition(prev.as_ref(), &task).map(TerminalCleanup::ClosedIssue)
+        }
     } else {
         None
     };
@@ -4791,6 +4802,69 @@ mod rescope_collapse_tests {
         assert!(
             other_after.sessions.is_empty(),
             "the session must not be collapsed onto an unrelated PR"
+        );
+    }
+
+    /// Regression for #250: when an issue a PR already claims
+    /// ("Closes #N") is observed Closed, the daemon must NOT emit its
+    /// own cleanup prompt. The PR's merge prompt owns cleanup after the
+    /// collapse; firing here too would surface a second, stale prompt
+    /// for the soon-to-be-absorbed issue row — and the two prompts key
+    /// on different workspaces, so the TUI's per-key dedupe can't merge
+    /// them.
+    #[tokio::test]
+    async fn closed_issue_claimed_by_pr_does_not_emit_removal_prompt() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        // Standalone issue workspace with a session; Open so the
+        // incoming Closed is a genuine transition.
+        let issue_open = gh_task(
+            "o/r#50",
+            "https://github.com/o/r/issues/50",
+            TaskState::Open,
+            vec![],
+        );
+        let mut issue_ws = Workspace::from_task(issue_open.clone(), Utc::now());
+        let session = WorkspaceSession::new(
+            issue_ws.key.clone(),
+            SessionKind::Shell,
+            std::path::PathBuf::from("/nonexistent/worktree"),
+            Utc::now(),
+        );
+        issue_ws.add_session(session);
+        let issue_key = issue_ws.key.clone();
+        seed(&store, &issue_ws);
+
+        // A PR claims the issue via `closes_issues`.
+        let pr_task = gh_task(
+            "o/r#51",
+            "https://github.com/o/r/pull/51",
+            TaskState::Open,
+            vec![issue_open.id.clone()],
+        );
+        seed(&store, &Workspace::from_task(pr_task, Utc::now()));
+
+        let mut rx = config.bus.subscribe();
+
+        // The issue is now observed Closed on its own workspace key.
+        let issue_closed = gh_task(
+            "o/r#50",
+            "https://github.com/o/r/issues/50",
+            TaskState::Closed,
+            vec![],
+        );
+        upsert_into_workspace_key(&config, &issue_key, issue_closed).await;
+
+        let mut saw_removable = false;
+        while let Ok(evt) = rx.try_recv() {
+            if matches!(evt, Event::MergedPrRemovable { .. }) {
+                saw_removable = true;
+            }
+        }
+        assert!(
+            !saw_removable,
+            "a PR-claimed closed issue must defer cleanup to the PR's merge prompt"
         );
     }
 

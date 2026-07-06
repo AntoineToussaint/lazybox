@@ -40,9 +40,16 @@ cargo run -p lazybox-tui  # rebuild + restart picks up the new build
 ```
 
 The running build version is always visible in the sidebar header
-(`lazybox --version` prints it too). Released binaries built outside a
-git checkout have no source ref to compare against, so the guard is a
-no-op there — comparing against the latest release tag is future work.
+(`lazybox --version` prints it too). Dev/source builds — anything not
+compiled by cargo-dist's `--profile dist` (`LAZYBOX_RELEASE_BUILD`,
+baked in `crates/ipc/build.rs`) — are tagged `vX.Y.Z (dev)` and never
+raise the nudge: a source checkout is normally *ahead* of the latest
+release and is updated with `git pull && cargo build`, not the
+installer swap "update & restart" implies (issue #251). The nudge is
+therefore gated on installer-managed release provenance; wiring the
+release-tag comparison that would let a stale *release* binary count
+how far it trails the channel is still future work, so in practice the
+nudge is currently dormant.
 
 ## Architecture
 

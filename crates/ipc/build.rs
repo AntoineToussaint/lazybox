@@ -35,6 +35,30 @@ fn main() {
     let source_dir = git(&["rev-parse", "--show-toplevel"]).unwrap_or_default();
     println!("cargo:rustc-env=LAZYBOX_BUILD_SOURCE_DIR={source_dir}");
 
+    // Installer-provenance marker. cargo-dist compiles release artifacts
+    // with `--profile dist` (see `[profile.dist]` in the workspace
+    // Cargo.toml); every other invocation — `cargo run`, `cargo build`,
+    // `cargo build --release`, `cargo test` — is a dev/source build. The
+    // profile name is the fourth path component up from OUT_DIR
+    // (`<target>/<profile>/build/<pkg>/out`), which is the only place
+    // cargo surfaces a *custom* profile name to a build script:
+    // `PROFILE` collapses every release-inheriting profile to `release`.
+    // Only a build we can confidently attribute to the installer flow is
+    // marked a release; anything else falls back to dev.
+    let is_release_build = std::env::var_os("OUT_DIR")
+        .map(std::path::PathBuf::from)
+        .and_then(|out| {
+            out.ancestors()
+                .nth(3)
+                .and_then(|p| p.file_name())
+                .map(|name| name == "dist")
+        })
+        .unwrap_or(false);
+    println!(
+        "cargo:rustc-env=LAZYBOX_RELEASE_BUILD={}",
+        u8::from(is_release_build)
+    );
+
     // Re-run when HEAD moves (new commit / checkout) so the baked SHA
     // tracks the source. `--git-path` resolves correctly inside git
     // worktrees, where `.git` is a file pointing elsewhere.

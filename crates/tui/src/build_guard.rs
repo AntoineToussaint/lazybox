@@ -8,27 +8,47 @@
 //! build against "latest", so a 89-commits-behind binary runs with no
 //! warning at all.
 //!
-//! This module closes that hole for the dev / dogfood path: the binary
-//! remembers the git checkout it was built from ([`BUILD_SOURCE_DIR`])
-//! and its commit ([`BUILD_GIT_SHA`]), and at startup counts how many
-//! commits that build trails `origin/main`. A non-zero count raises the
-//! persistent "outdated build" banner.
+//! The binary remembers the git checkout it was built from
+//! ([`BUILD_SOURCE_DIR`]) and its commit ([`BUILD_GIT_SHA`]), and at
+//! startup counts how many commits that build trails `origin/main`. A
+//! non-zero count raises the persistent "outdated build" banner.
 //!
 //! The count is read from the existing `origin/main` remote-tracking
 //! ref — no network, so startup pays nothing. That ref can itself lag
 //! the true remote (a `git fetch` only updates `FETCH_HEAD`), which can
-//! only *under*-report staleness; it never invents a warning. Released
-//! binaries built outside a checkout have an empty `BUILD_SOURCE_DIR`
-//! and the guard is a no-op — the release-tag comparison is left as
-//! future work.
+//! only *under*-report staleness; it never invents a warning.
+//!
+//! The nudge is gated on build provenance ([`is_release_build`], issue
+//! #251): its "update & restart" fix only fits an installer-managed
+//! release binary, so a dev/source build — normally *ahead* of the
+//! latest release, and updated with `git pull && cargo build` — is
+//! tagged `(dev)` in the header and never nudged. That leaves the nudge
+//! dormant until a release build can compare itself against the latest
+//! release tag (future work); a released binary built outside a checkout
+//! has no source ref to count against regardless.
 
-use lazybox_ipc::{BUILD_GIT_SHA, BUILD_SOURCE_DIR};
+use lazybox_ipc::{BUILD_GIT_SHA, BUILD_SOURCE_DIR, IS_RELEASE_BUILD};
 use std::process::Command;
+
+/// Whether the running binary is an installer-managed release build
+/// (cargo-dist) rather than a dev/source build. The outdated-build nudge
+/// is gated on this: its "update & restart" fix only applies to a binary
+/// an installer can swap in place, and a source checkout is normally
+/// *ahead* of the latest release, so nagging it reads as a false alarm.
+/// A dev build is tagged `(dev)` in the header instead (issue #251).
+pub fn is_release_build() -> bool {
+    IS_RELEASE_BUILD
+}
 
 /// How many commits the running build trails `origin/main`, when that
 /// can be determined locally and is non-zero. `None` means "current,
-/// or can't tell" — both resolve to no banner.
+/// or can't tell" — both resolve to no banner. Suppressed entirely on
+/// dev/source builds: only an installer-managed release carries the
+/// "update & restart" affordance the banner implies (issue #251).
 pub fn commits_behind() -> Option<u32> {
+    if !is_release_build() {
+        return None;
+    }
     commits_behind_in(BUILD_SOURCE_DIR, BUILD_GIT_SHA)
 }
 
@@ -90,6 +110,17 @@ mod tests {
         assert_eq!(commits_behind_in("", "abc123"), None);
         assert_eq!(commits_behind_in("/some/repo", ""), None);
         assert_eq!(commits_behind_in("/some/repo", "unknown"), None);
+    }
+
+    #[test]
+    fn dev_builds_never_nudge() {
+        // The test binary is itself a dev/source build, so the guard is
+        // gated off no matter how far the checkout trails main — a source
+        // build is updated with `git pull && cargo build`, not the
+        // installer swap the banner implies (issue #251). `commits_behind`
+        // must short-circuit before shelling out to git.
+        assert!(!is_release_build());
+        assert_eq!(commits_behind(), None);
     }
 
     #[test]

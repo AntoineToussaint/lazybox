@@ -223,7 +223,9 @@ the Nth agent workspace, and `` ]]` `` opens the fuzzy workspace
 switcher. The snippet picker (see
 [`docs/snippets.md`](docs/snippets.md)) is a category-grouped list with
 a live body-preview pane, filtering on key+description+category, that
-auto-submits when the typed key uniquely matches (`]]srev`). The leader
+auto-submits when the typed key uniquely matches (`]]srev`); snippets
+sent this session float into a "Recent" group at the top (session MRU,
+`recent_snippets`) so a repeat is `]]s`+Enter. The leader
 is non-timed, so after `]]` it waits for the command key rather than
 leaving on an idle timer — browsing snippets never races an exit; `Esc`
 or any unbound key cancels back to the terminal. A lone `]` followed by

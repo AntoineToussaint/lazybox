@@ -90,25 +90,31 @@ fn category_rank(cat: &str) -> u8 {
     }
 }
 
-/// Label shown for a group header — empty category renders as "Other".
+/// Label shown for a group header — empty category renders as "Other",
+/// and the whitespace-sentinel recent group as "Recent".
 fn category_label(cat: &str) -> &str {
-    if cat.is_empty() { "Other" } else { cat }
+    match cat {
+        "" => "Other",
+        RECENT_CAT => "Recent",
+        other => other,
+    }
 }
 
 /// Deterministic per-category accent, so the same category always
 /// draws in the same color across renders (and custom categories get
-/// a stable color too).
+/// a stable color too). Every palette entry is a theme color designed
+/// to be legible as *foreground* (accent / success / warn / error are
+/// all used as text elsewhere) — `theme.hover`, a subtle highlight
+/// tint, is deliberately excluded so no category label lands
+/// low-contrast on the picker surface in either theme.
 fn category_color(theme: &Theme, cat: &str) -> Color {
     if cat.is_empty() {
         return theme.text_dim;
     }
-    let palette = [
-        theme.accent,
-        theme.success,
-        theme.warn,
-        theme.hover,
-        theme.error,
-    ];
+    if cat == RECENT_CAT {
+        return theme.accent;
+    }
+    let palette = [theme.accent, theme.success, theme.warn, theme.error];
     let h = cat.bytes().fold(0usize, |a, b| a.wrapping_add(b as usize));
     palette[h % palette.len()]
 }
@@ -138,6 +144,12 @@ enum LayoutItem {
     Row { pos: usize, row_idx: usize },
 }
 
+/// Header label for the most-recently-used group shown at the top of
+/// the picker on an empty filter. A leading space keeps it from
+/// colliding with a real user category of the same name in
+/// `category_rank` (categories never start with whitespace).
+const RECENT_CAT: &str = " Recent";
+
 pub struct SnippetPicker {
     /// Caller-supplied rows. Must arrive sorted by key (we
     /// `debug_assert!` it in `new` so a mis-sorted test input
@@ -152,6 +164,16 @@ pub struct SnippetPicker {
     /// Indices into `rows` that match the current filter, grouped by
     /// category in display order. Recomputed on every keystroke.
     visible_indices: Vec<usize>,
+    /// Row indices of recently-used snippets, most-recent first
+    /// (resolved from the caller's MRU key list in `with_recent`).
+    /// Shown as a "Recent" group at the top when the filter is empty,
+    /// so a repeated snippet is one `]]s` + `Enter` away (#252).
+    recent_rows: Vec<usize>,
+    /// How many leading `visible_indices` belong to the "Recent" group
+    /// this refilter — non-zero only on an empty filter with recents.
+    /// Lets `layout` emit the single "Recent" header without re-deriving
+    /// it from per-row categories (recent rows keep their real one).
+    recent_count: usize,
     /// Topmost visible list line (headers + rows), kept in step with
     /// the cursor in `view`.
     list_scroll: usize,
@@ -168,10 +190,27 @@ impl SnippetPicker {
             filter: initial_filter,
             cursor: None,
             visible_indices: Vec::new(),
+            recent_rows: Vec::new(),
+            recent_count: 0,
             list_scroll: 0,
         };
         picker.refilter();
         picker
+    }
+
+    /// Seed the most-recently-used group from a caller's MRU key list
+    /// (most-recent first). Keys not present in `rows` are dropped;
+    /// duplicates keep their first (most-recent) position. Builder-style
+    /// so the many 2-arg test constructions stay untouched (#252).
+    pub fn with_recent(mut self, recent: Vec<String>) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        self.recent_rows = recent
+            .iter()
+            .filter(|k| seen.insert((*k).clone()))
+            .filter_map(|k| self.rows.iter().position(|r| &r.key == k))
+            .collect();
+        self.refilter();
+        self
     }
 
     /// Recompute `visible_indices` from `filter`, grouped by category,
@@ -206,7 +245,17 @@ impl SnippetPicker {
                 .cmp(&category_rank(cb))
                 .then_with(|| ca.cmp(cb))
         });
-        self.visible_indices = idxs;
+        // On an empty filter, float the recently-used snippets into a
+        // "Recent" group at the very top (they also remain in their real
+        // category below — the group is a shortcut, not a move). A
+        // non-empty filter is a deliberate search, so recents step aside.
+        if q.is_empty() && !self.recent_rows.is_empty() {
+            self.recent_count = self.recent_rows.len();
+            self.visible_indices = self.recent_rows.iter().copied().chain(idxs).collect();
+        } else {
+            self.recent_count = 0;
+            self.visible_indices = idxs;
+        }
         self.cursor = (!self.visible_indices.is_empty()).then_some(0);
         self.list_scroll = 0;
     }
@@ -240,6 +289,23 @@ impl SnippetPicker {
     fn layout(&self) -> Vec<LayoutItem> {
         let mut out: Vec<LayoutItem> = Vec::new();
         let mut i = 0;
+        // The leading `recent_count` rows are the "Recent" group — one
+        // explicit header, since those rows keep their real category and
+        // the contiguous-category scan below would otherwise mis-split
+        // them.
+        if self.recent_count > 0 {
+            out.push(LayoutItem::Header {
+                cat: RECENT_CAT.to_string(),
+                count: self.recent_count,
+            });
+            while i < self.recent_count {
+                out.push(LayoutItem::Row {
+                    pos: i,
+                    row_idx: self.visible_indices[i],
+                });
+                i += 1;
+            }
+        }
         while i < self.visible_indices.len() {
             let cat = self.rows[self.visible_indices[i]].category.clone();
             let mut j = i;
@@ -958,5 +1024,94 @@ mod tests {
             "list scrolled: {}",
             picker.list_scroll
         );
+    }
+
+    // ── Recent group (#252) ──────────────────────────────────────────
+
+    /// A recently-used snippet floats into a "Recent" group at the top,
+    /// with the cursor on it — so reopening and pressing Enter re-runs
+    /// it. It stays in its real category too (a shortcut, not a move).
+    #[test]
+    fn recent_group_floats_to_top_with_cursor() {
+        let picker = SnippetPicker::new(make_rows(), String::new()).with_recent(vec!["pr".into()]);
+        assert_eq!(picker.recent_count, 1);
+        assert_eq!(picker.cursor, Some(0));
+        assert_eq!(picker.rows[picker.visible_indices[0]].key, "pr");
+        let pr_seen = picker
+            .visible_indices
+            .iter()
+            .filter(|&&i| picker.rows[i].key == "pr")
+            .count();
+        assert_eq!(
+            pr_seen, 2,
+            "recent is a shortcut — pr also under its category"
+        );
+    }
+
+    /// Enter on a freshly-opened picker submits the most-recent snippet.
+    #[test]
+    fn enter_on_fresh_open_submits_most_recent() {
+        let mut picker =
+            SnippetPicker::new(make_rows(), String::new()).with_recent(vec!["rev".into()]);
+        match picker.on_key(&key(Key::Enter)) {
+            Some(Msg::ChoicePicked(v)) => assert_eq!(picker.rows[v[0]].key, "rev"),
+            other => panic!("expected most-recent submit, got {other:?}"),
+        }
+    }
+
+    /// A search steps the Recent group aside — typing means "find", not
+    /// "repeat" — so `pr` stops being duplicated at the top.
+    #[test]
+    fn filtering_hides_the_recent_group() {
+        let mut picker =
+            SnippetPicker::new(make_rows(), String::new()).with_recent(vec!["pr".into()]);
+        assert_eq!(picker.recent_count, 1);
+        // `pr` shows twice on an empty filter: once in Recent, once in
+        // its category.
+        assert_eq!(
+            picker
+                .visible_indices
+                .iter()
+                .filter(|&&i| picker.rows[i].key == "pr")
+                .count(),
+            2,
+        );
+        // Filter to `pr` by key: the recent group is gone, so `pr`
+        // appears exactly once.
+        let _ = picker.on_key(&ke('p'));
+        let _ = picker.on_key(&ke('r'));
+        assert_eq!(picker.recent_count, 0, "a filter drops the recent group");
+        assert_eq!(
+            picker
+                .visible_indices
+                .iter()
+                .filter(|&&i| picker.rows[i].key == "pr")
+                .count(),
+            1,
+            "no recent duplicate while filtering",
+        );
+    }
+
+    /// Recent keys not present in the library are dropped; MRU order is
+    /// preserved for the ones that survive.
+    #[test]
+    fn stale_recent_key_ignored_order_preserved() {
+        let picker = SnippetPicker::new(make_rows(), String::new()).with_recent(vec![
+            "ghost".into(),
+            "rev".into(),
+            "pr".into(),
+        ]);
+        assert_eq!(picker.recent_count, 2);
+        assert_eq!(picker.rows[picker.visible_indices[0]].key, "rev");
+        assert_eq!(picker.rows[picker.visible_indices[1]].key, "pr");
+    }
+
+    /// The rendered modal labels the group "Recent" when recents exist.
+    #[test]
+    fn render_shows_recent_header() {
+        let mut picker =
+            SnippetPicker::new(make_rows(), String::new()).with_recent(vec!["rev".into()]);
+        let out = render(&mut picker, 92, 20);
+        assert!(out.contains("Recent"), "recent header: {out}");
     }
 }

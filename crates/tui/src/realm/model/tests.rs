@@ -1017,6 +1017,49 @@ snippets:
         );
     }
 
+    /// Sending a snippet records it in the session MRU so the picker's
+    /// "Recent" group can float it to the top next time (#252). A shell
+    /// terminal keeps the setup simple.
+    #[test]
+    fn sending_a_snippet_records_it_in_recent() {
+        let mut m = model_with_active_terminal_and_snippet(
+            "recent",
+            "\nsnippets:\n  ls:\n    description: List\n    body: ls -la\n",
+            "ls",
+            lazybox_ipc::TerminalKind::Shell,
+        );
+        assert!(m.recent_snippets.is_empty(), "nothing sent yet");
+        let _ = m.handle_choice_picked(vec![0]);
+        assert_eq!(
+            m.recent_snippets,
+            vec!["ls".to_string()],
+            "MRU records the send"
+        );
+    }
+
+    /// The session MRU is most-recent-first, de-duplicated, and capped.
+    #[test]
+    fn recent_snippets_mru_dedups_and_caps() {
+        let mut m = build_model();
+        for k in ["a", "b", "c"] {
+            m.record_recent_snippet(k.to_string());
+        }
+        assert_eq!(m.recent_snippets, vec!["c", "b", "a"], "most-recent first");
+        // Re-using an entry moves it to the front without duplicating.
+        m.record_recent_snippet("a".to_string());
+        assert_eq!(m.recent_snippets, vec!["a", "c", "b"]);
+        // The list is capped — oldest entries fall off the end.
+        for k in ["d", "e", "f", "g"] {
+            m.record_recent_snippet(k.to_string());
+        }
+        assert_eq!(m.recent_snippets.len(), 5, "capped at RECENT_SNIPPETS_MAX");
+        assert_eq!(m.recent_snippets[0], "g", "newest at the front");
+        assert!(
+            !m.recent_snippets.contains(&"b".to_string()),
+            "oldest dropped"
+        );
+    }
+
     /// apply_snippets seeds the model collection. Sanity check
     /// that the lookup path resolves.
     #[test]

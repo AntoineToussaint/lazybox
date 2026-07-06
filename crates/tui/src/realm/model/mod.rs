@@ -721,6 +721,12 @@ pub struct Model<T: TerminalAdapter> {
     /// mount/unmount. Storing keys (not full rows) avoids cloning
     /// the snippet body twice on every picker mount.
     pub(crate) snippet_choices: Vec<String>,
+    /// Snippet keys sent this session, most-recent first (capped at
+    /// `RECENT_SNIPPETS_MAX`). Passed to each picker as its "Recent"
+    /// group so a repeated snippet is one `]]s` + `Enter` away (#252).
+    /// Session-scoped — deliberately not persisted; it tracks the
+    /// current work session's rhythm, not a durable preference.
+    pub(crate) recent_snippets: Vec<String>,
     /// Session keys backing the active `JumpPicker`, in the same order
     /// as its rows — `Msg::ChoicePicked(idx)` resolves to a key here.
     /// Cleared on mount/unmount.
@@ -835,6 +841,11 @@ use crate::realm::status_ctx::StatusCtx;
 /// delivered key is always reflected on screen even when it produces
 /// no `Msg`. See `Model::forward_modal_event`.
 const MODAL_REDRAW_WINDOW: Duration = Duration::from_millis(120);
+
+/// How many recently-used snippets the picker's "Recent" group holds
+/// (#252). Small enough to stay a shortcut list, not a second library —
+/// the group is a fast lane for the handful of snippets in active use.
+const RECENT_SNIPPETS_MAX: usize = 5;
 
 /// How long the footer must sit idle (no modal, no notice) after
 /// startup before a feature tip (#115) is allowed to surface. Long
@@ -958,6 +969,7 @@ impl<T: TerminalAdapter> Model<T> {
             pending_focus_terminal: None,
             snippets: lazybox_config::Snippets::default(),
             snippet_choices: Vec::new(),
+            recent_snippets: Vec::new(),
             jump_choices: Vec::new(),
             theme_choices: Vec::new(),
             theme_picker_prev: None,
@@ -1276,8 +1288,18 @@ impl<T: TerminalAdapter> Model<T> {
             keys.push(k.to_string());
         }
         self.snippet_choices = keys;
-        let picker = SnippetPicker::new(rows, initial_filter);
+        let picker =
+            SnippetPicker::new(rows, initial_filter).with_recent(self.recent_snippets.clone());
         self.mount_modal(Id::SnippetPicker, picker);
+    }
+
+    /// Record a snippet key as just-used: move it to the front of the
+    /// session MRU list (`recent_snippets`), de-duplicating and capping
+    /// the list. Drives the picker's "Recent" group (#252).
+    pub(crate) fn record_recent_snippet(&mut self, key: String) {
+        self.recent_snippets.retain(|k| k != &key);
+        self.recent_snippets.insert(0, key);
+        self.recent_snippets.truncate(RECENT_SNIPPETS_MAX);
     }
 
     /// Mount the read-only snippets browser (`]`, or the Settings

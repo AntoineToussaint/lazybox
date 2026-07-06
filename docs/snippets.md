@@ -97,8 +97,15 @@ lists it). The commands:
   cancels without sending.
 - **`]]srev`** — the fast path: when what you type in the picker exactly
   equals a snippet key (here `rev`) and it's the only snippet whose key
-  starts with that text, the body is sent and submitted immediately, no
-  `Enter` needed.
+  starts with that text, the body is **sent and submitted immediately,
+  no `Enter`** — and no second look. If you author a snippet whose body
+  drives something irreversible, keep that in mind: the exact-key path
+  skips the preview dwell (it only fires on a unique, unambiguous key).
+- **Recent first.** Snippets you've sent this session float into a
+  **Recent** group at the top of the picker, most-recent first, with the
+  cursor on the last one — so repeating a snippet is `]]s` then `Enter`.
+  Start typing and the Recent group steps aside (a filter means "find",
+  not "repeat"). The list is session-scoped.
 - **`]]q`** — exits the terminal pane back to the sidebar. **`]]f`**
   toggles focus mode, **`]]<digit>`** jumps to the Nth agent workspace,
   and **`` ]]` ``** opens the fuzzy workspace switcher.
@@ -108,7 +115,9 @@ lists it). The commands:
   cancels back to the terminal.
 - **A lone `]`** — a single `]` followed by any non-`]` key is sent to
   the agent verbatim, so `]` is typeable in code, arrays, and
-  markdown. Only the doubled `]]` is intercepted.
+  markdown. Only the doubled `]]` is intercepted. To type a literal
+  `]]` into an agent (nested arrays, some markdown), remap the prefix
+  with `ui.terminal_escape_char` to a character you don't type, e.g. `}`.
 
 The picker is a small overlay; the terminal stays focused underneath.
 Rows are **grouped under category headers** (Review, Git & PR,

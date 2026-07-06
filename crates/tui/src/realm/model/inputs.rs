@@ -234,6 +234,11 @@ impl<T: TerminalAdapter> Model<T> {
                 let bytes = encode_snippet_for_pty(&snippet.body);
                 cmds.push(IpcCommand::Write { terminal_id, bytes });
             }
+            // Only reached once the snippet has actually been dispatched
+            // (agent inject or shell write) — so the MRU tracks sent
+            // snippets, not abandoned ones. Ends the `snippet` borrow of
+            // `self.snippets` above (NLL) before this `&mut self` call.
+            self.record_recent_snippet(key.clone());
             self.flash_info(format!("sent snippet ]{key}"));
             return cmds;
         }

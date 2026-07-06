@@ -2391,30 +2391,36 @@ impl<T: TerminalAdapter> Model<T> {
         } else {
             Vec::new()
         };
-        // Command menu for the `]]` leader popup (#252): the agent-jump
-        // roster (`1..9` → agent workspace name, sidebar order) on top,
-        // then the fixed commands `` ` `` jump, `s` snippets, `f` focus,
-        // `q` exit. A small mnemonic menu rather than the whole snippet
-        // library — snippets live one level down, behind `]]s`. Built
-        // only while the leader is armed so the steady-state render pays
-        // nothing.
+        // Command menu for the `]]` leader popup (#252): the fixed
+        // commands (`s` snippets, `f` focus, `q` exit, `` ` `` jump)
+        // FIRST so they're always visible, then the agent-jump roster
+        // (`1..9` → agent workspace name, sidebar order). Ordering
+        // matters — the popup caps its rows (`LEADER_MAX_ROWS`) and
+        // truncates the tail into "+N more", so a user with many agent
+        // workspaces must still see the exit / snippet commands rather
+        // than have them pushed off the bottom. A small mnemonic menu
+        // rather than the whole snippet library — snippets live one
+        // level down, behind `]]s`. Built only while the leader is armed
+        // so the steady-state render pays nothing.
         let leader_menu_rows: Vec<(String, String)> = if self.terminal_leader_armed {
-            let mut rows: Vec<(String, String)> = self
-                .sidebar
-                .agent_workspace_keys()
-                .into_iter()
-                .take(9)
-                .enumerate()
-                .filter_map(|(i, k)| {
-                    self.sidebar
-                        .workspace_by_key(&k)
-                        .map(|w| ((i + 1).to_string(), w.name.clone()))
-                })
-                .collect();
-            rows.push(("`".to_string(), "jump to workspace".to_string()));
-            rows.push(("s".to_string(), "snippets".to_string()));
-            rows.push(("f".to_string(), "focus mode".to_string()));
-            rows.push(("q".to_string(), "exit to sidebar".to_string()));
+            let mut rows: Vec<(String, String)> = vec![
+                ("s".to_string(), "snippets".to_string()),
+                ("f".to_string(), "focus mode".to_string()),
+                ("q".to_string(), "exit to sidebar".to_string()),
+                ("`".to_string(), "jump to workspace".to_string()),
+            ];
+            rows.extend(
+                self.sidebar
+                    .agent_workspace_keys()
+                    .into_iter()
+                    .take(9)
+                    .enumerate()
+                    .filter_map(|(i, k)| {
+                        self.sidebar
+                            .workspace_by_key(&k)
+                            .map(|w| ((i + 1).to_string(), w.name.clone()))
+                    }),
+            );
             rows
         } else {
             Vec::new()

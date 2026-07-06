@@ -310,4 +310,55 @@ mod tests {
         let out = render_to_string("x x");
         assert!(out.contains("x again to quit"));
     }
+
+    fn render_leader(rows: &[(String, String)]) -> String {
+        let (w, h) = (80u16, 24u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| render_terminal_leader(f, Rect::new(0, 0, w, h), ']', rows))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The leader popup lists the command menu and an Esc hint.
+    #[test]
+    fn terminal_leader_shows_command_menu() {
+        let rows = vec![
+            ("s".to_string(), "snippets".to_string()),
+            ("f".to_string(), "focus mode".to_string()),
+            ("q".to_string(), "exit to sidebar".to_string()),
+        ];
+        let out = render_leader(&rows);
+        assert!(out.contains("snippets"), "missing snippets row: {out}");
+        assert!(out.contains("exit to sidebar"), "missing exit row: {out}");
+        assert!(out.contains("Esc cancel"), "missing cancel hint: {out}");
+    }
+
+    /// With more rows than the popup caps at, the *head* of the list
+    /// survives and the tail collapses to "+N more". The caller orders
+    /// the fixed commands first precisely so `s`/`f`/`q` can never be the
+    /// rows that get truncated (#252) — a user with a long agent roster
+    /// must still see the exit.
+    #[test]
+    fn terminal_leader_truncates_the_tail_not_the_head() {
+        let mut rows = vec![
+            ("s".to_string(), "snippets".to_string()),
+            ("f".to_string(), "focus mode".to_string()),
+            ("q".to_string(), "exit to sidebar".to_string()),
+            ("`".to_string(), "jump to workspace".to_string()),
+        ];
+        for i in 1..=9 {
+            rows.push((i.to_string(), format!("agent-{i}")));
+        }
+        let out = render_leader(&rows);
+        assert!(out.contains("snippets"), "head command dropped: {out}");
+        assert!(
+            out.contains("exit to sidebar"),
+            "exit command dropped: {out}"
+        );
+        assert!(out.contains("more"), "overflow marker missing: {out}");
+    }
 }

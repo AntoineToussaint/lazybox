@@ -699,6 +699,46 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
+    /// A mouse press while a *dismissable* modal (a read-only or
+    /// progress overlay, never a destructive confirm — see
+    /// `Id::dismissable_by_outside_click`) is up closes it, exactly
+    /// like Esc, and then lets the click do its normal thing. So
+    /// clicking a sidebar workspace while the worktree-provisioning
+    /// checklist is up both dismisses the checklist and selects that
+    /// workspace in one action, instead of the modal hijacking the
+    /// click.
+    ///
+    /// Returns whether it handled the event. Only left/right/middle
+    /// *presses* qualify — scroll and drag over a dismissable overlay
+    /// still forward to it (so e.g. the sync-status window scrolls).
+    /// A blocking modal, or no modal, returns `false` so the caller
+    /// forwards to the modal / pane as before.
+    pub fn dismiss_modal_on_outside_click(&mut self, m: crossterm::event::MouseEvent) -> bool {
+        use crossterm::event::MouseEventKind;
+        if !matches!(m.kind, MouseEventKind::Down(_)) {
+            return false;
+        }
+        let dismissable = self
+            .modal_stack
+            .last()
+            .is_some_and(Id::dismissable_by_outside_click);
+        if !dismissable {
+            return false;
+        }
+        // Close it the same way Esc does (per-modal cleanup +
+        // draining any queued daemon prompt).
+        let cmds = self.handle_modal_dismissed();
+        self.dispatch_cmds(cmds);
+        // Fall through to normal pane hit-testing only when nothing is
+        // left on the stack — a dismissable overlay stacked over
+        // another modal must reveal that modal, not click into a pane
+        // behind it.
+        if self.modal_stack.is_empty() {
+            self.handle_mouse(m);
+        }
+        true
+    }
+
     /// Mouse routing:
     /// - Down on a splitter line → start drag (resize panes on
     ///   subsequent Drag events until Up).

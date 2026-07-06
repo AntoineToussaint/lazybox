@@ -218,20 +218,16 @@ impl<T: TerminalAdapter> Model<T> {
         // the client missed — which can include the one-shot
         // `TerminalSpawned` that dismisses an in-flight
         // worktree-provisioning checklist, AND the per-stage
-        // `WorktreeProgress` updates that would have advanced it. If
-        // those were dropped, the checklist hangs forever on whatever
-        // step it last saw (typically "Preparing worktree") even though
-        // the spawn finished. The snapshot is authoritative: if it shows
-        // the checklist's session already has a live terminal, the work
-        // is done — tear the stuck modal down. A failed checklist is left
-        // up so the user can still read its error.
-        if let IpcEvent::Snapshot { terminals, .. } = &event
-            && let Some(state) = self.worktree_progress.as_ref()
-            && !state.failed()
-            && terminals.iter().any(|t| t.session_key == state.session_key)
-        {
-            self.force_dismiss_worktree_progress();
-        }
+        // `WorktreeProgress` updates that would have advanced it. Left
+        // unhandled the checklist hangs forever on whatever step it last
+        // saw. Rather than special-case it here with an abrupt teardown,
+        // let the snapshot's terminals register below and reconcile it at
+        // the tail of this function via
+        // `reconcile_worktree_progress_with_terminals`: that *queues* a
+        // graceful dismiss, so the checklist still walks its remaining
+        // stages for their minimum dwell before closing instead of
+        // flashing a single half-step. A failed checklist is left up
+        // (reconcile skips it) so the user can still read its error.
 
         let is_snapshot = matches!(&event, IpcEvent::Snapshot { .. });
         let is_spawn = matches!(

@@ -90,6 +90,23 @@ pub const CLAUDE_STANDALONE_PROMPT_PHRASES: &[&str] = &[
 /// renders (`1. Yes`) plus the bare `(y/n)` family.
 const CLAUDE_CHOICE_MARKERS: &[&str] = &["1. Yes", "1) Yes", "(y/n)", "[y/n]"];
 
+/// Startup interstitials an unattended (`--dangerously-skip-permissions`)
+/// spawn CANNOT clear on its own, so the run stalls silently instead of
+/// doing the work (issue #256). `--dangerously-skip-permissions` bypasses
+/// tool-permission checks but NOT an MCP server's OAuth/login gate, and no
+/// human is present to `run /mcp`. Treated as `InputNeeded` so the blocked
+/// workspace flashes for attention rather than the auto-fix just dying.
+///
+/// Phrased singular + plural (`1 MCP server needs` / `2 MCP servers need`).
+/// The `MCP server(s) … authentication` stem is distinctive enough that no
+/// chat prose realistically produces it; keeping the `needs authentication`
+/// half anchors on the operative words even if the styled `⚠`/count prefix
+/// or the `· run /mcp` suffix fragments out of the detect window.
+pub const CLAUDE_BLOCKING_INTERSTITIAL_PHRASES: &[&str] = &[
+    "mcp server needs authentication",
+    "mcp servers need authentication",
+];
+
 /// Substring "any-of" match. Plain text in; bytes should be passed
 /// through [`strip_ansi_lossy`] first so escape sequences don't split
 /// the markers.
@@ -197,6 +214,9 @@ fn claude_state_of(s: &str, compact: &str, last_chunk_start: Option<usize>) -> A
 /// the state itself).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Trigger {
+    /// A startup blocker an unattended spawn can't clear — an MCP server
+    /// awaiting interactive auth (`CLAUDE_BLOCKING_INTERSTITIAL_PHRASES`).
+    BlockingInterstitial,
     /// Selection arrow + numbered options, more recent than the composer.
     StructuralChooser,
     /// `Esc to cancel` permission footer + numbered options.
@@ -391,6 +411,22 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
         || choice_pos.is_some()
         || compact.contains("esctocancel")
         || arrow_on_numbered_option(s);
+
+    // A startup interstitial an unattended spawn can't clear (an MCP
+    // server needing interactive auth) outranks every prompt shape: the
+    // agent is wedged before it can do any work. Unlike the consent
+    // phrases this is NOT gated on the composer footer — the warning
+    // renders ALONGSIDE the drawn composer at startup, so a more-recent
+    // `? for shortcuts` doesn't mean it was cleared. Only a live working
+    // anchor painted after it (the agent streaming = it got past the gate)
+    // suppresses it, keeping a resolved-then-working session from pinning
+    // InputNeeded (issue #256).
+    let blocker_pos = last_compact_match_pos(compact, CLAUDE_BLOCKING_INTERSTITIAL_PHRASES);
+    if marker_at_least_as_recent(blocker_pos, work_anchor_against(blocker_pos)) {
+        d.state = AgentState::InputNeeded;
+        d.trigger = Some(Trigger::BlockingInterstitial);
+        return d;
+    }
 
     // WEAK: arrow + numbered options, gated on the full composer footer
     // (incl. `Tab to amend`) so injected prose / parked prompts stay Idle.
@@ -1387,6 +1423,38 @@ mod tests {
         // No composer footer at all (full-screen dialog) → always live.
         let bare = "Allow Bash?\n❯ 1. Yes\n2. No\nEsc to cancel";
         assert_eq!(claude_state(bare.as_bytes()), Some(AgentState::InputNeeded));
+    }
+
+    #[test]
+    fn mcp_auth_interstitial_reads_as_input_needed() {
+        // The exact startup blocker from issue #256: an autonomous spawn
+        // can't clear an MCP server's auth gate, so surface it (flash +
+        // attention) instead of the run silently dying. Note the warning
+        // renders ABOVE the drawn composer footer — a more-recent
+        // `? for shortcuts` must NOT read it as cleared.
+        let blocked = "⚠ 1 MCP server needs authentication · run /mcp\n? for shortcuts";
+        assert_eq!(
+            claude_state(blocked.as_bytes()),
+            Some(AgentState::InputNeeded)
+        );
+        // The composer never reports ready while wedged, so the injector
+        // can't paste the work prompt into a blocked session.
+        assert!(!claude_ready_for_prompt(blocked.as_bytes()));
+
+        // Plural phrasing fires too.
+        let plural = "⚠ 2 MCP servers need authentication · run /mcp\n? for shortcuts";
+        assert_eq!(
+            claude_state(plural.as_bytes()),
+            Some(AgentState::InputNeeded)
+        );
+
+        // Once the agent got past the gate and is streaming (a live status
+        // line painted AFTER the warning), it's no longer pinned.
+        let recovered = "⚠ 1 MCP server needs authentication · run /mcp\n✻ (8s · 412 tokens · esc to interrupt)";
+        assert_eq!(
+            claude_state(recovered.as_bytes()),
+            Some(AgentState::Working)
+        );
     }
 
     #[test]

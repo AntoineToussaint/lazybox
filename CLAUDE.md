@@ -40,9 +40,16 @@ cargo run -p lazybox-tui  # rebuild + restart picks up the new build
 ```
 
 The running build version is always visible in the sidebar header
-(`lazybox --version` prints it too). Released binaries built outside a
-git checkout have no source ref to compare against, so the guard is a
-no-op there — comparing against the latest release tag is future work.
+(`lazybox --version` prints it too). Dev/source builds — anything not
+compiled by cargo-dist's `--profile dist` (`LAZYBOX_RELEASE_BUILD`,
+baked in `crates/ipc/build.rs`) — are tagged `vX.Y.Z (dev)` and never
+raise the nudge: a source checkout is normally *ahead* of the latest
+release and is updated with `git pull && cargo build`, not the
+installer swap "update & restart" implies (issue #251). The nudge is
+therefore gated on installer-managed release provenance; wiring the
+release-tag comparison that would let a stale *release* binary count
+how far it trails the channel is still future work, so in practice the
+nudge is currently dormant.
 
 ## Architecture
 
@@ -187,7 +194,7 @@ agent use `]]` then `` ` ``), `!` jump to agent-asking workspace,
 `Shift-F` jump to failing CI, `Shift-P` toggle
 the activity pane (auto-hidden when the workspace has no activity), `.`
 toggle focus mode (near-fullscreen agent terminal behind a slim event
-header; from inside a terminal use `]]f`, and `]]` also exits),
+header; from inside a terminal use `]]f`, and `]]q` exits),
 `]]<digit>` jump the focused terminal straight to the Nth agent
 workspace (sidebar order; the number rides a badge on each agent row
 and the `]]` leader popup), `Shift-arrows` resize splitters, `F8` /
@@ -216,17 +223,20 @@ selection, `d` toggle PR/issue description, `m` mark the focused row
 read, `z` undo mark-read, `r` reply.
 
 **TerminalStack**: all keys forward to the PTY. `]]` (configurable
-escape sequence) is a leader: bare `]]` returns to the sidebar (on the
-idle tick), `]]f` toggles focus mode, `]]<digit>` jumps to the Nth
-agent workspace, and `]]<key>` opens the snippet picker (see
-[`docs/snippets.md`](docs/snippets.md)) — a category-grouped list with
+escape sequence) is a *non-timed* leader (#252) that opens a small
+command menu (which-key popup): `]]s` opens the snippet picker, `]]f`
+toggles focus mode, `]]q` exits to the sidebar, `]]<digit>` jumps to
+the Nth agent workspace, and `` ]]` `` opens the fuzzy workspace
+switcher. The snippet picker (see
+[`docs/snippets.md`](docs/snippets.md)) is a category-grouped list with
 a live body-preview pane, filtering on key+description+category, that
-auto-submits when the typed key uniquely matches. The `]]` leader
-popup lists the agent roster (digits), `` ` `` (jump to any
-workspace via the fuzzy picker) and `f` above the snippet keys.
-Digits, `` ` `` and `f` are reserved by the leader, shadowing any
-snippet bound to them. A lone `]` followed by any non-`]` key is sent to the agent
-verbatim. `Ctrl-c`
+auto-submits when the typed key uniquely matches (`]]srev`); snippets
+sent this session float into a "Recent" group at the top (session MRU,
+`recent_snippets`) so a repeat is `]]s`+Enter. The leader
+is non-timed, so after `]]` it waits for the command key rather than
+leaving on an idle timer — browsing snippets never races an exit; `Esc`
+or any unbound key cancels back to the terminal. A lone `]` followed by
+any non-`]` key is sent to the agent verbatim. `Ctrl-c`
 is forwarded as an interrupt. `Ctrl-w` is the tile prefix:
 `Ctrl-w |` / `Ctrl-w -` split, `Ctrl-w <arrow>` moves tile focus,
 `Ctrl-w q` closes the focused tile. `Shift-PgUp/PgDn` scroll the

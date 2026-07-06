@@ -72,6 +72,13 @@ impl Sidebar {
                 concat!("v", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(theme.text_dim),
             ));
+            // Neutral build-provenance tag on dev/source builds: it marks
+            // the binary as one you update with `git pull && cargo build`
+            // (not an installer swap) and is why such a build never raises
+            // the "update & restart" nudge below (issue #251).
+            if !crate::build_guard::is_release_build() {
+                header_left.push(Span::styled(" (dev)", Style::default().fg(theme.text_dim)));
+            }
         }
         // Persistent outdated-build warning, shown on every mailbox so a
         // uniformly-stale install can't quietly reproduce already-fixed
@@ -678,6 +685,7 @@ impl Sidebar {
                 badges: self.runner_badges(key),
                 agent_number: agent_numbers.get(key).copied(),
                 ascii_glyphs: self.ascii_glyphs,
+                auto_merge_armed: workspace.is_some_and(|w| w.auto_merge_on_green),
             };
             positions.push(i);
             rows.push(build_workspace_row(&ctx));

@@ -109,6 +109,12 @@ mod effects_tests {
     /// warning: a sticky footer banner naming the fix *and* the sidebar
     /// flag the header repaints every frame. This is the uniformly-stale
     /// install the daemon/client mismatch check can't see (#234).
+    ///
+    /// Drives `note_outdated_build` directly to exercise the banner
+    /// render machinery; the provenance gate that decides *whether* to
+    /// reach it lives one layer up in `check_build_freshness`, covered by
+    /// [`check_build_freshness_quiet_on_dev_build`] and
+    /// `build_guard::dev_builds_never_nudge`.
     #[test]
     fn outdated_build_raises_persistent_warning() {
         use crate::realm::components::footer::NoticeSeverity;
@@ -121,6 +127,21 @@ mod effects_tests {
         assert!(n.message.contains("89"));
         assert!(n.message.contains("update & restart"));
         assert_eq!(m.sidebar.outdated_commits_behind(), Some(89));
+    }
+
+    /// The provenance gate: on a dev/source build `check_build_freshness`
+    /// must leave the UI quiet no matter how far the checkout trails
+    /// `main`, because "update & restart" only fits an installer-managed
+    /// release binary (#251). The test binary is itself a dev build, so
+    /// this asserts the real startup path stays silent.
+    #[test]
+    fn check_build_freshness_quiet_on_dev_build() {
+        let mut m = build_model();
+
+        m.check_build_freshness();
+
+        assert!(m.status.notice.is_none(), "dev build must not nudge");
+        assert_eq!(m.sidebar.outdated_commits_behind(), None);
     }
 
     /// A manual-refresh sync failure paints a sticky "✗ sync failed"
@@ -421,6 +442,7 @@ mod effects_tests {
         let ev = || IpcEvent::MergedPrRemovable {
             workspace_key: WorkspaceKey::new("github:o/r#1"),
             label: "o/r#1".into(),
+            terminal_state: lazybox_ipc::RemovableTerminalState::Merged,
             active_terminal_count: 0,
             has_local_work: false,
         };
@@ -1017,6 +1039,49 @@ snippets:
         );
     }
 
+    /// Sending a snippet records it in the session MRU so the picker's
+    /// "Recent" group can float it to the top next time (#252). A shell
+    /// terminal keeps the setup simple.
+    #[test]
+    fn sending_a_snippet_records_it_in_recent() {
+        let mut m = model_with_active_terminal_and_snippet(
+            "recent",
+            "\nsnippets:\n  ls:\n    description: List\n    body: ls -la\n",
+            "ls",
+            lazybox_ipc::TerminalKind::Shell,
+        );
+        assert!(m.recent_snippets.is_empty(), "nothing sent yet");
+        let _ = m.handle_choice_picked(vec![0]);
+        assert_eq!(
+            m.recent_snippets,
+            vec!["ls".to_string()],
+            "MRU records the send"
+        );
+    }
+
+    /// The session MRU is most-recent-first, de-duplicated, and capped.
+    #[test]
+    fn recent_snippets_mru_dedups_and_caps() {
+        let mut m = build_model();
+        for k in ["a", "b", "c"] {
+            m.record_recent_snippet(k.to_string());
+        }
+        assert_eq!(m.recent_snippets, vec!["c", "b", "a"], "most-recent first");
+        // Re-using an entry moves it to the front without duplicating.
+        m.record_recent_snippet("a".to_string());
+        assert_eq!(m.recent_snippets, vec!["a", "c", "b"]);
+        // The list is capped — oldest entries fall off the end.
+        for k in ["d", "e", "f", "g"] {
+            m.record_recent_snippet(k.to_string());
+        }
+        assert_eq!(m.recent_snippets.len(), 5, "capped at RECENT_SNIPPETS_MAX");
+        assert_eq!(m.recent_snippets[0], "g", "newest at the front");
+        assert!(
+            !m.recent_snippets.contains(&"b".to_string()),
+            "oldest dropped"
+        );
+    }
+
     /// apply_snippets seeds the model collection. Sanity check
     /// that the lookup path resolves.
     #[test]
@@ -1139,16 +1204,29 @@ snippets:
         assert_eq!(m.focus(), PaneFocus::Terminals, "leader doesn't leave yet");
     }
 
-    /// `]]<printable>` opens the snippet picker pre-filtered by the
-    /// follow-up char, and disarms the leader.
+    /// `]]s` opens the snippet picker and disarms the leader (#252).
     #[test]
-    fn leader_then_char_opens_snippet_picker() {
+    fn leader_s_opens_snippet_picker() {
         let mut m = model_in_terminal_with_snippets("leader-char");
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        m.dispatch_key(RealmKey::new(Key::Char('s'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        assert!(matches!(m.top_modal(), Some(Id::SnippetPicker)));
+    }
+
+    /// `]]<unbound>` — a key that isn't a leader command — cancels back
+    /// to the terminal without opening the picker or leaving (#252). Only
+    /// `s`/`f`/`q`/digit/`` ` `` are commands now.
+    #[test]
+    fn leader_then_unbound_key_cancels_back_to_terminal() {
+        let mut m = model_in_terminal_with_snippets("leader-unbound");
         m.dispatch_key(esc_key());
         m.dispatch_key(esc_key());
         m.dispatch_key(RealmKey::new(Key::Char('r'), RealmMods::NONE));
         assert!(!m.terminal_leader_pending(), "leader consumed");
-        assert!(matches!(m.top_modal(), Some(Id::SnippetPicker)));
+        assert!(m.top_modal().is_none(), "unbound `]]r` opens no picker");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "stays in the terminal");
     }
 
     /// `]]` then `Esc` cancels the leader back into the terminal —
@@ -1177,20 +1255,54 @@ snippets:
         assert_eq!(m.focus(), PaneFocus::Terminals);
     }
 
-    /// An armed leader with no follow-up key leaves the pane once the
-    /// escape window elapses (the idle tick). Uses a 1ms window so the
-    /// test doesn't sleep the default 600ms.
+    /// The `]]` leader is non-timed (#252): an armed leader with no
+    /// follow-up key stays armed across idle ticks and never leaves on
+    /// its own, so a user reading the popup and deciding which command
+    /// to press is never yanked to the sidebar mid-decision. `]]q` is
+    /// the explicit exit (see `leader_q_leaves_to_sidebar`).
     #[test]
-    fn idle_leader_leaves_on_tick_after_window() {
+    fn idle_leader_stays_armed_and_never_leaves_on_tick() {
         let mut m = model_in_terminal_with_snippets("leader-idle");
-        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
         m.dispatch_key(esc_key());
         m.dispatch_key(esc_key());
         assert!(m.terminal_leader_pending());
+        // Ticking — however long the pane sits idle — must not leave.
         std::thread::sleep(std::time::Duration::from_millis(3));
         m.tick_terminal_leader();
-        assert!(!m.terminal_leader_pending(), "window elapsed → disarmed");
-        assert_eq!(m.focus(), PaneFocus::Sidebar, "idle leader leaves the pane");
+        assert!(m.terminal_leader_pending(), "non-timed leader stays armed");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "idle leader never leaves");
+    }
+
+    /// `]]q` is the explicit exit to the sidebar, replacing the old
+    /// idle-tick leave (#252).
+    #[test]
+    fn leader_q_leaves_to_sidebar() {
+        let mut m = model_in_terminal_with_snippets("leader-quit");
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+        m.dispatch_key(RealmKey::new(Key::Char('q'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "`]]q` consumes the leader");
+        assert_eq!(m.focus(), PaneFocus::Sidebar, "`]]q` leaves to the sidebar");
+        assert!(m.top_modal().is_none(), "no picker mounted on exit");
+    }
+
+    /// `]]s` still opens the picker even when a long time passes between
+    /// the leader and the `s` — the race that made the picker "flash and
+    /// vanish" is gone because the leader no longer times out (#252).
+    #[test]
+    fn leader_then_delayed_s_still_opens_picker() {
+        let mut m = model_in_terminal_with_snippets("leader-delay");
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        // Simulate an idle gap (PTY output flooding, a thoughtful user):
+        // ticks fire but must not disarm the leader.
+        for _ in 0..5 {
+            m.tick_terminal_leader();
+        }
+        assert!(m.terminal_leader_pending(), "leader survived the idle gap");
+        m.dispatch_key(RealmKey::new(Key::Char('s'), RealmMods::NONE));
+        assert!(matches!(m.top_modal(), Some(Id::SnippetPicker)));
     }
 
     /// A single-line snippet body is sent raw plus a trailing `\r`.
@@ -4501,11 +4613,12 @@ mod focus_mode_tests {
         assert!(!m.focus_mode, "no terminal → no focus mode");
     }
 
-    /// Bare `]]` arms the leader; with no follow key the pane leaves on
-    /// the idle tick — and in focus mode that must also drop focus mode,
-    /// since the sidebar it returns to is hidden while focus mode is on.
+    /// `]]q` exits the terminal to the sidebar — and in focus mode that
+    /// must also drop focus mode, since the sidebar it returns to is
+    /// hidden while focus mode is on (#252, replacing the old idle-tick
+    /// leave).
     #[test]
-    fn bracket_idle_leave_exits_focus_mode() {
+    fn leader_q_exits_focus_mode() {
         let mut m = build_model();
         let ws = workspace_with_agent("owner/repo#1");
         let key = SessionKey::from(&ws.key);
@@ -4515,18 +4628,59 @@ mod focus_mode_tests {
         m.set_focus_attr();
         m.focus_mode = true;
 
-        // `]]` arms the leader (no immediate leave now that the leader
-        // always has bindings to offer); with no follow key the idle
-        // tick leaves the pane once the escape window lapses.
+        // `]]` arms the non-timed leader; `q` is the exit command.
         m.dispatch_key(char_key(']'));
         m.dispatch_key(char_key(']'));
-        assert!(m.terminal_leader_at.is_some(), "`]]` arms the leader");
-        // Force the idle window past, then tick — Instant can't be
-        // fast-forwarded, so backdate the arm timestamp instead.
-        m.terminal_leader_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(60));
-        m.tick_terminal_leader();
-        assert!(!m.focus_mode, "idle `]]` exits focus mode");
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+        m.dispatch_key(char_key('q'));
+        assert!(!m.focus_mode, "`]]q` exits focus mode");
         assert_eq!(m.focus(), PaneFocus::Sidebar);
+    }
+
+    /// Once the snippet picker is mounted, nothing in the daemon-event
+    /// stream may auto-close it (#252): a flood of PTY output, an agent
+    /// state change, a spawn that steals pane focus, and the idle tick
+    /// all fire, and the picker stays on top the whole time. This is the
+    /// "flash for ~0.1s and vanish" the issue is about — proven immune.
+    #[test]
+    fn snippet_picker_survives_daemon_output_and_focus_steal() {
+        let mut m = build_model();
+        let ws = workspace_with_agent("owner/repo#1");
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        spawn_terminal(&mut m, &key);
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        m.apply_snippets(lazybox_config::Snippets::builtin());
+
+        m.mount_snippet_picker("r".to_string());
+        assert!(
+            matches!(m.top_modal(), Some(Id::SnippetPicker)),
+            "picker up"
+        );
+
+        // Agent spews output, changes state, a spawn lands (which steals
+        // focus to the terminal), and the run loop keeps ticking.
+        for seq in 0..20 {
+            m.handle_daemon_event(IpcEvent::TerminalOutput {
+                terminal_id: TerminalId(1),
+                bytes: b"codex spinner churn...\r\n".to_vec(),
+                seq,
+            });
+            m.tick_terminal_leader();
+        }
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(2),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+        });
+        m.tick_terminal_leader();
+
+        assert!(
+            matches!(m.top_modal(), Some(Id::SnippetPicker)),
+            "no daemon event or tick may close the picker",
+        );
     }
 
     /// `]]<digit>` moves the displayed terminal to the Nth agent
@@ -4773,14 +4927,13 @@ mod terminal_section_dispatch_tests {
         );
     }
 
-    /// The escape char doubled leaves even with the `leave_terminal`
-    /// override present — proving `ui.terminal_escape_char` is the chord
-    /// owner. Uses a 1ms window so the idle tick fires without sleeping
-    /// the default escape window.
+    /// `]]q` leaves even with the `leave_terminal` override present —
+    /// proving `ui.terminal_escape_char` (not the action_keys slot) owns
+    /// the chord. `]]` arms the non-timed leader and `q` is its exit
+    /// command (#252).
     #[test]
-    fn escape_char_doubled_leaves_regardless_of_override() {
+    fn leader_q_leaves_regardless_of_override() {
         let mut m = model_in_live_terminal();
-        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
         let mut ov = std::collections::BTreeMap::new();
         ov.insert("leave_terminal".to_string(), "Esc".to_string());
         m.apply_action_key_overrides(ov);
@@ -4791,12 +4944,11 @@ mod terminal_section_dispatch_tests {
             m.terminal_leader_pending(),
             "the escape char doubled arms the leader"
         );
-        std::thread::sleep(std::time::Duration::from_millis(3));
-        m.tick_terminal_leader();
+        m.dispatch_key(RealmKey::new(Key::Char('q'), RealmMods::NONE));
         assert_eq!(
             m.focus(),
             PaneFocus::Sidebar,
-            "escape char doubled is the way out, override or not",
+            "`]]q` is the way out, override or not",
         );
     }
 
@@ -5308,5 +5460,130 @@ mod click_outside_modal_dismiss_tests {
             "help closes on an outside press",
         );
         assert_eq!(m.focus(), PaneFocus::Sidebar);
+    }
+}
+
+#[cfg(test)]
+mod auto_merge_on_green_tests {
+    //! Client-side "auto-merge on green": when an armed workspace's own
+    //! PR crosses into merge-ready on a poll update, the model fires
+    //! `Command::MergePr` exactly once per arming — reusing the manual
+    //! `g m` path. The one-shot latch stops a re-broadcast of the same
+    //! green state from double-merging, but a genuine de-green→re-green
+    //! re-arms it.
+    use super::super::*;
+    use chrono::Utc;
+    use lazybox_core::{CiStatus, Task, TaskId, TaskRole, TaskState, Workspace};
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn model() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+    ) {
+        let (client, server) = channel::pair();
+        let m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        (m, server)
+    }
+
+    /// A green, author-owned, non-conflicting PR workspace with the
+    /// "auto-merge on green" arm set. Flip individual fields per test.
+    fn armed_pr(ci: CiStatus) -> Workspace {
+        let task = Task {
+            id: TaskId {
+                source: "github".into(),
+                key: "owner/repo#1".into(),
+            },
+            title: "add thing".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/owner/repo/pull/1".into(),
+            repo: Some("owner/repo".into()),
+            branch: Some("feature".into()),
+            base_branch: Some("main".into()),
+            updated_at: Utc::now(),
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+        let mut ws = Workspace::from_task(task, Utc::now());
+        ws.auto_merge_on_green = true;
+        ws
+    }
+
+    /// Count (and consume) the `MergePr` commands the model queued.
+    fn merges(server: &mut lazybox_ipc::Connection) -> usize {
+        let mut n = 0;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if matches!(cmd, IpcCommand::MergePr { .. }) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn armed_green_pr_fires_merge_exactly_once() {
+        let (mut m, mut server) = model();
+        while server.rx.try_recv().is_ok() {} // drain startup traffic
+        let ws = armed_pr(CiStatus::Success);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws.clone())));
+        assert_eq!(merges(&mut server), 1, "armed + green fires once");
+        // Same green state re-broadcast next poll: the one-shot latch
+        // must suppress a second merge.
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert_eq!(merges(&mut server), 0, "no double-merge on re-broadcast");
+    }
+
+    #[test]
+    fn unarmed_or_ungreen_never_fires() {
+        let (mut m, mut server) = model();
+        while server.rx.try_recv().is_ok() {}
+        // Armed but CI not green yet.
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(armed_pr(
+            CiStatus::Pending,
+        ))));
+        assert_eq!(merges(&mut server), 0, "pending CI must not auto-merge");
+        // Green but not armed.
+        let mut unarmed = armed_pr(CiStatus::Success);
+        unarmed.auto_merge_on_green = false;
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(unarmed)));
+        assert_eq!(merges(&mut server), 0, "disarmed workspace must not merge");
+    }
+
+    #[test]
+    fn re_green_after_failed_race_re_fires() {
+        let (mut m, mut server) = model();
+        while server.rx.try_recv().is_ok() {}
+        let green = armed_pr(CiStatus::Success);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(green.clone())));
+        assert_eq!(merges(&mut server), 1);
+        // The merge lost a race: a fresh check flipped CI red on the
+        // same workspace. That's no longer merge-ready → the latch
+        // releases.
+        let mut red = green.clone();
+        red.pr.as_mut().unwrap().ci = CiStatus::Failure;
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(red)));
+        assert_eq!(merges(&mut server), 0, "red CI blocks the auto-merge");
+        // CI recovers → the one-shot re-arms and fires again.
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(green)));
+        assert_eq!(merges(&mut server), 1, "a genuine re-green re-fires");
     }
 }

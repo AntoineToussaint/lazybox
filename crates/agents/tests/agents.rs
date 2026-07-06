@@ -42,28 +42,33 @@ fn claude_spawn_and_resume_argv() {
 }
 
 #[test]
-fn claude_skip_permissions_appends_bypass_flag() {
+fn claude_skip_permissions_appends_unattended_flags() {
     let agent = Claude;
     let ctx = SpawnCtx {
         skip_permissions: true,
         ..sample_ctx()
     };
+    // `--strict-mcp-config` makes Claude ignore ambient MCP configs so an
+    // unauthenticated MCP server can't wedge the autonomous spawn on its
+    // `run /mcp` auth gate (issue #256).
     assert_eq!(
         agent.spawn(&ctx),
         vec![
             "claude".to_string(),
-            "--dangerously-skip-permissions".to_string()
+            "--dangerously-skip-permissions".to_string(),
+            "--strict-mcp-config".to_string(),
         ],
-        "autonomous (skip_permissions) spawn must bypass tool-use prompts"
+        "autonomous (skip_permissions) spawn must bypass tool-use prompts and drop ambient MCP"
     );
     assert_eq!(
         agent.resume(&ctx),
         vec![
             "claude".to_string(),
             "--continue".to_string(),
-            "--dangerously-skip-permissions".to_string()
+            "--dangerously-skip-permissions".to_string(),
+            "--strict-mcp-config".to_string(),
         ],
-        "resume must carry the bypass flag too so a resumed autonomous session stays unattended"
+        "resume must carry the unattended flags too so a resumed autonomous session stays clean"
     );
 }
 

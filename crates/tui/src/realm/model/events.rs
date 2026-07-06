@@ -347,25 +347,31 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
-        // The daemon detected a PR merge and wants the user to decide
-        // whether to remove the workspace + delete its worktree. Queue
-        // it onto the shared removal-prompt machinery (reason
-        // `Merged`), deduped against any already-active/queued prompt.
+        // The daemon detected a PR merge or an issue close and wants the
+        // user to decide whether to remove the workspace + delete its
+        // worktree. Queue it onto the shared removal-prompt machinery
+        // (reason `Merged` / `Closed`, which differ only in copy),
+        // deduped against any already-active/queued prompt.
         if let IpcEvent::MergedPrRemovable {
             workspace_key,
             label,
+            terminal_state,
             active_terminal_count,
             has_local_work,
         } = &event
         {
             if !self.removal_already_pending(workspace_key) {
+                let reason = match terminal_state {
+                    lazybox_ipc::RemovableTerminalState::Merged => super::RemovalReason::Merged,
+                    lazybox_ipc::RemovableTerminalState::Closed => super::RemovalReason::Closed,
+                };
                 self.pending_removal_prompts
                     .push_back(super::RemovalPrompt {
                         workspace_key: workspace_key.clone(),
                         label: label.clone(),
                         title: None,
                         terminal_count: *active_terminal_count,
-                        reason: super::RemovalReason::Merged,
+                        reason,
                         has_local_work: *has_local_work,
                     });
                 self.maybe_mount_next_removal_prompt();
@@ -378,6 +384,9 @@ impl<T: TerminalAdapter> Model<T> {
         // filter) gets a fresh details fetch on next focus.
         if let IpcEvent::WorkspaceRemoved(key) = &event {
             self.pr_details_fetched.remove(key);
+            // A merged/removed workspace can't re-fire; drop its arming
+            // latch so the set doesn't leak keys across a session.
+            self.auto_merge_fired.remove(key);
             // Drop any Activity-pane visibility override so a re-added
             // workspace re-applies the empty-aware default instead of a
             // stale manual choice.
@@ -434,6 +443,12 @@ impl<T: TerminalAdapter> Model<T> {
         // the 3s Hint fade clears each.
         if let Some(msg) = self.sidebar.drain_pending_asking_notices().pop() {
             self.flash_hint(msg);
+        }
+        // Client-side "auto-merge on green": a poll update to an armed
+        // workspace may have just made its PR merge-ready. The event
+        // carries the full workspace, so check it directly.
+        if let IpcEvent::WorkspaceUpserted(ws) = &event {
+            self.maybe_auto_merge(ws);
         }
         self.right.on_daemon_event(&event);
         self.terminals.on_daemon_event(&event);
@@ -667,6 +682,34 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
+    /// Client-side "auto-merge on green" trigger. Called after every
+    /// `WorkspaceUpserted` with the freshly-upserted workspace. When
+    /// the workspace is armed and its own PR just satisfied every merge
+    /// guard ([`lazybox_tui_core::intent::should_auto_merge`]), fire the
+    /// same `MergePr` the manual `g m` uses — exactly once per arming.
+    ///
+    /// The persisted `auto_merge_on_green` flag is the arm; the
+    /// transient `auto_merge_fired` set is the one-shot latch. Once
+    /// dispatched we leave the key latched until the PR is no longer
+    /// merge-ready (merged, or CI/state slipped) — at which point we
+    /// clear it, so a genuine re-green after a failed race can re-fire,
+    /// but a re-broadcast of the same green state can't double-merge.
+    fn maybe_auto_merge(&mut self, ws: &lazybox_core::Workspace) {
+        if crate::intent::should_auto_merge(ws) {
+            if self.auto_merge_fired.insert(ws.key.clone()) {
+                self.flash_info(format!("auto-merging {} — CI green", ws.name));
+                self.send_cmd(IpcCommand::MergePr {
+                    workspace_key: ws.key.clone(),
+                });
+            }
+        } else {
+            // No longer merge-ready — release the latch so a fresh green
+            // (e.g. after a failing-check race made the first attempt a
+            // no-op) re-arms the one-shot.
+            self.auto_merge_fired.remove(&ws.key);
+        }
+    }
+
     /// Auto-fade transient notices. Called once per iteration in
     /// the run loop. Severity decides the timeout:
     /// - Retryable: 5s. Hiccups self-heal, no need to linger.
@@ -699,21 +742,14 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
-    /// Leave the terminal pane once the armed `]]` leader has sat
-    /// idle for `ui_defaults.escape_window` with no follow-up key.
-    /// This is what makes bare `]]` (leader armed, no binding key)
-    /// resolve to "exit to sidebar": the user pressed `]]` and didn't
-    /// pick a snippet, so we honor the leave. Called once per run-loop
-    /// iteration (the loop ticks ~every 16ms even while idle), so the
-    /// leave fires within a frame of the window elapsing.
+    /// Resolve a lone held `]` once its chord window lapses. The `]]`
+    /// leader itself is non-timed now (#252) — it waits for the next
+    /// key rather than leaving on an idle tick, so browsing snippets
+    /// never races an "exit to sidebar" — so this only handles the
+    /// *first* `]` of a would-be chord that never got a second press.
+    /// Called once per run-loop iteration (the loop ticks ~every 16ms
+    /// even while idle).
     pub fn tick_terminal_leader(&mut self) {
-        if let Some(armed_at) = self.terminal_leader_at
-            && armed_at.elapsed() >= self.ui_defaults.escape_window
-        {
-            self.terminal_leader_at = None;
-            self.leave_terminal_to_sidebar();
-            self.redraw = true;
-        }
         // A lone `]` that armed the chord but never saw a second press
         // (or any following key) would otherwise sit held indefinitely.
         // Once the chord window lapses, resolve it:

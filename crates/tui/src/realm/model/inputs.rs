@@ -234,6 +234,11 @@ impl<T: TerminalAdapter> Model<T> {
                 let bytes = encode_snippet_for_pty(&snippet.body);
                 cmds.push(IpcCommand::Write { terminal_id, bytes });
             }
+            // Only reached once the snippet has actually been dispatched
+            // (agent inject or shell write) — so the MRU tracks sent
+            // snippets, not abandoned ones. Ends the `snippet` borrow of
+            // `self.snippets` above (NLL) before this `&mut self` call.
+            self.record_recent_snippet(key.clone());
             self.flash_info(format!("sent snippet ]{key}"));
             return cmds;
         }
@@ -679,10 +684,10 @@ impl<T: TerminalAdapter> Model<T> {
                 {
                     let session_key: lazybox_core::SessionKey = (&workspace_key).into();
                     // Out-of-scope: drop the row + kill terminals (worktree
-                    // left on disk). Merged: also delete the worktree.
+                    // left on disk). Merged/Closed: also delete the worktree.
                     cmds.push(match reason {
                         super::RemovalReason::OutOfScope => IpcCommand::Kill { session_key },
-                        super::RemovalReason::Merged => {
+                        super::RemovalReason::Merged | super::RemovalReason::Closed => {
                             IpcCommand::RemoveMergedWorkspace { session_key }
                         }
                     });

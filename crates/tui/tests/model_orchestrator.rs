@@ -55,7 +55,7 @@ fn fresh_model_focuses_sidebar() {
 fn tab_cycles_focus_through_panes() {
     // Tab cycles Sidebar → Right → Terminals → Sidebar when there's
     // no PTY swallowing keys. Inside a terminal with a live PTY,
-    // Tab belongs to the shell — use `]]` to exit. The fixture
+    // Tab belongs to the shell — use `]]]` to exit. The fixture
     // built by `build_model()` has no terminals running, so Tab
     // cycles all the way around.
     let mut m = build_model();

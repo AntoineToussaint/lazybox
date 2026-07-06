@@ -5,9 +5,9 @@ expression: rendered
 
 
 
-
  g …
   m  merge PR
+  g  auto-merge
   v  reviewers
   a  assignees
   l  labels

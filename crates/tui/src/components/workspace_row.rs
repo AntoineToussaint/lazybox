@@ -68,6 +68,11 @@ pub struct WorkspaceRowCtx<'a> {
     /// of the default unicode glyphs (`⇄`/`○`/`◆`). Wired from
     /// `display.ascii_glyphs` in `~/.lazybox/config.yaml`.
     pub ascii_glyphs: bool,
+    /// This workspace has "auto-merge on green" armed
+    /// (`Workspace::auto_merge_on_green`). Renders a distinct ` ARM `
+    /// pill ahead of the status pills so the user can see, at a glance,
+    /// which rows will merge themselves once CI goes green.
+    pub auto_merge_armed: bool,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -496,8 +501,9 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // a pill, handing the slack back to the title flex. When ANY
     // row has a pill, the column expands to 19 cells (9 review + 1
     // gutter + 9 CI) and pill-less rows get padded by the table
-    // renderer.
-    if primary.is_none() && secondary.is_none() {
+    // renderer. An armed row always shows its ` ARM ` marker even
+    // when no CI/review pill applies yet (e.g. armed before CI runs).
+    if primary.is_none() && secondary.is_none() && !ctx.auto_merge_armed {
         return Cell::empty();
     }
     let row_style = ctx.row_style();
@@ -505,11 +511,23 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         Some(p) => Span::styled(p.label, p.style),
         None => Span::styled(BLANK_PILL, row_style),
     };
-    Cell::new(vec![
-        pill_span(primary),
-        Span::styled(" ", row_style),
-        pill_span(secondary),
-    ])
+    let mut spans = Vec::with_capacity(4);
+    if ctx.auto_merge_armed {
+        let arm_style = if ctx.is_cursor {
+            row_style
+        } else {
+            Style::default()
+                .bg(ctx.theme.accent)
+                .fg(ratatui::style::Color::Black)
+                .add_modifier(Modifier::BOLD)
+        };
+        spans.push(Span::styled(" ARM ", arm_style));
+        spans.push(Span::styled(" ", row_style));
+    }
+    spans.push(pill_span(primary));
+    spans.push(Span::styled(" ", row_style));
+    spans.push(pill_span(secondary));
+    Cell::new(spans)
 }
 
 fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -600,6 +618,7 @@ mod tests {
             badges: vec![],
             agent_number: None,
             ascii_glyphs: false,
+            auto_merge_armed: false,
         }
     }
 
@@ -860,6 +879,7 @@ mod tests {
             badges: vec![],
             agent_number: None,
             ascii_glyphs: false,
+            auto_merge_armed: false,
         };
         assert_eq!(cell_type(&ctx).width(), 0);
     }
@@ -1003,6 +1023,7 @@ mod tests {
             badges: vec![],
             agent_number: None,
             ascii_glyphs: false,
+            auto_merge_armed: false,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -1034,6 +1055,45 @@ mod tests {
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
         assert_eq!(cell_status(&ctx).width(), 19);
+    }
+
+    /// An armed workspace surfaces its ` ARM ` marker even when the PR
+    /// has no CI / review pill yet — so a freshly-armed row is visibly
+    /// distinct before CI even starts.
+    #[test]
+    fn cell_status_shows_arm_pill_when_armed_without_ci() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.review = ReviewStatus::None;
+        task.ci = CiStatus::None;
+        task.state = TaskState::Open;
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.auto_merge_armed = true;
+        let cell = cell_status(&ctx);
+        assert!(cell.width() > 0, "armed row renders a status cell");
+        assert_eq!(cell.spans[0].content.as_ref(), " ARM ");
+    }
+
+    /// The ARM marker rides ahead of the live CI pill rather than
+    /// replacing it — an armed PR with running/red CI shows both.
+    #[test]
+    fn cell_status_arm_pill_coexists_with_ci_pill() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.ci = CiStatus::Failure;
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.auto_merge_armed = true;
+        let cell = cell_status(&ctx);
+        assert!(
+            cell.spans.iter().any(|s| s.content.as_ref() == " ARM "),
+            "armed marker present"
+        );
+        assert!(
+            cell.spans.iter().any(|s| s.content.as_ref().contains("CI")),
+            "live CI pill still present alongside the arm"
+        );
     }
 
     /// `cell_time` carries its own leading space, so when the status
@@ -1380,6 +1440,7 @@ mod tests {
             badges: vec![],
             agent_number: None,
             ascii_glyphs: false,
+            auto_merge_armed: false,
         };
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];

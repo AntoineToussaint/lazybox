@@ -160,28 +160,26 @@ pub fn render_quit_hint(frame: &mut Frame, area: Rect, quit_keys: &str) {
     );
 }
 
-/// Largest snippet list the terminal-leader popup will enumerate
-/// before collapsing the tail into a "+N more" row. Keeps the popup
-/// from swallowing the screen on a big library.
+/// Most rows the terminal-leader popup enumerates before collapsing the
+/// tail into a "+N more" row. Keeps the popup from swallowing the screen
+/// when the agent roster is long.
 const LEADER_MAX_ROWS: usize = 8;
 
 /// Render the which-key popup for the armed terminal `]]` leader
-/// (issue #205). Lists the agent-jump roster (`]]<digit>` → workspace,
-/// `]]f` → focus mode) on top of the snippet keys reachable as
-/// `]]<key>`, plus a hint that an idle window leaves the pane. Visual
-/// twin of [`render`], but the binding set is the agent roster + the
-/// snippet library, so it takes the rows directly.
+/// (issues #205, #252). Lists the leader's command menu — the caller
+/// orders the fixed commands (`]]s` snippets, `]]f` focus, `]]q` exit,
+/// `` ]]` `` jump) first, then the agent-jump roster (`]]<digit>` →
+/// workspace) — plus a hint that Esc cancels. The list is capped at
+/// `LEADER_MAX_ROWS` with the tail collapsed to "+N more", so the head
+/// (commands) always survives. Visual twin of [`render`], but the
+/// binding set is the leader menu, so it takes the rows directly.
 pub fn render_terminal_leader(
     frame: &mut Frame,
     area: Rect,
     escape_char: char,
-    agents: &[(String, String)],
-    snippets: &[(String, String)],
+    rows: &[(String, String)],
 ) {
     let theme = crate::theme::current();
-    // Agent jumps come first — they're why a heads-down user armed the
-    // leader — then the snippet library. One flat list, capped together.
-    let rows: Vec<(String, String)> = agents.iter().chain(snippets.iter()).cloned().collect();
     let shown = rows.len().min(LEADER_MAX_ROWS);
     let overflow = rows.len() - shown;
     let extra_rows = if overflow > 0 { 1 } else { 0 };
@@ -202,13 +200,8 @@ pub fn render_terminal_leader(
     frame.render_widget(Clear, panel);
     frame.render_widget(Block::default().style(bg), panel);
 
-    let title_kind = if snippets.is_empty() {
-        "jump"
-    } else {
-        "jump · snippets"
-    };
     let title = Line::from(Span::styled(
-        format!(" {escape_char}{escape_char} · {title_kind} "),
+        format!(" {escape_char}{escape_char} "),
         Style::default()
             .bg(theme.surface)
             .fg(theme.text_dim)
@@ -266,11 +259,13 @@ pub fn render_terminal_leader(
             );
         }
     }
-    // Footer hint on the bottom row of the panel.
+    // Footer hint on the bottom row of the panel. The commands (incl.
+    // `q` exit) are listed above; Esc cancels back to the terminal. The
+    // leader is non-timed (#252), so nothing leaves on its own.
     let hint_y = panel.y + panel.height.saturating_sub(1);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " Esc cancel · idle leaves ",
+            " Esc cancel ".to_string(),
             Style::default().bg(theme.surface).fg(theme.text_dim),
         ))),
         Rect {
@@ -316,5 +311,56 @@ mod tests {
         // A user who remapped quit to `x x` should be told to press x.
         let out = render_to_string("x x");
         assert!(out.contains("x again to quit"));
+    }
+
+    fn render_leader(rows: &[(String, String)]) -> String {
+        let (w, h) = (80u16, 24u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| render_terminal_leader(f, Rect::new(0, 0, w, h), ']', rows))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The leader popup lists the command menu and an Esc hint.
+    #[test]
+    fn terminal_leader_shows_command_menu() {
+        let rows = vec![
+            ("s".to_string(), "snippets".to_string()),
+            ("f".to_string(), "focus mode".to_string()),
+            ("q".to_string(), "exit to sidebar".to_string()),
+        ];
+        let out = render_leader(&rows);
+        assert!(out.contains("snippets"), "missing snippets row: {out}");
+        assert!(out.contains("exit to sidebar"), "missing exit row: {out}");
+        assert!(out.contains("Esc cancel"), "missing cancel hint: {out}");
+    }
+
+    /// With more rows than the popup caps at, the *head* of the list
+    /// survives and the tail collapses to "+N more". The caller orders
+    /// the fixed commands first precisely so `s`/`f`/`q` can never be the
+    /// rows that get truncated (#252) — a user with a long agent roster
+    /// must still see the exit.
+    #[test]
+    fn terminal_leader_truncates_the_tail_not_the_head() {
+        let mut rows = vec![
+            ("s".to_string(), "snippets".to_string()),
+            ("f".to_string(), "focus mode".to_string()),
+            ("q".to_string(), "exit to sidebar".to_string()),
+            ("`".to_string(), "jump to workspace".to_string()),
+        ];
+        for i in 1..=9 {
+            rows.push((i.to_string(), format!("agent-{i}")));
+        }
+        let out = render_leader(&rows);
+        assert!(out.contains("snippets"), "head command dropped: {out}");
+        assert!(
+            out.contains("exit to sidebar"),
+            "exit command dropped: {out}"
+        );
+        assert!(out.contains("more"), "overflow marker missing: {out}");
     }
 }

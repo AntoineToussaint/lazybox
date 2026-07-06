@@ -2024,7 +2024,9 @@ mod outdated_build_tests {
     /// A current build paints no warning; a stale one paints the
     /// persistent header banner naming the fix. The header is the
     /// always-visible surface a uniformly-stale install can't scroll
-    /// past (#234).
+    /// past (#234). Sets the outdated flag directly to test the render
+    /// path — the provenance gate that decides whether the flag is ever
+    /// set lives in `build_guard`/`check_build_freshness` (#251).
     #[test]
     fn header_shows_outdated_warning_only_when_behind() {
         let mut sb = Sidebar::new(PaneId::new(1));

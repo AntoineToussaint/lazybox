@@ -77,7 +77,7 @@ pub const BUILD_SOURCE_DIR: &str = env!("LAZYBOX_BUILD_SOURCE_DIR");
 /// && cargo build`, so the guard is gated on this and a source build is
 /// instead tagged `(dev)` in the header. A build we can't confidently
 /// attribute to the release flow is treated as dev.
-pub const IS_RELEASE_BUILD: bool = env!("LAZYBOX_RELEASE_BUILD").as_bytes()[0] == b'1';
+pub const IS_RELEASE_BUILD: bool = matches!(env!("LAZYBOX_RELEASE_BUILD").as_bytes(), [b'1', ..]);
 
 /// Stable id for a spawned terminal. Distinct from SessionKey because a
 /// single session may hold multiple terminals (agent + shell + logs).

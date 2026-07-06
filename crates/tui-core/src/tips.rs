@@ -164,7 +164,7 @@ mod tests {
         };
         let tip = next_tip(&ctx, &[], &no_overrides()).expect("a tip");
         assert_eq!(tip.id, "leave_terminal");
-        assert!(tip.message.contains("]]"), "{}", tip.message);
+        assert!(tip.message.contains("]]]"), "{}", tip.message);
     }
 
     #[test]

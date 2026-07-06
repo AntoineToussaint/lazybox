@@ -115,7 +115,7 @@ impl Component for Splash {
         // goes to the PTY, so the globals need the `]]` escape first
         // (issue #114).
         lines.push(Line::from(Span::styled(
-            "    In a terminal, press ]] to return here first.",
+            "    In a terminal, press ]]] to return here first.",
             Style::default().fg(theme.text_dim),
         )));
         lines.push(Line::raw(""));

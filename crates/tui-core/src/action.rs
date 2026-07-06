@@ -758,9 +758,9 @@ impl ActionDef {
             },
             ActionKind::LeaveTerminal => &Self {
                 kind: ActionKind::LeaveTerminal,
-                default_keys: "]]",
+                default_keys: "]]]",
                 label: "exit to sidebar",
-                describe: "Double-tap the escape char to leave the terminal. The same `]]` is a leader: `]]<key>` opens snippets; a lone `]` is sent to the agent.",
+                describe: "Triple-tap the escape char to leave the terminal. `]]` is a non-timed leader: `]]<key>` opens snippets and `]]]` exits; a lone `]` is sent to the agent.",
                 section: Section::Terminal,
             },
         }
@@ -1687,7 +1687,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
 ///
 /// "Universal" holds from the sidebar / activity panes. From the
 /// terminal pane the PTY eats every key, so each of these needs the
-/// `]]` leave chord first — see [`ActionDef::available_in_terminal`].
+/// `]]]` leave chord first — see [`ActionDef::available_in_terminal`].
 pub fn universal_shortcuts() -> Vec<&'static ActionDef> {
     [
         ActionKind::OpenHelp,
@@ -1988,11 +1988,12 @@ mod tests {
             "Shift-PgUp/Dn",
             "Shift-Arrows",
             "all keys",
-            // The terminal `]]` leave chord is dispatched by the
+            // The terminal `]]]` leave chord is dispatched by the
             // terminal-pane escape-char latch (rendered from the
-            // configured `ui.terminal_escape_char`, #170), never by the
-            // catalog matcher — so it carries no parseable catalog chord.
-            "]]",
+            // configured `ui.terminal_escape_char`, #170/#252), never by
+            // the catalog matcher — so it carries no parseable catalog
+            // chord.
+            "]]]",
         ];
         for def in ActionDef::all() {
             if presentation.contains(&def.default_keys) {
@@ -2115,8 +2116,8 @@ mod tests {
         // The lie this issue guards against: the splash / tour / footer
         // present these as "always available," but in a focused
         // terminal the PTY eats them. None may report
-        // `available_in_terminal` — the honest contract is "press `]]`
-        // first." The `]]` leave chord is the one that genuinely works.
+        // `available_in_terminal` — the honest contract is "press `]]]`
+        // first." The `]]]` leave chord is the one that genuinely works.
         for def in universal_shortcuts() {
             assert!(
                 !def.available_in_terminal(),
@@ -2127,7 +2128,7 @@ mod tests {
         }
         assert!(
             ActionDef::for_kind(ActionKind::LeaveTerminal).available_in_terminal(),
-            "the `]]` leave chord is the gateway back to the globals",
+            "the `]]]` leave chord is the gateway back to the globals",
         );
     }
 

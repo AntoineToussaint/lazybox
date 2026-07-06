@@ -291,6 +291,23 @@ pub mod builtins {
     /// prompt stop matching once fresh output arrives.
     const PROMPT_TAIL_WINDOW: usize = 2 * 1024;
 
+    /// Flags that make an unattended (`skip_permissions`) Claude launch
+    /// start clean. `--dangerously-skip-permissions` bypasses
+    /// tool-permission prompts; `--strict-mcp-config` makes Claude ignore
+    /// every ambient MCP config (user / project / plugin `.mcp.json`) and
+    /// load only servers from an explicit `--mcp-config` — which lazybox
+    /// doesn't pass, so zero servers load. That forecloses the "⚠ N MCP
+    /// server needs authentication · run /mcp" startup gate an autonomous
+    /// spawn can't clear (issue #256): `--dangerously-skip-permissions`
+    /// bypasses tool-permission checks but NOT an MCP server's OAuth/login
+    /// gate. Interactive spawns keep their MCP servers.
+    fn push_unattended_flags(argv: &mut Vec<String>, ctx: &SpawnCtx) {
+        if ctx.skip_permissions {
+            argv.push("--dangerously-skip-permissions".into());
+            argv.push("--strict-mcp-config".into());
+        }
+    }
+
     /// Append `--settings <path>` when the daemon generated a hooks
     /// settings file for this spawn. Claude's `--settings` accepts a
     /// file path and takes precedence over user/project settings — the
@@ -332,26 +349,22 @@ pub mod builtins {
         }
         fn spawn(&self, ctx: &SpawnCtx) -> Vec<String> {
             let mut argv = vec!["claude".into()];
-            if ctx.skip_permissions {
-                argv.push("--dangerously-skip-permissions".into());
-            }
+            push_unattended_flags(&mut argv, ctx);
             push_settings_flag(&mut argv, ctx);
             argv
         }
         fn resume(&self, ctx: &SpawnCtx) -> Vec<String> {
             let mut argv = vec!["claude".into(), "--continue".into()];
-            if ctx.skip_permissions {
-                argv.push("--dangerously-skip-permissions".into());
-            }
+            push_unattended_flags(&mut argv, ctx);
             push_settings_flag(&mut argv, ctx);
             argv
         }
 
         fn prepare_unattended(&self, worktree: &Path) {
-            if let Err(e) = crate::claude_trust::seed_workspace_trust(worktree) {
+            if let Err(e) = crate::claude_env::seed_unattended_env(worktree) {
                 tracing::warn!(
                     worktree = %worktree.display(),
-                    "claude: failed to pre-trust worktree for unattended launch: {e}",
+                    "claude: failed to prepare unattended env (trust/onboarding): {e}",
                 );
             }
         }
@@ -581,6 +594,7 @@ mod tests {
     use super::{Agent, LlmProvider, SpawnCtx};
 
     const SKIP_FLAG: &str = "--dangerously-skip-permissions";
+    const STRICT_MCP_FLAG: &str = "--strict-mcp-config";
 
     #[test]
     fn builtin_agents_map_to_their_llm_provider() {
@@ -629,7 +643,11 @@ mod tests {
         };
         assert_eq!(
             claude.spawn(&on),
-            vec!["claude".to_string(), SKIP_FLAG.to_string()]
+            vec![
+                "claude".to_string(),
+                SKIP_FLAG.to_string(),
+                STRICT_MCP_FLAG.to_string()
+            ]
         );
     }
 
@@ -655,7 +673,8 @@ mod tests {
             vec![
                 "claude".to_string(),
                 "--continue".to_string(),
-                SKIP_FLAG.to_string()
+                SKIP_FLAG.to_string(),
+                STRICT_MCP_FLAG.to_string()
             ]
         );
     }

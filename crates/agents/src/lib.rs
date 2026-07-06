@@ -5,7 +5,7 @@
 //! input, and (3) injecting prompts. Adding a new agent is one file.
 
 pub mod agent;
-pub(crate) mod claude_trust;
+pub(crate) mod claude_env;
 pub mod detect;
 pub mod hook;
 pub mod hook_settings;

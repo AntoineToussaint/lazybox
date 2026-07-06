@@ -4810,7 +4810,8 @@ mod tests {
             with_skip,
             vec![
                 "claude".to_string(),
-                "--dangerously-skip-permissions".to_string()
+                "--dangerously-skip-permissions".to_string(),
+                "--strict-mcp-config".to_string(),
             ]
         );
 

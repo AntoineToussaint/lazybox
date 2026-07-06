@@ -232,6 +232,10 @@ pub(crate) enum RemovalReason {
     /// The PR merged. Yes → `Command::RemoveMergedWorkspace` (kill
     /// sessions, delete the worktree, drop the row).
     Merged,
+    /// The issue closed. Same cleanup command as `Merged` (kill
+    /// sessions, delete the worktree, drop the row) — a separate
+    /// variant only so the confirm copy reads "closed" not "merged".
+    Closed,
 }
 
 /// Concrete target a destructive `ActionConfirm` modal was mounted

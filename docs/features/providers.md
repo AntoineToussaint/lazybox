@@ -81,7 +81,7 @@ implements `ScopeSource` for the setup flow. Credential chain:
 - [ ] PRs and issues both appear, with correct state (open/draft/merged/closed).
 - [ ] CI status reflects the rolled-up check state (success/failure/mixed/pending).
 - [ ] An issue and a PR that closes it (`Closes #N`) collapse appropriately.
-- [ ] `g m` / `Shift-M` merges a green, approved, conflict-free PR.
+- [ ] `g m` merges a green, approved, conflict-free PR.
 - [ ] `g v` / `g a` / `g l` mutate reviewers / assignees / labels and the change reflects on next poll.
 - [ ] `g o` / `Shift-O` opens the PR/issue in the browser.
 - [ ] With no `GH_TOKEN`, creds fall back to `gh auth token`.

@@ -28,7 +28,7 @@ body:
       placeholder: |
         1. Launch with `make run`
         2. Open a workspace with `Enter`
-        3. Press `Shift-M` to merge
+        3. Press `g m` to merge
         4. ...
     validations:
       required: true

@@ -41,8 +41,8 @@ pub struct LeaderGroup {
     /// One row per in-group chord: keys `g m`, label `merge PR`.
     chords: Vec<Binding>,
     /// The full key display for each in-group action, so the legacy
-    /// direct-key aliases (`Shift-M`, …) stay visible alongside the
-    /// leader chord, e.g. `aliases: g m | Shift-M · g v | Shift-V`.
+    /// direct-key aliases (`Shift-V`, …) stay visible alongside the
+    /// leader chord, e.g. `aliases: g m · g v | Shift-V`.
     aliases: String,
 }
 
@@ -518,7 +518,7 @@ mod tests {
             .iter()
             .find(|lg| lg.heading.contains("press g"))
             .expect("g leader block missing from help panel");
-        for alias in ["Shift-M", "Shift-V", "Shift-G", "Shift-L", "Shift-O"] {
+        for alias in ["Shift-V", "Shift-G", "Shift-L", "Shift-O"] {
             assert!(
                 g.aliases.contains(alias),
                 "aliases line omits {alias}: {:?}",

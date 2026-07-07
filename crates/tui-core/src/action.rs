@@ -622,7 +622,7 @@ impl ActionDef {
             },
             ActionKind::MergePr => &Self {
                 kind: ActionKind::MergePr,
-                default_keys: "g m | Shift-M",
+                default_keys: "g m",
                 label: "merge PR",
                 describe: "Merge the PR (only when CI green + approved + no conflicts).",
                 section: Section::Workspace,
@@ -1928,15 +1928,15 @@ mod tests {
 
     #[test]
     fn default_chords_splits_alternatives() {
-        // `g m | Shift-M` yields the leader sequence AND the legacy
+        // `g v | Shift-V` yields the leader sequence AND the legacy
         // modifier alias as two alternatives.
-        let def = ActionDef::for_kind(ActionKind::MergePr);
+        let def = ActionDef::for_kind(ActionKind::RequestReviewers);
         let chords = def.default_chords();
-        assert_eq!(chords.len(), 2, "merge has a leader + a Shift alias");
+        assert_eq!(chords.len(), 2, "reviewers has a leader + a Shift alias");
         assert!(matches!(chords[0], Chord::Seq(_)));
         assert_eq!(
             chords[1],
-            Chord::Key(KeyStroke::new(false, true, false, ChordCode::Char('m'))),
+            Chord::Key(KeyStroke::new(false, true, false, ChordCode::Char('v'))),
         );
     }
 

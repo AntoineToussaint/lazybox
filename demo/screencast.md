@@ -59,7 +59,7 @@ Target: **90–120s**, terminal-only, stitched from short takes.
    — drive a running agent without touching the keyboard.
 
 5. **Close — merge and clean up (90–110s).**
-   Back on the PR row, `Shift-M` to merge. The "remove worktree?" prompt
+   Back on the PR row, `g m` to merge. The "remove worktree?" prompt
    appears; confirm. The worktree is torn down and the inbox returns to a
    clean state — the task is done and gone from the queue.
 
@@ -69,5 +69,5 @@ Target: **90–120s**, terminal-only, stitched from short takes.
 - Trim dead air between key presses, but keep each live moment (the row
   lighting up, the agent's first lines, the phone reply landing) on screen
   long enough to read.
-- Caption the keys as they're pressed (`w`, `Shift-M`) so the screencast
+- Caption the keys as they're pressed (`w`, `g m`) so the screencast
   doubles as a quick keybinding reference.

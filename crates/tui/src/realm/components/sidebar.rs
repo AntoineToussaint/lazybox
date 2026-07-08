@@ -119,7 +119,7 @@ impl Sidebar {
         self.inner.tick_working()
     }
 
-    /// Drain Shift-M "Merge PR #N?" requests. The orchestrator mounts
+    /// Drain `g m` "Merge PR #N?" requests. The orchestrator mounts
     /// a Confirm modal per entry.
 
     /// Optimistic local update: mark the workspace's PR as `Merged`

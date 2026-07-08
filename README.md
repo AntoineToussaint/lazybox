@@ -139,7 +139,7 @@ to focus it, drag the splitters to resize, wheel-scroll, and right-click links
 | `c` / `x` / `u` · `s` | Spawn Claude / Codex / Cursor · spawn a shell (`c` needs the `claude` CLI on `PATH`; `s` always works) |
 | `w` | "Work" — spawn Claude with the right prompt for the row's state (fix CI / address comments / implement issue) |
 | `m` · `r` | Mark read · reply |
-| `g` | GitHub menu (which-key popup): `g m` merge · `g v` reviewers · `g a` assignees · `g l` labels · `g o` open in browser (`Shift-V` / `Shift-L` / `Shift-O` are direct aliases) |
+| `g` | GitHub menu (which-key popup): `g m` merge · `g v` reviewers · `g a` assignees · `g l` labels · `g o` open in browser (`Shift-V` / `Shift-G` / `Shift-L` / `Shift-O` are direct aliases; merge is `g m` only) |
 | `,` · `?` · `q q` | Settings · help · quit |
 | `]]` | Leave a terminal, back to the sidebar |
 

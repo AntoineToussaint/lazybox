@@ -525,6 +525,13 @@ mod tests {
                 g.aliases,
             );
         }
+        // Merge dropped its `Shift-M` alias (#264) — it must NOT
+        // reappear on the aliases line.
+        assert!(
+            !g.aliases.contains("Shift-M"),
+            "merge's legacy Shift-M alias leaked back into the aliases line: {:?}",
+            g.aliases,
+        );
     }
 
     #[test]

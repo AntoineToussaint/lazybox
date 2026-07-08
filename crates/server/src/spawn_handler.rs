@@ -730,32 +730,14 @@ pub async fn handle_spawn(
             // ticks.
             const STATE_BUF_CAP: usize = 32 * 1024;
             let mut state_buf: Vec<u8> = Vec::with_capacity(STATE_BUF_CAP);
-            // Hysteresis: timestamp of the last InputNeeded detection.
-            // When detect_state leaves InputNeeded (to Working or Idle)
-            // and the previous state was InputNeeded, we ONLY honor the
-            // transition if it's been long enough since we last saw the
-            // prompt patterns — gives the buffer time to capture genuine
-            // new output (user typed a response, Claude is now streaming
-            // back), rather than treating a ticker chunk that scrolled the
-            // prompt out of buffer as "agent done." The faster, expected
-            // Working↔Idle flips are NOT damped — only leaving the sticky
-            // "needs input" state is.
-            let mut last_input_needed_at: Option<std::time::Instant> = None;
-            const INPUT_NEEDED_HYSTERESIS: std::time::Duration = std::time::Duration::from_secs(8);
-            // Hysteresis for the other transient edge: leaving `Working`.
-            // Claude paints its live status line (the spinner / token
-            // counter) ONLY while busy, but it vanishes for a chunk whenever
-            // the agent prints output between spinner frames or the terminal
-            // does a full repaint — momentarily leaving the PTY detector with
-            // no working anchor and no idle composer either, an ambiguous
-            // Idle. Without damping, that single frame flips a genuinely-busy
-            // agent to Idle and back, breaking the sidebar working indicator
-            // and `!` jump. Only the AMBIGUOUS exit is damped — a real
-            // end-of-turn draws the composer footer, which reads as an
-            // affirmative idle and is honored immediately. Shorter than the
-            // InputNeeded window: the spinner reappears within a frame or two.
-            let mut last_working_at: Option<std::time::Instant> = None;
-            const WORKING_HYSTERESIS: std::time::Duration = std::time::Duration::from_secs(5);
+            // The terminal's lifecycle state machine. It owns the transition
+            // table (`Done` stickiness, the allowed edges) and the timing
+            // anchors the two hysteresis windows measure against — the flap
+            // damping that keeps a busy/waiting agent from flickering to Idle
+            // when Claude's status line drops for a single chunk. Every PTY
+            // reading commits through it; the current state itself lives in
+            // the shared `agent_states` cache.
+            let mut state_machine = lazybox_agents::AgentStateMachine::new();
 
             // Notify the initial-prompt injector exactly once when the
             // first byte of output arrives. `notify_one` STORES a permit
@@ -802,10 +784,7 @@ pub async fn handle_spawn(
                     id_for_pump,
                     &session_key_for_pump,
                     &terminal_meta_map,
-                    &mut last_input_needed_at,
-                    INPUT_NEEDED_HYSTERESIS,
-                    &mut last_working_at,
-                    WORKING_HYSTERESIS,
+                    &mut state_machine,
                     &hook_driven_map,
                     &input_shapes_map,
                 )
@@ -851,7 +830,7 @@ pub async fn handle_spawn(
                     let answered = agent_detect_resets_map.lock().await.remove(&id_for_pump);
                     if answered {
                         state_buf.clear();
-                        last_input_needed_at = None;
+                        state_machine.reset_input_anchor();
                         tracing::debug!(
                             terminal_id = ?id_for_pump,
                             "user answered prompt; clearing agent-state detection buffer",
@@ -867,10 +846,7 @@ pub async fn handle_spawn(
                     id_for_pump,
                     &session_key_for_pump,
                     &terminal_meta_map,
-                    &mut last_input_needed_at,
-                    INPUT_NEEDED_HYSTERESIS,
-                    &mut last_working_at,
-                    WORKING_HYSTERESIS,
+                    &mut state_machine,
                     &hook_driven_map,
                     &input_shapes_map,
                 )
@@ -1795,80 +1771,6 @@ fn pty_reading_allowed(
             && current != Some(lazybox_ipc::AgentState::InputNeeded))
 }
 
-/// Hysteresis decision for the edge that LEAVES `InputNeeded`.
-///
-/// Claude's status-bar ticker can scroll the prompt out of the detect
-/// window for a single chunk, flipping the reading to Idle even though
-/// Claude is genuinely still waiting; without damping, the `?` pill
-/// flickers off and back. But a (possibly wrong) `InputNeeded` must NOT
-/// stick for the full hysteresis window once a CLEAR signal says
-/// otherwise — a live `Working` status line or an affirmatively-drawn
-/// idle composer. So the transient is damped ONLY when the new reading
-/// is the ambiguous fall-through (`clear_exit_signal == false`); a
-/// positive marker is honored immediately. Returns true to suppress.
-fn should_suppress_input_needed_exit(
-    current: Option<lazybox_ipc::AgentState>,
-    new_state: lazybox_ipc::AgentState,
-    clear_exit_signal: bool,
-    since_last_input_needed: Option<std::time::Duration>,
-    hysteresis: std::time::Duration,
-) -> bool {
-    current == Some(lazybox_ipc::AgentState::InputNeeded)
-        && new_state != lazybox_ipc::AgentState::InputNeeded
-        && !clear_exit_signal
-        && since_last_input_needed.is_some_and(|e| e < hysteresis)
-}
-
-/// `Done` is sticky against a bare idle reading.
-///
-/// `Done` is set by the `Stop` hook when the agent finishes its turn
-/// (#80). The PTY detector keeps running in hook mode and contributes a
-/// "confident idle" correction (composer drawn) — and `SessionStart`/
-/// `SessionEnd` hooks also map to `Idle` — either of which would
-/// immediately demote a freshly-set `Done` back to `Idle`, losing the
-/// "completed" alert the moment it fired. So an `Idle` reading does NOT
-/// overwrite a cached `Done`: the agent stays `Done` until it works
-/// again (`Working`) or asks for input (`InputNeeded`). Returns true to
-/// suppress the transition.
-fn done_is_sticky(
-    current: Option<lazybox_ipc::AgentState>,
-    new_state: lazybox_ipc::AgentState,
-) -> bool {
-    current == Some(lazybox_ipc::AgentState::Done) && new_state == lazybox_ipc::AgentState::Idle
-}
-
-/// Hysteresis decision for the edge that LEAVES `Working`.
-///
-/// Claude paints its live status line (spinner glyph + token counter +
-/// `esc to interrupt`) ONLY while busy. That line vanishes for a chunk
-/// whenever the agent prints output between spinner frames or the
-/// terminal does a full repaint, leaving the PTY detector with no
-/// working anchor — and, mid-turn, no idle composer either. The result
-/// is an AMBIGUOUS Idle that would flip a genuinely-busy agent to Idle
-/// and back, breaking the sidebar working indicator and `!` jump. Damp
-/// that transient: suppress `Working → Idle` within the window UNLESS the
-/// Idle is affirmative (`ready_for_prompt` — the composer footer is
-/// drawn, the real end-of-turn), which is honored immediately. Returns
-/// true to suppress.
-///
-/// Only the PTY fallback reaches here: on a hook-driven terminal with
-/// fresh hooks, ambiguous PTY Idle readings are already filtered by
-/// `pty_reading_allowed`, and `Stop` provides the authoritative idle.
-/// This covers the no-hook and stale-hook windows, where the spinner is
-/// the only working signal.
-fn should_suppress_working_exit(
-    current: Option<lazybox_ipc::AgentState>,
-    new_state: lazybox_ipc::AgentState,
-    ready_for_prompt: bool,
-    since_last_working: Option<std::time::Duration>,
-    hysteresis: std::time::Duration,
-) -> bool {
-    current == Some(lazybox_ipc::AgentState::Working)
-        && new_state == lazybox_ipc::AgentState::Idle
-        && !ready_for_prompt
-        && since_last_working.is_some_and(|e| e < hysteresis)
-}
-
 /// Base-URL env var pointing the agent at the global LLM gateway, if one
 /// is configured. The gateway URL (`agent.llm_gateway_url`) is global;
 /// the agent's upstream provider only picks *which* base-URL var carries
@@ -2406,10 +2308,7 @@ pub(crate) async fn maybe_emit_state_change(
             std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
         >,
     >,
-    last_input_needed_at: &mut Option<std::time::Instant>,
-    hysteresis: std::time::Duration,
-    last_working_at: &mut Option<std::time::Instant>,
-    working_hysteresis: std::time::Duration,
+    state_machine: &mut lazybox_agents::AgentStateMachine,
     hook_driven: &std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
     >,
@@ -2521,7 +2420,6 @@ pub(crate) async fn maybe_emit_state_change(
             ),
             "detect_state → InputNeeded",
         );
-        *last_input_needed_at = Some(std::time::Instant::now());
         // Every InputNeeded the PTY detector raises is
         // structurally a chooser / permission / consent dialog
         // (freeform asks are deliberately not flagged), so a
@@ -2534,84 +2432,41 @@ pub(crate) async fn maybe_emit_state_change(
             .await
             .insert(id, lazybox_agents::PromptShape::Chooser);
     }
-    // Refresh the working anchor on every busy reading, even the
-    // ones deduped below, so the Working-exit hysteresis measures
-    // time since the spinner was LAST seen — a transient frame
-    // that drops it then reads as a recent-enough anchor to damp.
-    if new_state == lazybox_ipc::AgentState::Working {
-        *last_working_at = Some(std::time::Instant::now());
-    }
-    // Hysteresis. Claude's status-bar updates make the
-    // detector miss the prompt for one chunk, then catch
-    // it on the next. Without this guard the pill flickers
-    // every few seconds while Claude is genuinely still
-    // waiting. Only damp the edge that LEAVES InputNeeded —
-    // and only when the new reading is the ambiguous
-    // fall-through. A clear signal that the prompt is gone — a
-    // live Working status line, or an idle composer the
-    // readiness probe affirmatively recognizes — is honored
-    // immediately, so a wrong InputNeeded can't stick for the
-    // full window once Claude is visibly streaming or idle.
-    // Computed once: an affirmatively-recognized idle composer is
-    // a clear end-of-turn for BOTH the InputNeeded and Working
-    // exits below. Only probed for an Idle reading — a Working
-    // reading is itself the clear signal — so streaming chunks
-    // don't pay to re-strip the window.
+    // Evidence quality the state machine's hysteresis needs: an
+    // affirmatively-recognized idle composer, or a live Working
+    // status line, is a CLEAR end of the prior state (honored
+    // immediately); anything else is the ambiguous fall-through a
+    // dropped status-line frame produces (damped within the window).
+    // `ready_for_prompt` is only probed for an Idle reading — a
+    // Working reading is itself the clear signal — so streaming
+    // chunks don't pay to re-strip the window.
     let ready_for_prompt =
         new_state == lazybox_ipc::AgentState::Idle && agent.detect_ready_for_prompt(detect_window);
-    let clear_exit_signal = new_state == lazybox_ipc::AgentState::Working || ready_for_prompt;
+    let reading = lazybox_agents::Reading {
+        state: new_state,
+        clear: new_state == lazybox_ipc::AgentState::Working || ready_for_prompt,
+    };
     // Read + decide + insert under ONE lock acquisition. A
     // separate read-then-insert let a concurrent writer (hook
     // ingest, the optimistic Enter flip) land between the two
-    // and be silently clobbered by a stale decision.
+    // and be silently clobbered by a stale decision. The machine
+    // owns the transition table (`Done` stickiness) and the flap
+    // damping; it returns `None` for a no-op, a forbidden edge, or
+    // a suppressed ambiguous flip.
     let current = {
         let mut map = states.lock().await;
         let current = map.get(&id).copied();
-        if should_suppress_input_needed_exit(
-            current,
-            new_state,
-            clear_exit_signal,
-            last_input_needed_at.map(|t| t.elapsed()),
-            hysteresis,
-        ) {
+        let Some(committed) = state_machine.on_reading(current, reading, std::time::Instant::now())
+        else {
             drop(map);
-            tracing::debug!(
+            tracing::trace!(
                 terminal_id = ?id,
                 ?new_state,
-                "state hysteresis: suppressing InputNeeded → {:?}",
-                new_state,
+                "state machine: no transition",
             );
             return;
-        }
-        if done_is_sticky(current, new_state) {
-            return;
-        }
-        // Symmetric damping for the Working→Idle edge: a single
-        // frame where Claude's spinner is absent reads as an
-        // ambiguous Idle (no working anchor, composer not yet
-        // drawn). Suppress it within the window so a busy agent
-        // doesn't flicker to Idle between spinner frames; an
-        // affirmative idle composer (`ready_for_prompt`) is the
-        // real end-of-turn and is honored immediately.
-        if should_suppress_working_exit(
-            current,
-            new_state,
-            ready_for_prompt,
-            last_working_at.map(|t| t.elapsed()),
-            working_hysteresis,
-        ) {
-            drop(map);
-            tracing::debug!(
-                terminal_id = ?id,
-                ?new_state,
-                "state hysteresis: suppressing Working → Idle",
-            );
-            return;
-        }
-        if current == Some(new_state) {
-            return;
-        }
-        map.insert(id, new_state);
+        };
+        map.insert(id, committed);
         current
     };
     // The broadcast itself — live-key resolution, the structured
@@ -3271,23 +3126,23 @@ pub async fn handle_ingest_hook(
     // pump transition slip between them and be clobbered. The hook →
     // state mapping consults the current state (an unrecognized
     // `Notification` is a no-change while `InputNeeded`), so it runs
-    // under the same guard.
+    // under the same guard. `hook_to_state` yields the candidate; the
+    // machine's transition table commits it (or rejects it — e.g. a
+    // `SessionStart`/`SessionEnd` idle hook must not clear a `Done` the
+    // preceding `Stop` just set, #80).
     let (prev, new_state, changed) = {
         let mut states = config.agent_states.lock().await;
         let prev = states.get(&terminal_id).copied();
         let Some(new_state) = lazybox_agents::hook::hook_to_state(&hook, prev) else {
             return;
         };
-        // A `SessionStart`/`SessionEnd` idle hook must not clear a
-        // `Done` the preceding `Stop` just set (#80).
-        if done_is_sticky(prev, new_state) {
-            return;
+        match lazybox_agents::AgentStateMachine::transition(prev, new_state) {
+            Some(committed) => {
+                states.insert(terminal_id, committed);
+                (prev, new_state, true)
+            }
+            None => (prev, new_state, false),
         }
-        let changed = prev != Some(new_state);
-        if changed {
-            states.insert(terminal_id, new_state);
-        }
-        (prev, new_state, changed)
     };
     // Record the prompt's shape — whether a bare chooser keystroke is a
     // complete answer — for `handle_write`'s optimistic flip. Done even
@@ -3942,145 +3797,6 @@ mod tests {
             !wait_until_input_resolved(rx, id, &input_resolved_states(), Duration::from_secs(1))
                 .await
         );
-    }
-
-    #[test]
-    fn hysteresis_damps_only_ambiguous_input_needed_exit() {
-        use lazybox_ipc::AgentState::{Idle, InputNeeded, Working};
-        let hyst = std::time::Duration::from_secs(8);
-        let recent = Some(std::time::Duration::from_secs(1));
-        let stale = Some(std::time::Duration::from_secs(9));
-
-        // Ambiguous fall-through to Idle within the window → damp.
-        assert!(should_suppress_input_needed_exit(
-            Some(InputNeeded),
-            Idle,
-            false,
-            recent,
-            hyst,
-        ));
-        // A clear signal (live Working / affirmative idle composer) is
-        // honored immediately, even within the window.
-        assert!(!should_suppress_input_needed_exit(
-            Some(InputNeeded),
-            Working,
-            true,
-            recent,
-            hyst,
-        ));
-        assert!(!should_suppress_input_needed_exit(
-            Some(InputNeeded),
-            Idle,
-            true,
-            recent,
-            hyst,
-        ));
-        // Past the window → no damping regardless.
-        assert!(!should_suppress_input_needed_exit(
-            Some(InputNeeded),
-            Idle,
-            false,
-            stale,
-            hyst,
-        ));
-        // Never damp transitions that aren't leaving InputNeeded.
-        assert!(!should_suppress_input_needed_exit(
-            Some(Working),
-            Idle,
-            false,
-            recent,
-            hyst,
-        ));
-        // No prior InputNeeded timestamp → nothing to damp.
-        assert!(!should_suppress_input_needed_exit(
-            Some(InputNeeded),
-            Idle,
-            false,
-            None,
-            hyst,
-        ));
-    }
-
-    #[test]
-    fn done_is_sticky_only_against_idle() {
-        use lazybox_ipc::AgentState::{Done, Idle, InputNeeded, Working};
-        // An idle reading must not clear a freshly-set Done (the
-        // `Stop`-driven "finished its turn" state) — the PTY's
-        // confident-idle correction and SessionStart/End would
-        // otherwise demote it instantly (#80).
-        assert!(done_is_sticky(Some(Done), Idle));
-        // Done yields to real progress / a fresh prompt.
-        assert!(!done_is_sticky(Some(Done), Working));
-        assert!(!done_is_sticky(Some(Done), InputNeeded));
-        // Sticky only applies when already Done — a normal Working →
-        // Idle transition is honored (the agent really went quiet).
-        assert!(!done_is_sticky(Some(Working), Idle));
-        assert!(!done_is_sticky(Some(InputNeeded), Idle));
-        assert!(!done_is_sticky(None, Idle));
-    }
-
-    #[test]
-    fn hysteresis_damps_only_ambiguous_working_exit() {
-        use lazybox_ipc::AgentState::{Idle, InputNeeded, Working};
-        let hyst = std::time::Duration::from_secs(5);
-        let recent = Some(std::time::Duration::from_secs(1));
-        let stale = Some(std::time::Duration::from_secs(6));
-
-        // Spinner dropped for one frame: ambiguous Idle (composer not
-        // drawn) within the window → damp, so a busy agent doesn't
-        // flicker to Idle between frames.
-        assert!(should_suppress_working_exit(
-            Some(Working),
-            Idle,
-            false,
-            recent,
-            hyst,
-        ));
-        // A real end-of-turn draws the composer footer → affirmative
-        // idle, honored immediately even within the window.
-        assert!(!should_suppress_working_exit(
-            Some(Working),
-            Idle,
-            true,
-            recent,
-            hyst,
-        ));
-        // Past the window → the spinner has been gone long enough that
-        // the agent really is idle; let it through.
-        assert!(!should_suppress_working_exit(
-            Some(Working),
-            Idle,
-            false,
-            stale,
-            hyst,
-        ));
-        // Never damp a transition INTO a live dialog — a permission
-        // prompt mid-work must surface immediately.
-        assert!(!should_suppress_working_exit(
-            Some(Working),
-            InputNeeded,
-            false,
-            recent,
-            hyst,
-        ));
-        // Only the Working→Idle edge is damped; an Idle→Idle re-read or a
-        // non-Working prior state is untouched.
-        assert!(!should_suppress_working_exit(
-            Some(Idle),
-            Idle,
-            false,
-            recent,
-            hyst,
-        ));
-        // No prior Working timestamp (e.g. first frame after stale hooks
-        // open the gate) → nothing to anchor on, let it through.
-        assert!(!should_suppress_working_exit(
-            Some(Working),
-            Idle,
-            false,
-            None,
-            hyst,
-        ));
     }
 
     /// PTY readings on a hook-driven terminal: fresh hooks own
@@ -5482,10 +5198,7 @@ mod tests {
                 std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
             >,
         >,
-        last_input_needed_at: Option<std::time::Instant>,
-        last_working_at: Option<std::time::Instant>,
-        input_hysteresis: Duration,
-        working_hysteresis: Duration,
+        state_machine: lazybox_agents::AgentStateMachine,
         hook_driven: std::sync::Arc<
             tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
         >,
@@ -5522,10 +5235,10 @@ mod tests {
                 id,
                 session_key,
                 terminal_meta,
-                last_input_needed_at: None,
-                last_working_at: None,
-                input_hysteresis,
-                working_hysteresis,
+                state_machine: lazybox_agents::AgentStateMachine::with_hysteresis(
+                    input_hysteresis,
+                    working_hysteresis,
+                ),
                 hook_driven: std::sync::Arc::new(tokio::sync::Mutex::new(
                     std::collections::HashMap::new(),
                 )),
@@ -5547,10 +5260,7 @@ mod tests {
                 self.id,
                 &self.session_key,
                 &self.terminal_meta,
-                &mut self.last_input_needed_at,
-                self.input_hysteresis,
-                &mut self.last_working_at,
-                self.working_hysteresis,
+                &mut self.state_machine,
                 &self.hook_driven,
                 &self.input_shapes,
             )
@@ -5686,8 +5396,8 @@ mod tests {
         let agent = lazybox_agents::registry().get("claude").unwrap();
         let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
         let mut buf = Vec::new();
-        let mut lin = None;
-        let mut lw = None;
+        let mut state_machine =
+            lazybox_agents::AgentStateMachine::with_hysteresis(Duration::ZERO, Duration::ZERO);
         maybe_emit_state_change(
             Some(&agent),
             &mut buf,
@@ -5697,10 +5407,7 @@ mod tests {
             id,
             &issue_key,
             &config.terminal_meta,
-            &mut lin,
-            Duration::ZERO,
-            &mut lw,
-            Duration::ZERO,
+            &mut state_machine,
             &config.hook_driven_terminals,
             &config.input_needed_shapes,
         )

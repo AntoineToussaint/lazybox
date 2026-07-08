@@ -5291,8 +5291,11 @@ mod worktree_progress_recovery_tests {
         // while the stale component stayed mounted (issue #267).
         fn rendered(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) -> String {
             let mut term = Terminal::new(TestBackend::new(70, 20)).expect("test terminal");
-            term.draw(|f| m.app.view(&Id::WorktreeProgress, f, Rect::new(0, 0, 70, 20)))
-                .expect("draw mounted modal");
+            term.draw(|f| {
+                m.app
+                    .view(&Id::WorktreeProgress, f, Rect::new(0, 0, 70, 20))
+            })
+            .expect("draw mounted modal");
             let buf = term.backend().buffer();
             (0..buf.area.height)
                 .map(|y| {

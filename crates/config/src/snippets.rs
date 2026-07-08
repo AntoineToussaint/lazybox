@@ -1082,13 +1082,23 @@ snippets:
         }
         // `push` and `resume` teach the safe force-push after a rewrite.
         assert!(b.get("push").unwrap().body.contains("--force-with-lease"));
-        assert!(b.get("resume").unwrap().body.contains("git rebase --continue"));
+        assert!(
+            b.get("resume")
+                .unwrap()
+                .body
+                .contains("git rebase --continue")
+        );
         // `sync` is the merge (no-rewrite) alternative to `rebase`.
         assert!(b.get("sync").unwrap().body.contains("merg"));
         assert!(b.get("rebase").unwrap().body.contains("--force-with-lease"));
         // A narrowed fetch keeps the branch's remote-tracking ref intact so
         // the post-rebase `--force-with-lease` still guards a teammate's push.
-        assert!(b.get("rebase").unwrap().body.contains("git fetch origin main"));
+        assert!(
+            b.get("rebase")
+                .unwrap()
+                .body
+                .contains("git fetch origin main")
+        );
     }
 
     #[test]

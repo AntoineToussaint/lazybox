@@ -1258,6 +1258,34 @@ mod tests {
         );
     }
 
+    /// Regression for issue #269: narrowing the sidebar must not drop
+    /// the CI status column while the title is short enough to leave
+    /// room for it. The old budgeter reserved the title's full 20-cell
+    /// `min` and shed the status column to fund padding it never filled
+    /// — losing the CI signal AND leaving a blank gap. A 7-cell title
+    /// at width 44 has ample room for the 19-cell status column.
+    #[test]
+    fn short_title_keeps_status_instead_of_leaving_empty_gap() {
+        let mut task = make_task("owner/repo#7", "Fix bug");
+        task.ci = CiStatus::Failure; // " CI FAIL " status pill
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let columns = build_columns(2);
+        let rows = vec![build_row(&ctx)];
+        let lines = crate::components::table::render_table(&rows, &columns, 44);
+        let line: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(line.contains('7'), "item number dropped: {line:?}");
+        assert!(
+            line.contains("Fix bug"),
+            "short title should render in full: {line:?}",
+        );
+        assert!(
+            line.contains("CI FAIL"),
+            "status must survive when the short title leaves room: {line:?}",
+        );
+    }
+
     /// Regression for issue #130: at a tiny width even the role /
     /// state indicators shed, and the title finally elides with `…` —
     /// but the item number is still there, so the row is identifiable

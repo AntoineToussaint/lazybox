@@ -279,6 +279,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             kind: TerminalKind::Shell,
             cwd: Some(cwd.clone()),
             initial_prompt: None,
+            on_main: false,
         },
         Command::Write {
             terminal_id: tid,
@@ -517,6 +518,7 @@ async fn a_stalled_handler_does_not_block_poll_forwarding() {
             kind: TerminalKind::Shell,
             cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
             initial_prompt: None,
+            on_main: false,
         })
         .unwrap();
 

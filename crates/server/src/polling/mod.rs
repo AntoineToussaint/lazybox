@@ -912,6 +912,8 @@ async fn dispatch_action(
                 // permission prompts disabled (subject to the
                 // `agent.autonomous_skip_permissions` toggle).
                 true,
+                // Autonomous work runs on its own isolated worktree.
+                false,
             )
             .await;
         }
@@ -936,8 +938,13 @@ async fn dispatch_action(
             // SAME singleton definition `handle_spawn` uses to collapse
             // duplicate spawns, so the two stay consistent.
             if let Some(existing) =
-                crate::spawn_handler::find_existing_singleton(config, &session_key, &term_kind)
-                    .await
+                crate::spawn_handler::find_existing_singleton(
+                    config,
+                    &session_key,
+                    &term_kind,
+                    false,
+                )
+                .await
             {
                 tracing::info!(
                     source = source_name,
@@ -1036,6 +1043,8 @@ async fn dispatch_action(
                         // prompt lands in the trust chooser) and push a
                         // fix without a human to approve its edits.
                         true,
+                        // Auto-fix runs on its own isolated worktree.
+                        false,
                     )
                     .await;
                 }

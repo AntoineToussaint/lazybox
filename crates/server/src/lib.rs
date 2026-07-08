@@ -251,6 +251,14 @@ pub struct ServerConfig {
     /// reconnecting client can re-render the indicator. Cleaned on
     /// `TerminalExited` alongside the other per-terminal maps.
     pub no_permission_terminals: Arc<Mutex<HashSet<TerminalId>>>,
+    /// Terminals running on the repo's shared main checkout rather than
+    /// an isolated worktree. Populated by `handle_spawn` for a
+    /// main-checkout spawn; read by `snapshot_terminals` (badge replay
+    /// on reconnect) and `find_existing_singleton` (so a main-checkout
+    /// agent is a distinct singleton from the same agent on an isolated
+    /// worktree in the same workspace). Cleaned on `TerminalExited`
+    /// alongside the other per-terminal maps.
+    pub on_main_terminals: Arc<Mutex<HashSet<TerminalId>>>,
     /// Terminals whose agent-state detection buffer should be dropped
     /// on the pump's next output chunk. Set by `handle_write` when the
     /// user submits an answer to an `InputNeeded` prompt (Enter while
@@ -460,6 +468,7 @@ impl ServerConfig {
             agent_states: Arc::new(Mutex::new(HashMap::new())),
             terminal_meta: Arc::new(Mutex::new(HashMap::new())),
             no_permission_terminals: Arc::new(Mutex::new(HashSet::new())),
+            on_main_terminals: Arc::new(Mutex::new(HashSet::new())),
             agent_detect_resets: Arc::new(Mutex::new(HashSet::new())),
             hook_driven_terminals: Arc::new(Mutex::new(HashMap::new())),
             prompt_submit_signals: Arc::new(Mutex::new(HashMap::new())),
@@ -880,6 +889,7 @@ async fn dispatch_command(
             kind,
             cwd,
             initial_prompt,
+            on_main,
         } => {
             // A spawn carrying a pre-built work prompt is an autonomous
             // "work on this" launch — run it unattended (skip permissions,
@@ -896,6 +906,7 @@ async fn dispatch_command(
                 cwd,
                 initial_prompt,
                 autonomous,
+                on_main,
             )
             .await;
         }
@@ -1034,6 +1045,7 @@ async fn dispatch_command(
                     lazybox_ipc::TerminalKind::Agent(agent_id),
                     None,
                     None,
+                    false,
                     false,
                 )
                 .await;

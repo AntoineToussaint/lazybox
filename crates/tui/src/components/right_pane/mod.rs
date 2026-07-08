@@ -1675,6 +1675,7 @@ impl RightPane {
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id),
                         cwd: None,
                         initial_prompt: prompt,
+                        on_main: false,
                     });
                     self.feed.clear_selection();
                 }

@@ -526,6 +526,7 @@ impl<T: TerminalAdapter> Model<T> {
                     kind: lazybox_ipc::TerminalKind::Shell,
                     cwd: None,
                     initial_prompt: None,
+                    on_main: false,
                 });
                 self.flash_info(format!(
                     "Provisioning worktree for {workspace_key} — opening in {} when ready…",

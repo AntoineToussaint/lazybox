@@ -63,6 +63,7 @@ fn all_commands() -> Vec<Command> {
             kind: TerminalKind::Agent("claude".into()),
             cwd: Some("/tmp".into()),
             initial_prompt: None,
+            on_main: false,
         },
         Command::Spawn {
             session_key: key.clone(),
@@ -70,6 +71,7 @@ fn all_commands() -> Vec<Command> {
             kind: TerminalKind::Shell,
             cwd: None,
             initial_prompt: None,
+            on_main: true,
         },
         Command::Spawn {
             session_key: key.clone(),
@@ -79,6 +81,7 @@ fn all_commands() -> Vec<Command> {
             },
             cwd: None,
             initial_prompt: Some("fix the failing CI".into()),
+            on_main: false,
         },
         Command::CreateSession {
             session_key: key.clone(),
@@ -211,6 +214,7 @@ fn all_events() -> Vec<Event> {
                 replay: b"replay-bytes".to_vec(),
                 last_seq: 42,
                 no_permission: true,
+                on_main: true,
                 last_user_message: Some("fix the flaky test".into()),
             }],
             projects: vec![],
@@ -232,6 +236,7 @@ fn all_events() -> Vec<Event> {
             session_key: key.clone(),
             kind: TerminalKind::Shell,
             no_permission: false,
+            on_main: false,
         },
         Event::TerminalOutput {
             terminal_id: TerminalId(2),

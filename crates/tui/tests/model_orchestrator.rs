@@ -877,6 +877,7 @@ fn w_on_issue_with_running_claude_injects_implement_prompt() {
         session_key: SessionKey::from(&ws_key),
         kind: TerminalKind::Agent("claude".into()),
         no_permission: false,
+        on_main: false,
     });
 
     // TerminalSpawned auto-focuses the terminal pane. In real usage
@@ -961,6 +962,7 @@ fn w_on_issue_from_right_pane_also_injects() {
         session_key: SessionKey::from(&ws_key),
         kind: TerminalKind::Agent("claude".into()),
         no_permission: false,
+        on_main: false,
     });
 
     // Get to the right pane. TerminalSpawned auto-focused terminals;
@@ -1047,6 +1049,7 @@ fn sidebar_w_honors_activity_selection() {
         .find_map(|c| match c {
             Command::Spawn {
                 initial_prompt: Some(p),
+                on_main: false,
                 ..
             } => Some(p.clone()),
             _ => None,
@@ -1818,6 +1821,7 @@ fn terminal_spawned_mid_checklist_walks_every_step_before_dismissing() {
         session_key: sk,
         kind: TerminalKind::Agent("claude".into()),
         no_permission: false,
+        on_main: false,
     });
     assert!(
         m.modal_stack.contains(&Id::WorktreeProgress),
@@ -1885,6 +1889,7 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
             replay: Vec::new(),
             last_seq: 0,
             no_permission: false,
+            on_main: false,
             last_user_message: None,
         }],
         projects: vec![],
@@ -1934,6 +1939,7 @@ fn instant_resume_does_not_flash_the_progress_modal() {
         session_key: SessionKey::new("github:o/r#42"),
         kind: TerminalKind::Agent("claude".into()),
         no_permission: false,
+        on_main: false,
     });
     assert!(
         !m.modal_stack.contains(&Id::WorktreeProgress),
@@ -1957,6 +1963,7 @@ fn failed_step_keeps_the_checklist_up_past_terminal_spawned() {
         session_key: sk,
         kind: TerminalKind::Shell,
         no_permission: false,
+        on_main: false,
     });
     assert_eq!(
         m.modal_stack.last(),

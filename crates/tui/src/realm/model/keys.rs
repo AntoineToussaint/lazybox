@@ -579,6 +579,7 @@ impl<T: TerminalAdapter> Model<T> {
                 kind: lazybox_ipc::TerminalKind::Agent(agent_id),
                 cwd,
                 initial_prompt: Some(prompt),
+                on_main,
             } => {
                 if let Some(terminal_id) = self.sidebar.find_agent_terminal(&session_key, &agent_id)
                 {
@@ -609,6 +610,7 @@ impl<T: TerminalAdapter> Model<T> {
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id),
                         cwd,
                         initial_prompt: Some(prompt),
+                        on_main,
                     }
                 }
             }
@@ -1186,6 +1188,12 @@ fn action_from_entry(
             .as_ref()
             .map(|Param::Agent(id)| Action::WorkWith(id.clone()));
     }
+    if entry.kind == ActionKind::SpawnAgentOnMain {
+        return entry
+            .param
+            .as_ref()
+            .map(|Param::Agent(id)| Action::SpawnAgentOnMain(id.clone()));
+    }
     action_from_kind(entry.kind)
 }
 
@@ -1201,6 +1209,7 @@ fn action_from_kind(
     use lazybox_tui_core::action::{Action, ActionKind};
     Some(match kind {
         ActionKind::SpawnShell => Action::SpawnShell,
+        ActionKind::SpawnShellOnMain => Action::SpawnShellOnMain,
         ActionKind::MarkAllRead => Action::MarkAllRead,
         ActionKind::Work => Action::Work,
         ActionKind::OpenEditor => Action::OpenEditor,

@@ -254,6 +254,7 @@ impl<T: TerminalAdapter> Model<T> {
                         kind: lazybox_ipc::TerminalKind::Shell,
                         cwd: None,
                         initial_prompt: None,
+                        on_main: false,
                     });
                 }
             }
@@ -265,6 +266,37 @@ impl<T: TerminalAdapter> Model<T> {
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
                         cwd: None,
                         initial_prompt: None,
+                        on_main: false,
+                    });
+                }
+            }
+            // Main-checkout variants (`b c` / `b s`, confirm-guarded):
+            // same spawn, but `on_main` tells the daemon to land in the
+            // repo's shared main checkout instead of an isolated
+            // worktree. `session_id` is deliberately dropped — "on main"
+            // always targets the shared checkout, not the selected
+            // session sub-row.
+            Action::SpawnAgentOnMain(agent_id) => {
+                if let Some(sk) = session_key {
+                    cmds.push(IpcCommand::Spawn {
+                        session_key: sk,
+                        session_id: None,
+                        kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
+                        cwd: None,
+                        initial_prompt: None,
+                        on_main: true,
+                    });
+                }
+            }
+            Action::SpawnShellOnMain => {
+                if let Some(sk) = session_key {
+                    cmds.push(IpcCommand::Spawn {
+                        session_key: sk,
+                        session_id: None,
+                        kind: lazybox_ipc::TerminalKind::Shell,
+                        cwd: None,
+                        initial_prompt: None,
+                        on_main: true,
                     });
                 }
             }
@@ -702,6 +734,7 @@ impl<T: TerminalAdapter> Model<T> {
                 kind: lazybox_ipc::TerminalKind::Agent(agent_id),
                 cwd: None,
                 initial_prompt: prompt,
+                on_main: false,
             });
             self.right.clear_activity_selection();
         } else {

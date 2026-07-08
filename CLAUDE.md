@@ -215,7 +215,13 @@ into PR, `Shift-X` archive. `g` is a leader key that opens the
 browser. Merge has no direct-key alias — `g m` is its only default
 chord. The legacy `Shift-{V,G,L,O}` keys remain as direct aliases
 (Activity-section bindings shadow them while the right pane is
-focused — e.g. `Shift-G` is jump-to-bottom there).
+focused — e.g. `Shift-G` is jump-to-bottom there). `b` is a leader
+for the **on-main** group (which-key popup): `b c` / `b x` / `b u`
+start an agent, `b s` a shell, on the repo's shared **main checkout**
+(default branch) instead of an isolated worktree — confirmed first
+since edits land on the shared branch, and the resulting terminal
+carries a `⎇ main` tab badge. Only surfaces on workspaces with a repo
+scope.
 
 **RightPane (Activity)**: `j/k` or arrows move the row cursor,
 `g/G` top/bottom, `→/l` expand row, `←/h` collapse row, `Enter`

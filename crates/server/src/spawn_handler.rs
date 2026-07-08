@@ -352,6 +352,7 @@ pub async fn handle_spawn(
     cwd: Option<String>,
     initial_prompt: Option<String>,
     autonomous: bool,
+    on_main: bool,
 ) {
     // Autonomous sessions (e.g. `@lazybox`-triggered work) launch with
     // tool-use permission prompts disabled so the agent runs unattended
@@ -389,7 +390,7 @@ pub async fn handle_spawn(
     // path: wait for the winner's terminal, deliver the prompt, focus.
     // Held in a drop guard so every exit path — including the failure
     // returns below — releases the claim.
-    let _inflight = match InflightSpawnGuard::try_claim(config, &session_key, &kind) {
+    let _inflight = match InflightSpawnGuard::try_claim(config, &session_key, &kind, on_main) {
         Ok(guard) => guard,
         Err(()) => {
             collapse_onto_inflight_spawn(config, &session_key, &kind, initial_prompt.as_deref())
@@ -403,7 +404,7 @@ pub async fn handle_spawn(
     // alone fails the moment a second client connects to the same
     // daemon. The guard here protects the invariant for everyone:
     // at most one Claude per session, one Codex per session, etc.
-    if let Some(existing) = find_existing_singleton(config, &session_key, &kind).await {
+    if let Some(existing) = find_existing_singleton(config, &session_key, &kind, on_main).await {
         tracing::info!(
             terminal_id = ?existing,
             has_initial_prompt = initial_prompt.is_some(),
@@ -435,7 +436,7 @@ pub async fn handle_spawn(
         if let Some(c) = cwd.as_deref() {
             (Some(PathBuf::from(c)), None)
         } else {
-            match resolve_or_create_session(config, &session_key, session_id, &kind).await {
+            match resolve_or_create_session(config, &session_key, session_id, &kind, on_main).await {
                 Ok((path, sid)) => (Some(path), Some(sid)),
                 Err(e) => {
                     let _ = config.bus.send(Event::provider_error_permanent(
@@ -623,6 +624,9 @@ pub async fn handle_spawn(
             .await
             .insert(terminal_id);
     }
+    if on_main {
+        config.on_main_terminals.lock().await.insert(terminal_id);
+    }
     config
         .terminals
         .lock()
@@ -651,6 +655,7 @@ pub async fn handle_spawn(
     let input_shapes_map = config.input_needed_shapes.clone();
     let terminal_meta_map = config.terminal_meta.clone();
     let no_permission_map = config.no_permission_terminals.clone();
+    let on_main_map = config.on_main_terminals.clone();
     let store_for_pump = config.store.clone();
     let id_for_pump = terminal_id;
     let key_for_pump = backend_key.clone();
@@ -700,6 +705,7 @@ pub async fn handle_spawn(
         session_key,
         kind,
         no_permission: skip_permissions,
+        on_main,
     });
     if let Err(e) = send_result {
         tracing::error!("handle_spawn: bus.send(TerminalSpawned) failed: {e}");
@@ -890,6 +896,7 @@ pub async fn handle_spawn(
         input_shapes_map.lock().await.remove(&id_for_pump);
         terminal_meta_map.lock().await.remove(&id_for_pump);
         no_permission_map.lock().await.remove(&id_for_pump);
+        on_main_map.lock().await.remove(&id_for_pump);
         let _ = store_for_pump.delete_kv(&format!("terminal:{key_for_pump}"));
         let _ = store_for_pump.delete_kv(&format!("terminal-noperm:{key_for_pump}"));
         let _ = store_for_pump.delete_kv(&format!("terminal-msg:{key_for_pump}"));
@@ -1143,6 +1150,7 @@ async fn resolve_or_create_session(
     session_key: &SessionKey,
     session_id: Option<SessionId>,
     kind: &TerminalKind,
+    on_main: bool,
 ) -> Result<(PathBuf, SessionId), crate::ServerError> {
     let workspace_key = WorkspaceKey::new(session_key.as_str());
 
@@ -1200,6 +1208,35 @@ async fn resolve_or_create_session(
         }
     };
 
+    // Main-checkout spawn: skip the isolated per-session worktree and
+    // land in the repo's shared checkout on its default branch. The
+    // path is stable per repo (`<root>/<scope>/main`) so every
+    // main-checkout session across the repo's workspaces reuses one
+    // worktree — that's the point (it IS the shared main). No `Session`
+    // is persisted for it: the singleton guard handles agent reuse and
+    // the deterministic path handles shells, so an ephemeral session id
+    // is enough for `terminal_sessions`. Repo-less / standalone
+    // workspaces have no scope and no meaningful "main", so they fall
+    // through to normal isolated provisioning.
+    if on_main && let Some(path) = main_worktree_path(&workspace) {
+        let provisioned = provision_worktree(config, &workspace, &path, session_key, true).await;
+        if let Err(e) = &provisioned {
+            tracing::warn!("main-checkout worktree provisioning failed: {e}");
+            emit_worktree_progress(
+                config,
+                session_key,
+                WorktreeStep::Clone,
+                WorktreeStepStatus::Failed(e.to_string()),
+            );
+            let _ = config.bus.send(Event::provider_error_retryable(
+                "worktree",
+                format!("main checkout setup failed; using empty dir ({e})"),
+            ));
+            ensure_dir_exists(&path).await;
+        }
+        return Ok((path, SessionId::new()));
+    }
+
     if let Some(id) = session_id {
         let session = workspace.find_session(id).ok_or_else(|| {
             crate::ServerError::Workspace(format!("session {id:?} not in workspace"))
@@ -1223,7 +1260,7 @@ async fn resolve_or_create_session(
     let path = worktree_path_for_session(&workspace, 0);
 
     let prov_start = std::time::Instant::now();
-    let provisioned = provision_worktree(config, &workspace, &path, session_key).await;
+    let provisioned = provision_worktree(config, &workspace, &path, session_key, false).await;
     tracing::info!(
         elapsed_ms = prov_start.elapsed().as_millis(),
         ok = provisioned.is_ok(),
@@ -1420,6 +1457,7 @@ async fn provision_worktree(
     workspace: &Workspace,
     target: &std::path::Path,
     session_key: &SessionKey,
+    on_main: bool,
 ) -> Result<(), crate::ServerError> {
     use crate::ServerError;
     use lazybox_git_ops::CheckoutPhase;
@@ -1482,7 +1520,21 @@ async fn provision_worktree(
             let (owner, name) = repo.split_once('/').ok_or_else(|| {
                 ServerError::Workspace(format!("repo '{repo}' is not owner/name"))
             })?;
-            let worktree = match task.and_then(|t| t.branch.as_deref()) {
+            // On-main: ignore the task branch and check out the repo's
+            // default branch into the shared main worktree. `checkout_at`
+            // is idempotent on the path, so repeated main-checkout spawns
+            // reuse the one worktree rather than fighting over the branch.
+            let on_main_branch = if on_main {
+                Some(
+                    mgr.default_branch(owner, name)
+                        .await
+                        .map_err(|e| ServerError::Worktree(format!("default_branch: {e}")))?,
+                )
+            } else {
+                None
+            };
+            let worktree = match on_main_branch.as_deref().or(task.and_then(|t| t.branch.as_deref()))
+            {
                 Some(branch) => mgr
                     .checkout_at(target, owner, name, branch)
                     .await
@@ -1838,7 +1890,10 @@ async fn ensure_worktree_present(
         return;
     }
     tracing::info!("worktree {} missing — re-provisioning", path.display());
-    if let Err(e) = provision_worktree(config, workspace, path, session_key).await {
+    // Re-provisioning a persisted session's worktree — always an
+    // isolated per-session tree (main-checkout terminals aren't
+    // persisted as sessions).
+    if let Err(e) = provision_worktree(config, workspace, path, session_key, false).await {
         tracing::warn!("re-provision failed: {e}");
         emit_worktree_progress(
             config,
@@ -1867,13 +1922,22 @@ pub(crate) async fn find_existing_singleton(
     config: &ServerConfig,
     session_key: &SessionKey,
     kind: &TerminalKind,
+    on_main: bool,
 ) -> Option<TerminalId> {
     let target = kind.singleton_key()?;
+    // A main-checkout agent and the same agent on an isolated worktree
+    // are DISTINCT singletons within one workspace — otherwise a `b c`
+    // (claude on main) would collapse onto an already-running isolated
+    // claude and never reach the main checkout. Match the requested
+    // checkout too, using the same per-terminal set the badge reads.
+    let on_main_set = config.on_main_terminals.lock().await.clone();
     let snapshot = snapshot_terminals(config).await;
     snapshot
         .iter()
         .find(|t| {
-            t.session_key == *session_key && t.kind.singleton_key().as_deref() == Some(&target)
+            t.session_key == *session_key
+                && t.kind.singleton_key().as_deref() == Some(&target)
+                && on_main_set.contains(&t.terminal_id) == on_main
         })
         .map(|t| t.terminal_id)
 }
@@ -1896,9 +1960,18 @@ impl InflightSpawnGuard {
         config: &ServerConfig,
         session_key: &SessionKey,
         kind: &TerminalKind,
+        on_main: bool,
     ) -> Result<Option<Self>, ()> {
         let Some(target) = kind.singleton_key() else {
             return Ok(None);
+        };
+        // Fold the checkout into the identity so a main-checkout spawn
+        // doesn't race-collapse onto an in-flight isolated spawn of the
+        // same agent (mirrors `find_existing_singleton`).
+        let target = if on_main {
+            format!("{target}:main")
+        } else {
+            target
         };
         let key = (session_key.as_str().to_string(), target);
         let mut set = config
@@ -2187,6 +2260,22 @@ pub fn worktree_path_for_session(workspace: &Workspace, index: usize) -> PathBuf
         Some(scope) => root.join(scope).join(name),
         None => root.join(name),
     }
+}
+
+/// Shared main-checkout worktree path for a workspace's repo:
+/// `<root>/<scope>/main`. Keyed on the workspace's repo/project scope
+/// (not its slug) so every workspace on the same repo resolves the same
+/// path — the whole point of "the main checkout" is that it's shared.
+/// `None` for a repo-less / project-less workspace, which has no scope
+/// and no meaningful default branch to sit on.
+///
+/// The literal `main` segment is a stable folder label; the branch
+/// actually checked out is the repo's resolved default (`main` or
+/// `master`), which the folder name doesn't try to track.
+pub fn main_worktree_path(workspace: &Workspace) -> Option<PathBuf> {
+    workspace
+        .worktree_scope()
+        .map(|scope| worktree_root().join(scope).join("main"))
 }
 
 /// Explicit session creation. Always provisions a fresh worktree
@@ -2921,6 +3010,10 @@ pub async fn handle_inject_prompt(
                     fb.cwd,
                     prompt,
                     autonomous,
+                    // Inject-fallback re-spawns an isolated worktree
+                    // session; the main-checkout flow never routes
+                    // through prompt injection.
+                    false,
                 )
                 .await;
                 return;
@@ -3270,6 +3363,10 @@ pub async fn recover_sessions(config: &ServerConfig) {
             session_key,
             kind,
             no_permission,
+            // The main-checkout marker lives in an in-memory set that a
+            // daemon restart clears; a recovered terminal keeps running
+            // on its worktree but the badge doesn't survive the restart.
+            on_main: false,
         });
         tokio::spawn(async move {
             let exit_code = match backend.subscribe(&key_for_pump).await {
@@ -3451,6 +3548,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
             .collect()
     };
     let no_permission = config.no_permission_terminals.lock().await.clone();
+    let on_main = config.on_main_terminals.lock().await.clone();
 
     let mut out = Vec::with_capacity(entries.len());
     for (id, key, session_key, kind) in entries {
@@ -3492,6 +3590,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
             };
         out.push(TerminalSnapshot {
             no_permission: no_permission.contains(&id),
+            on_main: on_main.contains(&id),
             last_user_message: load_user_message(config, &key),
             terminal_id: id,
             session_key,
@@ -3571,6 +3670,9 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 // Restored from a persisted session record, which
                 // doesn't carry the autonomous flag — re-spawn with
                 // prompts on rather than silently bypassing.
+                false,
+                // Restored sessions live in their persisted worktree;
+                // main-checkout terminals aren't persisted as sessions.
                 false,
             )
             .await;
@@ -3950,24 +4052,47 @@ mod tests {
         let key: SessionKey = "test:ws-guard".into();
         let kind = TerminalKind::Agent("claude".into());
 
-        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind)
+        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind, false)
             .expect("first claim wins")
             .expect("agents are singletons");
         // Second claim on the same identity loses.
-        assert!(InflightSpawnGuard::try_claim(&config, &key, &kind).is_err());
+        assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, false).is_err());
         // A different kind on the same workspace is a separate identity.
         assert!(
-            InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Agent("codex".into()))
+            InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Agent("codex".into()), false)
                 .is_ok()
         );
         // Shells are never singletons — no guard, never blocked.
         assert!(matches!(
-            InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Shell),
+            InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Shell, false),
             Ok(None)
         ));
         drop(guard);
         // Released → claimable again.
-        assert!(InflightSpawnGuard::try_claim(&config, &key, &kind).is_ok());
+        assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, false).is_ok());
+    }
+
+    /// #271: a main-checkout spawn of an agent is a DISTINCT singleton
+    /// identity from the same agent on an isolated worktree in the same
+    /// workspace — so `b c` doesn't race-collapse onto an in-flight
+    /// isolated `c`.
+    #[test]
+    fn inflight_guard_separates_main_from_isolated() {
+        let config = ServerConfig::in_memory();
+        let key: SessionKey = "test:ws-main".into();
+        let kind = TerminalKind::Agent("claude".into());
+
+        let _isolated = InflightSpawnGuard::try_claim(&config, &key, &kind, false)
+            .expect("isolated claim wins")
+            .expect("agents are singletons");
+        // The isolated identity is taken…
+        assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, false).is_err());
+        // …but the on-main identity is still free.
+        let _main = InflightSpawnGuard::try_claim(&config, &key, &kind, true)
+            .expect("main claim wins")
+            .expect("agents are singletons");
+        // And now the on-main identity is taken too.
+        assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, true).is_err());
     }
 
     /// Kill/Spawn serialization semantics: `await_inflight_spawns`
@@ -3983,7 +4108,7 @@ mod tests {
         let config = ServerConfig::in_memory();
         let key: SessionKey = "test:ws-kill".into();
         let kind = TerminalKind::Agent("claude".into());
-        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind)
+        let guard = InflightSpawnGuard::try_claim(&config, &key, &kind, false)
             .unwrap()
             .unwrap();
 
@@ -4998,6 +5123,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn main_worktree_path_is_shared_per_repo() {
+        // #271: the main checkout is one shared worktree per repo scope
+        // — two DIFFERENT workspaces on the same repo resolve the SAME
+        // `<root>/<scope>/main` path (unlike per-session worktrees),
+        // which is what makes "the main checkout" a single shared tree.
+        let named = |name: &str, project: lazybox_core::ProjectKey| {
+            let mut ws =
+                Workspace::empty(WorkspaceKey::new(format!("local:{name}")), "main", Utc::now());
+            ws.name = name.into();
+            ws.project_key = Some(project);
+            ws
+        };
+        let pr = named("PR 12", lazybox_core::ProjectKey::github("acme", "widget"));
+        let issue = named("Issues", lazybox_core::ProjectKey::github("acme", "widget"));
+        let other = named("Issues", lazybox_core::ProjectKey::github("acme", "gadget"));
+
+        let expected = worktree_root().join("github-acme-widget").join("main");
+        assert_eq!(main_worktree_path(&pr), Some(expected.clone()));
+        assert_eq!(
+            main_worktree_path(&issue),
+            Some(expected),
+            "two workspaces on the same repo share one main checkout",
+        );
+        assert_ne!(
+            main_worktree_path(&pr),
+            main_worktree_path(&other),
+            "different repos get different main checkouts",
+        );
+
+        // A repo-less / project-less workspace has no shared main.
+        let bare = Workspace::empty(WorkspaceKey::new("bare"), "main", Utc::now());
+        assert_eq!(main_worktree_path(&bare), None);
+    }
+
     /// End-to-end through `provision_worktree`: a blank workspace under
     /// a local project has no repo to clone, so it gets a standalone
     /// `git init` worktree on the workspace-key branch rather than a
@@ -5011,7 +5171,7 @@ mod tests {
         let dir = tmp.path().join("worktree");
         let session_key = SessionKey::new("scratch");
         let mut bus_rx = config.bus.subscribe();
-        provision_worktree(&config, &ws, &dir, &session_key)
+        provision_worktree(&config, &ws, &dir, &session_key, false)
             .await
             .unwrap();
         assert!(dir.join(".git").exists(), "a real git repo was created");

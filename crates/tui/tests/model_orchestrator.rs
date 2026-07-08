@@ -1331,10 +1331,10 @@ fn leader_g_then_unmapped_key_redispatches() {
 }
 
 /// Arming is purely catalog-driven: `g` arms the leader from sidebar
-/// focus even with no workspace selected (just like the single-key
-/// `Shift-M` resolves at the keyboard layer regardless of target). The
-/// completed chord then no-ops in `dispatch_action` if nothing is
-/// actionable — same contract as every other workspace action.
+/// focus even with no workspace selected — the chord resolves at the
+/// keyboard layer regardless of target. The completed chord then
+/// no-ops in `dispatch_action` if nothing is actionable — same
+/// contract as every other workspace action.
 #[test]
 fn leader_g_arms_from_sidebar_without_workspace() {
     use lazybox_tui_core::action::{ChordCode, KeyStroke};

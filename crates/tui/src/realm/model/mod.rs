@@ -588,7 +588,7 @@ pub struct Model<T: TerminalAdapter> {
     /// `WorktreeProgress` event, cleared when the modal dismisses.
     worktree_progress: Option<crate::realm::components::worktree_progress::WorktreeProgressState>,
     /// Workspace key whose PR is being confirmed for merge by the
-    /// `Shift-M` Confirm modal. Set when the modal mounts, taken on
+    /// `g m` Confirm modal. Set when the modal mounts, taken on
     /// `Msg::Confirmed` / `Msg::ModalDismissed`.
     /// Source workspace key the `Shift-A` adopt picker is gathering
     /// a target for. Set when the picker mounts; consumed when the
@@ -2378,7 +2378,7 @@ impl<T: TerminalAdapter> Model<T> {
             };
         // Resolve the focused pane's CONTEXTUAL bindings for the
         // footer hint bar. Contextual = state-aware short list
-        // ("Shift-M merge" when the row is READY, "w fix CI" when
+        // ("g m merge" when the row is READY, "w fix CI" when
         // CI is failing, etc.) so the user always sees what's
         // actionable right now, not a generic alphabet. The full
         // keymap stays in `?` help.

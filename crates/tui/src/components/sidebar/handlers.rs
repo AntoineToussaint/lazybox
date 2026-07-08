@@ -167,8 +167,8 @@ impl Sidebar {
             // arms (sidebar chrome shows "press again to confirm");
             // second within the latch window fires `Kill`.
 
-            // Shift+M MergePr is now handled by the catalog
-            // dispatch path in `Model::dispatch_action` — it does
+            // MergePr (the `g m` leader) is now handled by the
+            // catalog dispatch path in `Model::dispatch_action` — it does
             // the same `resolve_merge` precondition check, then
             // mounts the Confirm modal. The match arm here used to
             // queue a `pending_merge_requests` entry that the

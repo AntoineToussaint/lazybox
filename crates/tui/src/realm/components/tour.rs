@@ -131,7 +131,7 @@ const STEPS: &[TourStep] = &[
             "  g l  labels      g o  open in browser",
             "",
             "g shows the menu; the second key picks. The old",
-            "Shift-M/V/G/L/O keys still work as direct aliases.",
+            "Shift-V/G/L/O keys still work as direct aliases.",
             "",
             "? shows the keymap, , Settings, t themes, q q quits. In",
             "a terminal keys go to the agent — press ]]q to return first.",

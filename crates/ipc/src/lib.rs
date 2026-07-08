@@ -672,6 +672,15 @@ pub enum Command {
     MergePr {
         workspace_key: lazybox_core::WorkspaceKey,
     },
+    /// Close the workspace's GitHub issue upstream. Fires from the
+    /// sidebar's `Shift-C` shortcut on an issue-only workspace, after
+    /// a confirm. GitHub has no non-admin "delete issue" via the API,
+    /// so the daemon closes the issue (state `NOT_PLANNED`) via the
+    /// GraphQL `closeIssue` mutation. The next poll picks up the
+    /// closed state and offers the usual workspace-removal prompt.
+    CloseIssue {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
     /// Request reviews on the workspace's PR from the given GitHub
     /// logins. Adds to the existing reviewer set (no replacement).
     /// Only meaningful when the focused workspace's primary task is
@@ -941,6 +950,26 @@ pub enum Event {
     PrMergeFailed {
         workspace_key: lazybox_core::WorkspaceKey,
         pr_label: String,
+        reason: String,
+    },
+    /// The issue for `workspace_key` was just closed via
+    /// `Command::CloseIssue`. The local Task still reads `Open` until
+    /// the next poll catches up, so the TUI flashes a footer notice so
+    /// the keypress doesn't look like a no-op. The workspace-removal
+    /// prompt follows from the daemon's open→closed detection on the
+    /// next poll (which `handle_close_issue` wakes).
+    IssueClosed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        issue_label: String,
+    },
+    /// `Command::CloseIssue` failed at the GitHub API — the user
+    /// pressed `Shift-C` and the close did NOT happen. Surfaced as a
+    /// prominent, persistent error naming the reason (e.g. missing
+    /// permissions), mirroring `PrMergeFailed`. The issue stays
+    /// Open/actionable.
+    IssueCloseFailed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        issue_label: String,
         reason: String,
     },
     /// A workspace's primary task just reached a terminal state (a PR

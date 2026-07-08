@@ -704,6 +704,27 @@ pub fn merge_pr_body(pull_request_node_id: &str) -> serde_json::Value {
     })
 }
 
+/// GraphQL mutation that closes an issue as `NOT_PLANNED` — the
+/// "won't do" close, distinct from the `COMPLETED` state a resolving
+/// PR produces. GitHub offers no non-admin issue *delete* over the
+/// API, so lazybox's "delete issue" resolves to this. Closing an
+/// already-closed issue is a no-op on GitHub's side, so retrying is
+/// safe.
+const CLOSE_ISSUE_MUTATION: &str = r#"
+mutation($id: ID!) {
+  closeIssue(input: { issueId: $id, stateReason: NOT_PLANNED }) {
+    issue { id state stateReason }
+  }
+}
+"#;
+
+pub fn close_issue_body(issue_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": CLOSE_ISSUE_MUTATION,
+        "variables": { "id": issue_node_id },
+    })
+}
+
 /// GraphQL mutation: add a 👀 reaction to any `Reactable` (Issue body
 /// or IssueComment, in lazybox's case). Posting this reaction is the
 /// authoritative idempotency marker for the `@lazybox`-mention
@@ -2464,6 +2485,18 @@ mod tests {
     fn test_extract_repo_malformed() {
         assert_eq!(extract_repo_from_url("not-a-url"), "unknown/unknown");
         assert_eq!(extract_repo_from_url(""), "unknown/unknown");
+    }
+
+    #[test]
+    fn close_issue_body_targets_the_node_as_not_planned() {
+        // Issue #270: "delete issue" resolves to a NOT_PLANNED close.
+        // Pin the mutation + variable so a stray edit to either can't
+        // silently retarget or change the close reason.
+        let body = close_issue_body("I_kwDOabc123");
+        assert_eq!(body["variables"]["id"], "I_kwDOabc123");
+        let query = body["query"].as_str().unwrap();
+        assert!(query.contains("closeIssue"));
+        assert!(query.contains("stateReason: NOT_PLANNED"));
     }
 
     #[test]

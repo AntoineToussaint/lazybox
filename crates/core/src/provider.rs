@@ -226,6 +226,18 @@ pub trait TaskProvider: Send + Sync {
         Err(ProviderError::unsupported(self.name(), "merge"))
     }
 
+    /// Close the workspace's issue. Providers that can't truly delete
+    /// an issue (GitHub, for non-admins) close it instead. Defaults to
+    /// `unsupported` so a provider without an issue-close concept opts
+    /// in explicitly.
+    ///
+    /// Idempotency: closing an already-closed issue returns `Ok(())`
+    /// — the polling cycle reconciles the local copy regardless.
+    async fn close_issue(&self, workspace: &Workspace) -> Result<(), ProviderError> {
+        let _ = workspace;
+        Err(ProviderError::unsupported(self.name(), "close_issue"))
+    }
+
     /// Request reviewer(s) on the workspace's task. `logins` are
     /// provider-native account identifiers (github logins, linear
     /// user ids, …).

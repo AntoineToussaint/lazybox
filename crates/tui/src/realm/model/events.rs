@@ -383,6 +383,28 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // `Shift-C` reached GitHub and the issue was closed. The local
+        // Task still reads `Open` until the next poll, so flash a notice
+        // now; the daemon's open→closed detection (which the close
+        // handler woke) follows with the workspace-removal prompt.
+        if let IpcEvent::IssueClosed { issue_label, .. } = &event {
+            self.flash_info(format!("closed {issue_label}"));
+            self.redraw = true;
+            return;
+        }
+        // `Shift-C` reached GitHub and was rejected — the close did NOT
+        // happen. Surface a distinct, persistent error naming the reason
+        // (mirrors `PrMergeFailed`). The issue stays Open/actionable.
+        if let IpcEvent::IssueCloseFailed {
+            issue_label,
+            reason,
+            ..
+        } = &event
+        {
+            self.flash_error(format!("✗ close failed — {issue_label}: {reason}"));
+            self.redraw = true;
+            return;
+        }
         // The daemon detected a PR merge or an issue close and wants the
         // user to decide whether to remove the workspace + delete its
         // worktree. Queue it onto the shared removal-prompt machinery

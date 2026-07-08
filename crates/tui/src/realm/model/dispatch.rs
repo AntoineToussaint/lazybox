@@ -100,6 +100,27 @@ impl<T: TerminalAdapter> Model<T> {
                     Action::Archive => vec![IpcCommand::Kill {
                         session_key: session_key.clone(),
                     }],
+                    Action::CloseIssue => match workspace.as_ref() {
+                        // Re-check against the STASHED workspace — a poll
+                        // could have closed the issue or attached a PR
+                        // while the modal was up. Same predicate the
+                        // catalog gates the keypress on, so the two never
+                        // disagree.
+                        Some(ws)
+                            if lazybox_tui_core::action::availability(
+                                lazybox_tui_core::action::ActionKind::CloseIssue,
+                                Some(ws),
+                            ) =>
+                        {
+                            vec![IpcCommand::CloseIssue {
+                                workspace_key: ws.key.clone(),
+                            }]
+                        }
+                        _ => {
+                            self.flash_info("issue is no longer open — nothing to close");
+                            Vec::new()
+                        }
+                    },
                     Action::LongSnooze => {
                         // Re-resolve against the stashed workspace so a
                         // state change while the modal was up can't

@@ -1184,6 +1184,7 @@ fn action_from_kind(
         ActionKind::MergePr => Action::MergePr,
         ActionKind::ToggleAutoMerge => Action::ToggleAutoMerge,
         ActionKind::Archive => Action::Archive,
+        ActionKind::CloseIssue => Action::CloseIssue,
         ActionKind::ToggleSnooze => Action::ToggleSnooze,
         ActionKind::LongSnooze => Action::LongSnooze,
         ActionKind::Refresh => Action::Refresh,

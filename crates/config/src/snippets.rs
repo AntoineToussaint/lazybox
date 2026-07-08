@@ -330,12 +330,47 @@ impl Snippets {
                 "rebase".to_string(),
                 entry(
                     "Git & PR",
-                    "Rebase onto the base branch",
-                    "Rebase this branch onto the latest base branch. Fetch first \
-                     (`git fetch`), replay cleanly, and resolve any conflicts \
+                    "Rebase onto the latest main",
+                    "Rebase this branch onto the latest `main` (or whatever base it \
+                     targets). Fetch first (`git fetch origin`), then rebase onto \
+                     `origin/main`, replaying cleanly and resolving any conflicts \
                      conservatively — preserve the intent of both sides, never drop a \
                      change just to clear markers, and flag anything ambiguous for me. \
-                     When done, confirm the branch still builds and tests pass.",
+                     When it's done, confirm the branch still builds and tests pass, then \
+                     push the rewritten history with `--force-with-lease` (never a bare \
+                     `--force`).",
+                ),
+            ),
+            (
+                "sync".to_string(),
+                entry(
+                    "Git & PR",
+                    "Update the branch from main (merge, no rewrite)",
+                    "Bring this branch up to date with the latest `main` by *merging*, not \
+                     rebasing — use this when the branch is already pushed or shared and \
+                     you'd rather not rewrite history. Fetch first (`git fetch origin`), \
+                     merge `origin/main` in, and resolve any conflicts by honoring the \
+                     intent of both sides (never drop a change just to clear markers), \
+                     flagging anything ambiguous for me. Confirm the branch builds and \
+                     tests pass afterward. Since this doesn't rewrite history, a plain \
+                     `git push` is enough — no force needed. (Prefer `rebase` instead when \
+                     you want a linear history on an unshared branch.)",
+                ),
+            ),
+            (
+                "continue".to_string(),
+                entry(
+                    "Git & PR",
+                    "Continue an in-progress rebase through conflicts",
+                    "A rebase is in progress and has stopped on a conflict. For each \
+                     conflicted file, work out what both the replayed commit and the \
+                     upstream changes intended and keep a result that honors both — don't \
+                     blindly take one side just to clear the markers. Stage the resolved \
+                     files, run `git rebase --continue`, and repeat for each commit the \
+                     rebase stops on until it finishes. If it reaches a state you can't \
+                     safely resolve, run `git rebase --abort` and tell me rather than \
+                     forcing a bad merge. When it completes, confirm the tree builds and \
+                     tests pass, then push with `--force-with-lease`.",
                 ),
             ),
             (
@@ -360,6 +395,21 @@ impl Snippets {
                      whichever is easier to paste. Explain per file which side you kept \
                      and why, then confirm the merged result actually builds and passes \
                      tests rather than just clearing the markers.",
+                ),
+            ),
+            (
+                "push".to_string(),
+                entry(
+                    "Git & PR",
+                    "Push the branch (force-with-lease after a rewrite)",
+                    "Push the current branch to its remote. If its history was rewritten — \
+                     after a rebase, amend, or squash — push with `--force-with-lease` so \
+                     you overwrite only your own commits and never clobber work someone \
+                     else pushed; never use a bare `--force`. Otherwise a plain `git push` \
+                     (add `-u` to set the upstream on the first push). If \
+                     `--force-with-lease` is rejected because the remote moved, stop and \
+                     tell me what changed rather than escalating to `--force`. Confirm the \
+                     push landed and the branch is in sync when done.",
                 ),
             ),
             // ── Testing ─────────────────────────────────────────────
@@ -1009,6 +1059,28 @@ snippets:
                 );
             }
         }
+    }
+
+    /// The Git & PR category covers the day-to-day rebase/update/push
+    /// loop (#276): rebasing onto main, merging main in without a
+    /// rewrite, continuing a rebase through conflicts, and pushing
+    /// rewritten history safely. Every one is a Git & PR built-in.
+    #[test]
+    fn builtin_covers_rebase_and_push_workflow() {
+        let b = Snippets::builtin();
+        for key in ["rebase", "sync", "continue", "push", "conflicts"] {
+            let s = b
+                .get(key)
+                .unwrap_or_else(|| panic!("`{key}` ships built-in"));
+            assert_eq!(s.category, "Git & PR", "`{key}` is a Git & PR lens");
+            assert_eq!(s.origin, SnippetOrigin::BuiltIn);
+        }
+        // `push` and `continue` teach the safe force-push after a rewrite.
+        assert!(b.get("push").unwrap().body.contains("--force-with-lease"));
+        assert!(b.get("continue").unwrap().body.contains("git rebase --continue"));
+        // `sync` is the merge (no-rewrite) alternative to `rebase`.
+        assert!(b.get("sync").unwrap().body.contains("merg"));
+        assert!(b.get("rebase").unwrap().body.contains("--force-with-lease"));
     }
 
     #[test]

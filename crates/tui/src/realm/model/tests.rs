@@ -4506,8 +4506,9 @@ mod workspace_focus_memory_tests {
         let mut m = build_model();
         // Seed far more workspaces than the viewport can show so the
         // list overflows and the cursor has room to travel.
-        let workspaces: Vec<Workspace> =
-            (1..=60).map(|n| empty_ws(&format!("github:o/r#{n}"))).collect();
+        let workspaces: Vec<Workspace> = (1..=60)
+            .map(|n| empty_ws(&format!("github:o/r#{n}")))
+            .collect();
         m.handle_daemon_event(IpcEvent::Snapshot {
             workspaces,
             terminals: vec![],

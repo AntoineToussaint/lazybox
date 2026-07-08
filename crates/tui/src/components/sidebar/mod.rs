@@ -448,15 +448,6 @@ pub struct Sidebar {
     /// can't masquerade as a live regression. Set once at startup by
     /// [`crate::build_guard`]; `None` is the current-build common case.
     outdated_commits_behind: Option<u32>,
-    /// Workspace keys whose PR GitHub confirmed as merged (via
-    /// `Command::MergePr` → `Event::PrMerged`) but whose next poll
-    /// hasn't yet caught up. Latches the MERGED pill locally so an
-    /// interim poll that still reports `Open` — broadcast/snapshot lag,
-    /// a tick in-flight when the merge landed — can't flicker the row
-    /// back to Open. Cleared once a poll confirms the terminal state
-    /// (Merged/Closed) or the workspace is removed. The merge already
-    /// succeeded, so holding MERGED is authoritative, never optimistic.
-    merge_confirmed: std::collections::HashSet<SessionKey>,
 }
 
 /// A queued user-facing notification that the outer (IO-aware) layer
@@ -499,7 +490,6 @@ impl Sidebar {
             now_override: None,
             search: None,
             outdated_commits_behind: None,
-            merge_confirmed: std::collections::HashSet::new(),
         }
     }
 
@@ -678,10 +668,6 @@ impl Sidebar {
         // Read the clock before the mutable borrow of `workspaces`.
         let now = self.now();
         let sk: SessionKey = key.into();
-        // Latch the confirmed merge so a later poll/snapshot that still
-        // reports `Open` (broadcast lag, an in-flight tick) can't revert
-        // the pill — see `apply_merge_latch`.
-        self.merge_confirmed.insert(sk.clone());
         if let Some(workspace) = self.workspaces.get_mut(&sk) {
             if let Some(pr) = workspace.pr.as_mut() {
                 pr.state = lazybox_core::TaskState::Merged;
@@ -691,45 +677,6 @@ impl Sidebar {
                 pr.closed_at = Some(now);
             }
             self.recompute_visible();
-        }
-    }
-
-    /// Enforce the confirmed-merge latch on a workspace about to be
-    /// stored (from a `WorkspaceUpserted` poll or a reconnect
-    /// `Snapshot`). Once `mark_workspace_merged` has latched a key,
-    /// GitHub already accepted the merge, so:
-    /// - an incoming poll still showing `Open` is stale — force the PR
-    ///   back to `Merged` so the row doesn't flicker,
-    /// - an incoming poll showing the terminal state (`Merged`/`Closed`)
-    ///   has caught up — accept it and drop the latch,
-    /// - a workspace that lost its PR entirely can't hold a merge — drop
-    ///   the latch.
-    ///
-    /// No-op for un-latched keys (the overwhelming common case), so
-    /// every non-merged upsert is untouched.
-    fn apply_merge_latch(&mut self, key: &SessionKey, workspace: &mut Workspace) {
-        if !self.merge_confirmed.contains(key) {
-            return;
-        }
-        let now = self.now();
-        match workspace.pr.as_mut() {
-            Some(pr)
-                if matches!(
-                    pr.state,
-                    lazybox_core::TaskState::Merged | lazybox_core::TaskState::Closed
-                ) =>
-            {
-                self.merge_confirmed.remove(key);
-            }
-            Some(pr) => {
-                pr.state = lazybox_core::TaskState::Merged;
-                if pr.closed_at.is_none() {
-                    pr.closed_at = Some(now);
-                }
-            }
-            None => {
-                self.merge_confirmed.remove(key);
-            }
         }
     }
 

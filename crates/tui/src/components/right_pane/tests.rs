@@ -727,3 +727,88 @@ mod has_visible_content_tests {
         assert!(!pane_with(Some(ws)).has_visible_content());
     }
 }
+
+#[cfg(test)]
+mod mark_workspace_merged_tests {
+    //! Issue #265: `Event::PrMerged` flips the right-pane header pill to
+    //! MERGED immediately for the shown workspace — the twin of
+    //! `Sidebar::mark_workspace_merged` — so the detail pane and the
+    //! sidebar row agree without waiting for the confirming poll.
+    use super::super::{PaneId, RightPane};
+    use chrono::Utc;
+    use lazybox_core::{Task, TaskId, TaskState, Workspace, WorkspaceKey};
+
+    fn open_pr_task() -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
+            title: "a pr".into(),
+            body: None,
+            state: TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::Success,
+            review: lazybox_core::ReviewStatus::Approved,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/1".into(),
+            repo: Some("o/r".into()),
+            branch: Some("feature".into()),
+            base_branch: Some("main".into()),
+            updated_at: Utc::now(),
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: Some("PR_node".into()),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    fn state_of(pane: &RightPane) -> TaskState {
+        pane.selected_workspace()
+            .and_then(|w| w.pr.as_ref())
+            .expect("pane shows a PR workspace")
+            .state
+    }
+
+    #[test]
+    fn flips_the_shown_workspace_to_merged() {
+        let ws = Workspace::from_task(open_pr_task(), Utc::now());
+        let key = ws.key.clone();
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        assert_eq!(state_of(&pane), TaskState::Open);
+
+        pane.mark_workspace_merged(&key);
+        assert_eq!(
+            state_of(&pane),
+            TaskState::Merged,
+            "shown PR flips to MERGED"
+        );
+    }
+
+    #[test]
+    fn ignores_a_merge_for_a_different_workspace() {
+        let ws = Workspace::from_task(open_pr_task(), Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+
+        pane.mark_workspace_merged(&WorkspaceKey::new("github:other/repo#9"));
+        assert_eq!(
+            state_of(&pane),
+            TaskState::Open,
+            "a merge for another workspace must not touch this pane",
+        );
+    }
+}

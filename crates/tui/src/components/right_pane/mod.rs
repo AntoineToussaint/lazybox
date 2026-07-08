@@ -855,6 +855,20 @@ impl RightPane {
         self.workspace.as_ref()
     }
 
+    /// Optimistic local flip mirroring `Sidebar::mark_workspace_merged`:
+    /// when `Event::PrMerged` confirms a merge, flip the header pill to
+    /// MERGED now if this pane is showing that workspace, instead of
+    /// waiting for the confirming poll. The Model's merge latch keeps it
+    /// MERGED across any interim `Open` poll.
+    pub fn mark_workspace_merged(&mut self, key: &lazybox_core::WorkspaceKey) {
+        if let Some(ws) = self.workspace.as_mut()
+            && ws.key == *key
+            && let Some(pr) = ws.pr.as_mut()
+        {
+            pr.state = lazybox_core::TaskState::Merged;
+        }
+    }
+
     pub fn comment_cursor(&self) -> usize {
         self.feed.cursor
     }

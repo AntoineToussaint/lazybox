@@ -191,12 +191,7 @@ impl Sidebar {
                 self.workspaces.clear();
                 for w in workspaces {
                     let key: SessionKey = (&w.key).into();
-                    let mut ws = w.clone();
-                    // Hold a confirmed-merge latch across reconnect: a
-                    // fresh snapshot taken before the daemon re-polled
-                    // could still report the PR as Open.
-                    self.apply_merge_latch(&key, &mut ws);
-                    self.workspaces.insert(key, ws);
+                    self.workspaces.insert(key, w.clone());
                 }
                 self.running_terminals.clear();
                 for t in terminals {
@@ -246,18 +241,12 @@ impl Sidebar {
                         }
                     }
                 }
-                let mut ws = (**workspace).clone();
-                // A poll that ran before GitHub reflected a just-merged
-                // PR would report `Open`; the latch forces MERGED so the
-                // row can't flicker back until a poll confirms it.
-                self.apply_merge_latch(&key, &mut ws);
-                self.workspaces.insert(key, ws);
+                self.workspaces.insert(key, (**workspace).clone());
                 self.recompute_visible();
             }
             Event::WorkspaceRemoved(key) => {
                 let session_key: SessionKey = key.into();
                 self.workspaces.remove(&session_key);
-                self.merge_confirmed.remove(&session_key);
                 self.recompute_visible();
             }
             Event::SessionCreated(session) => {

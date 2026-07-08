@@ -94,6 +94,17 @@ impl<'a> WorkspaceRowCtx<'a> {
             .map(|t| t.title.as_str())
             .unwrap_or_else(|| self.workspace.map(|w| w.name.as_str()).unwrap_or("?"))
     }
+
+    /// An issue that's been sitting untouched long enough to read in
+    /// months (`Nmo` in the time column). PRs are excluded — they carry
+    /// their own staleness cues (CI, review, conflict pills) and a fade
+    /// would fight those. Stale issues get a dim title so active rows
+    /// stand out and old ones don't waste a second glance (issue #274).
+    fn is_stale_issue(&self) -> bool {
+        self.task.is_some_and(|t| {
+            !t.is_pr() && lazybox_core::time::is_stale_at(&t.updated_at, self.now)
+        })
+    }
 }
 
 /// Column spec for every workspace row in the current render pass.
@@ -335,7 +346,14 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // column (#80). No truncation here — the table renderer trims with
     // `…` when the flex column ends up smaller than the cell's natural
     // width.
-    Cell::from_span(Span::styled(ctx.raw_title().to_string(), ctx.row_style()))
+    //
+    // Stale issues fade (DIM) so the eye skips them — but never on the
+    // cursor row, whose highlight fill must stay legible.
+    let mut style = ctx.row_style();
+    if !ctx.is_cursor && ctx.is_stale_issue() {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    Cell::from_span(Span::styled(ctx.raw_title().to_string(), style))
 }
 
 /// Render the task's labels as compact chips: ` [name] [name] +N`.
@@ -537,6 +555,12 @@ fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let text = crate::components::sidebar::relative_time(task.updated_at, ctx.now);
     let style = if ctx.is_cursor {
         ctx.row_style()
+    } else if ctx.is_stale_issue() {
+        // Already `Nmo` here — fade it further so a stale issue's age
+        // reads as "old, ignore me" rather than just another timestamp.
+        Style::default()
+            .fg(ctx.theme.text_dim)
+            .add_modifier(Modifier::DIM)
     } else {
         Style::default().fg(ctx.theme.text_dim)
     };
@@ -1109,6 +1133,76 @@ mod tests {
         let cell = cell_time(&ctx);
         // First span is a single-cell row-style space.
         assert_eq!(cell.spans[0].content.as_ref(), " ");
+    }
+
+    fn make_stale_task(key: &str, title: &str) -> Task {
+        let mut t = make_task(key, title);
+        t.updated_at = fixed_time() - chrono::Duration::days(40);
+        t
+    }
+
+    /// Issue #274: an issue old enough to read in months fades — its
+    /// title and age carry `DIM` so active rows draw the eye.
+    #[test]
+    fn stale_issue_title_and_time_are_dimmed() {
+        let task = make_stale_task("owner/repo#1", "old issue");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+
+        assert!(ctx.is_stale_issue());
+        // Age renders in months.
+        assert_eq!(cell_text(&cell_time(&ctx)).trim(), "1mo");
+
+        let title = cell_title(&ctx);
+        assert!(title.spans[0].style.add_modifier.contains(Modifier::DIM));
+        let time = cell_time(&ctx);
+        // The age span (after the leading space) is dimmed.
+        assert!(time.spans[1].style.add_modifier.contains(Modifier::DIM));
+    }
+
+    /// A recent issue is untouched — no fade.
+    #[test]
+    fn fresh_issue_is_not_dimmed() {
+        let task = make_task("owner/repo#1", "new issue");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+
+        assert!(!ctx.is_stale_issue());
+        let title = cell_title(&ctx);
+        assert!(!title.spans[0].style.add_modifier.contains(Modifier::DIM));
+    }
+
+    /// PRs keep their own staleness cues (CI / review pills) — an old
+    /// PR must NOT fade, or the fade would fight those signals.
+    #[test]
+    fn stale_pr_is_not_dimmed() {
+        let mut task = make_stale_task("owner/repo#7", "old pr");
+        task.url = "https://github.com/owner/repo/pull/7".into();
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.now = fixed_time();
+
+        assert!(task.is_pr());
+        assert!(!ctx.is_stale_issue());
+        let title = cell_title(&ctx);
+        assert!(!title.spans[0].style.add_modifier.contains(Modifier::DIM));
+    }
+
+    /// The cursor row's highlight fill must stay legible — the fade is
+    /// suppressed there even when the issue is stale.
+    #[test]
+    fn cursor_row_suppresses_stale_fade() {
+        let task = make_stale_task("owner/repo#1", "old issue");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.is_cursor = true;
+
+        let title = cell_title(&ctx);
+        assert!(!title.spans[0].style.add_modifier.contains(Modifier::DIM));
     }
 
     /// Regression for issue #22, part 1: title flex reclaims the

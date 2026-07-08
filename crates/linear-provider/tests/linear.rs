@@ -154,6 +154,24 @@ fn mapper_assignee_role_takes_precedence() {
 }
 
 #[test]
+fn mapper_carries_created_at_as_age_anchor() {
+    // Linear's `createdAt` rides onto `Task.created_at`, and `opened_at`
+    // returns it even when the issue was updated far more recently — the
+    // age signal the sidebar reads for the stale-issue fade (issue #274).
+    let opened = chrono::DateTime::parse_from_rfc3339("2026-01-02T08:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let mut issue = make_issue("x", "ENG-9", "started", Some("me"), Some("me"));
+    issue.created_at = Some(opened);
+    issue.updated_at = chrono::DateTime::parse_from_rfc3339("2026-05-28T08:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let task = graphql::issue_to_task(&issue, "me");
+    assert_eq!(task.created_at, Some(opened));
+    assert_eq!(task.opened_at(), opened);
+}
+
+#[test]
 fn mapper_author_role_when_only_creator_matches() {
     let issue = make_issue("x", "ENG-2", "unstarted", Some("other"), Some("me"));
     let task = graphql::issue_to_task(&issue, "me");

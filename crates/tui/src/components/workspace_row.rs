@@ -554,13 +554,15 @@ fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let Some(task) = ctx.task else {
         return Cell::empty();
     };
-    // Issues show their age (time since opened) so an old issue reads as
-    // old even after recent chatter; PRs show recency of activity, which
-    // is what their CI/review pills are keyed to.
-    let anchor = if task.is_pr() {
-        task.updated_at
-    } else {
+    // A stale issue shows its age (time since opened) so it reads as old
+    // even after recent chatter. Everything else — PRs, and recent issues —
+    // keeps the last-activity timestamp: PRs because their CI/review pills
+    // key off activity, recent issues because the issue asked to leave
+    // their existing display untouched (issue #274).
+    let anchor = if ctx.is_stale_issue() {
         task.opened_at()
+    } else {
+        task.updated_at
     };
     let text = crate::components::sidebar::relative_time(anchor, ctx.now);
     let style = if ctx.is_cursor {
@@ -1175,6 +1177,28 @@ mod tests {
         );
     }
 
+    /// Issue #274: a recent issue keeps its last-activity display — the
+    /// age anchor only kicks in once the issue is stale, so a 3-day-old
+    /// issue commented on an hour ago still reads `1h`, not `3d`.
+    #[test]
+    fn recent_issue_keeps_activity_display() {
+        let mut task = make_task("owner/repo#1", "young and active");
+        task.created_at = Some(fixed_time() - chrono::Duration::days(3));
+        task.updated_at = fixed_time() - chrono::Duration::hours(1);
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+
+        assert!(!ctx.is_stale_issue());
+        assert_eq!(cell_text(&cell_time(&ctx)).trim(), "1h");
+        assert!(
+            !cell_title(&ctx).spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::DIM)
+        );
+    }
+
     /// Issue #274: an issue old enough to read in months fades — its
     /// title and age carry `DIM` so active rows draw the eye.
     #[test]
@@ -1216,8 +1240,7 @@ mod tests {
         task.url = "https://github.com/owner/repo/pull/7".into();
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
-        let mut ctx = ctx_for(&ws, &task, &theme);
-        ctx.now = fixed_time();
+        let ctx = ctx_for(&ws, &task, &theme);
 
         assert!(task.is_pr());
         assert!(!ctx.is_stale_issue());

@@ -136,9 +136,9 @@ impl Column {
 ///      `…`, but only once the title genuinely needs their space.
 ///      Flex columns are never dropped here.
 ///   5. Whatever space is left over goes to the Flex columns, split
-///      equally. If even the kept columns + flex mins still overflow
+///      equally. If even the kept columns + flex floors still overflow
 ///      (extremely narrow pane), the flex columns shrink below their
-///      min — down to 0 — and the renderer elides their content.
+///      floor — down to 0 — and the renderer elides their content.
 ///
 /// `cell_widths[row][col]` is the natural width of the cell's
 /// content in cells. Empty for an empty table.
@@ -543,6 +543,21 @@ mod tests {
         let widths = compute_widths(&cols, &[], 11);
         // per_flex = 3, leftover = 2 → cols 0,1 get +1.
         assert_eq!(widths, vec![4, 4, 3]);
+    }
+
+    /// With several Flex columns, each floors at `min(min, its own
+    /// content)` after the #269 change, then the leftover slack splits
+    /// equally. The sidebar only ever uses one Flex column, but the
+    /// primitive supports more, so pin the distribution: differing
+    /// content widths must not skew the split of the remaining space.
+    #[test]
+    fn multiple_flex_floor_at_content_then_split_slack() {
+        let cols = [Column::flex(10), Column::flex(10)];
+        // Col 0 content 5 → floor min(10,5)=5; col 1 content 50 → floor
+        // min(10,50)=10. floors consume 15 of 100 → 85 remaining, split
+        // 42 each with a 1-cell remainder to the leftmost flex.
+        let widths = compute_widths(&cols, &[vec![5, 50]], 100);
+        assert_eq!(widths, vec![5 + 42 + 1, 10 + 42]);
     }
 
     #[test]

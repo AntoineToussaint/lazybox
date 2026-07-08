@@ -23,7 +23,7 @@ so a fresh install has plenty to expand out of the box — review
 (`rev`, `deepreview`, `nit`, plus the dedicated suite `audit` for a
 full pre-ship pass, `arch` for a staff-engineer design review, and
 `hotpath` for a performance review), git & PR (`pr`, `ready`, `commit`,
-`rebase`, `sync`, `continue`, `push`, `squash`), testing (`test`, `tdd`, `repro`), debugging
+`rebase`, `sync`, `resume`, `push`, `squash`), testing (`test`, `tdd`, `repro`), debugging
 (`bug`, `bisect`, `trace`), refactor (`refac`, `rename`, `extract`),
 performance (`perf`, `bench`), security (`sec`, `deps`, `leaks`),
 docs (`doc`, `readme`, `adr`), and chores (`lint`, `ci`, `clean`).

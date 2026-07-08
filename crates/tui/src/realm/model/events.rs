@@ -761,7 +761,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Applied at ingest to every `WorkspaceUpserted` / `Snapshot`
     /// workspace, so both panes and `maybe_auto_merge` see one
     /// consistent state. No-op for un-latched keys.
-    fn apply_merge_latch(&mut self, ws: &mut lazybox_core::Workspace) {
+    pub(super) fn apply_merge_latch(&mut self, ws: &mut lazybox_core::Workspace) {
         if !self.merge_confirmed.contains(&ws.key) {
             return;
         }

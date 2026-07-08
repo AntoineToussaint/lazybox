@@ -4495,6 +4495,52 @@ mod workspace_focus_memory_tests {
         );
     }
 
+    /// Regression for #268: a wheel event over the sidebar scrolls the
+    /// list (moves the selection cursor, which drags the scroll offset
+    /// and scrollbar thumb) instead of being swallowed. Before the fix
+    /// the `ScrollUp/ScrollDown` router only handled the activity pane
+    /// and the terminal, so the wheel did nothing over the sidebar even
+    /// though the scrollbar showed the list overflowing.
+    #[test]
+    fn wheel_over_the_sidebar_scrolls_the_list() {
+        let mut m = build_model();
+        // Seed far more workspaces than the viewport can show so the
+        // list overflows and the cursor has room to travel.
+        let workspaces: Vec<Workspace> =
+            (1..=60).map(|n| empty_ws(&format!("github:o/r#{n}"))).collect();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces,
+            terminals: vec![],
+            projects: vec![],
+        });
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _, _) = m.effective_pane_rects(area);
+        let wheel = |kind| MouseEvent {
+            kind,
+            column: sidebar_rect.x + sidebar_rect.width / 2,
+            row: sidebar_rect.y + 10,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        let before = m.sidebar().cursor();
+        m.redraw = false;
+        m.dispatch_mouse_in(wheel(MouseEventKind::ScrollDown), area);
+        let after = m.sidebar().cursor();
+        assert!(
+            after > before,
+            "wheel-down over the sidebar must advance the cursor: {before} -> {after}",
+        );
+        assert!(m.redraw, "scrolling the sidebar repaints");
+
+        // Wheel back up walks the cursor toward the top again.
+        m.dispatch_mouse_in(wheel(MouseEventKind::ScrollUp), area);
+        assert!(
+            m.sidebar().cursor() < after,
+            "wheel-up over the sidebar must move the cursor back up",
+        );
+    }
+
     #[test]
     fn clicking_the_already_selected_row_keeps_the_sidebar() {
         // The escape hatch: clicking the sidebar row of the workspace

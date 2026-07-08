@@ -360,6 +360,13 @@ impl Sidebar {
         self.inner.click_to_select(area, click_row)
     }
 
+    /// Mouse-wheel scroll over the sidebar. Advances the selection
+    /// cursor by `delta` rows (the scroll offset is coupled to it).
+    /// Returns true when the cursor moved.
+    pub fn scroll_by_wheel(&mut self, delta: isize) -> bool {
+        self.inner.scroll_by_wheel(delta)
+    }
+
     /// Click the role-filter chip in the sidebar header → cycle it.
     /// Returns true on a hit (caller should mark a redraw).
     pub fn click_to_cycle_filter(&mut self, col: u16, row: u16) -> bool {

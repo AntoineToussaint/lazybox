@@ -1052,6 +1052,21 @@ impl<T: TerminalAdapter> Model<T> {
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let raw_up = matches!(m.kind, MouseEventKind::ScrollUp);
+                if rect_contains(sidebar_rect, m.column, m.row) {
+                    let scaled = self.dampen_scroll_step(raw_up);
+                    if scaled == 0 {
+                        return;
+                    }
+                    let delta = if raw_up { -scaled } else { scaled };
+                    if self.sidebar.scroll_by_wheel(delta) {
+                        // Cursor moved → same follow-up as a j/k press:
+                        // re-sync the panes so the activity view tracks
+                        // the newly-selected workspace.
+                        self.sync_panes();
+                        self.redraw = true;
+                    }
+                    return;
+                }
                 if rect_contains(right_top_rect, m.column, m.row) {
                     // Inertia damper: the OS-driven "flick keeps
                     // scrolling for 500ms after the gesture" phase

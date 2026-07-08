@@ -940,14 +940,13 @@ async fn dispatch_action(
             // user-launched `b c` on this PR must suppress the auto-fix
             // spawn just as a plain `c` does, so we never stack a second
             // agent on the same work.
-            if let Some(existing) =
-                crate::spawn_handler::find_existing_singleton(
-                    config,
-                    &session_key,
-                    &term_kind,
-                    None,
-                )
-                .await
+            if let Some(existing) = crate::spawn_handler::find_existing_singleton(
+                config,
+                &session_key,
+                &term_kind,
+                None,
+            )
+            .await
             {
                 tracing::info!(
                     source = source_name,

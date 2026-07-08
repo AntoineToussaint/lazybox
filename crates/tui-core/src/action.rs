@@ -1764,9 +1764,9 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // repo/project scope — that's what gives a shared main checkout
         // to sit on. A repo-less/standalone workspace has no "main", so
         // the `b …` chords don't surface there.
-        ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => {
-            workspace.map(|w| w.worktree_scope().is_some()).unwrap_or(false)
-        }
+        ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => workspace
+            .map(|w| w.worktree_scope().is_some())
+            .unwrap_or(false),
         // Workspace actions without a resolver yet — gate purely on
         // the workspace's existence. These all need a target.
         ActionKind::OpenWorkspace

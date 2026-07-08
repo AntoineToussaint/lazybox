@@ -410,7 +410,8 @@ pub async fn handle_spawn(
     // alone fails the moment a second client connects to the same
     // daemon. The guard here protects the invariant for everyone:
     // at most one Claude per session, one Codex per session, etc.
-    if let Some(existing) = find_existing_singleton(config, &session_key, &kind, Some(on_main)).await
+    if let Some(existing) =
+        find_existing_singleton(config, &session_key, &kind, Some(on_main)).await
     {
         tracing::info!(
             terminal_id = ?existing,
@@ -1549,7 +1550,9 @@ async fn provision_worktree(
             } else {
                 None
             };
-            let worktree = match on_main_branch.as_deref().or(task.and_then(|t| t.branch.as_deref()))
+            let worktree = match on_main_branch
+                .as_deref()
+                .or(task.and_then(|t| t.branch.as_deref()))
             {
                 Some(branch) => mgr
                     .checkout_at(target, owner, name, branch)
@@ -2163,7 +2166,9 @@ async fn live_singleton(
     // checkout flag settled here. Reading the set first would open the
     // same TOCTOU `find_existing_singleton` avoids.
     let on_main_set = config.on_main_terminals.lock().await;
-    present.into_iter().find(|id| on_main_set.contains(id) == on_main)
+    present
+        .into_iter()
+        .find(|id| on_main_set.contains(id) == on_main)
 }
 
 /// How long `Kill` waits for an in-flight spawn on the same workspace
@@ -4122,8 +4127,13 @@ mod tests {
         assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, false).is_err());
         // A different kind on the same workspace is a separate identity.
         assert!(
-            InflightSpawnGuard::try_claim(&config, &key, &TerminalKind::Agent("codex".into()), false)
-                .is_ok()
+            InflightSpawnGuard::try_claim(
+                &config,
+                &key,
+                &TerminalKind::Agent("codex".into()),
+                false
+            )
+            .is_ok()
         );
         // Shells are never singletons — no guard, never blocked.
         assert!(matches!(
@@ -5237,8 +5247,11 @@ mod tests {
         // `<root>/<scope>/main` path (unlike per-session worktrees),
         // which is what makes "the main checkout" a single shared tree.
         let named = |name: &str, project: lazybox_core::ProjectKey| {
-            let mut ws =
-                Workspace::empty(WorkspaceKey::new(format!("local:{name}")), "main", Utc::now());
+            let mut ws = Workspace::empty(
+                WorkspaceKey::new(format!("local:{name}")),
+                "main",
+                Utc::now(),
+            );
             ws.name = name.into();
             ws.project_key = Some(project);
             ws
@@ -5269,8 +5282,7 @@ mod tests {
         // (`slugify("main") == "main"`), whose isolated path is
         // `<scope>/main`. `_main` is unreachable by `slugify`
         // ([a-z0-9-] only), so the two never share a directory.
-        let mut named_main =
-            Workspace::empty(WorkspaceKey::new("local:main"), "main", Utc::now());
+        let mut named_main = Workspace::empty(WorkspaceKey::new("local:main"), "main", Utc::now());
         named_main.name = "main".into();
         named_main.project_key = Some(lazybox_core::ProjectKey::github("acme", "widget"));
         assert_ne!(

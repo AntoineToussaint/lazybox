@@ -2295,7 +2295,13 @@ impl TerminalStack {
                         s.on_main,
                     )
                 })
-                .unwrap_or((crate::components::icons::SHELL, "?".into(), None, false, false));
+                .unwrap_or((
+                    crate::components::icons::SHELL,
+                    "?".into(),
+                    None,
+                    false,
+                    false,
+                ));
             let is_active = i == self.active_tab_idx;
             let style = if is_active && focused {
                 Style::default()
@@ -3985,8 +3991,14 @@ mod extract_text_offset_tests {
     #[test]
     fn recap_rows_refused_when_body_too_short() {
         let sk = SessionKey::new("session");
-        let mut slot =
-            TerminalStack::make_slot(sk, TerminalKind::Agent("claude".into()), 0, false, false, None);
+        let mut slot = TerminalStack::make_slot(
+            sk,
+            TerminalKind::Agent("claude".into()),
+            0,
+            false,
+            false,
+            None,
+        );
         slot.last_user_message = Some("hi".into());
         assert_eq!(TerminalStack::recap_rows(&slot, 2), 0);
         assert_eq!(TerminalStack::recap_rows(&slot, 3), 2);

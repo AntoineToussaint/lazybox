@@ -2782,7 +2782,11 @@ mod merge_focus_follow_tests {
         assert!(
             matches!(
                 cmds.as_slice(),
-                [Command::Spawn { kind: TerminalKind::Shell, on_main: true, .. }]
+                [Command::Spawn {
+                    kind: TerminalKind::Shell,
+                    on_main: true,
+                    ..
+                }]
             ),
             "shell-on-main emits Spawn(Shell, on_main): {cmds:?}",
         );

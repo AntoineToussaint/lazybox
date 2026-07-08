@@ -703,7 +703,7 @@ async fn autonomous_spawn_wires_no_permission_consistently() {
             TerminalKind::Agent("claude".into()),
             Some(cwd),
             None,
-            true, // autonomous
+            true,  // autonomous
             false, // on_main
         )
         .await;

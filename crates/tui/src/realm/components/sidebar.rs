@@ -392,6 +392,12 @@ impl Sidebar {
         self.inner.cursor()
     }
 
+    /// Test accessor — the row-window scroll offset from the last render.
+    #[doc(hidden)]
+    pub fn __test_scroll(&self) -> usize {
+        self.inner.__test_scroll()
+    }
+
     /// Toggle the repo header under the cursor. Same effect as the
     /// `Space` key on a header.
     pub fn toggle_repo_at_cursor(&mut self) -> bool {

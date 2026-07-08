@@ -1151,6 +1151,15 @@ impl Sidebar {
         self.cursor
     }
 
+    /// Test accessor — the row-window scroll offset the last `render`
+    /// settled on. Only meaningful after a render (the offset is
+    /// recomputed there to keep the cursor on-screen); used to assert
+    /// the visible list actually scrolled, not just the cursor.
+    #[doc(hidden)]
+    pub fn __test_scroll(&self) -> usize {
+        self.scroll
+    }
+
     pub fn visible_count(&self) -> usize {
         self.visible.len()
     }

@@ -1244,9 +1244,9 @@ impl ActionDef {
                  the inbox until then — effectively hidden.",
             ),
             ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Guard::Confirm(
-                "Start this session on the shared main checkout? It runs \
-                 on the repo's default branch, not an isolated worktree — \
-                 edits and commits touch the shared branch directly.",
+                "Start this session on the shared main checkout instead of \
+                 an isolated worktree? Edits and commits land on the shared \
+                 branch directly, not a throwaway tree.",
             ),
             _ => Guard::None,
         }
@@ -2142,6 +2142,7 @@ mod tests {
         let presentation = [
             "c / x / u",
             "w c / w x / w u",
+            "b c / b x / b u",
             "g/G",
             "↑/↓",
             "→/←",

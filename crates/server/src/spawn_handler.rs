@@ -393,8 +393,14 @@ pub async fn handle_spawn(
     let _inflight = match InflightSpawnGuard::try_claim(config, &session_key, &kind, on_main) {
         Ok(guard) => guard,
         Err(()) => {
-            collapse_onto_inflight_spawn(config, &session_key, &kind, initial_prompt.as_deref())
-                .await;
+            collapse_onto_inflight_spawn(
+                config,
+                &session_key,
+                &kind,
+                on_main,
+                initial_prompt.as_deref(),
+            )
+            .await;
             return;
         }
     };
@@ -432,21 +438,29 @@ pub async fn handle_spawn(
     // `owning_session` is the session id this spawn lives in — used
     // to populate `terminal_sessions` so the migration freeze can
     // scope correctly. None when cwd was overridden out-of-band.
-    let (cwd_path, owning_session): (Option<PathBuf>, Option<lazybox_core::SessionId>) =
-        if let Some(c) = cwd.as_deref() {
-            (Some(PathBuf::from(c)), None)
-        } else {
-            match resolve_or_create_session(config, &session_key, session_id, &kind, on_main).await {
-                Ok((path, sid)) => (Some(path), Some(sid)),
-                Err(e) => {
-                    let _ = config.bus.send(Event::provider_error_permanent(
-                        "spawn:session",
-                        e.to_string(),
-                    ));
-                    return;
-                }
+    // `on_main` is the REQUEST; `landed_on_main` is whether the spawn
+    // actually reached the shared main checkout. They diverge when the
+    // request can't be honored — a `cwd` override, or a workspace with
+    // no repo scope to give a main checkout — in which case the spawn
+    // falls back to an isolated tree and must NOT wear the "main" badge.
+    let (cwd_path, owning_session, landed_on_main): (
+        Option<PathBuf>,
+        Option<lazybox_core::SessionId>,
+        bool,
+    ) = if let Some(c) = cwd.as_deref() {
+        (Some(PathBuf::from(c)), None, false)
+    } else {
+        match resolve_or_create_session(config, &session_key, session_id, &kind, on_main).await {
+            Ok((path, sid, landed)) => (Some(path), Some(sid), landed),
+            Err(e) => {
+                let _ = config.bus.send(Event::provider_error_permanent(
+                    "spawn:session",
+                    e.to_string(),
+                ));
+                return;
             }
-        };
+        }
+    };
     // Session + worktree are resolved here — for a fresh issue this is
     // where a cold clone / `git fetch` / setup script gets paid
     // synchronously, so surfacing the elapsed time makes the otherwise-
@@ -624,7 +638,7 @@ pub async fn handle_spawn(
             .await
             .insert(terminal_id);
     }
-    if on_main {
+    if landed_on_main {
         config.on_main_terminals.lock().await.insert(terminal_id);
     }
     config
@@ -705,7 +719,7 @@ pub async fn handle_spawn(
         session_key,
         kind,
         no_permission: skip_permissions,
-        on_main,
+        on_main: landed_on_main,
     });
     if let Err(e) = send_result {
         tracing::error!("handle_spawn: bus.send(TerminalSpawned) failed: {e}");
@@ -1151,7 +1165,7 @@ async fn resolve_or_create_session(
     session_id: Option<SessionId>,
     kind: &TerminalKind,
     on_main: bool,
-) -> Result<(PathBuf, SessionId), crate::ServerError> {
+) -> Result<(PathBuf, SessionId, bool), crate::ServerError> {
     let workspace_key = WorkspaceKey::new(session_key.as_str());
 
     // Sandbox workspaces (key prefix `sandbox-`) live in a
@@ -1168,7 +1182,7 @@ async fn resolve_or_create_session(
                 "sandbox dir create_dir_all failed at spawn time: {e}",
             );
         }
-        return Ok((path, session_id.unwrap_or_else(SessionId::new)));
+        return Ok((path, session_id.unwrap_or_else(SessionId::new), false));
     }
 
     // Spawn against a workspace that isn't (yet) persisted — common
@@ -1204,6 +1218,7 @@ async fn resolve_or_create_session(
             return Ok((
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                 SessionId::new(),
+                false,
             ));
         }
     };
@@ -1234,7 +1249,7 @@ async fn resolve_or_create_session(
             ));
             ensure_dir_exists(&path).await;
         }
-        return Ok((path, SessionId::new()));
+        return Ok((path, SessionId::new(), true));
     }
 
     if let Some(id) = session_id {
@@ -1242,11 +1257,11 @@ async fn resolve_or_create_session(
             crate::ServerError::Workspace(format!("session {id:?} not in workspace"))
         })?;
         ensure_worktree_present(config, &workspace, &session.worktree_path, session_key).await;
-        return Ok((session.worktree_path.clone(), session.id));
+        return Ok((session.worktree_path.clone(), session.id, false));
     }
     if let Some(session) = workspace.default_session() {
         ensure_worktree_present(config, &workspace, &session.worktree_path, session_key).await;
-        return Ok((session.worktree_path.clone(), session.id));
+        return Ok((session.worktree_path.clone(), session.id, false));
     }
 
     // Workspace exists but has no sessions yet — provision one.
@@ -1303,7 +1318,7 @@ async fn resolve_or_create_session(
     workspace.add_session(session.clone());
     persist_and_broadcast(config, &workspace).await?;
     let _ = config.bus.send(Event::SessionCreated(Box::new(session)));
-    Ok((path, new_session_id))
+    Ok((path, new_session_id, false))
 }
 
 /// Build a deterministic branch name for a task that has no upstream
@@ -1929,15 +1944,20 @@ pub(crate) async fn find_existing_singleton(
     // are DISTINCT singletons within one workspace — otherwise a `b c`
     // (claude on main) would collapse onto an already-running isolated
     // claude and never reach the main checkout. Match the requested
-    // checkout too, using the same per-terminal set the badge reads.
-    let on_main_set = config.on_main_terminals.lock().await.clone();
+    // checkout via the snapshot's own `on_main` field: it is computed
+    // inside `snapshot_terminals` from the same maps in a consistent
+    // order (`on_main_terminals` inserted before `terminals`), so it
+    // never disagrees with the terminal it describes. Reading a
+    // separate `on_main_terminals` clone here instead would open a
+    // TOCTOU where a terminal that entered the snapshot after the clone
+    // is misclassified as isolated.
     let snapshot = snapshot_terminals(config).await;
     snapshot
         .iter()
         .find(|t| {
             t.session_key == *session_key
                 && t.kind.singleton_key().as_deref() == Some(&target)
-                && on_main_set.contains(&t.terminal_id) == on_main
+                && t.on_main == on_main
         })
         .map(|t| t.terminal_id)
 }
@@ -2014,15 +2034,17 @@ async fn collapse_onto_inflight_spawn(
     config: &ServerConfig,
     session_key: &SessionKey,
     kind: &TerminalKind,
+    on_main: bool,
     prompt: Option<&str>,
 ) {
     tracing::info!(
         %session_key,
         ?kind,
+        on_main,
         has_prompt = prompt.is_some(),
         "handle_spawn: a spawn for this singleton is already in flight — collapsing onto it",
     );
-    let Some(existing) = await_inflight_singleton(config, session_key, kind).await else {
+    let Some(existing) = await_inflight_singleton(config, session_key, kind, on_main).await else {
         tracing::warn!(
             %session_key,
             ?kind,
@@ -2056,12 +2078,22 @@ async fn await_inflight_singleton(
     config: &ServerConfig,
     session_key: &SessionKey,
     kind: &TerminalKind,
+    on_main: bool,
 ) -> Option<TerminalId> {
+    // `target` matches the terminal_meta kind (un-folded); the inflight
+    // CLAIM key folds `:main` exactly as `InflightSpawnGuard::try_claim`
+    // does, so a main-checkout collapse waits on the right winner and
+    // never mistakes an isolated agent's claim for it.
     let target = kind.singleton_key()?;
-    let claim = (session_key.as_str().to_string(), target.clone());
+    let claim_target = if on_main {
+        format!("{target}:main")
+    } else {
+        target.clone()
+    };
+    let claim = (session_key.as_str().to_string(), claim_target);
     let deadline = tokio::time::Instant::now() + INFLIGHT_COLLAPSE_DEADLINE;
     loop {
-        if let Some(id) = live_singleton(config, session_key, &target).await {
+        if let Some(id) = live_singleton(config, session_key, &target, on_main).await {
             return Some(id);
         }
         let claimed = config
@@ -2074,7 +2106,7 @@ async fn await_inflight_singleton(
             // the insert→release window — the maps are populated before
             // the winner's guard drops, so a miss here means the spawn
             // genuinely failed.
-            return live_singleton(config, session_key, &target).await;
+            return live_singleton(config, session_key, &target, on_main).await;
         }
         let _ = tokio::time::timeout(
             Duration::from_millis(100),
@@ -2094,6 +2126,7 @@ async fn live_singleton(
     config: &ServerConfig,
     session_key: &SessionKey,
     target: &str,
+    on_main: bool,
 ) -> Option<TerminalId> {
     let candidates: Vec<TerminalId> = {
         let meta = config.terminal_meta.lock().await;
@@ -2107,8 +2140,25 @@ async fn live_singleton(
     if candidates.is_empty() {
         return None;
     }
-    let terminals = config.terminals.lock().await;
-    candidates.into_iter().find(|id| terminals.contains_key(id))
+    let present: Vec<TerminalId> = {
+        let terminals = config.terminals.lock().await;
+        candidates
+            .into_iter()
+            .filter(|id| terminals.contains_key(id))
+            .collect()
+    };
+    if present.is_empty() {
+        return None;
+    }
+    // `terminal_meta` carries no checkout flag, so match the requested
+    // one against `on_main_terminals`. Read LAST — after confirming the
+    // candidate is in `terminals` — because `on_main_terminals` is
+    // populated before `terminals` at spawn (and cleared after it at
+    // teardown), so a terminal that's live in `terminals` always has its
+    // checkout flag settled here. Reading the set first would open the
+    // same TOCTOU `find_existing_singleton` avoids.
+    let on_main_set = config.on_main_terminals.lock().await;
+    present.into_iter().find(|id| on_main_set.contains(id) == on_main)
 }
 
 /// How long `Kill` waits for an in-flight spawn on the same workspace
@@ -2263,19 +2313,27 @@ pub fn worktree_path_for_session(workspace: &Workspace, index: usize) -> PathBuf
 }
 
 /// Shared main-checkout worktree path for a workspace's repo:
-/// `<root>/<scope>/main`. Keyed on the workspace's repo/project scope
+/// `<root>/<scope>/_main`. Keyed on the workspace's repo/project scope
 /// (not its slug) so every workspace on the same repo resolves the same
 /// path — the whole point of "the main checkout" is that it's shared.
 /// `None` for a repo-less / project-less workspace, which has no scope
 /// and no meaningful default branch to sit on.
 ///
-/// The literal `main` segment is a stable folder label; the branch
-/// actually checked out is the repo's resolved default (`main` or
-/// `master`), which the folder name doesn't try to track.
+/// The leading underscore matters: `worktree_path_for_session` names
+/// isolated trees `<scope>/<slug>`, and `slug::slugify` only ever emits
+/// `[a-z0-9-]`, so `_main` can never collide with a per-session slug —
+/// including a workspace or project literally named "main". Without it a
+/// "main"-slugged workspace's isolated tree and the shared checkout would
+/// share one directory and `checkout_at`'s path-idempotency would
+/// silently drop one onto the other's branch.
+///
+/// The `main` label is stable; the branch actually checked out is the
+/// repo's resolved default (`main` or `master`), which the folder name
+/// doesn't try to track.
 pub fn main_worktree_path(workspace: &Workspace) -> Option<PathBuf> {
     workspace
         .worktree_scope()
-        .map(|scope| worktree_root().join(scope).join("main"))
+        .map(|scope| worktree_root().join(scope).join("_main"))
 }
 
 /// Explicit session creation. Always provisions a fresh worktree
@@ -5140,7 +5198,7 @@ mod tests {
         let issue = named("Issues", lazybox_core::ProjectKey::github("acme", "widget"));
         let other = named("Issues", lazybox_core::ProjectKey::github("acme", "gadget"));
 
-        let expected = worktree_root().join("github-acme-widget").join("main");
+        let expected = worktree_root().join("github-acme-widget").join("_main");
         assert_eq!(main_worktree_path(&pr), Some(expected.clone()));
         assert_eq!(
             main_worktree_path(&issue),
@@ -5156,6 +5214,21 @@ mod tests {
         // A repo-less / project-less workspace has no shared main.
         let bare = Workspace::empty(WorkspaceKey::new("bare"), "main", Utc::now());
         assert_eq!(main_worktree_path(&bare), None);
+
+        // The shared segment must never collide with an isolated
+        // per-session tree — even for a workspace literally named "main"
+        // (`slugify("main") == "main"`), whose isolated path is
+        // `<scope>/main`. `_main` is unreachable by `slugify`
+        // ([a-z0-9-] only), so the two never share a directory.
+        let mut named_main =
+            Workspace::empty(WorkspaceKey::new("local:main"), "main", Utc::now());
+        named_main.name = "main".into();
+        named_main.project_key = Some(lazybox_core::ProjectKey::github("acme", "widget"));
+        assert_ne!(
+            main_worktree_path(&named_main),
+            Some(worktree_path_for_session(&named_main, 0)),
+            "shared main checkout must not collide with a `main`-named workspace's tree",
+        );
     }
 
     /// End-to-end through `provision_worktree`: a blank workspace under

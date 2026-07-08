@@ -159,6 +159,29 @@ impl<T: TerminalAdapter> Model<T> {
                             Vec::new()
                         }
                     }
+                    // On-main spawns fire against the STASHED workspace,
+                    // not the live selection — a daemon event could have
+                    // drifted the sidebar cursor while the confirm was up,
+                    // and `dispatch_action_unchecked` would otherwise
+                    // launch a shared-branch session on whatever the
+                    // cursor landed on. `on_main` always targets the
+                    // shared checkout, so `session_id` is None.
+                    Action::SpawnAgentOnMain(agent_id) => vec![IpcCommand::Spawn {
+                        session_key: session_key.clone(),
+                        session_id: None,
+                        kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
+                        cwd: None,
+                        initial_prompt: None,
+                        on_main: true,
+                    }],
+                    Action::SpawnShellOnMain => vec![IpcCommand::Spawn {
+                        session_key: session_key.clone(),
+                        session_id: None,
+                        kind: lazybox_ipc::TerminalKind::Shell,
+                        cwd: None,
+                        initial_prompt: None,
+                        on_main: true,
+                    }],
                     // A future destructive action that hasn't grown a
                     // targeted arm yet falls back to the legacy
                     // selection-based dispatch.

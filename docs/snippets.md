@@ -18,12 +18,12 @@ key. Press `e` in the browser to jump to the YAML file.
 This page documents that full lifecycle — create, browse, list/use,
 edit, delete — plus the file format and the picker reference.
 
-lazybox ships a **broad, categorized built-in library** (~38 prompts)
+lazybox ships a **broad, categorized built-in library** (~41 prompts)
 so a fresh install has plenty to expand out of the box — review
 (`rev`, `deepreview`, `nit`, plus the dedicated suite `audit` for a
 full pre-ship pass, `arch` for a staff-engineer design review, and
 `hotpath` for a performance review), git & PR (`pr`, `ready`, `commit`,
-`rebase`, `squash`), testing (`test`, `tdd`, `repro`), debugging
+`rebase`, `sync`, `resume`, `push`, `squash`), testing (`test`, `tdd`, `repro`), debugging
 (`bug`, `bisect`, `trace`), refactor (`refac`, `rename`, `extract`),
 performance (`perf`, `bench`), security (`sec`, `deps`, `leaks`),
 docs (`doc`, `readme`, `adr`), and chores (`lint`, `ci`, `clean`).
@@ -158,7 +158,7 @@ are optional; a missing file simply contributes nothing.
 
 | Scope          | Path                          | Use it for                                        |
 | -------------- | ----------------------------- | ------------------------------------------------- |
-| **Built-in**   | _(shipped with lazybox)_        | A broad, categorized starter library (~35 prompts). |
+| **Built-in**   | _(shipped with lazybox)_        | A broad, categorized starter library (~41 prompts). |
 | **Global**     | `~/.lazybox/snippets.yaml`      | Your personal library, shared across all repos.   |
 | **Repo-local** | `<repo>/.lazybox/snippets.yaml` | Project-specific prompts, checked into the repo.   |
 

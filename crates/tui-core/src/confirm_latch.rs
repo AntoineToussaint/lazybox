@@ -1,7 +1,7 @@
 //! Generic "first press arms, second press fires" latch.
 //!
 //! Three sidebar actions follow the same contract: `Shift-X` (kill),
-//! `Shift-M` (merge), `Shift-Z` (long snooze). Each used to maintain
+//! `g m` (merge), `Shift-Z` (long snooze). Each used to maintain
 //! its own `Option<SessionKey>` field + disarm-on-other-key check
 //! inline in `Sidebar::handle_key`. Same shape, three copies —
 //! perfect for a generic.

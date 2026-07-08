@@ -780,7 +780,7 @@ impl Sidebar {
         build_work_prompt(self.selected_workspace()?)
     }
 
-    /// Return the workspace key the `Shift-M` merge shortcut would
+    /// Return the workspace key the `g m` merge shortcut would
     /// target. Delegates to [`resolve_merge`] so the contextual footer
     /// advertises the key under exactly the same conditions the merge
     /// dispatch fires — no second predicate to drift out of sync.

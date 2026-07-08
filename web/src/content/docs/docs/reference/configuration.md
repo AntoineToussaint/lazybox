@@ -245,7 +245,7 @@ back to the default rather than breaking the keyboard, so a typo is harmless.
 ```yaml
 ui:
   action_keys:
-    merge_pr: Ctrl-m       # was Shift-M
+    merge_pr: Ctrl-m       # was g m
     refresh: Ctrl-r        # was Shift-R
     spawn_shell: t         # was s
     quit: Ctrl-q           # single press (default is the q q chord)
@@ -278,7 +278,7 @@ action in
 | `open_editor` | `e` | Open the worktree in your editor |
 | `mark_all_read` | `m` | Mark the workspace read |
 | `toggle_snooze` | `z` | Snooze (~4h) |
-| `merge_pr` | `Shift-M` | Merge the PR |
+| `merge_pr` | `g m` | Merge the PR |
 | `request_reviewers` | `Shift-V` | Request reviewers |
 | `add_assignees` | `Shift-G` | Change assignees |
 | `manage_labels` | `Shift-L` | Edit labels |

@@ -247,14 +247,14 @@ applies repo mounts/scripts after `git worktree add`. See the README
 **Status:** stable
 **Crate(s):** `tui`, `gh-provider`
 **Config / flags:** —
-**Key bindings:** `g m` (or `Shift-M`)
+**Key bindings:** `g m`
 
 ### What it does
 Merges the workspace's PR behind a confirmation modal, when CI is green, the PR
 is approved, and there are no conflicts.
 
 ### How to use it
-Press `g m` (or `Shift-M`); a Confirm modal appears — arrows/Tab navigate
+Press `g m`; a Confirm modal appears — arrows/Tab navigate
 Yes/No, `Enter` confirms.
 
 ### How it works (brief)
@@ -262,7 +262,7 @@ Yes/No, `Enter` confirms.
 `merge_workspace` (GitHub GraphQL mutation) after the confirm modal.
 
 ### Test checklist
-- [ ] `g m` / `Shift-M` opens a Confirm modal.
+- [ ] `g m` opens a Confirm modal.
 - [ ] Confirming merges a green/approved/conflict-free PR; the row reflects merged on next poll.
 - [ ] Cancelling leaves the PR untouched.
 

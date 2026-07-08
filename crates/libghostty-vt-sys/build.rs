@@ -82,6 +82,24 @@ fn main() {
     let zig_target = zig_target(&target);
     build.arg(format!("-Dtarget={zig_target}"));
 
+    // macOS 26 (Tahoe) SDK workaround. zig 0.15.2's bundled LLD can't follow
+    // the Tahoe `libSystem.tbd` reexport chain when linking in native mode,
+    // so every libc symbol (_free, _malloc, _waitpid, _dispatch_*, …) comes
+    // back undefined — this kills even zig's internal build *runner* before
+    // ghostty compiles at all, and ghostty's `apple_sdk` deliberately forces
+    // the native SDK into the link, so there's no env-only escape. If native
+    // linking is broken on this host AND an older, linkable macOS SDK is
+    // installed, route the zig subprocess at it via an `xcrun --show-sdk-path`
+    // shim on PATH. No-op (returns None) on machines and CI where native
+    // linking already works, so nothing changes off Tahoe.
+    if let Some(shim_dir) = macos_sdk_shim(&zig_bin, &out_dir) {
+        let existing = env::var_os("PATH").unwrap_or_default();
+        let mut parts = vec![shim_dir];
+        parts.extend(env::split_paths(&existing));
+        let joined = env::join_paths(parts).expect("join PATH for zig SDK shim");
+        build.env("PATH", joined);
+    }
+
     // Run zig build. On macOS without Xcode.app, the xcframework step fails
     // but the actual library + headers are still produced. Check outputs
     // instead of panicking on exit code.
@@ -301,6 +319,182 @@ fn run(mut command: Command, context: &str) {
         .status()
         .unwrap_or_else(|error| panic!("failed to execute {context}: {error}"));
     assert!(status.success(), "{context} failed with status {status}");
+}
+
+/// Detect the macOS 26 (Tahoe) libSystem link breakage and, if present,
+/// return a directory holding an `xcrun` shim that redirects
+/// `--show-sdk-path` at an older, linkable SDK. Prepend it to the zig
+/// subprocess's PATH. See the call site for the full rationale. Returns
+/// `None` when native linking already works or no workaround is possible.
+#[cfg(not(target_os = "macos"))]
+fn macos_sdk_shim(_zig_bin: &Path, _out_dir: &Path) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_sdk_shim(zig_bin: &Path, out_dir: &Path) -> Option<PathBuf> {
+    let work = out_dir.join("sdk-probe");
+    std::fs::create_dir_all(&work).ok()?;
+
+    // 1. Does native libc linking work as-is? Most machines — and CI on
+    //    older macOS — say yes; bail out for zero behavior change.
+    if zig_links_natively(zig_bin, &work, None) {
+        return None;
+    }
+
+    // 2. Native link is broken (Tahoe). Probe installed SDKs newest-first so
+    //    we stay as close to the host as possible, and pick the first that
+    //    the pinned zig can actually link against. The unversioned
+    //    `MacOSX.sdk` (the broken newest) is skipped during discovery.
+    let mut sdks = discover_macos_sdks();
+    sdks.sort_by(|a, b| b.1.cmp(&a.1));
+    for (sdk, _ver) in &sdks {
+        if zig_links_natively(zig_bin, &work, Some(sdk)) {
+            let shim_dir = out_dir.join("sdk-shim");
+            write_xcrun_shim(&shim_dir, sdk)?;
+            println!(
+                "cargo:warning=libghostty-vt: this macOS SDK won't link with zig 0.15.2 \
+                 (Tahoe libSystem reexport chain); routing zig at {} instead",
+                sdk.display()
+            );
+            return Some(shim_dir);
+        }
+    }
+
+    // 3. Nothing linkable. Let the build proceed to zig's own (clearer)
+    //    error, but leave an actionable breadcrumb first.
+    println!(
+        "cargo:warning=libghostty-vt: native macOS SDK won't link with zig 0.15.2 and no older \
+         linkable SDK was found. Install an older Command Line Tools SDK (e.g. MacOSX15.sdk) or \
+         use a prebuilt lazybox release."
+    );
+    None
+}
+
+/// Try to link a minimal libc-backed zig program with the given SDK routed
+/// in via a throwaway shim (or the native SDK when `sdk` is `None`). Returns
+/// true only on a clean link — the output file is left behind even on
+/// failure, so the exit status is the only reliable signal.
+#[cfg(target_os = "macos")]
+fn zig_links_natively(zig_bin: &Path, work: &Path, sdk: Option<&Path>) -> bool {
+    // Pull in the C allocator + posix wrappers — the same libSystem surface
+    // that fails against a `libSystem.tbd` zig's LLD can't parse.
+    let src = work.join("probe.zig");
+    let program = "const std = @import(\"std\");\n\
+         pub fn main() !void {\n\
+         \x20   const a = std.heap.c_allocator;\n\
+         \x20   const p = a.alloc(u8, 8) catch return;\n\
+         \x20   a.free(p);\n\
+         }\n";
+    if std::fs::write(&src, program).is_err() {
+        return false;
+    }
+
+    let mut cmd = Command::new(zig_bin);
+    cmd.arg("build-exe")
+        .arg(&src)
+        .arg("-lc")
+        .arg(format!("-femit-bin={}", work.join("probe-bin").display()))
+        .current_dir(work)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    if let Some(sdk) = sdk {
+        let shim = work.join("probe-shim");
+        if write_xcrun_shim(&shim, sdk).is_none() {
+            return false;
+        }
+        let existing = env::var_os("PATH").unwrap_or_default();
+        let mut parts = vec![shim];
+        parts.extend(env::split_paths(&existing));
+        if let Ok(joined) = env::join_paths(parts) {
+            cmd.env("PATH", joined);
+        }
+    }
+
+    cmd.status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Write an executable `xcrun` shim into `dir` that answers
+/// `--show-sdk-path` with `sdk` and passes every other invocation through to
+/// the real `/usr/bin/xcrun` (so `xcode-select` and other queries still
+/// work). Returns `Some(())` on success.
+#[cfg(target_os = "macos")]
+fn write_xcrun_shim(dir: &Path, sdk: &Path) -> Option<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).ok()?;
+    let script = dir.join("xcrun");
+    let body = format!(
+        "#!/bin/sh\n\
+         for a in \"$@\"; do\n\
+         \x20 if [ \"$a\" = \"--show-sdk-path\" ]; then echo '{}'; exit 0; fi\n\
+         done\n\
+         exec /usr/bin/xcrun \"$@\"\n",
+        sdk.display()
+    );
+    std::fs::write(&script, body).ok()?;
+    let mut perms = std::fs::metadata(&script).ok()?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script, perms).ok()?;
+    Some(())
+}
+
+/// Enumerate installed macOS SDKs (Command Line Tools + any selected
+/// Xcode.app), returning `(canonical_path, (major, minor))`. The
+/// unversioned `MacOSX.sdk` symlink is skipped — it points at the newest
+/// SDK, which is exactly the one that won't link. Canonicalization dedupes
+/// the `MacOSX26.sdk -> MacOSX26.5.sdk` version symlinks.
+#[cfg(target_os = "macos")]
+fn discover_macos_sdks() -> Vec<(PathBuf, (u32, u32))> {
+    let mut roots = vec![PathBuf::from("/Library/Developer/CommandLineTools/SDKs")];
+    if let Some(dev) = Command::new("xcode-select")
+        .arg("-p")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        roots.push(PathBuf::from(dev).join("Platforms/MacOSX.platform/Developer/SDKs"));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut found = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(ver_str) = name
+                .strip_prefix("MacOSX")
+                .and_then(|s| s.strip_suffix(".sdk"))
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            let Some(ver) = parse_macos_version(ver_str) else {
+                continue;
+            };
+            let path = entry.path();
+            let canon = std::fs::canonicalize(&path).unwrap_or(path);
+            if seen.insert(canon.clone()) {
+                found.push((canon, ver));
+            }
+        }
+    }
+    found
+}
+
+/// Parse a `<major>[.<minor>]` SDK version string (e.g. "15.4", "26").
+#[cfg(target_os = "macos")]
+fn parse_macos_version(s: &str) -> Option<(u32, u32)> {
+    let mut it = s.split('.');
+    let major = it.next()?.parse::<u32>().ok()?;
+    let minor = it.next().unwrap_or("0").parse::<u32>().unwrap_or(0);
+    Some((major, minor))
 }
 
 fn zig_target(target: &str) -> String {

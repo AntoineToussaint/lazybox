@@ -65,7 +65,7 @@ second key. The `Shift-*` forms are direct aliases for the same actions.
 
 | Chord | Alias | Action |
 | --- | --- | --- |
-| `g m` | `Shift-M` | Merge the PR (when CI green, approved, no conflicts) |
+| `g m` | — | Merge the PR (when CI green, approved, no conflicts) |
 | `g v` | `Shift-V` | Request reviewers |
 | `g a` | `Shift-G` | Change assignees |
 | `g l` | `Shift-L` | Manage labels |

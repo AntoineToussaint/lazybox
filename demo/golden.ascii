@@ -6,7 +6,7 @@
   q q             quit              Enter           open               w               work on this
   s               shell             e               editor             m               mark read
   z               snooze            Shift+Z         long snooze        Shift+N         new workspace
-  n               new workspace     g m | Shift-M   merge PR           g g             auto-merge
+  n               new workspace     g m             merge PR           g g             auto-merge
   g v | Shift-V   reviewers         g a | Shift-G   assignees          g l | Shift-L   labels
   g o | Shift-O   open in browser   r               reply              Shift+A         adopt sessions
   Shift+J         join into PR      Shift+X         archive            c               spawn claude

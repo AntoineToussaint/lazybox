@@ -665,7 +665,7 @@ pub enum Command {
         target_workspace_key: lazybox_core::WorkspaceKey,
     },
     /// Merge the workspace's PR via the provider. Fires from the
-    /// sidebar's `Shift-M` shortcut on a READY (approved + green
+    /// sidebar's `g m` shortcut on a READY (approved + green
     /// CI) row. The daemon looks up the PR's `node_id` and calls
     /// the GraphQL `mergePullRequest` mutation. Method defaults
     /// to the repo's setting; future per-repo config can override.

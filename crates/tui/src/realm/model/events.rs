@@ -53,7 +53,7 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// True when `workspace_key` is already the active removal prompt
     /// or sitting in the queue. The daemon dedupes per-process, but a
-    /// re-emit (daemon restart, a Shift-M `PrMerged` racing the poll's
+    /// re-emit (daemon restart, a `g m` `PrMerged` racing the poll's
     /// `MergedPrRemovable`) could otherwise stack duplicate prompts —
     /// belt and braces.
     fn removal_already_pending(&self, workspace_key: &lazybox_core::WorkspaceKey) -> bool {
@@ -361,7 +361,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.right.mark_workspace_merged(workspace_key);
             self.flash_info(format!("merged {pr_label}"));
             // The removal prompt is NOT queued here. Both user-initiated
-            // (Shift-M) and externally-merged PRs are surfaced by the
+            // (`g m`) and externally-merged PRs are surfaced by the
             // daemon's open→merged transition, which emits a single
             // `MergedPrRemovable` (with worktree-safety info this event
             // lacks). The `Refresh` below wakes that poll so the prompt

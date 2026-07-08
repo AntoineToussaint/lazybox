@@ -428,11 +428,13 @@ fn m_emits_mark_read() {
 
 // ── Navigation bounds ─────────────────────────────────────────────────
 //
-// (Shift-X / Shift-M no longer have sidebar-level tests — both are
-// catalog actions now, dispatched by `Model::dispatch_action` and
-// gated by the `ActionConfirm` modal. The sidebar's inline handlers
-// for those keys were deleted; the equivalent behavior is exercised
-// at the model layer in `tests/model_orchestrator.rs`.)
+// (Archive and Merge are catalog actions now, dispatched by
+// `Model::dispatch_action` and gated by the `ActionConfirm` modal.
+// The sidebar's inline handlers for those keys were deleted; the
+// equivalent behavior is exercised at the model layer in
+// `tests/model_orchestrator.rs`. Merge additionally dropped its
+// legacy `Shift-M` alias (#264) — the retired-key no-op guard for
+// that lives below in `shift_m_is_no_longer_bound_in_the_sidebar`.)
 
 #[test]
 fn j_stops_at_last_workspace() {
@@ -899,16 +901,22 @@ fn w_on_healthy_open_pr_spawns_default_agent() {
 }
 
 #[test]
-fn shift_m_on_non_ready_pr_is_noop() {
-    // Belt-and-braces: the match guard already gates on
-    // merge_target_for_cursor; pin it.
-    let mut s = sidebar_with_pr(|t| t.ci = CiStatus::Failure);
+fn shift_m_is_no_longer_bound_in_the_sidebar() {
+    // The legacy `Shift-M` merge alias was dropped (#264) — merge is
+    // now the `g m` leader only, dispatched via the catalog and gated
+    // in `Model::dispatch_action` (covered in `model_orchestrator.rs`).
+    // Pressing the retired key must be an inert no-op even on a READY
+    // (green + approved) row, not fire a merge.
+    let mut s = sidebar_with_pr(|t| {
+        t.review = ReviewStatus::Approved;
+        t.ci = CiStatus::Success;
+    });
     let mut cmds: Vec<Command> = Vec::new();
     s.handle_key(shift_char('M'), &mut cmds);
     s.handle_key(shift_char('M'), &mut cmds);
     assert!(
         cmds.is_empty(),
-        "Shift-M on a CI-failing PR must not fire: {cmds:?}"
+        "retired Shift-M must not fire anything: {cmds:?}"
     );
 }
 

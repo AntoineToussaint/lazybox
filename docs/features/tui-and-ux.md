@@ -77,7 +77,7 @@ in their pane handlers rather than as catalog actions.
 ### Test checklist
 - [ ] `q q` within 800ms quits; a single `q` does not.
 - [ ] `g` opens the GitHub which-key group; `g m` merges.
-- [ ] `Shift-M` still works as a direct alias for `g m`.
+- [ ] `Shift-M` no longer merges — `g m` is the only default merge chord.
 - [ ] A `ui.action_keys` override remaps the bound action.
 - [ ] The help overlay reflects effective (overridden) keys.
 

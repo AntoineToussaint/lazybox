@@ -169,7 +169,7 @@ per-pane cursor navigation (`j/k`, arrows) stays as pane match arms in
 `components/{sidebar,right_pane,terminal_stack}`. A catalog row is one
 enriched binding (#102): `chords: Vec<Chord>` where `Chord = Key |
 Seq` — `Seq` is every leader/double-press (`g m`, `q q`, `] ]`), and
-multiple chords are alternatives (`g m | Shift-M`); a `param`
+multiple chords are alternatives (`g v | Shift-V`); a `param`
 (agent id) that generates one real `SpawnAgent` row per enabled agent
 at startup; and a `guard` (`None | DoublePress | Confirm(prompt)`) that
 carries the `q q` double-tap and the archive/merge/long-snooze confirm
@@ -212,9 +212,10 @@ resize.
 into PR, `Shift-X` archive. `g` is a leader key that opens the
 **github** group as a two-step chord (which-key popup): `g m` merge,
 `g v` reviewers, `g a` assignees, `g l` labels, `g o` open in
-browser. The legacy `Shift-{M,V,G,L,O}` keys remain as direct
-aliases (Activity-section bindings shadow them while the right pane
-is focused — e.g. `Shift-G` is jump-to-bottom there).
+browser. Merge has no direct-key alias — `g m` is its only default
+chord. The legacy `Shift-{V,G,L,O}` keys remain as direct aliases
+(Activity-section bindings shadow them while the right pane is
+focused — e.g. `Shift-G` is jump-to-bottom there).
 
 **RightPane (Activity)**: `j/k` or arrows move the row cursor,
 `g/G` top/bottom, `→/l` expand row, `←/h` collapse row, `Enter`

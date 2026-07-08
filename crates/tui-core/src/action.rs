@@ -622,7 +622,7 @@ impl ActionDef {
             },
             ActionKind::MergePr => &Self {
                 kind: ActionKind::MergePr,
-                default_keys: "g m | Shift-M",
+                default_keys: "g m",
                 label: "merge PR",
                 describe: "Merge the PR (only when CI green + approved + no conflicts).",
                 section: Section::Workspace,
@@ -889,7 +889,7 @@ pub struct KeyStroke {
 ///
 /// Parsed from the catalog's `default_keys` string so the catalog
 /// stays human-readable: alternatives are separated by ` | `
-/// (`"g m | Shift-M"`), and the keystrokes WITHIN one alternative are
+/// (`"g v | Shift-V"`), and the keystrokes WITHIN one alternative are
 /// space-separated (`"g m"`, `"q q"`). Presentation-only strings
 /// (`"g/G"`, `"↑/↓"`, `"all keys"`) still don't parse to a chord.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1928,15 +1928,31 @@ mod tests {
 
     #[test]
     fn default_chords_splits_alternatives() {
-        // `g m | Shift-M` yields the leader sequence AND the legacy
+        // `g v | Shift-V` yields the leader sequence AND the legacy
         // modifier alias as two alternatives.
-        let def = ActionDef::for_kind(ActionKind::MergePr);
+        let def = ActionDef::for_kind(ActionKind::RequestReviewers);
         let chords = def.default_chords();
-        assert_eq!(chords.len(), 2, "merge has a leader + a Shift alias");
+        assert_eq!(chords.len(), 2, "reviewers has a leader + a Shift alias");
         assert!(matches!(chords[0], Chord::Seq(_)));
         assert_eq!(
             chords[1],
-            Chord::Key(KeyStroke::new(false, true, false, ChordCode::Char('m'))),
+            Chord::Key(KeyStroke::new(false, true, false, ChordCode::Char('v'))),
+        );
+    }
+
+    #[test]
+    fn default_merge_is_a_single_g_m_chord() {
+        // Merge dropped its legacy `Shift-M` direct alias (#264):
+        // the `g m` leader is now its only default chord. Pin the
+        // negative so a re-added alias fails the build.
+        let chords = ActionDef::for_kind(ActionKind::MergePr).default_chords();
+        assert_eq!(chords.len(), 1, "merge no longer has a Shift-M alias");
+        assert_eq!(
+            chords[0],
+            Chord::Seq(vec![
+                KeyStroke::new(false, false, false, ChordCode::Char('g')),
+                KeyStroke::new(false, false, false, ChordCode::Char('m')),
+            ]),
         );
     }
 
@@ -2336,8 +2352,9 @@ mod tests {
 
     #[test]
     fn vim_preset_is_leaders_primary() {
-        // The vim preset drops the legacy `Shift-M` alias for merge —
-        // only the `g m` leader survives.
+        // The vim preset keeps merge as a leader-only chord — only
+        // the `g m` leader survives (matching the default, which no
+        // longer carries a Shift alias either).
         let overrides = keymap_preset("vim").unwrap();
         let catalog = ActionDef::catalog(&[], &overrides);
         let merge = catalog

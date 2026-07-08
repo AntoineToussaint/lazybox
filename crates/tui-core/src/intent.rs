@@ -392,7 +392,7 @@ pub fn resolve_adopt(workspace: Option<&Workspace>) -> Intent {
     }
 }
 
-/// Resolve `Shift-M` (merge). Same READY-gating the contextual
+/// Resolve `g m` (merge). Same READY-gating the contextual
 /// footer uses — the resolver and the hint share one predicate via
 /// [`merge_block_reason`].
 pub fn resolve_merge(workspace: Option<&Workspace>) -> Intent {

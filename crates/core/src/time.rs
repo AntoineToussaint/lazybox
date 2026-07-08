@@ -1,14 +1,22 @@
 use chrono::{DateTime, Utc};
 
-/// Age, in days, at which a task's relative time crosses from a
-/// fine-grained day/hour count into the months bucket (`Nmo`). This is
-/// also the "stale" threshold the sidebar uses to de-emphasize old
-/// issues — the formatter and the display-side staleness check share
-/// one boundary so "shows months" and "reads as stale" never disagree.
-pub const STALE_AGE_DAYS: i64 = 30;
+/// Days-per-month used by the relative-time formatter: the boundary at
+/// which an age stops reading in days (`29d`) and starts reading in
+/// months (`1mo`), and the divisor for the month count. A calendar
+/// approximation — good enough for a staleness glance, not for exact
+/// arithmetic.
+pub const DAYS_PER_MONTH: i64 = 30;
 
-/// Whether `then` is at least [`STALE_AGE_DAYS`] old relative to `now` —
-/// i.e. old enough that [`time_ago_at`] renders it as `Nmo`.
+/// Age, in days, past which a task is treated as "stale" and
+/// de-emphasized in the sidebar (issue #274). Defined as one month so
+/// "reads as `Nmo`" and "counts as stale" flip at the same point —
+/// [`is_stale_at`] and [`time_ago_at`]'s months boundary stay in lockstep
+/// by construction. Changing the staleness window (e.g. to two months)
+/// only moves the fade; the formatter keeps switching to months at
+/// [`DAYS_PER_MONTH`] regardless, so no day/month display gap can open.
+pub const STALE_AGE_DAYS: i64 = DAYS_PER_MONTH;
+
+/// Whether `then` is at least [`STALE_AGE_DAYS`] old relative to `now`.
 pub fn is_stale_at(then: &DateTime<Utc>, now: DateTime<Utc>) -> bool {
     now.signed_duration_since(then).num_days() >= STALE_AGE_DAYS
 }
@@ -42,14 +50,14 @@ pub fn time_ago_at(dt: &DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 
     let days = diff.num_days();
-    if days < STALE_AGE_DAYS {
+    if days < DAYS_PER_MONTH {
         return format!("{days}d ago");
     }
 
     // 30-day months don't tile a 365-day year (12 × 30 = 360), so gate
     // on `days` rather than `months`: without this, ages of 360–364 days
     // skip the months branch (`months == 12`) yet still floor to 0 years.
-    let months = days / 30;
+    let months = days / DAYS_PER_MONTH;
     if days < 365 {
         return format!("{months}mo ago");
     }
@@ -127,9 +135,29 @@ mod tests {
         let boundary = now - chrono::Duration::days(STALE_AGE_DAYS);
         assert!(!is_stale_at(&fresh, now));
         assert!(is_stale_at(&boundary, now));
-        // The stale threshold is exactly where `time_ago_at` starts
-        // rendering months, so the two never disagree.
-        assert_eq!(ago(now, STALE_AGE_DAYS - 1, 0), "29d ago");
+    }
+
+    /// Lockstep invariant (issue #274): the first day an item counts as
+    /// stale is the first day it reads in months. A fade on a row still
+    /// showing `29d`, or a `2mo` row that isn't faded, would look broken —
+    /// this pins that it can't happen. Guards against decoupling
+    /// `STALE_AGE_DAYS` from the formatter's `DAYS_PER_MONTH` boundary.
+    #[test]
+    fn staleness_and_months_display_stay_in_lockstep() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let last_fresh_day = STALE_AGE_DAYS - 1;
+        assert!(!is_stale_at(
+            &(now - chrono::Duration::days(last_fresh_day)),
+            now
+        ));
+        assert_eq!(
+            ago(now, last_fresh_day, 0),
+            format!("{last_fresh_day}d ago")
+        );
+        assert!(is_stale_at(
+            &(now - chrono::Duration::days(STALE_AGE_DAYS)),
+            now
+        ));
         assert_eq!(ago(now, STALE_AGE_DAYS, 0), "1mo ago");
     }
 

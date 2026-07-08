@@ -212,6 +212,14 @@ pub struct Task {
     #[serde(default)]
     pub base_branch: Option<String>,
     pub updated_at: DateTime<Utc>,
+    /// When the task was opened. Unlike `updated_at`, providers never
+    /// bump this on later activity, so it's the stable signal for "how
+    /// old is this" — what the sidebar reads to show an issue's age and
+    /// fade stale ones (issue #274). `None` for older snapshots and
+    /// providers that don't supply it; callers fall back to
+    /// `updated_at` via [`Task::opened_at`].
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
     /// When this task reached a terminal state — `closedAt` for a
     /// PR (merge closes it too) or a closed issue. Unlike
     /// `updated_at`, GitHub does NOT bump this on later activity
@@ -296,6 +304,15 @@ impl Task {
         url.contains("/pull/")
             || url.contains("/pull-requests/")
             || url.contains("/merge_requests/")
+    }
+
+    /// When this task was opened, for age/staleness purposes. Uses the
+    /// provider-supplied creation time when known, else falls back to
+    /// `updated_at` — the best available lower bound on age when a
+    /// provider (or an older persisted snapshot) didn't record
+    /// `created_at`.
+    pub fn opened_at(&self) -> DateTime<Utc> {
+        self.created_at.unwrap_or(self.updated_at)
     }
 }
 
@@ -496,6 +513,7 @@ mod status_tag_tests {
             branch: Some("b".into()),
             base_branch: None,
             updated_at: Utc::now(),
+            created_at: None,
             closed_at: None,
             labels: vec![],
             reviewers: vec![],

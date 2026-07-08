@@ -546,10 +546,10 @@ pub(crate) fn relative_time(
         return format!("{hours}h");
     }
     let days = hours / 24;
-    if days < lazybox_core::time::STALE_AGE_DAYS {
+    if days < lazybox_core::time::DAYS_PER_MONTH {
         return format!("{days}d");
     }
-    let months = days / 30;
+    let months = days / lazybox_core::time::DAYS_PER_MONTH;
     format!("{months}mo")
 }
 

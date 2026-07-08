@@ -124,6 +124,7 @@ fn make_issue(
         description: Some("body".into()),
         url: format!("https://linear.app/acme/issue/{identifier}"),
         updated_at: chrono::Utc::now(),
+        created_at: None,
         priority: Some(2.0),
         state: IssueState {
             name: "State".into(),

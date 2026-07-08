@@ -2451,23 +2451,33 @@ pub(crate) async fn maybe_emit_state_change(
     // ingest, the optimistic Enter flip) land between the two
     // and be silently clobbered by a stale decision. The machine
     // owns the transition table (`Done` stickiness) and the flap
-    // damping; it returns `None` for a no-op, a forbidden edge, or
-    // a suppressed ambiguous flip.
+    // damping.
     let (current, committed) = {
         let mut map = states.lock().await;
         let current = map.get(&id).copied();
-        let Some(committed) = state_machine.on_reading(current, reading, std::time::Instant::now())
-        else {
-            drop(map);
-            tracing::trace!(
-                terminal_id = ?id,
-                ?new_state,
-                "state machine: no transition",
-            );
-            return;
-        };
-        map.insert(id, committed);
-        (current, committed)
+        match state_machine.on_reading(current, reading, std::time::Instant::now()) {
+            lazybox_agents::Outcome::Committed(committed) => {
+                map.insert(id, committed);
+                (current, committed)
+            }
+            // Keep the flap-damping visible at debug — a stuck / missing `?`
+            // pill is bisected from this line. `current → new_state` names
+            // the damped edge. (Elevated from the steady-state cases below,
+            // which the same log would flood at 100+ chunks/sec.)
+            lazybox_agents::Outcome::Damped => {
+                drop(map);
+                tracing::debug!(
+                    terminal_id = ?id,
+                    ?current,
+                    ?new_state,
+                    "state hysteresis: damped ambiguous flap",
+                );
+                return;
+            }
+            // A per-chunk dedupe (steady state) or a structurally held edge
+            // (`Done` stickiness) — silent, as before.
+            lazybox_agents::Outcome::Unchanged | lazybox_agents::Outcome::Rejected => return,
+        }
     };
     // The broadcast itself — live-key resolution, the structured
     // log, and the `bus.send` — lives in `broadcast_agent_state`
@@ -2518,8 +2528,8 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     // Only flip a terminal that's actually parked on a prompt — a flip
     // only makes sense as the answer to a live `?`, and the bare-keystroke
     // shape check below is meaningful only for an `InputNeeded` terminal.
-    // (`Done` stickiness is enforced structurally by the state machine at
-    // the commit below, not by this gate.)
+    // This is a fast pre-check; the flip is re-validated atomically under
+    // the state lock below, since the terminal can resolve in between.
     if config.agent_state_for(terminal_id).await != Some(lazybox_ipc::AgentState::InputNeeded) {
         return;
     }
@@ -2556,13 +2566,21 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     let Some(session_key) = session_key else {
         return;
     };
-    // Commit through the machine like the two detection paths: the flip is
-    // `InputNeeded → Working`, an allowed edge, but routing it here keeps
-    // `Working` from ever overwriting a `Done` that raced in between the
-    // gate above and this lock.
+    // Atomic compare-and-set under the state lock: flip ONLY if the
+    // terminal is still parked on the prompt. If it raced to Working / Idle
+    // / Done since the pre-check above, the `?` is already gone (or the
+    // agent finished) — leave it alone. This re-check, not the transition
+    // table, is what protects a raced-in `Done`: `Done → Working` is itself
+    // an allowed edge, so committing the flip against a `Done` would stomp
+    // the "finished" alert. The `transition` call keeps the flip behind the
+    // same choke point as the detection paths (it always commits here,
+    // since `InputNeeded → Working` is legal and state-changing).
     let prev = {
         let mut map = config.agent_states.lock().await;
         let prev = map.get(&terminal_id).copied();
+        if prev != Some(lazybox_ipc::AgentState::InputNeeded) {
+            return;
+        }
         let Some(committed) =
             lazybox_agents::AgentStateMachine::transition(prev, lazybox_ipc::AgentState::Working)
         else {

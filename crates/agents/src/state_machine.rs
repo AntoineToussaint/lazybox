@@ -35,7 +35,7 @@ use lazybox_ipc::AgentState;
 /// waiting; without damping the `?` pill flickers off and back. Longer than
 /// [`WORKING_HYSTERESIS`] because a parked prompt can sit quiet far longer
 /// than a spinner drops between frames.
-pub const INPUT_NEEDED_HYSTERESIS: Duration = Duration::from_secs(8);
+pub(crate) const INPUT_NEEDED_HYSTERESIS: Duration = Duration::from_secs(8);
 
 /// Hysteresis window for the edge that LEAVES `Working`. Claude paints its
 /// live status line (spinner + token counter + `esc to interrupt`) only
@@ -43,7 +43,7 @@ pub const INPUT_NEEDED_HYSTERESIS: Duration = Duration::from_secs(8);
 /// output between spinner frames or the terminal does a full repaint,
 /// leaving the detector with an ambiguous `Idle`. Shorter than the
 /// `InputNeeded` window: the spinner reappears within a frame or two.
-pub const WORKING_HYSTERESIS: Duration = Duration::from_secs(5);
+pub(crate) const WORKING_HYSTERESIS: Duration = Duration::from_secs(5);
 
 /// One detection reading offered to the machine, tagged with the evidence
 /// quality the hysteresis needs.
@@ -77,8 +77,28 @@ pub struct Reading {
 ///
 /// Only meaningful for `from != to`; a self-loop is not a transition (see
 /// [`AgentStateMachine::transition`]).
-pub fn transition_allowed(from: AgentState, to: AgentState) -> bool {
+pub(crate) fn transition_allowed(from: AgentState, to: AgentState) -> bool {
     !matches!((from, to), (AgentState::Done, AgentState::Idle))
+}
+
+/// The result of folding a [`Reading`] into the machine via
+/// [`AgentStateMachine::on_reading`]. Distinguishes a committed move from
+/// the reasons a reading was held, so the caller can log the diagnostic
+/// (`Damped`) cases without drowning the log in the high-frequency
+/// steady-state `Unchanged` dedupe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// The machine moved to this state; broadcast it.
+    Committed(AgentState),
+    /// The reading matched the current state — nothing to do. The common
+    /// steady-state case: a streaming agent re-reads `Working` every chunk.
+    Unchanged,
+    /// A structurally forbidden edge held the state (only `Done → Idle`
+    /// today — `Done` stickiness).
+    Rejected,
+    /// An ambiguous flap (a dropped status-line frame) was damped within a
+    /// hysteresis window; the prior state stands.
+    Damped,
 }
 
 /// One terminal's lifecycle state machine.
@@ -136,9 +156,9 @@ impl AgentStateMachine {
     }
 
     /// Fold a PTY detection `reading` in at time `now`, given the terminal's
-    /// current cached `state`. Returns `Some(new)` on a committed
-    /// transition, `None` when the reading is a no-op, a forbidden edge, or
-    /// a damped ambiguous flap.
+    /// `current` cached state. Returns the [`Outcome`]: a committed move, or
+    /// the reason the reading was held (a no-op dedupe, a forbidden edge, or
+    /// a damped ambiguous flap).
     ///
     /// The two damped edges are the flaps a dropped status-line frame
     /// produces: an ambiguous `Idle` while a prompt is genuinely still up
@@ -149,10 +169,10 @@ impl AgentStateMachine {
     /// window.
     pub fn on_reading(
         &mut self,
-        state: Option<AgentState>,
+        current: Option<AgentState>,
         reading: Reading,
         now: Instant,
-    ) -> Option<AgentState> {
+    ) -> Outcome {
         // Refresh the anchor on every busy / waiting reading, even ones that
         // dedupe or damp below, so the hysteresis measures time since the
         // signal was LAST seen — a transient frame that drops it still reads
@@ -162,12 +182,16 @@ impl AgentStateMachine {
             AgentState::Working => self.last_working_at = Some(now),
             _ => {}
         }
-        if self.suppress_input_needed_exit(state, reading, now)
-            || self.suppress_working_exit(state, reading, now)
+        if self.suppress_input_needed_exit(current, reading, now)
+            || self.suppress_working_exit(current, reading, now)
         {
-            return None;
+            return Outcome::Damped;
         }
-        Self::transition(state, reading.state)
+        match Self::transition(current, reading.state) {
+            Some(to) => Outcome::Committed(to),
+            None if current == Some(reading.state) => Outcome::Unchanged,
+            None => Outcome::Rejected,
+        }
     }
 
     /// Drop the `InputNeeded` anchor so the exit hysteresis can't hold a `?`
@@ -184,11 +208,11 @@ impl AgentStateMachine {
     /// is visibly streaming or idle.
     fn suppress_input_needed_exit(
         &self,
-        state: Option<AgentState>,
+        current: Option<AgentState>,
         reading: Reading,
         now: Instant,
     ) -> bool {
-        state == Some(AgentState::InputNeeded)
+        current == Some(AgentState::InputNeeded)
             && reading.state != AgentState::InputNeeded
             && !reading.clear
             && self
@@ -203,11 +227,11 @@ impl AgentStateMachine {
     /// (it isn't an `Idle` reading).
     fn suppress_working_exit(
         &self,
-        state: Option<AgentState>,
+        current: Option<AgentState>,
         reading: Reading,
         now: Instant,
     ) -> bool {
-        state == Some(AgentState::Working)
+        current == Some(AgentState::Working)
             && reading.state == AgentState::Idle
             && !reading.clear
             && self
@@ -293,53 +317,130 @@ mod tests {
         }
     }
 
+    fn machine() -> AgentStateMachine {
+        AgentStateMachine::with_hysteresis(Duration::from_secs(8), Duration::from_secs(5))
+    }
+
+    #[test]
+    fn on_reading_reports_dedupe_and_sticky_distinctly() {
+        let mut m = machine();
+        let now = Instant::now();
+        // A reading that matches the current state is a silent no-op.
+        assert_eq!(
+            m.on_reading(Some(Working), clear(Working), now),
+            Outcome::Unchanged
+        );
+        // The forbidden Done→Idle edge is a structural rejection, NOT a damp
+        // — so the caller can log the two differently.
+        assert_eq!(
+            m.on_reading(Some(Done), clear(Idle), now),
+            Outcome::Rejected
+        );
+    }
+
     #[test]
     fn ambiguous_input_needed_exit_is_damped_within_the_window() {
-        let mut m =
-            AgentStateMachine::with_hysteresis(Duration::from_secs(8), Duration::from_secs(5));
+        let mut m = machine();
         let t0 = Instant::now();
         // Enter InputNeeded (sets the anchor).
         assert_eq!(
             m.on_reading(Some(Working), clear(InputNeeded), t0),
-            Some(InputNeeded)
+            Outcome::Committed(InputNeeded)
         );
         // An ambiguous Idle one second later is damped.
         let t1 = t0 + Duration::from_secs(1);
-        assert_eq!(m.on_reading(Some(InputNeeded), ambiguous(Idle), t1), None);
+        assert_eq!(
+            m.on_reading(Some(InputNeeded), ambiguous(Idle), t1),
+            Outcome::Damped
+        );
         // A clear Idle (recognized composer) is honored immediately.
-        assert_eq!(m.on_reading(Some(InputNeeded), clear(Idle), t1), Some(Idle));
+        assert_eq!(
+            m.on_reading(Some(InputNeeded), clear(Idle), t1),
+            Outcome::Committed(Idle)
+        );
     }
 
     #[test]
     fn stale_input_needed_exit_passes() {
-        let mut m =
-            AgentStateMachine::with_hysteresis(Duration::from_secs(8), Duration::from_secs(5));
+        let mut m = machine();
         let t0 = Instant::now();
         assert_eq!(
             m.on_reading(Some(Working), clear(InputNeeded), t0),
-            Some(InputNeeded)
+            Outcome::Committed(InputNeeded)
         );
         // Past the window, even an ambiguous Idle passes.
         let t1 = t0 + Duration::from_secs(9);
         assert_eq!(
             m.on_reading(Some(InputNeeded), ambiguous(Idle), t1),
-            Some(Idle)
+            Outcome::Committed(Idle)
         );
     }
 
     #[test]
     fn ambiguous_working_exit_is_damped_but_a_dialog_is_not() {
-        let mut m =
-            AgentStateMachine::with_hysteresis(Duration::from_secs(8), Duration::from_secs(5));
+        let mut m = machine();
         let t0 = Instant::now();
-        assert_eq!(m.on_reading(Some(Idle), clear(Working), t0), Some(Working));
+        assert_eq!(
+            m.on_reading(Some(Idle), clear(Working), t0),
+            Outcome::Committed(Working)
+        );
         // Spinner dropped for a frame → ambiguous Idle within window → damp.
         let t1 = t0 + Duration::from_secs(1);
-        assert_eq!(m.on_reading(Some(Working), ambiguous(Idle), t1), None);
+        assert_eq!(
+            m.on_reading(Some(Working), ambiguous(Idle), t1),
+            Outcome::Damped
+        );
         // A live dialog mid-work surfaces immediately (not an Idle reading).
         assert_eq!(
             m.on_reading(Some(Working), ambiguous(InputNeeded), t1),
-            Some(InputNeeded)
+            Outcome::Committed(InputNeeded)
+        );
+    }
+
+    #[test]
+    fn clear_working_exit_is_honored_within_the_window() {
+        // Symmetric to the InputNeeded exit: a CLEAR idle (the composer
+        // footer is drawn — a real end of turn) leaves `Working` immediately
+        // even while the anchor is fresh.
+        let mut m = machine();
+        let t0 = Instant::now();
+        assert_eq!(
+            m.on_reading(Some(Idle), clear(Working), t0),
+            Outcome::Committed(Working)
+        );
+        let t1 = t0 + Duration::from_secs(1);
+        assert_eq!(
+            m.on_reading(Some(Working), clear(Idle), t1),
+            Outcome::Committed(Idle)
+        );
+    }
+
+    #[test]
+    fn stale_working_exit_passes() {
+        let mut m = machine();
+        let t0 = Instant::now();
+        assert_eq!(
+            m.on_reading(Some(Idle), clear(Working), t0),
+            Outcome::Committed(Working)
+        );
+        // Past the 5s working window, even an ambiguous Idle passes: the
+        // spinner has been gone long enough that the agent really is idle.
+        let t1 = t0 + Duration::from_secs(6);
+        assert_eq!(
+            m.on_reading(Some(Working), ambiguous(Idle), t1),
+            Outcome::Committed(Idle)
+        );
+    }
+
+    #[test]
+    fn working_exit_with_no_anchor_passes() {
+        // First frame after stale hooks open the PTY gate: the machine never
+        // saw a Working reading, so there's no anchor to damp against and an
+        // ambiguous Idle passes straight through.
+        let mut m = machine();
+        assert_eq!(
+            m.on_reading(Some(Working), ambiguous(Idle), Instant::now()),
+            Outcome::Committed(Idle)
         );
     }
 
@@ -347,25 +448,33 @@ mod tests {
     fn done_survives_an_idle_reading_but_not_progress() {
         let mut m = AgentStateMachine::new();
         let now = Instant::now();
-        // A bare idle reading can't clear Done.
-        assert_eq!(m.on_reading(Some(Done), clear(Idle), now), None);
-        assert_eq!(m.on_reading(Some(Done), ambiguous(Idle), now), None);
+        // A bare idle reading can't clear Done (a structural rejection).
+        assert_eq!(
+            m.on_reading(Some(Done), clear(Idle), now),
+            Outcome::Rejected
+        );
+        assert_eq!(
+            m.on_reading(Some(Done), ambiguous(Idle), now),
+            Outcome::Rejected
+        );
         // Real progress and a fresh prompt do.
-        assert_eq!(m.on_reading(Some(Done), clear(Working), now), Some(Working));
+        assert_eq!(
+            m.on_reading(Some(Done), clear(Working), now),
+            Outcome::Committed(Working)
+        );
         assert_eq!(
             m.on_reading(Some(Done), clear(InputNeeded), now),
-            Some(InputNeeded)
+            Outcome::Committed(InputNeeded)
         );
     }
 
     #[test]
     fn reset_input_anchor_lets_the_next_exit_through() {
-        let mut m =
-            AgentStateMachine::with_hysteresis(Duration::from_secs(8), Duration::from_secs(5));
+        let mut m = machine();
         let t0 = Instant::now();
         assert_eq!(
             m.on_reading(Some(Working), clear(InputNeeded), t0),
-            Some(InputNeeded)
+            Outcome::Committed(InputNeeded)
         );
         // Without a reset the ambiguous exit would damp...
         m.reset_input_anchor();
@@ -373,7 +482,7 @@ mod tests {
         let t1 = t0 + Duration::from_secs(1);
         assert_eq!(
             m.on_reading(Some(InputNeeded), ambiguous(Idle), t1),
-            Some(Idle)
+            Outcome::Committed(Idle)
         );
     }
 }

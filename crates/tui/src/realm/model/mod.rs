@@ -1806,7 +1806,13 @@ impl<T: TerminalAdapter> Model<T> {
         component: Box<dyn tuirealm::component::AppComponent<Msg, UserEvent>>,
     ) {
         use tuirealm::subscription::{EventClause, Sub, SubClause};
-        let _ = self.app.mount(
+        // `remount`, not `mount`: a modal re-mounted under an id that is
+        // still live in the view (e.g. the `WorktreeProgress` checklist
+        // re-mounting itself on every step advance) must *replace* the
+        // stale component. `mount` errors with `ComponentAlreadyMounted`
+        // and we swallow the result, which left the first-step component
+        // frozen on screen while `modal_stack` tracked it as current.
+        let _ = self.app.remount(
             id.clone(),
             component,
             vec![Sub::new(EventClause::Any, SubClause::Always)],

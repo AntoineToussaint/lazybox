@@ -144,6 +144,39 @@ mod effects_tests {
         assert_eq!(m.sidebar.outdated_commits_behind(), None);
     }
 
+    /// Issue #265: a `g m` merge GitHub rejected must surface as a
+    /// distinct, persistent error (Permanent severity → never
+    /// auto-fades) naming the reason, not a self-fading retryable
+    /// flash. The PR stays actionable, so no optimistic MERGED flip.
+    #[test]
+    fn pr_merge_failed_raises_a_persistent_error_naming_the_reason() {
+        use crate::realm::components::footer::NoticeSeverity;
+        use lazybox_ipc::Event as IpcEvent;
+
+        let mut m = build_model();
+        m.status.polling = None;
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            pr_label: "o/r#1".into(),
+            reason: "Required status check \"ci\" is expected".into(),
+        });
+
+        let n = m.status.notice.as_ref().expect("merge-failed banner set");
+        assert_eq!(
+            n.severity,
+            NoticeSeverity::Permanent,
+            "a failed merge must not auto-fade like a transient blip",
+        );
+        assert!(n.message.contains("merge failed"), "message: {}", n.message);
+        assert!(n.message.contains("o/r#1"), "message: {}", n.message);
+        assert!(
+            n.message.contains("Required status check"),
+            "the GitHub reason must be quoted: {}",
+            n.message,
+        );
+    }
+
     /// A manual-refresh sync failure paints a sticky "✗ sync failed"
     /// banner; the next successful poll (auto-cycle) from the *same*
     /// provider must clear it so a recovered sync doesn't leave the
@@ -5585,5 +5618,273 @@ mod auto_merge_on_green_tests {
         // CI recovers → the one-shot re-arms and fires again.
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(green)));
         assert_eq!(merges(&mut server), 1, "a genuine re-green re-fires");
+    }
+
+    #[test]
+    fn confirmed_merge_suppresses_a_redundant_auto_merge() {
+        // #265: after GitHub confirms a merge (`PrMerged`), an interim
+        // poll that still reports the armed PR as green + Open must NOT
+        // re-fire `MergePr`. The Model latches the merge and patches the
+        // incoming workspace to Merged at ingest, so `merge_block_reason`
+        // blocks the auto-merge instead of firing a doomed second attempt
+        // (which would now surface as a loud `PrMergeFailed`).
+        let (mut m, mut server) = model();
+        while server.rx.try_recv().is_ok() {} // drain startup traffic
+
+        let ws = armed_pr(CiStatus::Success);
+        let key = ws.key.clone();
+
+        // GitHub confirmed the merge (manual `g m` or the first
+        // auto-fire), latching the key.
+        m.handle_daemon_event(IpcEvent::PrMerged {
+            workspace_key: key.clone(),
+            pr_label: "owner/repo#1".into(),
+        });
+        let _ = merges(&mut server); // ignore anything queued so far
+
+        // An in-flight poll re-reports the PR green + Open before GitHub
+        // shows it merged.
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert_eq!(
+            merges(&mut server),
+            0,
+            "a confirmed-merge workspace must not re-fire auto-merge on an interim Open poll",
+        );
+        assert!(
+            m.merge_confirmed.contains(&key),
+            "the interim Open poll holds the latch",
+        );
+    }
+}
+
+#[cfg(test)]
+mod merge_latch_tests {
+    //! Issue #265: a confirmed merge (`Event::PrMerged`) is latched
+    //! Model-side so MERGED is authoritative. Every incoming
+    //! `WorkspaceUpserted` / `Snapshot` is patched through
+    //! `apply_merge_latch` before fan-out, so an interim poll still
+    //! reporting `Open` can't flicker the row/header back; the latch
+    //! releases only when a poll confirms the terminal state or the
+    //! workspace is removed.
+    use super::super::*;
+    use chrono::{Duration, Utc};
+    use lazybox_core::{CiStatus, SessionKey, Task, TaskId, TaskRole, TaskState, Workspace};
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn right_pane_state(m: &Model<tuirealm::terminal::TestTerminalAdapter>) -> Option<TaskState> {
+        m.right
+            .selected_workspace()
+            .and_then(|w| w.pr.as_ref())
+            .map(|pr| pr.state)
+    }
+
+    fn pr_ws(state: TaskState) -> Workspace {
+        pr_ws_n(1, state)
+    }
+
+    /// A PR workspace keyed `owner/repo#{num}` so a test can build
+    /// several distinct rows (e.g. to navigate the sidebar between them).
+    fn pr_ws_n(num: u32, state: TaskState) -> Workspace {
+        let task = Task {
+            id: TaskId {
+                source: "github".into(),
+                key: format!("owner/repo#{num}"),
+            },
+            title: "add thing".into(),
+            body: None,
+            state,
+            role: TaskRole::Author,
+            ci: CiStatus::Success,
+            review: lazybox_core::ReviewStatus::Approved,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/owner/repo/pull/{num}"),
+            repo: Some("owner/repo".into()),
+            branch: Some("feature".into()),
+            base_branch: Some("main".into()),
+            updated_at: Utc::now() - Duration::hours(1),
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: Some("PR_node".into()),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+        Workspace::from_task(task, Utc::now())
+    }
+
+    fn state_of(ws: &Workspace) -> TaskState {
+        ws.pr.as_ref().expect("workspace has a PR").state
+    }
+
+    #[test]
+    fn apply_merge_latch_forces_merged_on_an_interim_open_poll_and_holds() {
+        let mut m = build_model();
+        let mut ws = pr_ws(TaskState::Open);
+        m.merge_confirmed.insert(ws.key.clone());
+
+        m.apply_merge_latch(&mut ws);
+
+        assert_eq!(
+            state_of(&ws),
+            TaskState::Merged,
+            "interim Open forced to Merged"
+        );
+        assert!(
+            m.merge_confirmed.contains(&ws.key),
+            "latch held until a poll confirms the terminal state",
+        );
+        assert!(
+            ws.pr.as_ref().unwrap().closed_at.is_some(),
+            "closed_at stamped so the sidebar grace window keys off it",
+        );
+    }
+
+    #[test]
+    fn apply_merge_latch_releases_when_a_poll_confirms_the_terminal_state() {
+        for state in [TaskState::Merged, TaskState::Closed] {
+            let mut m = build_model();
+            let mut ws = pr_ws(state);
+            m.merge_confirmed.insert(ws.key.clone());
+
+            m.apply_merge_latch(&mut ws);
+
+            assert_eq!(state_of(&ws), state, "confirming poll accepted as-is");
+            assert!(
+                !m.merge_confirmed.contains(&ws.key),
+                "{state:?} poll releases the latch",
+            );
+        }
+    }
+
+    #[test]
+    fn apply_merge_latch_is_a_noop_for_unlatched_keys() {
+        let mut m = build_model();
+        let mut ws = pr_ws(TaskState::Open);
+        m.apply_merge_latch(&mut ws);
+        assert_eq!(
+            state_of(&ws),
+            TaskState::Open,
+            "un-latched upsert untouched"
+        );
+    }
+
+    #[test]
+    fn pr_merged_latches_and_an_interim_open_upsert_holds_while_merged_releases() {
+        let mut m = build_model();
+        m.status.polling = None;
+        let key = pr_ws(TaskState::Open).key.clone();
+
+        m.handle_daemon_event(IpcEvent::PrMerged {
+            workspace_key: key.clone(),
+            pr_label: "owner/repo#1".into(),
+        });
+        assert!(m.merge_confirmed.contains(&key), "PrMerged latches the key");
+
+        // Interim poll still Open → patched, latch held.
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr_ws(
+            TaskState::Open,
+        ))));
+        assert!(
+            m.merge_confirmed.contains(&key),
+            "an interim Open poll holds the latch",
+        );
+
+        // Confirming poll reports Merged → released.
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr_ws(
+            TaskState::Merged,
+        ))));
+        assert!(
+            !m.merge_confirmed.contains(&key),
+            "a confirming Merged poll releases the latch",
+        );
+    }
+
+    #[test]
+    fn snapshot_recovery_reporting_open_still_holds_the_latch() {
+        let mut m = build_model();
+        m.status.polling = None;
+        let key = pr_ws(TaskState::Open).key.clone();
+        m.merge_confirmed.insert(key.clone());
+
+        // Reconnect: a fresh snapshot taken before the daemon re-polled
+        // still shows the PR Open.
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![pr_ws(TaskState::Open)],
+            terminals: vec![],
+            projects: vec![],
+        });
+        assert!(
+            m.merge_confirmed.contains(&key),
+            "the latch survives a reconnect snapshot reporting Open",
+        );
+    }
+
+    #[test]
+    fn workspace_removed_clears_the_latch() {
+        let mut m = build_model();
+        let key = pr_ws(TaskState::Open).key.clone();
+        m.merge_confirmed.insert(key.clone());
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(key.clone()));
+        assert!(
+            !m.merge_confirmed.contains(&key),
+            "removing the workspace drops its latch",
+        );
+    }
+
+    #[test]
+    fn navigating_away_and_back_keeps_the_right_pane_merged() {
+        // The right pane's immediate flip only touches the copy it's
+        // currently showing, so a user who navigates away and back before
+        // the confirming poll relies on `sync_panes` pulling the sidebar's
+        // (latched-MERGED) copy. Lock that seam in.
+        let mut m = build_model();
+        m.status.polling = None;
+
+        let x = pr_ws_n(1, TaskState::Open);
+        let y = pr_ws_n(2, TaskState::Open);
+        let x_key = x.key.clone();
+        let x_sk = SessionKey::from(&x.key);
+        let y_sk = SessionKey::from(&y.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(x)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(y)));
+
+        // Merge X (the freshly-merged row stays in the Inbox during the
+        // grace window, so it's still selectable).
+        m.handle_daemon_event(IpcEvent::PrMerged {
+            workspace_key: x_key,
+            pr_label: "owner/repo#1".into(),
+        });
+
+        // Navigate to Y (right pane shows Y, Open) …
+        assert!(m.sidebar.focus_workspace_key(&y_sk));
+        m.sync_panes();
+        assert_eq!(right_pane_state(&m), Some(TaskState::Open), "Y shows Open");
+
+        // … then back to X before any confirming poll. The header must
+        // still read MERGED, not revert to Open.
+        assert!(m.sidebar.focus_workspace_key(&x_sk));
+        m.sync_panes();
+        assert_eq!(
+            right_pane_state(&m),
+            Some(TaskState::Merged),
+            "the right pane stays MERGED across a navigate-away-and-back",
+        );
     }
 }

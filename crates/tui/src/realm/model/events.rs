@@ -103,7 +103,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// After the very first Snapshot, apply any pending CLI preselect.
     /// Also feeds the polling modal so it can detect "first task
     /// arrived".
-    pub(super) fn dispatch_daemon_event(&mut self, event: IpcEvent) {
+    pub(super) fn dispatch_daemon_event(&mut self, mut event: IpcEvent) {
         // Hot path: PTY output. Bytes only mutate one terminal's grid
         // — no workspace / sidebar / layout state changes — so skip
         // the full fan-out (and the Workspace clone inside
@@ -119,6 +119,25 @@ impl<T: TerminalAdapter> Model<T> {
                 self.redraw = true;
             }
             return;
+        }
+        // Enforce the confirmed-merge latch centrally, before any pane or
+        // the auto-merge check sees the workspace. Once GitHub accepted a
+        // merge (`Event::PrMerged` latched the key), an incoming
+        // poll/snapshot that still reports `Open` is stale — patch the
+        // owned event to MERGED here so the sidebar row AND the right-pane
+        // header agree, and `maybe_auto_merge` reads the merged state
+        // (which `merge_block_reason` then blocks) instead of re-firing a
+        // redundant merge. No-op unless a key is latched.
+        if !self.merge_confirmed.is_empty() {
+            match &mut event {
+                IpcEvent::WorkspaceUpserted(ws) => self.apply_merge_latch(ws),
+                IpcEvent::Snapshot { workspaces, .. } => {
+                    for ws in workspaces.iter_mut() {
+                        self.apply_merge_latch(ws);
+                    }
+                }
+                _ => {}
+            }
         }
         // Agent-state pings repeat at the detector's cadence while an
         // agent streams. Forward them (the asking/working sets and the
@@ -323,19 +342,23 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
-        // `g m` merge completed: GitHub accepted the merge. Optimistically
-        // flip the local task state to Merged so the badge pill
-        // changes IMMEDIATELY — without this the user has to wait up
-        // to the next poll cycle (~30s) for the visual to catch up,
-        // which felt broken. Refresh still goes out so the next
-        // poll backfills everything else.
+        // `g m` completed: GitHub accepted the merge. Latch the key so
+        // the MERGED state is authoritative from here on (any interim
+        // poll still reporting `Open` is patched back to MERGED at ingest
+        // — see `apply_merge_latch`), then flip both panes' stored copies
+        // IMMEDIATELY so the badge pill and the right-pane header change
+        // now instead of waiting up to a poll cycle (~30s) for the visual
+        // to catch up. Refresh still goes out so the next poll backfills
+        // everything else and eventually confirms + releases the latch.
         if let IpcEvent::PrMerged {
             pr_label,
             workspace_key,
             ..
         } = &event
         {
+            self.merge_confirmed.insert(workspace_key.clone());
             self.sidebar.mark_workspace_merged(workspace_key);
+            self.right.mark_workspace_merged(workspace_key);
             self.flash_info(format!("merged {pr_label}"));
             // The removal prompt is NOT queued here. Both user-initiated
             // (`g m`) and externally-merged PRs are surfaced by the
@@ -344,6 +367,19 @@ impl<T: TerminalAdapter> Model<T> {
             // lacks). The `Refresh` below wakes that poll so the prompt
             // follows within a few seconds.
             self.send_cmd(IpcCommand::Refresh);
+            self.redraw = true;
+            return;
+        }
+        // `g m` reached GitHub and was rejected — the merge did NOT
+        // happen. Surface a distinct, persistent error (Permanent
+        // severity → no auto-fade) naming the reason so it reads as
+        // "your merge failed," not a transient sync blip. The PR stays
+        // Open/actionable; no optimistic MERGED flip here.
+        if let IpcEvent::PrMergeFailed {
+            pr_label, reason, ..
+        } = &event
+        {
+            self.flash_error(format!("✗ merge failed — {pr_label}: {reason}"));
             self.redraw = true;
             return;
         }
@@ -387,6 +423,9 @@ impl<T: TerminalAdapter> Model<T> {
             // A merged/removed workspace can't re-fire; drop its arming
             // latch so the set doesn't leak keys across a session.
             self.auto_merge_fired.remove(key);
+            // Same for the confirmed-merge latch — the row is gone, so a
+            // stale entry could only leak or mis-patch a re-added key.
+            self.merge_confirmed.remove(key);
             // Drop any Activity-pane visibility override so a re-added
             // workspace re-applies the empty-aware default instead of a
             // stale manual choice.
@@ -707,6 +746,43 @@ impl<T: TerminalAdapter> Model<T> {
             // (e.g. after a failing-check race made the first attempt a
             // no-op) re-arms the one-shot.
             self.auto_merge_fired.remove(&ws.key);
+        }
+    }
+
+    /// Patch a workspace about to be stored/fanned-out so a confirmed
+    /// merge stays MERGED. Once `Event::PrMerged` latched a key, GitHub
+    /// already accepted the merge, so:
+    /// - an incoming poll still showing `Open` is stale → force `Merged`
+    ///   (stamp `closed_at` so the sidebar's grace window keys off it);
+    /// - an incoming poll showing the terminal state (`Merged`/`Closed`)
+    ///   has caught up → accept it and release the latch;
+    /// - a workspace that lost its PR entirely → release the latch.
+    ///
+    /// Applied at ingest to every `WorkspaceUpserted` / `Snapshot`
+    /// workspace, so both panes and `maybe_auto_merge` see one
+    /// consistent state. No-op for un-latched keys.
+    pub(super) fn apply_merge_latch(&mut self, ws: &mut lazybox_core::Workspace) {
+        if !self.merge_confirmed.contains(&ws.key) {
+            return;
+        }
+        match ws.pr.as_mut() {
+            Some(pr)
+                if matches!(
+                    pr.state,
+                    lazybox_core::TaskState::Merged | lazybox_core::TaskState::Closed
+                ) =>
+            {
+                self.merge_confirmed.remove(&ws.key);
+            }
+            Some(pr) => {
+                pr.state = lazybox_core::TaskState::Merged;
+                if pr.closed_at.is_none() {
+                    pr.closed_at = Some(chrono::Utc::now());
+                }
+            }
+            None => {
+                self.merge_confirmed.remove(&ws.key);
+            }
         }
     }
 

@@ -931,6 +931,18 @@ pub enum Event {
         workspace_key: lazybox_core::WorkspaceKey,
         pr_label: String,
     },
+    /// `Command::MergePr` failed at the GitHub merge API — the user
+    /// pressed `g m` and the merge did NOT happen. Distinct from a
+    /// generic retryable `ProviderError`: the TUI surfaces this as a
+    /// prominent, persistent error naming the reason (not mergeable,
+    /// branch protection, required checks, review required, conflict,
+    /// permissions) rather than a self-fading flash. The PR stays
+    /// Open/actionable.
+    PrMergeFailed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+        reason: String,
+    },
     /// A workspace's primary task just reached a terminal state (a PR
     /// merged, or an issue closed) and its workspace is a candidate for
     /// removal. Emitted once per transition (the upsert path only acts

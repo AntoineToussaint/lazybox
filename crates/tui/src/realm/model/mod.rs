@@ -629,6 +629,18 @@ pub struct Model<T: TerminalAdapter> {
     /// when the PR leaves the merge-ready state (so a fresh green
     /// re-fires after a failed race) and on `Event::WorkspaceRemoved`.
     auto_merge_fired: std::collections::HashSet<lazybox_core::WorkspaceKey>,
+    /// Workspace keys whose PR GitHub confirmed as merged (via
+    /// `Command::MergePr` → `Event::PrMerged`) but whose next poll hasn't
+    /// caught up yet. Held Model-side — not in a single pane — because the
+    /// MERGED state must show identically in the sidebar row AND the
+    /// right-pane header, and `maybe_auto_merge` must not re-fire on a PR
+    /// we already know is merged. Every incoming `WorkspaceUpserted` /
+    /// `Snapshot` is patched through [`Self::apply_merge_latch`] before
+    /// fan-out, so an interim poll still reporting `Open` can't flicker
+    /// the row back. Cleared once a poll confirms the terminal state
+    /// (Merged/Closed) or on `Event::WorkspaceRemoved`. The merge already
+    /// succeeded, so holding MERGED is authoritative, never optimistic.
+    merge_confirmed: std::collections::HashSet<lazybox_core::WorkspaceKey>,
     /// Last `SessionKey` we sent a `Command::FocusWorkspace` for.
     /// Single source of truth for "did the cursor leave the previous
     /// workspace?". `sync_panes` reads it after every key/mouse
@@ -973,6 +985,7 @@ impl<T: TerminalAdapter> Model<T> {
             ui_defaults: lazybox_config::UiDefaults::default(),
             pr_details_fetched: std::collections::HashSet::new(),
             auto_merge_fired: std::collections::HashSet::new(),
+            merge_confirmed: std::collections::HashSet::new(),
             last_focused_session_key: None,
             needs_pane_sync: false,
             workspace_focus: std::collections::HashMap::new(),

@@ -244,7 +244,18 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
     };
     if let Err(e) = provider.merge(&ws).await {
         tracing::warn!("merge {workspace_key}: {e:?}");
-        emit_err(&format!("merge failed: {e}"));
+        // A user-initiated merge that GitHub rejected is not a
+        // transient blip — surface it as a distinct, persistent error
+        // (with the reason) so the user can't mistake it for "the
+        // keypress did nothing." The PR stays Open/actionable.
+        let label = pr_label
+            .clone()
+            .unwrap_or_else(|| workspace_key.as_str().to_string());
+        let _ = config.bus.send(Event::PrMergeFailed {
+            workspace_key: workspace_key.clone(),
+            pr_label: label,
+            reason: e.to_string(),
+        });
         return;
     }
     tracing::info!("merged PR for workspace {workspace_key}");

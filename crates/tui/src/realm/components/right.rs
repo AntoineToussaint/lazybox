@@ -79,6 +79,11 @@ impl Right {
         self.inner.mark_workspace_merged(key);
     }
 
+    /// The workspace this pane is currently rendering, if any.
+    pub fn selected_workspace(&self) -> Option<&lazybox_core::Workspace> {
+        self.inner.selected_workspace()
+    }
+
     /// Direct render entry point. See `Sidebar::view_in`.
     pub fn view_in(&mut self, area: Rect, frame: &mut Frame) {
         self.inner.render(area, frame, self.focused);

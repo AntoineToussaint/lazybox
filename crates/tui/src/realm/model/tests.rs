@@ -5668,7 +5668,7 @@ mod merge_latch_tests {
     //! workspace is removed.
     use super::super::*;
     use chrono::{Duration, Utc};
-    use lazybox_core::{CiStatus, Task, TaskId, TaskRole, TaskState, Workspace};
+    use lazybox_core::{CiStatus, SessionKey, Task, TaskId, TaskRole, TaskState, Workspace};
     use lazybox_ipc::{Event as IpcEvent, channel};
     use tuirealm::ratatui::layout::Size;
 
@@ -5677,11 +5677,24 @@ mod merge_latch_tests {
         Model::new_for_test(client, Size::new(120, 40)).expect("model init")
     }
 
+    fn right_pane_state(m: &Model<tuirealm::terminal::TestTerminalAdapter>) -> Option<TaskState> {
+        m.right
+            .selected_workspace()
+            .and_then(|w| w.pr.as_ref())
+            .map(|pr| pr.state)
+    }
+
     fn pr_ws(state: TaskState) -> Workspace {
+        pr_ws_n(1, state)
+    }
+
+    /// A PR workspace keyed `owner/repo#{num}` so a test can build
+    /// several distinct rows (e.g. to navigate the sidebar between them).
+    fn pr_ws_n(num: u32, state: TaskState) -> Workspace {
         let task = Task {
             id: TaskId {
                 source: "github".into(),
-                key: "owner/repo#1".into(),
+                key: format!("owner/repo#{num}"),
             },
             title: "add thing".into(),
             body: None,
@@ -5691,7 +5704,7 @@ mod merge_latch_tests {
             review: lazybox_core::ReviewStatus::Approved,
             checks: vec![],
             unread_count: 0,
-            url: "https://github.com/owner/repo/pull/1".into(),
+            url: format!("https://github.com/owner/repo/pull/{num}"),
             repo: Some("owner/repo".into()),
             branch: Some("feature".into()),
             base_branch: Some("main".into()),
@@ -5832,6 +5845,46 @@ mod merge_latch_tests {
         assert!(
             !m.merge_confirmed.contains(&key),
             "removing the workspace drops its latch",
+        );
+    }
+
+    #[test]
+    fn navigating_away_and_back_keeps_the_right_pane_merged() {
+        // The right pane's immediate flip only touches the copy it's
+        // currently showing, so a user who navigates away and back before
+        // the confirming poll relies on `sync_panes` pulling the sidebar's
+        // (latched-MERGED) copy. Lock that seam in.
+        let mut m = build_model();
+        m.status.polling = None;
+
+        let x = pr_ws_n(1, TaskState::Open);
+        let y = pr_ws_n(2, TaskState::Open);
+        let x_key = x.key.clone();
+        let x_sk = SessionKey::from(&x.key);
+        let y_sk = SessionKey::from(&y.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(x)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(y)));
+
+        // Merge X (the freshly-merged row stays in the Inbox during the
+        // grace window, so it's still selectable).
+        m.handle_daemon_event(IpcEvent::PrMerged {
+            workspace_key: x_key,
+            pr_label: "owner/repo#1".into(),
+        });
+
+        // Navigate to Y (right pane shows Y, Open) …
+        assert!(m.sidebar.focus_workspace_key(&y_sk));
+        m.sync_panes();
+        assert_eq!(right_pane_state(&m), Some(TaskState::Open), "Y shows Open");
+
+        // … then back to X before any confirming poll. The header must
+        // still read MERGED, not revert to Open.
+        assert!(m.sidebar.focus_workspace_key(&x_sk));
+        m.sync_panes();
+        assert_eq!(
+            right_pane_state(&m),
+            Some(TaskState::Merged),
+            "the right pane stays MERGED across a navigate-away-and-back",
         );
     }
 }

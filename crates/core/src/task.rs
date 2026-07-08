@@ -533,6 +533,24 @@ mod status_tag_tests {
     }
 
     #[test]
+    fn opened_at_prefers_created_at_and_falls_back_to_updated_at() {
+        let created = Utc::now() - chrono::Duration::days(90);
+        let updated = Utc::now();
+        let mut t = base();
+        t.updated_at = updated;
+
+        // No creation time recorded (older snapshot / provider that
+        // doesn't supply it) → age falls back to last activity.
+        t.created_at = None;
+        assert_eq!(t.opened_at(), updated);
+
+        // Creation time known → used verbatim, even when far older than
+        // the last activity.
+        t.created_at = Some(created);
+        assert_eq!(t.opened_at(), created);
+    }
+
+    #[test]
     fn auto_merge_armed_is_not_queued() {
         // REGRESSION: auto_merge_enabled used to render as "QUEUED" even
         // though the PR was neither approved nor actually in the queue.

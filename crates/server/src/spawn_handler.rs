@@ -2453,7 +2453,7 @@ pub(crate) async fn maybe_emit_state_change(
     // owns the transition table (`Done` stickiness) and the flap
     // damping; it returns `None` for a no-op, a forbidden edge, or
     // a suppressed ambiguous flip.
-    let current = {
+    let (current, committed) = {
         let mut map = states.lock().await;
         let current = map.get(&id).copied();
         let Some(committed) = state_machine.on_reading(current, reading, std::time::Instant::now())
@@ -2467,7 +2467,7 @@ pub(crate) async fn maybe_emit_state_change(
             return;
         };
         map.insert(id, committed);
-        current
+        (current, committed)
     };
     // The broadcast itself — live-key resolution, the structured
     // log, and the `bus.send` — lives in `broadcast_agent_state`
@@ -2481,7 +2481,7 @@ pub(crate) async fn maybe_emit_state_change(
         id,
         session_key,
         current,
-        new_state,
+        committed,
         StateSource::Pty,
     )
     .await;
@@ -2515,12 +2515,11 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     if !pressed_enter && !answered_chooser {
         return;
     }
-    // Only flip a terminal that's actually parked on a prompt. This gate
-    // is also what keeps the flip from clobbering a sticky `Done`: a
-    // finished agent reads `Done`, not `InputNeeded`, so it never reaches
-    // the `Working` send below. That's the only thing protecting `Done`
-    // here — there's no explicit `done_is_sticky` call — so broadening
-    // this condition would need to re-add one.
+    // Only flip a terminal that's actually parked on a prompt — a flip
+    // only makes sense as the answer to a live `?`, and the bare-keystroke
+    // shape check below is meaningful only for an `InputNeeded` terminal.
+    // (`Done` stickiness is enforced structurally by the state machine at
+    // the commit below, not by this gate.)
     if config.agent_state_for(terminal_id).await != Some(lazybox_ipc::AgentState::InputNeeded) {
         return;
     }
@@ -2557,11 +2556,21 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
     let Some(session_key) = session_key else {
         return;
     };
-    config
-        .agent_states
-        .lock()
-        .await
-        .insert(terminal_id, lazybox_ipc::AgentState::Working);
+    // Commit through the machine like the two detection paths: the flip is
+    // `InputNeeded → Working`, an allowed edge, but routing it here keeps
+    // `Working` from ever overwriting a `Done` that raced in between the
+    // gate above and this lock.
+    let prev = {
+        let mut map = config.agent_states.lock().await;
+        let prev = map.get(&terminal_id).copied();
+        let Some(committed) =
+            lazybox_agents::AgentStateMachine::transition(prev, lazybox_ipc::AgentState::Working)
+        else {
+            return;
+        };
+        map.insert(terminal_id, committed);
+        prev
+    };
     // Tell the output pump to drop its detection buffer on the next
     // chunk. Without this the just-answered prompt's markers linger in
     // the rolling window and re-fire InputNeeded on the very next
@@ -2575,7 +2584,7 @@ pub async fn handle_write(config: &ServerConfig, terminal_id: TerminalId, bytes:
         &config.bus,
         terminal_id,
         &session_key,
-        Some(lazybox_ipc::AgentState::InputNeeded),
+        prev,
         lazybox_ipc::AgentState::Working,
         StateSource::Flip,
     )

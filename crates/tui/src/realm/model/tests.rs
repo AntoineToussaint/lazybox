@@ -5957,3 +5957,89 @@ mod merge_latch_tests {
         );
     }
 }
+
+mod inspect_list_remount_tests {
+    //! Same root cause as [`super::worktree_progress_recovery_tests`]
+    //! (issue #267): `mount_modal_boxed` used to call `app.mount`, which
+    //! errors on an already-live id. The worktree inspector re-mounts
+    //! itself in place after a delete (`mount_inspect_list` is documented
+    //! as idempotent — re-rendering the now-shorter list), so under the
+    //! old code that re-render silently failed and the inspector kept
+    //! showing the deleted row. This pins the re-mount-replaces-the-live
+    //! component contract on a second, non-progress code path.
+    use super::super::{Id, Model};
+    use lazybox_ipc::channel;
+    use tuirealm::ratatui::Terminal;
+    use tuirealm::ratatui::backend::TestBackend;
+    use tuirealm::ratatui::layout::{Rect, Size};
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn healthy_dto(name: &str) -> lazybox_ipc::WorktreeInspectionDto {
+        lazybox_ipc::WorktreeInspectionDto {
+            path: std::path::PathBuf::from(format!("/tmp/worktrees/{name}")),
+            bare_path: None,
+            branch: Some("main".into()),
+            session_id: None,
+            reasons: Vec::new(),
+            size_bytes: 0,
+            last_modified_unix: Some(0),
+            has_uncommitted_changes: false,
+            has_unpushed_commits: false,
+            is_safe_to_delete: false,
+        }
+    }
+
+    fn rendered(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) -> String {
+        let mut term = Terminal::new(TestBackend::new(120, 20)).expect("test terminal");
+        term.draw(|f| m.app.view(&Id::InspectList, f, Rect::new(0, 0, 120, 20)))
+            .expect("draw mounted modal");
+        let buf = term.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn re_inspecting_replaces_the_stale_inspector_list() {
+        let mut m = build_model();
+
+        // Open the inspector with two worktrees.
+        m.mount_inspect_list(vec![healthy_dto("alpha-tree"), healthy_dto("beta-tree")]);
+        assert!(m.modal_stack.contains(&Id::InspectList));
+        let out = rendered(&mut m);
+        assert!(out.contains("alpha-tree"), "first list shows alpha:\n{out}");
+        assert!(out.contains("beta-tree"), "first list shows beta:\n{out}");
+
+        // `beta-tree` was deleted; the daemon replies with the shorter
+        // inspection, which re-mounts the list in place. The stale row
+        // must be gone — which only happens if the re-mount replaced the
+        // live component instead of silently failing.
+        m.mount_inspect_list(vec![healthy_dto("alpha-tree")]);
+        assert_eq!(
+            m.modal_stack
+                .iter()
+                .filter(|id| **id == Id::InspectList)
+                .count(),
+            1,
+            "re-inspect must not pile up duplicate inspector entries",
+        );
+        let out = rendered(&mut m);
+        assert!(
+            out.contains("alpha-tree"),
+            "surviving row still shown:\n{out}"
+        );
+        assert!(
+            !out.contains("beta-tree"),
+            "the deleted row must not linger in the re-rendered list:\n{out}",
+        );
+    }
+}

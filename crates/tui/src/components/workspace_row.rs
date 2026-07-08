@@ -95,14 +95,16 @@ impl<'a> WorkspaceRowCtx<'a> {
             .unwrap_or_else(|| self.workspace.map(|w| w.name.as_str()).unwrap_or("?"))
     }
 
-    /// An issue that's been sitting untouched long enough to read in
-    /// months (`Nmo` in the time column). PRs are excluded — they carry
-    /// their own staleness cues (CI, review, conflict pills) and a fade
-    /// would fight those. Stale issues get a dim title so active rows
-    /// stand out and old ones don't waste a second glance (issue #274).
+    /// An issue that's been open long enough to read in months (`Nmo`
+    /// in the time column). Age is measured from when it was opened, not
+    /// last touched, so an old issue with recent chatter still reads as
+    /// old. PRs are excluded — they carry their own staleness cues (CI,
+    /// review, conflict pills) and a fade would fight those. Stale issues
+    /// get a dim title so active rows stand out and old ones don't waste
+    /// a second glance (issue #274).
     fn is_stale_issue(&self) -> bool {
         self.task.is_some_and(|t| {
-            !t.is_pr() && lazybox_core::time::is_stale_at(&t.updated_at, self.now)
+            !t.is_pr() && lazybox_core::time::is_stale_at(&t.opened_at(), self.now)
         })
     }
 }
@@ -552,7 +554,15 @@ fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let Some(task) = ctx.task else {
         return Cell::empty();
     };
-    let text = crate::components::sidebar::relative_time(task.updated_at, ctx.now);
+    // Issues show their age (time since opened) so an old issue reads as
+    // old even after recent chatter; PRs show recency of activity, which
+    // is what their CI/review pills are keyed to.
+    let anchor = if task.is_pr() {
+        task.updated_at
+    } else {
+        task.opened_at()
+    };
+    let text = crate::components::sidebar::relative_time(anchor, ctx.now);
     let style = if ctx.is_cursor {
         ctx.row_style()
     } else if ctx.is_stale_issue() {
@@ -604,6 +614,7 @@ mod tests {
             branch: Some("main".into()),
             base_branch: None,
             updated_at: fixed_time(),
+            created_at: None,
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
@@ -1141,6 +1152,29 @@ mod tests {
         t
     }
 
+    /// Issue #274, finding 1: age is measured from when the issue was
+    /// opened, not last touched. An issue opened months ago but commented
+    /// on today still reads as old (`Nmo`) and fades — `updated_at` alone
+    /// would have shown a misleading `now`.
+    #[test]
+    fn old_issue_with_recent_activity_still_reads_as_stale() {
+        let mut task = make_task("owner/repo#1", "old but chatty");
+        task.created_at = Some(fixed_time() - chrono::Duration::days(90));
+        task.updated_at = fixed_time(); // touched just now
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+
+        assert!(ctx.is_stale_issue());
+        assert_eq!(cell_text(&cell_time(&ctx)).trim(), "3mo");
+        assert!(
+            cell_title(&ctx).spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::DIM)
+        );
+    }
+
     /// Issue #274: an issue old enough to read in months fades — its
     /// title and age carry `DIM` so active rows draw the eye.
     #[test]
@@ -1189,6 +1223,23 @@ mod tests {
         assert!(!ctx.is_stale_issue());
         let title = cell_title(&ctx);
         assert!(!title.spans[0].style.add_modifier.contains(Modifier::DIM));
+    }
+
+    /// A PR shows recency of activity, not age: an old PR pushed to just
+    /// now reads as `now`, keeping the time column aligned with the
+    /// CI/review pills that key off activity.
+    #[test]
+    fn pr_time_tracks_activity_not_age() {
+        let mut task = make_task("owner/repo#7", "old but active pr");
+        task.url = "https://github.com/owner/repo/pull/7".into();
+        task.created_at = Some(fixed_time() - chrono::Duration::days(90));
+        task.updated_at = fixed_time();
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+
+        assert!(task.is_pr());
+        assert_eq!(cell_text(&cell_time(&ctx)).trim(), "now");
     }
 
     /// The cursor row's highlight fill must stay legible — the fade is

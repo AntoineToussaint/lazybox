@@ -1843,6 +1843,7 @@ fn collapse_task(key: &str, url: &str, closes: Vec<lazybox_core::TaskId>) -> laz
         branch: Some("feat".into()),
         base_branch: None,
         updated_at: chrono::Utc::now(),
+        created_at: None,
         closed_at: None,
         labels: vec![],
         reviewers: vec![],

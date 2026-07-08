@@ -27,6 +27,7 @@ query($after: String) {
       description
       url
       updatedAt
+      createdAt
       priority
       state { name type }
       assignee { id name }
@@ -107,6 +108,8 @@ pub struct Issue {
     pub url: String,
     #[serde(rename = "updatedAt")]
     pub updated_at: DateTime<Utc>,
+    #[serde(rename = "createdAt", default)]
+    pub created_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub priority: Option<f64>,
     pub state: IssueState,
@@ -215,6 +218,7 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         branch: None,
         base_branch: None,
         updated_at: issue.updated_at,
+        created_at: issue.created_at,
         closed_at: None,
         labels,
         reviewers: vec![],

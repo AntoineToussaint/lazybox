@@ -347,6 +347,19 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // `g m` reached GitHub and was rejected — the merge did NOT
+        // happen. Surface a distinct, persistent error (Permanent
+        // severity → no auto-fade) naming the reason so it reads as
+        // "your merge failed," not a transient sync blip. The PR stays
+        // Open/actionable; no optimistic MERGED flip here.
+        if let IpcEvent::PrMergeFailed {
+            pr_label, reason, ..
+        } = &event
+        {
+            self.flash_error(format!("✗ merge failed — {pr_label}: {reason}"));
+            self.redraw = true;
+            return;
+        }
         // The daemon detected a PR merge or an issue close and wants the
         // user to decide whether to remove the workspace + delete its
         // worktree. Queue it onto the shared removal-prompt machinery

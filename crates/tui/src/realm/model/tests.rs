@@ -144,6 +144,39 @@ mod effects_tests {
         assert_eq!(m.sidebar.outdated_commits_behind(), None);
     }
 
+    /// Issue #265: a `g m` merge GitHub rejected must surface as a
+    /// distinct, persistent error (Permanent severity → never
+    /// auto-fades) naming the reason, not a self-fading retryable
+    /// flash. The PR stays actionable, so no optimistic MERGED flip.
+    #[test]
+    fn pr_merge_failed_raises_a_persistent_error_naming_the_reason() {
+        use crate::realm::components::footer::NoticeSeverity;
+        use lazybox_ipc::Event as IpcEvent;
+
+        let mut m = build_model();
+        m.status.polling = None;
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            pr_label: "o/r#1".into(),
+            reason: "Required status check \"ci\" is expected".into(),
+        });
+
+        let n = m.status.notice.as_ref().expect("merge-failed banner set");
+        assert_eq!(
+            n.severity,
+            NoticeSeverity::Permanent,
+            "a failed merge must not auto-fade like a transient blip",
+        );
+        assert!(n.message.contains("merge failed"), "message: {}", n.message);
+        assert!(n.message.contains("o/r#1"), "message: {}", n.message);
+        assert!(
+            n.message.contains("Required status check"),
+            "the GitHub reason must be quoted: {}",
+            n.message,
+        );
+    }
+
     /// A manual-refresh sync failure paints a sticky "✗ sync failed"
     /// banner; the next successful poll (auto-cycle) from the *same*
     /// provider must clear it so a recovered sync doesn't leave the

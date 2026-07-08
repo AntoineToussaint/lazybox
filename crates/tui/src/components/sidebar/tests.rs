@@ -2048,3 +2048,117 @@ mod outdated_build_tests {
         assert!(!header_row(&mut sb).contains("behind"));
     }
 }
+
+mod merge_latch_tests {
+    //! Issue #265: once GitHub confirms a merge (`Event::PrMerged` →
+    //! `mark_workspace_merged`), the sidebar latches the MERGED pill so
+    //! a poll or reconnect snapshot that still reports `Open` — because
+    //! it was taken before GitHub caught up — can't flicker the row back
+    //! to Open. The latch releases when a poll confirms the terminal
+    //! state or the workspace is removed.
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+    use lazybox_core::{TaskState, Workspace};
+    use lazybox_ipc::Event;
+
+    fn pr_workspace(state: TaskState) -> Workspace {
+        let now = chrono::Utc::now();
+        let mut task = base_task();
+        task.id.key = "1".into();
+        task.url = "https://github.com/o/r/pull/1".into();
+        task.state = state;
+        Workspace::from_task(task, now)
+    }
+
+    fn pr_state(sb: &Sidebar, key: &SessionKey) -> TaskState {
+        sb.workspaces
+            .get(key)
+            .and_then(|w| w.pr.as_ref())
+            .map(|pr| pr.state)
+            .expect("workspace has a PR")
+    }
+
+    #[test]
+    fn latch_holds_merged_through_an_interim_open_poll() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let ws = pr_workspace(TaskState::Open);
+        let key = SessionKey::from(&ws.key);
+        let wkey = ws.key.clone();
+        sb.workspaces.insert(key.clone(), ws);
+
+        // GitHub accepted the merge — pill flips immediately.
+        sb.mark_workspace_merged(&wkey);
+        assert_eq!(pr_state(&sb, &key), TaskState::Merged);
+
+        // A poll that started before the merge landed re-reports Open.
+        sb.on_event(&Event::WorkspaceUpserted(Box::new(pr_workspace(
+            TaskState::Open,
+        ))));
+        assert_eq!(
+            pr_state(&sb, &key),
+            TaskState::Merged,
+            "interim Open poll must not revert a confirmed merge",
+        );
+    }
+
+    #[test]
+    fn latch_releases_once_a_poll_confirms_merged() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let ws = pr_workspace(TaskState::Open);
+        let key = SessionKey::from(&ws.key);
+        let wkey = ws.key.clone();
+        sb.workspaces.insert(key.clone(), ws);
+        sb.mark_workspace_merged(&wkey);
+        assert!(sb.merge_confirmed.contains(&key));
+
+        // The confirming poll finally reports the terminal state.
+        sb.on_event(&Event::WorkspaceUpserted(Box::new(pr_workspace(
+            TaskState::Merged,
+        ))));
+        assert_eq!(pr_state(&sb, &key), TaskState::Merged);
+        assert!(
+            !sb.merge_confirmed.contains(&key),
+            "a confirming poll releases the latch",
+        );
+    }
+
+    #[test]
+    fn latch_survives_a_reconnect_snapshot_reporting_open() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let ws = pr_workspace(TaskState::Open);
+        let key = SessionKey::from(&ws.key);
+        let wkey = ws.key.clone();
+        sb.workspaces.insert(key.clone(), ws);
+        sb.mark_workspace_merged(&wkey);
+
+        // Reconnect: a fresh snapshot taken before the daemon re-polled
+        // still shows the PR Open.
+        sb.on_event(&Event::Snapshot {
+            workspaces: vec![pr_workspace(TaskState::Open)],
+            terminals: vec![],
+            projects: vec![],
+        });
+        assert_eq!(
+            pr_state(&sb, &key),
+            TaskState::Merged,
+            "the latch must survive a reconnect snapshot",
+        );
+    }
+
+    #[test]
+    fn workspace_removed_clears_the_latch() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let ws = pr_workspace(TaskState::Open);
+        let key = SessionKey::from(&ws.key);
+        let wkey = ws.key.clone();
+        sb.workspaces.insert(key.clone(), ws);
+        sb.mark_workspace_merged(&wkey);
+        assert!(sb.merge_confirmed.contains(&key));
+
+        sb.on_event(&Event::WorkspaceRemoved(wkey));
+        assert!(
+            !sb.merge_confirmed.contains(&key),
+            "removing the workspace drops its latch",
+        );
+    }
+}

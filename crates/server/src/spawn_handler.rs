@@ -410,7 +410,8 @@ pub async fn handle_spawn(
     // alone fails the moment a second client connects to the same
     // daemon. The guard here protects the invariant for everyone:
     // at most one Claude per session, one Codex per session, etc.
-    if let Some(existing) = find_existing_singleton(config, &session_key, &kind, on_main).await {
+    if let Some(existing) = find_existing_singleton(config, &session_key, &kind, Some(on_main)).await
+    {
         tracing::info!(
             terminal_id = ?existing,
             has_initial_prompt = initial_prompt.is_some(),
@@ -1225,7 +1226,7 @@ async fn resolve_or_create_session(
 
     // Main-checkout spawn: skip the isolated per-session worktree and
     // land in the repo's shared checkout on its default branch. The
-    // path is stable per repo (`<root>/<scope>/main`) so every
+    // path is stable per repo (`<root>/<scope>/_main`) so every
     // main-checkout session across the repo's workspaces reuses one
     // worktree — that's the point (it IS the shared main). No `Session`
     // is persisted for it: the singleton guard handles agent reuse and
@@ -1937,27 +1938,31 @@ pub(crate) async fn find_existing_singleton(
     config: &ServerConfig,
     session_key: &SessionKey,
     kind: &TerminalKind,
-    on_main: bool,
+    on_main: Option<bool>,
 ) -> Option<TerminalId> {
     let target = kind.singleton_key()?;
     // A main-checkout agent and the same agent on an isolated worktree
     // are DISTINCT singletons within one workspace — otherwise a `b c`
     // (claude on main) would collapse onto an already-running isolated
-    // claude and never reach the main checkout. Match the requested
-    // checkout via the snapshot's own `on_main` field: it is computed
-    // inside `snapshot_terminals` from the same maps in a consistent
-    // order (`on_main_terminals` inserted before `terminals`), so it
-    // never disagrees with the terminal it describes. Reading a
-    // separate `on_main_terminals` clone here instead would open a
-    // TOCTOU where a terminal that entered the snapshot after the clone
-    // is misclassified as isolated.
+    // claude and never reach the main checkout. `handle_spawn` passes
+    // `Some(on_main)` to match its exact spawn; the auto-fix guard
+    // passes `None` because it asks "is ANY agent already working this
+    // PR?" and must skip regardless of which checkout it sits on.
+    //
+    // The checkout is read from the snapshot's own `on_main` field,
+    // computed inside `snapshot_terminals` from the same maps in a
+    // consistent order (`on_main_terminals` inserted before
+    // `terminals`), so it never disagrees with the terminal it
+    // describes. Reading a separate `on_main_terminals` clone here would
+    // open a TOCTOU where a terminal that entered the snapshot after the
+    // clone is misclassified as isolated.
     let snapshot = snapshot_terminals(config).await;
     snapshot
         .iter()
         .find(|t| {
             t.session_key == *session_key
                 && t.kind.singleton_key().as_deref() == Some(&target)
-                && t.on_main == on_main
+                && on_main.is_none_or(|want| t.on_main == want)
         })
         .map(|t| t.terminal_id)
 }
@@ -4151,6 +4156,50 @@ mod tests {
             .expect("agents are singletons");
         // And now the on-main identity is taken too.
         assert!(InflightSpawnGuard::try_claim(&config, &key, &kind, true).is_err());
+    }
+
+    /// #271: `find_existing_singleton` matches by checkout. A live
+    /// main-checkout agent is invisible to an isolated lookup and vice
+    /// versa (so `b c` doesn't collapse onto isolated `c`), but the
+    /// `None` "any checkout" lookup — what the auto-fix guard uses —
+    /// finds it regardless, so a user's `b c` on a PR suppresses a
+    /// duplicate auto-fix spawn.
+    #[tokio::test]
+    async fn find_existing_singleton_matches_by_checkout() {
+        let config = ServerConfig::in_memory();
+        let sk: SessionKey = "test:ws-fes".into();
+        let kind = TerminalKind::Agent("claude".into());
+        let tid = TerminalId(1);
+
+        // Simulate a live main-checkout claude: meta + terminals entry
+        // (so `snapshot_terminals` emits it) + the on_main marker.
+        config
+            .terminal_meta
+            .lock()
+            .await
+            .insert(tid, (sk.clone(), kind.clone()));
+        config
+            .terminals
+            .lock()
+            .await
+            .insert(tid, "backend-fes-1".to_string());
+        config.on_main_terminals.lock().await.insert(tid);
+
+        assert_eq!(
+            find_existing_singleton(&config, &sk, &kind, Some(false)).await,
+            None,
+            "an isolated lookup must not see the main-checkout agent",
+        );
+        assert_eq!(
+            find_existing_singleton(&config, &sk, &kind, Some(true)).await,
+            Some(tid),
+            "the main lookup finds it",
+        );
+        assert_eq!(
+            find_existing_singleton(&config, &sk, &kind, None).await,
+            Some(tid),
+            "the auto-fix `None` lookup finds it on any checkout",
+        );
     }
 
     /// Kill/Spawn serialization semantics: `await_inflight_spawns`

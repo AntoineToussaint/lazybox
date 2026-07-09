@@ -1052,6 +1052,31 @@ impl<T: TerminalAdapter> Model<T> {
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let raw_up = matches!(m.kind, MouseEventKind::ScrollUp);
+                if rect_contains(sidebar_rect, m.column, m.row) {
+                    // Advancing the sidebar cursor is a pure in-process
+                    // mutation — no daemon round trip — so, like the
+                    // local-scrollback path below (and unlike the
+                    // daemon-bound activity/terminal paths above), it
+                    // moves a fixed small step per wheel event and stops
+                    // when the events stop, rather than riding the
+                    // inertia damper. A damped step would jump the
+                    // selection several rows per notch and skip
+                    // workspaces.
+                    const SIDEBAR_WHEEL_STEP: isize = 3;
+                    let delta = if raw_up {
+                        -SIDEBAR_WHEEL_STEP
+                    } else {
+                        SIDEBAR_WHEEL_STEP
+                    };
+                    if self.sidebar.scroll_by_wheel(delta) {
+                        // Cursor moved → same follow-up as a j/k press:
+                        // re-sync the panes so the activity view tracks
+                        // the newly-selected workspace.
+                        self.sync_panes();
+                        self.redraw = true;
+                    }
+                    return;
+                }
                 if rect_contains(right_top_rect, m.column, m.row) {
                     // Inertia damper: the OS-driven "flick keeps
                     // scrolling for 500ms after the gesture" phase

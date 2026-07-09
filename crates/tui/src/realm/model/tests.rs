@@ -4562,6 +4562,85 @@ mod workspace_focus_memory_tests {
         );
     }
 
+    /// Regression for #268: a wheel event over the sidebar scrolls the
+    /// list instead of being swallowed. Before the fix the
+    /// `ScrollUp/ScrollDown` router only handled the activity pane and
+    /// the terminal, so the wheel did nothing over the sidebar even
+    /// though the scrollbar showed the list overflowing.
+    ///
+    /// The sidebar's scroll offset is coupled to the cursor (the render
+    /// keeps the cursor on-screen), so we assert on the settled scroll
+    /// offset after a render — proving the visible list actually moved,
+    /// not merely the selection.
+    #[test]
+    fn wheel_over_the_sidebar_scrolls_the_list() {
+        use tuirealm::ratatui::{Terminal, backend::TestBackend};
+
+        let mut m = build_model();
+        // Seed far more workspaces than the viewport can show so the
+        // list overflows and the cursor has room to travel.
+        let workspaces: Vec<Workspace> = (1..=60)
+            .map(|n| empty_ws(&format!("github:o/r#{n}")))
+            .collect();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces,
+            terminals: vec![],
+            projects: vec![],
+        });
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _, _) = m.effective_pane_rects(area);
+        let wheel = |kind| MouseEvent {
+            kind,
+            column: sidebar_rect.x + sidebar_rect.width / 2,
+            row: sidebar_rect.y + 10,
+            modifiers: KeyModifiers::NONE,
+        };
+        // Render the sidebar into `sidebar_rect`; `render` recomputes the
+        // scroll offset to keep the cursor on-screen, which is the value
+        // the scrollbar thumb tracks.
+        let render = |m: &mut Model<tuirealm::terminal::TestTerminalAdapter>| {
+            let mut term = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            term.draw(|f| m.__test_sidebar_mut().view_in(sidebar_rect, f))
+                .unwrap();
+        };
+
+        render(&mut m);
+        assert_eq!(m.sidebar().__test_scroll(), 0, "list starts at the top");
+
+        // Sustained wheel-down: the cursor advances and, once it reaches
+        // the bottom of the viewport, drags the scroll offset (and the
+        // scrollbar thumb) down with it.
+        let before_cursor = m.sidebar().cursor();
+        m.redraw = false;
+        for _ in 0..20 {
+            m.dispatch_mouse_in(wheel(MouseEventKind::ScrollDown), area);
+        }
+        render(&mut m);
+        assert!(
+            m.sidebar().cursor() > before_cursor,
+            "wheel-down over the sidebar must advance the cursor",
+        );
+        assert!(
+            m.sidebar().__test_scroll() > 0,
+            "sustained wheel-down must scroll the list off the top: scroll={}",
+            m.sidebar().__test_scroll(),
+        );
+        assert!(m.redraw, "scrolling the sidebar repaints");
+
+        // Wheel back up past the top: the offset clamps to zero (it
+        // never scrolls above the first row).
+        for _ in 0..40 {
+            m.dispatch_mouse_in(wheel(MouseEventKind::ScrollUp), area);
+        }
+        render(&mut m);
+        assert_eq!(
+            m.sidebar().__test_scroll(),
+            0,
+            "wheel-up must return the list to the top",
+        );
+    }
+
     #[test]
     fn clicking_the_already_selected_row_keeps_the_sidebar() {
         // The escape hatch: clicking the sidebar row of the workspace

@@ -867,6 +867,19 @@ impl Sidebar {
         }
     }
 
+    /// Mouse-wheel scroll over the sidebar. The rendered scroll offset
+    /// is coupled to the cursor (`render` keeps the cursor on-screen and
+    /// the scrollbar thumb tracks that offset), so there is no viewport
+    /// to move independently — wheeling advances the selection cursor by
+    /// `delta` rows, exactly like holding `j`/`k`, which drags the
+    /// scroll offset and scrollbar along with it. Returns whether the
+    /// cursor moved.
+    pub fn scroll_by_wheel(&mut self, delta: isize) -> bool {
+        let before = self.cursor;
+        self.move_cursor_by(delta);
+        self.cursor != before
+    }
+
     /// Look up a workspace by its session key. Used by paths that
     /// need workspace data without disturbing the cursor (e.g. the
     /// editor-deferred-by-spawn flow that has to find the
@@ -1136,6 +1149,15 @@ impl Sidebar {
 
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    /// Test accessor — the row-window scroll offset the last `render`
+    /// settled on. Only meaningful after a render (the offset is
+    /// recomputed there to keep the cursor on-screen); used to assert
+    /// the visible list actually scrolled, not just the cursor.
+    #[doc(hidden)]
+    pub fn __test_scroll(&self) -> usize {
+        self.scroll
     }
 
     pub fn visible_count(&self) -> usize {

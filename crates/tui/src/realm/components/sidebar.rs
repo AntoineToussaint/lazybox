@@ -360,6 +360,13 @@ impl Sidebar {
         self.inner.click_to_select(area, click_row)
     }
 
+    /// Mouse-wheel scroll over the sidebar. Advances the selection
+    /// cursor by `delta` rows (the scroll offset is coupled to it).
+    /// Returns true when the cursor moved.
+    pub fn scroll_by_wheel(&mut self, delta: isize) -> bool {
+        self.inner.scroll_by_wheel(delta)
+    }
+
     /// Click the role-filter chip in the sidebar header → cycle it.
     /// Returns true on a hit (caller should mark a redraw).
     pub fn click_to_cycle_filter(&mut self, col: u16, row: u16) -> bool {
@@ -383,6 +390,12 @@ impl Sidebar {
     /// workspace onto the screen row a click would land on.
     pub fn cursor(&self) -> usize {
         self.inner.cursor()
+    }
+
+    /// Test accessor — the row-window scroll offset from the last render.
+    #[doc(hidden)]
+    pub fn __test_scroll(&self) -> usize {
+        self.inner.__test_scroll()
     }
 
     /// Toggle the repo header under the cursor. Same effect as the

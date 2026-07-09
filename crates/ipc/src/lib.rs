@@ -41,7 +41,7 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// This binary's build identity: the workspace version plus the git
 /// short SHA captured at compile time (`build.rs`). Two binaries built
@@ -820,6 +820,19 @@ pub enum Command {
     ListProviderCredentials {
         principal_id: PrincipalId,
     },
+    /// Explicit "no" to a `MergedPrRemovable` prompt: keep the
+    /// workspace and its worktree. Pins the workspace in the daemon's
+    /// removal-prompt memory so the level-triggered re-emit stops
+    /// asking for the rest of the session. An Esc dismissal sends
+    /// nothing — the daemon re-prompts after its reprompt interval,
+    /// same semantics as the issue→PR merge modal.
+    ///
+    /// Appended last: bincode identifies variants by ordinal, so this
+    /// position (with the accompanying `PROTOCOL_VERSION` bump) keeps
+    /// the change mechanical.
+    KeepMergedWorkspace {
+        session_key: SessionKey,
+    },
 }
 
 /// The terminal state a removable workspace's primary task reached,
@@ -980,15 +993,19 @@ pub enum Event {
         issue_label: String,
         reason: String,
     },
-    /// A workspace's primary task just reached a terminal state (a PR
+    /// A workspace's primary task reached a terminal state (a PR
     /// merged, or an issue closed) and its workspace is a candidate for
-    /// removal. Emitted once per transition (the upsert path only acts
-    /// on the open→terminal flip, so a re-poll of an already-merged PR
-    /// or already-closed issue doesn't re-fire). The daemon has
+    /// removal. Level-triggered: emitted on the open→terminal flip and
+    /// then re-emitted by the daemon's per-tick reprompt scan for as
+    /// long as the workspace keeps sessions and the user hasn't
+    /// answered — so a broadcast lost to lag, a reconnect, or a daemon
+    /// restart can't strand the workspace unprompted. The daemon has
     /// inspected the backing worktree(s); the TUI prompts the user —
-    /// reusing the removal-confirm modal — and, on yes, replies with
-    /// `Command::RemoveMergedWorkspace`. On no it does nothing and the
-    /// transition won't re-prompt (it's already persisted).
+    /// reusing the removal-confirm modal — and replies with
+    /// `Command::RemoveMergedWorkspace` on yes or
+    /// `Command::KeepMergedWorkspace` on no (which stops the
+    /// re-prompts). An Esc dismissal sends nothing and the prompt
+    /// self-heals after the reprompt interval.
     ///
     /// Suppressed when `worktree.auto_cleanup_merged` is enabled — that
     /// opt-in path reaps safe worktrees silently instead.

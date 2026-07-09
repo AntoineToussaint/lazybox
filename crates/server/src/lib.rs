@@ -349,6 +349,12 @@ pub struct ServerConfig {
     /// decoupled from it is worth keeping. See
     /// [`polling::MergePromptMemory`].
     pub merge_prompts: Arc<Mutex<polling::MergePromptMemory>>,
+    /// Workspace-removal prompt memory (level-triggered
+    /// `MergedPrRemovable` re-emits + "keep" pins). Own lock for the
+    /// same reason as `merge_prompts`: it's touched from inside the
+    /// upsert path via `prompt_merged_pr_removal_with`. See
+    /// [`polling::RemovalPromptMemory`].
+    pub removal_prompts: Arc<Mutex<polling::RemovalPromptMemory>>,
     /// Authenticated user logins per provider source ("github" →
     /// "AntoineToussaint"). Populated by the polling layer when
     /// each provider client initializes; consumed by the Subscribe
@@ -480,6 +486,7 @@ impl ServerConfig {
             poll_state: Arc::new(Mutex::new(polling::TickState::default())),
             gh_client_cache: Arc::new(std::sync::Mutex::new(None)),
             merge_prompts: Arc::new(Mutex::new(polling::MergePromptMemory::default())),
+            removal_prompts: Arc::new(Mutex::new(polling::RemovalPromptMemory::default())),
             viewer_identities: Arc::new(std::sync::Mutex::new(Vec::new())),
             poll_wake: Arc::new(tokio::sync::Notify::new()),
             inflight_spawns: Arc::new(std::sync::Mutex::new(HashSet::new())),
@@ -628,6 +635,7 @@ impl Server {
                         lazybox_ipc::Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
                         lazybox_ipc::Command::Kill { .. } => "Kill",
                         lazybox_ipc::Command::RemoveMergedWorkspace { .. } => "RemoveMergedWorkspace",
+                        lazybox_ipc::Command::KeepMergedWorkspace { .. } => "KeepMergedWorkspace",
                         lazybox_ipc::Command::DeleteProject { .. } => "DeleteProject",
                         lazybox_ipc::Command::CollapseIntoPr { .. } => "CollapseIntoPr",
                         lazybox_ipc::Command::CreateWorkspace { .. } => "CreateWorkspace",
@@ -869,6 +877,11 @@ async fn dispatch_command(
                 terminals,
                 projects,
             });
+            // A fresh subscriber may have missed removal prompts emitted
+            // before it connected (broadcast is fire-and-forget) — reset
+            // the reprompt throttle so the tick kicked below re-offers
+            // any still-unresolved merged/closed workspace right away.
+            polling::mark_removal_prompts_for_replay(config).await;
             // Kick a fresh poll so the freshly-opened TUI refreshes within
             // a few seconds instead of waiting out the current sleep.
             config.poll_wake.notify_one();
@@ -1082,6 +1095,10 @@ async fn dispatch_command(
                 .insert(key.as_str().to_string());
             spawn_handler::await_inflight_spawns(config, key.as_str()).await;
             polling::delete_workspace(config, &key).await;
+        }
+        lazybox_ipc::Command::KeepMergedWorkspace { session_key } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            polling::keep_merged_workspace(config, &key).await;
         }
         lazybox_ipc::Command::RemoveMergedWorkspace { session_key } => {
             // Same worktree-teardown (and same spawn-race) exposure as Kill.

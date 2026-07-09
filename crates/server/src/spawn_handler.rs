@@ -838,6 +838,13 @@ pub async fn handle_spawn(
             }
             loop {
                 tokio::select! {
+                    // Biased, chunk arm first: pending output is always
+                    // drained before the quiet timer may classify, so an
+                    // expired deadline racing an arriving chunk can't
+                    // read a screen that's about to change. A busy stream
+                    // starving the timer is exactly the intended
+                    // semantics — chunks flowing means no classification.
+                    biased;
                     chunk = sub.live.recv() => {
                 let Some(chunk) = chunk else {
                     break;
@@ -930,6 +937,7 @@ pub async fn handle_spawn(
                             &mut state_machine,
                             &hook_driven_map,
                             &input_shapes_map,
+                            &agent_detect_resets_map,
                         )
                         .await;
                     }
@@ -2609,10 +2617,21 @@ pub(crate) async fn classify_quiet_screen(
     input_shapes: &std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
     >,
+    detect_resets: &std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<TerminalId>>>,
 ) {
     let Some(agent) = agent else {
         return;
     };
+    // A pending answer reset means the buffer's contents predate the
+    // user's answer by decree: `handle_write` flipped the `?` to Working
+    // and marked the buffer for clearing, but the clear only happens on
+    // the NEXT chunk. If the quiet timer fires in between, classifying
+    // the stale dialog would re-raise the just-answered `?` (and its
+    // notification). Peek — don't consume — so the chunk path still
+    // clears the buffer when output resumes.
+    if detect_resets.lock().await.contains(&id) {
+        return;
+    }
     let detect_window = detect_window(buf);
     if detect_window.is_empty() {
         return;
@@ -5675,6 +5694,7 @@ mod tests {
         input_shapes: std::sync::Arc<
             tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
         >,
+        detect_resets: std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<TerminalId>>>,
     }
 
     impl PumpDriver {
@@ -5716,6 +5736,9 @@ mod tests {
                 input_shapes: std::sync::Arc::new(tokio::sync::Mutex::new(
                     std::collections::HashMap::new(),
                 )),
+                detect_resets: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    std::collections::HashSet::new(),
+                )),
             }
         }
 
@@ -5755,6 +5778,7 @@ mod tests {
                 &mut self.state_machine,
                 &self.hook_driven,
                 &self.input_shapes,
+                &self.detect_resets,
             )
             .await;
             self.drain()
@@ -5877,6 +5901,68 @@ mod tests {
             "the quiet Idle classification must not clear Done",
         );
         assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+    }
+
+    /// The stale-hook variant of Done stickiness: 30+ seconds after the
+    /// `Stop` hook, the hooks-primary gate no longer filters PTY readings
+    /// — but a stray repaint (a pane resize, a reattach redraw) is still
+    /// just a byte-flow `Working`, and an ambiguous Working may never
+    /// clear `Done`. Pre-guard, the repaint committed Done → Working and
+    /// the next quiet classification landed Idle: the "finished, take a
+    /// look" marker silently wiped by resizing the window.
+    #[tokio::test]
+    async fn stray_repaint_after_stale_hooks_keeps_done() {
+        use lazybox_ipc::AgentState::Done;
+        let idle = include_bytes!("../../agents/tests/fixtures/idle_composer.bin");
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        // Done was set by a Stop hook long ago; the hook stream has been
+        // silent since (a finished agent fires no more hooks).
+        p.states.lock().await.insert(p.id, Done);
+        p.hook_driven
+            .lock()
+            .await
+            .insert(p.id, std::time::Instant::now() - Duration::from_secs(31));
+        // The resize repaints the resting composer as one chunk.
+        assert_eq!(
+            p.feed(idle).await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "a stray repaint must not demote Done to Working",
+        );
+        assert_eq!(
+            p.quiet().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "the follow-up quiet Idle must stay rejected by Done stickiness",
+        );
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+    }
+
+    /// The quiet timer racing the optimistic answer flip: `handle_write`
+    /// flipped the `?` to Working and marked the detect buffer for reset,
+    /// but the clear only happens on the next chunk. A quiet firing in
+    /// between must NOT classify the stale dialog still in the buffer —
+    /// that re-raised the just-answered `?` (and its notification).
+    #[tokio::test]
+    async fn pending_answer_reset_blocks_quiet_reclassification() {
+        use lazybox_ipc::AgentState::{InputNeeded, Working};
+        let input = include_bytes!("../../agents/tests/fixtures/permission_prompt_fragmented.bin");
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(input).await, vec![Working]);
+        assert_eq!(p.quiet().await, vec![InputNeeded]);
+        // The user answers: the flip commits Working and marks the reset.
+        p.states.lock().await.insert(p.id, Working);
+        p.detect_resets.lock().await.insert(p.id);
+        assert_eq!(
+            p.quiet().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "a pending answer reset must veto classifying the stale buffer",
+        );
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&Working));
+        assert!(
+            p.detect_resets.lock().await.contains(&p.id),
+            "the quiet path must peek, not consume — the next chunk still clears the buffer",
+        );
     }
 
     /// A brief repaint burst (a pane resize) at a parked prompt must not

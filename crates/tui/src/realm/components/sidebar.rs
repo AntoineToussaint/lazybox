@@ -360,9 +360,9 @@ impl Sidebar {
         self.inner.click_to_select(area, click_row)
     }
 
-    /// Mouse-wheel scroll over the sidebar. Advances the selection
-    /// cursor by `delta` rows (the scroll offset is coupled to it).
-    /// Returns true when the cursor moved.
+    /// Mouse-wheel scroll over the sidebar. Moves the viewport offset
+    /// by `delta` rows; the selection cursor is untouched. Returns
+    /// true when the offset moved.
     pub fn scroll_by_wheel(&mut self, delta: isize) -> bool {
         self.inner.scroll_by_wheel(delta)
     }

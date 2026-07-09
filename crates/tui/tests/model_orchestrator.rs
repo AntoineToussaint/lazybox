@@ -469,6 +469,53 @@ fn wheel_outside_terminal_pane_is_a_silent_noop() {
 }
 
 #[test]
+fn wheel_over_sidebar_scrolls_display_without_changing_selection() {
+    // A wheel event over the sidebar rect must only move the viewport
+    // offset. The selection drives the right pane, terminal stack,
+    // and focus, so a trackpad flick changing it yanked the user to a
+    // different workspace (#290).
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let workspaces: Vec<_> = (1..=30)
+        .map(|i| {
+            Workspace::empty(
+                WorkspaceKey(format!("github:owner/repo#{i}")),
+                "main",
+                Utc::now(),
+            )
+        })
+        .collect();
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces,
+        terminals: Vec::new(),
+        projects: vec![],
+    });
+    let selected = m.sidebar().selected_workspace_key().cloned();
+    assert!(selected.is_some(), "snapshot selects a workspace");
+
+    let area = Rect::new(0, 0, 100, 30);
+    m.dispatch_mouse_in(
+        MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 5, // sidebar column
+            row: 10,
+            modifiers: CtKeyModifiers::empty(),
+        },
+        area,
+    );
+
+    assert_eq!(
+        m.sidebar().selected_workspace_key().cloned(),
+        selected,
+        "wheel over the sidebar must not change the selected workspace"
+    );
+    assert!(
+        m.sidebar().__test_scroll() > 0,
+        "wheel over the sidebar moved the viewport offset"
+    );
+}
+
+#[test]
 fn drag_on_sidebar_splitter_changes_split() {
     let mut m = build_model();
     let (before, _) = m.split_pcts();

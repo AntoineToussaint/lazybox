@@ -498,17 +498,22 @@ impl Sidebar {
             })
             .collect();
 
-        // Row-window the list so the cursor stays on screen. Each
-        // `VisibleRow` is exactly one line, so the scroll offset is a
-        // plain row count — clamp it to keep `cursor` in view, then
-        // bound it to the tail so the last rows can't scroll past the
-        // bottom edge.
+        // Row-window the list. Each `VisibleRow` is exactly one line,
+        // so the scroll offset is a plain row count — clamp it to keep
+        // `cursor` in view, then bound it to the tail so the last rows
+        // can't scroll past the bottom edge. A wheel-detached viewport
+        // skips the cursor clamp: the wheel only moves the display,
+        // and snapping back here would undo it on the next frame. The
+        // detach flag is cleared by explicit cursor moves, so j/k et
+        // al. still re-anchor.
         let total_rows = lines.len();
         let viewport = inner.height as usize;
-        if self.cursor < self.scroll {
-            self.scroll = self.cursor;
-        } else if viewport > 0 && self.cursor >= self.scroll + viewport {
-            self.scroll = self.cursor + 1 - viewport;
+        if !self.scroll_detached {
+            if self.cursor < self.scroll {
+                self.scroll = self.cursor;
+            } else if viewport > 0 && self.cursor >= self.scroll + viewport {
+                self.scroll = self.cursor + 1 - viewport;
+            }
         }
         let max_scroll = total_rows.saturating_sub(viewport);
         if self.scroll > max_scroll {

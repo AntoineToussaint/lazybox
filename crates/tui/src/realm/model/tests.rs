@@ -3657,6 +3657,73 @@ mod destructive_confirm_tests {
     }
 
     #[test]
+    fn close_issue_gates_on_confirm_then_fires_close_command() {
+        // Issue #270: `Shift-C` must route through the confirm modal
+        // (nothing closed without a yes), and Yes emits a single
+        // `CloseIssue` aimed at the focused workspace.
+        let mut m = build_model();
+        let ws = open_issue_workspace("github:o/r#7");
+        let wk = ws.key.clone();
+        let sk = SessionKey::from(&wk);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk), "issue row focusable");
+
+        let cmds = m.dispatch_action(&Action::CloseIssue);
+        assert!(
+            cmds.is_empty(),
+            "close must gate on confirm first: {cmds:?}"
+        );
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+
+        let cmds = m.handle_confirmed(true);
+        match cmds.as_slice() {
+            [IpcCommand::CloseIssue { workspace_key }] => assert_eq!(workspace_key, &wk),
+            other => panic!("expected a single CloseIssue command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn close_issue_confirm_noops_when_issue_closed_under_the_modal() {
+        // The confirmed dispatch re-checks the stashed workspace: if a
+        // poll closed the issue while the modal was up, Yes must NOT
+        // fire a redundant close — it flashes and emits nothing.
+        let mut m = build_model();
+        let ws = open_issue_workspace("github:o/r#7");
+        let wk = ws.key.clone();
+        let sk = SessionKey::from(&wk);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let _ = m.dispatch_action(&Action::CloseIssue);
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+
+        // The issue closes upstream while the modal is up.
+        let mut closed = open_issue_workspace("github:o/r#7");
+        if let Some(issue) = closed.gh_issues.first_mut() {
+            issue.state = lazybox_core::TaskState::Closed;
+        }
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(closed)));
+
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            cmds.is_empty(),
+            "a closed-under-modal issue must not re-fire a close: {cmds:?}",
+        );
+    }
+
+    /// An open GitHub issue workspace (no PR) — the only shape the
+    /// close action is offered on. Built by reshaping a PR fixture into
+    /// an issue (matching `intent.rs`'s test helper).
+    fn open_issue_workspace(key: &str) -> Workspace {
+        let mut ws = merge_ready_pr_without_approval(key);
+        let mut issue = ws.pr.take().expect("fixture has a PR to reshape");
+        let num = key.rsplit_once('#').map(|(_, n)| n).unwrap_or("1");
+        issue.url = format!("https://github.com/o/r/issues/{num}");
+        ws.attach_task(issue);
+        ws
+    }
+
+    #[test]
     fn merge_confirm_fires_on_green_ci_without_approval() {
         // Regression for #144: a green-CI PR with no formal approval
         // (a personal repo / your own PR) is mergeable on GitHub, so

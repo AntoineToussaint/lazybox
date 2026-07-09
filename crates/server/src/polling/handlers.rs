@@ -104,6 +104,15 @@ impl ProviderHandle {
             Self::Linear(c) => lazybox_core::TaskProvider::merge(c, ws).await,
         }
     }
+    pub async fn close_issue(
+        &self,
+        ws: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        match self {
+            Self::Github(c) => lazybox_core::TaskProvider::close_issue(c, ws).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::close_issue(c, ws).await,
+        }
+    }
     pub async fn request_reviewers(
         &self,
         ws: &lazybox_core::Workspace,
@@ -272,6 +281,64 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
     }
     // Wake the poll loop so MERGED state lands in <5s instead of
     // waiting out the full interval.
+    config.poll_wake.notify_one();
+}
+
+/// Handle `Command::CloseIssue`: load the workspace, recover the
+/// issue's GraphQL node id from its first github issue, and ship a
+/// `closeIssue` mutation (state `NOT_PLANNED`). On success the next
+/// poll cycle picks up the CLOSED state, the workspace lands in the
+/// Inactive mailbox, and the daemon's open→closed detection offers
+/// the usual removal prompt.
+///
+/// A user-initiated close GitHub rejected surfaces as a distinct,
+/// persistent `Event::IssueCloseFailed` (mirroring the merge path) so
+/// the user can't mistake it for "the keypress did nothing" — the
+/// issue stays Open/actionable.
+pub async fn handle_close_issue(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let emit_err = |msg: &str| {
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("close-issue", msg));
+    };
+
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        emit_err(&format!("close-issue: workspace {workspace_key} not found"));
+        return;
+    };
+    let issue_label = ws
+        .gh_issues
+        .first()
+        .map(|i| i.id.key.clone())
+        .unwrap_or_else(|| workspace_key.as_str().to_string());
+
+    let provider = match build_provider_for_workspace(&workspace_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            emit_err(&e);
+            return;
+        }
+    };
+    if let Err(e) = provider.close_issue(&ws).await {
+        tracing::warn!("close-issue {workspace_key}: {e:?}");
+        let _ = config.bus.send(Event::IssueCloseFailed {
+            workspace_key: workspace_key.clone(),
+            issue_label,
+            reason: e.to_string(),
+        });
+        return;
+    }
+    tracing::info!("closed issue for workspace {workspace_key}");
+
+    // Local Task still reads `Open` until the next poll reconciles.
+    // Broadcast `IssueClosed` so the TUI flashes a footer notice and
+    // the user doesn't think the keypress did nothing.
+    let _ = config.bus.send(Event::IssueClosed {
+        workspace_key: workspace_key.clone(),
+        issue_label,
+    });
+    // Wake the poll loop so CLOSED state (and the removal prompt) lands
+    // in <5s instead of waiting out the full interval.
     config.poll_wake.notify_one();
 }
 

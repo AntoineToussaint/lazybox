@@ -79,6 +79,13 @@ pub enum Action {
     LongSnooze,
     /// Archive the workspace + kill any of its sessions. Destructive.
     Archive,
+    /// Close the focused GitHub issue upstream (as `NOT_PLANNED`).
+    /// Only surfaces on issue-only GitHub workspaces — a workspace
+    /// with a PR merges/closes the PR instead. GitHub can't truly
+    /// *delete* an issue via the API without elevated permissions, so
+    /// "delete" resolves to a close here (reversible, provider-side).
+    /// Confirm-guarded.
+    CloseIssue,
     /// Merge the workspace's PR if it's in a merge-ready state. Only
     /// surfaces for provider workspaces that have a merge concept
     /// (today: github PRs).
@@ -258,6 +265,7 @@ pub enum ActionKind {
     ToggleSnooze,
     LongSnooze,
     Archive,
+    CloseIssue,
     MergePr,
     ToggleAutoMerge,
     AdoptSessions,
@@ -356,6 +364,7 @@ impl Action {
             Action::ToggleSnooze => ActionKind::ToggleSnooze,
             Action::LongSnooze => ActionKind::LongSnooze,
             Action::Archive => ActionKind::Archive,
+            Action::CloseIssue => ActionKind::CloseIssue,
             Action::MergePr => ActionKind::MergePr,
             Action::ToggleAutoMerge => ActionKind::ToggleAutoMerge,
             Action::AdoptSessions => ActionKind::AdoptSessions,
@@ -620,6 +629,13 @@ impl ActionDef {
                 describe: "Drop the workspace and kill any sessions. Destructive.",
                 section: Section::Workspace,
             },
+            ActionKind::CloseIssue => &Self {
+                kind: ActionKind::CloseIssue,
+                default_keys: "Shift-C",
+                label: "close issue",
+                describe: "Close the focused GitHub issue upstream (as not-planned). Only on issue workspaces; a true delete needs elevated permissions, so this closes instead. Confirmed first.",
+                section: Section::Workspace,
+            },
             ActionKind::MergePr => &Self {
                 kind: ActionKind::MergePr,
                 default_keys: "g m",
@@ -840,6 +856,7 @@ impl ActionDef {
             ActionKind::AdoptSessions,
             ActionKind::CollapseIntoPr,
             ActionKind::Archive,
+            ActionKind::CloseIssue,
             // Sidebar list management
             ActionKind::CycleRoleFilter,
             ActionKind::CycleSort,
@@ -1181,6 +1198,11 @@ impl ActionDef {
                 "Archive the focused workspace? Active sessions \
                  are killed and the row drops from the inbox.",
             ),
+            ActionKind::CloseIssue => Guard::Confirm(
+                "Close this issue upstream (as not planned)? It drops \
+                 out of the inbox once the close lands. Reopen on \
+                 GitHub to undo.",
+            ),
             ActionKind::MergePr => Guard::Confirm(
                 "Merge the focused PR? Mainline branch updates \
                  immediately and the PR closes.",
@@ -1282,6 +1304,7 @@ impl ActionKind {
             ActionKind::ToggleSnooze => "toggle_snooze",
             ActionKind::LongSnooze => "long_snooze",
             ActionKind::Archive => "archive",
+            ActionKind::CloseIssue => "close_issue",
             ActionKind::MergePr => "merge_pr",
             ActionKind::ToggleAutoMerge => "toggle_auto_merge",
             ActionKind::AdoptSessions => "adopt_sessions",
@@ -1636,6 +1659,19 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
             intent::resolve_kill(workspace),
             intent::Intent::KillWorkspace { .. },
         ),
+        // Only on GitHub issue-only workspaces whose issue is still
+        // open — a workspace with a PR acts on the PR, an
+        // already-closed issue has nothing to close, and Linear closes
+        // aren't wired through the provider yet, so gate on a still-open
+        // github issue.
+        ActionKind::CloseIssue => workspace
+            .map(|w| {
+                w.pr.is_none()
+                    && w.gh_issues
+                        .first()
+                        .is_some_and(|i| i.state != lazybox_core::TaskState::Closed)
+            })
+            .unwrap_or(false),
         ActionKind::SpawnShell => matches!(
             intent::resolve_spawn_shell(workspace),
             intent::Intent::SpawnShell { .. },
@@ -2081,6 +2117,93 @@ mod tests {
         let ws = pos(ActionKind::JumpToWorkspace);
         assert_eq!(pos(ActionKind::JumpToAsking), ws + 1);
         assert_eq!(pos(ActionKind::JumpToFailingCi), ws + 2);
+    }
+
+    #[test]
+    fn close_issue_is_a_confirmed_workspace_action() {
+        // Issue #270: closing an issue is Confirm-guarded (nothing
+        // deleted without an explicit yes) and lives in the Workspace
+        // section next to Archive.
+        let def = ActionDef::for_kind(ActionKind::CloseIssue);
+        assert_eq!(def.section, Section::Workspace);
+        assert!(def.is_destructive(), "close must route through Confirm");
+        assert!(def.confirm_prompt().is_some());
+        assert_eq!(
+            def.default_chord(),
+            Some(Chord::Key(KeyStroke::new(
+                false,
+                true,
+                false,
+                ChordCode::Char('c'),
+            ))),
+            "close-issue defaults to Shift-C",
+        );
+    }
+
+    #[test]
+    fn close_issue_only_offered_on_github_issue_workspaces() {
+        use chrono::Utc;
+        use lazybox_core::{
+            CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey,
+        };
+        let task = |key: &str| Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: key.into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: String::new(),
+            repo: Some("acme/widget".into()),
+            branch: None,
+            base_branch: None,
+            updated_at: Utc::now(),
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: Some("I_node".into()),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        };
+
+        // No workspace → not offered.
+        assert!(!availability(ActionKind::CloseIssue, None));
+
+        // A github issue-only workspace offers close.
+        let mut ws = Workspace::empty(
+            WorkspaceKey("github-acme-widget-7".into()),
+            "main",
+            Utc::now(),
+        );
+        ws.attach_task(task("acme/widget#7"));
+        assert!(!ws.gh_issues.is_empty() && ws.pr.is_none());
+        assert!(availability(ActionKind::CloseIssue, Some(&ws)));
+
+        // An already-closed issue → nothing to close.
+        let mut closed = task("acme/widget#7");
+        closed.state = TaskState::Closed;
+        ws.attach_task(closed); // upsert-by-id replaces the open #7
+        assert!(!availability(ActionKind::CloseIssue, Some(&ws)));
+        ws.attach_task(task("acme/widget#7")); // re-open for the PR case
+
+        // A PR present → act on the PR instead, not the issue.
+        ws.pr = Some(task("acme/widget#8"));
+        assert!(!availability(ActionKind::CloseIssue, Some(&ws)));
     }
 
     #[test]

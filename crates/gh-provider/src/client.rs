@@ -2658,6 +2658,27 @@ impl GhClient {
         }
         Ok(())
     }
+
+    pub async fn close_issue_node(&self, issue_node_id: &str) -> Result<(), GhError> {
+        self.acquire_or_block("closeIssue mutation")?;
+        let body = graphql::close_issue_body(issue_node_id);
+        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
+        if let Some(data) = &response.data
+            && let Some(rl) = &data.rate_limit
+        {
+            self.observe_rate_limit(rl);
+        }
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::error!("closeIssue errors: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        Ok(())
+    }
 }
 
 impl lazybox_core::TaskProvider for GhClient {
@@ -2695,6 +2716,31 @@ impl lazybox_core::TaskProvider for GhClient {
             ));
         };
         self.merge_pr(node_id)
+            .await
+            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
+    }
+
+    /// Close the workspace's GitHub issue (as `NOT_PLANNED`). GitHub
+    /// exposes no non-admin issue *delete* over the API, so this is
+    /// lazybox's "delete issue." Requires the issue's `node_id` — the
+    /// polling cycle fills it in.
+    async fn close_issue(
+        &self,
+        workspace: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        let Some(issue) = workspace.gh_issues.first() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no issue", workspace.key),
+            ));
+        };
+        let Some(node_id) = issue.node_id.as_deref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                "issue has no node_id (poll first)",
+            ));
+        };
+        self.close_issue_node(node_id)
             .await
             .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
     }

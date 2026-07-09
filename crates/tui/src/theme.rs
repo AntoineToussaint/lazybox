@@ -369,6 +369,15 @@ impl Theme {
         Style::default().fg(self.chrome)
     }
 
+    /// Rule under a pane's title row — the pane's "border" in this
+    /// box-less layout. Accent when the pane has focus so the active
+    /// pane is identifiable at a glance (#286), chrome otherwise.
+    /// Pairs with [`Self::title`], which colors the title text the
+    /// same way.
+    pub fn pane_divider(&self, focused: bool) -> Style {
+        Style::default().fg(if focused { self.accent } else { self.chrome })
+    }
+
     /// Body text — default. Use `Style::default()` directly when you
     /// need to compose; this is for "explicitly the body color".
     pub fn body(&self) -> Style {
@@ -439,6 +448,13 @@ mod tests {
         assert_eq!(derived.accent, red);
         assert_eq!(derived.success, LAZYBOX_DARK.success);
         assert_eq!(derived.text_strong, LAZYBOX_DARK.text_strong);
+    }
+
+    #[test]
+    fn pane_divider_is_accent_only_when_focused() {
+        let t = &LAZYBOX_DARK;
+        assert_eq!(t.pane_divider(true).fg, Some(t.accent));
+        assert_eq!(t.pane_divider(false).fg, Some(t.chrome));
     }
 
     #[test]

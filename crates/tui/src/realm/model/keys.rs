@@ -94,6 +94,10 @@ impl<T: TerminalAdapter> Model<T> {
         //   - `]]<1..9>` jumps the view straight to the Nth agent
         //     workspace (sidebar order, top-down);
         //   - `` ]]` `` opens the fuzzy workspace switcher (issue #171);
+        //   - `]]|` / `]]-` split the focused tile, `]]<arrow>` moves
+        //     tile focus, `]]x` closes the tile — tile management rides
+        //     the same leader as everything else so terminal mode has
+        //     exactly one lazybox prefix (#286, ex-`Ctrl-w`);
         //   - Esc or any unbound key cancels back into the terminal so
         //     the user can keep typing.
         // The leader is NOT timed (#252): a timed idle-leave used to
@@ -104,10 +108,29 @@ impl<T: TerminalAdapter> Model<T> {
         // a plain mnemonic, not a triple-tap.
         if std::mem::take(&mut self.terminal_leader_armed) {
             self.redraw = true;
+            use lazybox_core::TileDirection;
+            let tile_dir = match key.code {
+                Key::Left => Some(TileDirection::Left),
+                Key::Right => Some(TileDirection::Right),
+                Key::Up => Some(TileDirection::Up),
+                Key::Down => Some(TileDirection::Down),
+                _ => None,
+            };
+            if let Some(dir) = tile_dir {
+                if key.modifiers.is_empty() {
+                    let mut cmds = Vec::new();
+                    self.terminals.move_tile_focus(dir, &mut cmds);
+                    self.flush_dispatched_cmds(cmds);
+                }
+                return;
+            }
+            // `|` arrives with a SHIFT modifier on most hosts, so the
+            // char commands accept a bare or shifted keystroke.
             if let Key::Char(c) = key.code
-                && key.modifiers.is_empty()
+                && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
                 && !c.is_control()
             {
+                use crate::components::terminal_stack::PendingSplit;
                 match c {
                     '1'..='9' => {
                         let n = c.to_digit(10).unwrap_or(0) as usize;
@@ -117,6 +140,22 @@ impl<T: TerminalAdapter> Model<T> {
                     'f' => self.toggle_focus_mode(),
                     'q' => self.leave_terminal_to_sidebar(),
                     '`' => self.mount_jump_picker(),
+                    '|' | '\\' => {
+                        let mut cmds = Vec::new();
+                        self.terminals.split_tile(PendingSplit::Vertical, &mut cmds);
+                        self.flush_dispatched_cmds(cmds);
+                    }
+                    '-' => {
+                        let mut cmds = Vec::new();
+                        self.terminals
+                            .split_tile(PendingSplit::Horizontal, &mut cmds);
+                        self.flush_dispatched_cmds(cmds);
+                    }
+                    'x' => {
+                        let mut cmds = Vec::new();
+                        self.terminals.close_focused_tile(&mut cmds);
+                        self.flush_dispatched_cmds(cmds);
+                    }
                     // Any other key is not a leader command — cancel back
                     // to the terminal (the key is consumed, not forwarded,
                     // matching the tmux-prefix "unbound key does nothing"

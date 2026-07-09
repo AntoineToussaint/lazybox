@@ -43,12 +43,6 @@ use std::collections::HashMap;
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
 
-/// How long the `Ctrl-w` tile prefix stays live waiting for its second
-/// key. Generous enough for a deliberate `Ctrl-w <dir>` chord, short
-/// enough that a stray `Ctrl-w` doesn't capture an unrelated keystroke
-/// seconds later.
-const CTRL_W_PREFIX_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
-
 /// Cap for the per-terminal recent-output buffer.
 ///
 /// libghostty-vt holds the canonical cell grid for rendering, but
@@ -325,13 +319,7 @@ pub struct TerminalStack {
     /// when no split has ever been requested. Mutating this triggers
     /// a `Command::SetSessionLayout` so the daemon persists.
     layout: lazybox_core::SessionLayout,
-    /// `Ctrl-w` tile-management prefix latch (tmux-style). When
-    /// armed, the next keystroke is interpreted as a tile action
-    /// (split, focus move, close); otherwise keys forward to the
-    /// active PTY. Generic `PrefixLatch` shared with future two-key
-    /// chord features — see `crate::confirm_latch::PrefixLatch`.
-    ctrl_w_latch: crate::confirm_latch::PrefixLatch,
-    /// Pending split operation: when the user hits `Ctrl-w |` we
+    /// Pending split operation: when the user hits `]]|` we
     /// emit `Command::Spawn` for a new shell, then once the
     /// `TerminalSpawned` event arrives we wrap the focused leaf in a
     /// fresh split with the new terminal. `Some(direction)` means
@@ -856,7 +844,6 @@ impl TerminalStack {
             collapsed: true,
             collapse_user_set: false,
             layout: lazybox_core::SessionLayout::default(),
-            ctrl_w_latch: crate::confirm_latch::PrefixLatch::new(),
             pending_split: None,
             pending_resizes: Vec::new(),
             tab_strip_hits: Vec::new(),
@@ -880,15 +867,14 @@ impl TerminalStack {
     ///
     /// No-op when the layout is unchanged: this is called from
     /// `sync_panes` after every key dispatch and daemon event, and
-    /// unconditionally resetting the `Ctrl-w` latch / pending split
-    /// here meant ANY daemon event landing between `Ctrl-w |` and the
-    /// `TerminalSpawned` it waits on silently cancelled the split.
+    /// unconditionally resetting the pending split here meant ANY
+    /// daemon event landing between `]]|` and the `TerminalSpawned`
+    /// it waits on silently cancelled the split.
     pub fn set_layout(&mut self, layout: lazybox_core::SessionLayout) {
         if self.layout == layout {
             return;
         }
         self.layout = layout;
-        self.ctrl_w_latch.disarm();
         self.pending_split = None;
     }
 
@@ -1897,13 +1883,15 @@ impl TerminalStack {
                 keys: Cow::Borrowed("Ctrl-c"),
                 label: Cow::Borrowed("interrupt"),
             },
-            // `Ctrl-w` is the tile prefix (split / focus-move / close);
-            // like `Ctrl-c` it's forwarded to the dispatcher rather than
-            // a catalog action, so it's hand-curated here. Labeled
-            // "split panes" rather than "tiles" — the latter meant
-            // nothing to a user who'd never used tmux-style panes (#202).
+            // Tile management rides the `]]` leader like every other
+            // lazybox chord in terminal mode (#286): `]]|` / `]]-`
+            // split, `]]<arrow>` moves tile focus, `]]x` closes the
+            // tile. Surface the split entry point; the leader popup
+            // lists the rest. Labeled "split panes" rather than
+            // "tiles" — the latter meant nothing to a user who'd
+            // never used tmux-style panes (#202).
             Binding {
-                keys: Cow::Borrowed("Ctrl-w"),
+                keys: Cow::Owned(format!("{leader}|")),
                 label: Cow::Borrowed("split panes"),
             },
             // Snippet picker entry point (issues #40, #205, #252). `]]s`
@@ -1919,33 +1907,6 @@ impl TerminalStack {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, cmds: &mut Vec<Command>) -> PaneOutcome {
-        // Tile-management prefix. Once `Ctrl-w` arms the latch, the
-        // next key is a tile action (split, focus move, close);
-        // anything unrecognised disarms cleanly. Same vocabulary as
-        // tmux/vim windows so existing muscle memory transfers.
-        let ctrl_w =
-            key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL);
-        let mut literal_ctrl_w = false;
-        // `take_within` honors the prefix only if the follow-up key
-        // arrives within the window — a lone `Ctrl-w` the user never
-        // completed expires instead of eating an unrelated keystroke
-        // minutes later (symmetric with the `]]` leader's timeout).
-        if self.ctrl_w_latch.take_within(CTRL_W_PREFIX_WINDOW) {
-            // Doubled prefix `Ctrl-w Ctrl-w` → send ONE literal Ctrl-w
-            // to the inner program (readline word-erase, vim/emacs window
-            // commands), the escape hatch for the tile prefix — same idea
-            // as the `]]`/`]` leader. Any other key is a tile action.
-            if ctrl_w {
-                literal_ctrl_w = true; // fall through to PTY forwarding
-            } else {
-                return self.handle_tile_action(key, cmds);
-            }
-        }
-        if ctrl_w && !literal_ctrl_w {
-            self.ctrl_w_latch.arm();
-            return PaneOutcome::Consumed;
-        }
-
         // Scrollback navigation. Mouse-wheel scroll is the primary
         // path (handled by the orchestrator's `handle_mouse`), but
         // a keyboard fallback matters: some host terminals don't
@@ -2088,7 +2049,7 @@ impl TerminalStack {
                     self.collapse_user_set = true;
                 }
 
-                // Stage 2 of a Ctrl-w split: wrap the focused leaf
+                // Stage 2 of a `]]|` split: wrap the focused leaf
                 // in a fresh split with this new terminal as the
                 // sibling. Without this, the new shell shows up as a
                 // tab but never enters the tile tree.
@@ -2147,7 +2108,7 @@ impl TerminalStack {
             } => {
                 // The tab badge is per-terminal. The daemon caches and
                 // broadcasts agent state per terminal, so a workspace
-                // running two agents (a `Ctrl-w` split, or claude +
+                // running two agents (a `]]|` split, or claude +
                 // codex) must have each badge track its OWN terminal.
                 // Applying by `session_key` instead clobbered every
                 // sibling badge with the last terminal's state — a
@@ -2382,7 +2343,9 @@ impl TerminalStack {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     "─".repeat(div_area.width as usize),
-                    theme.divider(),
+                    // Accent while the pane has focus — same at-a-glance
+                    // focus cue the sidebar / activity dividers use (#286).
+                    theme.pane_divider(focused),
                 ))),
                 div_area,
             );
@@ -2526,45 +2489,14 @@ impl TerminalStack {
         };
     }
 
-    /// Tile-action dispatch: a key arriving right after `Ctrl-w`.
-    /// Splits, focus moves, close, escape. Anything unrecognised is
-    /// a clean no-op (the prefix has already been consumed; the user
-    /// just has to retry).
-    fn handle_tile_action(&mut self, key: KeyEvent, cmds: &mut Vec<Command>) -> PaneOutcome {
-        use lazybox_core::TileDirection;
-
-        // Need an active session to know where to spawn into. Without
-        // one, splits + new shells have nowhere to land.
-        let Some(session_key) = self.active_session.clone() else {
-            return PaneOutcome::Consumed;
-        };
-
-        match (key.code, key.modifiers) {
-            (KeyCode::Char('|'), _) | (KeyCode::Char('\\'), _) => {
-                self.begin_split(session_key, PendingSplit::Vertical, cmds);
-            }
-            (KeyCode::Char('-'), _) => {
-                self.begin_split(session_key, PendingSplit::Horizontal, cmds);
-            }
-            (KeyCode::Left, _) => self.move_focus(TileDirection::Left, cmds),
-            (KeyCode::Down, _) => self.move_focus(TileDirection::Down, cmds),
-            (KeyCode::Up, _) => self.move_focus(TileDirection::Up, cmds),
-            (KeyCode::Right, _) => self.move_focus(TileDirection::Right, cmds),
-            (KeyCode::Char('q'), _) => self.close_focused_tile(cmds),
-            _ => {}
-        }
-        PaneOutcome::Consumed
-    }
-
-    /// Stage 1 of a split: arm the pending-split flag and emit a
-    /// shell-spawn command. The new terminal id arrives on
+    /// Stage 1 of a split (`]]|` / `]]-`): arm the pending-split flag
+    /// and emit a shell-spawn command. The new terminal id arrives on
     /// `Event::TerminalSpawned`; that's where we mutate the layout.
-    fn begin_split(
-        &mut self,
-        session_key: SessionKey,
-        direction: PendingSplit,
-        cmds: &mut Vec<Command>,
-    ) {
+    /// No-op without an active session — the split has nowhere to land.
+    pub fn split_tile(&mut self, direction: PendingSplit, cmds: &mut Vec<Command>) {
+        let Some(session_key) = self.active_session.clone() else {
+            return;
+        };
         self.pending_split = Some(direction);
         cmds.push(Command::Spawn {
             session_key,
@@ -2578,9 +2510,9 @@ impl TerminalStack {
         });
     }
 
-    /// Move focus across the tile tree (or cycle through tabs in
-    /// Tabs mode). Persists the new layout via `SetSessionLayout`.
-    fn move_focus(&mut self, dir: lazybox_core::TileDirection, cmds: &mut Vec<Command>) {
+    /// Move focus across the tile tree (`]]<arrow>`), or cycle through
+    /// tabs in Tabs mode. Persists the new layout via `SetSessionLayout`.
+    pub fn move_tile_focus(&mut self, dir: lazybox_core::TileDirection, cmds: &mut Vec<Command>) {
         match &mut self.layout {
             lazybox_core::SessionLayout::Tabs { active } => {
                 // In tabs mode h/l cycle the tab strip; j/k are no-ops
@@ -2609,10 +2541,10 @@ impl TerminalStack {
         self.persist_layout(cmds);
     }
 
-    /// Close the focused leaf, collapsing its parent split into the
-    /// surviving sibling. Single-leaf trees are refused (would leave
+    /// Close the focused leaf (`]]x`), collapsing its parent split into
+    /// the surviving sibling. Single-leaf trees are refused (would leave
     /// the session with nothing visible).
-    fn close_focused_tile(&mut self, cmds: &mut Vec<Command>) {
+    pub fn close_focused_tile(&mut self, cmds: &mut Vec<Command>) {
         let lazybox_core::SessionLayout::Splits { tree, focused } = &mut self.layout else {
             return;
         };
@@ -2828,20 +2760,23 @@ impl TerminalStack {
             lazybox_core::TileTree::Leaf { terminal_id } => {
                 let is_focused_leaf = pane_focused && current_path == focus_path;
                 self.render_one_terminal(TerminalId(*terminal_id), rect, frame, is_focused_leaf);
-                // Highlight the focused leaf with a one-cell top
-                // accent line. Subtle but enough to disambiguate
-                // when two shells look identical.
-                if is_focused_leaf && rect.height > 0 && rect.width > 0 {
+                // Every leaf gets a one-cell top rule: accent on the
+                // focused tile, chrome on the rest (#286). The contrast
+                // between the two is what makes "where does my typing
+                // land" legible at a glance — an accent bar with nothing
+                // to compare against read as decoration, not focus.
+                if rect.height > 0 && rect.width > 0 {
                     let bar = Rect {
                         x: rect.x,
                         y: rect.y,
                         width: rect.width,
                         height: 1,
                     };
+                    let color = if is_focused_leaf { accent } else { chrome };
                     frame.render_widget(
                         Paragraph::new(Line::from(Span::styled(
                             "─".repeat(bar.width as usize),
-                            Style::default().fg(accent),
+                            Style::default().fg(color),
                         ))),
                         bar,
                     );
@@ -3633,6 +3568,9 @@ mod detect_target_tests {
 
 #[cfg(test)]
 mod ctrl_w_tests {
+    //! Tile management moved under the `]]` leader (#286); `Ctrl-w`
+    //! is no longer a lazybox prefix and must reach the inner program
+    //! unmediated (readline word-erase, vim/emacs window commands).
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use lazybox_ipc::Command;
@@ -3660,32 +3598,14 @@ mod ctrl_w_tests {
     }
 
     #[test]
-    fn doubled_ctrl_w_sends_one_literal() {
-        let mut stack = shell_stack();
-        let mut cmds = Vec::new();
-        // First Ctrl-w arms the tile prefix, writes nothing.
-        stack.handle_key(ctrl_w(), &mut cmds);
-        assert!(write_bytes(&cmds).is_empty(), "first Ctrl-w writes nothing");
-        // Second Ctrl-w within the window → one literal Ctrl-w (0x17).
-        cmds.clear();
-        stack.handle_key(ctrl_w(), &mut cmds);
-        assert_eq!(write_bytes(&cmds), vec![0x17], "doubled Ctrl-w → 0x17");
-    }
-
-    #[test]
-    fn ctrl_w_then_tile_key_is_not_forwarded() {
+    fn ctrl_w_forwards_straight_to_the_pty() {
         let mut stack = shell_stack();
         let mut cmds = Vec::new();
         stack.handle_key(ctrl_w(), &mut cmds);
-        cmds.clear();
-        // `j` after the prefix is a tile action, not input to the PTY.
-        stack.handle_key(
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
-            &mut cmds,
-        );
-        assert!(
-            !write_bytes(&cmds).contains(&b'j'),
-            "the tile-direction key must not leak to the PTY"
+        assert_eq!(
+            write_bytes(&cmds),
+            vec![0x17],
+            "Ctrl-w is the inner program's key, not a lazybox prefix"
         );
     }
 }
@@ -4647,7 +4567,7 @@ mod set_layout_tests {
     //! `set_layout` runs inside `sync_panes`, i.e. after EVERY key
     //! dispatch and daemon event. It must be a no-op when the layout
     //! is unchanged — otherwise any daemon event landing between
-    //! `Ctrl-w |` and the `TerminalSpawned` it waits on resets the
+    //! `]]|` and the `TerminalSpawned` it waits on resets the
     //! latch and silently cancels the pending split.
     use super::*;
 

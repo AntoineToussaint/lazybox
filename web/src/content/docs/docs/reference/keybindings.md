@@ -98,9 +98,9 @@ The terminal forwards every key to the PTY. Only the keys below are intercepted.
 | `]]` (two presses) | Return to the sidebar |
 | `]]<key>` | Open the snippet picker (fuzzy-filtered by key) |
 | `]` then non-`]` | Sent to the agent verbatim |
-| `Ctrl-w \|` / `Ctrl-w -` | Split the tile (vertical / horizontal) |
-| `Ctrl-w <arrow>` | Move tile focus |
-| `Ctrl-w q` | Close the focused tile |
+| `]]\|` / `]]-` | Split the tile (vertical / horizontal) |
+| `]]<arrow>` | Move tile focus |
+| `]]x` | Close the focused tile |
 | `Shift-PgUp` / `Shift-PgDn` | Scroll the scrollback |
 | `Shift-Home` / `Shift-End` | Jump scrollback top / bottom |
 

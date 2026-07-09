@@ -1251,7 +1251,8 @@ snippets:
 
     /// `]]<unbound>` — a key that isn't a leader command — cancels back
     /// to the terminal without opening the picker or leaving (#252). Only
-    /// `s`/`f`/`q`/digit/`` ` `` are commands now.
+    /// `s`/`f`/`q`/`x`/digit/`` ` ``/the split-and-arrow tile chords are
+    /// commands now.
     #[test]
     fn leader_then_unbound_key_cancels_back_to_terminal() {
         let mut m = model_in_terminal_with_snippets("leader-unbound");
@@ -3633,9 +3634,130 @@ mod wheel_routing_tests {
         );
     }
 
-    // (Ctrl-w escape-hatch byte behavior is unit-tested at the
-    // TerminalStack level in `components::terminal_stack::ctrl_w_tests`,
-    // which exercises `handle_key` directly without Model key routing.)
+    // (Ctrl-w now forwards straight to the PTY — no lazybox prefix,
+    // #286 — unit-tested at the TerminalStack level in
+    // `components::terminal_stack::ctrl_w_tests`.)
+}
+
+#[cfg(test)]
+mod leader_tile_tests {
+    //! `]]` leader tile commands (#286): tile/split management rides
+    //! the same leader as every other terminal-mode chord, replacing
+    //! the retired `Ctrl-w` prefix.
+    use super::super::*;
+    use lazybox_ipc::{
+        Command as IpcCommand, Event as IpcEvent, TerminalId, TerminalKind, channel,
+    };
+    use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model_with_terminals(
+        n: u64,
+    ) -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+    ) {
+        let (client, server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = lazybox_core::SessionKey::from("github:o/r#1");
+        m.terminals.set_active_session(Some(key.clone()));
+        for id in 1..=n {
+            m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+                terminal_id: TerminalId(id),
+                session_key: key.clone(),
+                kind: TerminalKind::Shell,
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        m.focus = PaneFocus::Terminals;
+        (m, server)
+    }
+
+    fn two_leaf_split() -> lazybox_core::SessionLayout {
+        lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![0],
+        }
+    }
+
+    fn arm_leader(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+        m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+    }
+
+    /// `]]|` splits the focused tile: a Shell spawn goes to the daemon
+    /// and the leader is consumed. `|` arrives shifted on most hosts,
+    /// so the chord must accept the SHIFT modifier.
+    #[test]
+    fn leader_pipe_splits_the_focused_tile() {
+        let (mut m, mut server) = build_model_with_terminals(1);
+        while server.rx.try_recv().is_ok() {}
+        arm_leader(&mut m);
+        m.dispatch_key(RealmKey::new(Key::Char('|'), RealmMods::SHIFT));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "split stays in the pane");
+        let mut saw_spawn = false;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if matches!(
+                cmd,
+                IpcCommand::Spawn {
+                    kind: TerminalKind::Shell,
+                    ..
+                }
+            ) {
+                saw_spawn = true;
+            }
+        }
+        assert!(saw_spawn, "`]]|` emits a Shell spawn for the new tile");
+    }
+
+    /// `]]→` moves tile focus across the split and persists the layout.
+    #[test]
+    fn leader_arrow_moves_tile_focus() {
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.terminals.set_layout(two_leaf_split());
+        while server.rx.try_recv().is_ok() {}
+        arm_leader(&mut m);
+        m.dispatch_key(RealmKey::new(Key::Right, RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        assert_eq!(
+            m.terminals.focused_terminal_id(),
+            Some(TerminalId(2)),
+            "`]]→` moves focus to the right tile"
+        );
+        let mut saw_persist = false;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if matches!(cmd, IpcCommand::SetSessionLayout { .. }) {
+                saw_persist = true;
+            }
+        }
+        assert!(saw_persist, "tile-focus moves persist the layout");
+    }
+
+    /// `]]x` closes the focused tile: its PTY is killed daemon-side and
+    /// the two-leaf split collapses back to Tabs.
+    #[test]
+    fn leader_x_closes_focused_tile() {
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.terminals.set_layout(two_leaf_split());
+        while server.rx.try_recv().is_ok() {}
+        arm_leader(&mut m);
+        m.dispatch_key(RealmKey::new(Key::Char('x'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        let mut saw_close = false;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if matches!(cmd, IpcCommand::Close { .. }) {
+                saw_close = true;
+            }
+        }
+        assert!(saw_close, "`]]x` kills the focused tile's PTY");
+    }
 }
 
 #[cfg(test)]

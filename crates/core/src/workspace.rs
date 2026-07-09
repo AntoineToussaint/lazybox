@@ -788,8 +788,8 @@ pub enum TileTree {
     },
 }
 
-/// Direction for spatial navigation between tiles. Maps onto vim
-/// `Ctrl-w h/j/k/l`.
+/// Direction for spatial navigation between tiles (the TUI's
+/// `]]<arrow>` chords).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileDirection {
     Left,

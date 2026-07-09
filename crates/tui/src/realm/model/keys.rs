@@ -34,6 +34,13 @@ impl<T: TerminalAdapter> Model<T> {
         // this key mutates anything, so a later re-select can restore it
         // (#182).
         self.record_workspace_focus();
+        // Any key pressed while the sidebar is focused re-anchors a
+        // wheel-detached viewport (#290): keys act on — or move — the
+        // selection, so the selection must be on screen. Only the
+        // wheel detaches; only mouse scrolling keeps it detached.
+        if self.focus == PaneFocus::Sidebar && self.sidebar.reanchor_viewport() {
+            self.redraw = true;
+        }
         // The sidebar's `/` search bar, while open, owns every
         // keystroke — route them straight in before pane / catalog /
         // global dispatch so typing a query (`f`, `s`, `Tab`, …) edits

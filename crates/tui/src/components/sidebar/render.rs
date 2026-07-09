@@ -519,6 +519,8 @@ impl Sidebar {
         if self.scroll > max_scroll {
             self.scroll = max_scroll;
         }
+        self.last_viewport = viewport;
+        self.rendered_scroll = self.scroll;
 
         let para = Paragraph::new(lines).scroll((self.scroll as u16, 0));
         frame.render_widget(para, inner);

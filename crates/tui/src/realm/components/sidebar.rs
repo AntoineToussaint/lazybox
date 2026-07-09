@@ -367,6 +367,12 @@ impl Sidebar {
         self.inner.scroll_by_wheel(delta)
     }
 
+    /// Re-anchor a wheel-detached viewport to the cursor. Returns
+    /// true when the viewport was detached (caller should repaint).
+    pub fn reanchor_viewport(&mut self) -> bool {
+        self.inner.reanchor_viewport()
+    }
+
     /// Click the role-filter chip in the sidebar header → cycle it.
     /// Returns true on a hit (caller should mark a redraw).
     pub fn click_to_cycle_filter(&mut self, col: u16, row: u16) -> bool {

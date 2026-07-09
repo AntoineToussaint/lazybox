@@ -4713,6 +4713,62 @@ mod workspace_focus_memory_tests {
         );
     }
 
+    /// Any key pressed while the sidebar is focused re-anchors a
+    /// wheel-detached viewport (#290). The wheel may leave the cursor
+    /// off-screen, but keys act on the selection — `m` marks IT read,
+    /// `z` snoozes IT — so the frame after a keypress must show it.
+    #[test]
+    fn sidebar_key_reanchors_a_wheel_detached_viewport() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers as RealmMods};
+        use tuirealm::ratatui::{Terminal, backend::TestBackend};
+
+        let mut m = build_model();
+        let workspaces: Vec<Workspace> = (1..=60)
+            .map(|n| empty_ws(&format!("github:o/r#{n}")))
+            .collect();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces,
+            terminals: vec![],
+            projects: vec![],
+        });
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _, _) = m.effective_pane_rects(area);
+        let render = |m: &mut Model<tuirealm::terminal::TestTerminalAdapter>| {
+            let mut term = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            term.draw(|f| m.__test_sidebar_mut().view_in(sidebar_rect, f))
+                .unwrap();
+        };
+
+        render(&mut m);
+        for _ in 0..20 {
+            m.dispatch_mouse_in(
+                MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: sidebar_rect.x + sidebar_rect.width / 2,
+                    row: sidebar_rect.y + 10,
+                    modifiers: KeyModifiers::NONE,
+                },
+                area,
+            );
+        }
+        render(&mut m);
+        assert!(
+            m.sidebar().__test_scroll() > m.sidebar().cursor(),
+            "wheel-down leaves the cursor off-screen above the viewport",
+        );
+
+        // `m` targets the selection without moving the cursor — the
+        // re-anchor must come from the keypress itself, not from a
+        // cursor move.
+        m.dispatch_key(KeyEvent::new(Key::Char('m'), RealmMods::NONE));
+        render(&mut m);
+        assert!(
+            m.sidebar().__test_scroll() <= m.sidebar().cursor(),
+            "a sidebar keypress snaps the viewport back onto the cursor",
+        );
+    }
+
     #[test]
     fn clicking_the_already_selected_row_keeps_the_sidebar() {
         // The escape hatch: clicking the sidebar row of the workspace

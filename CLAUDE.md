@@ -188,7 +188,9 @@ The footer hint bar reads each pane's `contextual_bindings()`.
 
 **Global**: `Tab` cycle panes, `?` help, `q q` quit, `,` settings,
 `]` browse snippets (read-only catalog; `e` there opens the YAML),
-`Shift-R` refresh, `Shift-T` tour, `Shift-D` sync status, `` ` ``
+`Shift-R` refresh, `Ctrl-L` force a full repaint (recovery for a
+stale/garbled screen; resize and focus-regain also repaint
+automatically), `Shift-T` tour, `Shift-D` sync status, `` ` ``
 open the fuzzy jump-to-workspace picker (all repos; from inside an
 agent use `]]` then `` ` ``), `!` jump to agent-asking workspace,
 `Shift-F` jump to failing CI, `Shift-P` toggle

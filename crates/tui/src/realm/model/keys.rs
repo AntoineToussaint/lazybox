@@ -1222,6 +1222,7 @@ fn action_from_kind(
         ActionKind::ToggleSnooze => Action::ToggleSnooze,
         ActionKind::LongSnooze => Action::LongSnooze,
         ActionKind::Refresh => Action::Refresh,
+        ActionKind::ForceRedraw => Action::ForceRedraw,
         ActionKind::AdoptSessions => Action::AdoptSessions,
         ActionKind::CollapseIntoPr => Action::CollapseIntoPr,
         ActionKind::Reply => Action::Reply,

@@ -977,6 +977,57 @@ fn split_tiles_paint_focus_contrast_bars() {
 }
 
 #[test]
+fn tile_rule_is_carved_above_the_recap_not_over_it() {
+    // #286 follow-up: the tile rule must not overdraw content — an
+    // agent tile in a split keeps its pinned "you ▸ …" recap visible
+    // on the row BELOW the rule.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.set_active_session(Some(ws_key("o/r#1")));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    // Submit the prompt while the agent is the only (focused)
+    // terminal, THEN add the shell — spawning first would steal focus
+    // and the recap would record against the wrong terminal.
+    type_str(&mut t, "fix the bug");
+    let mut cmds = Vec::new();
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
+    // Focus the SHELL tile so the agent tile is the unfocused one —
+    // the case the old overdraw hid entirely.
+    t.set_layout(SessionLayout::Splits {
+        tree: TileTree::VSplit {
+            top: Box::new(TileTree::Leaf { terminal_id: 1 }),
+            bottom: Box::new(TileTree::Leaf { terminal_id: 2 }),
+            ratio: 50,
+        },
+        focused: vec![1],
+    });
+
+    let out = render_to_string(&mut t, 60, 20, true);
+    assert!(
+        out.contains("you ▸ fix the bug"),
+        "recap must stay visible under the tile rule; got:\n{out}"
+    );
+}
+
+#[test]
+fn close_focused_tile_in_tabs_closes_the_active_terminal() {
+    // #286 follow-up: `]]x` must not be a silent no-op in Tabs mode —
+    // it closes the active tab's terminal.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.set_active_session(Some(ws_key("o/r#1")));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.set_layout(SessionLayout::Tabs { active: 0 });
+
+    let mut cmds = Vec::new();
+    t.close_focused_tile(&mut cmds);
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::Close { terminal_id } if *terminal_id == TerminalId(1))),
+        "Tabs-mode close targets the active terminal, got {cmds:?}"
+    );
+}
+
+#[test]
 fn tile_command_keys_without_the_leader_reach_the_pty() {
     // With no armed leader, the erstwhile tile keys (`x`, `|`, Ctrl-w)
     // are ordinary input and must route to the PTY.

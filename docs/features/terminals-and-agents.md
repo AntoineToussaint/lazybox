@@ -355,7 +355,7 @@ leaving, splitting, scrolling, and copying.
 - `]]` (two presses of the escape char) returns to the sidebar.
 - `Tab` cycles focus only before you've typed in the current visit; after the first keystroke it routes to the PTY (autocomplete).
 - `Ctrl-c` is forwarded as SIGINT.
-- `]]` then `|`/`\` (split vertical), `-` (split horizontal), arrows (move focus), `x` (close tile). `Ctrl-w` is not a lazybox prefix — it reaches the inner program (readline word-erase).
+- `]]` then `|`/`\` (split vertical), `-` (split horizontal), arrows (move tile focus / cycle tabs), `x` (close the focused terminal). `Ctrl-w` is not a lazybox prefix — it reaches the inner program (readline word-erase).
 - Mouse wheel scrolls scrollback (8 rows/notch), or forwards to programs with mouse tracking on (Claude, vim, less).
 - Left-click + drag does pane-scoped selection; release copies via OSC 52 (footer shows `copied N lines`). For host-native selection across the whole screen, press `F8` to flip mouse capture off, drag, then `F8` back.
 - `Shift-PageUp/PageDown` and `Shift-Home/End` move through scrollback.

@@ -159,9 +159,25 @@ impl Terminals {
         self.inner.move_tile_focus(dir, cmds);
     }
 
-    /// `]]x` — close the focused tile and its PTY.
+    /// `]]x` — close the focused terminal (tile or active tab) and
+    /// its PTY.
     pub fn close_focused_tile(&mut self, cmds: &mut Vec<IpcCommand>) {
         self.inner.close_focused_tile(cmds);
+    }
+
+    /// Whether the active session renders as a tile tree (vs Tabs).
+    /// Drives the layout-tailored rows of the `]]` leader popup.
+    pub fn layout_is_splits(&self) -> bool {
+        matches!(
+            self.inner.layout(),
+            lazybox_core::SessionLayout::Splits { .. }
+        )
+    }
+
+    /// Number of terminals in the active session's visible set. Also
+    /// feeds the leader popup's layout-tailored rows.
+    pub fn visible_terminal_count(&self) -> usize {
+        self.inner.visible_terminals().len()
     }
 
     /// State-aware short list for the footer hint bar — the `]]` leave,

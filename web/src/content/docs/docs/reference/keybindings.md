@@ -99,8 +99,8 @@ The terminal forwards every key to the PTY. Only the keys below are intercepted.
 | `]]<key>` | Open the snippet picker (fuzzy-filtered by key) |
 | `]` then non-`]` | Sent to the agent verbatim |
 | `]]\|` / `]]-` | Split the tile (vertical / horizontal) |
-| `]]<arrow>` | Move tile focus |
-| `]]x` | Close the focused tile |
+| `]]<arrow>` | Move tile focus (cycle tabs in Tabs mode) |
+| `]]x` | Close the focused terminal (tile or active tab) |
 | `Shift-PgUp` / `Shift-PgDn` | Scroll the scrollback |
 | `Shift-Home` / `Shift-End` | Jump scrollback top / bottom |
 

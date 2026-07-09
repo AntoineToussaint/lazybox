@@ -95,9 +95,10 @@ impl<T: TerminalAdapter> Model<T> {
         //     workspace (sidebar order, top-down);
         //   - `` ]]` `` opens the fuzzy workspace switcher (issue #171);
         //   - `]]|` / `]]-` split the focused tile, `]]<arrow>` moves
-        //     tile focus, `]]x` closes the tile — tile management rides
-        //     the same leader as everything else so terminal mode has
-        //     exactly one lazybox prefix (#286, ex-`Ctrl-w`);
+        //     tile focus (cycles tabs in Tabs mode), `]]x` closes the
+        //     focused terminal — tile management rides the same leader
+        //     as everything else so terminal mode has exactly one
+        //     lazybox prefix (#286, ex-`Ctrl-w`);
         //   - Esc or any unbound key cancels back into the terminal so
         //     the user can keep typing.
         // The leader is NOT timed (#252): a timed idle-leave used to
@@ -108,61 +109,37 @@ impl<T: TerminalAdapter> Model<T> {
         // a plain mnemonic, not a triple-tap.
         if std::mem::take(&mut self.terminal_leader_armed) {
             self.redraw = true;
-            use lazybox_core::TileDirection;
-            let tile_dir = match key.code {
-                Key::Left => Some(TileDirection::Left),
-                Key::Right => Some(TileDirection::Right),
-                Key::Up => Some(TileDirection::Up),
-                Key::Down => Some(TileDirection::Down),
-                _ => None,
-            };
-            if let Some(dir) = tile_dir {
-                if key.modifiers.is_empty() {
-                    let mut cmds = Vec::new();
+            use super::terminal_leader::LeaderCmd;
+            use crate::components::terminal_stack::PendingSplit;
+            // Which key means which command lives in ONE place
+            // (`terminal_leader::LeaderCmd`), shared with the which-key
+            // popup's row list so dispatch and display can't drift. A
+            // `None` key is not a leader command — cancel back to the
+            // terminal (the key is consumed, not forwarded, matching
+            // the tmux-prefix "unbound key does nothing" convention).
+            let mut cmds = Vec::new();
+            match LeaderCmd::from_key(key.code, key.modifiers) {
+                Some(LeaderCmd::JumpAgent(n)) => self.jump_to_agent_workspace(n),
+                Some(LeaderCmd::Snippets) => self.mount_snippet_picker(String::new()),
+                Some(LeaderCmd::ToggleFocusMode) => self.toggle_focus_mode(),
+                Some(LeaderCmd::ExitToSidebar) => self.leave_terminal_to_sidebar(),
+                Some(LeaderCmd::JumpPicker) => self.mount_jump_picker(),
+                Some(LeaderCmd::SplitVertical) => {
+                    self.terminals.split_tile(PendingSplit::Vertical, &mut cmds);
+                }
+                Some(LeaderCmd::SplitHorizontal) => {
+                    self.terminals
+                        .split_tile(PendingSplit::Horizontal, &mut cmds);
+                }
+                Some(LeaderCmd::MoveTile(dir)) => {
                     self.terminals.move_tile_focus(dir, &mut cmds);
-                    self.flush_dispatched_cmds(cmds);
                 }
-                return;
-            }
-            // `|` arrives with a SHIFT modifier on most hosts, so the
-            // char commands accept a bare or shifted keystroke.
-            if let Key::Char(c) = key.code
-                && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
-                && !c.is_control()
-            {
-                use crate::components::terminal_stack::PendingSplit;
-                match c {
-                    '1'..='9' => {
-                        let n = c.to_digit(10).unwrap_or(0) as usize;
-                        self.jump_to_agent_workspace(n);
-                    }
-                    's' => self.mount_snippet_picker(String::new()),
-                    'f' => self.toggle_focus_mode(),
-                    'q' => self.leave_terminal_to_sidebar(),
-                    '`' => self.mount_jump_picker(),
-                    '|' | '\\' => {
-                        let mut cmds = Vec::new();
-                        self.terminals.split_tile(PendingSplit::Vertical, &mut cmds);
-                        self.flush_dispatched_cmds(cmds);
-                    }
-                    '-' => {
-                        let mut cmds = Vec::new();
-                        self.terminals
-                            .split_tile(PendingSplit::Horizontal, &mut cmds);
-                        self.flush_dispatched_cmds(cmds);
-                    }
-                    'x' => {
-                        let mut cmds = Vec::new();
-                        self.terminals.close_focused_tile(&mut cmds);
-                        self.flush_dispatched_cmds(cmds);
-                    }
-                    // Any other key is not a leader command — cancel back
-                    // to the terminal (the key is consumed, not forwarded,
-                    // matching the tmux-prefix "unbound key does nothing"
-                    // convention).
-                    _ => {}
+                Some(LeaderCmd::CloseTerminal) => {
+                    self.terminals.close_focused_tile(&mut cmds);
                 }
+                None => {}
             }
+            self.flush_dispatched_cmds(cmds);
             return;
         }
         match key.code {

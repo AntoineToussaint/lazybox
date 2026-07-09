@@ -29,6 +29,7 @@ mod host_terminal;
 mod inputs;
 mod keys;
 mod modals;
+mod terminal_leader;
 #[cfg(test)]
 mod tests;
 
@@ -2491,8 +2492,8 @@ impl<T: TerminalAdapter> Model<T> {
             Vec::new()
         };
         // Command menu for the `]]` leader popup (#252): the fixed
-        // commands (`s` snippets, `f` focus, `q` exit, `` ` `` jump,
-        // the tile-management chords, #286) FIRST so they're always
+        // commands (one table with the key dispatch —
+        // `terminal_leader::LeaderCmd`, #286) FIRST so they're always
         // visible, then the agent-jump roster (`1..9` → agent workspace
         // name, sidebar order). Ordering matters — the popup caps its
         // rows (`LEADER_MAX_ROWS`) and truncates the tail into "+N
@@ -2503,16 +2504,10 @@ impl<T: TerminalAdapter> Model<T> {
         // Built only while the leader is armed so the steady-state
         // render pays nothing.
         let leader_menu_rows: Vec<(String, String)> = if self.terminal_leader_armed {
-            let mut rows: Vec<(String, String)> = vec![
-                ("s".to_string(), "snippets".to_string()),
-                ("f".to_string(), "focus mode".to_string()),
-                ("q".to_string(), "exit to sidebar".to_string()),
-                ("`".to_string(), "jump to workspace".to_string()),
-                ("|".to_string(), "split right".to_string()),
-                ("-".to_string(), "split down".to_string()),
-                ("←↓↑→".to_string(), "move tile".to_string()),
-                ("x".to_string(), "close tile".to_string()),
-            ];
+            let mut rows = terminal_leader::LeaderCmd::menu_rows(
+                self.terminals.layout_is_splits(),
+                self.terminals.visible_terminal_count(),
+            );
             rows.extend(
                 self.sidebar
                     .agent_workspace_keys()

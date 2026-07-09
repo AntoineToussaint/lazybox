@@ -141,6 +141,17 @@ pub enum Action {
     CycleMailbox,
     /// Open the incremental search bar scoped to the focused project.
     OpenSearch,
+    /// Toggle the focused workspace row in/out of the sidebar's
+    /// multi-select set — the targets a broadcast
+    /// ([`Action::BroadcastToSelected`]) fans out to. Selection
+    /// survives j/k navigation; Esc clears it.
+    SelectWorkspace,
+    /// Send one instruction — a snippet, free text, or both — to every
+    /// multi-selected workspace in one shot ("merge when green" to N
+    /// PRs at once). Each target's running agent gets the settle-gated
+    /// inject; a plain shell gets a direct write; workspaces with no
+    /// session are skipped and reported.
+    BroadcastToSelected,
 
     // ── Activity pane (right) ──────────────────────────────────────
     /// Toggle the activity-section collapse on the focused workspace.
@@ -294,6 +305,8 @@ pub enum ActionKind {
     CycleSort,
     CycleMailbox,
     OpenSearch,
+    SelectWorkspace,
+    BroadcastToSelected,
     // Activity
     ToggleActivity,
     ToggleRow,
@@ -395,6 +408,8 @@ impl Action {
             Action::CycleSort => ActionKind::CycleSort,
             Action::CycleMailbox => ActionKind::CycleMailbox,
             Action::OpenSearch => ActionKind::OpenSearch,
+            Action::SelectWorkspace => ActionKind::SelectWorkspace,
+            Action::BroadcastToSelected => ActionKind::BroadcastToSelected,
             Action::ToggleActivity => ActionKind::ToggleActivity,
             Action::ToggleRow => ActionKind::ToggleRow,
             Action::Reply => ActionKind::Reply,
@@ -764,6 +779,20 @@ impl ActionDef {
                 describe: "Open the incremental search bar scoped to the focused project.",
                 section: Section::Sidebar,
             },
+            ActionKind::SelectWorkspace => &Self {
+                kind: ActionKind::SelectWorkspace,
+                default_keys: "v",
+                label: "select",
+                describe: "Toggle the focused workspace in/out of the multi-select set. Selected rows are the targets Shift-B broadcasts to; Esc clears the selection.",
+                section: Section::Sidebar,
+            },
+            ActionKind::BroadcastToSelected => &Self {
+                kind: ActionKind::BroadcastToSelected,
+                default_keys: "Shift-B",
+                label: "broadcast",
+                describe: "Send one instruction — a snippet, free text, or both — to every multi-selected workspace at once. Running agents get the prompt injected; plain shells get a direct write; workspaces with no session are skipped and reported.",
+                section: Section::Sidebar,
+            },
             // ── Activity ────────────────────────────────────────────
             ActionKind::ToggleActivity => &Self {
                 kind: ActionKind::ToggleActivity,
@@ -908,6 +937,8 @@ impl ActionDef {
             ActionKind::CycleSort,
             ActionKind::CycleMailbox,
             ActionKind::OpenSearch,
+            ActionKind::SelectWorkspace,
+            ActionKind::BroadcastToSelected,
             // Activity
             ActionKind::ToggleActivity,
             ActionKind::ToggleRow,
@@ -1370,6 +1401,8 @@ impl ActionKind {
             ActionKind::CycleSort => "cycle_sort",
             ActionKind::CycleMailbox => "cycle_mailbox",
             ActionKind::OpenSearch => "open_search",
+            ActionKind::SelectWorkspace => "select_workspace",
+            ActionKind::BroadcastToSelected => "broadcast_to_selected",
             ActionKind::ToggleActivity => "toggle_activity",
             ActionKind::ToggleRow => "toggle_row",
             ActionKind::ActivityTop => "activity_top",
@@ -1812,6 +1845,12 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::CycleSort
         | ActionKind::CycleMailbox
         | ActionKind::OpenSearch => true,
+        // Toggling a selection mark needs a row under the cursor; the
+        // broadcast itself acts on the selection set (which the catalog
+        // can't see), so the dispatcher gates on it and surfaces a
+        // footer nudge when nothing is selected.
+        ActionKind::SelectWorkspace => has_ws,
+        ActionKind::BroadcastToSelected => true,
         // Global / no-workspace-needed actions.
         ActionKind::NewWorkspace
         | ActionKind::NewProject

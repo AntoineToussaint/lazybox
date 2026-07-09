@@ -217,6 +217,16 @@ pub enum Id {
     /// (`Msg::OpenSnippetsFile`); any other non-scroll key dismisses.
     /// See `realm::components::snippet_browser`.
     SnippetBrowser,
+    /// Snippet-pick step of the broadcast flow (`Shift-B` on a sidebar
+    /// multi-select). Same `SnippetPicker` component as
+    /// `Id::SnippetPicker`, but the pick doesn't send — it funnels into
+    /// the `BroadcastText` compose step (`Ctrl-F` skips the snippet).
+    /// Targets live in `pending_broadcast`.
+    BroadcastSnippet,
+    /// Compose step of the broadcast flow: a Textarea pre-filled with
+    /// the picked snippet's body (custom text appends after it).
+    /// Submit → one delivery per target in `pending_broadcast`.
+    BroadcastText,
 }
 
 impl Id {
@@ -272,6 +282,17 @@ pub(crate) enum ActionConfirmTarget {
     Workspace(lazybox_core::SessionKey),
     /// A project header — `Archive` here deletes the whole project.
     Project(lazybox_core::ProjectKey),
+}
+
+/// In-flight broadcast (`Shift-B`): the targets resolved from the
+/// sidebar multi-select when the flow mounted — stashed, not re-read
+/// at send time, so a daemon event that reshuffles the sidebar under
+/// the modals can't change who gets the message — plus the snippet
+/// picked in step one (`None` = free text only). Consumed on submit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BroadcastDraft {
+    pub(crate) targets: Vec<lazybox_core::SessionKey>,
+    pub(crate) snippet_key: Option<String>,
 }
 
 /// One queued workspace-removal prompt. Surfaced one at a time as a
@@ -772,6 +793,10 @@ pub struct Model<T: TerminalAdapter> {
     /// Session-scoped — deliberately not persisted; it tracks the
     /// current work session's rhythm, not a durable preference.
     pub(crate) recent_snippets: Vec<String>,
+    /// Active broadcast flow (`Shift-B`), if any. Set when the flow
+    /// mounts, threaded through the snippet-pick step, consumed by the
+    /// compose submit (or dropped on Esc). See [`BroadcastDraft`].
+    pub(crate) pending_broadcast: Option<BroadcastDraft>,
     /// Session keys backing the active `JumpPicker`, in the same order
     /// as its rows — `Msg::ChoicePicked(idx)` resolves to a key here.
     /// Cleared on mount/unmount.
@@ -1017,6 +1042,7 @@ impl<T: TerminalAdapter> Model<T> {
             snippets: lazybox_config::Snippets::default(),
             snippet_choices: Vec::new(),
             recent_snippets: Vec::new(),
+            pending_broadcast: None,
             jump_choices: Vec::new(),
             theme_choices: Vec::new(),
             theme_picker_prev: None,
@@ -1338,6 +1364,82 @@ impl<T: TerminalAdapter> Model<T> {
         let picker =
             SnippetPicker::new(rows, initial_filter).with_recent(self.recent_snippets.clone());
         self.mount_modal(Id::SnippetPicker, picker);
+    }
+
+    /// Kick off the broadcast flow (`Shift-B`): resolve the sidebar's
+    /// multi-selected workspaces into a target list and mount the
+    /// snippet-pick step (skipped straight to compose when the snippet
+    /// library is empty). No selection → a footer nudge instead.
+    pub(crate) fn mount_broadcast_picker(&mut self) {
+        use crate::realm::components::snippet_picker::{PickerRow, SnippetPicker};
+        let targets = self.sidebar.selected_broadcast_keys();
+        if targets.is_empty() {
+            self.flash_info("nothing selected — mark workspaces with v first");
+            return;
+        }
+        self.pending_broadcast = Some(BroadcastDraft {
+            targets,
+            snippet_key: None,
+        });
+        if self.snippets.is_empty() {
+            self.mount_broadcast_textarea(None);
+            return;
+        }
+        let mut rows = Vec::with_capacity(self.snippets.len());
+        let mut keys = Vec::with_capacity(self.snippets.len());
+        for (k, v) in self.snippets.all() {
+            rows.push(PickerRow::new(k, v));
+            keys.push(k.to_string());
+        }
+        self.snippet_choices = keys;
+        let picker = SnippetPicker::new(rows, String::new())
+            .with_recent(self.recent_snippets.clone())
+            .with_title(self.broadcast_header())
+            .with_free_text_option();
+        self.mount_modal(Id::BroadcastSnippet, picker);
+    }
+
+    /// Mount the broadcast compose step: a Textarea whose header names
+    /// every target ("you selected: …") and whose buffer starts as the
+    /// picked snippet's body (custom text appends after it) — or empty
+    /// for a free-text-only send. Submit fans out one delivery per
+    /// target (`dispatch_broadcast`).
+    pub(crate) fn mount_broadcast_textarea(&mut self, snippet_body: Option<String>) {
+        use crate::realm::components::textarea::Textarea;
+        let Some(draft) = &self.pending_broadcast else {
+            return;
+        };
+        let n = draft.targets.len();
+        let title = format!(
+            "Broadcast to {n} workspace{}",
+            if n == 1 { "" } else { "s" }
+        );
+        let mut modal = Textarea::new(title).with_header(self.broadcast_header());
+        if let Some(body) = snippet_body {
+            // Trailing blank line so appended custom text starts on its
+            // own line; trimmed back off at send time if unused.
+            modal = modal.with_body(format!("{}\n\n", body.trim_end()));
+        }
+        self.mount_modal(Id::BroadcastText, modal);
+    }
+
+    /// "Broadcast to N: a, b, c" — the target recap shown on both
+    /// broadcast modals so what's about to be hit is always visible.
+    fn broadcast_header(&self) -> String {
+        let Some(draft) = &self.pending_broadcast else {
+            return String::new();
+        };
+        let names: Vec<String> = draft
+            .targets
+            .iter()
+            .map(|k| {
+                self.sidebar
+                    .workspace_by_key(k)
+                    .map(|w| w.name.clone())
+                    .unwrap_or_else(|| k.to_string())
+            })
+            .collect();
+        format!("Broadcast to {}: {}", names.len(), names.join(", "))
     }
 
     /// Record a snippet key as just-used: move it to the front of the

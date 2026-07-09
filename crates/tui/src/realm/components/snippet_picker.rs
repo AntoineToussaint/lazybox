@@ -179,6 +179,13 @@ pub struct SnippetPicker {
     /// Topmost visible list line (headers + rows), kept in step with
     /// the cursor in `view`.
     list_scroll: usize,
+    /// Modal-border title override. `None` renders the default
+    /// " Snippets "; the broadcast flow names its targets here.
+    title: Option<String>,
+    /// Offer a `Ctrl-F` "no snippet — free text only" escape that
+    /// resolves as an empty pick (`Msg::ChoicePicked(vec![])`). Set by
+    /// the broadcast flow, whose compose step follows either way.
+    offer_free_text: bool,
 }
 
 impl SnippetPicker {
@@ -195,9 +202,24 @@ impl SnippetPicker {
             recent_rows: Vec::new(),
             recent_count: 0,
             list_scroll: 0,
+            title: None,
+            offer_free_text: false,
         };
         picker.refilter();
         picker
+    }
+
+    /// Override the modal-border title (default " Snippets ").
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Offer the `Ctrl-F` "free text only" escape — Enter-equivalent
+    /// that resolves as an empty pick instead of a snippet row.
+    pub fn with_free_text_option(mut self) -> Self {
+        self.offer_free_text = true;
+        self
     }
 
     /// Seed the most-recently-used group from a caller's MRU key list
@@ -373,6 +395,9 @@ impl SnippetPicker {
                 let row_idx = *self.visible_indices.get(c)?;
                 Some(Msg::ChoicePicked(vec![row_idx]))
             }
+            // "No snippet — free text only": an empty pick the
+            // broadcast handler reads as "skip straight to compose".
+            Key::Char('f') if ctrl && self.offer_free_text => Some(Msg::ChoicePicked(Vec::new())),
             Key::Backspace => {
                 self.filter.pop();
                 self.refilter();
@@ -542,10 +567,14 @@ impl Component for SnippetPicker {
         let modal = Rect::new(x, y, modal_w, modal_h);
 
         frame.render_widget(Clear, modal);
+        let title = match &self.title {
+            Some(t) => format!(" {t} "),
+            None => " Snippets ".to_string(),
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .title(Span::styled(" Snippets ", theme.modal_title()))
+            .title(Span::styled(title, theme.modal_title()))
             .border_style(theme.modal_border());
         let inner = block.inner(modal);
         frame.render_widget(block, modal);
@@ -644,17 +673,25 @@ impl Component for SnippetPicker {
         }
 
         // Help line.
+        let mut help = vec![
+            Span::styled("↑↓", Style::default().fg(theme.accent).bold()),
+            Span::raw(" navigate  "),
+            Span::styled("Enter", Style::default().fg(theme.success).bold()),
+            Span::raw(" send  "),
+            Span::styled("Type", Style::default().fg(theme.accent).bold()),
+            Span::raw(" filter  "),
+        ];
+        if self.offer_free_text {
+            help.push(Span::styled(
+                "Ctrl-F",
+                Style::default().fg(theme.accent).bold(),
+            ));
+            help.push(Span::raw(" free text  "));
+        }
+        help.push(Span::styled("Esc", Style::default().fg(theme.error).bold()));
+        help.push(Span::raw(" cancel"));
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("↑↓", Style::default().fg(theme.accent).bold()),
-                Span::raw(" navigate  "),
-                Span::styled("Enter", Style::default().fg(theme.success).bold()),
-                Span::raw(" send  "),
-                Span::styled("Type", Style::default().fg(theme.accent).bold()),
-                Span::raw(" filter  "),
-                Span::styled("Esc", Style::default().fg(theme.error).bold()),
-                Span::raw(" cancel"),
-            ])),
+            Paragraph::new(Line::from(help)),
             Rect {
                 x: inner.x,
                 y: inner.y + inner.height - 1,
@@ -791,6 +828,41 @@ mod tests {
             Some(Msg::ChoicePicked(v)) => assert_eq!(picker.rows[v[0]].key, "rev"),
             other => panic!("expected `]]rev` to auto-submit, got {other:?}"),
         }
+    }
+
+    /// `Ctrl-F` with the free-text option on resolves as an EMPTY pick
+    /// — the broadcast flow's "no snippet" escape. Without the option
+    /// (the plain `]]s` picker) the same chord does nothing.
+    #[test]
+    fn ctrl_f_free_text_resolves_as_empty_pick_only_when_offered() {
+        let ctrl_f = KeyEvent::new(Key::Char('f'), KeyModifiers::CONTROL);
+        let mut plain = SnippetPicker::new(make_rows(), String::new());
+        assert_eq!(plain.on_key(&ctrl_f), None, "not offered — inert");
+
+        let mut offered = SnippetPicker::new(make_rows(), String::new()).with_free_text_option();
+        assert_eq!(
+            offered.on_key(&ctrl_f),
+            Some(Msg::ChoicePicked(Vec::new())),
+            "offered — resolves as an empty pick",
+        );
+        // The help line advertises the escape.
+        let screen = render(&mut offered, 92, 26);
+        assert!(screen.contains("Ctrl-F"), "help line names it:\n{screen}");
+        assert!(screen.contains("free text"), "help line names it");
+    }
+
+    /// The broadcast picker's title override lands on the modal border
+    /// so the target list is visible while picking.
+    #[test]
+    fn with_title_overrides_modal_border_title() {
+        let mut picker =
+            SnippetPicker::new(make_rows(), String::new()).with_title("Broadcast to 2: ws-a, ws-b");
+        let screen = render(&mut picker, 92, 26);
+        assert!(
+            screen.contains("Broadcast to 2: ws-a, ws-b"),
+            "custom title rendered:\n{screen}"
+        );
+        assert!(!screen.contains(" Snippets "), "default title replaced");
     }
 
     #[test]

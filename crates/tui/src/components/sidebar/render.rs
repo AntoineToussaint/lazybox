@@ -676,6 +676,7 @@ impl Sidebar {
                 now,
                 focused,
                 is_cursor: i == self.cursor,
+                is_selected: self.broadcast_selected.contains(key),
                 max_pr_num_width,
                 asking: workspace.is_some_and(|w| {
                     crate::agent_attention::workspace_is_asking(w, &self.agents_asking)

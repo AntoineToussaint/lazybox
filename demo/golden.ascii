@@ -15,6 +15,7 @@
   w x             work in codex     w u             work in cursor     b c             claude on main
   b x             codex on main     b u             cursor on main     f               filter
   o               sort              Shift+S         mailbox            /               search
-  Enter           toggle section    →/←             expand/collapse    g               top
-  Shift+G         bottom            d               description        Space           select row
-  z               undo mark-read    Shift+PgUp/Dn   scroll             ]]              exit to sidebar
+  v               select            Shift+B         broadcast          Enter           toggle section
+  →/←             expand/collapse   g               top                Shift+G         bottom
+  d               description       Space           select row         z               undo mark-read
+  Shift+PgUp/Dn   scroll            ]]              exit to sidebar    ]]<key>         snippets

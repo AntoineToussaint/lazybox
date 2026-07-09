@@ -223,6 +223,34 @@ impl Sidebar {
         self.inner.selected_workspace()
     }
 
+    /// See `Sidebar::toggle_broadcast_select`.
+    pub fn toggle_broadcast_select(&mut self) -> Option<bool> {
+        self.inner.toggle_broadcast_select()
+    }
+
+    /// See `Sidebar::selected_broadcast_keys`.
+    pub fn selected_broadcast_keys(&self) -> Vec<lazybox_core::SessionKey> {
+        self.inner.selected_broadcast_keys()
+    }
+
+    /// See `Sidebar::broadcast_selected_count`.
+    pub fn broadcast_selected_count(&self) -> usize {
+        self.inner.broadcast_selected_count()
+    }
+
+    /// See `Sidebar::clear_broadcast_selection`.
+    pub fn clear_broadcast_selection(&mut self) -> bool {
+        self.inner.clear_broadcast_selection()
+    }
+
+    /// See `Sidebar::broadcast_terminal`.
+    pub fn broadcast_terminal(
+        &self,
+        key: &lazybox_core::SessionKey,
+    ) -> Option<(lazybox_ipc::TerminalId, bool)> {
+        self.inner.broadcast_terminal(key)
+    }
+
     /// Look up a workspace by key (independent of cursor).
     pub fn workspace_by_key(
         &self,

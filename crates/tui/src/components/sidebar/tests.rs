@@ -1533,6 +1533,178 @@ mod search_tests {
 }
 
 #[cfg(test)]
+mod broadcast_select_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use lazybox_core::Workspace;
+
+    fn issue_ws(key: &str, title: &str) -> Workspace {
+        let mut t = base_task();
+        t.id.key = key.into();
+        t.title = title.into();
+        t.url = format!("https://github.com/o/r/issues/{key}");
+        let mut w = Workspace::from_task(t, chrono::Utc::now());
+        w.name = title.into();
+        w
+    }
+
+    fn sidebar_with_issues(items: &[(&str, &str)]) -> Sidebar {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        for (key, title) in items {
+            let w = issue_ws(key, title);
+            sb.workspaces.insert(SessionKey::from(&w.key), w);
+        }
+        sb.recompute_visible();
+        sb
+    }
+
+    /// `v` marks the cursor row and the mark survives navigating away
+    /// — the selection is keyed by workspace, not row index.
+    #[test]
+    fn toggle_marks_row_and_survives_navigation() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha"), ("2", "Beta")]);
+        let first = sb.selected_session_key().expect("cursor on a row").clone();
+        assert_eq!(sb.toggle_broadcast_select(), Some(true));
+        let mut cmds = Vec::new();
+        sb.handle_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut cmds,
+        );
+        assert_ne!(sb.selected_session_key(), Some(&first), "cursor moved");
+        assert!(sb.is_broadcast_selected(&first), "mark survives j/k");
+        // Toggling again from the OTHER row selects that one too.
+        assert_eq!(sb.toggle_broadcast_select(), Some(true));
+        assert_eq!(sb.broadcast_selected_count(), 2);
+        // Re-toggle deselects.
+        assert_eq!(sb.toggle_broadcast_select(), Some(false));
+        assert_eq!(sb.broadcast_selected_count(), 1);
+    }
+
+    /// The broadcast target list comes out in visible (sidebar) order
+    /// regardless of the order rows were marked in.
+    #[test]
+    fn selected_keys_follow_visible_order() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha"), ("2", "Beta"), ("3", "Gamma")]);
+        let visible: Vec<SessionKey> = sb
+            .visible_rows()
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        // Mark last visible row first, then the first one.
+        assert!(sb.focus_workspace_key(&visible[2]));
+        sb.toggle_broadcast_select();
+        assert!(sb.focus_workspace_key(&visible[0]));
+        sb.toggle_broadcast_select();
+        assert_eq!(
+            sb.selected_broadcast_keys(),
+            vec![visible[0].clone(), visible[2].clone()],
+            "targets in sidebar order, not selection order",
+        );
+    }
+
+    /// Esc clears the marks (consumed); with nothing selected it
+    /// bubbles so outer layers keep their Esc semantics.
+    #[test]
+    fn esc_clears_selection_then_passes_through() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.toggle_broadcast_select();
+        assert_eq!(sb.broadcast_selected_count(), 1);
+        let mut cmds = Vec::new();
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(sb.handle_key(esc, &mut cmds), PaneOutcome::Consumed);
+        assert_eq!(sb.broadcast_selected_count(), 0);
+        assert_eq!(
+            sb.handle_key(esc, &mut cmds),
+            PaneOutcome::Pass,
+            "no selection — Esc bubbles",
+        );
+    }
+
+    /// A removed workspace drops out of the selection so a later
+    /// broadcast can't target a ghost.
+    #[test]
+    fn workspace_removed_prunes_selection() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha"), ("2", "Beta")]);
+        let key = sb.selected_session_key().expect("cursor on a row").clone();
+        sb.toggle_broadcast_select();
+        assert!(sb.is_broadcast_selected(&key));
+        sb.on_event(&Event::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(
+            key.as_str(),
+        )));
+        assert!(!sb.is_broadcast_selected(&key));
+        assert_eq!(sb.broadcast_selected_count(), 0);
+    }
+
+    /// Delivery routing: agents beat shells, shells beat nothing, and
+    /// agent ties break on the lowest terminal id (deterministic).
+    #[test]
+    fn broadcast_terminal_prefers_agent_then_shell() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        let key = sb.selected_session_key().expect("cursor on a row").clone();
+        assert_eq!(sb.broadcast_terminal(&key), None, "no sessions yet");
+        let spawn = |sb: &mut Sidebar, id: u64, kind: TerminalKind| {
+            sb.on_event(&Event::TerminalSpawned {
+                terminal_id: TerminalId(id),
+                session_key: key.clone(),
+                kind,
+                no_permission: false,
+                on_main: false,
+            });
+        };
+        spawn(&mut sb, 3, TerminalKind::Shell);
+        assert_eq!(
+            sb.broadcast_terminal(&key),
+            Some((TerminalId(3), false)),
+            "shell-only workspace delivers to the shell",
+        );
+        spawn(&mut sb, 7, TerminalKind::Agent("claude".into()));
+        spawn(&mut sb, 5, TerminalKind::Agent("codex".into()));
+        assert_eq!(
+            sb.broadcast_terminal(&key),
+            Some((TerminalId(5), true)),
+            "agent wins over the shell; lowest id breaks the tie",
+        );
+    }
+
+    /// Selected rows render the `✓` mark in the selection gutter.
+    #[test]
+    fn selected_row_renders_check_mark() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut sb = sidebar_with_issues(&[("1", "Alpha"), ("2", "Beta")]);
+        // Mark the cursor row, then move off it — the ✓ renders on
+        // non-cursor rows (the cursor row keeps its caret).
+        sb.toggle_broadcast_select();
+        let mut cmds = Vec::new();
+        sb.handle_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut cmds,
+        );
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| sb.render(f.area(), f, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let mut screen = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                screen.push_str(buffer[(x, y)].symbol());
+            }
+            screen.push('\n');
+        }
+        assert!(
+            screen.contains('✓'),
+            "selected row must show the ✓ mark:\n{screen}",
+        );
+    }
+}
+
+#[cfg(test)]
 mod working_spinner_tests {
     use super::super::*;
     use lazybox_core::WorkspaceKey;

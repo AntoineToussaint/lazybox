@@ -1,20 +1,20 @@
-  Tab             cycle panes       Shift+R         refresh            ,               settings
-  t               theme             ]               snippets           ?               help
-  Shift+T         tour              Shift+D         sync status        `               jump to workspace
-  !               next asking       Shift+F         next failing       .               focus mode
-  Shift+W         start agent       Shift+P         activity pane      Shift+Arrows    resize splitters
-  q q             quit              Enter           open               w               work on this
-  s               shell             b s             shell on main      e               editor
-  m               mark read         z               snooze             Shift+Z         long snooze
-  Shift+N         new workspace     n               new workspace      g m             merge PR
-  g g             auto-merge        g v | Shift-V   reviewers          g a | Shift-G   assignees
-  g l | Shift-L   labels            g o | Shift-O   open in browser    r               reply
-  Shift+A         adopt sessions    Shift+J         join into PR       Shift+X         archive
-  Shift+C         close issue       c               spawn claude       x               spawn codex
-  u               spawn cursor      w c             work in claude     w x             work in codex
-  w u             work in cursor    b c             claude on main     b x             codex on main
-  b u             cursor on main    f               filter             o               sort
-  Shift+S         mailbox           /               search             Enter           toggle section
-  →/←             expand/collapse   g               top                Shift+G         bottom
-  d               description       Space           select row         z               undo mark-read
-  Shift+PgUp/Dn   scroll            ]]              exit to sidebar    ]]<key>         snippets
+  Tab             cycle panes       Shift+R         refresh            Ctrl+L          redraw
+  ,               settings          t               theme              ]               snippets
+  ?               help              Shift+T         tour               Shift+D         sync status
+  `               jump to workspace !               next asking        Shift+F         next failing
+  .               focus mode        Shift+W         start agent        Shift+P         activity pane
+  Shift+Arrows    resize splitters  q q             quit               Enter           open
+  w               work on this      s               shell              b s             shell on main
+  e               editor            m               mark read          z               snooze
+  Shift+Z         long snooze       Shift+N         new workspace      n               new workspace
+  g m             merge PR          g g             auto-merge         g v | Shift-V   reviewers
+  g a | Shift-G   assignees         g l | Shift-L   labels             g o | Shift-O   open in browser
+  r               reply             Shift+A         adopt sessions     Shift+J         join into PR
+  Shift+X         archive           Shift+C         close issue        c               spawn claude
+  x               spawn codex       u               spawn cursor       w c             work in claude
+  w x             work in codex     w u             work in cursor     b c             claude on main
+  b x             codex on main     b u             cursor on main     f               filter
+  o               sort              Shift+S         mailbox            /               search
+  Enter           toggle section    →/←             expand/collapse    g               top
+  Shift+G         bottom            d               description        Space           select row
+  z               undo mark-read    Shift+PgUp/Dn   scroll             ]]              exit to sidebar

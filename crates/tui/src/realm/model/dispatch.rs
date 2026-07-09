@@ -159,6 +159,29 @@ impl<T: TerminalAdapter> Model<T> {
                             Vec::new()
                         }
                     }
+                    // On-main spawns fire against the STASHED workspace,
+                    // not the live selection — a daemon event could have
+                    // drifted the sidebar cursor while the confirm was up,
+                    // and `dispatch_action_unchecked` would otherwise
+                    // launch a shared-branch session on whatever the
+                    // cursor landed on. `on_main` always targets the
+                    // shared checkout, so `session_id` is None.
+                    Action::SpawnAgentOnMain(agent_id) => vec![IpcCommand::Spawn {
+                        session_key: session_key.clone(),
+                        session_id: None,
+                        kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
+                        cwd: None,
+                        initial_prompt: None,
+                        on_main: true,
+                    }],
+                    Action::SpawnShellOnMain => vec![IpcCommand::Spawn {
+                        session_key: session_key.clone(),
+                        session_id: None,
+                        kind: lazybox_ipc::TerminalKind::Shell,
+                        cwd: None,
+                        initial_prompt: None,
+                        on_main: true,
+                    }],
                     // A future destructive action that hasn't grown a
                     // targeted arm yet falls back to the legacy
                     // selection-based dispatch.
@@ -254,6 +277,7 @@ impl<T: TerminalAdapter> Model<T> {
                         kind: lazybox_ipc::TerminalKind::Shell,
                         cwd: None,
                         initial_prompt: None,
+                        on_main: false,
                     });
                 }
             }
@@ -265,6 +289,37 @@ impl<T: TerminalAdapter> Model<T> {
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
                         cwd: None,
                         initial_prompt: None,
+                        on_main: false,
+                    });
+                }
+            }
+            // Main-checkout variants (`b c` / `b s`, confirm-guarded):
+            // same spawn, but `on_main` tells the daemon to land in the
+            // repo's shared main checkout instead of an isolated
+            // worktree. `session_id` is deliberately dropped — "on main"
+            // always targets the shared checkout, not the selected
+            // session sub-row.
+            Action::SpawnAgentOnMain(agent_id) => {
+                if let Some(sk) = session_key {
+                    cmds.push(IpcCommand::Spawn {
+                        session_key: sk,
+                        session_id: None,
+                        kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
+                        cwd: None,
+                        initial_prompt: None,
+                        on_main: true,
+                    });
+                }
+            }
+            Action::SpawnShellOnMain => {
+                if let Some(sk) = session_key {
+                    cmds.push(IpcCommand::Spawn {
+                        session_key: sk,
+                        session_id: None,
+                        kind: lazybox_ipc::TerminalKind::Shell,
+                        cwd: None,
+                        initial_prompt: None,
+                        on_main: true,
                     });
                 }
             }
@@ -702,6 +757,7 @@ impl<T: TerminalAdapter> Model<T> {
                 kind: lazybox_ipc::TerminalKind::Agent(agent_id),
                 cwd: None,
                 initial_prompt: prompt,
+                on_main: false,
             });
             self.right.clear_activity_selection();
         } else {

@@ -62,6 +62,15 @@ pub enum Action {
     SpawnAgent(String),
     /// Spawn a shell in the focused workspace's worktree.
     SpawnShell,
+    /// Spawn a specific agent on the repo's shared **main checkout**
+    /// (default branch) rather than an isolated worktree — the `b c` /
+    /// `b x` / `b u` leader chords. Riskier (edits land on the shared
+    /// branch), so it's confirm-guarded. Id is dynamic like
+    /// [`Action::SpawnAgent`].
+    SpawnAgentOnMain(String),
+    /// Spawn a shell on the repo's shared main checkout (`b s`).
+    /// Confirm-guarded for the same reason as [`Action::SpawnAgentOnMain`].
+    SpawnShellOnMain,
     /// Open the workspace's worktree in the user's editor.
     OpenEditor,
     /// Create a brand-new pre-PR workspace (asks for a name).
@@ -258,6 +267,8 @@ pub enum ActionKind {
     WorkWith,
     SpawnAgent,
     SpawnShell,
+    SpawnAgentOnMain,
+    SpawnShellOnMain,
     OpenEditor,
     NewWorkspace,
     NewProject,
@@ -357,6 +368,8 @@ impl Action {
             Action::WorkWith(_) => ActionKind::WorkWith,
             Action::SpawnAgent(_) => ActionKind::SpawnAgent,
             Action::SpawnShell => ActionKind::SpawnShell,
+            Action::SpawnAgentOnMain(_) => ActionKind::SpawnAgentOnMain,
+            Action::SpawnShellOnMain => ActionKind::SpawnShellOnMain,
             Action::OpenEditor => ActionKind::OpenEditor,
             Action::NewWorkspace => ActionKind::NewWorkspace,
             Action::NewProject => ActionKind::NewProject,
@@ -578,6 +591,23 @@ impl ActionDef {
                 default_keys: "s",
                 label: "shell",
                 describe: "Open a shell in the workspace's worktree.",
+                section: Section::Workspace,
+            },
+            ActionKind::SpawnAgentOnMain => &Self {
+                kind: ActionKind::SpawnAgentOnMain,
+                // Per-agent binding generated in `catalog()` (`b c` /
+                // `b x` / `b u`); this placeholder gives the help panel
+                // a row with the literal multi-agent form.
+                default_keys: "b c / b x / b u",
+                label: "agent on main",
+                describe: "Open an agent terminal on the repo's shared main checkout (default branch) instead of an isolated worktree — confirmed first, since edits land on the shared branch.",
+                section: Section::Workspace,
+            },
+            ActionKind::SpawnShellOnMain => &Self {
+                kind: ActionKind::SpawnShellOnMain,
+                default_keys: "b s",
+                label: "shell on main",
+                describe: "Open a shell on the repo's shared main checkout (default branch) instead of an isolated worktree — confirmed first, since edits land on the shared branch.",
                 section: Section::Workspace,
             },
             ActionKind::OpenEditor => &Self {
@@ -836,6 +866,8 @@ impl ActionDef {
             ActionKind::WorkWith,
             ActionKind::SpawnAgent,
             ActionKind::SpawnShell,
+            ActionKind::SpawnAgentOnMain,
+            ActionKind::SpawnShellOnMain,
             ActionKind::OpenEditor,
             ActionKind::MarkAllRead,
             ActionKind::ToggleSnooze,
@@ -1211,6 +1243,11 @@ impl ActionDef {
                 "Long-snooze this workspace (~1 year)? It drops from \
                  the inbox until then — effectively hidden.",
             ),
+            ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Guard::Confirm(
+                "Start this session on the shared main checkout instead of \
+                 an isolated worktree? Edits and commits land on the shared \
+                 branch directly, not a throwaway tree.",
+            ),
             _ => Guard::None,
         }
     }
@@ -1297,6 +1334,8 @@ impl ActionKind {
             ActionKind::WorkWith => "work_with",
             ActionKind::SpawnAgent => "spawn_agent",
             ActionKind::SpawnShell => "spawn_shell",
+            ActionKind::SpawnAgentOnMain => "spawn_agent_on_main",
+            ActionKind::SpawnShellOnMain => "spawn_shell_on_main",
             ActionKind::OpenEditor => "open_editor",
             ActionKind::NewWorkspace => "new_workspace",
             ActionKind::NewProject => "new_project",
@@ -1459,9 +1498,14 @@ impl ActionDef {
     ) -> Vec<CatalogEntry> {
         let mut out: Vec<CatalogEntry> = Vec::new();
         for def in ActionDef::all() {
-            // The static SpawnAgent / WorkWith rows are placeholders for
-            // the generated per-agent rows below — drop them.
-            if matches!(def.kind, ActionKind::SpawnAgent | ActionKind::WorkWith) {
+            // The static SpawnAgent / WorkWith / SpawnAgentOnMain rows
+            // are placeholders for the generated per-agent rows below —
+            // drop them. (SpawnShellOnMain is a real static row and
+            // stays.)
+            if matches!(
+                def.kind,
+                ActionKind::SpawnAgent | ActionKind::WorkWith | ActionKind::SpawnAgentOnMain
+            ) {
                 continue;
             }
             out.push(CatalogEntry {
@@ -1554,6 +1598,42 @@ impl ActionDef {
                     chords: vec![seq],
                     keys_display,
                     config_key: format!("work_with.{id}"),
+                });
+            }
+        }
+        // Scoped "spawn on main" agent rows: `<main-leader> <agent-key>`
+        // (e.g. `b c` / `b x` / `b u`). The leader is the first key of
+        // whatever `spawn_shell_on_main` resolves to (its default `b s`,
+        // honoring a remap) so the whole main-checkout family moves
+        // together, and the second key is the agent's own default
+        // shortcut. Generated only for agents with a default key; the
+        // shell-on-main row (`b s`) is the static counterpart.
+        let on_main = ActionDef::for_kind(ActionKind::SpawnAgentOnMain);
+        let main_leader: Option<KeyStroke> = ActionDef::for_kind(ActionKind::SpawnShellOnMain)
+            .effective_chords(overrides)
+            .into_iter()
+            .find_map(|c| match c {
+                Chord::Seq(keys) => keys.first().copied(),
+                Chord::Key(k) => Some(k),
+            });
+        if let Some(leader) = main_leader {
+            for id in agents {
+                let Some(key) = agent_default_key(id) else {
+                    continue;
+                };
+                let second = KeyStroke::new(false, false, false, ChordCode::Char(key));
+                let seq = Chord::Seq(vec![leader, second]);
+                let keys_display =
+                    std::borrow::Cow::Owned(format!("{} {}", leader.display(), second.display()));
+                out.push(CatalogEntry {
+                    kind: ActionKind::SpawnAgentOnMain,
+                    param: Some(Param::Agent(id.clone())),
+                    section: on_main.section,
+                    label: std::borrow::Cow::Owned(format!("{id} on main")),
+                    describe: on_main.describe,
+                    chords: vec![seq],
+                    keys_display,
+                    config_key: format!("spawn_agent_on_main.{id}"),
                 });
             }
         }
@@ -1680,6 +1760,13 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
             intent::resolve_reply(workspace),
             intent::Intent::MountReply { .. },
         ),
+        // "On main" only makes sense when the workspace resolves to a
+        // repo/project scope — that's what gives a shared main checkout
+        // to sit on. A repo-less/standalone workspace has no "main", so
+        // the `b …` chords don't surface there.
+        ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => workspace
+            .map(|w| w.worktree_scope().is_some())
+            .unwrap_or(false),
         // Workspace actions without a resolver yet — gate purely on
         // the workspace's existence. These all need a target.
         ActionKind::OpenWorkspace
@@ -2055,6 +2142,7 @@ mod tests {
         let presentation = [
             "c / x / u",
             "w c / w x / w u",
+            "b c / b x / b u",
             "g/G",
             "↑/↓",
             "→/←",
@@ -2373,6 +2461,81 @@ mod tests {
                 .iter()
                 .any(|e| e.param == Some(Param::Agent("aider".into()))),
             "an agent with no default key gets no scoped work chord",
+        );
+    }
+
+    #[test]
+    fn catalog_generates_on_main_chords_per_agent_plus_shell() {
+        // Issue #271: `b c` / `b x` / `b u` spawn an agent on the shared
+        // main checkout; `b s` a shell. All share the `b` leader and are
+        // confirm-guarded.
+        use std::collections::BTreeMap;
+        let agents: Vec<String> = ["claude", "codex", "cursor", "aider"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let catalog = ActionDef::catalog(&agents, &BTreeMap::new());
+
+        let agent_rows: Vec<&CatalogEntry> = catalog
+            .iter()
+            .filter(|e| e.kind == ActionKind::SpawnAgentOnMain)
+            .collect();
+        // One row per agent WITH a default key — `aider` has none.
+        assert_eq!(agent_rows.len(), 3, "one on-main row per known agent");
+
+        let b = KeyStroke::new(false, false, false, ChordCode::Char('b'));
+        let codex = agent_rows
+            .iter()
+            .find(|e| e.param == Some(Param::Agent("codex".into())))
+            .expect("codex on-main row");
+        assert_eq!(codex.config_key, "spawn_agent_on_main.codex");
+        assert_eq!(
+            codex.chords,
+            vec![Chord::Seq(vec![
+                b,
+                KeyStroke::new(false, false, false, ChordCode::Char('x')),
+            ])],
+            "codex on-main chord is `b x`",
+        );
+
+        // The shell-on-main row is a plain static `b s`.
+        let shell = catalog
+            .iter()
+            .find(|e| e.kind == ActionKind::SpawnShellOnMain)
+            .expect("shell-on-main row");
+        assert_eq!(
+            shell.chords,
+            vec![Chord::Seq(vec![
+                b,
+                KeyStroke::new(false, false, false, ChordCode::Char('s')),
+            ])],
+            "shell-on-main chord is `b s`",
+        );
+
+        // Both are confirm-guarded — main is riskier than an isolated
+        // worktree.
+        assert!(ActionDef::for_kind(ActionKind::SpawnAgentOnMain).is_destructive());
+        assert!(ActionDef::for_kind(ActionKind::SpawnShellOnMain).is_destructive());
+    }
+
+    #[test]
+    fn on_main_leader_follows_a_shell_on_main_remap() {
+        // The generated agent-on-main chords take their leader from the
+        // shell-on-main binding, so remapping it moves `b c` → `n c`.
+        use std::collections::BTreeMap;
+        let mut overrides = BTreeMap::new();
+        overrides.insert("spawn_shell_on_main".to_string(), "n s".to_string());
+        let catalog = ActionDef::catalog(&["claude".to_string()], &overrides);
+        let claude = catalog
+            .iter()
+            .find(|e| e.kind == ActionKind::SpawnAgentOnMain)
+            .expect("claude on-main row");
+        assert_eq!(
+            claude.chords,
+            vec![Chord::Seq(vec![
+                KeyStroke::new(false, false, false, ChordCode::Char('n')),
+                KeyStroke::new(false, false, false, ChordCode::Char('c')),
+            ])],
         );
     }
 

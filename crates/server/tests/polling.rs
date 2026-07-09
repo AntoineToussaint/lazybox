@@ -3965,6 +3965,7 @@ mod live_collapse_e2e {
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: Some(tmp.path().to_string_lossy().into_owned()),
                 initial_prompt: None,
+                on_main: false,
             })
             .unwrap();
         let terminal_id = wait_spawned(&mut client).await;

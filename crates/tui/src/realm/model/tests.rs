@@ -942,6 +942,7 @@ snippets:
             session_key,
             kind,
             no_permission: false,
+            on_main: false,
         });
         assert_eq!(
             m.terminals.active_terminal_id(),
@@ -2750,6 +2751,56 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// #271: the on-main session actions emit a `Spawn { on_main: true }`
+    /// targeting the shared main checkout (no session sub-row), and they
+    /// are confirm-guarded so `dispatch_action` mounts a confirm rather
+    /// than firing directly.
+    #[test]
+    fn on_main_actions_spawn_with_on_main_flag() {
+        use lazybox_ipc::{Command, TerminalKind};
+        use lazybox_tui_core::action::{Action, ActionDef};
+
+        let mut m = build_model();
+        let ws = workspace("owner/repo#1", true, Duration::minutes(1));
+        let sk: SessionKey = (&ws.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        // The unchecked dispatch (what the confirm's Yes runs) builds the
+        // real command with `on_main: true`.
+        let cmds = m.dispatch_action_unchecked(&Action::SpawnAgentOnMain("claude".into()));
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [Command::Spawn { kind: TerminalKind::Agent(id), on_main: true, session_id: None, .. }]
+                    if id == "claude"
+            ),
+            "agent-on-main emits Spawn(Agent, on_main) with no session sub-row: {cmds:?}",
+        );
+
+        let cmds = m.dispatch_action_unchecked(&Action::SpawnShellOnMain);
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [Command::Spawn {
+                    kind: TerminalKind::Shell,
+                    on_main: true,
+                    ..
+                }]
+            ),
+            "shell-on-main emits Spawn(Shell, on_main): {cmds:?}",
+        );
+
+        // Both are confirm-guarded, so the guarded entry point mounts a
+        // confirm and emits nothing directly.
+        assert!(ActionDef::for_action(&Action::SpawnShellOnMain).is_destructive());
+        let guarded = m.dispatch_action(&Action::SpawnShellOnMain);
+        assert!(
+            guarded.is_empty(),
+            "the guarded path defers to the confirm modal: {guarded:?}",
+        );
+    }
+
     /// Regression for #177: `w` provisions a worktree first (seconds) and
     /// the `TerminalSpawned` lands much later. If the user navigated away
     /// in the meantime, focus must still snap back to the workspace `w`
@@ -2797,6 +2848,7 @@ mod merge_focus_follow_tests {
             session_key: issue_sk,
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
+            on_main: false,
         });
 
         // Focus snapped back to the issue, new agent as the active tab.
@@ -2867,6 +2919,7 @@ mod merge_focus_follow_tests {
             session_key: sk.clone(),
             kind: TerminalKind::Agent("codex".into()),
             no_permission: false,
+            on_main: false,
         });
         assert!(m.sidebar.focus_workspace_key(&sk));
 
@@ -2911,6 +2964,7 @@ mod merge_focus_follow_tests {
             session_key: sk.clone(),
             kind: TerminalKind::Agent("codex".into()),
             no_permission: false,
+            on_main: false,
         });
         // `TerminalSpawned` auto-focuses the terminal pane; return to the
         // sidebar (cursor on the PR) so the catalog resolves `w`.
@@ -2960,6 +3014,7 @@ mod merge_focus_follow_tests {
             session_key: sk.clone(),
             kind: TerminalKind::Agent("codex".into()),
             no_permission: false,
+            on_main: false,
         });
         m.focus = PaneFocus::Sidebar;
         m.set_focus_attr();
@@ -3278,6 +3333,7 @@ mod daemon_event_fastpath_tests {
             session_key: (&key).into(),
             kind: lazybox_ipc::TerminalKind::Shell,
             no_permission: false,
+            on_main: false,
         });
         m.redraw = false;
         m.handle_daemon_event(IpcEvent::TerminalOutput {
@@ -3337,6 +3393,7 @@ mod daemon_event_fastpath_tests {
             session_key: session_key.clone(),
             kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
             no_permission: false,
+            on_main: false,
         });
         m.handle_daemon_event(IpcEvent::AgentState {
             terminal_id: TerminalId(1),
@@ -3351,6 +3408,7 @@ mod daemon_event_fastpath_tests {
             session_key: session_key.clone(),
             kind: lazybox_ipc::TerminalKind::Agent("codex".into()),
             no_permission: false,
+            on_main: false,
         });
 
         m.redraw = false;
@@ -3402,6 +3460,7 @@ mod wheel_routing_tests {
             session_key: key,
             kind: TerminalKind::Shell,
             no_permission: false,
+            on_main: false,
         });
         m.focus = PaneFocus::Terminals;
 
@@ -4054,6 +4113,7 @@ mod collapse_into_pr_tests {
             session_key: issue_sk.clone(),
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
+            on_main: false,
         });
         assert!(
             m.terminals.active_terminal_id() == Some(TerminalId(7)),
@@ -4135,6 +4195,7 @@ mod collapse_into_pr_tests {
             session_key: issue_sk.clone(),
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
+            on_main: false,
         });
         m.handle_daemon_event(IpcEvent::AgentState {
             session_key: issue_sk.clone(),
@@ -4485,6 +4546,7 @@ mod workspace_focus_memory_tests {
             session_key: key.clone(),
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
+            on_main: false,
         });
     }
 
@@ -4746,6 +4808,7 @@ mod focus_mode_tests {
             session_key: key.clone(),
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
+            on_main: false,
         });
     }
 
@@ -4856,6 +4919,7 @@ mod focus_mode_tests {
             session_key: key.clone(),
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
+            on_main: false,
         });
         m.tick_terminal_leader();
 
@@ -5078,6 +5142,7 @@ mod terminal_section_dispatch_tests {
             session_key: key,
             kind: TerminalKind::Shell,
             no_permission: false,
+            on_main: false,
         });
         m.focus = PaneFocus::Terminals;
         m.set_focus_attr();
@@ -5201,6 +5266,7 @@ mod spawn_spinner_projection_tests {
             session_key: sk.clone(),
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
+            on_main: false,
         });
         // Light the spinner for that same target.
         m.status.note_spawning(
@@ -5233,6 +5299,7 @@ mod spawn_spinner_projection_tests {
             session_key: sk.clone(),
             kind: TerminalKind::Shell,
             no_permission: false,
+            on_main: false,
         });
         // Shell spawn whose baseline (0) is below the current count (1).
         m.status
@@ -5265,6 +5332,7 @@ mod spawn_spinner_projection_tests {
             session_key: SessionKey::new("github:o/r#2"),
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
+            on_main: false,
         });
         assert!(
             m.status.spawning.is_some(),
@@ -5277,6 +5345,7 @@ mod spawn_spinner_projection_tests {
             session_key: target,
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
+            on_main: false,
         });
         assert!(
             m.status.spawning.is_none(),
@@ -5323,6 +5392,7 @@ mod worktree_progress_recovery_tests {
             replay: Vec::new(),
             last_seq: 0,
             no_permission: false,
+            on_main: false,
             last_user_message: None,
         }
     }

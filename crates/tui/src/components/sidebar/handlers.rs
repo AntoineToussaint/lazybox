@@ -96,6 +96,7 @@ impl Sidebar {
                         kind: TerminalKind::Agent(agent_id),
                         cwd: None,
                         initial_prompt: prompt,
+                        on_main: false,
                     });
                 }
                 PaneOutcome::Consumed
@@ -118,6 +119,7 @@ impl Sidebar {
                             kind: TerminalKind::Shell,
                             cwd: None,
                             initial_prompt: None,
+                            on_main: false,
                         });
                     }
                     _ => {

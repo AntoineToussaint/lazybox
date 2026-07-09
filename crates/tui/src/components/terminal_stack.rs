@@ -563,6 +563,10 @@ struct TerminalSlot {
     /// running unattended). Drives the "no-perms" badge in the tab
     /// strip so it's obvious which sessions skip approval prompts.
     no_permission: bool,
+    /// Running on the repo's shared main checkout rather than an
+    /// isolated worktree. Drives the "main" badge in the tab strip so
+    /// it's obvious the session sits on the shared branch.
+    on_main: bool,
     /// Whether this terminal was drawn in the last frame. Set by
     /// `render_one_terminal`, reset for every slot at the top of
     /// `render`. Output for a displayed terminal is fed to the VT
@@ -1727,6 +1731,7 @@ impl TerminalStack {
         kind: TerminalKind,
         last_seq: u64,
         no_permission: bool,
+        on_main: bool,
         last_user_message: Option<String>,
     ) -> TerminalSlot {
         let vt = TerminalVt::new().expect("libghostty-vt init");
@@ -1742,6 +1747,7 @@ impl TerminalStack {
             composing: String::new(),
             last_user_message,
             no_permission,
+            on_main,
             displayed: false,
             pending_feed: Vec::new(),
             pending_truncated: false,
@@ -2043,6 +2049,7 @@ impl TerminalStack {
                         snap.kind.clone(),
                         snap.last_seq,
                         snap.no_permission,
+                        snap.on_main,
                         snap.last_user_message.clone(),
                     );
                     // Replay the daemon-side ring through the VT so
@@ -2059,9 +2066,16 @@ impl TerminalStack {
                 session_key,
                 kind,
                 no_permission,
+                on_main,
             } => {
-                let slot =
-                    Self::make_slot(session_key.clone(), kind.clone(), 0, *no_permission, None);
+                let slot = Self::make_slot(
+                    session_key.clone(),
+                    kind.clone(),
+                    0,
+                    *no_permission,
+                    *on_main,
+                    None,
+                );
                 self.terminals.insert(*terminal_id, slot);
                 // A fresh terminal arrived for the active session —
                 // expand so the user actually sees it. We bypass the
@@ -2261,7 +2275,7 @@ impl TerminalStack {
         // tab label occupies for click-hit-testing.
         let mut cursor: u16 = title_area.x + title_prefix.chars().count() as u16;
         for (i, id) in visible.iter().enumerate() {
-            let (icon, label, agent_state, no_permission) = self
+            let (icon, label, agent_state, no_permission, on_main) = self
                 .terminals
                 .get(id)
                 .map(|s| {
@@ -2278,9 +2292,16 @@ impl TerminalStack {
                         Self::tab_label(&s.kind),
                         Some(s.agent_state),
                         s.no_permission,
+                        s.on_main,
                     )
                 })
-                .unwrap_or((crate::components::icons::SHELL, "?".into(), None, false));
+                .unwrap_or((
+                    crate::components::icons::SHELL,
+                    "?".into(),
+                    None,
+                    false,
+                    false,
+                ));
             let is_active = i == self.active_tab_idx;
             let style = if is_active && focused {
                 Style::default()
@@ -2341,6 +2362,17 @@ impl TerminalStack {
                     Style::default().fg(theme.warn).add_modifier(Modifier::DIM),
                 ));
                 cursor = cursor.saturating_add(noperm_text.chars().count() as u16);
+            }
+            // On-main: this session runs on the repo's shared main
+            // checkout, not an isolated worktree — flag it so it's
+            // obvious edits here touch the shared branch directly.
+            if on_main {
+                let main_text = " ⎇ main";
+                title_spans.push(Span::styled(
+                    main_text,
+                    Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+                ));
+                cursor = cursor.saturating_add(main_text.chars().count() as u16);
             }
         }
         frame.render_widget(Paragraph::new(Line::from(title_spans)), title_area);
@@ -2540,6 +2572,9 @@ impl TerminalStack {
             kind: TerminalKind::Shell,
             cwd: None,
             initial_prompt: None,
+            // A tile-split shell lands in the workspace's default
+            // (isolated) worktree, not the shared main checkout.
+            on_main: false,
         });
     }
 
@@ -3605,7 +3640,7 @@ mod ctrl_w_tests {
     fn shell_stack() -> TerminalStack {
         let sk = SessionKey::new("session");
         let mut stack = TerminalStack::new(PaneId::new(0));
-        let slot = TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false, None);
+        let slot = TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false, false, None);
         stack.terminals.insert(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
         stack
@@ -3856,6 +3891,7 @@ mod extract_text_offset_tests {
             kind,
             0,
             false,
+            false,
             last_user_message.map(str::to_string),
         );
         let mut payload = String::new();
@@ -3955,8 +3991,14 @@ mod extract_text_offset_tests {
     #[test]
     fn recap_rows_refused_when_body_too_short() {
         let sk = SessionKey::new("session");
-        let mut slot =
-            TerminalStack::make_slot(sk, TerminalKind::Agent("claude".into()), 0, false, None);
+        let mut slot = TerminalStack::make_slot(
+            sk,
+            TerminalKind::Agent("claude".into()),
+            0,
+            false,
+            false,
+            None,
+        );
         slot.last_user_message = Some("hi".into());
         assert_eq!(TerminalStack::recap_rows(&slot, 2), 0);
         assert_eq!(TerminalStack::recap_rows(&slot, 3), 2);
@@ -4015,6 +4057,7 @@ mod resync_tests {
             session_key: sk.clone(),
             kind: TerminalKind::Shell,
             no_permission: false,
+            on_main: false,
         });
         stack.set_active_session(Some(sk.clone()));
         stack
@@ -4127,6 +4170,7 @@ mod hidden_feed_tests {
             session_key: sk.clone(),
             kind: TerminalKind::Shell,
             no_permission: false,
+            on_main: false,
         });
     }
 
@@ -4292,6 +4336,7 @@ mod footer_scroll_independence {
             TerminalKind::Agent("claude".into()),
             0,
             false,
+            false,
             None,
         );
         slot.vt.ensure_size(W - 3, H - 4);
@@ -4441,6 +4486,7 @@ mod agent_badge_tests {
             session_key: sk.clone(),
             kind: TerminalKind::Agent(agent.into()),
             no_permission: false,
+            on_main: false,
         });
     }
 
@@ -4546,6 +4592,7 @@ mod rebadge_tests {
             session_key: sk.clone(),
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
+            on_main: false,
         });
         stack.set_active_session(Some(sk.clone()));
         stack
@@ -4611,6 +4658,7 @@ mod set_layout_tests {
             session_key: sk.clone(),
             kind: TerminalKind::Shell,
             no_permission: false,
+            on_main: false,
         });
         stack.set_active_session(Some(sk.clone()));
         stack
@@ -4637,6 +4685,7 @@ mod set_layout_tests {
             session_key: sk,
             kind: TerminalKind::Shell,
             no_permission: false,
+            on_main: false,
         });
         assert!(stack.pending_split.is_none(), "spawn consumed the split");
         assert!(
@@ -4677,6 +4726,7 @@ mod spawn_focus_tests {
             session_key: sk.clone(),
             kind,
             no_permission: false,
+            on_main: false,
         });
     }
 
@@ -4772,6 +4822,7 @@ mod terminal_availability_tests {
             session_key: sk.clone(),
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
+            on_main: false,
         });
         stack.set_active_session(Some(sk));
         stack
@@ -4841,6 +4892,7 @@ mod spawn_projection_tests {
             session_key: sk.clone(),
             kind,
             no_permission: false,
+            on_main: false,
         });
     }
 

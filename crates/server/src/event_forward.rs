@@ -512,6 +512,7 @@ mod tests {
                 replay: b"REPLAY".to_vec(),
                 last_seq: 5,
                 no_permission: false,
+                on_main: false,
                 last_user_message: None,
             }],
             projects: Vec::new(),
@@ -564,6 +565,7 @@ mod tests {
                 session_key: sk.clone(),
                 kind: TerminalKind::Shell,
                 no_permission: false,
+                on_main: false,
             })
             .unwrap();
         for seq in 1..=10 {

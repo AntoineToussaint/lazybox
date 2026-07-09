@@ -912,6 +912,8 @@ async fn dispatch_action(
                 // permission prompts disabled (subject to the
                 // `agent.autonomous_skip_permissions` toggle).
                 true,
+                // Autonomous work runs on its own isolated worktree.
+                false,
             )
             .await;
         }
@@ -932,12 +934,19 @@ async fn dispatch_action(
             // trigger (red CI / conflict) persists across polls and a
             // fix can take longer than the cooldown, so without this
             // check a slow agent would silently exhaust the budget +
-            // spam the PR while it's actually still working. Uses the
-            // SAME singleton definition `handle_spawn` uses to collapse
-            // duplicate spawns, so the two stay consistent.
-            if let Some(existing) =
-                crate::spawn_handler::find_existing_singleton(config, &session_key, &term_kind)
-                    .await
+            // spam the PR while it's actually still working. `None` =
+            // "is ANY agent of this kind already working this PR, on its
+            // isolated worktree OR the shared main checkout?" — a
+            // user-launched `b c` on this PR must suppress the auto-fix
+            // spawn just as a plain `c` does, so we never stack a second
+            // agent on the same work.
+            if let Some(existing) = crate::spawn_handler::find_existing_singleton(
+                config,
+                &session_key,
+                &term_kind,
+                None,
+            )
+            .await
             {
                 tracing::info!(
                     source = source_name,
@@ -1036,6 +1045,8 @@ async fn dispatch_action(
                         // prompt lands in the trust chooser) and push a
                         // fix without a human to approve its edits.
                         true,
+                        // Auto-fix runs on its own isolated worktree.
+                        false,
                     )
                     .await;
                 }

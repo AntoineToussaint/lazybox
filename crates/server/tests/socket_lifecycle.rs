@@ -197,6 +197,7 @@ async fn hook_ingest_over_socket_reaches_shared_embedded_config() {
         kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
         cwd: None,
         initial_prompt: None,
+        on_main: false,
     })
     .expect("spawn");
     let spawned = tokio::time::timeout(Duration::from_secs(2), async {

@@ -34,6 +34,7 @@ fn spawned(id: u64, session: &str, kind: TerminalKind) -> Event {
         session_key: sk(session),
         kind,
         no_permission: false,
+        on_main: false,
     }
 }
 
@@ -175,6 +176,7 @@ fn snapshot_replaces_all_terminals() {
             replay: b"\x1b[0mhi\n".to_vec(),
             last_seq: 42,
             no_permission: false,
+            on_main: false,
             last_user_message: None,
         }],
         projects: vec![],
@@ -649,6 +651,7 @@ fn render_shows_no_perms_badge_for_autonomous_session() {
         session_key: sk("o/r#1"),
         kind: TerminalKind::Agent("claude".into()),
         no_permission: true,
+        on_main: false,
     });
     t.set_active_session(Some(sk("o/r#1")));
     let out = render_to_string(&mut t, 60, 10, true);
@@ -1033,6 +1036,7 @@ fn snapshot_restores_recap_for_agent_terminal() {
             replay: b"reconnected\n".to_vec(),
             last_seq: 3,
             no_permission: false,
+            on_main: false,
             last_user_message: Some("rebase onto main".into()),
         }],
         projects: vec![],

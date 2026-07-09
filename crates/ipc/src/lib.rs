@@ -41,7 +41,7 @@ pub const PROTOCOL_MAGIC: [u8; 4] = *b"LZBX";
 /// order, so adding, removing, or reordering a variant or field makes
 /// an old peer silently misread every subsequent frame. The handshake
 /// turns that garbage into a clear "restart the daemon" error.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// This binary's build identity: the workspace version plus the git
 /// short SHA captured at compile time (`build.rs`). Two binaries built
@@ -435,6 +435,14 @@ pub enum Command {
         /// shells don't define `Agent::inject_prompt`.
         #[serde(default)]
         initial_prompt: Option<String>,
+        /// Run this session on the repo's shared **main checkout**
+        /// (the default branch, in one worktree reused across the
+        /// repo) instead of provisioning an isolated per-task
+        /// worktree. Riskier — changes land directly on the shared
+        /// branch — so the client gates it behind a confirm. Ignored
+        /// when `cwd` is overridden.
+        #[serde(default)]
+        on_main: bool,
     },
     Write {
         terminal_id: TerminalId,
@@ -1044,6 +1052,11 @@ pub enum Event {
         /// shell terminals.
         #[serde(default)]
         no_permission: bool,
+        /// Running on the repo's shared main checkout rather than an
+        /// isolated worktree. Drives the terminal's "main" badge so
+        /// it's obvious the session sits on the shared branch.
+        #[serde(default)]
+        on_main: bool,
     },
     TerminalOutput {
         terminal_id: TerminalId,
@@ -1364,6 +1377,11 @@ pub struct TerminalSnapshot {
     /// a fresh `TerminalSpawned`.
     #[serde(default)]
     pub no_permission: bool,
+    /// Running on the repo's shared main checkout. Lets a reconnecting
+    /// client re-render the "main" badge without a fresh
+    /// `TerminalSpawned`.
+    #[serde(default)]
+    pub on_main: bool,
     /// Last prompt the user submitted to this terminal (Agent-only;
     /// `None` for shells and for agents that haven't received a prompt
     /// yet). Persisted daemon-side from `Command::RecordUserMessage` so

@@ -98,6 +98,7 @@ async fn spawn_and_wait(
             kind,
             cwd: None,
             initial_prompt: None,
+            on_main: false,
         })
         .unwrap();
     let spawned = wait_for(
@@ -649,6 +650,7 @@ async fn interactive_claude_spawn_keeps_permission_prompts() {
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: None,
                 initial_prompt: None,
+                on_main: false,
             })
             .unwrap();
         let spawned = wait_for(
@@ -701,7 +703,8 @@ async fn autonomous_spawn_wires_no_permission_consistently() {
             TerminalKind::Agent("claude".into()),
             Some(cwd),
             None,
-            true, // autonomous
+            true,  // autonomous
+            false, // on_main
         )
         .await;
 
@@ -754,6 +757,7 @@ async fn unknown_agent_id_emits_provider_error() {
                 kind: TerminalKind::Agent("does-not-exist".into()),
                 cwd: None,
                 initial_prompt: None,
+                on_main: false,
             })
             .unwrap();
         let evt = wait_for(
@@ -982,6 +986,7 @@ async fn spawn_with_initial_prompt_delivers_work_to_agent() {
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: None,
                 initial_prompt: Some(WORK.into()),
+                on_main: false,
             })
             .unwrap();
         let _ = wait_for(
@@ -1056,6 +1061,7 @@ async fn spawn_onto_existing_singleton_injects_the_prompt() {
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: None,
                 initial_prompt: Some(WORK.into()),
+                on_main: false,
             })
             .unwrap();
 
@@ -1362,6 +1368,7 @@ async fn wedged_session_does_not_block_subscribe_or_subsequent_spawn() {
                 kind: TerminalKind::Shell,
                 cwd: None,
                 initial_prompt: None,
+                on_main: false,
             })
             .unwrap();
         let spawned = wait_for(
@@ -1523,6 +1530,7 @@ async fn concurrent_spawns_collapse_onto_one_backend_session() {
                 Some(cwd_a),
                 None,
                 false,
+                false, // on_main
             )
             .await;
         });
@@ -1540,6 +1548,7 @@ async fn concurrent_spawns_collapse_onto_one_backend_session() {
                 Some(cwd),
                 Some(WORK.into()),
                 true,
+                false, // on_main
             )
             .await;
         });
@@ -1617,6 +1626,7 @@ async fn spawn_aborts_when_workspace_was_deleted_mid_flight() {
             None, // no cwd override → goes through workspace resolution
             None,
             false,
+            false, // on_main
         )
         .await;
 
@@ -1912,6 +1922,7 @@ async fn collapse_into_pr_carries_live_terminal_to_the_pr() {
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: None,
                 initial_prompt: None,
+                on_main: false,
             })
             .unwrap();
         let terminal_id = match wait_for(
@@ -2066,6 +2077,7 @@ async fn many_concurrent_prompt_spawns_all_deliver() {
                     Some(cwd),
                     Some(prompt),
                     false,
+                    false, // on_main
                 )
                 .await;
             }));

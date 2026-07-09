@@ -33,7 +33,7 @@ use lazybox_ipc::AgentState;
 /// status-bar ticker can scroll a live prompt out of the detect window for a
 /// single chunk, momentarily reading as `Idle` even though Claude is still
 /// waiting; without damping the `?` pill flickers off and back. Longer than
-/// [`WORKING_HYSTERESIS`] because a parked prompt can sit quiet far longer
+/// `WORKING_HYSTERESIS` because a parked prompt can sit quiet far longer
 /// than a spinner drops between frames.
 pub(crate) const INPUT_NEEDED_HYSTERESIS: Duration = Duration::from_secs(8);
 
@@ -144,7 +144,7 @@ impl AgentStateMachine {
     /// (`None` when it has never reported one) and a candidate `to`, returns
     /// `Some(to)` when the move is a legal, state-changing transition, or
     /// `None` when it is a no-op (`from == to`) or a forbidden edge
-    /// ([`transition_allowed`]). This is the single choke point for every
+    /// (`transition_allowed`). This is the single choke point for every
     /// state change — the PTY pump, hook ingest, and the optimistic answer
     /// flip all commit through it.
     pub fn transition(from: Option<AgentState>, to: AgentState) -> Option<AgentState> {

@@ -93,8 +93,12 @@ pub fn render(
             NoticeSeverity::Info | NoticeSeverity::Hint => theme.text_dim,
         };
         // 4 cells of chrome: the two flanking pads + the pill's
-        // inner spaces.
-        let message = crate::util::truncate_ellipsis(&n.message, right_cap.saturating_sub(4));
+        // inner spaces. Middle truncation, not end: notice tails
+        // carry the actionable part ("… — press ! to jump", an error
+        // reason after its fixed prefix), so cutting from the end
+        // would delete exactly what the message exists to deliver.
+        let message =
+            crate::util::truncate_ellipsis_middle(&n.message, right_cap.saturating_sub(4));
         Some(Line::from(vec![
             Span::styled(" ", bg),
             Span::styled(
@@ -298,19 +302,53 @@ mod tests {
     fn long_notice_never_displaces_hints() {
         let keymap = [binding("w", "work on this")];
         let globals = [binding("?", "help"), binding("q q", "quit")];
-        let notice = Notice::new("t".repeat(200), NoticeSeverity::Info);
+        let notice = Notice::new("x".repeat(200), NoticeSeverity::Info);
         let row = render_row_full(&keymap, &globals, None, Some(&notice));
         assert!(row.contains("work on this"), "contextual hint displaced");
         assert!(row.contains("help"), "global help hint displaced");
         assert!(row.contains("q q"), "quit chord displaced");
         assert!(row.contains("quit"), "quit label displaced");
         assert!(row.contains('…'), "long notice must truncate visibly");
-        // The notice segment stays within its ~40% budget (48 cells
-        // at 120 cols): no run of notice text longer than the cap.
+        // The notice segment stays within its ~40% budget: message
+        // cells ≤ right_cap - 4 chrome = 44 at 120 cols. Middle
+        // truncation splits the payload around the '…', so bound the
+        // total ('x' appears in no hint label), not a single run.
+        let shown = row.matches('x').count();
+        assert!(shown <= 44, "notice text exceeded its cap: {shown} cells");
+    }
+
+    /// The tail of an agent notice is its payload — the composed
+    /// "<slug> needs input — press ! to jump" exceeds the cap at 120
+    /// cols, and end-truncation used to delete the jump instruction.
+    /// Middle truncation must keep it.
+    #[test]
+    fn notice_actionable_tail_survives_truncation() {
+        let keymap = [binding("w", "work on this")];
+        let globals = [binding("?", "help"), binding("q q", "quit")];
+        let msg = format!("{}… needs input — press ! to jump", "T".repeat(23));
+        let notice = Notice::new(msg, NoticeSeverity::Hint);
+        let row = render_row_full(&keymap, &globals, None, Some(&notice));
         assert!(
-            !row.contains(&"t".repeat(49)),
-            "notice segment exceeded its cap",
+            row.contains("! to jump"),
+            "actionable tail truncated away: {row:?}",
         );
+        assert!(row.contains("work on this"), "contextual hint displaced");
+    }
+
+    /// The cap is enforced in terminal cells, not chars: a CJK/emoji
+    /// issue title renders two cells per char, and a char-budgeted
+    /// truncation would let the pill spill to ~80% of the row and
+    /// displace the hints all over again.
+    #[test]
+    fn wide_char_notice_stays_within_cap() {
+        let keymap = [binding("w", "work on this")];
+        let globals = [binding("?", "help"), binding("q q", "quit")];
+        let notice = Notice::new("好".repeat(100), NoticeSeverity::Info);
+        let row = render_row_full(&keymap, &globals, None, Some(&notice));
+        assert!(row.contains("work on this"), "contextual hint displaced");
+        assert!(row.contains("help"), "global help hint displaced");
+        assert!(row.contains("quit"), "quit label displaced");
+        assert!(row.contains('…'), "wide-char notice must truncate visibly");
     }
 
     /// Same guarantee for the polling status — the right segment is

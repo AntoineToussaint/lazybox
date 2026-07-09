@@ -5272,6 +5272,75 @@ mod worktree_progress_recovery_tests {
         );
     }
 
+    /// Issue #267 — the checklist's *state* walked correctly (the tests
+    /// above pass), but the mounted modal was re-added with `app.mount`,
+    /// which errors on an already-live id; the error was swallowed, so
+    /// every step past the first was silently dropped and the user only
+    /// ever saw step 1 before it vanished. This renders the *real*
+    /// mounted component and proves an advanced step actually repaints.
+    #[test]
+    fn advancing_the_checklist_repaints_the_mounted_modal() {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        use tuirealm::ratatui::layout::Rect;
+
+        // Render the *mounted* `WorktreeProgress` component (whatever the
+        // app currently holds under that id) to a fresh backend, so we
+        // observe the actual on-screen component — not the Model's
+        // separate `WorktreeProgressState`, which advanced correctly even
+        // while the stale component stayed mounted (issue #267).
+        fn rendered(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) -> String {
+            let mut term = Terminal::new(TestBackend::new(70, 20)).expect("test terminal");
+            term.draw(|f| {
+                m.app
+                    .view(&Id::WorktreeProgress, f, Rect::new(0, 0, 70, 20))
+            })
+            .expect("draw mounted modal");
+            let buf = term.backend().buffer();
+            (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        let mut m = build_model();
+        let key = WorkspaceKey::new("github:mind-build/mind#1");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+
+        // Mount on the first step, then drive the daemon truth forward so
+        // the display has somewhere to walk to.
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: session_key.clone(),
+            step: WorktreeStep::WorktreeAdd,
+            status: WorktreeStepStatus::Started,
+        });
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key,
+            step: WorktreeStep::Setup,
+            status: WorktreeStepStatus::Started,
+        });
+        // The freshly-mounted modal shows step 0 as the in-flight spinner
+        // — nothing is checked off yet.
+        assert!(
+            !rendered(&mut m).contains('✓'),
+            "no step should be done before the walk starts",
+        );
+
+        // Walk the display one step past the min-dwell. `shown` advances
+        // and step 0 checks off — which only paints if the re-mount
+        // replaced the stale component.
+        m.advance_worktree_progress_at(Instant::now() + Duration::from_secs(1));
+        assert!(
+            rendered(&mut m).contains('✓'),
+            "an advanced step must repaint the mounted modal, not freeze on step 1:\n{}",
+            rendered(&mut m),
+        );
+    }
+
     #[test]
     fn snapshot_without_the_session_terminal_leaves_checklist_up() {
         let mut m = build_model();
@@ -5885,6 +5954,92 @@ mod merge_latch_tests {
             right_pane_state(&m),
             Some(TaskState::Merged),
             "the right pane stays MERGED across a navigate-away-and-back",
+        );
+    }
+}
+
+mod inspect_list_remount_tests {
+    //! Same root cause as [`super::worktree_progress_recovery_tests`]
+    //! (issue #267): `mount_modal_boxed` used to call `app.mount`, which
+    //! errors on an already-live id. The worktree inspector re-mounts
+    //! itself in place after a delete (`mount_inspect_list` is documented
+    //! as idempotent — re-rendering the now-shorter list), so under the
+    //! old code that re-render silently failed and the inspector kept
+    //! showing the deleted row. This pins the re-mount-replaces-the-live
+    //! component contract on a second, non-progress code path.
+    use super::super::{Id, Model};
+    use lazybox_ipc::channel;
+    use tuirealm::ratatui::Terminal;
+    use tuirealm::ratatui::backend::TestBackend;
+    use tuirealm::ratatui::layout::{Rect, Size};
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn healthy_dto(name: &str) -> lazybox_ipc::WorktreeInspectionDto {
+        lazybox_ipc::WorktreeInspectionDto {
+            path: std::path::PathBuf::from(format!("/tmp/worktrees/{name}")),
+            bare_path: None,
+            branch: Some("main".into()),
+            session_id: None,
+            reasons: Vec::new(),
+            size_bytes: 0,
+            last_modified_unix: Some(0),
+            has_uncommitted_changes: false,
+            has_unpushed_commits: false,
+            is_safe_to_delete: false,
+        }
+    }
+
+    fn rendered(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) -> String {
+        let mut term = Terminal::new(TestBackend::new(120, 20)).expect("test terminal");
+        term.draw(|f| m.app.view(&Id::InspectList, f, Rect::new(0, 0, 120, 20)))
+            .expect("draw mounted modal");
+        let buf = term.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn re_inspecting_replaces_the_stale_inspector_list() {
+        let mut m = build_model();
+
+        // Open the inspector with two worktrees.
+        m.mount_inspect_list(vec![healthy_dto("alpha-tree"), healthy_dto("beta-tree")]);
+        assert!(m.modal_stack.contains(&Id::InspectList));
+        let out = rendered(&mut m);
+        assert!(out.contains("alpha-tree"), "first list shows alpha:\n{out}");
+        assert!(out.contains("beta-tree"), "first list shows beta:\n{out}");
+
+        // `beta-tree` was deleted; the daemon replies with the shorter
+        // inspection, which re-mounts the list in place. The stale row
+        // must be gone — which only happens if the re-mount replaced the
+        // live component instead of silently failing.
+        m.mount_inspect_list(vec![healthy_dto("alpha-tree")]);
+        assert_eq!(
+            m.modal_stack
+                .iter()
+                .filter(|id| **id == Id::InspectList)
+                .count(),
+            1,
+            "re-inspect must not pile up duplicate inspector entries",
+        );
+        let out = rendered(&mut m);
+        assert!(
+            out.contains("alpha-tree"),
+            "surviving row still shown:\n{out}"
+        );
+        assert!(
+            !out.contains("beta-tree"),
+            "the deleted row must not linger in the re-rendered list:\n{out}",
         );
     }
 }

@@ -336,9 +336,32 @@ pub struct Sidebar {
     /// j/k handlers maintain that invariant.
     cursor: usize,
     /// Index of the topmost `visible` row drawn in the content area.
-    /// The list has no other scroll state — `render` clamps this to
-    /// keep `cursor` on screen, so it follows j/k automatically.
+    /// Anchored to the cursor by default — `render` clamps this to
+    /// keep `cursor` on screen, so it follows j/k automatically. The
+    /// mouse wheel moves it directly instead (`scroll_by_wheel`),
+    /// setting `scroll_detached`.
     scroll: usize,
+    /// True while the wheel has moved the viewport away from the
+    /// cursor. `render` then skips its keep-cursor-visible clamp so
+    /// the cursor may sit off-screen; any explicit cursor move
+    /// (`set_cursor`: j/k, click, jump pickers), a search-query
+    /// change, or — via the model's key dispatch
+    /// (`reanchor_viewport`) — ANY key pressed while the sidebar is
+    /// focused clears the flag, re-anchoring the viewport to the
+    /// selection (#290).
+    scroll_detached: bool,
+    /// Content-area height of the last render (0 before the first
+    /// frame). Lets `scroll_by_wheel` clamp to the same last-full-page
+    /// bound `render` uses, so a bottom-edge notch reports "no
+    /// movement" instead of overshooting and snapping back a frame
+    /// later.
+    last_viewport: usize,
+    /// `scroll` as of the last render — the offset actually on
+    /// screen. Mouse hit-testing maps clicks through this, not
+    /// `scroll`: a wheel event may have moved `scroll` after the
+    /// frame was drawn (wheel repaints ride the render throttle), and
+    /// a click must land on the row the user saw.
+    rendered_scroll: usize,
     mailbox: Mailbox,
     /// Live filter on top of the mailbox. Cycles via `f`. Default
     /// `All` is a no-op; the other variants restrict the visible
@@ -469,6 +492,9 @@ impl Sidebar {
             repo_summaries: BTreeMap::new(),
             cursor: 0,
             scroll: 0,
+            scroll_detached: false,
+            last_viewport: 0,
+            rendered_scroll: 0,
             mailbox: Mailbox::Inbox,
             role_filter: RoleFilter::default(),
             sort_mode: SortMode::default(),
@@ -845,9 +871,10 @@ impl Sidebar {
             return false;
         }
         // Add the scroll offset the renderer applied so a click lands
-        // on the row actually drawn under the cursor, not the row that
-        // would be there at scroll 0.
-        let idx = (click_row - area.y - HEADER_HEIGHT) as usize + self.scroll;
+        // on the row actually drawn under the cursor — `rendered_scroll`,
+        // not `scroll`, because a wheel notch dispatched after the last
+        // frame may have moved `scroll` past what's on screen.
+        let idx = (click_row - area.y - HEADER_HEIGHT) as usize + self.rendered_scroll;
         match self.visible.get(idx) {
             // Headers ARE selectable now (post-Stage-4): the user
             // needs to land cursor on a project header to fire
@@ -860,24 +887,53 @@ impl Sidebar {
             | Some(VisibleRow::Session { .. })
             | Some(VisibleRow::RepoHeader(_))
             | Some(VisibleRow::KindHeader(_)) => {
-                self.cursor = idx;
+                self.set_cursor(idx);
                 true
             }
             None => false,
         }
     }
 
-    /// Mouse-wheel scroll over the sidebar. The rendered scroll offset
-    /// is coupled to the cursor (`render` keeps the cursor on-screen and
-    /// the scrollbar thumb tracks that offset), so there is no viewport
-    /// to move independently — wheeling advances the selection cursor by
-    /// `delta` rows, exactly like holding `j`/`k`, which drags the
-    /// scroll offset and scrollbar along with it. Returns whether the
-    /// cursor moved.
+    /// Explicit-navigation cursor assignment (keys, clicks, jump
+    /// pickers): moves the cursor AND re-anchors a wheel-detached
+    /// viewport. The passive index fixups in `recompute_visible_inner`
+    /// write `self.cursor` directly instead — a background resort must
+    /// never yank a wheel-scrolled display back to the cursor.
+    fn set_cursor(&mut self, idx: usize) {
+        self.cursor = idx;
+        self.scroll_detached = false;
+    }
+
+    /// Re-anchor a wheel-detached viewport: the next render clamps
+    /// the scroll offset back to the cursor. Returns whether the
+    /// viewport was detached (callers repaint on true). The model
+    /// calls this for every key pressed while the sidebar is focused
+    /// — keys act on (or move) the selection, so it must be on
+    /// screen.
+    pub fn reanchor_viewport(&mut self) -> bool {
+        std::mem::take(&mut self.scroll_detached)
+    }
+
+    /// Mouse-wheel scroll over the sidebar: move the viewport offset
+    /// by `delta` rows, leaving the cursor untouched. Selection
+    /// changes have side effects — the right pane, terminal stack,
+    /// and focus all follow the selected workspace — so a trackpad
+    /// flick must never change it (#290). Detaches the offset from
+    /// the cursor (`scroll_detached`); the next explicit cursor move
+    /// re-anchors. Returns whether the offset moved.
     pub fn scroll_by_wheel(&mut self, delta: isize) -> bool {
-        let before = self.cursor;
-        self.move_cursor_by(delta);
-        self.cursor != before
+        // Clamp to the same last-full-page bound `render` settles on
+        // (`last_viewport` is 0 before the first frame — fall back to
+        // a 1-row page) so a bottom-edge notch reports no movement
+        // instead of overshooting and snapping back next frame.
+        let max = self.visible.len().saturating_sub(self.last_viewport.max(1));
+        let target = self.scroll.saturating_add_signed(delta).min(max);
+        if target == self.scroll {
+            return false;
+        }
+        self.scroll = target;
+        self.scroll_detached = true;
+        true
     }
 
     /// Look up a workspace by its session key. Used by paths that
@@ -895,7 +951,7 @@ impl Sidebar {
             if let VisibleRow::Workspace(k) = row
                 && k == key
             {
-                self.cursor = i;
+                self.set_cursor(i);
                 return true;
             }
         }
@@ -918,7 +974,7 @@ impl Sidebar {
             if let VisibleRow::RepoHeader(name) = row
                 && name == &label
             {
-                self.cursor = i;
+                self.set_cursor(i);
                 return true;
             }
         }
@@ -1086,7 +1142,7 @@ impl Sidebar {
             if let VisibleRow::Session { session_id, .. } = row
                 && *session_id == id
             {
-                self.cursor = i;
+                self.set_cursor(i);
                 return true;
             }
         }
@@ -1151,10 +1207,10 @@ impl Sidebar {
         self.cursor
     }
 
-    /// Test accessor — the row-window scroll offset the last `render`
-    /// settled on. Only meaningful after a render (the offset is
-    /// recomputed there to keep the cursor on-screen); used to assert
-    /// the visible list actually scrolled, not just the cursor.
+    /// Test accessor — the row-window scroll offset, as moved by
+    /// `scroll_by_wheel` and settled by the last `render` (which
+    /// re-anchors it to the cursor unless wheel-detached). Used to
+    /// assert the visible list actually scrolled, not just the cursor.
     #[doc(hidden)]
     pub fn __test_scroll(&self) -> usize {
         self.scroll
@@ -1297,6 +1353,9 @@ impl Sidebar {
                 });
             }
         }
+        // The query is scoped to the CURSOR's project — make sure
+        // that's the project on screen while the user types.
+        self.scroll_detached = false;
     }
 
     /// True while the `/` input bar is capturing keystrokes. The
@@ -1354,6 +1413,10 @@ impl Sidebar {
             _ => {}
         }
         if query_changed {
+            // Filtering re-lands the cursor on the best match; the
+            // viewport must follow so the user sees what they're
+            // narrowing to, even mid-wheel-detach.
+            self.scroll_detached = false;
             self.recompute_visible();
         }
     }
@@ -1392,6 +1455,9 @@ impl Sidebar {
     }
 
     fn move_cursor_by(&mut self, delta: isize) {
+        // Even an edge-clamped press (j on the last row) re-anchors a
+        // wheel-detached viewport back onto the cursor.
+        self.scroll_detached = false;
         if delta == 0 || self.visible.is_empty() {
             return;
         }
@@ -1407,7 +1473,7 @@ impl Sidebar {
             .position(|i| *i == self.cursor)
             .unwrap_or(0);
         let target = (pos as isize + delta).clamp(0, selectable.len() as isize - 1) as usize;
-        self.cursor = selectable[target];
+        self.set_cursor(selectable[target]);
     }
 
     /// Total unread activity items across all VISIBLE workspaces. Used
@@ -1562,7 +1628,7 @@ impl Sidebar {
             .iter()
             .position(|r| matches!(r, VisibleRow::RepoHeader(n) if n == &repo))
         {
-            self.cursor = idx;
+            self.set_cursor(idx);
         }
         true
     }
@@ -1592,7 +1658,7 @@ impl Sidebar {
     /// non-selectable header instead of falling through to the first
     /// workspace row.
     fn reset_cursor_and_recompute(&mut self) {
-        self.cursor = 0;
+        self.set_cursor(0);
         self.recompute_visible_inner(false);
     }
 

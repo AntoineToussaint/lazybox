@@ -4632,17 +4632,18 @@ mod workspace_focus_memory_tests {
     /// the terminal, so the wheel did nothing over the sidebar even
     /// though the scrollbar showed the list overflowing.
     ///
-    /// The sidebar's scroll offset is coupled to the cursor (the render
-    /// keeps the cursor on-screen), so we assert on the settled scroll
-    /// offset after a render — proving the visible list actually moved,
-    /// not merely the selection.
+    /// The wheel moves the viewport offset only (#290): the render's
+    /// keep-cursor-visible clamp is skipped while wheel-detached, so we
+    /// assert on the settled scroll offset after a render — proving the
+    /// visible list actually moved — and that the cursor/selection
+    /// stayed put.
     #[test]
     fn wheel_over_the_sidebar_scrolls_the_list() {
         use tuirealm::ratatui::{Terminal, backend::TestBackend};
 
         let mut m = build_model();
         // Seed far more workspaces than the viewport can show so the
-        // list overflows and the cursor has room to travel.
+        // list overflows and the viewport has room to travel.
         let workspaces: Vec<Workspace> = (1..=60)
             .map(|n| empty_ws(&format!("github:o/r#{n}")))
             .collect();
@@ -4672,18 +4673,25 @@ mod workspace_focus_memory_tests {
         render(&mut m);
         assert_eq!(m.sidebar().__test_scroll(), 0, "list starts at the top");
 
-        // Sustained wheel-down: the cursor advances and, once it reaches
-        // the bottom of the viewport, drags the scroll offset (and the
-        // scrollbar thumb) down with it.
+        // Sustained wheel-down: the scroll offset (and the scrollbar
+        // thumb) moves down; the cursor and selection stay exactly
+        // where they were.
         let before_cursor = m.sidebar().cursor();
+        let before_selected = m.sidebar().selected_workspace_key().cloned();
         m.redraw = false;
         for _ in 0..20 {
             m.dispatch_mouse_in(wheel(MouseEventKind::ScrollDown), area);
         }
         render(&mut m);
-        assert!(
-            m.sidebar().cursor() > before_cursor,
-            "wheel-down over the sidebar must advance the cursor",
+        assert_eq!(
+            m.sidebar().cursor(),
+            before_cursor,
+            "wheel-down over the sidebar must not move the cursor",
+        );
+        assert_eq!(
+            m.sidebar().selected_workspace_key().cloned(),
+            before_selected,
+            "wheel-down over the sidebar must not change the selection",
         );
         assert!(
             m.sidebar().__test_scroll() > 0,
@@ -4702,6 +4710,62 @@ mod workspace_focus_memory_tests {
             m.sidebar().__test_scroll(),
             0,
             "wheel-up must return the list to the top",
+        );
+    }
+
+    /// Any key pressed while the sidebar is focused re-anchors a
+    /// wheel-detached viewport (#290). The wheel may leave the cursor
+    /// off-screen, but keys act on the selection — `m` marks IT read,
+    /// `z` snoozes IT — so the frame after a keypress must show it.
+    #[test]
+    fn sidebar_key_reanchors_a_wheel_detached_viewport() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers as RealmMods};
+        use tuirealm::ratatui::{Terminal, backend::TestBackend};
+
+        let mut m = build_model();
+        let workspaces: Vec<Workspace> = (1..=60)
+            .map(|n| empty_ws(&format!("github:o/r#{n}")))
+            .collect();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces,
+            terminals: vec![],
+            projects: vec![],
+        });
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sidebar_rect, _, _) = m.effective_pane_rects(area);
+        let render = |m: &mut Model<tuirealm::terminal::TestTerminalAdapter>| {
+            let mut term = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            term.draw(|f| m.__test_sidebar_mut().view_in(sidebar_rect, f))
+                .unwrap();
+        };
+
+        render(&mut m);
+        for _ in 0..20 {
+            m.dispatch_mouse_in(
+                MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: sidebar_rect.x + sidebar_rect.width / 2,
+                    row: sidebar_rect.y + 10,
+                    modifiers: KeyModifiers::NONE,
+                },
+                area,
+            );
+        }
+        render(&mut m);
+        assert!(
+            m.sidebar().__test_scroll() > m.sidebar().cursor(),
+            "wheel-down leaves the cursor off-screen above the viewport",
+        );
+
+        // `m` targets the selection without moving the cursor — the
+        // re-anchor must come from the keypress itself, not from a
+        // cursor move.
+        m.dispatch_key(KeyEvent::new(Key::Char('m'), RealmMods::NONE));
+        render(&mut m);
+        assert!(
+            m.sidebar().__test_scroll() <= m.sidebar().cursor(),
+            "a sidebar keypress snaps the viewport back onto the cursor",
         );
     }
 

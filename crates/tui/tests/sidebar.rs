@@ -575,6 +575,158 @@ fn render_windows_list_to_keep_cursor_visible_with_scrollbar() {
     );
 }
 
+/// 20 workspaces in one repo — a list far taller than the test
+/// viewports below, so wheel/scroll behavior is observable.
+fn tall_sidebar() -> Sidebar {
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let workspaces: Vec<_> = (1..=20)
+        .map(|i| {
+            make_workspace(
+                "owner/repo",
+                &format!("o/r#{i}"),
+                now - Duration::minutes(i),
+            )
+        })
+        .collect();
+    s.on_event(&Event::Snapshot {
+        workspaces,
+        terminals: vec![],
+        projects: vec![],
+    });
+    s
+}
+
+#[test]
+fn wheel_scrolls_viewport_without_moving_selection() {
+    // The wheel must ONLY move the display. Selection changes have
+    // side effects (right pane / terminal stack / focus follow the
+    // selected workspace), so a trackpad flick over the sidebar must
+    // never land the user on a different workspace (#290).
+    let mut s = tall_sidebar();
+    render_to_string(&mut s, 40, 12, true);
+    let selected = s.selected_session_key().cloned();
+    let cursor = s.cursor();
+    assert_eq!(s.__test_scroll(), 0);
+
+    // At the top, wheel-up has nowhere to go.
+    assert!(!s.scroll_by_wheel(-3), "wheel-up at the top is a no-op");
+
+    assert!(s.scroll_by_wheel(3), "wheel-down moves the viewport");
+    render_to_string(&mut s, 40, 12, true);
+
+    assert_eq!(
+        s.selected_session_key().cloned(),
+        selected,
+        "wheel must not change the selected workspace"
+    );
+    assert_eq!(s.cursor(), cursor, "wheel must not move the cursor");
+    assert_eq!(
+        s.__test_scroll(),
+        3,
+        "viewport offset moved and survived the render clamp"
+    );
+}
+
+#[test]
+fn keyboard_nav_reanchors_wheel_scrolled_viewport() {
+    // Wheel the cursor off-screen, then press Down: the viewport must
+    // snap back to keep the cursor visible — keyboard nav still
+    // behaves exactly as before the wheel decoupling.
+    let mut s = tall_sidebar();
+    render_to_string(&mut s, 40, 12, true);
+    let cursor = s.cursor();
+    s.scroll_by_wheel(10);
+    render_to_string(&mut s, 40, 12, true);
+    assert_eq!(s.__test_scroll(), 10);
+    assert!(s.cursor() < s.__test_scroll(), "cursor is above the fold");
+
+    s.handle_key(key_code(KeyCode::Down), &mut Vec::new());
+    let rendered = render_to_string(&mut s, 40, 12, true);
+    assert_eq!(s.cursor(), cursor + 1);
+    assert_eq!(
+        s.__test_scroll(),
+        s.cursor(),
+        "render re-anchored the viewport onto the cursor row"
+    );
+    assert!(
+        rendered.contains('▸'),
+        "cursor marker back on screen; got:\n{rendered}"
+    );
+}
+
+#[test]
+fn search_reanchors_wheel_scrolled_viewport() {
+    // `/` search re-lands the cursor on the best match; a wheel-
+    // detached viewport must snap back so the user sees what the
+    // query is narrowing to.
+    let mut s = tall_sidebar();
+    render_to_string(&mut s, 40, 12, true);
+    let cursor = s.cursor();
+    s.scroll_by_wheel(10);
+    render_to_string(&mut s, 40, 12, true);
+    assert_eq!(s.__test_scroll(), 10);
+
+    s.open_search();
+    s.handle_search_key(key_code(KeyCode::Char('t')));
+    render_to_string(&mut s, 40, 12, true);
+    assert_eq!(
+        s.cursor(),
+        cursor,
+        "a query matching every row keeps the cursor on its workspace"
+    );
+    assert!(
+        s.__test_scroll() <= s.cursor(),
+        "typing a query snaps the viewport back to the match; scroll={}",
+        s.__test_scroll()
+    );
+}
+
+#[test]
+fn wheel_clamps_to_the_last_page_without_overshoot() {
+    // The dispatch-time clamp must agree with render's tail clamp:
+    // a notch at the bottom edge reports no movement instead of
+    // overshooting and getting pulled back on the next frame.
+    let mut s = tall_sidebar();
+    render_to_string(&mut s, 40, 12, true);
+    assert!(s.scroll_by_wheel(1000), "big flick reaches the bottom");
+    let settled = s.__test_scroll();
+    render_to_string(&mut s, 40, 12, true);
+    assert_eq!(
+        s.__test_scroll(),
+        settled,
+        "dispatch clamp matches the render clamp"
+    );
+    assert!(
+        !s.scroll_by_wheel(3),
+        "another notch at the bottom reports no movement"
+    );
+}
+
+#[test]
+fn click_maps_through_the_rendered_offset_not_the_pending_one() {
+    // Wheel repaints ride the render throttle, so a click can arrive
+    // after a notch mutated `scroll` but before the frame painted.
+    // The click must select the row the user is looking at (the last
+    // rendered frame), not the row under the not-yet-drawn offset.
+    let mut s = tall_sidebar();
+    let area = Rect::new(0, 0, 40, 12);
+    render_to_string(&mut s, 40, 12, true);
+    // First content row below the 5-line header shows visible[1]
+    // (row 0 is the repo header) at scroll 0.
+    let click_row = area.y + 5 + 1;
+    assert!(s.click_to_select(area, click_row));
+    let clicked_before = s.cursor();
+
+    s.scroll_by_wheel(3); // dispatched, not yet rendered
+    assert!(s.click_to_select(area, click_row));
+    assert_eq!(
+        s.cursor(),
+        clicked_before,
+        "unpainted wheel notch must not shift the click mapping"
+    );
+}
+
 #[test]
 fn render_hides_scrollbar_when_list_fits() {
     // Two workspaces in a viewport with room to spare → no indicator.

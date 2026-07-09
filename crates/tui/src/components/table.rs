@@ -36,6 +36,13 @@ pub enum ColumnWidth {
     /// are subtracted from `total_width`. Title column uses this.
     /// If multiple Flex columns share a row, each gets an equal
     /// share. Truncates rather than overflowing.
+    ///
+    /// `min` is the width the flex column is *protected* to: other
+    /// (lower-priority) columns are dropped to keep the flex at least
+    /// this wide. But the flex only fights up to the smaller of `min`
+    /// and its natural content width — a flex column whose content is
+    /// shorter than `min` won't force a column to drop just to reserve
+    /// padding it never fills (issue #269).
     Flex { min: usize },
 }
 
@@ -115,18 +122,23 @@ impl Column {
 /// Algorithm:
 ///   1. Fixed columns take their declared width.
 ///   2. Max columns take `max(min, max-across-rows-of-cell-width)`.
-///   3. Flex columns claim their `min` up front.
+///   3. Flex columns claim a floor of `min(min, natural content
+///      width)` up front — capping the floor at the content width is
+///      what stops a short title from evicting a status/CI column just
+///      to reserve padding it will never fill (issue #269). The flex
+///      still expands to absorb leftover slack in step 5.
 ///   4. If the natural widths overflow `total_width`, shed the
 ///      lowest-[`priority`](Column::priority) non-flex columns (set
 ///      them to 0) one at a time until the row fits or there's
 ///      nothing droppable left. This is what makes a narrow sidebar
 ///      degrade gracefully — secondary columns (time, status,
 ///      indicators) drop out before the title is squeezed to a lone
-///      `…`. Flex columns are never dropped here.
+///      `…`, but only once the title genuinely needs their space.
+///      Flex columns are never dropped here.
 ///   5. Whatever space is left over goes to the Flex columns, split
-///      equally. If even the kept columns + flex mins still overflow
+///      equally. If even the kept columns + flex floors still overflow
 ///      (extremely narrow pane), the flex columns shrink below their
-///      min — down to 0 — and the renderer elides their content.
+///      floor — down to 0 — and the renderer elides their content.
 ///
 /// `cell_widths[row][col]` is the natural width of the cell's
 /// content in cells. Empty for an empty table.
@@ -158,8 +170,20 @@ pub fn compute_widths(
             }
             ColumnWidth::Flex { min } => {
                 flex_indices.push(i);
-                widths[i] = min;
-                consumed = consumed.saturating_add(min);
+                // Floor the flex at its content width, not its declared
+                // min: the column only fights to keep other columns from
+                // crowding it up to the smaller of the two. A title
+                // shorter than `min` demands only its content, so a
+                // status/CI column stays instead of being dropped to
+                // reserve title padding that never fills (issue #269).
+                let natural = cell_widths
+                    .iter()
+                    .map(|row| row.get(i).copied().unwrap_or(0))
+                    .max()
+                    .unwrap_or(0);
+                let floor = natural.min(min);
+                widths[i] = floor;
+                consumed = consumed.saturating_add(floor);
             }
         }
     }
@@ -521,29 +545,47 @@ mod tests {
         assert_eq!(widths, vec![4, 4, 3]);
     }
 
+    /// With several Flex columns, each floors at `min(min, its own
+    /// content)` after the #269 change, then the leftover slack splits
+    /// equally. The sidebar only ever uses one Flex column, but the
+    /// primitive supports more, so pin the distribution: differing
+    /// content widths must not skew the split of the remaining space.
+    #[test]
+    fn multiple_flex_floor_at_content_then_split_slack() {
+        let cols = [Column::flex(10), Column::flex(10)];
+        // Col 0 content 5 → floor min(10,5)=5; col 1 content 50 → floor
+        // min(10,50)=10. floors consume 15 of 100 → 85 remaining, split
+        // 42 each with a 1-cell remainder to the leftmost flex.
+        let widths = compute_widths(&cols, &[vec![5, 50]], 100);
+        assert_eq!(widths, vec![5 + 42 + 1, 10 + 42]);
+    }
+
     #[test]
     fn flex_shrinks_below_min_when_no_droppable_columns_fit() {
-        // Fixed 60 + flex_min 50 = 110, total = 100. The fixed column
-        // has DEFAULT_PRIORITY (not droppable), so the flex column
-        // absorbs the 10-cell overflow and shrinks to 40 — the
+        // Fixed 60 + flex_min 50 = 110, total = 100. The flex row has
+        // 50 cells of content, so its floor demand is the full min. The
+        // fixed column has DEFAULT_PRIORITY (not droppable), so the flex
+        // column absorbs the 10-cell overflow and shrinks to 40 — the
         // renderer then elides its content with `…` instead of letting
         // the row overflow and clip without warning.
         let cols = [Column::fixed(60), Column::flex(50)];
-        let widths = compute_widths(&cols, &[], 100);
+        let widths = compute_widths(&cols, &[vec![0, 50]], 100);
         assert_eq!(widths, vec![60, 40]);
     }
 
     #[test]
     fn low_priority_columns_drop_before_flex_shrinks() {
         // Fixed 10 (kept) + max 20 (low priority) + flex_min 30 = 60,
-        // total = 40. The max column is dropped (priority < default),
-        // freeing its 20 cells; the flex then keeps its full min.
+        // total = 40. The flex row has 30 cells of content, so its floor
+        // demand is the full min. The max column is dropped (priority <
+        // default), freeing its 20 cells; the flex then keeps its full
+        // min.
         let cols = [
             Column::fixed(10),
             Column::max(20).priority(10),
             Column::flex(30),
         ];
-        let widths = compute_widths(&cols, &[vec![0, 20, 0]], 40);
+        let widths = compute_widths(&cols, &[vec![0, 20, 30]], 40);
         assert_eq!(widths, vec![10, 0, 30]);
     }
 
@@ -557,13 +599,40 @@ mod tests {
             Column::max(8).priority(5),
             Column::flex(10),
         ];
-        // 10 + 8 + 8 + 10 = 36, total = 30 → must shed 6+. Dropping the
-        // priority-5 column frees 8 → fits. priority-50 column survives.
-        let widths = compute_widths(&cols, &[vec![0, 8, 8, 0]], 30);
+        // 10 + 8 + 8 + 10 = 36, total = 30 → must shed 6+. The flex row
+        // has 10 cells of content, so its floor demand is the full min.
+        // Dropping the priority-5 column frees 8 → fits. priority-50
+        // column survives.
+        let widths = compute_widths(&cols, &[vec![0, 8, 8, 10]], 30);
         assert_eq!(widths[2], 0, "lowest-priority column should drop first");
         assert_eq!(widths[1], 8, "higher-priority column should survive");
         // Flex reclaims the slack freed by the drop.
         assert_eq!(widths[3], 30 - 10 - 8);
+    }
+
+    /// Regression for issue #269: a droppable column is KEPT when the
+    /// flex column's actual content is shorter than its declared min,
+    /// even though `fixed + max + flex_min` would overflow. The flex
+    /// only fights up to its content width, so the status-like column
+    /// stays instead of being dropped to reserve title padding that
+    /// would just render as empty space.
+    #[test]
+    fn short_flex_content_does_not_evict_a_column_that_fits() {
+        // Fixed 10 + max 19 (status, low priority) + flex_min 20 = 49.
+        // total = 40. Old behaviour: flex demands its full min (20), so
+        // 10 + 19 + 20 = 49 > 40 → status dropped, its 19 cells become
+        // title padding. New behaviour: the title is only 6 cells, so it
+        // demands 6, 10 + 19 + 6 = 35 ≤ 40 → nothing drops.
+        let cols = [
+            Column::fixed(10),
+            Column::max(0).priority(20), // status-like
+            Column::flex(20),            // title
+        ];
+        // Row: fixed content 10, status content 19, title content 6.
+        let widths = compute_widths(&cols, &[vec![10, 19, 6]], 40);
+        assert_eq!(widths[1], 19, "status column must survive a short title");
+        // Title flex keeps the leftover slack (6 content + padding).
+        assert_eq!(widths, vec![10, 19, 11]);
     }
 
     #[test]

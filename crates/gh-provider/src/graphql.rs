@@ -219,6 +219,11 @@ pub struct GqlPr {
     pub url: String,
     #[serde(rename = "updatedAt")]
     pub updated_at: DateTime<Utc>,
+    /// When the PR was opened. Stable across later activity. `default`
+    /// so queries that don't select `createdAt` (lazy detail fetches)
+    /// still deserialize — the age falls back to `updatedAt`.
+    #[serde(rename = "createdAt", default)]
+    pub created_at: Option<DateTime<Utc>>,
     /// When the PR was closed (merge also closes it). Stable — unlike
     /// `updatedAt`, GitHub does NOT bump this on post-merge activity.
     #[serde(rename = "closedAt", default)]
@@ -1622,6 +1627,7 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
             Some(pr.base_ref_name.clone())
         },
         updated_at: pr.updated_at,
+        created_at: pr.created_at,
         closed_at: pr.closed_at,
         labels: pr
             .labels
@@ -2277,6 +2283,12 @@ pub struct GqlIssue {
     pub url: String,
     #[serde(rename = "updatedAt")]
     pub updated_at: DateTime<Utc>,
+    /// When the issue was opened. Stable across later activity — the
+    /// signal for the sidebar's age display + stale fade (issue #274).
+    /// `default` so queries that omit `createdAt` fall back to
+    /// `updatedAt`.
+    #[serde(rename = "createdAt", default)]
+    pub created_at: Option<DateTime<Utc>>,
     /// When the issue was closed. Stable across later activity, unlike
     /// `updatedAt`. `None` while the issue is open.
     #[serde(rename = "closedAt", default)]
@@ -2434,6 +2446,7 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         branch: None,
         base_branch: None,
         updated_at: issue.updated_at,
+        created_at: issue.created_at,
         closed_at: issue.closed_at,
         labels: issue
             .labels
@@ -2568,6 +2581,7 @@ mod tests {
             body: None,
             url: format!("https://github.com/o/r/issues/{number}"),
             updated_at: chrono::Utc::now(),
+            created_at: None,
             closed_at: None,
             state: "OPEN".into(),
             author: author.map(|login| GqlAuthor {
@@ -2720,6 +2734,7 @@ mod tests {
             body: None,
             url: format!("https://github.com/o/r/pull/{number}"),
             updated_at: chrono::Utc::now(),
+            created_at: None,
             closed_at: None,
             is_draft: false,
             state: "OPEN".into(),
@@ -3481,6 +3496,25 @@ mod tests {
         let task = pr_to_task(&pr, "alice");
         assert_eq!(task.state, TaskState::Merged);
         assert_eq!(task.closed_at, Some(merged_at));
+    }
+
+    /// `createdAt` rides from the wire onto `Task.created_at`, and
+    /// `opened_at()` returns it even when `updated_at` is far more
+    /// recent — the age signal the sidebar reads for the stale-issue
+    /// fade (issue #274).
+    #[test]
+    fn issue_to_task_carries_created_at_as_age_anchor() {
+        let opened = chrono::DateTime::parse_from_rfc3339("2026-01-02T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut issue = make_issue(9, "old issue", Some("bob"), &[]);
+        issue.created_at = Some(opened);
+        issue.updated_at = chrono::DateTime::parse_from_rfc3339("2026-05-28T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let task = issue_to_task(&issue, "alice");
+        assert_eq!(task.created_at, Some(opened));
+        assert_eq!(task.opened_at(), opened);
     }
 
     /// Last commenter falls through from `comments.nodes[0]` even

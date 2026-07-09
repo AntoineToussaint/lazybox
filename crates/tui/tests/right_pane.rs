@@ -43,6 +43,7 @@ fn make_task(key: &str) -> Task {
         branch: Some("feature/x".into()),
         base_branch: Some("main".into()),
         updated_at: Utc::now(),
+        created_at: None,
         closed_at: None,
         labels: vec![],
         reviewers: vec!["alice".into(), "bob".into()],

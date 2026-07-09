@@ -4996,6 +4996,7 @@ mod tests {
             branch: None,
             base_branch: None,
             updated_at: chrono::Utc::now(),
+            created_at: None,
             closed_at: None,
             labels: vec![],
             reviewers: vec![],

@@ -4632,17 +4632,18 @@ mod workspace_focus_memory_tests {
     /// the terminal, so the wheel did nothing over the sidebar even
     /// though the scrollbar showed the list overflowing.
     ///
-    /// The sidebar's scroll offset is coupled to the cursor (the render
-    /// keeps the cursor on-screen), so we assert on the settled scroll
-    /// offset after a render — proving the visible list actually moved,
-    /// not merely the selection.
+    /// The wheel moves the viewport offset only (#290): the render's
+    /// keep-cursor-visible clamp is skipped while wheel-detached, so we
+    /// assert on the settled scroll offset after a render — proving the
+    /// visible list actually moved — and that the cursor/selection
+    /// stayed put.
     #[test]
     fn wheel_over_the_sidebar_scrolls_the_list() {
         use tuirealm::ratatui::{Terminal, backend::TestBackend};
 
         let mut m = build_model();
         // Seed far more workspaces than the viewport can show so the
-        // list overflows and the cursor has room to travel.
+        // list overflows and the viewport has room to travel.
         let workspaces: Vec<Workspace> = (1..=60)
             .map(|n| empty_ws(&format!("github:o/r#{n}")))
             .collect();
@@ -4672,18 +4673,25 @@ mod workspace_focus_memory_tests {
         render(&mut m);
         assert_eq!(m.sidebar().__test_scroll(), 0, "list starts at the top");
 
-        // Sustained wheel-down: the cursor advances and, once it reaches
-        // the bottom of the viewport, drags the scroll offset (and the
-        // scrollbar thumb) down with it.
+        // Sustained wheel-down: the scroll offset (and the scrollbar
+        // thumb) moves down; the cursor and selection stay exactly
+        // where they were.
         let before_cursor = m.sidebar().cursor();
+        let before_selected = m.sidebar().selected_workspace_key().cloned();
         m.redraw = false;
         for _ in 0..20 {
             m.dispatch_mouse_in(wheel(MouseEventKind::ScrollDown), area);
         }
         render(&mut m);
-        assert!(
-            m.sidebar().cursor() > before_cursor,
-            "wheel-down over the sidebar must advance the cursor",
+        assert_eq!(
+            m.sidebar().cursor(),
+            before_cursor,
+            "wheel-down over the sidebar must not move the cursor",
+        );
+        assert_eq!(
+            m.sidebar().selected_workspace_key().cloned(),
+            before_selected,
+            "wheel-down over the sidebar must not change the selection",
         );
         assert!(
             m.sidebar().__test_scroll() > 0,

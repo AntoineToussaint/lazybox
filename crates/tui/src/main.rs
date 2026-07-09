@@ -466,6 +466,21 @@ fn wipe_state_db() {
 /// trusts the daemon's persisted setup (no first-run wizard, no
 /// detection, no polling kickoff — all of that lives on the daemon
 /// side).
+/// `attention.notifier` (config crate) → the platform layer's backend.
+/// A hand mapping because tui-core deliberately doesn't depend on
+/// lazybox-config.
+fn map_notifier_backend(
+    b: lazybox_config::NotifierBackend,
+) -> lazybox_tui::platform::NotifierBackend {
+    match b {
+        lazybox_config::NotifierBackend::Auto => lazybox_tui::platform::NotifierBackend::Auto,
+        lazybox_config::NotifierBackend::Osc => lazybox_tui::platform::NotifierBackend::Osc,
+        lazybox_config::NotifierBackend::Subprocess => {
+            lazybox_tui::platform::NotifierBackend::Subprocess
+        }
+    }
+}
+
 async fn run_remote(
     socket_path: &std::path::Path,
     preselect: Option<lazybox_tui::realm::model::Preselect>,
@@ -488,6 +503,13 @@ async fn run_remote(
     };
 
     spawn_terminal_restore_on_signal();
+    // The remote path skips the full config application (the daemon
+    // owns most of it), but notifications fire client-side — arm them
+    // here too or `--connect` sessions would stay silent.
+    let notifier = lazybox_config::Config::load()
+        .map(|c| c.attention.notifier)
+        .unwrap_or_default();
+    lazybox_tui::platform::set_notifier_backend(map_notifier_backend(notifier));
     tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client)?;
         model.note_daemon_build(&daemon.build);
@@ -699,6 +721,12 @@ async fn run_embedded_realm(
         {
             tracing::warn!("ui.theme = {name:?} not found; using the default theme");
         }
+        // Arm desktop notifications with the configured backend. Until
+        // this call `notify_user` is a logged no-op — arming is the
+        // binary's opt-in so library tests never spawn real banners.
+        lazybox_tui::platform::set_notifier_backend(map_notifier_backend(
+            user_config.attention.notifier,
+        ));
         let ui_defaults = user_config.resolved_ui();
         model.apply_sidebar_config(
             user_config.attention.clone(),

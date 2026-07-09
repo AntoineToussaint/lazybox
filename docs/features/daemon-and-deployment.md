@@ -262,7 +262,7 @@ Top-level keys (`crates/config/src/lib.rs`):
 | `slack` | `bot_token`, `app_token`, `anchor_channel`, `channel_prefix`, `per_workspace_channels` |
 | `agent` | `autonomous_skip_permissions`, `skip_permissions`, nested agent config |
 | `agent_shortcuts` | Single-char keys → agent ids |
-| `attention` | Which signals flag a row: `unread`, `ci_failing`, `review_pending`, `agent_asking`, `mentioned`, `desktop_notify` |
+| `attention` | Which signals flag a row: `unread`, `ci_failing`, `review_pending`, `agent_asking`, `mentioned`, `desktop_notify`, `notifier` (`auto` \| `osc` \| `subprocess` banner delivery) |
 | `ui` | View/behavior: `auto_mark_delay`, `quit_double_tap_window`, `terminal_escape_char`, `split_step_percent`, `task_body_max_rows`, `short_snooze`, `long_snooze`, `action_keys`, `tour_seen` |
 | `display`, `shell`, `hooks`, `terminal`, `mention`, `auto_fix` | Display merging, shell, agent hooks, terminal, mention routing, auto-fix triggers |
 

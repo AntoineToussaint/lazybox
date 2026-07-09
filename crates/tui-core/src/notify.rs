@@ -26,7 +26,17 @@
 //! Inside tmux the sequence is wrapped in a passthrough envelope so
 //! it reaches the outer terminal — tmux must have `allow-passthrough`
 //! enabled (the default since tmux 3.3a).
+//!
+//! Sequences are never written to stdout at the point of the
+//! triggering event. The render loop flushes ratatui frames to the
+//! same fd, and an escape sequence landing mid-frame (or a frame
+//! flush splitting the escape) reaches the terminal malformed: the
+//! payload paints as literal text on screen and the banner is lost
+//! (issue #296). Instead [`queue_osc_notification`] parks the built
+//! sequence and the TUI run loop writes it *between* frames, on the
+//! render thread, via [`flush_pending_osc`].
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Which OSC notification dialect the controlling terminal speaks.
@@ -114,13 +124,44 @@ pub fn osc_sequence(notifier: OscNotifier, title: &str, body: &str, in_tmux: boo
     if in_tmux { wrap_tmux(&seq) } else { seq }
 }
 
-/// Emit a notification to stdout for the given dialect. Best-effort —
-/// a closed or redirected stdout simply drops it.
-pub fn emit_osc_notification(notifier: OscNotifier, title: &str, body: &str) {
+/// OSC sequences queued by [`queue_osc_notification`], awaiting the
+/// run loop's between-frames [`flush_pending_osc`].
+static PENDING_OSC: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Queue a notification for the given dialect. The sequence is built
+/// here (tmux-wrapped when `$TMUX` is set) but written to stdout only
+/// by [`flush_pending_osc`], between frames on the render thread —
+/// writing from the point of the triggering event could interleave
+/// the escape bytes with a ratatui frame flush.
+pub fn queue_osc_notification(notifier: OscNotifier, title: &str, body: &str) {
     let seq = osc_sequence(notifier, title, body, std::env::var_os("TMUX").is_some());
+    if let Ok(mut pending) = PENDING_OSC.lock() {
+        pending.push(seq);
+    }
+}
+
+/// Drain the queued sequences in FIFO order.
+pub fn take_pending_osc() -> Vec<String> {
+    PENDING_OSC
+        .lock()
+        .map(|mut pending| std::mem::take(&mut *pending))
+        .unwrap_or_default()
+}
+
+/// Write queued sequences to stdout. Called by the TUI run loop after
+/// the render step, so the escape bytes are serialized with frame
+/// output on the same thread. Best-effort — a closed or redirected
+/// stdout simply drops them.
+pub fn flush_pending_osc() {
+    let pending = take_pending_osc();
+    if pending.is_empty() {
+        return;
+    }
     use std::io::Write;
     let mut out = std::io::stdout();
-    let _ = out.write_all(seq.as_bytes());
+    for seq in &pending {
+        let _ = out.write_all(seq.as_bytes());
+    }
     let _ = out.flush();
 }
 
@@ -231,6 +272,23 @@ mod tests {
                 assert!(seq.ends_with("\x1b\\"), "must be ST-terminated: {seq:?}");
             }
         }
+    }
+
+    #[test]
+    fn queued_notifications_drain_in_order() {
+        // Regression for issue #296: notifications must be parked for
+        // the render thread, not written to stdout at the point of the
+        // triggering event, or the escape bytes can interleave with a
+        // frame flush and paint as literal junk. Content assertions
+        // use `contains` because the built sequence is tmux-wrapped
+        // when the test itself runs under tmux.
+        queue_osc_notification(OscNotifier::Osc777, "First", "one");
+        queue_osc_notification(OscNotifier::Osc9, "Second", "two");
+        let drained = take_pending_osc();
+        assert_eq!(drained.len(), 2);
+        assert!(drained[0].contains("777;notify;First;one"));
+        assert!(drained[1].contains("9;Second — two"));
+        assert!(take_pending_osc().is_empty(), "drain must empty the queue");
     }
 
     #[test]

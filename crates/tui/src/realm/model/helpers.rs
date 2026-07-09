@@ -1151,6 +1151,14 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         }
         redraw_is_input = false;
 
+        // Emit any OSC desktop notifications queued during this
+        // iteration's drain. Here — after the frame flush, on the
+        // render thread — is the one point where the escape bytes
+        // can't interleave with a half-written ratatui frame, which
+        // would paint the payload as literal text and lose the
+        // banner (#296).
+        crate::notify::flush_pending_osc();
+
         // 5. Block on the unified wait. One input event per
         // iteration, render between events — the "drain all then
         // render once" pattern looked good on paper (fewer renders

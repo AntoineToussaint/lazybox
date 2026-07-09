@@ -51,11 +51,13 @@ pub(crate) const WORKING_HYSTERESIS: Duration = Duration::from_secs(5);
 pub struct Reading {
     /// The state this reading implies.
     pub state: AgentState,
-    /// Whether the detector is *affirmatively* sure — a live `Working`
-    /// status line, or an idle composer the readiness probe recognized — as
-    /// opposed to the ambiguous fall-through a dropped status-line frame
-    /// produces. A clear reading is honored immediately; an ambiguous one is
-    /// damped within the hysteresis window.
+    /// Whether the detector is *affirmatively* sure. The daemon's quiet
+    /// classification — the resting screen read after seconds of PTY
+    /// silence — is clear and honored immediately; the per-chunk
+    /// byte-flow `Working` reading is inferred, not affirmed, so it
+    /// arrives ambiguous and is damped within the hysteresis window
+    /// when it would exit `InputNeeded` (a brief repaint burst at a
+    /// parked prompt must not flap the `?` off).
     pub clear: bool,
 }
 

@@ -538,6 +538,9 @@ impl<T: TerminalAdapter> Model<T> {
                 // happen?"
                 self.pending_refresh_ack = true;
             }
+            Action::ForceRedraw => {
+                self.force_full_redraw();
+            }
             Action::OpenHelp => {
                 self.mount_help();
             }

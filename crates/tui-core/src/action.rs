@@ -161,6 +161,10 @@ pub enum Action {
     CyclePane,
     /// Force a fresh poll of every provider (Shift+R / g).
     Refresh,
+    /// Clear the host terminal and repaint the whole UI from scratch
+    /// (Ctrl-L). Recovery hatch for a screen left stale or garbled by
+    /// something no event reports — e.g. display sleep/wake.
+    ForceRedraw,
     /// Open the `?` help modal.
     OpenHelp,
     /// Launch the in-app feature tour / guided walkthrough.
@@ -302,6 +306,7 @@ pub enum ActionKind {
     // Global
     CyclePane,
     Refresh,
+    ForceRedraw,
     OpenHelp,
     OpenTour,
     OpenSyncStatus,
@@ -398,6 +403,7 @@ impl Action {
             Action::UndoMarkRead => ActionKind::UndoMarkRead,
             Action::CyclePane => ActionKind::CyclePane,
             Action::Refresh => ActionKind::Refresh,
+            Action::ForceRedraw => ActionKind::ForceRedraw,
             Action::OpenHelp => ActionKind::OpenHelp,
             Action::OpenTour => ActionKind::OpenTour,
             Action::OpenSyncStatus => ActionKind::OpenSyncStatus,
@@ -450,6 +456,13 @@ impl ActionDef {
                 default_keys: "Shift-R",
                 label: "refresh",
                 describe: "Re-poll every provider for fresh tasks.",
+                section: Section::Global,
+            },
+            ActionKind::ForceRedraw => &Self {
+                kind: ActionKind::ForceRedraw,
+                default_keys: "Ctrl-l",
+                label: "redraw",
+                describe: "Clear the terminal and repaint the whole UI from scratch. Use when the screen looks stale or garbled after a resize, fullscreen toggle, or display sleep/wake.",
                 section: Section::Global,
             },
             ActionKind::OpenHelp => &Self {
@@ -844,6 +857,7 @@ impl ActionDef {
             // Global
             ActionKind::CyclePane,
             ActionKind::Refresh,
+            ActionKind::ForceRedraw,
             ActionKind::OpenSettings,
             ActionKind::OpenThemePicker,
             ActionKind::OpenSnippets,
@@ -1366,6 +1380,7 @@ impl ActionKind {
             ActionKind::UndoMarkRead => "undo_mark_read",
             ActionKind::CyclePane => "cycle_pane",
             ActionKind::Refresh => "refresh",
+            ActionKind::ForceRedraw => "force_redraw",
             ActionKind::OpenHelp => "open_help",
             ActionKind::OpenTour => "open_tour",
             ActionKind::OpenSyncStatus => "open_sync_status",
@@ -1803,6 +1818,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::StartAgent
         | ActionKind::CyclePane
         | ActionKind::Refresh
+        | ActionKind::ForceRedraw
         | ActionKind::OpenHelp
         | ActionKind::OpenTour
         | ActionKind::OpenSyncStatus

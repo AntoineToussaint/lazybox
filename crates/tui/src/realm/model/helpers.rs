@@ -1351,17 +1351,30 @@ fn dispatch_event<T: TerminalAdapter>(model: &mut Model<T>, event: crossterm::ev
                 model.forward_modal_event(RealmEvent::Paste(text));
             }
         }
+        // The host terminal changed size (SIGWINCH). Ratatui's draw
+        // autoresizes its buffers to the backend, but only a draw
+        // does that — and nothing else guarantees one here, so an
+        // unhandled resize left the UI painted for the old size until
+        // some unrelated event forced a frame. Full clear + repaint:
+        // the clear also covers the size-unchanged reports some
+        // terminals emit on fullscreen toggles, where a plain redraw
+        // would diff to nothing against a screen the host rebuilt.
+        crossterm::event::Event::Resize(_, _) => {
+            model.force_full_redraw();
+        }
         // Terminal focus changed (DEC mode 1004). Recorded process-
         // globally so `platform::notify_user` can suppress banners
-        // while lazybox is the focused window. No redraw — purely a
-        // notification-gating signal.
+        // while lazybox is the focused window. Regaining focus also
+        // repaints from scratch: display sleep/wake and window
+        // restores can wipe the host's screen without any resize
+        // event, and this is the first signal we get afterwards.
         crossterm::event::Event::FocusGained => {
             crate::notify::set_terminal_focus(true);
+            model.force_full_redraw();
         }
         crossterm::event::Event::FocusLost => {
             crate::notify::set_terminal_focus(false);
         }
-        _ => {}
     }
 }
 
@@ -1468,6 +1481,60 @@ pub(super) fn base64_encode(bytes: &[u8]) -> String {
         out.push('=');
     }
     out
+}
+
+#[cfg(test)]
+mod host_event_redraw_tests {
+    //! The host-terminal events that must repaint the UI (issue #285).
+    //! A resize (SIGWINCH) or a focus regain after display sleep/wake
+    //! used to fall through `dispatch_event` without setting the
+    //! redraw flag, so the screen stayed painted for the old size /
+    //! stale content until an unrelated event forced a frame.
+    use super::{Model, dispatch_event};
+    use lazybox_ipc::channel;
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    #[test]
+    fn resize_event_forces_redraw() {
+        let mut m = build_model();
+        m.redraw = false;
+        dispatch_event(&mut m, crossterm::event::Event::Resize(200, 60));
+        assert!(m.redraw, "a terminal resize must schedule a repaint");
+    }
+
+    #[test]
+    fn focus_gained_forces_redraw() {
+        let mut m = build_model();
+        m.redraw = false;
+        dispatch_event(&mut m, crossterm::event::Event::FocusGained);
+        assert!(
+            m.redraw,
+            "regaining focus (e.g. after display sleep/wake) must repaint"
+        );
+    }
+
+    #[test]
+    fn focus_lost_does_not_redraw() {
+        let mut m = build_model();
+        m.redraw = false;
+        dispatch_event(&mut m, crossterm::event::Event::FocusLost);
+        assert!(!m.redraw, "losing focus needs no repaint");
+    }
+
+    /// The catalog's manual escape hatch (`Ctrl-l`) goes through the
+    /// same full-repaint path as the host events.
+    #[test]
+    fn force_redraw_action_repaints() {
+        let mut m = build_model();
+        m.redraw = false;
+        m.dispatch_action_unchecked(&lazybox_tui_core::action::Action::ForceRedraw);
+        assert!(m.redraw, "the redraw action must schedule a repaint");
+    }
 }
 
 #[cfg(test)]

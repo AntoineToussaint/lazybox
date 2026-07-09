@@ -1441,6 +1441,29 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
+    /// Clear the host terminal and schedule a repaint of every cell —
+    /// the recovery for a resize, fullscreen toggle, or display
+    /// sleep/wake that left the real screen out of sync with ratatui's
+    /// idea of it.
+    ///
+    /// Deliberately NOT `Terminal::clear()` / `clear_screen()`: those
+    /// snapshot the cursor with a `CSI 6 n` query, and the reply is
+    /// consumed by the dedicated input-reader thread parked inside
+    /// `crossterm::event::read()` (which also holds crossterm's
+    /// internal reader lock), so the query stalls the UI thread for
+    /// its full 2 s timeout. The backend `clear` is a plain escape
+    /// write; the double `swap_buffers` resets both diff buffers so
+    /// the next draw rewrites every cell instead of diffing against a
+    /// frame the host is no longer showing.
+    pub fn force_full_redraw(&mut self) {
+        use tuirealm::ratatui::backend::Backend as _;
+        let raw = self.terminal.raw_mut();
+        let _ = raw.backend_mut().clear();
+        raw.swap_buffers();
+        raw.swap_buffers();
+        self.redraw = true;
+    }
+
     /// Apply catalog-driven action key overrides (`ui.action_keys`).
     /// Map of snake_case `ActionKind` names → key-spec strings;
     /// catalog lookups in `find_action_for_chord` consult this map

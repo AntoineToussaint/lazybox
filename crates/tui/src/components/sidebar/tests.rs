@@ -1744,6 +1744,44 @@ mod done_alert_tests {
         assert!(!sb.agents_done.contains(&key));
         assert!(sb.agents_working.contains(&key));
     }
+
+    /// Footer notices must never carry the raw workspace name —
+    /// issue/PR workspaces are named after their full issue title,
+    /// which displaces the footer's shortcut hints (#291). Both the
+    /// asking and done notices cap it to a short slug.
+    #[test]
+    fn agent_notices_truncate_long_workspace_names() {
+        let long = "Footer notices (workspace/issue titles) hide the shortcut \
+                    hints — hints must always stay visible";
+        let (mut sb, key) = sidebar_with_one_workspace();
+        sb.workspaces.get_mut(&key).unwrap().name = long.into();
+
+        sb.on_event(&agent_state(&key, AgentState::InputNeeded));
+        let asking = sb.drain_pending_asking_notices();
+        assert_eq!(asking.len(), 1);
+        assert!(!asking[0].contains(long), "raw title leaked: {}", asking[0]);
+        assert!(asking[0].contains('…'), "cut must be visible");
+        assert!(asking[0].ends_with("needs input — press ! to jump"));
+
+        sb.on_event(&agent_state(&key, AgentState::Done));
+        let done = sb.drain_pending_asking_notices();
+        assert_eq!(done.len(), 1);
+        assert!(!done[0].contains(long), "raw title leaked: {}", done[0]);
+        assert!(done[0].ends_with("finished"));
+    }
+
+    /// Short names pass through untouched — the slug cap only bites
+    /// on title-length names.
+    #[test]
+    fn agent_notices_keep_short_workspace_names_intact() {
+        let (mut sb, key) = sidebar_with_one_workspace();
+        sb.on_event(&agent_state(&key, AgentState::InputNeeded));
+        let asking = sb.drain_pending_asking_notices();
+        assert_eq!(
+            asking,
+            vec!["Ship it needs input — press ! to jump".to_string()]
+        );
+    }
 }
 
 #[cfg(test)]

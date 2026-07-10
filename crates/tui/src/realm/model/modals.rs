@@ -698,8 +698,11 @@ impl<T: TerminalAdapter> Model<T> {
         // "Archive the focused workspace"). Catalog default is the
         // safety net when no override is available.
         let def = ActionDef::for_action(&action);
-        let prompt: String = override_prompt
-            .unwrap_or_else(|| def.confirm_prompt().unwrap_or("Confirm action?").to_string());
+        let prompt: String = override_prompt.unwrap_or_else(|| {
+            def.confirm_prompt()
+                .unwrap_or("Confirm action?")
+                .to_string()
+        });
         // Each destructive action declares its own Enter default in the
         // catalog (next to its prompt) instead of inheriting a blanket
         // No — `confirm_default_yes` carries it here. Fall back to No for

@@ -191,6 +191,10 @@ pub enum Id {
     /// scrollable view of recent provider-sync outcomes built from
     /// `self.status.sync`. No pending state — dismiss just pops it.
     SyncStatus,
+    /// Notices log window (default `Shift-M`, #309). Scrollable view of
+    /// recent footer notices built from `self.status.messages`; `c`
+    /// clears the log, any other non-scroll key dismisses.
+    Messages,
     /// Spinner + step checklist shown while a first spawn on a fresh
     /// workspace provisions its worktree. Mounted on the first
     /// `WorktreeProgress` daemon event (so an instant resume never
@@ -245,6 +249,7 @@ impl Id {
             self,
             Id::WorktreeProgress
                 | Id::SyncStatus
+                | Id::Messages
                 | Id::Help
                 | Id::SnippetPicker
                 | Id::SnippetBrowser
@@ -341,6 +346,9 @@ pub enum Msg {
     PollingTimeout,
     PollingEmptyInbox(Vec<String>),
     ModalDismissed,
+    /// `c` pressed in the messages window (#309) — wipe the notice
+    /// history and re-render the (now empty) window.
+    MessagesCleared,
     /// Sidebar / Right / Terminals routes — kept in case a future
     /// pane goes through tuirealm. Today panes drain themselves
     /// directly inside the orchestrator's pane-dispatch path.
@@ -1909,11 +1917,20 @@ impl<T: TerminalAdapter> Model<T> {
         msg: impl Into<String>,
         severity: crate::realm::components::footer::NoticeSeverity,
     ) {
-        use crate::realm::components::footer::Notice;
+        use crate::realm::components::footer::{Notice, NoticeSeverity};
+        let msg = msg.into();
         // Any fresh notice supersedes a sync-error banner, so the
         // "clear on recovery" tag only stays armed while the
         // sync-error notice is the one actually on screen.
         self.sync_error_source = None;
+        // Every notice flashes in the footer AND accumulates in the
+        // durable messages log (#309) — except one-shot Hints, which
+        // are ephemeral UI nudges (`scroll: alt-screen`) that would
+        // only clutter the readable history. Record before the string
+        // is moved into the Notice.
+        if severity != NoticeSeverity::Hint {
+            self.status.messages.record(&msg, severity);
+        }
         self.status.notice = Some(Notice::new(msg, severity));
         self.redraw = true;
     }
@@ -2870,6 +2887,17 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::ModalDismissed => {
                 let cmds = self.handle_modal_dismissed();
                 self.dispatch_cmds(cmds);
+            }
+            Msg::MessagesCleared => {
+                // Wipe the durable history and re-render the window
+                // against the now-empty log (it stays open showing the
+                // placeholder). `mount_messages` short-circuits if the
+                // window is already up, so drop it first.
+                self.status.messages.clear();
+                if self.modal_stack.last() == Some(&Id::Messages) {
+                    self.pop_modal();
+                }
+                self.mount_messages();
             }
             Msg::OpenSnippetsFile => {
                 // `e` in the browser: drop the modal, then open the YAML

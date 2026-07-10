@@ -631,6 +631,20 @@ impl<T: TerminalAdapter> Model<T> {
         );
     }
 
+    /// Build + mount the notices-log window from the current
+    /// `MessageLog` snapshot (#309). Idempotent: re-pressing the key
+    /// while it's up is a no-op. Re-mounting after a `c` clear is
+    /// intentional — it rebuilds the window against the now-empty log.
+    pub(super) fn mount_messages(&mut self) {
+        use crate::realm::components::messages::Messages;
+
+        if self.modal_stack.last() == Some(&Id::Messages) {
+            return;
+        }
+        let entries: Vec<_> = self.status.messages.recent().cloned().collect();
+        self.mount_modal(Id::Messages, Messages::new(entries, chrono::Utc::now()));
+    }
+
     /// If there's a queued workspace-removal prompt and no modal is
     /// currently up, mount it. Copy depends on the prompt's
     /// [`RemovalReason`]; the user's answer (Y → remove, N → keep +

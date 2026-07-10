@@ -7069,3 +7069,139 @@ mod flash_log_tests {
         assert_eq!(m.sync_error_source.as_deref(), Some("github"));
     }
 }
+
+#[cfg(test)]
+mod dismiss_and_messages_tests {
+    //! #309: every footer notice is dismissable with one key (Esc, the
+    //! catalog `DismissNotice` binding) regardless of severity, and
+    //! every non-hint notice also accumulates in a durable, clearable
+    //! messages log surfaced by the `Shift-M` window. Severity still
+    //! only decides auto-fade, never dismissability.
+    use super::super::{Id, Model, Msg};
+    use crate::realm::components::footer::NoticeSeverity;
+    use chrono::Utc;
+    use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn key(code: Key) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Every notice flashed accumulates in the messages log — except
+    /// one-shot Hints, which are ephemeral UI nudges that would only
+    /// clutter the readable history.
+    #[test]
+    fn flash_records_notices_in_the_log_except_hints() {
+        let mut m = build_model();
+        m.flash_info("saved");
+        m.flash_error("boom");
+        m.flash_hint("scroll: alt-screen");
+
+        let logged: Vec<_> = m.status.messages.recent().collect();
+        // Most-recent-first, hint excluded.
+        assert_eq!(logged.len(), 2, "hint must not be logged: {logged:?}");
+        assert_eq!(logged[0].message, "boom");
+        assert_eq!(logged[0].severity, NoticeSeverity::Permanent);
+        assert_eq!(logged[1].message, "saved");
+        assert_eq!(logged[1].severity, NoticeSeverity::Info);
+    }
+
+    /// Esc clears the current notice whatever its severity — the whole
+    /// point of #309. A sticky Permanent error (which never auto-fades)
+    /// is the case that motivated it.
+    #[test]
+    fn esc_dismisses_a_sticky_notice() {
+        let mut m = build_model();
+        m.flash_error("scary red error");
+        assert!(m.status.notice.is_some());
+
+        m.dispatch_key(key(Key::Esc));
+        assert!(m.status.notice.is_none(), "Esc must clear the sticky notice");
+        // Dismissing the footer surface leaves the durable log intact.
+        assert_eq!(m.status.messages.recent().count(), 1, "log survives dismiss");
+    }
+
+    /// With a quiet footer, Esc keeps its normal (no-op here) meaning —
+    /// the dismiss path is gated on a notice actually being up.
+    #[test]
+    fn esc_is_inert_when_no_notice_is_up() {
+        let mut m = build_model();
+        assert!(m.status.notice.is_none());
+        m.dispatch_key(key(Key::Esc));
+        assert!(m.status.notice.is_none());
+    }
+
+    /// The collision the guard defends against: with a sidebar
+    /// multi-select up, Esc drops the selection FIRST (its established
+    /// meaning) and leaves the notice — a second Esc then clears the
+    /// notice. Dismiss must never silently eat the pane's own Esc.
+    #[test]
+    fn esc_yields_to_a_sidebar_multi_select() {
+        let mut m = build_model();
+        let ws = Workspace::empty(WorkspaceKey::new("local:scratch"), "main", Utc::now());
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+        assert_eq!(m.sidebar.toggle_broadcast_select(), Some(true));
+        assert_eq!(m.sidebar.broadcast_selected_count(), 1);
+
+        m.flash_error("boom");
+        // First Esc: the sidebar consumes it to clear the selection; the
+        // notice stays.
+        m.dispatch_key(key(Key::Esc));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "Esc must clear the multi-select before touching the notice",
+        );
+        assert!(m.status.notice.is_some(), "notice survives the first Esc");
+        // Second Esc: nothing else claims it now, so the notice clears.
+        m.dispatch_key(key(Key::Esc));
+        assert!(m.status.notice.is_none(), "second Esc clears the notice");
+    }
+
+    /// `Shift-M` opens the messages window (catalog → dispatch → mount),
+    /// populated from the logged notices.
+    #[test]
+    fn shift_m_opens_the_messages_window() {
+        let mut m = build_model();
+        m.flash_error("boom");
+        assert!(m.top_modal().is_none(), "no modal before Shift-M");
+
+        m.dispatch_key(KeyEvent::new(Key::Char('M'), KeyModifiers::SHIFT));
+        assert_eq!(m.top_modal(), Some(&Id::Messages));
+
+        // A non-navigation, non-`c` key pops it back off.
+        m.dispatch_modal_key(key(Key::Esc));
+        assert!(m.top_modal().is_none(), "Esc closes the messages window");
+    }
+
+    /// `c` in the window wipes the durable log and leaves the window up,
+    /// now showing the empty placeholder.
+    #[test]
+    fn c_clears_the_log_and_keeps_the_window_open() {
+        let mut m = build_model();
+        m.flash_error("boom");
+        m.mount_messages();
+        assert_eq!(m.top_modal(), Some(&Id::Messages));
+
+        m.update(Msg::MessagesCleared);
+        assert_eq!(
+            m.status.messages.recent().count(),
+            0,
+            "the log is wiped",
+        );
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Messages),
+            "the window stays up on the empty placeholder",
+        );
+    }
+}

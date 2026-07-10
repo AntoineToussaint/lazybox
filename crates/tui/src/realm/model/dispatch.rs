@@ -550,6 +550,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenSyncStatus => {
                 self.mount_sync_status();
             }
+            Action::OpenMessages => {
+                self.mount_messages();
+            }
             Action::OpenSettings => {
                 self.open_settings();
             }

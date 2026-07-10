@@ -388,6 +388,27 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return cmds;
         }
+        // Default-agent picker — pick → persist `setup.default_agent`
+        // and update both panes live (no restart). Empty / Esc drops
+        // the stash without changing anything.
+        if matches!(self.modal_stack.last(), Some(Id::DefaultAgentPicker)) {
+            let agent = picks
+                .first()
+                .and_then(|i| self.default_agent_choices.get(*i).cloned());
+            self.default_agent_choices.clear();
+            self.pop_modal();
+            if let Some(agent) = agent {
+                self.set_default_agent(&agent);
+                match lazybox_config::Config::save_with(|c| {
+                    c.setup.default_agent = Some(agent.clone());
+                }) {
+                    Ok(()) => self.flash_info(format!("default agent: {agent}")),
+                    Err(e) => self.flash_info(format!("couldn't save config: {e}")),
+                }
+                self.redraw = true;
+            }
+            return cmds;
+        }
         // Sidebar right-click context menu. Pick → route through
         // `dispatch_action`, the same single fan-out the keyboard
         // shortcut uses. That keeps the destructive gate intact:
@@ -779,6 +800,9 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 self.theme_choices.clear();
                 self.redraw = true;
+            }
+            Some(Id::DefaultAgentPicker) => {
+                self.default_agent_choices.clear();
             }
             _ => {}
         }

@@ -200,6 +200,12 @@ impl Sidebar {
         self.inner.default_agent()
     }
 
+    /// Live-update the default agent (Settings → "Change default
+    /// agent"). Delegates to the inner pane.
+    pub fn set_default_agent(&mut self, agent: impl Into<String>) {
+        self.inner.set_default_agent(agent);
+    }
+
     /// Agent `w` should target on `workspace_key`: an agent already
     /// running there (so `w` injects into it) wins over `default_agent`.
     /// See [`crate::components::sidebar::Sidebar::work_target_agent`].

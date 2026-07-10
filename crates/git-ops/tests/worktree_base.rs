@@ -6,10 +6,35 @@
 //! (offline / auth) the call must still succeed against the local
 //! ref rather than blocking.
 
-use lazybox_git_ops::WorktreeManager;
+use lazybox_git_ops::{CheckoutPhase, WorktreeManager};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
+
+/// A progress sink that records every reported [`CheckoutPhase`] so a
+/// test can assert on the boundaries the manager emitted (e.g. that a
+/// degraded fetch surfaced a `BaseRefStale`).
+fn recording_sink() -> (
+    Arc<Mutex<Vec<CheckoutPhase>>>,
+    Arc<dyn Fn(CheckoutPhase) + Send + Sync>,
+) {
+    let seen: Arc<Mutex<Vec<CheckoutPhase>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = {
+        let seen = Arc::clone(&seen);
+        Arc::new(move |phase: CheckoutPhase| seen.lock().unwrap().push(phase))
+            as Arc<dyn Fn(CheckoutPhase) + Send + Sync>
+    };
+    (seen, sink)
+}
+
+/// The `BaseRefStale` note, if the sink recorded one.
+fn stale_note(seen: &Arc<Mutex<Vec<CheckoutPhase>>>) -> Option<String> {
+    seen.lock().unwrap().iter().find_map(|p| match p {
+        CheckoutPhase::BaseRefStale(note) => Some(note.clone()),
+        _ => None,
+    })
+}
 
 /// Build a Command for git in `cwd`, with GIT_DIR / GIT_WORK_TREE
 /// scrubbed. `cargo test` inherits env vars from the surrounding
@@ -214,4 +239,76 @@ async fn respects_configured_base_branch() {
     );
 
     drop(upstream);
+}
+
+#[tokio::test]
+async fn new_branch_surfaces_stale_base_when_fetch_fails() {
+    let (upstream, base, bare) = setup("acme", "stale");
+
+    let initial = git_out(upstream.path(), &["rev-parse", "HEAD"]);
+    let short = git_out(upstream.path(), &["rev-parse", "--short", "HEAD"]);
+    // Offline / unreachable origin: the fetch will fail and the checkout
+    // falls back to the bare clone's local main.
+    drop(upstream);
+
+    let (seen, sink) = recording_sink();
+    let wm = WorktreeManager::new(base.path().to_path_buf()).with_progress(sink);
+    let wt_path = base.path().join("stale-wt");
+    let wt = wm
+        .checkout_new_branch_at(&wt_path, "acme", "stale", "feature/z", "main")
+        .await
+        .expect("checkout still succeeds offline");
+
+    // Still branched off the local ref (creation must not block on the
+    // network) …
+    assert_eq!(git_out(&wt.path, &["rev-parse", "HEAD"]), initial);
+    assert_eq!(bare_ref(&bare, "refs/heads/main"), initial);
+
+    // … but the degradation is surfaced, not silent: a stale-base note
+    // naming the branch and the fallback commit.
+    let note = stale_note(&seen).expect("BaseRefStale reported on fetch failure");
+    assert!(note.contains("could not refresh main"), "note: {note}");
+    assert!(note.contains(&short), "note names the fallback sha: {note}");
+}
+
+#[tokio::test]
+async fn new_branch_reports_no_stale_note_when_fetch_succeeds() {
+    let (upstream, base, _bare) = setup("acme", "fresh");
+
+    let (seen, sink) = recording_sink();
+    let wm = WorktreeManager::new(base.path().to_path_buf()).with_progress(sink);
+    let wt_path = base.path().join("fresh-wt");
+    wm.checkout_new_branch_at(&wt_path, "acme", "fresh", "feature/ok", "main")
+        .await
+        .expect("checkout_new_branch_at");
+
+    assert!(
+        stale_note(&seen).is_none(),
+        "a healthy fetch must not report a stale base"
+    );
+
+    drop(upstream);
+}
+
+#[tokio::test]
+async fn checkout_existing_branch_surfaces_stale_base_when_fetch_fails() {
+    // The same treatment for `checkout_at` when attaching to an existing
+    // branch (issue #320): an offline fetch must still surface the
+    // stale-ref note rather than only logging it.
+    let (upstream, base, _bare) = setup("acme", "attach");
+    let short = git_out(upstream.path(), &["rev-parse", "--short", "HEAD"]);
+    drop(upstream);
+
+    let (seen, sink) = recording_sink();
+    let wm = WorktreeManager::new(base.path().to_path_buf()).with_progress(sink);
+    let wt_path = base.path().join("attach-wt");
+    let wt = wm
+        .checkout_at(&wt_path, "acme", "attach", "main")
+        .await
+        .expect("checkout_at succeeds offline against the local ref");
+    assert_eq!(wt.branch, "main");
+
+    let note = stale_note(&seen).expect("BaseRefStale reported for checkout_at");
+    assert!(note.contains("could not refresh main"), "note: {note}");
+    assert!(note.contains(&short), "note names the fallback sha: {note}");
 }

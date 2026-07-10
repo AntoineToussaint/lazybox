@@ -680,18 +680,32 @@ impl<T: TerminalAdapter> Model<T> {
         let mut cmds = Vec::new();
         match top {
             Some(Id::RemoveOutOfScope) => {
-                if let Some((workspace_key, reason)) = self.active_removal_prompt.take()
-                    && yes
-                {
+                if let Some((workspace_key, reason)) = self.active_removal_prompt.take() {
                     let session_key: lazybox_core::SessionKey = (&workspace_key).into();
-                    // Out-of-scope: drop the row + kill terminals (worktree
-                    // left on disk). Merged/Closed: also delete the worktree.
-                    cmds.push(match reason {
-                        super::RemovalReason::OutOfScope => IpcCommand::Kill { session_key },
-                        super::RemovalReason::Merged | super::RemovalReason::Closed => {
-                            IpcCommand::RemoveMergedWorkspace { session_key }
+                    match (yes, reason) {
+                        // Out-of-scope: drop the row + kill terminals
+                        // (worktree left on disk).
+                        (true, super::RemovalReason::OutOfScope) => {
+                            cmds.push(IpcCommand::Kill { session_key });
                         }
-                    });
+                        // Merged/Closed: also delete the worktree.
+                        (true, super::RemovalReason::Merged | super::RemovalReason::Closed) => {
+                            cmds.push(IpcCommand::RemoveMergedWorkspace { session_key });
+                        }
+                        // Explicit "no" on the merged/closed prompt is a
+                        // decision the daemon must hear: it pins the
+                        // workspace in `removal_prompts.kept` so the
+                        // level-triggered re-emit stops asking. (Esc
+                        // routes through `handle_modal_dismissed`
+                        // instead and stays silent — the daemon
+                        // re-prompts after its reprompt interval.)
+                        (false, super::RemovalReason::Merged | super::RemovalReason::Closed) => {
+                            cmds.push(IpcCommand::KeepMergedWorkspace { session_key });
+                        }
+                        // Out-of-scope "no" has nothing to tell the
+                        // daemon — its own prompt memory dedupes.
+                        (false, super::RemovalReason::OutOfScope) => {}
+                    }
                 }
             }
             Some(Id::MergeConfirm) => {

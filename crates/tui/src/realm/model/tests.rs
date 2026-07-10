@@ -466,8 +466,9 @@ mod effects_tests {
 
     /// A `MergedPrRemovable` event mounts the removal confirm (reason
     /// `Merged`), and a re-emit for the same workspace doesn't stack a
-    /// second prompt — the daemon's one-shot transition plus this
-    /// dedupe keep it to a single ask.
+    /// second prompt — the daemon's level-triggered re-emits (#292)
+    /// rely on this dedupe to keep an unanswered prompt to a single
+    /// visible ask.
     #[test]
     fn merged_pr_removable_mounts_confirm_and_dedupes() {
         use lazybox_ipc::Event as IpcEvent;
@@ -491,6 +492,88 @@ mod effects_tests {
             m.pending_removal_prompts.is_empty(),
             "re-emit must not stack a second prompt"
         );
+    }
+
+    /// Regression for #292: two PRs merging in the same poll produce
+    /// two `MergedPrRemovable` events → two modals, one after the
+    /// other. The second queues behind the first and mounts as soon as
+    /// the first is answered.
+    #[test]
+    fn two_merged_pr_removable_events_serialize_into_two_modals() {
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        let ev = |n: u64| IpcEvent::MergedPrRemovable {
+            workspace_key: WorkspaceKey::new(format!("github:o/r#{n}")),
+            label: format!("o/r#{n}"),
+            terminal_state: lazybox_ipc::RemovableTerminalState::Merged,
+            active_terminal_count: 0,
+            has_local_work: false,
+        };
+        m.handle_daemon_event(ev(1));
+        m.handle_daemon_event(ev(2));
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+        assert_eq!(
+            m.pending_removal_prompts.len(),
+            1,
+            "second prompt must queue behind the active one"
+        );
+
+        let cmds = m.handle_confirmed(true);
+        match &cmds[..] {
+            [IpcCommand::RemoveMergedWorkspace { session_key }] => {
+                assert_eq!(session_key.as_str(), "github:o/r#1");
+            }
+            other => panic!("expected RemoveMergedWorkspace for #1, got {other:?}"),
+        }
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::RemoveOutOfScope),
+            "answering the first modal must mount the second"
+        );
+        match &m.active_removal_prompt {
+            Some((key, super::super::RemovalReason::Merged)) => {
+                assert_eq!(key.as_str(), "github:o/r#2");
+            }
+            other => panic!("expected active prompt for #2, got {other:?}"),
+        }
+    }
+
+    /// `n` on a merged/closed removal confirm tells the daemon to stop
+    /// re-prompting (`KeepMergedWorkspace`) — unlike Esc, which stays
+    /// silent so the daemon's level-triggered re-emit self-heals.
+    #[test]
+    fn confirmed_no_on_merged_removal_sends_keep() {
+        let mut m = build_model();
+        let ws_key = WorkspaceKey::new("github:o/r#1");
+        m.active_removal_prompt = Some((ws_key.clone(), super::super::RemovalReason::Merged));
+        m.modal_stack.push(Id::RemoveOutOfScope);
+        let cmds = m.handle_confirmed(false);
+        match &cmds[..] {
+            [IpcCommand::KeepMergedWorkspace { session_key }] => {
+                assert_eq!(session_key, &SessionKey::from(&ws_key));
+            }
+            other => panic!("expected KeepMergedWorkspace, got {other:?}"),
+        }
+        assert!(m.active_removal_prompt.is_none());
+    }
+
+    /// Esc on a merged removal confirm is a deferral, not an answer:
+    /// no command goes out (the daemon re-prompts after its interval)
+    /// and the slot clears so a re-emit can queue again.
+    #[test]
+    fn modal_dismissed_on_merged_removal_is_silent_deferral() {
+        let mut m = build_model();
+        m.active_removal_prompt = Some((
+            WorkspaceKey::new("github:o/r#1"),
+            super::super::RemovalReason::Merged,
+        ));
+        m.modal_stack.push(Id::RemoveOutOfScope);
+        let cmds = m.handle_modal_dismissed();
+        assert!(
+            cmds.is_empty(),
+            "Esc must NOT send KeepMergedWorkspace, got: {cmds:?}"
+        );
+        assert!(m.active_removal_prompt.is_none());
     }
 
     /// `n` on RemoveOutOfScope clears the slot without producing

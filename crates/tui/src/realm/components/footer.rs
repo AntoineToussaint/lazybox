@@ -10,7 +10,10 @@
 //!   hints (`?` help, `Shift-T` tour, `q q` quit) is appended after
 //!   it so a first-time user can always find the way out and the way
 //!   to orient (issue #100) — the rest of the keymap still lives in
-//!   the `?` help modal and the tour.
+//!   the `?` help modal and the tour. The run is measured against
+//!   the zone's width and elided by whole cells — universal tail
+//!   surviving first, then contextual hints in order — with a dim
+//!   `… +N` overflow cell instead of mid-label clipping (#303).
 //! - **Right**: background polling status — spinner + "Pulling
 //!   tasks from github · PR query: …" — OR the most recent notice /
 //!   error if one is set. Retryable hiccups auto-fade; permanent +
@@ -167,7 +170,60 @@ pub fn render(
     // re-adds the handful of shortcuts a lost first-time user needs
     // to always see — chiefly how to quit. The rest of the keymap
     // still lives in the `?` help modal + the tour.
-    let mut spans: Vec<Span> = Vec::with_capacity((keymap.len() + globals.len()) * 4 + 3);
+    //
+    // The row is measured before it renders: whole hint cells are
+    // elided when the budget runs out, never clipped mid-label
+    // (#303). Survival priority is the reverse of render order —
+    // the globals tail first (rightmost = the escape hatches that
+    // exist precisely for the worst case), most-important-last
+    // within it, then contextual hints in catalog order. When
+    // anything drops, a dim `… +N` cell ends the bar so the user
+    // can tell "that's all" from "the rest fell off the edge".
+    let budget = left_rect.width as usize;
+    let cell_width = |b: &Binding| {
+        crate::util::visual_width(&compact_key(&b.keys)) + 1 + crate::util::visual_width(&b.label)
+    };
+    // "  ·  " between cells; also the contextual → globals gap width.
+    const SEP_W: usize = 5;
+    let total = keymap.len() + globals.len();
+    let mut kept_ctx = keymap.len();
+    let mut kept_glob = globals.len();
+    loop {
+        let dropped = total - kept_ctx - kept_glob;
+        let mut w = 1; // leading pad
+        if kept_ctx > 0 {
+            w += keymap[..kept_ctx].iter().map(cell_width).sum::<usize>() + SEP_W * (kept_ctx - 1);
+        }
+        if kept_glob > 0 {
+            if kept_ctx > 0 {
+                w += SEP_W;
+            }
+            w += globals[globals.len() - kept_glob..]
+                .iter()
+                .map(cell_width)
+                .sum::<usize>()
+                + SEP_W * (kept_glob - 1);
+        }
+        if dropped > 0 {
+            if kept_ctx + kept_glob > 0 {
+                w += SEP_W;
+            }
+            w += crate::util::visual_width(&format!("… +{dropped}"));
+        }
+        if w <= budget || kept_ctx + kept_glob == 0 {
+            break;
+        }
+        if kept_ctx > 0 {
+            kept_ctx -= 1;
+        } else {
+            kept_glob -= 1;
+        }
+    }
+    let dropped = total - kept_ctx - kept_glob;
+    let keymap = &keymap[..kept_ctx];
+    let globals = &globals[globals.len() - kept_glob..];
+
+    let mut spans: Vec<Span> = Vec::with_capacity((keymap.len() + globals.len()) * 4 + 5);
     spans.push(Span::styled(" ", bg));
     let key_style = Style::default()
         .bg(theme.surface)
@@ -194,6 +250,12 @@ pub fn render(
         spans.push(Span::styled(compact_key(&b.keys), key_style));
         spans.push(Span::styled(" ", bg));
         spans.push(Span::styled(b.label.clone(), label_style));
+    }
+    if dropped > 0 {
+        if !keymap.is_empty() || !globals.is_empty() {
+            spans.push(Span::styled("  ·  ", sep_style));
+        }
+        spans.push(Span::styled(format!("… +{dropped}"), label_style));
     }
     f.render_widget(Paragraph::new(Line::from(spans)).style(bg), left_rect);
 
@@ -254,7 +316,16 @@ mod tests {
         polling_status: Option<(&str, &str)>,
         notice: Option<&Notice>,
     ) -> String {
-        let w = 120u16;
+        render_row_at(120, keymap, globals, polling_status, notice)
+    }
+
+    fn render_row_at(
+        w: u16,
+        keymap: &[Binding],
+        globals: &[Binding],
+        polling_status: Option<(&str, &str)>,
+        notice: Option<&Notice>,
+    ) -> String {
         let backend = TestBackend::new(w, 1);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|f| {
@@ -276,6 +347,43 @@ mod tests {
         Binding {
             keys: Cow::Borrowed(keys),
             label: Cow::Borrowed(label),
+        }
+    }
+
+    /// A hint-rich contextual keymap like the sidebar's, with
+    /// labels whose 4-char heads appear in no other label so partial
+    /// rendering is detectable.
+    fn rich_keymap() -> Vec<Binding> {
+        vec![
+            binding("w", "work on this"),
+            binding("Enter", "open activity"),
+            binding("g m", "merge pull request"),
+            binding("Shift-V", "manage reviewers"),
+            binding("z", "snooze until later"),
+            binding("Shift-X", "delete forever"),
+            binding("/", "filter by role"),
+        ]
+    }
+
+    fn globals_tail() -> Vec<Binding> {
+        vec![
+            binding("?", "help"),
+            binding("Shift-T", "tour"),
+            binding("q q", "quit"),
+        ]
+    }
+
+    /// Every hint label must appear whole or not at all — a cell
+    /// that shows its first characters but not the rest was clipped
+    /// mid-label, exactly what measurement is supposed to prevent.
+    fn assert_no_partial_labels(row: &str, bindings: &[Binding]) {
+        for b in bindings {
+            let head: String = b.label.chars().take(4).collect();
+            assert!(
+                row.contains(b.label.as_ref()) || !row.contains(&head),
+                "label {:?} clipped mid-word in {row:?}",
+                b.label,
+            );
         }
     }
 
@@ -370,6 +478,80 @@ mod tests {
         assert!(row.contains("work on this"), "contextual hint displaced");
         assert!(row.contains("quit"), "quit label displaced");
         assert!(row.contains('…'), "long label must truncate visibly");
+    }
+
+    /// Narrow terminals elide whole hint cells by priority: the
+    /// globals tail survives (quit above all), contextual hints drop
+    /// from the end, and a `… +N` cell owns up to the hidden rest —
+    /// no hint ever clips mid-label (#303).
+    #[test]
+    fn narrow_width_elides_whole_cells_and_keeps_quit() {
+        let keymap = rich_keymap();
+        let globals = globals_tail();
+        for w in [60u16, 80, 100] {
+            let row = render_row_at(w, &keymap, &globals, None, None);
+            assert!(row.contains("q q"), "quit chord missing at {w} cols");
+            assert!(row.contains("quit"), "quit label missing at {w} cols");
+            assert_no_partial_labels(&row, &keymap);
+            assert_no_partial_labels(&row, &globals);
+            assert!(
+                row.contains("… +"),
+                "dropped cells need an overflow indicator at {w} cols: {row:?}",
+            );
+        }
+        // Sanity: at 60 cols the low-priority tail really is gone.
+        let row = render_row_at(60, &keymap, &globals, None, None);
+        assert!(!row.contains("filter by role"), "nothing elided at 60 cols");
+    }
+
+    /// At a comfortable width everything still fits — measurement
+    /// must not elide or add an indicator when there's room.
+    #[test]
+    fn wide_row_shows_everything_without_indicator() {
+        let keymap = rich_keymap();
+        let globals = globals_tail();
+        let row = render_row_at(200, &keymap, &globals, None, None);
+        for b in keymap.iter().chain(globals.iter()) {
+            assert!(row.contains(b.label.as_ref()), "{:?} missing", b.label);
+        }
+        assert!(!row.contains("… +"), "spurious overflow indicator: {row:?}");
+    }
+
+    /// For any width from the globals tail on up, the row never ends
+    /// in a partial label and always advertises `q q` quit — the
+    /// guarantee issue #100 added and unmeasured clipping silently
+    /// broke.
+    #[test]
+    fn any_width_keeps_quit_and_whole_labels() {
+        let keymap = rich_keymap();
+        let globals = globals_tail();
+        // Full globals tail: " ? help  ·  T tour  ·  q q quit" = 31.
+        for w in 31u16..=140 {
+            let row = render_row_at(w, &keymap, &globals, None, None);
+            assert!(row.contains("q q"), "quit chord missing at {w} cols");
+            assert!(row.contains("quit"), "quit label missing at {w} cols");
+            assert_no_partial_labels(&row, &keymap);
+            assert_no_partial_labels(&row, &globals);
+        }
+    }
+
+    /// Regression for the #303 worst case: a long notice shrinks the
+    /// hint zone on top of a hint-rich keymap. Hints must elide
+    /// cleanly (whole cells + indicator), not clip under the notice.
+    #[test]
+    fn long_notice_plus_rich_keymap_elides_cleanly() {
+        let keymap = rich_keymap();
+        let globals = globals_tail();
+        let notice = Notice::new("x".repeat(200), NoticeSeverity::Permanent);
+        let row = render_row_at(100, &keymap, &globals, None, Some(&notice));
+        assert!(row.contains("q q"), "quit chord displaced by notice");
+        assert!(row.contains("quit"), "quit label displaced by notice");
+        assert_no_partial_labels(&row, &keymap);
+        assert_no_partial_labels(&row, &globals);
+        assert!(
+            row.contains("… +"),
+            "dropped cells need an overflow indicator: {row:?}",
+        );
     }
 
     #[test]

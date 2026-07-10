@@ -644,6 +644,127 @@ mod effects_tests {
         );
     }
 
+    /// Read the initial Enter default of the Confirm modal mounted
+    /// under `id`. `Confirm::state()` exposes the highlighted button as
+    /// a bool so the mount site's default is assertable end-to-end.
+    fn mounted_confirm_default_yes(
+        m: &Model<tuirealm::terminal::TestTerminalAdapter>,
+        id: Id,
+    ) -> bool {
+        use tuirealm::state::{State, StateValue};
+        match m.app.state(&id).expect("confirm modal is mounted") {
+            State::Single(StateValue::Bool(b)) => b,
+            other => panic!("expected a Bool state, got {other:?}"),
+        }
+    }
+
+    /// Issue #312: the issue→PR session-merge prompt now defaults Enter
+    /// to Yes — accepting is the expected, non-destructive path (the
+    /// prompt only appears because a closing PR was detected).
+    #[test]
+    fn merge_prompt_defaults_to_yes() {
+        let mut m = build_model();
+        m.pending_merge_prompts.push_back((
+            WorkspaceKey::new("github:o/r#1"),
+            WorkspaceKey::new("github:o/r#2"),
+            "o/r#1".into(),
+            "o/r#2".into(),
+            1,
+        ));
+        m.maybe_mount_next_merge_prompt();
+        assert_eq!(m.top_modal(), Some(&Id::MergeConfirm));
+        assert!(
+            mounted_confirm_default_yes(&m, Id::MergeConfirm),
+            "issue→PR merge prompt should default to Yes",
+        );
+    }
+
+    /// Issue #312: workspace-removal deletes the worktree (no undo), so
+    /// its confirm keeps Enter on No.
+    #[test]
+    fn removal_prompt_defaults_to_no() {
+        let mut m = build_model();
+        m.pending_removal_prompts
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 0,
+                reason: super::super::RemovalReason::Merged,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
+            "removal prompt should default to No",
+        );
+    }
+
+    /// Issue #312: the clean-worktrees bulk-wipe confirm defaults No.
+    #[test]
+    fn clean_worktrees_prompt_defaults_to_no() {
+        let mut m = build_model();
+        m.mount_clean_worktrees_confirm();
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::CleanWorktreesConfirm),
+            "clean-worktrees prompt should default to No",
+        );
+    }
+
+    /// Issue #312: the inspector's delete-worktree confirm defaults No.
+    #[test]
+    fn inspect_delete_prompt_defaults_to_no() {
+        let mut m = build_model();
+        m.mount_inspect_confirm(lazybox_ipc::WorktreeInspectionDto {
+            path: std::path::PathBuf::from("/tmp/worktrees/o-r-feat"),
+            bare_path: None,
+            branch: Some("feat".into()),
+            session_id: None,
+            reasons: vec!["untracked".into()],
+            size_bytes: 0,
+            last_modified_unix: Some(0),
+            has_uncommitted_changes: false,
+            has_unpushed_commits: false,
+            is_safe_to_delete: false,
+        });
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::InspectConfirm),
+            "inspector delete prompt should default to No",
+        );
+    }
+
+    /// Issue #312: `mount_action_confirm` carries each destructive
+    /// action's declared default from the catalog — Archive defaults No
+    /// (destructive), the on-main spawn defaults Yes (explicit intent,
+    /// benign awareness gate).
+    #[test]
+    fn action_confirm_reads_catalog_default() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        m.mount_action_confirm(
+            Action::Archive,
+            super::super::ActionConfirmTarget::Workspace(SessionKey::from("github:o/r#1")),
+            None,
+        );
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::ActionConfirm),
+            "Archive confirm should default to No",
+        );
+
+        let mut m = build_model();
+        m.mount_action_confirm(
+            Action::SpawnAgentOnMain("claude".into()),
+            super::super::ActionConfirmTarget::Workspace(SessionKey::from("github:o/r#1")),
+            None,
+        );
+        assert!(
+            mounted_confirm_default_yes(&m, Id::ActionConfirm),
+            "agent-on-main confirm should default to Yes",
+        );
+    }
+
     /// Esc on a RemoveOutOfScope modal clears the slot but
     /// produces no command — there's nothing to tell the daemon;
     /// the workspace stays out of scope on its end too.

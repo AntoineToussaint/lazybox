@@ -21,7 +21,7 @@ use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::{Position, Rect};
 use tuirealm::ratatui::prelude::*;
 use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
-use tuirealm::state::State;
+use tuirealm::state::{State, StateValue};
 
 /// Y/N confirmation prompt.
 pub struct Confirm {
@@ -41,6 +41,8 @@ pub struct Confirm {
 
 impl Confirm {
     /// Build a prompt asking `question`. Defaults `Enter` to yes.
+    /// Call [`Self::default_no`] / [`Self::default_yes`] at the site to
+    /// state the default deliberately rather than leaning on this.
     pub fn new(question: impl Into<String>) -> Self {
         Self {
             question: question.into(),
@@ -51,11 +53,25 @@ impl Confirm {
         }
     }
 
-    /// Make `Enter` default to "no". Use for destructive prompts where
-    /// the safer option is to back out.
+    /// Make `Enter` default to "no". Use for destructive / hard-to-undo
+    /// prompts where the safer option is to back out.
     pub fn default_no(mut self) -> Self {
         self.selected_yes = false;
         self
+    }
+
+    /// Make `Enter` default to "yes". Use when the confirm is only an
+    /// awareness gate in front of an explicitly-requested, benign action
+    /// and accepting is the expected path.
+    pub fn default_yes(mut self) -> Self {
+        self.selected_yes = true;
+        self
+    }
+
+    /// Which button `Enter` currently fires (true = Yes). Reads the
+    /// initial default before any arrow/tab toggle.
+    pub fn selected_yes(&self) -> bool {
+        self.selected_yes
     }
 }
 
@@ -146,8 +162,11 @@ impl Component for Confirm {
         None
     }
     fn attr(&mut self, _: Attribute, _: AttrValue) {}
+    /// Expose the highlighted button so the mounting model (and its
+    /// tests) can read which side `Enter` defaults to via
+    /// `App::state`. Nothing in the render path depends on this.
     fn state(&self) -> State {
-        State::None
+        State::Single(StateValue::Bool(self.selected_yes))
     }
     fn perform(&mut self, _: Cmd) -> CmdResult {
         CmdResult::NoChange
@@ -252,6 +271,38 @@ mod tests {
             column: col,
             row,
         })
+    }
+
+    #[test]
+    fn builders_set_the_initial_default() {
+        // Issue #312: the three builder forms fix which button Enter
+        // fires before any toggle. `new` and `default_yes` highlight
+        // Yes; `default_no` highlights No.
+        assert!(Confirm::new("q").selected_yes());
+        assert!(Confirm::new("q").default_yes().selected_yes());
+        assert!(!Confirm::new("q").default_no().selected_yes());
+    }
+
+    #[test]
+    fn enter_fires_the_defaulted_side() {
+        // A default-no prompt returns `Confirmed(false)` on a bare
+        // Enter; a default-yes prompt returns `Confirmed(true)`.
+        let mut no = Confirm::new("q").default_no();
+        assert_eq!(
+            no.on(&Event::Keyboard(KeyEvent {
+                code: Key::Enter,
+                modifiers: KeyModifiers::empty(),
+            })),
+            Some(Msg::Confirmed(false)),
+        );
+        let mut yes = Confirm::new("q").default_yes();
+        assert_eq!(
+            yes.on(&Event::Keyboard(KeyEvent {
+                code: Key::Enter,
+                modifiers: KeyModifiers::empty(),
+            })),
+            Some(Msg::Confirmed(true)),
+        );
     }
 
     #[test]

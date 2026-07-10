@@ -663,6 +663,8 @@ impl<T: TerminalAdapter> Model<T> {
             RemovalReason::Merged => terminal_removal_copy(&prompt, "merged"),
             RemovalReason::Closed => terminal_removal_copy(&prompt, "closed"),
         };
+        // Deletes the worktree (force, when it has live terminals or
+        // local work) — no undo, so Enter backs out.
         let modal = Confirm::new(copy).default_no();
         self.active_removal_prompt = Some((prompt.workspace_key, prompt.reason));
         self.mount_modal(Id::RemoveOutOfScope, modal);
@@ -695,14 +697,21 @@ impl<T: TerminalAdapter> Model<T> {
         // (e.g. "Delete project X with 3 workspaces" vs. the generic
         // "Archive the focused workspace"). Catalog default is the
         // safety net when no override is available.
-        let prompt: String = override_prompt.unwrap_or_else(|| {
-            ActionDef::for_action(&action)
-                .confirm_prompt()
-                .unwrap_or("Confirm action?")
-                .to_string()
-        });
+        let def = ActionDef::for_action(&action);
+        let prompt: String = override_prompt
+            .unwrap_or_else(|| def.confirm_prompt().unwrap_or("Confirm action?").to_string());
+        // Each destructive action declares its own Enter default in the
+        // catalog (next to its prompt) instead of inheriting a blanket
+        // No — `confirm_default_yes` carries it here. Fall back to No for
+        // the "Confirm action?" safety net (a def with no declared guard).
+        let default_yes = def.confirm_default_yes().unwrap_or(false);
         self.pending_action_confirm = Some((action, target));
-        let modal = Confirm::new(&prompt).default_no();
+        let modal = Confirm::new(&prompt);
+        let modal = if default_yes {
+            modal.default_yes()
+        } else {
+            modal.default_no()
+        };
         self.mount_modal(Id::ActionConfirm, modal);
     }
 
@@ -810,6 +819,8 @@ impl<T: TerminalAdapter> Model<T> {
         } else {
             format!("Delete worktree {} ?", target.path.display())
         };
+        // Deletes a worktree off disk (overriding safety when dirty) —
+        // no undo, so Enter backs out.
         let modal = Confirm::new(&prompt).default_no();
         self.pending_inspect_target = Some(target);
         self.mount_modal(Id::InspectConfirm, modal);
@@ -822,6 +833,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// `(false)` / dismiss drops the prompt silently.
     pub(super) fn mount_clean_worktrees_confirm(&mut self) {
         use crate::realm::components::confirm::Confirm;
+        // Bulk-wipes worktrees off disk — no undo, so Enter backs out.
         let modal = Confirm::new(
             "Wipe every worktree whose session has no live terminal? \
              PR / issue rows stay; active sessions are skipped.",
@@ -975,9 +987,11 @@ impl<T: TerminalAdapter> Model<T> {
     /// Surface the next queued issue→PR merge prompt when no modal
     /// is currently up. The user's answer drives `Msg::Confirmed` /
     /// `Msg::ModalDismissed`, which dispatch a `Command::ConfirmMerge`
-    /// back to the daemon. Default-no: silently absorbing a session
-    /// the user is in the middle of using would be the surprising
-    /// outcome, so Enter biases toward "leave them separate".
+    /// back to the daemon. Default-yes: the prompt only appears because
+    /// a PR was detected closing this issue, so joining its sessions in
+    /// is the expected path — and it's non-destructive (the sessions
+    /// move, nothing is lost). Declining is the surprising outcome, so
+    /// Enter affirms the join.
     pub(super) fn maybe_mount_next_merge_prompt(&mut self) {
         use crate::realm::components::confirm::Confirm;
 
@@ -990,7 +1004,7 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         let modal =
-            Confirm::new(merge_prompt_question(&pr_label, &issue_label, count)).default_no();
+            Confirm::new(merge_prompt_question(&pr_label, &issue_label, count)).default_yes();
         self.active_merge_prompt = Some((issue_key, pr_key));
         self.mount_modal(Id::MergeConfirm, modal);
     }

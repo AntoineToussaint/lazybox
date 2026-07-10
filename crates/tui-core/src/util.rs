@@ -8,7 +8,12 @@
 //! CJK/emoji text (issue titles are arbitrary user content) render
 //! at up to twice the intended cells and blow the layout the budget
 //! was protecting.
+//!
+//! The truncation helpers return `Cow` so the fits case (the
+//! overwhelming majority) doesn't allocate — they run inside
+//! per-frame render paths.
 
+use std::borrow::Cow;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Visual width of a string in terminal cells.
@@ -23,12 +28,12 @@ pub fn char_visual_width(ch: char) -> usize {
 
 /// Truncate `s` so it fits in `budget` cells, adding `…` when
 /// clipped. Returns `s` unchanged when it already fits.
-pub fn truncate_ellipsis(s: &str, budget: usize) -> String {
+pub fn truncate_ellipsis(s: &str, budget: usize) -> Cow<'_, str> {
     if visual_width(s) <= budget {
-        return s.to_string();
+        return Cow::Borrowed(s);
     }
     if budget == 0 {
-        return String::new();
+        return Cow::Borrowed("");
     }
     let mut out = String::new();
     let mut used = 0usize;
@@ -40,8 +45,13 @@ pub fn truncate_ellipsis(s: &str, budget: usize) -> String {
         used += w;
         out.push(ch);
     }
-    out.push('…');
-    out
+    // Never render a double ellipsis: text that was already
+    // ellipsis-truncated upstream (e.g. a notice slug) can land its
+    // own `…` exactly at the cut point.
+    if !out.ends_with('…') {
+        out.push('…');
+    }
+    Cow::Owned(out)
 }
 
 /// Truncate `s` to `budget` cells keeping both ends, with `…`
@@ -49,15 +59,15 @@ pub fn truncate_ellipsis(s: &str, budget: usize) -> String {
 /// — e.g. a fixed actionable suffix ("… — press ! to jump") after a
 /// variable-length name, where end-truncation would delete exactly
 /// the part the message exists to deliver.
-pub fn truncate_ellipsis_middle(s: &str, budget: usize) -> String {
+pub fn truncate_ellipsis_middle(s: &str, budget: usize) -> Cow<'_, str> {
     if visual_width(s) <= budget {
-        return s.to_string();
+        return Cow::Borrowed(s);
     }
     if budget == 0 {
-        return String::new();
+        return Cow::Borrowed("");
     }
     if budget == 1 {
-        return "…".to_string();
+        return Cow::Borrowed("…");
     }
     let keep = budget - 1;
     let head_budget = keep / 2;
@@ -85,9 +95,24 @@ pub fn truncate_ellipsis_middle(s: &str, budget: usize) -> String {
         tail_rev.push(ch);
     }
 
-    head.push('…');
+    // As in `truncate_ellipsis`: don't double up with an ellipsis
+    // the input already carries at the cut point.
+    if !head.ends_with('…') && tail_rev.last() != Some(&'…') {
+        head.push('…');
+    }
     head.extend(tail_rev.into_iter().rev());
-    head
+    Cow::Owned(head)
+}
+
+/// Short workspace identifier for one-line notices. Issue/PR
+/// workspace names are full issue titles; interpolating one raw
+/// displaces the rest of the message (#291). Middle truncation
+/// keeps the title's head *and* tail — related issues often share a
+/// long prefix, so the tail is what disambiguates, and in focus mode
+/// (no sidebar) the notice can be the only surface naming the
+/// workspace.
+pub fn notice_slug(name: &str) -> Cow<'_, str> {
+    truncate_ellipsis_middle(name, 24)
 }
 
 #[cfg(test)]
@@ -116,6 +141,10 @@ mod tests {
     #[test]
     fn truncate_fits_returns_input_unchanged() {
         assert_eq!(truncate_ellipsis("hello", 10), "hello");
+        assert!(matches!(
+            truncate_ellipsis("hello", 10),
+            Cow::Borrowed("hello")
+        ));
     }
 
     #[test]
@@ -136,6 +165,17 @@ mod tests {
         assert_eq!(truncate_ellipsis("好好好好", 5), "好好…");
         assert_eq!(visual_width(&truncate_ellipsis("好好好好", 6)), 5);
         assert_eq!(truncate_ellipsis("好好好好", 6), "好好…");
+    }
+
+    /// Input already carrying an `…` at the cut point must not render
+    /// `……` when re-truncated by a downstream layer.
+    #[test]
+    fn truncate_never_doubles_an_ellipsis() {
+        assert_eq!(truncate_ellipsis("abcd…tail", 6), "abcd…");
+        // Head side: keep=8 → head is exactly "abc…".
+        assert_eq!(truncate_ellipsis_middle("abc…defghij", 9), "abc…ghij");
+        // Tail side: keep=8 → tail is exactly "…hij".
+        assert_eq!(truncate_ellipsis_middle("abcdefg…hij", 9), "abcd…hij");
     }
 
     #[test]
@@ -166,8 +206,26 @@ mod tests {
 
     #[test]
     fn middle_truncate_wide_chars_stay_within_cells() {
-        let out = truncate_ellipsis_middle(&"好".repeat(30), 15);
+        let wide = "好".repeat(30);
+        let out = truncate_ellipsis_middle(&wide, 15);
         assert!(visual_width(&out) <= 15, "{out:?}");
         assert!(out.contains('…'));
+    }
+
+    #[test]
+    fn notice_slug_passes_short_names_through() {
+        assert_eq!(notice_slug("Ship it"), "Ship it");
+    }
+
+    /// Long prefixes are what related issue titles share; the slug
+    /// keeps the tail so two siblings stay distinguishable.
+    #[test]
+    fn notice_slug_keeps_the_disambiguating_tail() {
+        let a = "Footer notices hide the shortcut hints";
+        let b = "Footer notices hide the sidebar badge";
+        let (sa, sb) = (notice_slug(a), notice_slug(b));
+        assert_ne!(sa, sb);
+        assert!(sa.ends_with("hints"));
+        assert!(visual_width(&sa) <= 24);
     }
 }

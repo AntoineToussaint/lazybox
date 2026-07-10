@@ -92,24 +92,29 @@ pub fn render(
             NoticeSeverity::Permanent => theme.error,
             NoticeSeverity::Info | NoticeSeverity::Hint => theme.text_dim,
         };
-        // 4 cells of chrome: the two flanking pads + the pill's
-        // inner spaces. Middle truncation, not end: notice tails
-        // carry the actionable part ("… — press ! to jump", an error
-        // reason after its fixed prefix), so cutting from the end
-        // would delete exactly what the message exists to deliver.
+        let pill = |msg: &str| {
+            Line::from(vec![
+                Span::styled(" ", bg),
+                Span::styled(
+                    format!(" {msg} "),
+                    Style::default()
+                        .bg(sev_color)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" ", bg),
+            ])
+        };
+        // The chrome (pads + pill spaces) is measured off the layout
+        // itself so a padding tweak can't silently desync the budget.
+        // Middle truncation, not end: notice tails carry the
+        // actionable part ("… — press ! to jump", an error reason
+        // after its fixed prefix), so cutting from the end would
+        // delete exactly what the message exists to deliver.
+        let chrome = pill("").width();
         let message =
-            crate::util::truncate_ellipsis_middle(&n.message, right_cap.saturating_sub(4));
-        Some(Line::from(vec![
-            Span::styled(" ", bg),
-            Span::styled(
-                format!(" {message} "),
-                Style::default()
-                    .bg(sev_color)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" ", bg),
-        ]))
+            crate::util::truncate_ellipsis_middle(&n.message, right_cap.saturating_sub(chrome));
+        Some(pill(&message))
     } else if let Some((spinner, label)) = polling_status {
         // Two-tone render: bright accent for the spinner glyph
         // (drives the eye), dim text for the surrounding label so
@@ -118,22 +123,25 @@ pub fn render(
         // word in the label the user cares about, so we don't try
         // to highlight it separately — at 1-2 characters of width
         // delta it would look like a typo.
-        let chrome = crate::util::visual_width(spinner) + 4;
+        let status = |label: &str| {
+            Line::from(vec![
+                Span::styled(
+                    format!(" {spinner} "),
+                    Style::default()
+                        .bg(theme.surface)
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{label} "),
+                    Style::default().bg(theme.surface).fg(theme.text_strong),
+                ),
+                Span::styled(" ", bg),
+            ])
+        };
+        let chrome = status("").width();
         let label = crate::util::truncate_ellipsis(label, right_cap.saturating_sub(chrome));
-        Some(Line::from(vec![
-            Span::styled(
-                format!(" {spinner} "),
-                Style::default()
-                    .bg(theme.surface)
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{label} "),
-                Style::default().bg(theme.surface).fg(theme.text_strong),
-            ),
-            Span::styled(" ", bg),
-        ]))
+        Some(status(&label))
     } else {
         None
     };

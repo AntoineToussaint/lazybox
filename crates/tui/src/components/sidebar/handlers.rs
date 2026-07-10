@@ -344,10 +344,12 @@ impl Sidebar {
                         // Inline footer notice in addition to the OS
                         // popup — covers users with notifications muted
                         // (which is most of them while focused). Hint
-                        // severity = 3s fade, dim color.
+                        // severity = 3s fade, dim color. Slugged name:
+                        // a raw issue title would displace the rest of
+                        // the message (#291).
                         self.pending_asking_notices.push(format!(
                             "{} needs input — press ! to jump",
-                            notice_slug(&workspace.name)
+                            crate::util::notice_slug(&workspace.name)
                         ));
                     }
                 }
@@ -368,8 +370,10 @@ impl Sidebar {
                         self.pending_notifications
                             .push(PendingNotification { title, body });
                     }
-                    self.pending_asking_notices
-                        .push(format!("{} finished", notice_slug(&workspace.name)));
+                    self.pending_asking_notices.push(format!(
+                        "{} finished",
+                        crate::util::notice_slug(&workspace.name)
+                    ));
                 }
                 // Only the asking transition can change the visible set
                 // (it feeds the per-repo attention counter); a done- or
@@ -420,15 +424,6 @@ impl Sidebar {
             _ => {}
         }
     }
-}
-
-/// Short workspace identifier for footer notices. Issue/PR workspace
-/// names are full issue titles, and a full title in the footer
-/// displaces the shortcut hints (#291) — the sidebar `?`/`✓` pill
-/// already identifies the workspace, so the notice only needs enough
-/// of the name to disambiguate.
-fn notice_slug(name: &str) -> String {
-    crate::util::truncate_ellipsis(name, 24)
 }
 
 /// Build the desktop notification for a newly-risen attention signal,

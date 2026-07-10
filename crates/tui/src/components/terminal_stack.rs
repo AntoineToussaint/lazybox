@@ -1258,13 +1258,13 @@ impl TerminalStack {
         ))
     }
 
-    /// Last-resort fallback for scrollback navigation: drive
-    /// the viewport directly via Top/Bottom anchors rather than
-    /// Delta. The Delta path appears to no-op against libghostty-vt
-    /// (offset doesn't change even though `scroll_viewport(Delta)`
-    /// is called). Top/Bottom is a known-good API that lets us at
-    /// least verify the terminal HAS scrollback content to look at.
-    /// Returns the scrollbar state for the diagnostic notice.
+    /// Jump the focused terminal's viewport to the top of its
+    /// scrollback. (Delta and Top/Bottom are equally reliable
+    /// against libghostty-vt — `scroll_repro.rs` pins both; a
+    /// scroll that looks like a no-op means there is no scrollback
+    /// to move into, which `scroll_active` reports as
+    /// `ScrollOutcome::NoScrollback`.) Returns the scrollbar state
+    /// for the diagnostic notice.
     pub fn scroll_to_top(&mut self) -> Option<String> {
         let id = self.focused_terminal_id()?;
         let slot = self.terminals.get_mut(&id)?;

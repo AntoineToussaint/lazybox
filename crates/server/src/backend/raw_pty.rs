@@ -93,6 +93,7 @@ impl SessionBackend for RawPtyBackend {
                 size,
                 cwd.map(|p| p.to_path_buf()).as_ref(),
                 env.to_vec(),
+                &[],
             )
             .map_err(|e| BackendError::Spawn(e.to_string()))?;
             let pty = Arc::new(pty);

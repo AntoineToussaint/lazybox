@@ -66,6 +66,24 @@ pub const TMUX_SOCKET: &str = "lazybox";
 /// OUTER terminal changes.
 const SCROLLBACK_TERMINAL_OVERRIDES: &str = ",xterm*:smcup@:rmcup@";
 
+/// Per-pane scrollback depth tmux retains. Set as `history-limit` in the
+/// conf and used as the `-S` start line when capturing history to seed a
+/// reattaching client (`capture_history`), so the two never drift.
+const HISTORY_LIMIT: u32 = 10_000;
+
+/// Minimum tmux version the backend's conf requires, enforced by
+/// [`TmuxBackend::detect`] (older tmux → raw-PTY fallback, same as no
+/// tmux at all). Pinned by the newest option the conf sets:
+/// `allow-passthrough` (tmux 3.3).
+///
+/// Old tmux must be REJECTED, not tolerated: an option unknown to the
+/// running tmux is a conf parse error, and tmux swaps the first
+/// attaching client into a "config error" view instead of the pane —
+/// which never repaints until a key is pressed, so lazybox's headless
+/// attach client streams no pane content at all. Every session on that
+/// host is silently dead (seen on Ubuntu 22.04 LTS, tmux 3.2a).
+pub const MIN_TMUX_VERSION: (u32, u32) = (3, 3);
+
 /// Clipboard passthrough options, independent of the scrollback flavor.
 /// `set-clipboard on` forwards an inner program's OSC 52 to the attach
 /// client; `allow-passthrough on` (off by default since tmux 3.3a) lets
@@ -103,6 +121,11 @@ const HYPERLINK_TERMINAL_FEATURES: &str = "set -as terminal-features 'xterm*:hyp
 ///   wheel via our encoded SGR sequence and enters copy-mode
 ///   automatically, scrolling its own history one line per notch
 ///   (a daemon round trip + pane repaint per notch).
+///
+/// Every option here may assume [`MIN_TMUX_VERSION`] — `detect()`
+/// refuses older tmux, because a single unknown option in this conf
+/// breaks every attach (see the constant's doc). Raising an option's
+/// floor means raising `MIN_TMUX_VERSION` with it.
 fn transparent_conf(native_scrollback: bool) -> String {
     let mut conf = String::from(
         "set -g prefix None\n\
@@ -113,9 +136,9 @@ fn transparent_conf(native_scrollback: bool) -> String {
     } else {
         conf.push_str("set -g mouse on\n");
     }
+    conf.push_str(&format!("set -g history-limit {HISTORY_LIMIT}\n"));
     conf.push_str(
-        "set -g history-limit 10000\n\
-         set -g default-terminal \"xterm-256color\"\n\
+        "set -g default-terminal \"xterm-256color\"\n\
          set -g escape-time 0\n\
          set -g window-size latest\n\
          set -g mode-style \"fg=default,bg=default\"\n\
@@ -160,6 +183,28 @@ fn transparent_conf(native_scrollback: bool) -> String {
         );
     }
     conf
+}
+
+/// Turn `tmux capture-pane -p` output into replay-ring bytes.
+///
+/// capture-pane separates pane lines with a bare `\n`. The reattaching
+/// client's VT parser runs with LNM off, where `\n` is a plain line feed
+/// that moves the cursor down WITHOUT returning to column 0 — feeding the
+/// capture verbatim would staircase every line. So each `\n` becomes
+/// `\r\n`. The trailing newline is dropped so the cursor lands at the end
+/// of the last history line, exactly where tmux's live attach repaint
+/// resumes, stitching seeded history to the live screen without a blank
+/// row between them.
+fn normalize_capture(stdout: &[u8]) -> Vec<u8> {
+    let trimmed = stdout.strip_suffix(b"\n").unwrap_or(stdout);
+    let mut seed = Vec::with_capacity(trimmed.len() + 16);
+    for &b in trimmed {
+        if b == b'\n' {
+            seed.push(b'\r');
+        }
+        seed.push(b);
+    }
+    seed
 }
 
 /// `set-option` invocations that bring an ALREADY-RUNNING tmux server
@@ -258,17 +303,60 @@ pub struct TmuxBackend {
     next_key: AtomicU64,
 }
 
+/// Pull `(major, minor)` out of a `tmux -V` banner. Handles the release
+/// shape (`tmux 3.2a`), the development shape (`tmux next-3.4`), and
+/// distro decorations, by parsing the first `digits.digits` run and
+/// ignoring any patch-letter suffix. `None` for banners with no such
+/// run (e.g. OpenBSD's `tmux openbsd-7.6`, which tracks upstream head
+/// and is always modern).
+fn parse_tmux_version(banner: &str) -> Option<(u32, u32)> {
+    let start = banner.find(|c: char| c.is_ascii_digit())?;
+    let rest = &banner[start..];
+    let major_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let major = rest[..major_end].parse().ok()?;
+    let rest = rest[major_end..].strip_prefix('.')?;
+    let minor_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let minor = rest[..minor_end].parse().ok()?;
+    Some((major, minor))
+}
+
+/// Probe PATH for a tmux that satisfies [`MIN_TMUX_VERSION`]. Returns
+/// the `tmux -V` banner when usable, `None` (with the reason logged)
+/// when tmux is missing or too old. A banner with no parseable version
+/// is treated as modern — those are development or vendor builds that
+/// track upstream head.
+pub fn modern_tmux_version() -> Option<String> {
+    let out = Command::new("tmux").arg("-V").output().ok()?;
+    if !out.status.success() {
+        tracing::debug!("tmux -V failed; tmux backend unavailable");
+        return None;
+    }
+    let banner = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if let Some(version) = parse_tmux_version(&banner)
+        && version < MIN_TMUX_VERSION
+    {
+        let (maj, min) = MIN_TMUX_VERSION;
+        tracing::warn!(
+            "{banner} is older than the required tmux {maj}.{min} — \
+             sessions will NOT survive lazybox restarts (raw-PTY \
+             fallback). Upgrade tmux to re-enable persistent sessions."
+        );
+        return None;
+    }
+    Some(banner)
+}
+
 impl TmuxBackend {
     /// Probe for tmux on PATH and write the transparent config. Returns
-    /// `None` when tmux isn't usable on this machine — callers fall
-    /// back to `RawPtyBackend`.
+    /// `None` when tmux isn't usable on this machine — missing entirely
+    /// or older than [`MIN_TMUX_VERSION`] — and callers fall back to
+    /// `RawPtyBackend`.
     pub fn detect() -> Option<Self> {
-        let out = Command::new("tmux").arg("-V").output().ok()?;
-        if !out.status.success() {
-            tracing::debug!("tmux -V failed; tmux backend unavailable");
-            return None;
-        }
-        let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let version = modern_tmux_version()?;
         tracing::info!("tmux backend available: {version}");
         // Profile-aware socket name. Default profile resolves to
         // "lazybox" — backward compatible with running sessions; a
@@ -427,13 +515,44 @@ impl TmuxBackend {
     /// Spawn the tmux-attach DaemonPty for `key`. The attach client
     /// is the I/O conduit; its lifetime is unrelated to the tmux
     /// session's — `wait_exit` polls tmux directly for that.
-    fn open_client(&self, key: &str, size: PtySize) -> Result<Slot, BackendError> {
+    ///
+    /// `seed` pre-loads the DaemonPty's replay ring with reconstructed
+    /// scrollback (see `capture_history`). A plain `tmux attach` only
+    /// repaints the visible pane, so without the seed a client that
+    /// reattaches to a session which survived a daemon restart has one
+    /// screenful and nothing to scroll back through.
+    fn open_client(&self, key: &str, size: PtySize, seed: &[u8]) -> Result<Slot, BackendError> {
         let argv = self.attach_argv(key);
-        let pty = DaemonPty::spawn(&argv, size, None, Vec::new())
+        let pty = DaemonPty::spawn(&argv, size, None, Vec::new(), seed)
             .map_err(|e| BackendError::Spawn(format!("tmux attach: {e}")))?;
         Ok(Slot {
             client: Arc::new(pty),
         })
+    }
+
+    /// Reconstruct a reattaching client's scrollback from tmux's own
+    /// history. The daemon's replay ring lives in memory and dies with
+    /// the daemon; tmux, however, keeps `history-limit` lines per pane
+    /// across restarts. `capture-pane -e -S -<limit>` dumps that history
+    /// (styled, via `-e`) down to the current bottom line, which we feed
+    /// into the ring ahead of the live attach bytes so the client
+    /// rebuilds the full scrollback instead of a single repainted screen.
+    ///
+    /// Best-effort: any failure returns an empty seed and the client
+    /// simply starts from the live repaint, exactly as before this fix.
+    async fn capture_history(&self, key: &str) -> Vec<u8> {
+        let start = format!("-{HISTORY_LIMIT}");
+        let out = match self
+            .tmux(&["capture-pane", "-p", "-e", "-S", &start, "-t", key])
+            .await
+        {
+            Ok(out) => out.stdout,
+            Err(e) => {
+                tracing::warn!(key, "tmux capture-pane for scrollback seed failed: {e}");
+                return Vec::new();
+            }
+        };
+        normalize_capture(&out)
     }
 }
 
@@ -517,7 +636,8 @@ impl SessionBackend for TmuxBackend {
                 pixel_width: 0,
                 pixel_height: 0,
             };
-            let slot = match self.open_client(&key, size) {
+            // Fresh session: tmux has no history yet, so nothing to seed.
+            let slot = match self.open_client(&key, size, &[]) {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = self.tmux(&["kill-session", "-t", &key]).await;
@@ -675,17 +795,36 @@ impl SessionBackend for TmuxBackend {
             // push the current option flavor before attaching so they
             // pick up the scrollback behavior too.
             self.ensure_server_options().await;
-            let pty = {
+            // Reuse the cached client only if it's still ALIVE. A
+            // `freeze` (detach-client) or any attach-client EOF makes
+            // the DaemonPty finish while the inner tmux session keeps
+            // running, but the dead Slot lingers in the map. Cloning
+            // it would hand back a closed broadcast — stale replay,
+            // no live output, no recovery. Detect that and open a
+            // fresh attach client instead, replacing the dead Slot.
+            let cached = {
+                let map = self.sessions.lock().await;
+                map.get(key)
+                    .filter(|slot| !slot.client.is_finished())
+                    .map(|slot| slot.client.clone())
+            };
+            let pty = if let Some(pty) = cached {
+                pty
+            } else {
+                // No live client — this is the reattach path (recovery
+                // after a daemon restart, or after a freeze/EOF). A fresh
+                // attach client only repaints the visible pane, so
+                // reconstruct scrollback from tmux's surviving history
+                // and seed it into the new client's replay ring. Captured
+                // WITHOUT the sessions lock held: `capture-pane` is a tmux
+                // round trip, and the hot reuse path above must never wait
+                // on it.
+                let seed = self.capture_history(key).await;
                 let mut map = self.sessions.lock().await;
-                // Reuse the cached client only if it's still ALIVE. A
-                // `freeze` (detach-client) or any attach-client EOF makes
-                // the DaemonPty finish while the inner tmux session keeps
-                // running, but the dead Slot lingers in the map. Cloning
-                // it would hand back a closed broadcast — stale replay,
-                // no live output, no recovery. Detect that and open a
-                // fresh attach client instead, replacing the dead Slot.
-                let alive = map.get(key).filter(|slot| !slot.client.is_finished());
-                if let Some(slot) = alive {
+                // Re-check under the lock: a concurrent subscribe may have
+                // opened a client while we were capturing. If so, reuse it
+                // and drop our seed rather than racing in a second client.
+                if let Some(slot) = map.get(key).filter(|slot| !slot.client.is_finished()) {
                     slot.client.clone()
                 } else {
                     let size = PtySize {
@@ -694,7 +833,7 @@ impl SessionBackend for TmuxBackend {
                         pixel_width: 0,
                         pixel_height: 0,
                     };
-                    let slot = self.open_client(key, size)?;
+                    let slot = self.open_client(key, size, &seed)?;
                     let pty = slot.client.clone();
                     map.insert(key.into(), slot);
                     pty
@@ -944,6 +1083,57 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&backend.config_path);
+    }
+
+    /// Version banners across the shapes tmux actually emits. The gate
+    /// must reject anything confidently below [`MIN_TMUX_VERSION`] (an
+    /// unknown conf option swaps every attach into tmux's config-error
+    /// view — dead sessions) and admit dev/vendor builds it can't parse.
+    #[test]
+    fn tmux_version_gate() {
+        // Release banners.
+        assert_eq!(parse_tmux_version("tmux 3.2a"), Some((3, 2)));
+        assert_eq!(parse_tmux_version("tmux 3.3"), Some((3, 3)));
+        assert_eq!(parse_tmux_version("tmux 3.5a"), Some((3, 5)));
+        // Development banner.
+        assert_eq!(parse_tmux_version("tmux next-3.4"), Some((3, 4)));
+        // No dotted version — OpenBSD tracks head; treated as modern.
+        assert_eq!(parse_tmux_version("tmux openbsd-7"), None);
+        assert_eq!(parse_tmux_version("tmux"), None);
+
+        assert!(parse_tmux_version("tmux 3.2a").unwrap() < MIN_TMUX_VERSION);
+        assert!(parse_tmux_version("tmux 3.3a").unwrap() >= MIN_TMUX_VERSION);
+        assert!(parse_tmux_version("tmux 4.0").unwrap() >= MIN_TMUX_VERSION);
+    }
+
+    /// capture-pane joins lines with bare `\n`; the seed must carriage-
+    /// return each line (LNM is off in the client VT) and drop the
+    /// trailing newline so the cursor parks at the end of the last
+    /// history line, where the live attach repaint picks up.
+    #[test]
+    fn normalize_capture_crlf_and_trailing_newline() {
+        assert_eq!(
+            normalize_capture(b"one\ntwo\nthree\n"),
+            b"one\r\ntwo\r\nthree"
+        );
+        // Escape sequences from `-e` pass through untouched.
+        assert_eq!(
+            normalize_capture(b"\x1b[31mred\x1b[0m\nplain\n"),
+            b"\x1b[31mred\x1b[0m\r\nplain"
+        );
+        // No trailing newline → nothing stripped.
+        assert_eq!(normalize_capture(b"tail"), b"tail");
+        assert_eq!(normalize_capture(b""), b"");
+    }
+
+    /// The `-S` capture depth and the conf's `history-limit` come from
+    /// the same constant, so seeding can never under-read the history
+    /// tmux was told to keep.
+    #[test]
+    fn capture_depth_matches_history_limit() {
+        assert!(
+            transparent_conf(true).contains(&format!("set -g history-limit {HISTORY_LIMIT}\n"))
+        );
     }
 
     /// The escape hatch writes the legacy conf.

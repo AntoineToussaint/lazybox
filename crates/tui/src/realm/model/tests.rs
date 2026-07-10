@@ -4103,6 +4103,50 @@ mod wheel_routing_tests {
         );
     }
 
+    /// Pull the `offset=` field out of `scrollbar_summary`.
+    fn scroll_offset(m: &Model<tuirealm::terminal::TestTerminalAdapter>) -> u64 {
+        let summary = m.terminals.scrollbar_summary().expect("summary");
+        summary
+            .split_whitespace()
+            .find_map(|kv| kv.strip_prefix("offset="))
+            .expect("offset field")
+            .parse()
+            .expect("numeric offset")
+    }
+
+    /// Regression for #306: each wheel notch over the terminal body must
+    /// actually move the scrollback viewport. The full route — mouse
+    /// dispatch → `scroll_active` → `scroll_viewport(Delta)` →
+    /// `scrollbar().offset` — used to be blamed on a libghostty Delta
+    /// no-op; this pins the whole chain end to end so a regression in
+    /// any hop (routing, damping, FFI) fails loudly.
+    #[test]
+    fn wheel_moves_the_scrollback_offset() {
+        let (mut m, _server, bottom) = build_model_with_terminal();
+        let mut bytes = Vec::new();
+        for i in 0..200 {
+            bytes.extend_from_slice(format!("line {i}\r\n").as_bytes());
+        }
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(7),
+            bytes,
+            seq: 1,
+        });
+
+        let bottom_offset = scroll_offset(&m);
+        assert!(bottom_offset > 0, "200 lines must produce scrollback");
+
+        // One notch = LOCAL_WHEEL_STEP (3) rows up.
+        m.handle_mouse(wheel_up_at(bottom.x + 2, bottom.y + 4));
+        assert_eq!(scroll_offset(&m), bottom_offset - 3);
+
+        // Sustained scrolling keeps walking toward the top.
+        for _ in 0..5 {
+            m.handle_mouse(wheel_up_at(bottom.x + 2, bottom.y + 4));
+        }
+        assert_eq!(scroll_offset(&m), bottom_offset - 18);
+    }
+
     // ── `]` flush + Ctrl-w literal: assert the BYTES reaching the PTY ──
 
     use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};

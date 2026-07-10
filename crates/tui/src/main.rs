@@ -738,7 +738,8 @@ async fn run_embedded_realm(
         // Generate the per-agent SpawnAgent catalog rows (#102 P2):
         // exactly the agents the wizard enabled. An unconfigured user
         // (empty `setup.agents`) falls back to the built-in trio so the
-        // zero-config `c` / `x` / `u` keys still work out of the box.
+        // zero-config `a c` / `a x` / `a u` chords still work out of
+        // the box.
         // Using the enabled set (rather than unioning it with the
         // built-ins) avoids binding both `cursor` and `cursor-agent` to
         // `u`. Per-agent key remaps live in `ui.action_keys` under

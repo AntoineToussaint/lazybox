@@ -25,7 +25,7 @@ zero-or-more `Session`s (each an embedded terminal in a worktree).
 
 ### How to use it
 Workspaces appear in the sidebar. `Enter` opens one; spawning a shell or agent
-(`s`/`c`/`x`/`u`/`w`) attaches a session; `Shift-X` archives it.
+(`s`, `a c`/`a x`/`a u`, or `w`) attaches a session; `Shift-X` archives it.
 
 ### How it works (brief)
 `Workspace` (`crates/core/src/workspace.rs`) carries `key`, optional

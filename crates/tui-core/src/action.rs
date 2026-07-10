@@ -605,11 +605,12 @@ impl ActionDef {
             },
             ActionKind::SpawnAgent => &Self {
                 kind: ActionKind::SpawnAgent,
-                // Default binding is per-agent; the runtime label
-                // (`spawn claude`) carries the id. Listed here so the
-                // help panel has a row, with the literal multi-agent
-                // form in the keys column.
-                default_keys: "c / x / u",
+                // Default binding is per-agent (`a c` / `a x` / `a u`,
+                // generated in `catalog()` under the `a` agent leader);
+                // the runtime label (`spawn claude`) carries the id.
+                // Listed here so the help panel has a row, with the
+                // literal multi-agent form in the keys column.
+                default_keys: "a c / a x / a u",
                 label: "spawn agent",
                 describe: "Open a new agent terminal (claude / codex / cursor / …) in the workspace.",
                 section: Section::Workspace,
@@ -724,28 +725,28 @@ impl ActionDef {
             },
             ActionKind::RequestReviewers => &Self {
                 kind: ActionKind::RequestReviewers,
-                default_keys: "g v | Shift-V",
+                default_keys: "g v",
                 label: "reviewers",
                 describe: "Request reviewer(s) on the workspace's PR.",
                 section: Section::Workspace,
             },
             ActionKind::AddAssignees => &Self {
                 kind: ActionKind::AddAssignees,
-                default_keys: "g a | Shift-G",
+                default_keys: "g a",
                 label: "assignees",
                 describe: "Change assignees on the workspace's PR / issue — pre-checks existing; toggle to add or remove.",
                 section: Section::Workspace,
             },
             ActionKind::ManageLabels => &Self {
                 kind: ActionKind::ManageLabels,
-                default_keys: "g l | Shift-L",
+                default_keys: "g l",
                 label: "labels",
                 describe: "Add / remove labels on the workspace's PR or issue. Picker pre-checks the labels currently applied; submit replaces the set.",
                 section: Section::Workspace,
             },
             ActionKind::OpenInBrowser => &Self {
                 kind: ActionKind::OpenInBrowser,
-                default_keys: "g o | Shift-O",
+                default_keys: "g o",
                 label: "open in browser",
                 describe: "Open the focused workspace's PR / issue page in your default web browser.",
                 section: Section::Workspace,
@@ -983,9 +984,10 @@ pub struct KeyStroke {
 ///
 /// Parsed from the catalog's `default_keys` string so the catalog
 /// stays human-readable: alternatives are separated by ` | `
-/// (`"g v | Shift-V"`), and the keystrokes WITHIN one alternative are
-/// space-separated (`"g m"`, `"q q"`). Presentation-only strings
-/// (`"g/G"`, `"↑/↓"`, `"all keys"`) still don't parse to a chord.
+/// (`"g v | Shift-V"` in a user override), and the keystrokes WITHIN
+/// one alternative are space-separated (`"g m"`, `"q q"`).
+/// Presentation-only strings (`"g/G"`, `"↑/↓"`, `"all keys"`) still
+/// don't parse to a chord.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Chord {
     /// Single keystroke.
@@ -1186,7 +1188,7 @@ impl Chord {
             [] => None,
             [one] => KeyStroke::parse(one).map(Chord::Key),
             // A `/` token inside a multi-key string is the "this key OR
-            // that key" presentation separator (`c / x / u`), not a
+            // that key" presentation separator (`a c / a x / a u`), not a
             // real sequence — a lone `/` only ever binds as a single
             // chord (sidebar search). Reject so presentation strings
             // don't fabricate a bogus sequence.
@@ -1493,9 +1495,10 @@ pub const KEYMAP_PRESETS: &[&str] = &["default", "vim"];
 
 /// Resolve a named keymap preset to its `action_keys` overrides, or
 /// `None` for an unknown name. `default` is the bare catalog (no
-/// overrides). `vim` goes leaders-primary — the github actions bind to
-/// their `g …` chord only, dropping the legacy `Shift-*` aliases — and
-/// moves pane-cycling onto `Ctrl-w` (vim's window key). Every preset is
+/// overrides) — which is itself leaders-primary since #304: grouped
+/// actions (github, agent spawns) ship only their leader chord, no
+/// direct-key aliases. What remains distinct about `vim` is
+/// pane-cycling on `Ctrl-w` (vim's window key). Every preset is
 /// collision-checked by the `preset_*_has_no_collisions` tests so a
 /// bad entry can't ship.
 pub fn keymap_preset(name: &str) -> Option<std::collections::BTreeMap<String, String>> {
@@ -1503,13 +1506,6 @@ pub fn keymap_preset(name: &str) -> Option<std::collections::BTreeMap<String, St
     match name {
         "default" => {}
         "vim" => {
-            // Leaders-primary: keep only the `g …` chord for the github
-            // actions (the `Shift-*` aliases drop away).
-            m.insert("merge_pr".into(), "g m".into());
-            m.insert("request_reviewers".into(), "g v".into());
-            m.insert("add_assignees".into(), "g a".into());
-            m.insert("manage_labels".into(), "g l".into());
-            m.insert("open_in_browser".into(), "g o".into());
             // Vim's window key cycles panes.
             m.insert("cycle_pane".into(), "Ctrl-w".into());
         }
@@ -1518,9 +1514,11 @@ pub fn keymap_preset(name: &str) -> Option<std::collections::BTreeMap<String, St
     Some(m)
 }
 
-/// The default single-letter key a known agent binds to. `None` for
-/// agents lazybox doesn't ship a convention for — they still get a
-/// catalog row (in help, remappable), just no default chord.
+/// The in-group key a known agent binds to under the `a` agent leader
+/// (`a c` spawns claude) — also the second stroke of the scoped
+/// `w <key>` / `b <key>` chords. `None` for agents lazybox doesn't
+/// ship a convention for — they still get a catalog row (in help,
+/// remappable), just no default chord.
 pub fn agent_default_key(id: &str) -> Option<char> {
     match id {
         "claude" => Some('c'),
@@ -1530,13 +1528,34 @@ pub fn agent_default_key(id: &str) -> Option<char> {
     }
 }
 
+/// Label of the leader *group* an action's default chord lives under —
+/// the name shown wherever the group is advertised as one unit: the
+/// footer's collapsed group cell (`g ▸ github`), the which-key popup
+/// title, and the help panel's leader headings (issue #304). Keyed by
+/// `ActionKind` rather than the leader keystroke so the label follows
+/// the actions when a remap moves the whole group to another key.
+pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
+    match kind {
+        ActionKind::MergePr
+        | ActionKind::ToggleAutoMerge
+        | ActionKind::RequestReviewers
+        | ActionKind::AddAssignees
+        | ActionKind::ManageLabels
+        | ActionKind::OpenInBrowser => Some("github"),
+        ActionKind::SpawnAgent => Some("agent"),
+        ActionKind::WorkWith => Some("work"),
+        ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("on main"),
+        _ => None,
+    }
+}
+
 impl ActionDef {
     /// Build the runtime catalog: every static action EXCEPT the
     /// generic `SpawnAgent` placeholder, plus one concrete `SpawnAgent`
-    /// row per enabled agent. The agent rows are what let `c` / `x` /
-    /// `u` live in the catalog — remappable via `ui.action_keys`
-    /// (`spawn_agent.<id>`), listed in help, and collision-checked —
-    /// instead of in a side map.
+    /// row per enabled agent. The agent rows are what let `a c` /
+    /// `a x` / `a u` live in the catalog — remappable via
+    /// `ui.action_keys` (`spawn_agent.<id>`), listed in help, and
+    /// collision-checked — instead of in a side map.
     ///
     /// `overrides` (`ui.action_keys`) are applied here so every
     /// consumer reads resolved chords + display strings.
@@ -1689,19 +1708,19 @@ impl ActionDef {
     }
 }
 
-/// Default chord(s) + display for an agent row from the built-in
-/// key convention. An agent lazybox has no convention for gets an
-/// empty chord list (no default binding) and a blank display.
+/// Default chord(s) + display for an agent row from the built-in key
+/// convention: the `a` agent leader then the agent's own key (`a c` /
+/// `a x` / `a u`) — one leader group instead of scattered top-level
+/// keys (#304). An agent lazybox has no convention for gets an empty
+/// chord list (no default binding) and a blank display.
 fn default_agent_chords(id: &str) -> (Vec<Chord>, std::borrow::Cow<'static, str>) {
     match agent_default_key(id) {
         Some(c) => (
-            vec![Chord::Key(KeyStroke::new(
-                false,
-                false,
-                false,
-                ChordCode::Char(c),
-            ))],
-            std::borrow::Cow::Owned(c.to_string()),
+            vec![Chord::Seq(vec![
+                KeyStroke::new(false, false, false, ChordCode::Char('a')),
+                KeyStroke::new(false, false, false, ChordCode::Char(c)),
+            ])],
+            std::borrow::Cow::Owned(format!("a {c}")),
         ),
         None => (Vec::new(), std::borrow::Cow::Borrowed("")),
     }
@@ -2105,12 +2124,34 @@ mod tests {
     }
 
     #[test]
-    fn default_chords_splits_alternatives() {
-        // `g v | Shift-V` yields the leader sequence AND the legacy
-        // modifier alias as two alternatives.
+    fn github_defaults_are_leader_only() {
+        // The default keymap is pure two-level (#304): every github
+        // action binds only its `g …` leader chord — the legacy
+        // `Shift-{V,G,L,O}` direct aliases are gone. Pin the negative
+        // so a re-added alias fails the build.
+        for kind in [
+            ActionKind::RequestReviewers,
+            ActionKind::AddAssignees,
+            ActionKind::ManageLabels,
+            ActionKind::OpenInBrowser,
+        ] {
+            let chords = ActionDef::for_kind(kind).default_chords();
+            assert_eq!(chords.len(), 1, "{kind:?} must bind its leader chord only");
+            assert!(matches!(chords[0], Chord::Seq(_)));
+        }
+    }
+
+    #[test]
+    fn override_splits_alternatives() {
+        // ` | `-separated alternatives still work through
+        // `ui.action_keys` — users who want the old direct aliases
+        // back re-add them there.
+        use std::collections::BTreeMap;
+        let mut overrides = BTreeMap::new();
+        overrides.insert("request_reviewers".into(), "g v | Shift-V".into());
         let def = ActionDef::for_kind(ActionKind::RequestReviewers);
-        let chords = def.default_chords();
-        assert_eq!(chords.len(), 2, "reviewers has a leader + a Shift alias");
+        let chords = def.effective_chords(&overrides);
+        assert_eq!(chords.len(), 2, "override carries a leader + an alias");
         assert!(matches!(chords[0], Chord::Seq(_)));
         assert_eq!(
             chords[1],
@@ -2166,10 +2207,9 @@ mod tests {
         // in the same section sharing a chord is a genuine ambiguity —
         // dispatch (`find_action_for_chord`) breaks the tie by
         // iteration order, so the second action is silently
-        // unreachable. Cross-section shadowing (e.g. `Shift-G` =
-        // assignees in Workspace vs jump-to-bottom in Activity) is a
-        // DELIBERATE, focus-ranked override and intentionally not
-        // flagged here. This is the single audit surface the catalog
+        // unreachable. Cross-section shadowing (e.g. `z` = snooze in
+        // Workspace vs undo-mark-read in Activity) is a DELIBERATE,
+        // focus-ranked override and intentionally not flagged here. This is the single audit surface the catalog
         // gained so collisions surface at build time instead of as
         // tribal knowledge in CLAUDE.md.
         use std::collections::HashMap;
@@ -2195,7 +2235,7 @@ mod tests {
         // matcher.
         // Presentation-only `default_keys` — no parseable chord.
         let presentation = [
-            "c / x / u",
+            "a c / a x / a u",
             "w c / w x / w u",
             "b c / b x / b u",
             "g/G",
@@ -2459,15 +2499,13 @@ mod tests {
             .find(|e| e.param == Some(Param::Agent("claude".into())))
             .expect("claude row");
         assert_eq!(claude.config_key, "spawn_agent.claude");
-        // Built-in convention: claude → `c`.
+        // Built-in convention: claude → `a c` under the agent leader.
         assert_eq!(
             claude.chords,
-            vec![Chord::Key(KeyStroke::new(
-                false,
-                false,
-                false,
-                ChordCode::Char('c')
-            ))],
+            vec![Chord::Seq(vec![
+                KeyStroke::new(false, false, false, ChordCode::Char('a')),
+                KeyStroke::new(false, false, false, ChordCode::Char('c')),
+            ])],
         );
 
         // An agent with no built-in convention gets a row but no chord.
@@ -2617,7 +2655,7 @@ mod tests {
 
     #[test]
     fn catalog_dedupes_shared_agent_default_key() {
-        // `cursor` and `cursor-agent` both default to `u`; only the
+        // `cursor` and `cursor-agent` both default to `a u`; only the
         // first keeps the binding, the second still gets a (remappable)
         // row but no colliding default chord.
         use std::collections::BTreeMap;
@@ -2626,7 +2664,10 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         let catalog = ActionDef::catalog(&agents, &BTreeMap::new());
-        let u = Chord::Key(KeyStroke::new(false, false, false, ChordCode::Char('u')));
+        let u = Chord::Seq(vec![
+            KeyStroke::new(false, false, false, ChordCode::Char('a')),
+            KeyStroke::new(false, false, false, ChordCode::Char('u')),
+        ]);
         let bound_to_u: Vec<&CatalogEntry> =
             catalog.iter().filter(|e| e.chords.contains(&u)).collect();
         assert_eq!(bound_to_u.len(), 1, "only one agent keeps `u`");
@@ -2694,10 +2735,15 @@ mod tests {
 
     #[test]
     fn vim_preset_is_leaders_primary() {
-        // The vim preset keeps merge as a leader-only chord — only
-        // the `g m` leader survives (matching the default, which no
-        // longer carries a Shift alias either).
+        // Leaders-primary is the default policy now (#304), so the vim
+        // preset inherits `g m` as merge's only chord without carrying
+        // its own github overrides — what stays vim-specific is
+        // pane-cycling on Ctrl-w.
         let overrides = keymap_preset("vim").unwrap();
+        assert!(
+            !overrides.contains_key("merge_pr"),
+            "vim no longer needs github overrides — the default is leaders-only",
+        );
         let catalog = ActionDef::catalog(&[], &overrides);
         let merge = catalog
             .iter()
@@ -2711,6 +2757,63 @@ mod tests {
             ])],
             "vim merge keeps only the g-leader, no Shift-M",
         );
+    }
+
+    #[test]
+    fn agent_rows_group_under_the_a_leader() {
+        // Issue #304: agent spawns are a leader group. Every generated
+        // `SpawnAgent` chord starts with the `a` leader, their second
+        // keystrokes are unique, and the group carries the "agent"
+        // label the footer cell / which-key title / help heading share.
+        use std::collections::BTreeMap;
+        let agents: Vec<String> = ["claude", "codex", "cursor"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let catalog = ActionDef::catalog(&agents, &BTreeMap::new());
+        let a = KeyStroke::new(false, false, false, ChordCode::Char('a'));
+        let mut seconds = Vec::new();
+        for entry in catalog.iter().filter(|e| e.kind == ActionKind::SpawnAgent) {
+            let seq = entry
+                .chords
+                .iter()
+                .find_map(|c| match c {
+                    Chord::Seq(strokes) if strokes.first() == Some(&a) => Some(strokes.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{:?} missing an `a` leader sequence", entry.param));
+            assert_eq!(seq.len(), 2);
+            seconds.push(seq[1]);
+        }
+        assert_eq!(seconds.len(), 3, "one `a …` chord per known agent");
+        let before = seconds.len();
+        seconds.sort_by_key(|k| format!("{k:?}"));
+        seconds.dedup();
+        assert_eq!(before, seconds.len(), "duplicate in-group keys");
+        assert_eq!(leader_group_label(ActionKind::SpawnAgent), Some("agent"));
+    }
+
+    #[test]
+    fn leader_group_labels_cover_the_grouped_actions() {
+        // The registry names every shipped leader group; ungrouped
+        // actions stay unlabeled so surfaces don't invent group cells
+        // for them.
+        assert_eq!(leader_group_label(ActionKind::MergePr), Some("github"));
+        assert_eq!(
+            leader_group_label(ActionKind::RequestReviewers),
+            Some("github"),
+        );
+        assert_eq!(leader_group_label(ActionKind::WorkWith), Some("work"));
+        assert_eq!(
+            leader_group_label(ActionKind::SpawnAgentOnMain),
+            Some("on main"),
+        );
+        assert_eq!(
+            leader_group_label(ActionKind::SpawnShellOnMain),
+            Some("on main"),
+        );
+        assert_eq!(leader_group_label(ActionKind::Work), None);
+        assert_eq!(leader_group_label(ActionKind::Quit), None);
     }
 
     #[test]

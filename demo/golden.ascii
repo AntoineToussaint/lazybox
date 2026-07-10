@@ -7,11 +7,11 @@
   w               work on this      s               shell              b s             shell on main
   e               editor            m               mark read          z               snooze
   Shift+Z         long snooze       Shift+N         new workspace      n               new workspace
-  g m             merge PR          g g             auto-merge         g v | Shift-V   reviewers
-  g a | Shift-G   assignees         g l | Shift-L   labels             g o | Shift-O   open in browser
+  g m             merge PR          g g             auto-merge         g v             reviewers
+  g a             assignees         g l             labels             g o             open in browser
   r               reply             Shift+A         adopt sessions     Shift+J         join into PR
-  Shift+X         archive           Shift+C         close issue        c               spawn claude
-  x               spawn codex       u               spawn cursor       w c             work in claude
+  Shift+X         archive           Shift+C         close issue        a c             spawn claude
+  a x             spawn codex       a u             spawn cursor       w c             work in claude
   w x             work in codex     w u             work in cursor     b c             claude on main
   b x             codex on main     b u             cursor on main     f               filter
   o               sort              Shift+S         mailbox            /               search

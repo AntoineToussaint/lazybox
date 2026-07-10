@@ -331,7 +331,7 @@ impl Row {
 /// Necessary because ratatui's `Paragraph` silently CLIPS content
 /// past `area.width` — there's no built-in "truncate-with-ellipsis"
 /// affordance. A user-visible empty-state hint like
-/// `"(no terminals — press s for shell, c for claude)"` rendered
+/// `"(no terminals — press s for shell, a c for claude)"` rendered
 /// into a narrow right pane just stopped mid-word, with no visual
 /// indicator that content was missing. Pre-truncating with `…`
 /// makes the cut obvious.
@@ -789,7 +789,7 @@ mod tests {
     /// truncated form so we don't drift back.
     #[test]
     fn truncate_line_handles_user_visible_no_terminals_hint() {
-        let hint = "(no terminals — press s for shell, c for claude)";
+        let hint = "(no terminals — press s for shell, a c for claude)";
         let line = ratatui::text::Line::from(Span::raw(hint));
         let out = truncate_line(line, 30);
         let s: String = out.spans.iter().map(|s| s.content.as_ref()).collect();

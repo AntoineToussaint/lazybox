@@ -377,13 +377,14 @@ impl Sidebar {
     }
 
     /// State-aware short list for the footer hint bar. Catalog-driven;
-    /// `overrides` carries the user's `ui.action_keys` map (empty when
-    /// untouched) and flows into the catalog's `effective_keys_display`.
+    /// `catalog` is the model's runtime catalog (`ui.action_keys`
+    /// overrides + generated per-agent rows already applied), so
+    /// leader-group cells and remapped keys both come out resolved.
     pub fn contextual_bindings(
         &self,
-        overrides: &std::collections::BTreeMap<String, String>,
+        catalog: &[lazybox_tui_core::action::CatalogEntry],
     ) -> Vec<crate::pane::Binding> {
-        self.inner.contextual_bindings(overrides)
+        self.inner.contextual_bindings(catalog)
     }
 
     /// Click-to-select a row. Returns true on a hit.

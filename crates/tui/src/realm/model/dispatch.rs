@@ -265,7 +265,7 @@ impl<T: TerminalAdapter> Model<T> {
         // session sub-row of a workspace; passing it makes the
         // daemon target that specific session instead of picking
         // / creating one. Matches the sidebar's existing spawn
-        // handlers — without this, `c` / `s` on a focused session
+        // handlers — without this, `a c` / `s` on a focused session
         // would silently spawn into the wrong session.
         let session_id = self.sidebar.selected_session_id();
         match action {

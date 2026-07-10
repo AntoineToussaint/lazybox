@@ -1849,22 +1849,29 @@ impl Sidebar {
     /// State-aware short list for the footer hint bar.
     ///
     /// Catalog-driven: this method only decides *which* actions to
-    /// surface right now. The catalog's `ActionDef::effective_keys_display`
-    /// resolves the actual chord (honoring `~/.lazybox/config.yaml::ui.
-    /// action_keys` overrides), and `contextual_label` resolves the
+    /// surface right now. `catalog` is the model's runtime catalog
+    /// ([`ActionDef::catalog`](lazybox_tui_core::action::ActionDef::catalog))
+    /// — effective chords with
+    /// `ui.action_keys` overrides already applied, including the
+    /// generated per-agent rows — and `contextual_label` resolves the
     /// state-aware verb. Adding a new sidebar action means landing it
     /// in the catalog and pushing it here — the footer, `?` help, and
     /// right-click menu all pick it up automatically, and a user
     /// rebind shows up in the footer without any extra plumbing.
     ///
-    /// `overrides` is the parsed `ui.action_keys` map (empty when the
-    /// user hasn't customized anything).
+    /// Actions whose effective chord is a two-step leader sequence
+    /// collapse into ONE group cell per leader (`g ▸ github`,
+    /// `a ▸ agent`) — the which-key popup teaches the second level, so
+    /// the footer only points at the door instead of listing every
+    /// room (issue #304).
     pub fn contextual_bindings(
         &self,
-        overrides: &std::collections::BTreeMap<String, String>,
+        catalog: &[lazybox_tui_core::action::CatalogEntry],
     ) -> Vec<crate::Binding> {
         use crate::Binding;
-        use lazybox_tui_core::action::{Action, ActionDef, contextual_label};
+        use lazybox_tui_core::action::{
+            Action, ActionKind, Chord, KeyStroke, Param, contextual_label, leader_group_label,
+        };
 
         let workspace = self.selected_workspace();
         let is_ready = self.merge_target_for_cursor().is_some();
@@ -1902,7 +1909,17 @@ impl Sidebar {
         // header case: Shift-X is the universal destroy key,
         // visible muscle-memory is enough.
         if workspace.is_some() {
-            actions.push(Action::SpawnAgent("claude".into()));
+            // Any bound agent row stands in for the whole `a ▸ agent`
+            // group — the leader collapse below folds every sibling
+            // into the one cell, so which agent it names is moot.
+            if let Some(id) = catalog.iter().find_map(|e| match (&e.kind, &e.param) {
+                (ActionKind::SpawnAgent, Some(Param::Agent(id))) if !e.chords.is_empty() => {
+                    Some(id.clone())
+                }
+                _ => None,
+            }) {
+                actions.push(Action::SpawnAgent(id));
+            }
             actions.push(Action::SpawnShell);
             actions.push(Action::OpenEditor);
             actions.push(Action::ToggleSnooze);
@@ -1927,27 +1944,50 @@ impl Sidebar {
         actions.push(Action::NewProject);
         actions.push(Action::NewWorkspace);
 
-        actions
-            .into_iter()
-            .map(|a| {
-                let def = ActionDef::for_action(&a);
-                // SpawnAgent's hint key is `c / x / u` — three agents
-                // — so the label needs to read "agent" generically,
-                // not "claude." Previously the row said
-                // "c / x / u   claude" which implied all three keys
-                // launch claude. Switching to "agent" matches the
-                // catalog's static `def.label` and removes the
-                // ambiguity.
-                let label: std::borrow::Cow<'static, str> = match &a {
-                    Action::SpawnAgent(_) => std::borrow::Cow::Borrowed(def.label),
-                    _ => std::borrow::Cow::Borrowed(contextual_label(&a, workspace)),
-                };
-                Binding {
-                    keys: def.effective_keys_display(overrides),
-                    label,
+        let mut out: Vec<Binding> = Vec::with_capacity(actions.len());
+        let mut seen_leaders: Vec<KeyStroke> = Vec::new();
+        for a in actions {
+            let Some(entry) = catalog.iter().find(|e| {
+                e.kind == a.kind()
+                    && match (&a, &e.param) {
+                        (Action::SpawnAgent(id), Some(Param::Agent(p))) => p == id,
+                        _ => true,
+                    }
+            }) else {
+                continue;
+            };
+            match entry.chords.first() {
+                // A leader chord renders as its group cell — once per
+                // leader, no matter how many siblings surfaced.
+                Some(Chord::Seq(strokes)) => {
+                    let head = strokes[0];
+                    if seen_leaders.contains(&head) {
+                        continue;
+                    }
+                    seen_leaders.push(head);
+                    let label = leader_group_label(entry.kind)
+                        .map(std::borrow::Cow::Borrowed)
+                        .unwrap_or_else(|| entry.label.clone());
+                    out.push(Binding {
+                        keys: std::borrow::Cow::Owned(format!("{} ▸", head.display())),
+                        label,
+                    });
                 }
-            })
-            .collect()
+                _ => {
+                    let label: std::borrow::Cow<'static, str> = match &a {
+                        // A single-key remap of an agent row keeps its
+                        // own name — there's no group cell to defer to.
+                        Action::SpawnAgent(_) => entry.label.clone(),
+                        _ => std::borrow::Cow::Borrowed(contextual_label(&a, workspace)),
+                    };
+                    out.push(Binding {
+                        keys: entry.keys_display.clone(),
+                        label,
+                    });
+                }
+            }
+        }
+        out
     }
 }
 

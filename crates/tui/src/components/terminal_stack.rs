@@ -2413,7 +2413,7 @@ impl TerminalStack {
 
         if visible.is_empty() {
             let line = Line::from(Span::styled(
-                "(no terminals — press s for shell, c for claude)",
+                "(no terminals — press s for shell, a c for claude)",
                 Style::default()
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::ITALIC),

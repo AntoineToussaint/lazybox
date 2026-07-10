@@ -327,7 +327,7 @@ fn which_key_github_group_golden_render() {
     let backend = TestBackend::new(40, 12);
     let mut term = Terminal::new(backend).unwrap();
     term.draw(|frame| {
-        which_key::render(frame, Rect::new(0, 0, 40, 12), g, &rows);
+        which_key::render(frame, Rect::new(0, 0, 40, 12), g, Some("github"), &rows);
     })
     .unwrap();
     let buf = term.backend().buffer();

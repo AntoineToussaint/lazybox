@@ -59,13 +59,13 @@ impl Sidebar {
             }
 
             // ── Spawn / open ──────────────────────────────────────────
-            // The per-agent spawn keys (`c` claude, `x` codex, `u`
-            // cursor) are catalog rows now (#102 P2) — generated per
-            // enabled agent in `ActionDef::catalog`, dispatched through
-            // `Model::dispatch_action(SpawnAgent(id))` before this
-            // handler ever runs. The old `agent_shortcuts` side map is
-            // gone; remap an agent's key via `ui.action_keys`
-            // (`spawn_agent.<id>`).
+            // The per-agent spawn chords (`a c` claude, `a x` codex,
+            // `a u` cursor) are catalog rows now (#102 P2, #304) —
+            // generated per enabled agent in `ActionDef::catalog`,
+            // dispatched through `Model::dispatch_action(SpawnAgent(id))`
+            // before this handler ever runs. The old `agent_shortcuts`
+            // side map is gone; remap an agent's chord via
+            // `ui.action_keys` (`spawn_agent.<id>`).
             //
             // `w` for "work on this" — single polymorphic key. Spawns
             // the default agent with a context-aware prompt:

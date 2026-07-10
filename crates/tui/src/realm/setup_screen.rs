@@ -61,7 +61,7 @@ pub fn render(screen: Screen) -> (Box<dyn AppComponent<Msg, UserEvent>>, Option<
             Box::new(
                 Choice::multi(
                     "Which AI coding agents should lazybox let you spawn into a \
-                     worktree?  Press `c`/`x`/`u` on a row to drop into them.",
+                     worktree?  Press `a` then `c`/`x`/`u` on a row to drop into them.",
                     items,
                 )
                 .title("Setup · agents")

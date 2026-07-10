@@ -169,7 +169,8 @@ per-pane cursor navigation (`j/k`, arrows) stays as pane match arms in
 `components/{sidebar,right_pane,terminal_stack}`. A catalog row is one
 enriched binding (#102): `chords: Vec<Chord>` where `Chord = Key |
 Seq` — `Seq` is every leader/double-press (`g m`, `q q`, `] ]`), and
-multiple chords are alternatives (`g v | Shift-V`); a `param`
+multiple chords are alternatives (a user override like
+`g v | Shift-V`); a `param`
 (agent id) that generates one real `SpawnAgent` row per enabled agent
 at startup; and a `guard` (`None | DoublePress | Confirm(prompt)`) that
 carries the `q q` double-tap and the archive/merge/long-snooze confirm
@@ -184,7 +185,13 @@ within a section or at the same rank under a focus. The `?` help is the
 generated Keys screen: every binding by scope with effective
 (post-override) chords. `ui.keymap_preset` selects an in-tree starter
 keymap (`default`, `vim`); explicit `ui.action_keys` layers on top.
-The footer hint bar reads each pane's `contextual_bindings()`.
+The default keymap is leaders-only (#304): grouped actions ship a
+single leader chord, no direct-key aliases — a concept with ≥2 sibling
+actions gets a leader group (named in `leader_group_label`); only true
+primary actions (`w`, `Enter`, navigation) earn top-level keys. The
+footer hint bar reads each pane's `contextual_bindings()`, collapsing
+a leader group into one cell (`g ▸ github`, `a ▸ agent`) — the
+which-key popup and `?` help reuse the same group labels.
 
 **Global**: `Tab` cycle panes, `?` help, `q q` quit, `,` settings,
 `]` browse snippets (read-only catalog; `e` there opens the YAML),
@@ -205,25 +212,25 @@ selection), mouse-click any pane to focus it, mouse-drag splitters to
 resize.
 
 **Sidebar**: `j/k` or arrows navigate, `Enter` open (focus activity),
-`w` work on this (contextual agent prompt), `c` claude, `x` codex,
-`u` cursor, `s` shell, `e` editor, `m` mark read, `z` snooze,
-`Shift-Z` long snooze, `f` cycle role filter, `o` cycle sort,
-`Space` collapse/expand repo group, `Shift-S` cycle mailbox
-(Inbox → Inactive → Snoozed), `/` search, `n` new workspace,
-`Shift-N` new project, `Shift-A` adopt sessions, `Shift-J` join issue
-into PR, `Shift-X` archive. `v` multi-selects workspace rows (marks
-survive j/k; `Esc` clears) and `Shift-B` broadcasts one instruction to
-every selected workspace: a snippet picker (`Ctrl-F` skips it for free
-text) feeds a compose textarea pre-filled with the snippet body, and
-submit delivers per target — running agents via the settle-gated
-inject, plain shells via a direct write, session-less workspaces
-skipped and named in the summary notice. `g` is a leader key that opens the
-**github** group as a two-step chord (which-key popup): `g m` merge,
-`g v` reviewers, `g a` assignees, `g l` labels, `g o` open in
-browser. Merge has no direct-key alias — `g m` is its only default
-chord. The legacy `Shift-{V,G,L,O}` keys remain as direct aliases
-(Activity-section bindings shadow them while the right pane is
-focused — e.g. `Shift-G` is jump-to-bottom there). `b` is a leader
+`w` work on this (contextual agent prompt), `s` shell, `e` editor,
+`m` mark read, `z` snooze, `Shift-Z` long snooze, `f` cycle role
+filter, `o` cycle sort, `Space` collapse/expand repo group, `Shift-S`
+cycle mailbox (Inbox → Inactive → Snoozed), `/` search, `n` new
+workspace, `Shift-N` new project, `Shift-A` adopt sessions, `Shift-J`
+join issue into PR, `Shift-X` archive. `v` multi-selects workspace
+rows (marks survive j/k; `Esc` clears) and `Shift-B` broadcasts one
+instruction to every selected workspace: a snippet picker (`Ctrl-F`
+skips it for free text) feeds a compose textarea pre-filled with the
+snippet body, and submit delivers per target — running agents via the
+settle-gated inject, plain shells via a direct write, session-less
+workspaces skipped and named in the summary notice. `a` is a leader
+for the **agent** group (which-key popup): `a c` claude, `a x` codex,
+`a u` cursor — no top-level `c`/`x`/`u` aliases (re-add via
+`ui.action_keys`, keyed `spawn_agent.<id>`). `g` is a leader that
+opens the **github** group the same way: `g m` merge, `g v`
+reviewers, `g a` assignees, `g l` labels, `g o` open in browser —
+leader chords only, the legacy `Shift-{M,V,G,L,O}` direct aliases are
+gone (#304). `b` is a leader
 for the **on-main** group (which-key popup): `b c` / `b x` / `b u`
 start an agent, `b s` a shell, on the repo's shared **main checkout**
 (default branch) instead of an isolated worktree — confirmed first

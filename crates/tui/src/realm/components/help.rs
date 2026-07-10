@@ -6,7 +6,7 @@
 use crate::pane::Binding;
 use crate::realm::Msg;
 use crate::realm::UserEvent;
-use lazybox_tui_core::action::{CatalogEntry, Chord, KeyStroke, Section};
+use lazybox_tui_core::action::{self, CatalogEntry, Chord, KeyStroke, Section};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::Event;
@@ -40,9 +40,10 @@ pub struct LeaderGroup {
     heading: String,
     /// One row per in-group chord: keys `g m`, label `merge PR`.
     chords: Vec<Binding>,
-    /// The full key display for each in-group action, so the legacy
-    /// direct-key aliases (`Shift-V`, …) stay visible alongside the
-    /// leader chord, e.g. `aliases: g m · g v | Shift-V`.
+    /// The full key display for each in-group action, so any
+    /// user-added direct-key aliases stay visible alongside the leader
+    /// chord, e.g. `aliases: g m · g v | Shift-V` after an override
+    /// (the default keymap ships leader chords only, #304).
     aliases: String,
 }
 
@@ -94,8 +95,18 @@ impl LeaderGroup {
                     .map(|(_, entry)| entry.keys_display.as_ref())
                     .collect::<Vec<_>>()
                     .join(" · ");
+                // The group's registry name (`github`, `agent`, …)
+                // heads the block — the same label the footer's group
+                // cell and the which-key popup title use (#304).
+                let label = group
+                    .iter()
+                    .find_map(|(_, entry)| action::leader_group_label(entry.kind));
+                let heading = match label {
+                    Some(name) => format!("{name} — press {leader_disp}, then:"),
+                    None => format!("press {leader_disp}, then:"),
+                };
                 Self {
-                    heading: format!("press {leader_disp}, then:"),
+                    heading,
                     chords,
                     aliases: format!("aliases: {aliases}"),
                 }
@@ -405,11 +416,11 @@ mod tests {
             .map(|b| (b.keys.to_string(), b.label.to_string()))
             .collect();
         assert!(
-            rows.iter().any(|(k, l)| k == "c" && l == "spawn claude"),
+            rows.iter().any(|(k, l)| k == "a c" && l == "spawn claude"),
             "per-agent claude row missing from Keys screen: {rows:?}",
         );
         assert!(
-            rows.iter().any(|(k, l)| k == "x" && l == "spawn codex"),
+            rows.iter().any(|(k, l)| k == "a x" && l == "spawn codex"),
             "per-agent codex row missing",
         );
         assert!(
@@ -505,11 +516,12 @@ mod tests {
         }
     }
 
-    /// The aliases line carries each action's full key display, so the
-    /// legacy Shift-* aliases stay visible alongside the leader chord —
-    /// derived from the same catalog key displays.
+    /// The default keymap is leaders-only (#304): no legacy Shift-*
+    /// alias may reappear on the g group's aliases line, and the
+    /// heading carries the group's registry name so the help panel,
+    /// footer cell, and which-key popup all tell the same story.
     #[test]
-    fn leader_section_reflects_the_shift_aliases() {
+    fn leader_section_is_alias_free_and_carries_the_group_label() {
         use lazybox_tui_core::action::ActionDef;
         let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
         let help = Help::from_catalog(&catalog, ']');
@@ -518,20 +530,57 @@ mod tests {
             .iter()
             .find(|lg| lg.heading.contains("press g"))
             .expect("g leader block missing from help panel");
-        for alias in ["Shift-V", "Shift-G", "Shift-L", "Shift-O"] {
+        assert!(
+            g.heading.starts_with("github"),
+            "g group heading missing its registry label: {:?}",
+            g.heading,
+        );
+        for alias in ["Shift-M", "Shift-V", "Shift-G", "Shift-L", "Shift-O"] {
             assert!(
-                g.aliases.contains(alias),
-                "aliases line omits {alias}: {:?}",
+                !g.aliases.contains(alias),
+                "legacy alias {alias} leaked back into the aliases line: {:?}",
                 g.aliases,
             );
         }
-        // Merge dropped its `Shift-M` alias (#264) — it must NOT
-        // reappear on the aliases line.
+    }
+
+    /// The `a` agent group forms its own leader block, labeled from the
+    /// registry, listing every generated spawn chord (#304).
+    #[test]
+    fn leader_section_lists_the_agent_chords_from_the_catalog() {
+        use lazybox_tui_core::action::ActionDef;
+        let agents = [
+            "claude".to_string(),
+            "codex".to_string(),
+            "cursor".to_string(),
+        ];
+        let catalog = ActionDef::catalog(&agents, &std::collections::BTreeMap::new());
+        let help = Help::from_catalog(&catalog, ']');
+        let a = help
+            .leaders
+            .iter()
+            .find(|lg| lg.heading.contains("press a"))
+            .expect("a leader block missing from help panel");
         assert!(
-            !g.aliases.contains("Shift-M"),
-            "merge's legacy Shift-M alias leaked back into the aliases line: {:?}",
-            g.aliases,
+            a.heading.starts_with("agent"),
+            "a group heading missing its registry label: {:?}",
+            a.heading,
         );
+        let rows: Vec<(String, String)> = a
+            .chords
+            .iter()
+            .map(|b| (b.keys.to_string(), b.label.to_string()))
+            .collect();
+        for (chord, label) in [
+            ("a c", "spawn claude"),
+            ("a x", "spawn codex"),
+            ("a u", "spawn cursor"),
+        ] {
+            assert!(
+                rows.iter().any(|(k, l)| k == chord && l == label),
+                "a leader block missing {chord} → {label}; got {rows:?}",
+            );
+        }
     }
 
     #[test]

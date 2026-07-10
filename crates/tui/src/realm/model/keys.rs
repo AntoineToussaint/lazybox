@@ -71,9 +71,11 @@ impl<T: TerminalAdapter> Model<T> {
             // fall-through) — so the bare-Work idle timeout no longer
             // applies.
             self.work_leader_at = None;
-            let action = key_event_to_stroke(realm_key_to_crossterm(&key))
-                .and_then(|stroke| find_action_for_seq(&prefix, &stroke, self.focus, &self.catalog))
-                .and_then(action_from_entry);
+            let action = self.resolve_focus_for_keys().and_then(|rfocus| {
+                key_event_to_stroke(realm_key_to_crossterm(&key))
+                    .and_then(|stroke| find_action_for_seq(&prefix, &stroke, rfocus, &self.catalog))
+                    .and_then(action_from_entry)
+            });
             if let Some(action) = action {
                 self.q_latch.disarm();
                 let cmds = self.dispatch_action(&action);
@@ -360,33 +362,36 @@ impl<T: TerminalAdapter> Model<T> {
         //
         // An empty terminal pane has no PTY to feed, so its keys
         // resolve as if the sidebar were focused — that's what keeps
-        // the empty-state hint's `c` / `s` / `x` shortcuts live now
-        // that agent spawns are catalog rows rather than a sidebar arm.
-        let resolve_focus = match self.focus {
-            PaneFocus::Terminals if self.terminals.is_empty() => Some(PaneFocus::Sidebar),
-            PaneFocus::Terminals => None,
-            other => Some(other),
-        };
-        if let Some(rfocus) = resolve_focus
+        // the empty-state hint's `s` / `a c` shortcuts live now that
+        // agent spawns are catalog rows rather than a sidebar arm.
+        if let Some(rfocus) = self.resolve_focus_for_keys()
             && let Some(stroke) = key_event_to_stroke(ct)
         {
             let action =
                 find_action_for_stroke(&stroke, rfocus, &self.catalog).and_then(action_from_entry);
             // Does this keystroke open a leader group? Any catalog entry
             // with a `Seq` starting with it (reachable from this focus)
-            // makes it a leader. Most leaders (`g`) have no direct action
-            // of their own. `w` is the exception (issue #224): it's BOTH
-            // a direct action (Work) AND the prefix for the scoped
-            // `w c` / `w x` chords — so it arms a *timed* leader (an
-            // agent key picks that agent; otherwise bare Work fires on
-            // the idle tick, `tick_work_leader`). The which-key popup
-            // comes for free from `self.leader`. Leader-arming is never
-            // done from an empty terminal pane: completion keys off the
-            // real focus, which is Terminals there.
+            // makes it a leader. Most leaders (`g`, `a`) have no direct
+            // action of their own. `w` is the exception (issue #224):
+            // it's BOTH a direct action (Work) AND the prefix for the
+            // scoped `w c` / `w x` chords — so it arms a *timed* leader
+            // (an agent key picks that agent; otherwise bare Work fires
+            // on the idle tick, `tick_work_leader`). The which-key popup
+            // comes for free from `self.leader`. Completion resolves
+            // through `resolve_focus_for_keys` too, so a leader armed
+            // from an empty terminal pane completes against the same
+            // sidebar scope it armed under.
             let is_work = matches!(action, Some(lazybox_tui_core::action::Action::Work));
-            let opens_leader = self.focus != PaneFocus::Terminals
-                && (action.is_none() || is_work)
-                && !seq_continuations(&stroke, rfocus, &self.catalog).is_empty();
+            // Only continuations the completion path can actually fire
+            // (`action_from_entry`) make a stroke a leader. Quit's `q q`
+            // is a `Seq` too, but it dispatches through the q-latch, not
+            // the catalog — arming on it (reachable from an empty
+            // terminal pane, where the quit branch is skipped) would
+            // show a popup whose completion goes nowhere.
+            let opens_leader = (action.is_none() || is_work)
+                && seq_continuations(&stroke, rfocus, &self.catalog)
+                    .iter()
+                    .any(|(_, entry)| action_from_entry(entry).is_some());
             if opens_leader {
                 self.q_latch.disarm();
                 self.leader.arm(stroke);
@@ -416,7 +421,7 @@ impl<T: TerminalAdapter> Model<T> {
             PaneFocus::Sidebar => self.sidebar.handle_key_direct(ct, &mut cmds),
             PaneFocus::Right => self.right.handle_key_direct(ct, &mut cmds),
             // Terminals pane with NO active terminal can't route to a
-            // PTY. The empty-state hint says "press s for shell, c
+            // PTY. The empty-state hint says "press s for shell, a c
             // for claude" — those bindings live on Sidebar, so we
             // forward there instead. PTY-routing resumes once the
             // first TerminalSpawned arrives.
@@ -483,6 +488,20 @@ impl<T: TerminalAdapter> Model<T> {
         self.terminals.handle_key_direct(held, &mut held_cmds);
         for cmd in held_cmds {
             self.send_cmd(cmd);
+        }
+    }
+
+    /// The focus catalog lookups resolve under, given the real pane
+    /// focus. An empty terminal pane has no PTY to feed, so its keys
+    /// resolve as if the sidebar were focused; a live terminal never
+    /// reaches the catalog (`None`). Shared by single-stroke dispatch,
+    /// leader arming + completion, and the which-key popup so all four
+    /// agree on scope.
+    pub(super) fn resolve_focus_for_keys(&self) -> Option<PaneFocus> {
+        match self.focus {
+            PaneFocus::Terminals if self.terminals.is_empty() => Some(PaneFocus::Sidebar),
+            PaneFocus::Terminals => None,
+            other => Some(other),
         }
     }
 

@@ -45,7 +45,10 @@ streams live `TerminalOutput` bytes. The default session backend is tmux
 
 ### Known sharp edges
 - libghostty's Zig sources are fetched at build time (pinned commit) — first build needs network.
-- tmux is required as the default wrapper; no raw-PTY mode is wired yet.
+- tmux ≥ 3.3 is required for persistent sessions (`allow-passthrough`
+  and friends in the transparent conf; older tmux turns an unknown conf
+  option into a config-error view that blocks every headless attach).
+  Older or missing tmux falls back to the ephemeral raw-PTY backend.
 
 ---
 

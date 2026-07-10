@@ -6,21 +6,16 @@
 //! screenful — nothing to scroll back through, which read as "scrolling
 //! is broken" on every recovered session.
 //!
-//! Skipped (pass, with a note) when tmux isn't on PATH.
+//! Skipped (pass, with a note) when tmux is missing or older than the
+//! backend's minimum — the same gate `TmuxBackend::detect()` applies,
+//! so the test only runs where the backend would actually engage.
 
+use lazybox_server::backend::tmux::modern_tmux_version;
 use lazybox_server::backend::{SessionBackend, TmuxBackend};
 use std::time::Duration;
 use tokio::time::timeout;
 
 const TEST_DEADLINE: Duration = Duration::from_secs(30);
-
-fn tmux_available() -> bool {
-    std::process::Command::new("tmux")
-        .arg("-V")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 fn kill_test_server(socket: &str) {
     let _ = std::process::Command::new("tmux")
@@ -30,8 +25,8 @@ fn kill_test_server(socket: &str) {
 
 #[tokio::test]
 async fn restarted_backend_seeds_scrollback_from_tmux_history() {
-    if !tmux_available() {
-        eprintln!("tmux not available — skipping restart-recovery test");
+    if modern_tmux_version().is_none() {
+        eprintln!("tmux missing or too old — skipping restart-recovery test");
         return;
     }
     let socket = format!("lazybox-test-restart-{}", std::process::id());

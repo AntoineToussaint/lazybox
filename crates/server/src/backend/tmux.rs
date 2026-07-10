@@ -71,25 +71,33 @@ const SCROLLBACK_TERMINAL_OVERRIDES: &str = ",xterm*:smcup@:rmcup@";
 /// reattaching client (`capture_history`), so the two never drift.
 const HISTORY_LIMIT: u32 = 10_000;
 
+/// Minimum tmux version the backend's conf requires, enforced by
+/// [`TmuxBackend::detect`] (older tmux → raw-PTY fallback, same as no
+/// tmux at all). Pinned by the newest option the conf sets:
+/// `allow-passthrough` (tmux 3.3).
+///
+/// Old tmux must be REJECTED, not tolerated: an option unknown to the
+/// running tmux is a conf parse error, and tmux swaps the first
+/// attaching client into a "config error" view instead of the pane —
+/// which never repaints until a key is pressed, so lazybox's headless
+/// attach client streams no pane content at all. Every session on that
+/// host is silently dead (seen on Ubuntu 22.04 LTS, tmux 3.2a).
+const MIN_TMUX_VERSION: (u32, u32) = (3, 3);
+
 /// Clipboard passthrough options, independent of the scrollback flavor.
 /// `set-clipboard on` forwards an inner program's OSC 52 to the attach
 /// client; `allow-passthrough on` (off by default since tmux 3.3a) lets
 /// a DCS-wrapped escape through. Without these tmux eats the clipboard
 /// request before lazybox can relay it to the host terminal.
-///
-/// `allow-passthrough` doesn't exist before tmux 3.3, so it must be set
-/// with `-q` — see `transparent_conf` for why an unknown option in this
-/// conf is catastrophic rather than cosmetic.
-const CLIPBOARD_PASSTHROUGH_OPTS: &str = "set -g set-clipboard on\nset -gq allow-passthrough on\n";
+const CLIPBOARD_PASSTHROUGH_OPTS: &str = "set -g set-clipboard on\nset -g allow-passthrough on\n";
 
 /// `terminal-features` entry advertising OSC 8 hyperlink support for the
 /// attach client. `terminal-features` is a server option (`-s`) and a
 /// list (`-a` append); the `xterm*` pattern matches the forced
 /// `TERM=xterm-256color`. Without it tmux strips hyperlinks because that
-/// terminfo lacks the `Hls` capability — see `transparent_conf`. `-q`
-/// because the option only exists since tmux 3.2.
+/// terminfo lacks the `Hls` capability — see `transparent_conf`.
 const HYPERLINK_TERMINAL_FEATURES_VALUE: &str = "xterm*:hyperlinks";
-const HYPERLINK_TERMINAL_FEATURES: &str = "set -asq terminal-features 'xterm*:hyperlinks'\n";
+const HYPERLINK_TERMINAL_FEATURES: &str = "set -as terminal-features 'xterm*:hyperlinks'\n";
 
 /// tmux client config: prefix off (so Ctrl-B reaches the agent), no
 /// key bindings (so nothing intercepts), no status bar (so output
@@ -114,15 +122,10 @@ const HYPERLINK_TERMINAL_FEATURES: &str = "set -asq terminal-features 'xterm*:hy
 ///   automatically, scrolling its own history one line per notch
 ///   (a daemon round trip + pane repaint per notch).
 ///
-/// **Every option newer than tmux 3.1 is set with `-q` (quiet).** A
-/// conf line naming an option the running tmux doesn't know is not a
-/// cosmetic warning: tmux queues the parse error and swaps the FIRST
-/// attaching client into a "config error" view instead of the pane —
-/// which never repaints until a key is pressed, so lazybox's headless
-/// attach client streams no pane content at all. Ubuntu 22.04 LTS ships
-/// tmux 3.2a, where `allow-passthrough` (3.3) is exactly such an
-/// option. `-q` makes an unknown option a silent no-op, degrading the
-/// single feature instead of every session.
+/// Every option here may assume [`MIN_TMUX_VERSION`] — `detect()`
+/// refuses older tmux, because a single unknown option in this conf
+/// breaks every attach (see the constant's doc). Raising an option's
+/// floor means raising `MIN_TMUX_VERSION` with it.
 fn transparent_conf(native_scrollback: bool) -> String {
     let mut conf = String::from(
         "set -g prefix None\n\
@@ -134,12 +137,10 @@ fn transparent_conf(native_scrollback: bool) -> String {
         conf.push_str("set -g mouse on\n");
     }
     conf.push_str(&format!("set -g history-limit {HISTORY_LIMIT}\n"));
-    // `window-size` only exists since tmux 3.1 — `-q`, see the doc
-    // comment above.
     conf.push_str(
         "set -g default-terminal \"xterm-256color\"\n\
          set -g escape-time 0\n\
-         set -gq window-size latest\n\
+         set -g window-size latest\n\
          set -g mode-style \"fg=default,bg=default\"\n\
          set -g message-style \"fg=default,bg=default\"\n\
          set -g focus-events on\n",
@@ -217,12 +218,9 @@ fn normalize_capture(stdout: &[u8]) -> Vec<u8> {
 fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
     // Clipboard passthrough is independent of the scrollback flavor, so
     // an already-running server picks it up either way.
-    // `allow-passthrough` needs `-q` (option is tmux 3.3+) — same
-    // reasoning as the conf, minus the broken-attach blast radius:
-    // here a missing `-q` merely fails one best-effort set-option.
     let clipboard = [
         vec!["set-option", "-g", "set-clipboard", "on"],
-        vec!["set-option", "-gq", "allow-passthrough", "on"],
+        vec!["set-option", "-g", "allow-passthrough", "on"],
     ];
     // Agents (e.g. Claude Code) nag when they detect tmux with
     // focus-events off. We own the config, so enable it for both fresh
@@ -230,11 +228,10 @@ fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
     let focus_events = vec!["set-option", "-g", "focus-events", "on"];
     // `terminal-features` is independent of the scrollback flavor — an
     // already-running server must learn the client speaks OSC 8 either
-    // way, else surviving sessions keep stripping hyperlinks. `-q`:
-    // the option is tmux 3.2+.
+    // way, else surviving sessions keep stripping hyperlinks.
     let hyperlinks = vec![
         "set-option",
-        "-asq",
+        "-as",
         "terminal-features",
         HYPERLINK_TERMINAL_FEATURES_VALUE,
     ];
@@ -306,17 +303,60 @@ pub struct TmuxBackend {
     next_key: AtomicU64,
 }
 
+/// Pull `(major, minor)` out of a `tmux -V` banner. Handles the release
+/// shape (`tmux 3.2a`), the development shape (`tmux next-3.4`), and
+/// distro decorations, by parsing the first `digits.digits` run and
+/// ignoring any patch-letter suffix. `None` for banners with no such
+/// run (e.g. OpenBSD's `tmux openbsd-7.6`, which tracks upstream head
+/// and is always modern).
+fn parse_tmux_version(banner: &str) -> Option<(u32, u32)> {
+    let start = banner.find(|c: char| c.is_ascii_digit())?;
+    let rest = &banner[start..];
+    let major_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let major = rest[..major_end].parse().ok()?;
+    let rest = rest[major_end..].strip_prefix('.')?;
+    let minor_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let minor = rest[..minor_end].parse().ok()?;
+    Some((major, minor))
+}
+
+/// Probe PATH for a tmux that satisfies [`MIN_TMUX_VERSION`]. Returns
+/// the `tmux -V` banner when usable, `None` (with the reason logged)
+/// when tmux is missing or too old. A banner with no parseable version
+/// is treated as modern — those are development or vendor builds that
+/// track upstream head.
+pub fn modern_tmux_version() -> Option<String> {
+    let out = Command::new("tmux").arg("-V").output().ok()?;
+    if !out.status.success() {
+        tracing::debug!("tmux -V failed; tmux backend unavailable");
+        return None;
+    }
+    let banner = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if let Some(version) = parse_tmux_version(&banner)
+        && version < MIN_TMUX_VERSION
+    {
+        let (maj, min) = MIN_TMUX_VERSION;
+        tracing::warn!(
+            "{banner} is older than the required tmux {maj}.{min} — \
+             sessions will NOT survive lazybox restarts (raw-PTY \
+             fallback). Upgrade tmux to re-enable persistent sessions."
+        );
+        return None;
+    }
+    Some(banner)
+}
+
 impl TmuxBackend {
     /// Probe for tmux on PATH and write the transparent config. Returns
-    /// `None` when tmux isn't usable on this machine — callers fall
-    /// back to `RawPtyBackend`.
+    /// `None` when tmux isn't usable on this machine — missing entirely
+    /// or older than [`MIN_TMUX_VERSION`] — and callers fall back to
+    /// `RawPtyBackend`.
     pub fn detect() -> Option<Self> {
-        let out = Command::new("tmux").arg("-V").output().ok()?;
-        if !out.status.success() {
-            tracing::debug!("tmux -V failed; tmux backend unavailable");
-            return None;
-        }
-        let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let version = modern_tmux_version()?;
         tracing::info!("tmux backend available: {version}");
         // Profile-aware socket name. Default profile resolves to
         // "lazybox" — backward compatible with running sessions; a
@@ -907,7 +947,7 @@ mod tests {
         assert!(conf.contains("unbind-key -a"));
         // Resize authority is pinned, not left to tmux's implicit default
         // (the `resize` impl's multi-client behavior depends on it).
-        assert!(conf.contains("set -gq window-size latest\n"));
+        assert!(conf.contains("set -g window-size latest\n"));
     }
 
     /// Legacy mode (`terminal.native_scrollback: false`) reproduces the
@@ -929,11 +969,11 @@ mod tests {
     fn server_option_cmds_match_conf_flavors() {
         let clipboard = [
             vec!["set-option", "-g", "set-clipboard", "on"],
-            vec!["set-option", "-gq", "allow-passthrough", "on"],
+            vec!["set-option", "-g", "allow-passthrough", "on"],
         ];
         let hyperlinks = vec![
             "set-option",
-            "-asq",
+            "-as",
             "terminal-features",
             "xterm*:hyperlinks",
         ];
@@ -981,7 +1021,7 @@ mod tests {
                 "native={native}"
             );
             assert!(
-                conf.contains("set -gq allow-passthrough on\n"),
+                conf.contains("set -g allow-passthrough on\n"),
                 "native={native}"
             );
         }
@@ -994,11 +1034,9 @@ mod tests {
     /// "right-click never opens URLs under the tmux backend" report.
     #[test]
     fn both_conf_flavors_advertise_hyperlinks() {
+        assert!(transparent_conf(true).contains("set -as terminal-features 'xterm*:hyperlinks'\n"));
         assert!(
-            transparent_conf(true).contains("set -asq terminal-features 'xterm*:hyperlinks'\n")
-        );
-        assert!(
-            transparent_conf(false).contains("set -asq terminal-features 'xterm*:hyperlinks'\n")
+            transparent_conf(false).contains("set -as terminal-features 'xterm*:hyperlinks'\n")
         );
     }
 
@@ -1045,6 +1083,27 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&backend.config_path);
+    }
+
+    /// Version banners across the shapes tmux actually emits. The gate
+    /// must reject anything confidently below [`MIN_TMUX_VERSION`] (an
+    /// unknown conf option swaps every attach into tmux's config-error
+    /// view — dead sessions) and admit dev/vendor builds it can't parse.
+    #[test]
+    fn tmux_version_gate() {
+        // Release banners.
+        assert_eq!(parse_tmux_version("tmux 3.2a"), Some((3, 2)));
+        assert_eq!(parse_tmux_version("tmux 3.3"), Some((3, 3)));
+        assert_eq!(parse_tmux_version("tmux 3.5a"), Some((3, 5)));
+        // Development banner.
+        assert_eq!(parse_tmux_version("tmux next-3.4"), Some((3, 4)));
+        // No dotted version — OpenBSD tracks head; treated as modern.
+        assert_eq!(parse_tmux_version("tmux openbsd-7"), None);
+        assert_eq!(parse_tmux_version("tmux"), None);
+
+        assert!(parse_tmux_version("tmux 3.2a").unwrap() < MIN_TMUX_VERSION);
+        assert!(parse_tmux_version("tmux 3.3a").unwrap() >= MIN_TMUX_VERSION);
+        assert!(parse_tmux_version("tmux 4.0").unwrap() >= MIN_TMUX_VERSION);
     }
 
     /// capture-pane joins lines with bare `\n`; the seed must carriage-

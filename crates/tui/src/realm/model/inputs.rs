@@ -689,10 +689,7 @@ impl<T: TerminalAdapter> Model<T> {
                             cmds.push(IpcCommand::Kill { session_key });
                         }
                         // Merged/Closed: also delete the worktree.
-                        (
-                            true,
-                            super::RemovalReason::Merged | super::RemovalReason::Closed,
-                        ) => {
+                        (true, super::RemovalReason::Merged | super::RemovalReason::Closed) => {
                             cmds.push(IpcCommand::RemoveMergedWorkspace { session_key });
                         }
                         // Explicit "no" on the merged/closed prompt is a
@@ -702,10 +699,7 @@ impl<T: TerminalAdapter> Model<T> {
                         // routes through `handle_modal_dismissed`
                         // instead and stays silent — the daemon
                         // re-prompts after its reprompt interval.)
-                        (
-                            false,
-                            super::RemovalReason::Merged | super::RemovalReason::Closed,
-                        ) => {
+                        (false, super::RemovalReason::Merged | super::RemovalReason::Closed) => {
                             cmds.push(IpcCommand::KeepMergedWorkspace { session_key });
                         }
                         // Out-of-scope "no" has nothing to tell the

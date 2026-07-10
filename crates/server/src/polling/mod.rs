@@ -3443,9 +3443,9 @@ fn removal_candidate_state(
 /// would sit unprompted forever (issue #292). Runs once per poll tick:
 /// any stored workspace still in terminal state with sessions — and
 /// not answered "keep" — is re-prompted through the same
-/// [`handlers::prompt_merged_pr_removal_with`] path, whose
+/// `handlers::prompt_merged_pr_removal_with` path, whose
 /// [`RemovalPromptMemory`] gate keeps the cadence to
-/// [`REMOVAL_REPROMPT_AFTER`].
+/// `REMOVAL_REPROMPT_AFTER`.
 ///
 /// No-op when `worktree.auto_cleanup_merged` is on — that opt-in path
 /// reaps silently on the transition instead of prompting.
@@ -3501,7 +3501,7 @@ pub async fn keep_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
 /// A client just (re)connected: forget the per-workspace emit
 /// timestamps (NOT the "keep" pins) so the next reprompt sweep
 /// re-fires immediately for anything still unresolved, instead of
-/// waiting out [`REMOVAL_REPROMPT_AFTER`]. A prompt the reconnecting
+/// waiting out `REMOVAL_REPROMPT_AFTER`. A prompt the reconnecting
 /// client never saw shouldn't be throttled as if it had been.
 pub async fn mark_removal_prompts_for_replay(config: &ServerConfig) {
     config.removal_prompts.lock().await.prompted.clear();

@@ -2496,8 +2496,7 @@ mod inspect_tests {
 
         let mut labels = std::collections::HashSet::new();
         for _ in 0..2 {
-            let evt =
-                drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+            let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
             let Event::MergedPrRemovable { label, .. } = evt else {
                 unreachable!()
             };

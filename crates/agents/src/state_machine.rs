@@ -51,11 +51,14 @@ pub(crate) const WORKING_HYSTERESIS: Duration = Duration::from_secs(5);
 pub struct Reading {
     /// The state this reading implies.
     pub state: AgentState,
-    /// Whether the detector is *affirmatively* sure — a live `Working`
-    /// status line, or an idle composer the readiness probe recognized — as
-    /// opposed to the ambiguous fall-through a dropped status-line frame
-    /// produces. A clear reading is honored immediately; an ambiguous one is
-    /// damped within the hysteresis window.
+    /// Whether the detector is *affirmatively* sure. The daemon's quiet
+    /// classification — the resting screen read after seconds of PTY
+    /// silence — is clear and honored immediately; the per-chunk
+    /// byte-flow `Working` reading is inferred, not affirmed, so it
+    /// arrives ambiguous and is damped within the hysteresis window
+    /// when it would exit `InputNeeded` (a brief repaint burst at a
+    /// parked prompt must not flap the `?` off) and unconditionally
+    /// when it would exit `Done` (see `suppress_done_exit`).
     pub clear: bool,
 }
 
@@ -96,8 +99,9 @@ pub enum Outcome {
     /// A structurally forbidden edge held the state (only `Done → Idle`
     /// today — `Done` stickiness).
     Rejected,
-    /// An ambiguous flap (a dropped status-line frame) was damped within a
-    /// hysteresis window; the prior state stands.
+    /// An ambiguous reading was held: a flap (a dropped status-line frame)
+    /// damped within a hysteresis window, or a byte-flow `Working` that may
+    /// not clear `Done`. The prior state stands.
     Damped,
 }
 
@@ -184,6 +188,7 @@ impl AgentStateMachine {
         }
         if self.suppress_input_needed_exit(current, reading, now)
             || self.suppress_working_exit(current, reading, now)
+            || Self::suppress_done_exit(current, reading)
         {
             return Outcome::Damped;
         }
@@ -218,6 +223,19 @@ impl AgentStateMachine {
             && self
                 .last_input_needed_at
                 .is_some_and(|t| now.duration_since(t) < self.input_hysteresis)
+    }
+
+    /// Whether to hold an ambiguous `Working` reading against `Done`. A
+    /// byte-flow `Working` — a stray repaint (pane resize, reattach
+    /// redraw) or the user typing into the composer — must not clear the
+    /// "finished, take a look" alert. Leaving `Done` requires affirmative
+    /// evidence: a clear `Working` (a quiet-classified live status line),
+    /// an `InputNeeded` (never a Working reading), or a hook (which
+    /// commits through `transition` directly and skips this damper).
+    /// Unlike the two windowed dampers this has no time bound — `Done`
+    /// has no natural decay, so ambiguity alone can never end it.
+    fn suppress_done_exit(current: Option<AgentState>, reading: Reading) -> bool {
+        current == Some(AgentState::Done) && reading.state == AgentState::Working && !reading.clear
     }
 
     /// Whether to damp the ambiguous `Working → Idle` edge — a single frame
@@ -465,6 +483,29 @@ mod tests {
         assert_eq!(
             m.on_reading(Some(Done), clear(InputNeeded), now),
             Outcome::Committed(InputNeeded)
+        );
+    }
+
+    #[test]
+    fn ambiguous_working_cannot_clear_done() {
+        // A byte-flow Working (a stray repaint after the hook gate has
+        // gone stale) must be held: only a CLEAR Working — a live status
+        // line classified on a quiet screen — is real progress.
+        let mut m = AgentStateMachine::new();
+        let now = Instant::now();
+        assert_eq!(
+            m.on_reading(Some(Done), ambiguous(Working), now),
+            Outcome::Damped
+        );
+        // No time window: it stays held arbitrarily later.
+        let later = now + Duration::from_secs(3600);
+        assert_eq!(
+            m.on_reading(Some(Done), ambiguous(Working), later),
+            Outcome::Damped
+        );
+        assert_eq!(
+            m.on_reading(Some(Done), clear(Working), later),
+            Outcome::Committed(Working)
         );
     }
 

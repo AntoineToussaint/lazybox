@@ -3881,11 +3881,15 @@ mod live_collapse_e2e {
     use lazybox_server::backend::{MockBackend, SessionBackend};
     use tokio::time::timeout;
 
-    /// Per-await budget for a single expected event.
-    const DEADLINE: Duration = Duration::from_secs(3);
+    /// Per-await budget for a single expected event. Must exceed the
+    /// pump's ~5s quiet window (#289): a PTY-raised `InputNeeded` only
+    /// surfaces once the stream has been silent past it. The tests that
+    /// wait on one run under paused time, so the budget costs nothing
+    /// in wall-clock.
+    const DEADLINE: Duration = Duration::from_secs(10);
     /// Whole-test budget — comfortably larger than any single
     /// [`DEADLINE`] wait so the outer guard only fires on a true hang.
-    const TEST_DEADLINE: Duration = Duration::from_secs(15);
+    const TEST_DEADLINE: Duration = Duration::from_secs(60);
 
     /// A Claude chooser screen — the PTY detector reads this as
     /// `InputNeeded` (mirrors the spawn_handler.rs e2e fixtures).
@@ -4043,12 +4047,17 @@ mod live_collapse_e2e {
         serde_json::from_str(&record.workspace_json.unwrap()).unwrap()
     }
 
-    #[tokio::test]
+    // Paused time: the PTY `?` only surfaces after the ~5s quiet window
+    // (screen-scrape classification is quiet-gated, #289), so the test
+    // rides tokio's auto-advance instead of sleeping for real.
+    #[tokio::test(start_paused = true)]
     async fn collapse_keeps_a_live_input_needed_agent_session() {
         timeout(TEST_DEADLINE, async {
             let mut live = spawn_live_agent_on_issue().await;
 
             // Park the agent on a prompt — the case that reads as "lost".
+            // The `?` surfaces once the PTY has been quiet past the
+            // classify window (a dialog freezes all output).
             live.mock.emit(&live.backend_key, CHOOSER).await;
             let asking = agent_state_key(&mut live.client, AgentState::InputNeeded)
                 .await
@@ -4115,7 +4124,10 @@ mod live_collapse_e2e {
         .expect("deadline");
     }
 
-    #[tokio::test]
+    // Paused time: the PTY `?` only surfaces after the ~5s quiet window
+    // (screen-scrape classification is quiet-gated, #289), so the test
+    // rides tokio's auto-advance instead of sleeping for real.
+    #[tokio::test(start_paused = true)]
     async fn every_agent_state_emitter_uses_the_live_session_after_collapse() {
         // The #205 acceptance: no emitter may broadcast under a key
         // captured at spawn time. After the rebadge, drive each of the

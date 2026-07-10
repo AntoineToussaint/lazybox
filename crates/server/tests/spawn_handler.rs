@@ -226,9 +226,12 @@ async fn ingest_hook_drives_agent_state_transitions() {
 /// source of truth. The PTY reading must surface even after a hook marked
 /// the terminal hook-driven (the policy the user approved over the older
 /// "hooks fully authoritative" design).
-#[tokio::test]
+// Paused time: the PTY `?` only surfaces after the ~5s quiet window
+// (screen-scrape classification is quiet-gated, #289), so the test
+// rides tokio's auto-advance instead of sleeping for real.
+#[tokio::test(start_paused = true)]
 async fn hook_driven_terminal_honors_pty_input_needed() {
-    timeout(TEST_DEADLINE, async {
+    timeout(Duration::from_secs(60), async {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let mut client = subscribed(config).await;
         let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
@@ -260,7 +263,9 @@ async fn hook_driven_terminal_honors_pty_input_needed() {
 
         // Now the PTY paints a permission chooser. The hook-driven
         // terminal must honor it — the inline approval fired no hook, so
-        // the screen is the only signal that the agent is blocked.
+        // the screen is the only signal that the agent is blocked. The
+        // `?` surfaces once the PTY has been quiet past the classify
+        // window (a dialog freezes all output).
         mock.emit(
             &key,
             concat!(
@@ -282,7 +287,7 @@ async fn hook_driven_terminal_honors_pty_input_needed() {
                     }
                 )
             },
-            Duration::from_secs(2),
+            Duration::from_secs(10),
         )
         .await;
         assert!(
@@ -1405,16 +1410,21 @@ async fn wedged_session_does_not_block_subscribe_or_subsequent_spawn() {
 /// prompt → InputNeeded, answer → Working, then a small follow-up
 /// chunk with no prompt markers — and asserts the state lands on Idle,
 /// never bouncing back to InputNeeded.
-#[tokio::test]
+// Paused time: the PTY `?` only surfaces after the ~5s quiet window
+// (screen-scrape classification is quiet-gated, #289), so the test
+// rides tokio's auto-advance instead of sleeping for real.
+#[tokio::test(start_paused = true)]
 async fn answering_a_prompt_clears_input_needed_and_does_not_bounce_back() {
-    timeout(TEST_DEADLINE, async {
+    timeout(Duration::from_secs(60), async {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let mut client = subscribed(config).await;
 
         let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
         let key = mock.list().await.unwrap().into_iter().next().unwrap();
 
-        // 1. A permission chooser shows up → detector flags InputNeeded.
+        // 1. A permission chooser shows up and the PTY goes quiet (a
+        //    dialog blocks all output) → the quiet classifier flags
+        //    InputNeeded.
         mock.emit(
             &key,
             concat!(
@@ -1436,7 +1446,7 @@ async fn answering_a_prompt_clears_input_needed_and_does_not_bounce_back() {
                     }
                 )
             },
-            Duration::from_secs(2),
+            Duration::from_secs(10),
         )
         .await;
         assert!(
@@ -1471,17 +1481,19 @@ async fn answering_a_prompt_clears_input_needed_and_does_not_bounce_back() {
             "answering must optimistically flip InputNeeded → Working"
         );
 
-        // 3. Claude acts on the answer and emits a small, prompt-free
-        //    follow-up. Pre-fix this chunk re-detected the STALE chooser
-        //    still in the buffer and bounced back to InputNeeded.
+        // 3. Claude acts on the answer, emits a small, prompt-free
+        //    follow-up, and goes quiet. Pre-fix this chunk re-detected
+        //    the STALE chooser still in the buffer and bounced back to
+        //    InputNeeded.
         mock.emit(&key, "Created the file.\nAll done.").await;
 
-        // The next state transition must be Idle, NOT InputNeeded — the
-        // pill is gone and stays gone.
+        // The next state transition (the quiet classification of the
+        // resting screen) must be Idle, NOT InputNeeded — the pill is
+        // gone and stays gone.
         let next = wait_for(
             &mut client,
             |e| matches!(e, Event::AgentState { .. }),
-            Duration::from_secs(2),
+            Duration::from_secs(10),
         )
         .await
         .expect("a follow-up AgentState transition must arrive");
@@ -1752,9 +1764,12 @@ async fn bare_keystroke_does_not_clear_free_text_elicitation() {
 /// only fired on `\r`/`\n`, so answering a chooser with `1` or
 /// dismissing it with Esc left the `?` pill pinned until ~16 KiB of
 /// fresh output evicted the stale prompt markers.
-#[tokio::test]
+// Paused time: the PTY `?` only surfaces after the ~5s quiet window
+// (screen-scrape classification is quiet-gated, #289), so the test
+// rides tokio's auto-advance instead of sleeping for real.
+#[tokio::test(start_paused = true)]
 async fn bare_chooser_keystroke_clears_input_needed() {
-    timeout(TEST_DEADLINE, async {
+    timeout(Duration::from_secs(60), async {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let mut client = subscribed(config).await;
 
@@ -1790,7 +1805,7 @@ async fn bare_chooser_keystroke_clears_input_needed() {
         // digit (no Enter) → optimistic flip to Working.
         mock.emit(&key, chooser).await;
         assert!(
-            wait_for(&mut client, input_needed, Duration::from_secs(2))
+            wait_for(&mut client, input_needed, Duration::from_secs(10))
                 .await
                 .is_some(),
             "chooser must be detected as InputNeeded"
@@ -1811,7 +1826,7 @@ async fn bare_chooser_keystroke_clears_input_needed() {
         // Same for a lone Esc (dismiss the chooser).
         mock.emit(&key, chooser).await;
         assert!(
-            wait_for(&mut client, input_needed, Duration::from_secs(2))
+            wait_for(&mut client, input_needed, Duration::from_secs(10))
                 .await
                 .is_some(),
             "re-rendered chooser must re-raise InputNeeded"
@@ -1827,6 +1842,95 @@ async fn bare_chooser_keystroke_clears_input_needed() {
                 .await
                 .is_some(),
             "a lone Esc must flip InputNeeded → Working"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// The quiet-gate wiring itself (#289): while chunks keep arriving the
+/// pump re-arms its quiet timer, so a prompt render mid-stream reads as
+/// `Working` (bytes flowing = the agent is doing something) and the `?`
+/// must NOT surface — even though the prompt markers sit in the detect
+/// buffer the whole time. Only once the PTY has been silent past the
+/// classify window does the parked dialog raise `InputNeeded`. Paused
+/// time makes the 2s chunk cadence and the ~5s quiet window exact.
+#[tokio::test(start_paused = true)]
+async fn streaming_holds_working_until_quiet_window_elapses() {
+    timeout(Duration::from_secs(120), async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        let _ = spawn_and_wait(&mut client, TerminalKind::Agent("claude".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        let input_needed = |e: &Event| {
+            matches!(
+                e,
+                Event::AgentState {
+                    state: lazybox_ipc::AgentState::InputNeeded,
+                    ..
+                }
+            )
+        };
+
+        // A permission prompt paints mid-stream. Bytes flowing → the
+        // immediate reading is the spinner, never the `?`.
+        mock.emit(
+            &key,
+            concat!(
+                "Do you want to proceed?\n",
+                "❯ 1. Yes\n",
+                "  2. No\n",
+                "Esc to cancel",
+            ),
+        )
+        .await;
+        let first = wait_for(
+            &mut client,
+            |e| matches!(e, Event::AgentState { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("byte flow must produce a state reading");
+        assert!(
+            matches!(
+                first,
+                Event::AgentState {
+                    state: lazybox_ipc::AgentState::Working,
+                    ..
+                }
+            ),
+            "the first reading while bytes flow must be Working, got {first:?}"
+        );
+
+        // The agent keeps streaming at a sub-quiet cadence; every chunk
+        // re-arms the timer, so the stale markers never classify.
+        for _ in 0..4 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            mock.emit(&key, "streaming tool output\n").await;
+        }
+        let leaked = wait_for(&mut client, input_needed, Duration::from_secs(1)).await;
+        assert!(
+            leaked.is_none(),
+            "a visibly-streaming session must never flip to `?`"
+        );
+
+        // The stream stops with the dialog re-painted as the resting
+        // screen; past the quiet window it must classify InputNeeded.
+        mock.emit(
+            &key,
+            concat!(
+                "Do you want to proceed?\n",
+                "❯ 1. Yes\n",
+                "  2. No\n",
+                "Esc to cancel",
+            ),
+        )
+        .await;
+        let raised = wait_for(&mut client, input_needed, Duration::from_secs(10)).await;
+        assert!(
+            raised.is_some(),
+            "a dialog quiet past the classify window must raise `?`"
         );
     })
     .await

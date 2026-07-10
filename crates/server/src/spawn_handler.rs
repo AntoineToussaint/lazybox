@@ -796,8 +796,18 @@ pub async fn handle_spawn(
                         *signaled = true;
                     }
                 };
+            // Quiet-classification timer (#289). Re-armed on every chunk;
+            // when it fires — PTY_QUIET_CLASSIFY_AFTER with no output —
+            // the resting screen is classified. While chunks flow, the
+            // only state reading is `Working` (see `note_pty_activity`).
+            // Never armed for non-agent terminals (no detector to run).
+            let mut quiet_deadline: Option<tokio::time::Instant> = None;
+            // Length of the most recent chunk appended to `state_buf` —
+            // the chunk-boundary hint the quiet classifier's same-chunk
+            // rule needs.
+            let mut last_chunk_len: usize = 0;
             if !sub.replay.is_empty() {
-                maybe_emit_state_change(
+                note_pty_activity(
                     agent_for_pump.as_ref(),
                     &mut state_buf,
                     &sub.replay,
@@ -808,9 +818,12 @@ pub async fn handle_spawn(
                     &terminal_meta_map,
                     &mut state_machine,
                     &hook_driven_map,
-                    &input_shapes_map,
                 )
                 .await;
+                last_chunk_len = sub.replay.len();
+                if agent_for_pump.is_some() {
+                    quiet_deadline = Some(tokio::time::Instant::now() + PTY_QUIET_CLASSIFY_AFTER);
+                }
                 let _ = bus.send(Event::TerminalOutput {
                     terminal_id: id_for_pump,
                     bytes: sub.replay.clone(),
@@ -823,7 +836,19 @@ pub async fn handle_spawn(
                 signaled_first_output = true;
                 check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
             }
-            while let Some(chunk) = sub.live.recv().await {
+            loop {
+                tokio::select! {
+                    // Biased, chunk arm first: pending output is always
+                    // drained before the quiet timer may classify, so an
+                    // expired deadline racing an arriving chunk can't
+                    // read a screen that's about to change. A busy stream
+                    // starving the timer is exactly the intended
+                    // semantics — chunks flowing means no classification.
+                    biased;
+                    chunk = sub.live.recv() => {
+                let Some(chunk) = chunk else {
+                    break;
+                };
                 // `subscribe` subscribes before snapshotting, so a live
                 // chunk already covered by the replay (seq within the
                 // snapshot's high-water mark) must be dropped to avoid
@@ -859,7 +884,7 @@ pub async fn handle_spawn(
                         );
                     }
                 }
-                maybe_emit_state_change(
+                note_pty_activity(
                     agent_for_pump.as_ref(),
                     &mut state_buf,
                     &chunk.bytes,
@@ -870,9 +895,13 @@ pub async fn handle_spawn(
                     &terminal_meta_map,
                     &mut state_machine,
                     &hook_driven_map,
-                    &input_shapes_map,
                 )
                 .await;
+                last_chunk_len = chunk.bytes.len();
+                if agent_for_pump.is_some() {
+                    quiet_deadline =
+                        Some(tokio::time::Instant::now() + PTY_QUIET_CLASSIFY_AFTER);
+                }
                 if !signaled_first_output {
                     first_output_signal_for_pump.notify_one();
                     signaled_first_output = true;
@@ -888,6 +917,31 @@ pub async fn handle_spawn(
                     bytes: chunk.bytes,
                     seq: chunk.seq,
                 });
+                    }
+                    // `unwrap_or_else(now)` only feeds the disabled arm —
+                    // select! evaluates the expression even when the `if`
+                    // precondition is false, it just never polls it.
+                    _ = tokio::time::sleep_until(
+                        quiet_deadline.unwrap_or_else(tokio::time::Instant::now)
+                    ), if quiet_deadline.is_some() => {
+                        quiet_deadline = None;
+                        classify_quiet_screen(
+                            agent_for_pump.as_ref(),
+                            &state_buf,
+                            last_chunk_len,
+                            &agent_states_map,
+                            &bus,
+                            id_for_pump,
+                            &session_key_for_pump,
+                            &terminal_meta_map,
+                            &mut state_machine,
+                            &hook_driven_map,
+                            &input_shapes_map,
+                            &agent_detect_resets_map,
+                        )
+                        .await;
+                    }
+                }
             }
             backend.wait_exit(&key_for_pump).await
         }
@@ -1803,6 +1857,17 @@ pub(crate) fn spawn_is_autonomous(initial_prompt: &Option<String>) -> bool {
 /// failure) and screen-scraping is the better signal again.
 const HOOK_STALENESS: Duration = Duration::from_secs(30);
 
+/// How long the PTY must stay silent before the resting screen is
+/// classified (`classify_quiet_screen`). While bytes are flowing the
+/// agent is doing *something*, so the state reading is `Working`;
+/// screen-scrape classification (`InputNeeded` / `Done`-adjacent /
+/// `Idle`) runs only once the stream has been quiet this long (#289).
+/// Claude repaints its status-line ticker about once a second while
+/// busy, so a genuinely working agent never goes quiet this long — and
+/// a blocking dialog freezes all output, so a parked prompt always
+/// does.
+pub(crate) const PTY_QUIET_CLASSIFY_AFTER: Duration = Duration::from_secs(5);
+
 /// Whether a PTY-detector reading may be emitted for a hook-driven
 /// terminal. Fresh hooks own Working↔Idle, so only two corrections
 /// pass: an on-screen permission dialog (`InputNeeded`) and an
@@ -2437,19 +2502,211 @@ async fn persist_and_broadcast(
     Ok(())
 }
 
-/// Ingest one PTY output chunk for a terminal: append to the rolling
-/// detection buffer, run the chunk-aware detector, apply the
-/// hooks-primary gate and both hysteresis dampers under a single
-/// `agent_states` compare-and-set, and — on a real change — emit via
-/// [`broadcast_agent_state`]. Lifted out of the output pump's spawn
-/// closure so the emitted-on-change sequence is unit-testable (the
-/// #167/#161 bugs were about the transition stream, not single-frame
-/// classification); the pump still owns the buffer and the two anchors
-/// across calls.
-pub(crate) async fn maybe_emit_state_change(
+/// The recent tail of the rolling buffer the detector actually scans.
+/// The 32 KiB outer buffer exists so spread-out tickers + small chunks
+/// accumulate enough context, but once a prompt scrolls past this tail
+/// it should STOP matching — otherwise the user's "I answered the
+/// prompt and moved on" never reflects: the old `❯ 1.` text stays in
+/// the buffer and the "needs input" label sticks. 16 KiB (was 8 KiB) —
+/// Claude's bash-permission prompts can sit BELOW 8+ KiB of preview
+/// output (long heredocs, `cat <<EOF | gh api ...` patches, multi-file
+/// `cat` outputs, etc.); 16 KiB still evicts stale prompts within
+/// ~half a screen of follow-up output, while comfortably covering
+/// claude's largest tool-preview screens.
+const DETECT_WINDOW: usize = 16 * 1024;
+
+fn detect_window(buf: &[u8]) -> &[u8] {
+    &buf[buf.len().saturating_sub(DETECT_WINDOW)..]
+}
+
+/// Ingest one PTY output chunk for a terminal: append it to the rolling
+/// detection buffer and offer the state machine a `Working` reading.
+/// Bytes flowing IS the working signal (issue #289) — no screen-scrape
+/// classification happens here. A stale prompt marker in the scrollback
+/// of a visibly-streaming session once pinned `InputNeeded`, so the
+/// classifier now runs only after the stream has gone quiet
+/// (`classify_quiet_screen`); mid-stream, the only thing a chunk can
+/// say is "the agent is doing something".
+///
+/// The reading is offered as ambiguous (`clear: false`): a byte-flow
+/// `Working` is inferred, not an affirmative status line, so the
+/// InputNeeded-exit hysteresis can hold a live `?` against a brief
+/// repaint burst (a pane resize) while a genuinely resumed stream still
+/// commits `Working` once the window lapses.
+pub(crate) async fn note_pty_activity(
     agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
     buf: &mut Vec<u8>,
     bytes: &[u8],
+    states: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
+    >,
+    bus: &tokio::sync::broadcast::Sender<Event>,
+    id: TerminalId,
+    session_key: &SessionKey,
+    terminal_meta: &std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
+        >,
+    >,
+    state_machine: &mut lazybox_agents::AgentStateMachine,
+    hook_driven: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
+    >,
+) {
+    const STATE_BUF_CAP: usize = 32 * 1024;
+    let Some(agent) = agent else {
+        return;
+    };
+    buf.extend_from_slice(bytes);
+    if buf.len() > STATE_BUF_CAP {
+        let drop = buf.len() - STATE_BUF_CAP;
+        buf.drain(..drop);
+    }
+    let reading = lazybox_agents::Reading {
+        state: lazybox_ipc::AgentState::Working,
+        clear: false,
+    };
+    commit_pty_reading(
+        agent,
+        detect_window(buf),
+        reading,
+        false,
+        states,
+        bus,
+        id,
+        session_key,
+        terminal_meta,
+        state_machine,
+        hook_driven,
+    )
+    .await;
+}
+
+/// Classify the resting screen once the PTY has been quiet for
+/// [`PTY_QUIET_CLASSIFY_AFTER`] and fold the result into the state
+/// machine. Only here does the screen-scrape detector run: with the
+/// stream at rest the recency anchors are settled, so a structural
+/// prompt on screen is a live gate (`InputNeeded`), a resting composer
+/// is `Idle`, and a still-painted status line is a wedged `Working` —
+/// none of which can flip a visibly-streaming session anymore.
+///
+/// `last_chunk_len` is the length of the most recent chunk appended to
+/// `buf` — the chunk-boundary hint the detector's same-chunk rule needs
+/// (a full-screen repaint delivers a live dialog and the bottom status
+/// bar in ONE chunk, status bar last; position alone would read the
+/// dialog as already answered).
+pub(crate) async fn classify_quiet_screen(
+    agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
+    buf: &[u8],
+    last_chunk_len: usize,
+    states: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
+    >,
+    bus: &tokio::sync::broadcast::Sender<Event>,
+    id: TerminalId,
+    session_key: &SessionKey,
+    terminal_meta: &std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<TerminalId, (SessionKey, lazybox_ipc::TerminalKind)>,
+        >,
+    >,
+    state_machine: &mut lazybox_agents::AgentStateMachine,
+    hook_driven: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
+    >,
+    input_shapes: &std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
+    >,
+    detect_resets: &std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<TerminalId>>>,
+) {
+    let Some(agent) = agent else {
+        return;
+    };
+    // A pending answer reset means the buffer's contents predate the
+    // user's answer by decree: `handle_write` flipped the `?` to Working
+    // and marked the buffer for clearing, but the clear only happens on
+    // the NEXT chunk. If the quiet timer fires in between, classifying
+    // the stale dialog would re-raise the just-answered `?` (and its
+    // notification). Peek — don't consume — so the chunk path still
+    // clears the buffer when output resumes.
+    if detect_resets.lock().await.contains(&id) {
+        return;
+    }
+    let detect_window = detect_window(buf);
+    if detect_window.is_empty() {
+        return;
+    }
+    let last_chunk_start = detect_window.len().saturating_sub(last_chunk_len);
+    let Some(new_state) = agent.detect_state_chunked(detect_window, last_chunk_start) else {
+        return;
+    };
+    tracing::trace!(
+        terminal_id = ?id,
+        buf_len = buf.len(),
+        detected = ?new_state,
+        "classify_quiet_screen ran",
+    );
+    if new_state == lazybox_ipc::AgentState::InputNeeded {
+        tracing::debug!(
+            terminal_id = ?id,
+            buf_len = buf.len(),
+            tail_tip = %String::from_utf8_lossy(
+                &detect_window[detect_window.len().saturating_sub(120)..]
+            ),
+            "classify_quiet_screen → InputNeeded",
+        );
+        // Every InputNeeded the PTY detector raises is
+        // structurally a chooser / permission / consent dialog
+        // (freeform asks are deliberately not flagged), so a
+        // bare chooser keystroke is a complete answer. Hook-
+        // raised elicitations overwrite this with `FreeText` in
+        // `handle_ingest_hook`. Recorded before the dedupe
+        // below so a re-rendered prompt refreshes the shape.
+        input_shapes
+            .lock()
+            .await
+            .insert(id, lazybox_agents::PromptShape::Chooser);
+    }
+    // `ready_for_prompt` is only probed for an Idle reading — the
+    // hooks-primary gate uses it to decide whether a quiet Idle may
+    // demote a hook-set `Working`.
+    let ready_for_prompt =
+        new_state == lazybox_ipc::AgentState::Idle && agent.detect_ready_for_prompt(detect_window);
+    // The quiet window itself is the confidence: the screen has been at
+    // rest for seconds, so the classification is authoritative and no
+    // flap-damping hysteresis should hold it.
+    let reading = lazybox_agents::Reading {
+        state: new_state,
+        clear: true,
+    };
+    commit_pty_reading(
+        agent,
+        detect_window,
+        reading,
+        ready_for_prompt,
+        states,
+        bus,
+        id,
+        session_key,
+        terminal_meta,
+        state_machine,
+        hook_driven,
+    )
+    .await;
+}
+
+/// Shared tail of both PTY state paths (`note_pty_activity`,
+/// `classify_quiet_screen`): the hooks-primary gate, the state-machine
+/// fold under a single `agent_states` compare-and-set, and — on a real
+/// change — the emit via [`broadcast_agent_state`]. Lifted out of the
+/// output pump's spawn closure so the emitted-on-change sequence is
+/// unit-testable (the #167/#161 bugs were about the transition stream,
+/// not single-frame classification).
+async fn commit_pty_reading(
+    agent: &std::sync::Arc<dyn lazybox_agents::Agent>,
+    detect_window: &[u8],
+    reading: lazybox_agents::Reading,
+    ready_for_prompt: bool,
     states: &std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
     >,
@@ -2469,52 +2726,7 @@ pub(crate) async fn maybe_emit_state_change(
     hook_driven: &std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, std::time::Instant>>,
     >,
-    input_shapes: &std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
-    >,
 ) {
-    const STATE_BUF_CAP: usize = 32 * 1024;
-    let Some(agent) = agent else {
-        return;
-    };
-    buf.extend_from_slice(bytes);
-    if buf.len() > STATE_BUF_CAP {
-        let drop = buf.len() - STATE_BUF_CAP;
-        buf.drain(..drop);
-    }
-    // Search only the recent tail. The 32 KiB outer buffer
-    // exists so spread-out tickers + small chunks accumulate
-    // enough context, but once a prompt scrolls past this
-    // tail it should STOP matching — otherwise the user's
-    // "I answered the prompt and moved on" never reflects:
-    // the old `❯ 1.` text stays in `buf`, every chunk
-    // re-detects Asking, hysteresis refreshes forever, and
-    // the "needs input" label sticks. 4 KiB is enough to
-    // capture a single prompt's render + a screen of context,
-    // small enough that next-screen content evicts the old.
-    // 16 KiB (was 8 KiB) — Claude's bash-permission prompts
-    // can sit BELOW 8+ KiB of preview output (long heredocs,
-    // `cat <<EOF | gh api ...` patches, multi-file `cat`
-    // outputs, etc.). The user reported a real
-    // `Do you want to proceed?` prompt going undetected
-    // because the prompt + arrow + choice markers were
-    // pushed past the old 8 KiB tail. 16 KiB still evicts
-    // stale prompts within ~half a screen of follow-up
-    // output, while comfortably covering claude's largest
-    // tool-preview screens.
-    const DETECT_WINDOW: usize = 16 * 1024;
-    let tail_start = buf.len().saturating_sub(DETECT_WINDOW);
-    let detect_window = &buf[tail_start..];
-    // Chunk-boundary hint: the chunk just appended occupies the
-    // LAST `bytes.len()` bytes of the window. A full-screen
-    // repaint delivers a live dialog and the bottom status bar
-    // in one chunk (status bar last); the chunk-aware detector
-    // keeps the dialog live instead of reading it as already
-    // answered by the "more recent" work anchor.
-    let last_chunk_start = detect_window.len().saturating_sub(bytes.len());
-    let Some(new_state) = agent.detect_state_chunked(detect_window, last_chunk_start) else {
-        return;
-    };
     // Hooks-primary, PTY-fallback. Once a terminal has reported
     // any structured lifecycle hook, hooks own the Working↔Idle
     // distinction (deterministic, no screen-scraping flicker), so
@@ -2543,8 +2755,8 @@ pub(crate) async fn maybe_emit_state_change(
         let current = states.lock().await.get(&id).copied();
         if !pty_reading_allowed(
             current,
-            new_state,
-            agent.detect_ready_for_prompt(detect_window),
+            reading.state,
+            ready_for_prompt,
             // Lazy: the dialog-supersession scan re-strips the
             // window, so only the one reading that needs it
             // (stale hooks + Working demoting a cached `?`)
@@ -2556,53 +2768,6 @@ pub(crate) async fn maybe_emit_state_change(
             return;
         }
     }
-    // Trace-level on steady-state runs (claude emits 100+
-    // chunks/sec during streaming and we don't want to drown
-    // the log). Only ELEVATE to debug-level on every Asking
-    // detection so a missing `?` pill is easy to bisect from
-    // the log without re-running with full trace verbosity.
-    // Toggle full trace via `RUST_LOG=lazybox_server=trace`.
-    tracing::trace!(
-        terminal_id = ?id,
-        buf_len = buf.len(),
-        detected = ?new_state,
-        "detect_state ran",
-    );
-    if new_state == lazybox_ipc::AgentState::InputNeeded {
-        tracing::debug!(
-            terminal_id = ?id,
-            buf_len = buf.len(),
-            tail_tip = %String::from_utf8_lossy(
-                &detect_window[detect_window.len().saturating_sub(120)..]
-            ),
-            "detect_state → InputNeeded",
-        );
-        // Every InputNeeded the PTY detector raises is
-        // structurally a chooser / permission / consent dialog
-        // (freeform asks are deliberately not flagged), so a
-        // bare chooser keystroke is a complete answer. Hook-
-        // raised elicitations overwrite this with `FreeText` in
-        // `handle_ingest_hook`. Recorded before the dedupe
-        // below so a re-rendered prompt refreshes the shape.
-        input_shapes
-            .lock()
-            .await
-            .insert(id, lazybox_agents::PromptShape::Chooser);
-    }
-    // Evidence quality the state machine's hysteresis needs: an
-    // affirmatively-recognized idle composer, or a live Working
-    // status line, is a CLEAR end of the prior state (honored
-    // immediately); anything else is the ambiguous fall-through a
-    // dropped status-line frame produces (damped within the window).
-    // `ready_for_prompt` is only probed for an Idle reading — a
-    // Working reading is itself the clear signal — so streaming
-    // chunks don't pay to re-strip the window.
-    let ready_for_prompt =
-        new_state == lazybox_ipc::AgentState::Idle && agent.detect_ready_for_prompt(detect_window);
-    let reading = lazybox_agents::Reading {
-        state: new_state,
-        clear: new_state == lazybox_ipc::AgentState::Working || ready_for_prompt,
-    };
     // Read + decide + insert under ONE lock acquisition. A
     // separate read-then-insert let a concurrent writer (hook
     // ingest, the optimistic Enter flip) land between the two
@@ -2626,7 +2791,7 @@ pub(crate) async fn maybe_emit_state_change(
                 tracing::debug!(
                     terminal_id = ?id,
                     ?current,
-                    ?new_state,
+                    new_state = ?reading.state,
                     "state hysteresis: damped ambiguous flap",
                 );
                 return;
@@ -5499,15 +5664,17 @@ mod tests {
         );
     }
 
-    /// Drives [`maybe_emit_state_change`] across a sequence of PTY chunks
-    /// the way the output pump does — one rolling buffer and the two
-    /// hysteresis anchors persist across calls — and collects the
-    /// `AgentState` the bus emits. Lets a test assert on the
+    /// Drives the pump's two state paths — [`note_pty_activity`] per PTY
+    /// chunk and [`classify_quiet_screen`] for the post-quiet
+    /// classification — the way the output pump does: one rolling buffer
+    /// and the hysteresis anchors persist across calls. Collects the
+    /// `AgentState` the bus emits so a test can assert on the
     /// emitted-on-change *sequence*, which is what the #167/#161 bugs were
     /// about, rather than a single frame's classification.
     struct PumpDriver {
         agent: std::sync::Arc<dyn lazybox_agents::Agent>,
         buf: Vec<u8>,
+        last_chunk_len: usize,
         states: std::sync::Arc<
             tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
         >,
@@ -5527,6 +5694,7 @@ mod tests {
         input_shapes: std::sync::Arc<
             tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
         >,
+        detect_resets: std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<TerminalId>>>,
     }
 
     impl PumpDriver {
@@ -5549,6 +5717,7 @@ mod tests {
                     .get("claude")
                     .expect("claude agent is a built-in"),
                 buf: Vec::new(),
+                last_chunk_len: 0,
                 states: std::sync::Arc::new(tokio::sync::Mutex::new(
                     std::collections::HashMap::new(),
                 )),
@@ -5567,13 +5736,16 @@ mod tests {
                 input_shapes: std::sync::Arc::new(tokio::sync::Mutex::new(
                     std::collections::HashMap::new(),
                 )),
+                detect_resets: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    std::collections::HashSet::new(),
+                )),
             }
         }
 
         /// Feed one PTY chunk; return the `AgentState`s broadcast for this
         /// terminal as a result (usually 0 or 1).
         async fn feed(&mut self, bytes: &[u8]) -> Vec<lazybox_ipc::AgentState> {
-            maybe_emit_state_change(
+            note_pty_activity(
                 Some(&self.agent),
                 &mut self.buf,
                 bytes,
@@ -5584,9 +5756,35 @@ mod tests {
                 &self.terminal_meta,
                 &mut self.state_machine,
                 &self.hook_driven,
-                &self.input_shapes,
             )
             .await;
+            self.last_chunk_len = bytes.len();
+            self.drain()
+        }
+
+        /// The pump's quiet timer fired — PTY_QUIET_CLASSIFY_AFTER of
+        /// silence — so classify the resting screen; return the
+        /// `AgentState`s broadcast as a result.
+        async fn quiet(&mut self) -> Vec<lazybox_ipc::AgentState> {
+            classify_quiet_screen(
+                Some(&self.agent),
+                &self.buf,
+                self.last_chunk_len,
+                &self.states,
+                &self.bus,
+                self.id,
+                &self.session_key,
+                &self.terminal_meta,
+                &mut self.state_machine,
+                &self.hook_driven,
+                &self.input_shapes,
+                &self.detect_resets,
+            )
+            .await;
+            self.drain()
+        }
+
+        fn drain(&mut self) -> Vec<lazybox_ipc::AgentState> {
             let mut out = Vec::new();
             while let Ok(ev) = self.rx.try_recv() {
                 if let Event::AgentState {
@@ -5601,11 +5799,14 @@ mod tests {
         }
     }
 
-    /// The transition table: real per-state PTY transcripts replayed as an
-    /// ordered chunk stream must produce the matching emitted-on-change
-    /// sequence. ZERO hysteresis so timing damping can't interfere — this
-    /// pins the stream the per-fixture corpus (`detect_fixtures.rs`) can't,
-    /// since each of those asserts a single frame in isolation.
+    /// The pump's two-path model (#289): chunks only ever read `Working`
+    /// (bytes flowing = the agent is doing something); the classifier runs
+    /// at the quiet boundary and decides the terminal state. Real
+    /// per-state PTY transcripts driven through both paths must produce
+    /// the matching emitted-on-change sequence. ZERO hysteresis so timing
+    /// damping can't interfere — this pins the stream the per-fixture
+    /// corpus (`detect_fixtures.rs`) can't, since each of those asserts a
+    /// single frame in isolation.
     #[tokio::test]
     async fn agent_state_transitions_emit_an_ordered_sequence() {
         use lazybox_ipc::AgentState::{Idle, InputNeeded, Working};
@@ -5615,49 +5816,179 @@ mod tests {
 
         let mut p = PumpDriver::new(Duration::ZERO, Duration::ZERO);
         let mut seq = Vec::new();
-        seq.extend(p.feed(idle).await);
-        seq.extend(p.feed(working).await);
-        seq.extend(p.feed(input).await);
-        seq.extend(p.feed(working).await);
-        seq.extend(p.feed(idle).await);
+        seq.extend(p.feed(idle).await); // bytes flowing → Working
+        seq.extend(p.quiet().await); // resting composer → Idle
+        seq.extend(p.feed(working).await); // streaming again → Working
+        seq.extend(p.feed(input).await); // dialog paints mid-stream → still Working
+        seq.extend(p.quiet().await); // dialog at rest → InputNeeded
+        seq.extend(p.feed(working).await); // stream resumes → Working
 
         assert_eq!(
             seq,
-            vec![Idle, Working, InputNeeded, Working, Idle],
-            "the emitted-on-change sequence must track the chunk stream",
+            vec![Working, Idle, Working, InputNeeded, Working],
+            "the emitted-on-change sequence must track chunks + quiet boundaries",
         );
     }
 
-    /// The status-ticker flicker: Claude's spinner vanishes for one frame,
-    /// leaving an ambiguous Idle (no work anchor, composer not drawn). The
-    /// Working-exit hysteresis must damp it so a busy agent doesn't blink
-    /// to Idle and back. Proven by contrast: the SAME chunk emits Idle once
-    /// the window is disabled, so it's the hysteresis — not a failure to
-    /// classify — that suppresses it.
+    /// The #289 headline regression: a session that is visibly streaming
+    /// must render the spinner even when a stale prompt marker sits in the
+    /// scrollback of the detect window. Pre-fix, the per-chunk classifier
+    /// re-detected the marker on every chunk and pinned `?` on a working
+    /// agent. Production hysteresis windows to prove no timing damping is
+    /// involved — the streaming path structurally never classifies.
     #[tokio::test]
-    async fn status_ticker_flicker_is_damped_by_working_hysteresis() {
-        use lazybox_ipc::AgentState::{Idle, Working};
-        let working = include_bytes!("../../agents/tests/fixtures/working_status_line.bin");
-        // A screenful of plain prose: classifies Idle, not ready. >16 KiB
-        // so the prior working anchor scrolls out of the detect window.
-        let flicker = "lorem ipsum dolor sit amet\n".repeat(800);
-        let flicker = flicker.as_bytes();
+    async fn streaming_with_stale_prompt_marker_stays_working() {
+        use lazybox_ipc::AgentState::Working;
+        let input = include_bytes!("../../agents/tests/fixtures/permission_prompt_fragmented.bin");
 
-        let mut damped = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
-        assert_eq!(damped.feed(working).await, vec![Working]);
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        // The prompt render arrives as a chunk: bytes flowing → spinner,
+        // NOT `?` — mid-stream the marker can't be trusted as live.
+        assert_eq!(p.feed(input).await, vec![Working]);
+        // The agent keeps streaming prose with the marker still in the
+        // buffer; no `?` may ever surface while output flows.
+        for _ in 0..5 {
+            assert_eq!(
+                p.feed(b"tool output line\n").await,
+                Vec::<lazybox_ipc::AgentState>::new(),
+                "a streaming session must stay Working, stale marker or not",
+            );
+        }
+    }
+
+    /// The counterpart: once the PTY has been quiet for the classify
+    /// window, a permission prompt at rest MUST surface as `?`.
+    #[tokio::test]
+    async fn quiet_at_a_permission_prompt_classifies_input_needed() {
+        use lazybox_ipc::AgentState::{InputNeeded, Working};
+        let input = include_bytes!("../../agents/tests/fixtures/permission_prompt_fragmented.bin");
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(input).await, vec![Working]);
         assert_eq!(
-            damped.feed(flicker).await,
+            p.quiet().await,
+            vec![InputNeeded],
+            "a dialog at rest past the quiet window must raise `?`",
+        );
+    }
+
+    /// Quiet after a `Stop` hook: the resting composer classifies Idle,
+    /// but `Done` is sticky against Idle — the "finished, take a look"
+    /// alert must survive both the trailing paint chunks (hooks are fresh,
+    /// so the byte-flow Working reading is gated) and the quiet
+    /// classification.
+    #[tokio::test]
+    async fn quiet_after_stop_hook_keeps_done() {
+        use lazybox_ipc::AgentState::Done;
+        let idle = include_bytes!("../../agents/tests/fixtures/idle_composer.bin");
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        // A Stop hook just landed: state is Done, hooks are fresh.
+        p.states.lock().await.insert(p.id, Done);
+        p.hook_driven
+            .lock()
+            .await
+            .insert(p.id, std::time::Instant::now());
+        // Claude paints its resting composer after the hook fired.
+        assert_eq!(
+            p.feed(idle).await,
             Vec::<lazybox_ipc::AgentState>::new(),
-            "an ambiguous Working→Idle within the window must be suppressed",
+            "trailing paint must not demote Done to Working",
         );
-
-        let mut undamped = PumpDriver::new(Duration::ZERO, Duration::ZERO);
-        assert_eq!(undamped.feed(working).await, vec![Working]);
         assert_eq!(
-            undamped.feed(flicker).await,
-            vec![Idle],
-            "with the window disabled the same chunk emits Idle — so it was the hysteresis that damped it",
+            p.quiet().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "the quiet Idle classification must not clear Done",
         );
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+    }
+
+    /// The stale-hook variant of Done stickiness: 30+ seconds after the
+    /// `Stop` hook, the hooks-primary gate no longer filters PTY readings
+    /// — but a stray repaint (a pane resize, a reattach redraw) is still
+    /// just a byte-flow `Working`, and an ambiguous Working may never
+    /// clear `Done`. Pre-guard, the repaint committed Done → Working and
+    /// the next quiet classification landed Idle: the "finished, take a
+    /// look" marker silently wiped by resizing the window.
+    #[tokio::test]
+    async fn stray_repaint_after_stale_hooks_keeps_done() {
+        use lazybox_ipc::AgentState::Done;
+        let idle = include_bytes!("../../agents/tests/fixtures/idle_composer.bin");
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        // Done was set by a Stop hook long ago; the hook stream has been
+        // silent since (a finished agent fires no more hooks).
+        p.states.lock().await.insert(p.id, Done);
+        p.hook_driven
+            .lock()
+            .await
+            .insert(p.id, std::time::Instant::now() - Duration::from_secs(31));
+        // The resize repaints the resting composer as one chunk.
+        assert_eq!(
+            p.feed(idle).await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "a stray repaint must not demote Done to Working",
+        );
+        assert_eq!(
+            p.quiet().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "the follow-up quiet Idle must stay rejected by Done stickiness",
+        );
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&Done));
+    }
+
+    /// The quiet timer racing the optimistic answer flip: `handle_write`
+    /// flipped the `?` to Working and marked the detect buffer for reset,
+    /// but the clear only happens on the next chunk. A quiet firing in
+    /// between must NOT classify the stale dialog still in the buffer —
+    /// that re-raised the just-answered `?` (and its notification).
+    #[tokio::test]
+    async fn pending_answer_reset_blocks_quiet_reclassification() {
+        use lazybox_ipc::AgentState::{InputNeeded, Working};
+        let input = include_bytes!("../../agents/tests/fixtures/permission_prompt_fragmented.bin");
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(input).await, vec![Working]);
+        assert_eq!(p.quiet().await, vec![InputNeeded]);
+        // The user answers: the flip commits Working and marks the reset.
+        p.states.lock().await.insert(p.id, Working);
+        p.detect_resets.lock().await.insert(p.id);
+        assert_eq!(
+            p.quiet().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "a pending answer reset must veto classifying the stale buffer",
+        );
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&Working));
+        assert!(
+            p.detect_resets.lock().await.contains(&p.id),
+            "the quiet path must peek, not consume — the next chunk still clears the buffer",
+        );
+    }
+
+    /// A brief repaint burst (a pane resize) at a parked prompt must not
+    /// flap the `?` off: the byte-flow Working reading is ambiguous, so
+    /// the InputNeeded-exit hysteresis holds it, and the next quiet
+    /// classification re-reads the same dialog.
+    #[tokio::test]
+    async fn repaint_burst_at_a_parked_prompt_is_damped() {
+        use lazybox_ipc::AgentState::{InputNeeded, Working};
+        let input = include_bytes!("../../agents/tests/fixtures/permission_prompt_fragmented.bin");
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(input).await, vec![Working]);
+        assert_eq!(p.quiet().await, vec![InputNeeded]);
+        // The repaint re-delivers the same screen as one chunk.
+        assert_eq!(
+            p.feed(input).await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "a repaint within the hysteresis window must not clear the `?`",
+        );
+        assert_eq!(
+            p.quiet().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "re-classifying the same dialog is a no-op",
+        );
+        assert_eq!(p.states.lock().await.get(&p.id), Some(&InputNeeded));
     }
 
     fn hook_event(kind: lazybox_ipc::HookEventKind) -> lazybox_ipc::HookEvent {
@@ -5720,7 +6051,7 @@ mod tests {
         let mut buf = Vec::new();
         let mut state_machine =
             lazybox_agents::AgentStateMachine::with_hysteresis(Duration::ZERO, Duration::ZERO);
-        maybe_emit_state_change(
+        note_pty_activity(
             Some(&agent),
             &mut buf,
             working,
@@ -5731,7 +6062,6 @@ mod tests {
             &config.terminal_meta,
             &mut state_machine,
             &config.hook_driven_terminals,
-            &config.input_needed_shapes,
         )
         .await;
         assert_eq!(

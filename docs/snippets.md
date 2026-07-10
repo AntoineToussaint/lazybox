@@ -101,11 +101,12 @@ lists it). The commands:
   no `Enter`** — and no second look. If you author a snippet whose body
   drives something irreversible, keep that in mind: the exact-key path
   skips the preview dwell (it only fires on a unique, unambiguous key).
-- **Recent first.** Snippets you've sent this session float into a
+- **Recent first.** Snippets you've sent float into a
   **Recent** group at the top of the picker, most-recent first, with the
   cursor on the last one — so repeating a snippet is `]]s` then `Enter`.
   Start typing and the Recent group steps aside (a filter means "find",
-  not "repeat"). The list is session-scoped.
+  not "repeat"). The list persists across restarts (stored in the state
+  DB, not `snippets.yaml`).
 - **`]]q`** — exits the terminal pane back to the sidebar. **`]]f`**
   toggles focus mode, **`]]<digit>`** jumps to the Nth agent workspace,
   and **`` ]]` ``** opens the fuzzy workspace switcher.

@@ -7682,3 +7682,100 @@ mod dismiss_and_messages_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod recent_snippets_tests {
+    //! Persistence of the snippet-picker "Recent" MRU across restarts
+    //! (#311): `record_recent_snippet` writes through to the state DB,
+    //! `seed_recent_snippets` restores it, and a corrupt / missing
+    //! value degrades to an empty list without panicking.
+    use super::super::*;
+    use lazybox_ipc::channel;
+    use lazybox_store::Store;
+    use lazybox_store::mock::MemoryStore;
+    use std::sync::Arc;
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    #[test]
+    fn record_writes_through_to_store() {
+        let store = Arc::new(MemoryStore::new());
+        let mut m = build_model();
+        m.seed_recent_snippets(store.clone());
+        m.record_recent_snippet("rev".into());
+
+        let raw = store
+            .get_kv(RECENT_SNIPPETS_KV_KEY)
+            .unwrap()
+            .expect("recent_snippets persisted");
+        let stored: Vec<String> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(stored, vec!["rev".to_string()]);
+    }
+
+    #[test]
+    fn record_without_store_stays_session_only() {
+        let mut m = build_model();
+        // No seed_recent_snippets → no store handle (the --connect path).
+        m.record_recent_snippet("rev".into());
+        assert_eq!(m.recent_snippets, vec!["rev".to_string()]);
+    }
+
+    #[test]
+    fn seed_missing_value_yields_empty() {
+        let store = Arc::new(MemoryStore::new());
+        let mut m = build_model();
+        m.seed_recent_snippets(store);
+        assert!(m.recent_snippets.is_empty());
+    }
+
+    #[test]
+    fn seed_corrupt_value_yields_empty_no_panic() {
+        let store = Arc::new(MemoryStore::new());
+        store.set_kv(RECENT_SNIPPETS_KV_KEY, "not json{").unwrap();
+        let mut m = build_model();
+        m.seed_recent_snippets(store);
+        assert!(m.recent_snippets.is_empty());
+    }
+
+    #[test]
+    fn seed_caps_to_max() {
+        let store = Arc::new(MemoryStore::new());
+        let overflow: Vec<String> = (0..RECENT_SNIPPETS_MAX + 3)
+            .map(|i| format!("s{i}"))
+            .collect();
+        store
+            .set_kv(
+                RECENT_SNIPPETS_KV_KEY,
+                &serde_json::to_string(&overflow).unwrap(),
+            )
+            .unwrap();
+        let mut m = build_model();
+        m.seed_recent_snippets(store);
+        assert_eq!(m.recent_snippets.len(), RECENT_SNIPPETS_MAX);
+        assert_eq!(m.recent_snippets[0], "s0");
+    }
+
+    #[test]
+    fn round_trip_across_restart_preserves_mru_order() {
+        let store: Arc<dyn lazybox_store::Store> = Arc::new(MemoryStore::new());
+
+        // Session one: record A, B, C.
+        let mut m1 = build_model();
+        m1.seed_recent_snippets(store.clone());
+        m1.record_recent_snippet("A".into());
+        m1.record_recent_snippet("B".into());
+        m1.record_recent_snippet("C".into());
+
+        // Session two: a fresh Model seeded from the same store.
+        let mut m2 = build_model();
+        m2.seed_recent_snippets(store);
+        assert_eq!(
+            m2.recent_snippets,
+            vec!["C".to_string(), "B".to_string(), "A".to_string()],
+        );
+    }
+}

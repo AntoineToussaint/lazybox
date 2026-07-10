@@ -778,6 +778,11 @@ async fn run_embedded_realm(
         let snippets =
             lazybox_config::Snippets::load_merged(std::env::current_dir().ok().as_deref());
         model.apply_snippets(snippets);
+        // Restore the snippet-picker "Recent" MRU from the state DB so
+        // frequently-used snippets stay one keystroke away across
+        // restarts (#311). Runtime state, not YAML — lives in the same
+        // store as read/unread and snooze.
+        model.seed_recent_snippets(config.store.clone());
         model = model.with_splits(user_config.ui.sidebar_pct, user_config.ui.right_top_pct);
         if let Some((report, sources)) = wizard_seed {
             model.start_setup_wizard(report, sources);

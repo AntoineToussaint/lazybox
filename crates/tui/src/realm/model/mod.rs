@@ -815,12 +815,17 @@ pub struct Model<T: TerminalAdapter> {
     /// mount/unmount. Storing keys (not full rows) avoids cloning
     /// the snippet body twice on every picker mount.
     pub(crate) snippet_choices: Vec<String>,
-    /// Snippet keys sent this session, most-recent first (capped at
+    /// Snippet keys sent, most-recent first (capped at
     /// `RECENT_SNIPPETS_MAX`). Passed to each picker as its "Recent"
     /// group so a repeated snippet is one `]]s` + `Enter` away (#252).
-    /// Session-scoped — deliberately not persisted; it tracks the
-    /// current work session's rhythm, not a durable preference.
+    /// Persisted to the state DB via `recent_snippets_store` so the
+    /// group survives a restart (#311).
     pub(crate) recent_snippets: Vec<String>,
+    /// State-DB handle used to persist `recent_snippets` across
+    /// restarts (#311). Set by `seed_recent_snippets` on the embedded
+    /// boot path; `None` on the `--connect` path (which loads no
+    /// snippets and owns no local store), where MRU stays session-only.
+    recent_snippets_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
     /// Active broadcast flow (`Shift-B`), if any. Set when the flow
     /// mounts, threaded through the snippet-pick step, consumed by the
     /// compose submit (or dropped on Esc). See [`BroadcastDraft`].
@@ -968,6 +973,11 @@ const MODAL_REDRAW_WINDOW: Duration = Duration::from_millis(120);
 /// the group is a fast lane for the handful of snippets in active use.
 const RECENT_SNIPPETS_MAX: usize = 5;
 
+/// State-DB key under which the recent-snippets MRU is persisted
+/// (#311). A plain kv entry — runtime state, like read/unread and
+/// snooze — not user-authored `snippets.yaml` content.
+const RECENT_SNIPPETS_KV_KEY: &str = "recent_snippets";
+
 /// How long the footer must sit idle (no modal, no notice) after
 /// startup before a feature tip (#115) is allowed to surface. Long
 /// enough that the first-run tour and the initial-poll spinner clear
@@ -1093,6 +1103,7 @@ impl<T: TerminalAdapter> Model<T> {
             snippets: lazybox_config::Snippets::default(),
             snippet_choices: Vec::new(),
             recent_snippets: Vec::new(),
+            recent_snippets_store: None,
             pending_broadcast: None,
             jump_choices: Vec::new(),
             theme_choices: Vec::new(),
@@ -1499,12 +1510,54 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Record a snippet key as just-used: move it to the front of the
-    /// session MRU list (`recent_snippets`), de-duplicating and capping
-    /// the list. Drives the picker's "Recent" group (#252).
+    /// MRU list (`recent_snippets`), de-duplicating and capping the
+    /// list, then persist it. Drives the picker's "Recent" group (#252)
+    /// and keeps it across restarts (#311).
     pub(crate) fn record_recent_snippet(&mut self, key: String) {
         self.recent_snippets.retain(|k| k != &key);
         self.recent_snippets.insert(0, key);
         self.recent_snippets.truncate(RECENT_SNIPPETS_MAX);
+        self.persist_recent_snippets();
+    }
+
+    /// Best-effort write of `recent_snippets` to the state DB. A write
+    /// failure just means the Recent group won't survive this quit —
+    /// non-fatal, like `persist_tip_seen`.
+    fn persist_recent_snippets(&self) {
+        let Some(store) = &self.recent_snippets_store else {
+            return;
+        };
+        let json = match serde_json::to_string(&self.recent_snippets) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::warn!("serialize recent_snippets failed: {e}");
+                return;
+            }
+        };
+        if let Err(e) = store.set_kv(RECENT_SNIPPETS_KV_KEY, &json) {
+            tracing::warn!("persist recent_snippets failed: {e}");
+        }
+    }
+
+    /// Seed `recent_snippets` from the state DB and retain the store
+    /// handle for future writes (#311). Called on the embedded boot
+    /// path after `apply_snippets`. A missing / empty / unparseable
+    /// value yields an empty list — non-fatal, MRU just starts fresh.
+    /// The `RECENT_SNIPPETS_MAX` cap is re-applied here in case the
+    /// stored list predates a smaller cap.
+    pub fn seed_recent_snippets(&mut self, store: std::sync::Arc<dyn lazybox_store::Store>) {
+        match store.get_kv(RECENT_SNIPPETS_KV_KEY) {
+            Ok(Some(json)) => match serde_json::from_str::<Vec<String>>(&json) {
+                Ok(mut recent) => {
+                    recent.truncate(RECENT_SNIPPETS_MAX);
+                    self.recent_snippets = recent;
+                }
+                Err(e) => tracing::warn!("parse recent_snippets failed: {e}"),
+            },
+            Ok(None) => {}
+            Err(e) => tracing::warn!("read recent_snippets failed: {e}"),
+        }
+        self.recent_snippets_store = Some(store);
     }
 
     /// Mount the read-only snippets browser (`]`, or the Settings

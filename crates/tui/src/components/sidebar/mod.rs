@@ -1772,7 +1772,8 @@ impl Sidebar {
     ///
     /// Catalog-driven: this method only decides *which* actions to
     /// surface right now. `catalog` is the model's runtime catalog
-    /// ([`ActionDef::catalog`]) — effective chords with
+    /// ([`ActionDef::catalog`](lazybox_tui_core::action::ActionDef::catalog))
+    /// — effective chords with
     /// `ui.action_keys` overrides already applied, including the
     /// generated per-agent rows — and `contextual_label` resolves the
     /// state-aware verb. Adding a new sidebar action means landing it

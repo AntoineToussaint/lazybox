@@ -890,11 +890,15 @@ impl<T: TerminalAdapter> Model<T> {
         self.leader.disarm();
         self.redraw = true;
         // Don't fire bare `Work` if the user's context moved on after
-        // pressing `w`: a modal opened, or focus left for the terminal
+        // pressing `w`: a modal opened, or a live terminal took focus
         // (e.g. a spawn landed). Mouse clicks cancel the leader at the
         // event itself (see `handle_mouse`). Firing here would spawn /
         // inject against whatever happens to be selected — a surprise.
-        if !self.modal_stack.is_empty() || self.focus == PaneFocus::Terminals {
+        // An *empty* terminal pane still fires: its keys resolve with
+        // sidebar scope (`resolve_focus_for_keys`), so the `w` that
+        // armed this leader was dispatched from there in the first
+        // place.
+        if !self.modal_stack.is_empty() || self.resolve_focus_for_keys().is_none() {
             return;
         }
         let cmds = self.dispatch_action(&lazybox_tui_core::action::Action::Work);

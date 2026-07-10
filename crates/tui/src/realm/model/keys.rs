@@ -366,8 +366,16 @@ impl<T: TerminalAdapter> Model<T> {
             // from an empty terminal pane completes against the same
             // sidebar scope it armed under.
             let is_work = matches!(action, Some(lazybox_tui_core::action::Action::Work));
+            // Only continuations the completion path can actually fire
+            // (`action_from_entry`) make a stroke a leader. Quit's `q q`
+            // is a `Seq` too, but it dispatches through the q-latch, not
+            // the catalog — arming on it (reachable from an empty
+            // terminal pane, where the quit branch is skipped) would
+            // show a popup whose completion goes nowhere.
             let opens_leader = (action.is_none() || is_work)
-                && !seq_continuations(&stroke, rfocus, &self.catalog).is_empty();
+                && seq_continuations(&stroke, rfocus, &self.catalog)
+                    .iter()
+                    .any(|(_, entry)| action_from_entry(entry).is_some());
             if opens_leader {
                 self.q_latch.disarm();
                 self.leader.arm(stroke);

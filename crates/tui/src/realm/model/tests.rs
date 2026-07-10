@@ -3038,6 +3038,79 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// Issue #304: an *empty* terminal pane resolves keys with sidebar
+    /// scope, so `w` there arms the timed leader and the idle-tick
+    /// timeout must still fire bare `Work` — the pane's focus guard
+    /// only blocks a *live* terminal (where the leader can't arm).
+    #[test]
+    fn w_from_empty_terminal_pane_times_out_to_bare_work() {
+        use lazybox_ipc::{Client, Command, EVENT_CHANNEL_CAPACITY};
+        use tokio::sync::mpsc;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        m.ui_defaults.escape_window = std::time::Duration::from_millis(1);
+
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        // Terminal pane focused with NO terminals — the empty-state
+        // hint's scope.
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        while cmd_rx.try_recv().is_ok() {} // drop setup traffic
+
+        m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
+        assert!(
+            m.work_leader_pending(),
+            "`w` arms the leader from an empty terminal pane",
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        m.tick_work_leader();
+        assert!(!m.work_leader_pending(), "idle tick resolves the leader");
+
+        let spawned = std::iter::from_fn(|| cmd_rx.try_recv().ok())
+            .any(|c| matches!(c, Command::Spawn { .. } | Command::InjectPrompt { .. }));
+        assert!(
+            spawned,
+            "bare `w` (leader timeout) from an empty terminal pane must still fire Work",
+        );
+    }
+
+    /// Issue #304: `q` in an empty terminal pane must not arm a leader.
+    /// Quit's `q q` is a catalog `Seq`, but it dispatches through the
+    /// q-latch, not `dispatch_action` — arming on it would pop a
+    /// which-key menu whose completion goes nowhere.
+    #[test]
+    fn q_in_empty_terminal_pane_does_not_arm_a_dead_quit_leader() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        assert!(m.terminals.is_empty(), "fixture: no terminals spawned");
+
+        m.dispatch_key(KeyEvent::new(Key::Char('q'), KeyModifiers::NONE));
+        assert!(
+            m.leader_pending().is_none(),
+            "`q` must not arm a leader — its completion can't dispatch Quit",
+        );
+        assert!(!m.quit, "a lone `q` never quits");
+    }
+
     /// Issue #224 hardening: a mouse click cancels the armed `w` leader,
     /// so its idle-tick timeout can't fire a stray `Work` after the user
     /// clicked away.

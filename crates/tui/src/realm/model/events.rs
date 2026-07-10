@@ -145,17 +145,13 @@ impl<T: TerminalAdapter> Model<T> {
             }
             IpcEvent::AgentRunFinished { run_id, error, .. } if Some(*run_id) == self.help_run => {
                 // The process exited — the next question starts a
-                // fresh run (with fresh context).
+                // fresh run (with fresh context). Every open turn is
+                // dead with it, including follow-ups queued behind the
+                // one that was streaming.
                 self.help_run = None;
                 self.help_run_starting = false;
                 let mut convo = self.help_convo_mut();
-                let unanswered = match convo.streaming_turn_mut() {
-                    Some(turn) => {
-                        turn.done = true;
-                        turn.answer.is_empty()
-                    }
-                    None => false,
-                };
+                let unanswered = convo.close_open_turns();
                 if let Some(error) = error {
                     convo.notice = Some(format!("help assistant exited: {error}"));
                 } else if unanswered {
@@ -167,21 +163,20 @@ impl<T: TerminalAdapter> Model<T> {
                 self.redraw = true;
                 true
             }
-            // Spawn/stdio failures for the run arrive as generic
-            // provider errors (the run protocol has no error event of
-            // its own; see `handle_start_agent_run`). While a help run
-            // is live or starting, claim them for the conversation.
+            // Spawn failures arrive as generic provider errors with an
+            // `agent_run*` source and no run id (see
+            // `handle_start_agent_run`), so they're only attributable
+            // to the help run while OUR start is in flight. Once the
+            // run is live its death arrives run-scoped as
+            // `AgentRunFinished`; a live-window `agent_run` error
+            // belongs to some other client's run and must fall through.
             IpcEvent::ProviderError {
                 source, message, ..
-            } if source.starts_with("agent_run")
-                && (self.help_run_starting || self.help_run.is_some()) =>
-            {
+            } if source.starts_with("agent_run") && self.help_run_starting => {
                 self.help_run_starting = false;
                 self.help_pending_questions.clear();
                 let mut convo = self.help_convo_mut();
-                if let Some(turn) = convo.streaming_turn_mut() {
-                    turn.done = true;
-                }
+                convo.close_open_turns();
                 convo.notice = Some(format!("help assistant unavailable — {message}"));
                 drop(convo);
                 self.redraw = true;

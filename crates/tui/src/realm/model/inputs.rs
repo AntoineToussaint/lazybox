@@ -297,10 +297,11 @@ showing keybinding search only"
             session_id: None,
             agent: HELP_AGENT_ID.to_string(),
             mode: AgentRuntimeMode::StreamJson,
-            // A neutral cwd: the sentinel key resolves to no workspace,
-            // and falling back to the daemon's cwd would let a stray
-            // CLAUDE.md there leak into the help context.
-            cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+            // Left to the daemon: the sentinel key resolves to no
+            // workspace and `resolve_cwd` picks a neutral cwd on ITS
+            // host — a client-side path wouldn't exist there in
+            // out-of-process / remote mode.
+            cwd: None,
             initial_input: Some(AgentInputMessage {
                 text: Some(format!("{context}\n\n# Question\n\n{question}")),
                 json: None,

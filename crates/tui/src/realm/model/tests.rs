@@ -7112,12 +7112,17 @@ mod help_ask_tests {
                 session_key,
                 agent,
                 mode,
+                cwd,
                 initial_input,
                 ..
             } => {
                 assert_eq!(session_key.as_str(), HELP_SESSION_KEY);
                 assert_eq!(agent, HELP_AGENT_ID);
                 assert_eq!(*mode, AgentRuntimeMode::StreamJson);
+                assert!(
+                    cwd.is_none(),
+                    "cwd is daemon policy — a client path may not exist on the daemon host",
+                );
                 let text = initial_input
                     .as_ref()
                     .and_then(|i| i.text.as_deref())
@@ -7209,13 +7214,66 @@ mod help_ask_tests {
         assert_eq!(convo.turns[0].answer, "Press `z` on a workspace.");
     }
 
+    /// Answers correlate to the *earliest* open turn: a follow-up
+    /// submitted while the previous answer is still streaming must not
+    /// hijack its tail, and each turn gets its own result.
+    #[test]
+    fn follow_up_mid_stream_keeps_turns_correlated() {
+        let mut m = build_model();
+        let _ = m.handle_help_asked("q1".into());
+        m.handle_daemon_event(run_started(1));
+        m.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+            run_id: AgentRunId(1),
+            delta: "A1 start".into(),
+        });
+        // Follow-up while A1 is still streaming.
+        let cmds = m.handle_help_asked("q2".into());
+        assert!(matches!(
+            cmds.first(),
+            Some(IpcCommand::SendAgentInput { .. })
+        ));
+        m.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+            run_id: AgentRunId(1),
+            delta: ", A1 end".into(),
+        });
+        {
+            let convo = m.help_convo_mut();
+            assert_eq!(convo.turns[0].answer, "A1 start, A1 end");
+            assert_eq!(convo.turns[1].answer, "", "A1's tail must not leak into q2");
+        }
+        m.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(1),
+            result: Some("A1 final".into()),
+            session_id: None,
+            error: None,
+        });
+        m.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+            run_id: AgentRunId(1),
+            delta: "A2".into(),
+        });
+        m.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(1),
+            result: Some("A2 final".into()),
+            session_id: None,
+            error: None,
+        });
+        let convo = m.help_convo_mut();
+        assert!(convo.turns[0].done);
+        assert_eq!(convo.turns[0].answer, "A1 final");
+        assert!(convo.turns[1].done, "q2's own result must close q2");
+        assert_eq!(convo.turns[1].answer, "A2 final");
+    }
+
     /// `AgentRunFinished` releases the run id so the next question
-    /// starts a fresh run instead of writing to a dead process.
+    /// starts a fresh run instead of writing to a dead process — and
+    /// closes every open turn, including follow-ups queued behind the
+    /// one that was streaming.
     #[test]
     fn run_finished_resets_for_a_fresh_start() {
         let mut m = build_model();
         let _ = m.handle_help_asked("q".into());
         m.handle_daemon_event(run_started(1));
+        let _ = m.handle_help_asked("follow-up".into());
         m.handle_daemon_event(IpcEvent::AgentRunFinished {
             run_id: AgentRunId(1),
             exit_code: Some(1),
@@ -7226,6 +7284,7 @@ mod help_ask_tests {
         {
             let convo = m.help_convo_mut();
             assert!(convo.turns[0].done, "open turn closed on exit");
+            assert!(convo.turns[1].done, "queued follow-up turn closed too");
             assert!(convo.notice.as_deref().unwrap_or("").contains("boom"));
         }
         let cmds = m.handle_help_asked("again?".into());
@@ -7237,12 +7296,14 @@ mod help_ask_tests {
 
     /// A spawn failure surfaces inside the help conversation — not as
     /// a footer sync-error banner (its `agent_run:*` source would
-    /// otherwise be misread as a provider sync failure).
+    /// otherwise be misread as a provider sync failure) — and closes
+    /// every queued turn, not just the last.
     #[test]
     fn spawn_failure_lands_in_the_convo_not_the_footer() {
         let mut m = build_model();
         m.status.polling = None;
         let _ = m.handle_help_asked("q".into());
+        let _ = m.handle_help_asked("queued while starting".into());
         m.handle_daemon_event(IpcEvent::ProviderError {
             source: format!("agent_run:{HELP_AGENT_ID}"),
             message: "No such file or directory".into(),
@@ -7252,6 +7313,7 @@ mod help_ask_tests {
         assert!(!m.help_run_starting);
         let convo = m.help_convo_mut();
         assert!(convo.turns[0].done);
+        assert!(convo.turns[1].done, "queued turn must not spin forever");
         let notice = convo.notice.as_deref().expect("notice set");
         assert!(notice.contains("unavailable"));
         drop(convo);
@@ -7264,6 +7326,30 @@ mod help_ask_tests {
             0,
             "and must not hit the sync log"
         );
+    }
+
+    /// Once the run is live, a generic `agent_run*` provider error can
+    /// belong to any structured run on the shared bus (it carries no
+    /// run id) — it must NOT be claimed for the help conversation. Run
+    /// death arrives run-scoped as `AgentRunFinished` instead.
+    #[test]
+    fn live_run_does_not_claim_other_runs_agent_run_errors() {
+        let mut m = build_model();
+        let _ = m.handle_help_asked("q".into());
+        m.handle_daemon_event(run_started(1));
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: "agent_run:stdin".into(),
+            message: "broken pipe on someone else's run".into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+        assert_eq!(m.help_run, Some(AgentRunId(1)), "run must stay adopted");
+        let convo = m.help_convo_mut();
+        assert!(
+            !convo.turns[0].done,
+            "the streaming answer must not be truncated by an unrelated error"
+        );
+        assert!(convo.notice.is_none());
     }
 
     /// Without the claude agent enabled there's nothing to escalate

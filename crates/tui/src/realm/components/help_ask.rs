@@ -57,9 +57,25 @@ pub struct HelpConvo {
 }
 
 impl HelpConvo {
-    /// The turn currently streaming, if any.
+    /// The turn awaiting its answer: the *earliest* un-done turn. The
+    /// run answers questions in submission order, so deltas and results
+    /// always belong to the oldest open turn — keyed on the last turn
+    /// instead, a follow-up asked mid-stream would hijack the previous
+    /// answer's tail and orphan its own.
     pub fn streaming_turn_mut(&mut self) -> Option<&mut HelpTurn> {
-        self.turns.last_mut().filter(|t| !t.done)
+        self.turns.iter_mut().find(|t| !t.done)
+    }
+
+    /// Close every open turn — the run is gone (exit or spawn failure),
+    /// so no answer can arrive for any of them. Returns `true` when a
+    /// closed turn had no answer yet.
+    pub fn close_open_turns(&mut self) -> bool {
+        let mut unanswered = false;
+        for turn in self.turns.iter_mut().filter(|t| !t.done) {
+            turn.done = true;
+            unanswered |= turn.answer.is_empty();
+        }
+        unanswered
     }
 }
 

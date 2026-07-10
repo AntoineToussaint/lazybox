@@ -1717,6 +1717,12 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     pub fn flash_error(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        // The footer width-caps its notice segment, so a long error
+        // (merge rejection reasons, spawn failures) can render
+        // truncated. Record the full text in the sync log so the
+        // sync-status window (`Shift-D`) can always show it.
+        self.status.sync.note_error("ui", "", &msg, "");
         self.flash(
             msg,
             crate::realm::components::footer::NoticeSeverity::Permanent,
@@ -1767,10 +1773,16 @@ impl<T: TerminalAdapter> Model<T> {
     /// recovers. See the `sync_error_source` field and
     /// [`Self::clear_sync_error_if_recovered`].
     pub fn flash_sync_error(&mut self, source: &str, msg: impl Into<String>) {
-        self.flash_error(msg);
-        // `flash` (called via `flash_error`) just reset the flag to
-        // `None`; re-arm it *after* so the banner is attributed to the
-        // provider that actually failed.
+        // Not `flash_error`: the provider failure is already in the
+        // sync log (recorded for every `ProviderError` event), so
+        // logging the banner text would double-count it under "ui".
+        self.flash(
+            msg,
+            crate::realm::components::footer::NoticeSeverity::Permanent,
+        );
+        // `flash` just reset the flag to `None`; re-arm it *after* so
+        // the banner is attributed to the provider that actually
+        // failed.
         self.sync_error_source = Some(source.to_string());
     }
 

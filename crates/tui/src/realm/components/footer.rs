@@ -14,7 +14,9 @@
 //! - **Right**: background polling status — spinner + "Pulling
 //!   tasks from github · PR query: …" — OR the most recent notice /
 //!   error if one is set. Retryable hiccups auto-fade; permanent +
-//!   auth errors stay until dismissed.
+//!   auth errors stay until dismissed. Capped at ~40% of the row
+//!   with `…` truncation — the hints are the footer's primary
+//!   content and a notice must never displace them (#291).
 //!
 //! Pure render — state lives on `Model` and gets passed in.
 
@@ -78,24 +80,41 @@ pub fn render(
     f.render_widget(Paragraph::new(Line::raw("")).style(bg), area);
 
     // Reserve the right-most segment for the notice (or polling
-    // status if no notice). Keymap fills the rest of the line.
+    // status if no notice). Keymap fills the rest of the line. The
+    // hints are the footer's primary content, so the right segment is
+    // capped at ~40% of the row and its message ellipsis-truncated —
+    // agent notices used to interpolate full issue titles and wipe
+    // out the hint zone entirely (#291).
+    let right_cap = (area.width as usize) * 2 / 5;
     let right_text = if let Some(n) = notice {
         let sev_color = match n.severity {
             NoticeSeverity::Retryable | NoticeSeverity::Auth => theme.warn,
             NoticeSeverity::Permanent => theme.error,
             NoticeSeverity::Info | NoticeSeverity::Hint => theme.text_dim,
         };
-        Some(Line::from(vec![
-            Span::styled(" ", bg),
-            Span::styled(
-                format!(" {} ", n.message),
-                Style::default()
-                    .bg(sev_color)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" ", bg),
-        ]))
+        let pill = |msg: &str| {
+            Line::from(vec![
+                Span::styled(" ", bg),
+                Span::styled(
+                    format!(" {msg} "),
+                    Style::default()
+                        .bg(sev_color)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" ", bg),
+            ])
+        };
+        // The chrome (pads + pill spaces) is measured off the layout
+        // itself so a padding tweak can't silently desync the budget.
+        // Middle truncation, not end: notice tails carry the
+        // actionable part ("… — press ! to jump", an error reason
+        // after its fixed prefix), so cutting from the end would
+        // delete exactly what the message exists to deliver.
+        let chrome = pill("").width();
+        let message =
+            crate::util::truncate_ellipsis_middle(&n.message, right_cap.saturating_sub(chrome));
+        Some(pill(&message))
     } else if let Some((spinner, label)) = polling_status {
         // Two-tone render: bright accent for the spinner glyph
         // (drives the eye), dim text for the surrounding label so
@@ -104,20 +123,25 @@ pub fn render(
         // word in the label the user cares about, so we don't try
         // to highlight it separately — at 1-2 characters of width
         // delta it would look like a typo.
-        Some(Line::from(vec![
-            Span::styled(
-                format!(" {spinner} "),
-                Style::default()
-                    .bg(theme.surface)
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{label} "),
-                Style::default().bg(theme.surface).fg(theme.text_strong),
-            ),
-            Span::styled(" ", bg),
-        ]))
+        let status = |label: &str| {
+            Line::from(vec![
+                Span::styled(
+                    format!(" {spinner} "),
+                    Style::default()
+                        .bg(theme.surface)
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{label} "),
+                    Style::default().bg(theme.surface).fg(theme.text_strong),
+                ),
+                Span::styled(" ", bg),
+            ])
+        };
+        let chrome = status("").width();
+        let label = crate::util::truncate_ellipsis(label, right_cap.saturating_sub(chrome));
+        Some(status(&label))
     } else {
         None
     };
@@ -221,11 +245,27 @@ mod tests {
     /// Render the footer to a flat string of its single row so tests
     /// can assert which hints surfaced.
     fn render_row(keymap: &[Binding], globals: &[Binding]) -> String {
+        render_row_full(keymap, globals, None, None)
+    }
+
+    fn render_row_full(
+        keymap: &[Binding],
+        globals: &[Binding],
+        polling_status: Option<(&str, &str)>,
+        notice: Option<&Notice>,
+    ) -> String {
         let w = 120u16;
         let backend = TestBackend::new(w, 1);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|f| {
-            render(f, Rect::new(0, 0, w, 1), keymap, globals, None, None);
+            render(
+                f,
+                Rect::new(0, 0, w, 1),
+                keymap,
+                globals,
+                polling_status,
+                notice,
+            );
         })
         .unwrap();
         let buf = term.backend().buffer().clone();
@@ -261,6 +301,75 @@ mod tests {
         let globals = [binding("q q", "quit")];
         let row = render_row(&[], &globals);
         assert!(row.contains("quit"));
+    }
+
+    /// A 200-char notice at 120 cols must not displace the hints:
+    /// the contextual group and the universal tail stay on the row,
+    /// and the notice is visibly truncated (#291).
+    #[test]
+    fn long_notice_never_displaces_hints() {
+        let keymap = [binding("w", "work on this")];
+        let globals = [binding("?", "help"), binding("q q", "quit")];
+        let notice = Notice::new("x".repeat(200), NoticeSeverity::Info);
+        let row = render_row_full(&keymap, &globals, None, Some(&notice));
+        assert!(row.contains("work on this"), "contextual hint displaced");
+        assert!(row.contains("help"), "global help hint displaced");
+        assert!(row.contains("q q"), "quit chord displaced");
+        assert!(row.contains("quit"), "quit label displaced");
+        assert!(row.contains('…'), "long notice must truncate visibly");
+        // The notice segment stays within its ~40% budget: message
+        // cells ≤ right_cap - 4 chrome = 44 at 120 cols. Middle
+        // truncation splits the payload around the '…', so bound the
+        // total ('x' appears in no hint label), not a single run.
+        let shown = row.matches('x').count();
+        assert!(shown <= 44, "notice text exceeded its cap: {shown} cells");
+    }
+
+    /// The tail of an agent notice is its payload — the composed
+    /// "<slug> needs input — press ! to jump" exceeds the cap at 120
+    /// cols, and end-truncation used to delete the jump instruction.
+    /// Middle truncation must keep it.
+    #[test]
+    fn notice_actionable_tail_survives_truncation() {
+        let keymap = [binding("w", "work on this")];
+        let globals = [binding("?", "help"), binding("q q", "quit")];
+        let msg = format!("{}… needs input — press ! to jump", "T".repeat(23));
+        let notice = Notice::new(msg, NoticeSeverity::Hint);
+        let row = render_row_full(&keymap, &globals, None, Some(&notice));
+        assert!(
+            row.contains("! to jump"),
+            "actionable tail truncated away: {row:?}",
+        );
+        assert!(row.contains("work on this"), "contextual hint displaced");
+    }
+
+    /// The cap is enforced in terminal cells, not chars: a CJK/emoji
+    /// issue title renders two cells per char, and a char-budgeted
+    /// truncation would let the pill spill to ~80% of the row and
+    /// displace the hints all over again.
+    #[test]
+    fn wide_char_notice_stays_within_cap() {
+        let keymap = [binding("w", "work on this")];
+        let globals = [binding("?", "help"), binding("q q", "quit")];
+        let notice = Notice::new("好".repeat(100), NoticeSeverity::Info);
+        let row = render_row_full(&keymap, &globals, None, Some(&notice));
+        assert!(row.contains("work on this"), "contextual hint displaced");
+        assert!(row.contains("help"), "global help hint displaced");
+        assert!(row.contains("quit"), "quit label displaced");
+        assert!(row.contains('…'), "wide-char notice must truncate visibly");
+    }
+
+    /// Same guarantee for the polling status — the right segment is
+    /// capped no matter which variant fills it.
+    #[test]
+    fn long_polling_label_never_displaces_hints() {
+        let keymap = [binding("w", "work on this")];
+        let globals = [binding("?", "help"), binding("q q", "quit")];
+        let label = "p".repeat(200);
+        let row = render_row_full(&keymap, &globals, Some(("⠋", &label)), None);
+        assert!(row.contains("work on this"), "contextual hint displaced");
+        assert!(row.contains("quit"), "quit label displaced");
+        assert!(row.contains('…'), "long label must truncate visibly");
     }
 
     #[test]

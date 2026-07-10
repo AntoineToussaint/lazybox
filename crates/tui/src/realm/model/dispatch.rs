@@ -507,7 +507,7 @@ impl<T: TerminalAdapter> Model<T> {
                     } => {
                         let name = workspace
                             .as_ref()
-                            .map(|w| w.name.clone())
+                            .map(|w| crate::util::notice_slug(&w.name).into_owned())
                             .unwrap_or_default();
                         if enabled {
                             self.flash_info(format!("auto-merge on green: armed for {name}"));

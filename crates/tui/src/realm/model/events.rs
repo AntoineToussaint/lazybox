@@ -758,7 +758,10 @@ impl<T: TerminalAdapter> Model<T> {
     fn maybe_auto_merge(&mut self, ws: &lazybox_core::Workspace) {
         if crate::intent::should_auto_merge(ws) {
             if self.auto_merge_fired.insert(ws.key.clone()) {
-                self.flash_info(format!("auto-merging {} — CI green", ws.name));
+                self.flash_info(format!(
+                    "auto-merging {} — CI green",
+                    crate::util::notice_slug(&ws.name)
+                ));
                 self.send_cmd(IpcCommand::MergePr {
                     workspace_key: ws.key.clone(),
                 });

@@ -589,30 +589,3 @@ pub(crate) fn badge_pill_style(theme: &crate::theme::Theme, letter: char) -> Sty
         .fg(fg)
         .add_modifier(Modifier::BOLD)
 }
-
-/// Visual width in cells of a string, treating each char as one cell.
-/// PR titles in the sidebar are ASCII in practice; the prefixes use
-/// `▸` (1-cell box-drawing) which `chars().count()` gets right.
-pub(super) fn visual_width(s: &str) -> usize {
-    s.chars().count()
-}
-
-/// Truncate `s` so it fits in `budget` cells, adding `…` when clipped.
-/// Returns `s` unchanged when it already fits (cheap fast-path).
-pub(crate) fn truncate_ellipsis(s: &str, budget: usize) -> String {
-    let w = visual_width(s);
-    if w <= budget {
-        return s.to_string();
-    }
-    if budget == 0 {
-        return String::new();
-    }
-    if budget == 1 {
-        return "…".to_string();
-    }
-    // Take `budget - 1` chars, append the ellipsis. Iterating chars
-    // (not bytes) keeps multi-byte UTF-8 intact.
-    let mut out: String = s.chars().take(budget - 1).collect();
-    out.push('…');
-    out
-}

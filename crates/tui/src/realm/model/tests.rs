@@ -6451,3 +6451,52 @@ mod inspect_list_remount_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod flash_log_tests {
+    //! Sticky footer errors are width-capped at render time (#291),
+    //! so `flash_error` must keep the full text recoverable in the
+    //! sync log (`Shift-D`). Provider sync banners are exempt: the
+    //! underlying `ProviderError` event is already recorded there,
+    //! and logging the banner too would double-count the failure.
+    use super::super::*;
+    use lazybox_ipc::channel;
+    use tuirealm::ratatui::layout::Size;
+
+    fn model() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+    ) {
+        let (client, server) = channel::pair();
+        let m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        (m, server)
+    }
+
+    #[test]
+    fn flash_error_records_full_text_in_sync_log() {
+        let (mut m, _server) = model();
+        let long = format!("✗ merge failed — repo#1: {}", "long reason ".repeat(20));
+        m.flash_error(long.clone());
+        let entry = m.status.sync.recent().next().expect("error logged");
+        assert_eq!(entry.source, "ui");
+        match &entry.outcome {
+            crate::realm::status_ctx::SyncOutcome::Err { message, .. } => {
+                assert_eq!(message, &long, "log keeps the untruncated text");
+            }
+            other => panic!("expected an Err outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flash_sync_error_does_not_double_log() {
+        let (mut m, _server) = model();
+        m.flash_sync_error("github", "✗ sync failed — github: boom");
+        assert_eq!(
+            m.status.sync.recent().count(),
+            0,
+            "the ProviderError event path owns the sync-log entry",
+        );
+        assert!(m.status.notice.is_some(), "the sticky banner still shows");
+        assert_eq!(m.sync_error_source.as_deref(), Some("github"));
+    }
+}

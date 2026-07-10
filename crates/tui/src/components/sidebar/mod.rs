@@ -34,9 +34,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// animation only nudges the render loop a few times a second while
 /// an agent is busy (and never when nothing is working).
 const WORKING_SPIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
+use crate::util::{truncate_ellipsis, visual_width};
 use lazybox_core::{SessionId, SessionKey, Workspace};
 use lazybox_ipc::{Command, Event, TerminalId, TerminalKind};
-use pills::visual_width;
 use ratatui::Frame;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -1878,7 +1878,7 @@ mod tests;
 // keep their `crate::components::sidebar::*` import paths.
 pub(crate) use pills::{
     AttentionSignal, StatusPill, attention_gate, badge_pill_style, mailbox_membership,
-    relative_time, role_badge, status_pills, truncate_ellipsis, workspace_attention_signals,
+    relative_time, role_badge, status_pills, workspace_attention_signals,
     workspace_needs_attention, workspace_type_label,
 };
 #[cfg(test)]

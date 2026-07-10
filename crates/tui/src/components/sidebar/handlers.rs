@@ -344,9 +344,13 @@ impl Sidebar {
                         // Inline footer notice in addition to the OS
                         // popup — covers users with notifications muted
                         // (which is most of them while focused). Hint
-                        // severity = 3s fade, dim color.
-                        self.pending_asking_notices
-                            .push(format!("{} needs input — press ! to jump", workspace.name));
+                        // severity = 3s fade, dim color. Slugged name:
+                        // a raw issue title would displace the rest of
+                        // the message (#291).
+                        self.pending_asking_notices.push(format!(
+                            "{} needs input — press ! to jump",
+                            crate::util::notice_slug(&workspace.name)
+                        ));
                     }
                 }
                 // Rising edge into Done — the agent finished its turn
@@ -366,8 +370,10 @@ impl Sidebar {
                         self.pending_notifications
                             .push(PendingNotification { title, body });
                     }
-                    self.pending_asking_notices
-                        .push(format!("{} finished", workspace.name));
+                    self.pending_asking_notices.push(format!(
+                        "{} finished",
+                        crate::util::notice_slug(&workspace.name)
+                    ));
                 }
                 // Only the asking transition can change the visible set
                 // (it feeds the per-repo attention counter); a done- or

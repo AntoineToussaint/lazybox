@@ -326,7 +326,7 @@ an async future/channel via `tick()`.
 
 **Status:** stable
 **Crate(s):** `tui-core` (`src/platform.rs`, `src/notify.rs`), `tui` (`components/sidebar/handlers.rs`)
-**Config / flags:** `attention.desktop_notify` (master), `attention.{unread,ci_failing,review_pending}` (which events notify)
+**Config / flags:** `attention.desktop_notify` (master), `attention.notifier` (`auto` | `osc` | `subprocess` delivery), `attention.{unread,ci_failing,review_pending}` (which events notify)
 **Key bindings:** —
 
 ### What it does
@@ -350,15 +350,26 @@ Active→Asking edge from `Event::AgentState` and the rising edge of attention
 signals on `Event::WorkspaceUpserted`
 (`crates/tui/src/components/sidebar/handlers.rs`).
 
-Delivery prefers the **terminal's own OSC notification sequence**
+Delivery is picked by `attention.notifier` (default `auto`): in a **local
+session** a dedicated helper runs when present — `terminal-notifier` (grouped)
+on macOS, `notify-send` on Linux — it's verifiable (helper exit status lands
+in the log) and immune to terminal OSC quirks. Without one, a recognized
+OSC-capable terminal's own banner is preferred over the `osascript` fallback,
+because `display notification` exits 0 even when macOS suppresses the banner
+(Script Editor permission denied, Focus mode) — osascript is the last resort
+for unrecognized terminals on a stock Mac; Windows is a stub. **Over SSH**
+(where a helper would banner the remote host) the
+**terminal's own OSC notification sequence** is used instead
 (`crates/tui-core/src/notify.rs`): Ghostty / Kitty / WezTerm get OSC 777
 (`ESC]777;notify;TITLE;BODY`), iTerm2 gets OSC 9 (body only), detected via
-`$TERM_PROGRAM`. This reaches the *local* machine even when lazybox runs over SSH
-and needs no helper binary. Inside tmux the sequence is wrapped in a
-passthrough envelope (requires `allow-passthrough`, default-on in tmux 3.3a).
-Terminals without OSC support (Terminal.app, plain SSH) fall back to the
-subprocess path: macOS prefers `terminal-notifier` (grouped) then `osascript`;
-Linux uses `notify-send`; Windows is a stub.
+`$TERM_PROGRAM`; the local emulator renders the banner. Inside tmux the
+sequence is wrapped in a passthrough envelope (requires `allow-passthrough`,
+default-on in tmux 3.3a). `notifier: osc` / `notifier: subprocess` force one
+path. OSC sequences are never written at the point of the triggering event —
+they're queued and emitted between frames on the render thread, so the escape
+bytes can't interleave with a ratatui frame flush and paint as literal junk
+(#296). Every attempt logs its chosen backend at debug level in
+`/tmp/lazybox.log`.
 
 Banners are suppressed while lazybox's terminal is reported focused (DEC mode
 1004 focus reporting) so it doesn't self-spam — a terminal that never reports

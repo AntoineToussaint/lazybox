@@ -71,7 +71,10 @@ impl Sidebar {
     /// drove an `AgentState::InputNeeded` event would spam the user's
     /// notification center. Keeping the IO side-effect in this
     /// wrapper (which production code goes through; tests don't)
-    /// keeps the inner sidebar fully deterministic.
+    /// keeps the inner sidebar fully deterministic. Model tests that
+    /// do reach this wrapper are covered by the second gate:
+    /// `notify_user` stays disarmed until the binary calls
+    /// `platform::set_notifier_backend` at startup.
     pub fn on_daemon_event(&mut self, evt: &IpcEvent) {
         self.inner.on_event(evt);
         for notif in self.inner.drain_pending_notifications() {

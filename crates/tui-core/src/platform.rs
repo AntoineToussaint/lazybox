@@ -72,10 +72,174 @@ pub fn detach_child_process(cmd: &mut std::process::Command) {
     }
 }
 
+/// Which delivery mechanism carries desktop notifications. Configured
+/// via `attention.notifier` in `~/.lazybox/config.yaml` and armed by
+/// the binary at startup with [`set_notifier_backend`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotifierBackend {
+    /// Pick per environment: the subprocess path when a local helper
+    /// can reach the user (it's verifiable and immune to terminal
+    /// OSC quirks), the OSC escape path over SSH (the only surface
+    /// that reaches the *local* machine).
+    Auto,
+    /// Always the terminal's OSC notification sequence.
+    Osc,
+    /// Always the subprocess helpers (`terminal-notifier` /
+    /// `osascript` / `notify-send`).
+    Subprocess,
+}
+
+const BACKEND_DISARMED: u8 = 0;
+const BACKEND_AUTO: u8 = 1;
+const BACKEND_OSC: u8 = 2;
+const BACKEND_SUBPROCESS: u8 = 3;
+
+/// Disarmed until the binary opts in. Library and test code drives
+/// the same event paths that fire notifications (`cargo test` pushes
+/// `AgentState::InputNeeded` through the sidebar), and an un-armed
+/// default keeps those runs from spawning real OS banners.
+static BACKEND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(BACKEND_DISARMED);
+
+/// Arm desktop notifications with the configured backend. Called once
+/// at startup by the `lazybox` binary; until then [`notify_user`] is
+/// a logged no-op.
+pub fn set_notifier_backend(backend: NotifierBackend) {
+    let v = match backend {
+        NotifierBackend::Auto => BACKEND_AUTO,
+        NotifierBackend::Osc => BACKEND_OSC,
+        NotifierBackend::Subprocess => BACKEND_SUBPROCESS,
+    };
+    BACKEND.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn notifier_backend() -> Option<NotifierBackend> {
+    match BACKEND.load(std::sync::atomic::Ordering::Relaxed) {
+        BACKEND_AUTO => Some(NotifierBackend::Auto),
+        BACKEND_OSC => Some(NotifierBackend::Osc),
+        BACKEND_SUBPROCESS => Some(NotifierBackend::Subprocess),
+        _ => None,
+    }
+}
+
+/// Resolved delivery path for one notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    Osc(crate::notify::OscNotifier),
+    Subprocess,
+}
+
+/// What the subprocess path would actually run, graded by how much
+/// its exit status can be trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubprocessNotifier {
+    /// A dedicated helper whose success is meaningful:
+    /// `terminal-notifier` (macOS) or `notify-send` (Linux).
+    Dedicated,
+    /// The `osascript` fallback: ships with every macOS install, but
+    /// `display notification` exits 0 even when the banner never
+    /// appears (Script Editor's notification permission denied, Focus
+    /// mode) — so "verifiable" doesn't hold for it.
+    // Each variant below is constructed only under its platform's cfg
+    // arm in `subprocess_notifier`; the enum itself is deliberately
+    // platform-complete so `resolve_route` stays pure and testable.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Osascript,
+    /// No helper at all (Linux without `notify-send`, Windows).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    Unavailable,
+}
+
+/// Pick the delivery path. Pure so the policy is unit-testable.
+///
+/// `Auto` prefers a *dedicated* subprocess helper locally: it's
+/// verifiable (exit status lands in the log) and immune to
+/// terminal/OSC quirks — an unhandled or corrupted escape sequence
+/// means a silently lost banner at best, literal junk on screen at
+/// worst. But that reasoning doesn't extend to `osascript`, which
+/// reports success even when macOS suppresses its banner — a
+/// recognized OSC-capable terminal's own notification surface beats
+/// it, so osascript stays the last resort. Over SSH the helpers
+/// would fire on the remote host where no one is looking, so OSC
+/// (which the local emulator renders) wins there.
+fn resolve_route(
+    backend: NotifierBackend,
+    osc: Option<crate::notify::OscNotifier>,
+    remote: bool,
+    subprocess: SubprocessNotifier,
+) -> Route {
+    use crate::notify::OscNotifier;
+    match backend {
+        NotifierBackend::Subprocess => Route::Subprocess,
+        // Explicit `osc` trusts the user over detection: `$TERM_PROGRAM`
+        // often doesn't survive an SSH hop, so an unrecognized terminal
+        // gets the widest-supported dialect rather than a silent drop.
+        NotifierBackend::Osc => Route::Osc(osc.unwrap_or(OscNotifier::Osc777)),
+        NotifierBackend::Auto => match (remote, osc, subprocess) {
+            (true, Some(n), _) => Route::Osc(n),
+            (_, _, SubprocessNotifier::Dedicated) => Route::Subprocess,
+            (_, Some(n), _) => Route::Osc(n),
+            (_, None, _) => Route::Subprocess,
+        },
+    }
+}
+
+/// Whether this process runs at the far end of an SSH connection —
+/// where a spawned notifier helper would banner the remote host's
+/// (headless) desktop instead of the user's.
+fn remote_session() -> bool {
+    std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
+}
+
+/// Grade the subprocess notifier this platform would run — see
+/// [`SubprocessNotifier`].
+fn subprocess_notifier() -> SubprocessNotifier {
+    #[cfg(target_os = "macos")]
+    {
+        if terminal_notifier_path().is_some() {
+            SubprocessNotifier::Dedicated
+        } else {
+            SubprocessNotifier::Osascript
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if notify_send_path().is_some() {
+            SubprocessNotifier::Dedicated
+        } else {
+            SubprocessNotifier::Unavailable
+        }
+    }
+    #[cfg(windows)]
+    {
+        SubprocessNotifier::Unavailable
+    }
+}
+
+/// Cached `terminal-notifier` lookup so we don't spawn `which` on
+/// every notification. `OnceLock` is `Sync`, safe to share across the
+/// threads that fire notifications.
+#[cfg(target_os = "macos")]
+fn terminal_notifier_path() -> Option<&'static std::path::Path> {
+    use std::sync::OnceLock;
+    static TERMINAL_NOTIFIER: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    TERMINAL_NOTIFIER
+        .get_or_init(|| which::which("terminal-notifier").ok())
+        .as_deref()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn notify_send_path() -> Option<&'static std::path::Path> {
+    use std::sync::OnceLock;
+    static NOTIFY_SEND: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    NOTIFY_SEND
+        .get_or_init(|| which::which("notify-send").ok())
+        .as_deref()
+}
+
 /// Fire a desktop notification with `title` + `body`. Best-effort —
-/// returns immediately whether or not the OS surface is available
-/// (no PII in error logs; we don't want a missing dependency to
-/// generate noise on every notification).
+/// returns immediately whether or not the OS surface is available.
+/// Every attempt logs its chosen backend at debug level so "where
+/// did my banner go" is answerable from `/tmp/lazybox.log`.
 ///
 /// Used to surface agent state changes that need the user's
 /// attention even when lazybox isn't the focused app — e.g. Claude
@@ -85,14 +249,69 @@ pub fn detach_child_process(cmd: &mut std::process::Command) {
 /// [`crate::notify::terminal_is_focused`]) — a banner for what the
 /// user is already looking at is pure noise.
 ///
-/// **OSC-capable terminals** (Ghostty / iTerm2 / Kitty / WezTerm):
-/// the banner is emitted as an OSC escape sequence written to the
-/// controlling terminal ([`crate::notify`]). This is preferred over
-/// the subprocess paths below because it reaches the *local* machine
-/// even when lazybox runs over SSH, and needs no helper binary.
-///
-/// The subprocess paths below are the fallback for terminals without
-/// OSC notification support (Terminal.app, plain SSH, …):
+/// Delivery is resolved by `resolve_route` from the backend armed
+/// at startup ([`set_notifier_backend`], `attention.notifier` in
+/// YAML). The OSC path never writes stdout here — the sequence is
+/// queued for the render thread to emit between frames
+/// ([`crate::notify::queue_osc_notification`]), so the escape bytes
+/// can't interleave with a ratatui frame flush (issue #296).
+pub fn notify_user(title: &str, body: &str) {
+    let Some(backend) = notifier_backend() else {
+        tracing::debug!(title, "notify_user: skipped — no backend armed");
+        return;
+    };
+    // Don't self-spam: when lazybox's own terminal is reported focused
+    // the user is already looking at it. Unknown focus (terminal
+    // never reported it) falls through and still notifies.
+    if crate::notify::terminal_is_focused() {
+        tracing::debug!(title, "notify_user: suppressed — terminal reported focused");
+        return;
+    }
+    let osc = crate::notify::detect_osc_notifier();
+    let remote = remote_session();
+    match resolve_route(backend, osc, remote, subprocess_notifier()) {
+        Route::Osc(notifier) => {
+            tracing::debug!(
+                title,
+                ?notifier,
+                remote,
+                "notify_user: OSC backend — queued for the render thread"
+            );
+            crate::notify::queue_osc_notification(notifier, title, body);
+        }
+        Route::Subprocess => {
+            tracing::debug!(title, remote, "notify_user: subprocess backend");
+            notify_subprocess(title, body);
+        }
+    }
+}
+
+/// Reap a spawned notifier helper on a detached thread and log its
+/// exit status — the subprocess path's verifiability is the reason
+/// `Auto` prefers it locally, so a helper that failed must leave a
+/// trace in the log rather than vanish with the banner.
+fn log_notifier_exit(helper: &'static str, spawned: std::io::Result<std::process::Child>) {
+    match spawned {
+        Ok(mut child) => {
+            std::thread::spawn(move || match child.wait() {
+                Ok(status) if status.success() => {
+                    tracing::debug!(helper, "notify_user: helper exited ok");
+                }
+                Ok(status) => {
+                    tracing::warn!(helper, %status, "notify_user: helper failed — banner likely lost");
+                }
+                Err(e) => {
+                    tracing::warn!(helper, error = %e, "notify_user: helper wait failed");
+                }
+            });
+        }
+        Err(e) => {
+            tracing::warn!(helper, error = %e, "notify_user: helper failed to spawn");
+        }
+    }
+}
+
+/// Subprocess delivery path.
 ///
 /// **macOS**: prefers `terminal-notifier` when it's on PATH — it
 /// ships its own bundle, so the banner carries a real icon and
@@ -113,29 +332,11 @@ pub fn detach_child_process(cmd: &mut std::process::Command) {
 /// missing — install `libnotify` (e.g. `apt install libnotify-bin`).
 ///
 /// **Windows**: stub (TODO: PowerShell `New-BurntToastNotification`).
-pub fn notify_user(title: &str, body: &str) {
-    // Don't self-spam: when lazybox's own terminal is reported focused
-    // the user is already looking at it. Unknown focus (terminal
-    // never reported it) falls through and still notifies.
-    if crate::notify::terminal_is_focused() {
-        return;
-    }
-    // Prefer the terminal's own OSC notification surface — it reaches
-    // the local machine even when lazybox runs over SSH (the subprocess
-    // fallbacks would fire on the remote host, where no one is
-    // looking) and needs no helper binary.
-    if let Some(notifier) = crate::notify::detect_osc_notifier() {
-        crate::notify::emit_osc_notification(notifier, title, body);
-        return;
-    }
+fn notify_subprocess(title: &str, body: &str) {
     #[cfg(target_os = "macos")]
     {
-        // Cache the `terminal-notifier` lookup so we don't spawn
-        // `which` on every notification. `OnceLock` is `Sync`, safe
-        // to share across the threads that fire notifications.
         use std::sync::OnceLock;
-        static TERMINAL_NOTIFIER: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-        let tn = TERMINAL_NOTIFIER.get_or_init(|| which::which("terminal-notifier").ok());
+        let tn = terminal_notifier_path();
 
         let stdio = || {
             (
@@ -149,7 +350,7 @@ pub fn notify_user(title: &str, body: &str) {
             // lazybox.app bundle id, spoofing one would surface the
             // wrong app's icon.
             let (i, o, e) = stdio();
-            let _ = std::process::Command::new(tn_path)
+            let spawned = std::process::Command::new(tn_path)
                 .arg("-title")
                 .arg(title)
                 .arg("-message")
@@ -160,6 +361,7 @@ pub fn notify_user(title: &str, body: &str) {
                 .stdout(o)
                 .stderr(e)
                 .spawn();
+            log_notifier_exit("terminal-notifier", spawned);
         } else {
             // Zero-dependency fallback, but newer macOS attributes its
             // banner to Script Editor (clicking opens an empty
@@ -172,26 +374,24 @@ pub fn notify_user(title: &str, body: &str) {
             });
             let script = osascript_notification_script(title, body);
             let (i, o, e) = stdio();
-            let _ = std::process::Command::new("osascript")
+            let spawned = std::process::Command::new("osascript")
                 .arg("-e")
                 .arg(script)
                 .stdin(i)
                 .stdout(o)
                 .stderr(e)
                 .spawn();
+            log_notifier_exit("osascript", spawned);
         }
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        use std::sync::OnceLock;
-        static NOTIFY_SEND: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-        let ns = NOTIFY_SEND.get_or_init(|| which::which("notify-send").ok());
-
-        let Some(ns_path) = ns else {
+        let Some(ns_path) = notify_send_path() else {
             // No notify-send on PATH → no notification. A one-time
             // tracing line so users can grep /tmp/lazybox.log and find
             // the install hint when they wonder where their
             // notifications went.
+            use std::sync::OnceLock;
             static WARNED: OnceLock<()> = OnceLock::new();
             WARNED.get_or_init(|| {
                 tracing::info!(
@@ -203,13 +403,14 @@ pub fn notify_user(title: &str, body: &str) {
             let _ = (title, body);
             return;
         };
-        let _ = std::process::Command::new(ns_path)
+        let spawned = std::process::Command::new(ns_path)
             .arg(title)
             .arg(body)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn();
+        log_notifier_exit("notify-send", spawned);
     }
     #[cfg(windows)]
     {
@@ -265,6 +466,118 @@ pub async fn wait_for_shutdown_signal() {
     {
         // TODO(windows): tokio::signal::windows::{ctrl_c, ctrl_break}
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use crate::notify::OscNotifier;
+
+    #[test]
+    fn auto_prefers_subprocess_locally_and_osc_over_ssh() {
+        // Local with a helper available: subprocess, even in an
+        // OSC-capable terminal — it's verifiable and immune to OSC
+        // quirks (issue #296).
+        assert_eq!(
+            resolve_route(
+                NotifierBackend::Auto,
+                Some(OscNotifier::Osc777),
+                false,
+                SubprocessNotifier::Dedicated
+            ),
+            Route::Subprocess
+        );
+        // Over SSH the helper would banner the remote host — OSC is
+        // the only surface that reaches the local machine.
+        assert_eq!(
+            resolve_route(
+                NotifierBackend::Auto,
+                Some(OscNotifier::Osc9),
+                true,
+                SubprocessNotifier::Dedicated
+            ),
+            Route::Osc(OscNotifier::Osc9)
+        );
+        // Local with only osascript (no terminal-notifier): a
+        // recognized terminal's own banner wins — osascript reports
+        // success even when macOS suppresses it, so it's the last
+        // resort, not the preferred "verifiable" path.
+        assert_eq!(
+            resolve_route(
+                NotifierBackend::Auto,
+                Some(OscNotifier::Osc777),
+                false,
+                SubprocessNotifier::Osascript
+            ),
+            Route::Osc(OscNotifier::Osc777)
+        );
+        // Local without any helper (Linux missing notify-send) still
+        // uses an OSC-capable terminal rather than dropping the banner.
+        assert_eq!(
+            resolve_route(
+                NotifierBackend::Auto,
+                Some(OscNotifier::Osc777),
+                false,
+                SubprocessNotifier::Unavailable
+            ),
+            Route::Osc(OscNotifier::Osc777)
+        );
+        // Unrecognized terminal and only osascript: best-effort
+        // osascript beats silence.
+        assert_eq!(
+            resolve_route(
+                NotifierBackend::Auto,
+                None,
+                false,
+                SubprocessNotifier::Osascript
+            ),
+            Route::Subprocess
+        );
+        // Nothing available: best-effort subprocess (no-op stub or a
+        // remote-host banner) rather than silence.
+        assert_eq!(
+            resolve_route(
+                NotifierBackend::Auto,
+                None,
+                true,
+                SubprocessNotifier::Unavailable
+            ),
+            Route::Subprocess
+        );
+    }
+
+    #[test]
+    fn explicit_backends_are_not_second_guessed() {
+        assert_eq!(
+            resolve_route(
+                NotifierBackend::Subprocess,
+                Some(OscNotifier::Osc777),
+                true,
+                SubprocessNotifier::Unavailable
+            ),
+            Route::Subprocess
+        );
+        assert_eq!(
+            resolve_route(
+                NotifierBackend::Osc,
+                Some(OscNotifier::Osc9),
+                false,
+                SubprocessNotifier::Dedicated
+            ),
+            Route::Osc(OscNotifier::Osc9)
+        );
+        // `osc` with an unrecognized terminal (TERM_PROGRAM lost over
+        // SSH) falls back to the widest dialect instead of dropping.
+        assert_eq!(
+            resolve_route(
+                NotifierBackend::Osc,
+                None,
+                false,
+                SubprocessNotifier::Dedicated
+            ),
+            Route::Osc(OscNotifier::Osc777)
+        );
     }
 }
 

@@ -668,14 +668,23 @@ impl GhClient {
         // 2xx + JSON content-type: this is the success path. A parse
         // failure here is a real schema mismatch between our types
         // and GitHub's response — surface it with status + content-
-        // type intact instead of dropping to `Serde`.
+        // type intact instead of dropping to `Serde`. The raw body
+        // goes to `tracing` only: it can carry the full GraphQL
+        // response (node payloads, JSON braces) which must never reach
+        // a user-facing footer notice (issue #305).
         serde_json::from_str::<T>(&raw_body)
             .map(|parsed| (parsed, byte_len))
-            .map_err(|e| GhError::HttpStatus {
-                status,
-                reason: " (json parse failed)".to_string(),
-                content_type,
-                body_excerpt: format!("{e} — body: {}", body_excerpt(&raw_body)),
+            .map_err(|e| {
+                tracing::warn!(
+                    "graphql 2xx response failed to parse ({e}); body: {}",
+                    body_excerpt(&raw_body)
+                );
+                GhError::HttpStatus {
+                    status,
+                    reason: " (json parse failed)".to_string(),
+                    content_type,
+                    body_excerpt: e.to_string(),
+                }
             })
     }
 
@@ -2325,7 +2334,7 @@ impl GhClient {
     pub async fn react_eyes(&self, reactable_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("addReaction(EYES) mutation")?;
         let body = graphql::add_reaction_eyes_body(reactable_node_id);
-        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
+        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -2343,16 +2352,7 @@ impl GhClient {
     pub async fn update_branch(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("updatePullRequestBranch mutation")?;
         let body = graphql::update_branch_body(pull_request_node_id);
-        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
-        // Observe rate-limit if the mutation response includes it
-        // (currently it doesn't — the mutation body doesn't select
-        // `rateLimit` — but if a future query body change pulls it
-        // in, we use it for free).
-        if let Some(data) = &response.data
-            && let Some(rl) = &data.rate_limit
-        {
-            self.observe_rate_limit(rl);
-        }
+        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -2454,12 +2454,7 @@ impl GhClient {
         }
         self.acquire_or_block("requestReviews mutation")?;
         let body = graphql::request_reviews_body(pull_request_node_id, &user_ids);
-        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
-        if let Some(data) = &response.data
-            && let Some(rl) = &data.rate_limit
-        {
-            self.observe_rate_limit(rl);
-        }
+        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -2488,12 +2483,7 @@ impl GhClient {
         }
         self.acquire_or_block("addAssigneesToAssignable mutation")?;
         let body = graphql::add_assignees_body(assignable_node_id, &user_ids);
-        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
-        if let Some(data) = &response.data
-            && let Some(rl) = &data.rate_limit
-        {
-            self.observe_rate_limit(rl);
-        }
+        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -2524,12 +2514,7 @@ impl GhClient {
         }
         self.acquire_or_block("removeAssigneesFromAssignable mutation")?;
         let body = graphql::remove_assignees_body(assignable_node_id, &user_ids);
-        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
-        if let Some(data) = &response.data
-            && let Some(rl) = &data.rate_limit
-        {
-            self.observe_rate_limit(rl);
-        }
+        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -2588,12 +2573,7 @@ impl GhClient {
         }
         self.acquire_or_block("addLabelsToLabelable mutation")?;
         let body = graphql::add_labels_body(labelable_node_id, label_ids);
-        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
-        if let Some(data) = &response.data
-            && let Some(rl) = &data.rate_limit
-        {
-            self.observe_rate_limit(rl);
-        }
+        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -2620,12 +2600,7 @@ impl GhClient {
         }
         self.acquire_or_block("removeLabelsFromLabelable mutation")?;
         let body = graphql::remove_labels_body(labelable_node_id, label_ids);
-        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
-        if let Some(data) = &response.data
-            && let Some(rl) = &data.rate_limit
-        {
-            self.observe_rate_limit(rl);
-        }
+        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -2641,12 +2616,7 @@ impl GhClient {
     pub async fn merge_pr(&self, pull_request_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("mergePullRequest mutation")?;
         let body = graphql::merge_pr_body(pull_request_node_id);
-        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
-        if let Some(data) = &response.data
-            && let Some(rl) = &data.rate_limit
-        {
-            self.observe_rate_limit(rl);
-        }
+        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -2662,12 +2632,7 @@ impl GhClient {
     pub async fn close_issue_node(&self, issue_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("closeIssue mutation")?;
         let body = graphql::close_issue_body(issue_node_id);
-        let response: graphql::GqlResponse = self.post_graphql_with_retry(&body).await?;
-        if let Some(data) = &response.data
-            && let Some(rl) = &data.rate_limit
-        {
-            self.observe_rate_limit(rl);
-        }
+        let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
             let joined = errors
                 .iter()
@@ -3462,6 +3427,108 @@ mod tests {
             "reported byte length must equal the raw response body length"
         );
         assert_eq!(value["data"]["hello"], "world");
+    }
+
+    /// Issue #305: the real `mergePullRequest` success reply has no
+    /// `search` field, so deserializing it as the search-shaped
+    /// `GqlResponse` failed and reported a false error that leaked the
+    /// raw response JSON into the footer. The dedicated
+    /// `GqlMutationResponse` must parse it cleanly and return `Ok`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn merge_success_json_reports_ok() {
+        const BODY: &str = r#"{"data":{"mergePullRequest":{"pullRequest":{"id":"PR_kwDO","state":"MERGED","merged":true}}}}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        client
+            .merge_pr("PR_kwDO")
+            .await
+            .expect("merge success must not report a false failure");
+    }
+
+    /// Same class of bug for the label mutation — its `data` node is
+    /// `addLabelsToLabelable`, also without a `search` field.
+    #[tokio::test(flavor = "current_thread")]
+    async fn label_mutation_success_reports_ok() {
+        const BODY: &str = r#"{"data":{"addLabelsToLabelable":{"labelable":{"__typename":"PullRequest"}}}}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        client
+            .add_labels("PR_kwDO", &["LA_1".to_string()])
+            .await
+            .expect("label mutation success must return Ok");
+    }
+
+    /// Reviewer mutation: `request_reviewers` first resolves the login
+    /// to a node id (query), then fires `requestReviews` (mutation).
+    /// Both replies are non-search-shaped; neither may misreport.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reviewer_mutation_success_reports_ok() {
+        const USER_ID: &str = r#"{"data":{"user":{"id":"U_1"}}}"#;
+        const MUTATION: &str = r#"{"data":{"requestReviews":{"pullRequest":{"id":"PR_kwDO"}}}}"#;
+        let base_uri = spawn_sequenced_response_server(vec![USER_ID, MUTATION]).await;
+        let client = make_client(&base_uri);
+        client
+            .request_reviewers("PR_kwDO", &["alice".to_string()])
+            .await
+            .expect("reviewer mutation success must return Ok");
+    }
+
+    /// Assignee mutation: same lookup-then-mutate shape as reviewers.
+    #[tokio::test(flavor = "current_thread")]
+    async fn assignee_mutation_success_reports_ok() {
+        const USER_ID: &str = r#"{"data":{"user":{"id":"U_1"}}}"#;
+        const MUTATION: &str =
+            r#"{"data":{"addAssigneesToAssignable":{"assignable":{"__typename":"PullRequest"}}}}"#;
+        let base_uri = spawn_sequenced_response_server(vec![USER_ID, MUTATION]).await;
+        let client = make_client(&base_uri);
+        client
+            .add_assignees("PR_kwDO", &["alice".to_string()])
+            .await
+            .expect("assignee mutation success must return Ok");
+    }
+
+    /// A genuine mutation failure surfaces the joined `GqlError`
+    /// messages — a clean reason, never the raw JSON body.
+    #[tokio::test(flavor = "current_thread")]
+    async fn mutation_graphql_error_surfaces_clean_message() {
+        const BODY: &str = r#"{"data":null,"errors":[{"message":"Pull request is not mergeable"}]}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        let err = client
+            .merge_pr("PR_kwDO")
+            .await
+            .expect_err("a real GraphQL error must still surface as an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Pull request is not mergeable"),
+            "expected the GraphQL error message, got: {msg}"
+        );
+        assert!(
+            !msg.contains('{'),
+            "error message must not leak raw JSON: {msg}"
+        );
+    }
+
+    /// Defense-in-depth (issue #305): even when a *typed* response
+    /// fails to deserialize, the user-facing error must never carry the
+    /// raw response body — that belongs in `tracing` only.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parse_failure_notice_never_leaks_raw_json_body() {
+        // Valid JSON, but the wrong shape for the search-typed parse —
+        // exactly the merge reply that triggered the original leak.
+        const BODY: &str = r#"{"data":{"mergePullRequest":{"pullRequest":{"state":"MERGED","merged":true}}}}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        let body = serde_json::json!({"query": "{}"});
+        let err = client
+            .post_graphql_with_retry::<graphql::GqlResponse>(&body)
+            .await
+            .expect_err("wrong-shaped 2xx body should fail to parse");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("mergePullRequest") && !msg.contains("MERGED"),
+            "parse-failure notice must not echo the raw response body: {msg}"
+        );
     }
 }
 

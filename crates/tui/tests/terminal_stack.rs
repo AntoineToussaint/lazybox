@@ -20,9 +20,6 @@ fn ctrl(c: char) -> KeyEvent {
 fn code(c: KeyCode) -> KeyEvent {
     KeyEvent::new(c, KeyModifiers::NONE)
 }
-fn arrow_right() -> KeyEvent {
-    KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)
-}
 
 fn sk(s: &str) -> SessionKey {
     s.into()
@@ -787,30 +784,31 @@ fn focus_terminal_returns_false_for_invisible_target() {
 
 // ── Tile-manager wiring ───────────────────────────────────────────────
 //
-// The renderer + Ctrl-w prefix drive the SessionLayout state. These
-// tests cover the state-machine path: arming the prefix, splitting,
-// focus moves, close. Render-shape tests live alongside (visual checks
-// require a TestBackend which we already use elsewhere).
+// The renderer + the `]]` leader's tile commands drive the
+// SessionLayout state (the Model resolves `]]|` / `]]<arrow>` / `]]x`
+// and calls these entry points, #286). These tests cover the
+// state-machine path: splitting, focus moves, close. Render-shape
+// tests live alongside (visual checks require a TestBackend which we
+// already use elsewhere).
 
 use lazybox_core::{SessionLayout, TileTree};
+use lazybox_tui::components::terminal_stack::PendingSplit;
 
 fn ws_key(s: &str) -> SessionKey {
     s.into()
 }
 
 #[test]
-fn ctrl_w_armed_then_pipe_emits_shell_spawn() {
-    // `Ctrl-w |` should arm a pending vertical split and emit a
-    // Shell spawn. The new terminal's id arrives later via
-    // TerminalSpawned and triggers `commit_pending_split`.
+fn split_tile_emits_shell_spawn() {
+    // `]]|` should arm a pending vertical split and emit a Shell
+    // spawn. The new terminal's id arrives later via TerminalSpawned
+    // and triggers `commit_pending_split`.
     let mut t = TerminalStack::new(PaneId::new(1));
     t.set_active_session(Some(ws_key("o/r#1")));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
 
     let mut cmds = Vec::new();
-    t.handle_key(ctrl('w'), &mut cmds);
-    assert!(cmds.is_empty(), "Ctrl-w on its own only arms");
-    t.handle_key(ch('|'), &mut cmds);
+    t.split_tile(PendingSplit::Vertical, &mut cmds);
 
     assert!(
         cmds.iter().any(|c| matches!(
@@ -832,8 +830,7 @@ fn terminal_spawned_after_split_promotes_to_splits_layout() {
     t.set_layout(SessionLayout::Tabs { active: 0 });
 
     let mut cmds = Vec::new();
-    t.handle_key(ctrl('w'), &mut cmds);
-    t.handle_key(ch('|'), &mut cmds);
+    t.split_tile(PendingSplit::Vertical, &mut cmds);
     // Stage 2: daemon would respond with TerminalSpawned for the new shell.
     t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
 
@@ -851,11 +848,11 @@ fn terminal_spawned_after_split_promotes_to_splits_layout() {
 }
 
 #[test]
-fn ctrl_w_right_moves_focus_right() {
+fn move_tile_focus_right_moves_focus_right() {
     // Pre-build a 2-leaf HSplit, focus on the left. Tile focus
-    // moves use arrow keys after Ctrl-W (used to be `h/j/k/l`
-    // vim-style — replaced for consistency with the no-vim-mode
-    // rule the rest of the app follows).
+    // moves use arrow keys after the `]]` leader (used to be
+    // `h/j/k/l` vim-style — replaced for consistency with the
+    // no-vim-mode rule the rest of the app follows).
     let mut t = TerminalStack::new(PaneId::new(1));
     t.set_active_session(Some(ws_key("o/r#1")));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
@@ -869,14 +866,9 @@ fn ctrl_w_right_moves_focus_right() {
         focused: vec![0],
     });
     let mut cmds = Vec::new();
-    t.handle_key(ctrl('w'), &mut cmds);
-    t.handle_key(arrow_right(), &mut cmds);
+    t.move_tile_focus(lazybox_core::TileDirection::Right, &mut cmds);
     if let SessionLayout::Splits { focused, .. } = t.layout() {
-        assert_eq!(
-            focused,
-            &vec![1u8],
-            "Ctrl-w Right moved focus to right tile"
-        );
+        assert_eq!(focused, &vec![1u8], "`]]→` moved focus to the right tile");
     }
     // Persist via SetSessionLayout.
     assert!(
@@ -887,7 +879,7 @@ fn ctrl_w_right_moves_focus_right() {
 }
 
 #[test]
-fn ctrl_w_q_closes_focused_tile_and_collapses() {
+fn close_focused_tile_closes_and_collapses() {
     let mut t = TerminalStack::new(PaneId::new(1));
     t.set_active_session(Some(ws_key("o/r#1")));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
@@ -901,8 +893,7 @@ fn ctrl_w_q_closes_focused_tile_and_collapses() {
         focused: vec![1],
     });
     let mut cmds = Vec::new();
-    t.handle_key(ctrl('w'), &mut cmds);
-    t.handle_key(ch('q'), &mut cmds);
+    t.close_focused_tile(&mut cmds);
     // Layout collapsed back to Tabs since only one leaf remained.
     assert!(
         matches!(t.layout(), SessionLayout::Tabs { .. }),
@@ -916,20 +907,143 @@ fn ctrl_w_q_closes_focused_tile_and_collapses() {
 }
 
 #[test]
-fn ctrl_w_arms_consumes_only_the_prefix() {
-    // After Ctrl-w fires once, a normal keystroke should NOT be a
-    // tile action — it should fall through to the PTY.
+fn pane_divider_is_accent_only_while_the_pane_has_focus() {
+    // #286: the rule under the tab strip doubles as the pane's focus
+    // ring — accent while the terminal pane has focus, chrome when
+    // another pane does.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.set_active_session(Some(ws_key("o/r#1")));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    let theme = lazybox_tui::theme::current();
+
+    for (focused, want) in [(true, theme.accent), (false, theme.chrome)] {
+        let backend = TestBackend::new(60, 12);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| t.render(Rect::new(0, 0, 60, 12), f, focused))
+            .unwrap();
+        // The divider sits on row 1, inset one column.
+        let cell = &term.backend().buffer()[(5u16, 1u16)];
+        assert_eq!(cell.symbol(), "─", "divider row must hold the rule");
+        assert_eq!(
+            cell.style().fg,
+            Some(want),
+            "divider color must track focus (focused={focused})"
+        );
+    }
+}
+
+#[test]
+fn split_tiles_paint_focus_contrast_bars() {
+    // #286: in a split, EVERY tile gets a top rule — accent on the
+    // focused tile, chrome on the rest — so "where does my typing
+    // land" is legible at a glance.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.set_active_session(Some(ws_key("o/r#1")));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
+    t.set_layout(SessionLayout::Splits {
+        tree: TileTree::HSplit {
+            left: Box::new(TileTree::Leaf { terminal_id: 1 }),
+            right: Box::new(TileTree::Leaf { terminal_id: 2 }),
+            ratio: 50,
+        },
+        focused: vec![1],
+    });
+
+    let (w, h) = (60u16, 12u16);
+    let backend = TestBackend::new(w, h);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| t.render(Rect::new(0, 0, w, h), f, true))
+        .unwrap();
+    let buf = term.backend().buffer();
+    let theme = lazybox_tui::theme::current();
+
+    // Tile bodies start at row 3 (title / divider / blank). The body
+    // spans x 1..59; a 50% HSplit puts the left tile around x=2 and
+    // the right tile past the divider column.
+    let left = &buf[(2u16, 3u16)];
+    let right = &buf[(w - 4, 3u16)];
+    assert_eq!(left.symbol(), "─", "unfocused tile still gets a rule");
+    assert_eq!(
+        left.style().fg,
+        Some(theme.chrome),
+        "unfocused tile's rule is chrome"
+    );
+    assert_eq!(
+        right.style().fg,
+        Some(theme.accent),
+        "focused tile's rule is accent"
+    );
+}
+
+#[test]
+fn tile_rule_is_carved_above_the_recap_not_over_it() {
+    // #286 follow-up: the tile rule must not overdraw content — an
+    // agent tile in a split keeps its pinned "you ▸ …" recap visible
+    // on the row BELOW the rule.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.set_active_session(Some(ws_key("o/r#1")));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    // Submit the prompt while the agent is the only (focused)
+    // terminal, THEN add the shell — spawning first would steal focus
+    // and the recap would record against the wrong terminal.
+    type_str(&mut t, "fix the bug");
+    let mut cmds = Vec::new();
+    t.handle_key(code(KeyCode::Enter), &mut cmds);
+    t.on_event(&spawned(2, "o/r#1", TerminalKind::Shell));
+    // Focus the SHELL tile so the agent tile is the unfocused one —
+    // the case the old overdraw hid entirely.
+    t.set_layout(SessionLayout::Splits {
+        tree: TileTree::VSplit {
+            top: Box::new(TileTree::Leaf { terminal_id: 1 }),
+            bottom: Box::new(TileTree::Leaf { terminal_id: 2 }),
+            ratio: 50,
+        },
+        focused: vec![1],
+    });
+
+    let out = render_to_string(&mut t, 60, 20, true);
+    assert!(
+        out.contains("you ▸ fix the bug"),
+        "recap must stay visible under the tile rule; got:\n{out}"
+    );
+}
+
+#[test]
+fn close_focused_tile_in_tabs_closes_the_active_terminal() {
+    // #286 follow-up: `]]x` must not be a silent no-op in Tabs mode —
+    // it closes the active tab's terminal.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.set_active_session(Some(ws_key("o/r#1")));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
+    t.set_layout(SessionLayout::Tabs { active: 0 });
+
+    let mut cmds = Vec::new();
+    t.close_focused_tile(&mut cmds);
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Command::Close { terminal_id } if *terminal_id == TerminalId(1))),
+        "Tabs-mode close targets the active terminal, got {cmds:?}"
+    );
+}
+
+#[test]
+fn tile_command_keys_without_the_leader_reach_the_pty() {
+    // With no armed leader, the erstwhile tile keys (`x`, `|`, Ctrl-w)
+    // are ordinary input and must route to the PTY.
     let mut t = TerminalStack::new(PaneId::new(1));
     t.set_active_session(Some(ws_key("o/r#1")));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));
 
     let mut cmds = Vec::new();
-    // Press a regular key. No prefix → routes to PTY.
     t.handle_key(ch('x'), &mut cmds);
-    assert!(
-        cmds.iter().any(|c| matches!(c, Command::Write { .. })),
-        "untouched keys go to the active terminal"
-    );
+    t.handle_key(ch('|'), &mut cmds);
+    t.handle_key(ctrl('w'), &mut cmds);
+    let writes = cmds
+        .iter()
+        .filter(|c| matches!(c, Command::Write { .. }))
+        .count();
+    assert_eq!(writes, 3, "untouched keys go to the active terminal");
 }
 
 // ── Pinned "you ▸ …" recap ─────────────────────────────────────────────
@@ -1527,7 +1641,7 @@ fn footer_drops_all_keys_to_pty_noise() {
 fn footer_surfaces_leader_focus_and_tile_escape_hatches() {
     // Issue #170 / #202: from inside a focused terminal the hint bar
     // must carry the way back to the sidebar (`]]`), the focus-mode
-    // toggle (`]]f`), the split-panes prefix (`Ctrl-w`) and the snippet
+    // toggle (`]]f`), the split chord (`]]|`, #286) and the snippet
     // leader. The `Shift-PgUp/PgDn` scroll hint is deliberately absent
     // (#202) — scrolling is intuitive and crowded out more useful hints.
     let bindings = TerminalStack::contextual_bindings(']');
@@ -1551,8 +1665,12 @@ fn footer_surfaces_leader_focus_and_tile_escape_hatches() {
         "split-panes hint, got {labels:?}"
     );
     assert!(
-        keys.iter().any(|k| k == "Ctrl-w"),
-        "split-panes prefix, got {keys:?}"
+        keys.iter().any(|k| k == "]]|"),
+        "split chord must ride the `]]` leader, got {keys:?}"
+    );
+    assert!(
+        !keys.iter().any(|k| k == "Ctrl-w"),
+        "Ctrl-w is the inner program's key now (#286), got {keys:?}"
     );
     assert!(
         keys.iter().any(|k| k == "]]s"),
@@ -1580,6 +1698,7 @@ fn footer_leader_hints_honor_the_configured_escape_char() {
         keys.iter().any(|k| k == "}}s"),
         "snippet leader, got {keys:?}"
     );
+    assert!(keys.iter().any(|k| k == "}}|"), "split chord, got {keys:?}");
     assert!(
         keys.iter().all(|k| !k.contains("]]")),
         "no hardcoded `]]` should leak through, got {keys:?}",
@@ -1589,7 +1708,7 @@ fn footer_leader_hints_honor_the_configured_escape_char() {
 #[test]
 fn every_footer_hint_is_catalog_backed_or_allowlisted() {
     // #188: the footer mixes catalog-derived hints with hand-curated
-    // ones (`Ctrl-c`, `Ctrl-w`, the snippet leader). Nothing else may
+    // ones (`Ctrl-c`, the split chord, the snippet leader). Nothing else may
     // creep in untracked — a tile/interrupt handler renamed out from
     // under its hint, or a label drifting from the catalog, must fail
     // the build rather than ship a footer that lies.
@@ -1611,12 +1730,13 @@ fn every_footer_hint_is_catalog_backed_or_allowlisted() {
     // leader-rendered form while the label still tracks the catalog.
     catalog_pairs.push(("]]f".to_string(), "focus mode".to_string()));
     // The explicit record of what's intentionally NOT catalog-backed:
-    // keys forwarded straight to the PTY (`Ctrl-c` interrupt, `Ctrl-w`
-    // split-panes prefix) and the snippet leader (its bindings are the
-    // user's snippet library, not catalog actions).
+    // `Ctrl-c` (forwarded straight to the PTY as an interrupt), the
+    // `]]|` split chord (a leader command, not a catalog action) and
+    // the snippet leader (its bindings are the user's snippet library,
+    // not catalog actions).
     let allow: &[(&str, &str)] = &[
         ("Ctrl-c", "interrupt"),
-        ("Ctrl-w", "split panes"),
+        ("]]|", "split panes"),
         ("]]s", "snippets"),
     ];
     for b in &bindings {
@@ -1639,8 +1759,8 @@ fn footer_leave_hint_tracks_the_escape_char_not_an_action_override() {
     // footer must always render the escape char doubled + the `q` exit
     // command (`]]q`), since the `]]` leader is non-timed (#252). The
     // function takes no `overrides` map precisely because no terminal
-    // hint is action_keys-sensitive — the leave/focus/snippet chords all
-    // derive from the escape char, and `Ctrl-c`/`Ctrl-w` are literal.
+    // hint is action_keys-sensitive — the leave/focus/split/snippet
+    // chords all derive from the escape char, and `Ctrl-c` is literal.
     let bindings = TerminalStack::contextual_bindings(']');
     let leave = bindings.iter().find(|b| b.label == "exit to sidebar");
     assert!(leave.is_some(), "leave-terminal binding must surface");

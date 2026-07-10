@@ -263,12 +263,16 @@ impl Sidebar {
             frame.render_widget(Paragraph::new(Line::from(stats_spans)), row2);
         }
 
-        // Row 3 — thin grey divider.
+        // Row 3 — thin divider; accent-tinted while this pane has
+        // focus so the active pane reads at a glance (#286).
         if area.height >= 4 {
             let div_area = Rect::new(area.x + l_pad, area.y + 3, inner_width, 1);
             let divider = "─".repeat(div_area.width as usize);
             frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(divider, theme.divider()))),
+                Paragraph::new(Line::from(Span::styled(
+                    divider,
+                    theme.pane_divider(focused),
+                ))),
                 div_area,
             );
         }

@@ -1745,10 +1745,12 @@ impl RightPane {
 
         self.render_header(chunks[0], frame);
 
-        // Thin separator.
+        // Thin separator; accent-tinted while this pane has focus so
+        // the active pane reads at a glance (#286) — same cue as the
+        // sidebar / terminal dividers.
         let sep = Block::default()
             .borders(Borders::TOP)
-            .border_style(Style::default().fg(Color::DarkGray));
+            .border_style(crate::theme::current().pane_divider(focused));
         frame.render_widget(sep, chunks[1]);
 
         if chunks[2].height > 0 {

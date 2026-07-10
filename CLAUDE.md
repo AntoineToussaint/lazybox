@@ -246,9 +246,11 @@ is non-timed, so after `]]` it waits for the command key rather than
 leaving on an idle timer — browsing snippets never races an exit; `Esc`
 or any unbound key cancels back to the terminal. A lone `]` followed by
 any non-`]` key is sent to the agent verbatim. `Ctrl-c`
-is forwarded as an interrupt. `Ctrl-w` is the tile prefix:
-`Ctrl-w |` / `Ctrl-w -` split, `Ctrl-w <arrow>` moves tile focus,
-`Ctrl-w q` closes the focused tile. `Shift-PgUp/PgDn` scroll the
+is forwarded as an interrupt. Tile management rides the same leader
+(#286): `]]|` / `]]-` split, `]]<arrow>` moves tile focus (cycles
+tabs in Tabs mode), `]]x` closes the focused terminal (tile or active
+tab) — `Ctrl-w` is no longer a lazybox prefix and reaches the inner
+program (readline word-erase). `Shift-PgUp/PgDn` scroll the
 scrollback, `Shift-Home/End` jump top/bottom (mouse wheel works too).
 
 ## Conventions

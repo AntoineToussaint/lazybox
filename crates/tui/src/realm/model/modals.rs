@@ -92,13 +92,13 @@ fn terminals_phrase(count: usize) -> String {
 }
 
 /// Confirm copy for folding an issue with live terminals into the PR
-/// that closes it. Says "transfer" rather than "merge": the sessions
-/// move into the PR workspace, and "merge" would read like the nearby
-/// `g m` git-merge action (issue #314).
+/// that closes it. Says "join" — matching the `Shift-J` "join issue
+/// into PR" action and the follow-up flash — rather than "merge", which
+/// would read like the nearby `g m` git-merge action (issue #314).
 fn merge_prompt_question(pr_label: &str, issue_label: &str, count: usize) -> String {
     format!(
         "{pr_label} closes {issue_label}, which has {phrase}. \
-         Transfer the issue's sessions to the PR workspace?",
+         Join the issue's sessions into the PR workspace?",
         phrase = terminals_phrase(count),
     )
 }
@@ -1205,18 +1205,20 @@ mod tests {
         assert!(copy.contains("will be lost"), "got: {copy}");
     }
 
-    /// Issue #314: the issue→PR session-move prompt says "transfer",
-    /// never "merge" — "merge" collides with the nearby `g m` git-merge
-    /// action and reads like a PR merge.
+    /// Issue #314: the issue→PR session-move prompt says "join" —
+    /// matching the `Shift-J` action and the flash — never "merge",
+    /// which collides with the nearby `g m` git-merge action and reads
+    /// like a PR merge.
     #[test]
-    fn merge_prompt_says_transfer_not_merge() {
+    fn merge_prompt_says_join_not_merge() {
         let one = merge_prompt_question("o/r#2", "o/r#1", 1);
-        assert!(one.contains("Transfer the issue's sessions"), "got: {one}");
+        assert!(one.contains("Join the issue's sessions"), "got: {one}");
         assert!(!one.to_lowercase().contains("merge"), "got: {one}");
         assert!(one.contains("1 running terminal"), "got: {one}");
 
         let many = merge_prompt_question("o/r#2", "o/r#1", 3);
         assert!(many.contains("3 running terminals"), "got: {many}");
+        assert!(!many.to_lowercase().contains("merge"), "got: {many}");
     }
 
     /// The bulk-shortcut row renders as a single distinctive line so

@@ -122,6 +122,26 @@ pub struct AttentionConfig {
     /// `false` to keep the badge but silence the desktop banner.
     /// Default on.
     pub desktop_notify: bool,
+    /// Which mechanism carries the desktop banner. `auto` picks per
+    /// environment (subprocess helpers locally, the terminal's OSC
+    /// escape sequence over SSH); `osc` / `subprocess` force one path.
+    pub notifier: NotifierBackend,
+}
+
+/// `attention.notifier` values — how a desktop banner is delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifierBackend {
+    /// Subprocess helpers when they can reach the user (local
+    /// session), the terminal's OSC sequence over SSH.
+    #[default]
+    Auto,
+    /// Always the terminal's OSC notification escape sequence
+    /// (Ghostty / iTerm2 / Kitty / WezTerm).
+    Osc,
+    /// Always a spawned helper: `terminal-notifier` / `osascript`
+    /// (macOS), `notify-send` (Linux).
+    Subprocess,
 }
 
 impl Default for AttentionConfig {
@@ -133,6 +153,7 @@ impl Default for AttentionConfig {
             agent_asking: true,
             mentioned: true,
             desktop_notify: true,
+            notifier: NotifierBackend::Auto,
         }
     }
 }
@@ -1456,6 +1477,28 @@ auto_fix:
         let written = serde_yaml::to_string(&cfg).expect("serialize");
         let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
         assert!(!reparsed.attention.desktop_notify);
+    }
+
+    #[test]
+    fn notifier_backend_defaults_auto_and_parses_variants() {
+        // Absent → auto, so existing configs keep working banners.
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert_eq!(cfg.attention.notifier, NotifierBackend::Auto);
+
+        for (yaml, want) in [
+            ("attention:\n  notifier: auto\n", NotifierBackend::Auto),
+            ("attention:\n  notifier: osc\n", NotifierBackend::Osc),
+            (
+                "attention:\n  notifier: subprocess\n",
+                NotifierBackend::Subprocess,
+            ),
+        ] {
+            let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+            assert_eq!(cfg.attention.notifier, want, "yaml: {yaml}");
+            let written = serde_yaml::to_string(&cfg).expect("serialize");
+            let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+            assert_eq!(reparsed.attention.notifier, want, "round-trip: {yaml}");
+        }
     }
 
     #[test]

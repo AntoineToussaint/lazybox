@@ -217,9 +217,15 @@ resize.
 filter, `o` cycle sort, `Space` collapse/expand repo group, `Shift-S`
 cycle mailbox (Inbox → Inactive → Snoozed), `/` search, `n` new
 workspace, `Shift-N` new project, `Shift-A` adopt sessions, `Shift-J`
-join issue into PR, `Shift-X` archive. `a` is a leader for the
-**agent** group (which-key popup): `a c` claude, `a x` codex, `a u`
-cursor — no top-level `c`/`x`/`u` aliases (re-add via
+join issue into PR, `Shift-X` archive. `v` multi-selects workspace
+rows (marks survive j/k; `Esc` clears) and `Shift-B` broadcasts one
+instruction to every selected workspace: a snippet picker (`Ctrl-F`
+skips it for free text) feeds a compose textarea pre-filled with the
+snippet body, and submit delivers per target — running agents via the
+settle-gated inject, plain shells via a direct write, session-less
+workspaces skipped and named in the summary notice. `a` is a leader
+for the **agent** group (which-key popup): `a c` claude, `a x` codex,
+`a u` cursor — no top-level `c`/`x`/`u` aliases (re-add via
 `ui.action_keys`, keyed `spawn_agent.<id>`). `g` is a leader that
 opens the **github** group the same way: `g m` merge, `g v`
 reviewers, `g a` assignees, `g l` labels, `g o` open in browser —
@@ -253,9 +259,11 @@ is non-timed, so after `]]` it waits for the command key rather than
 leaving on an idle timer — browsing snippets never races an exit; `Esc`
 or any unbound key cancels back to the terminal. A lone `]` followed by
 any non-`]` key is sent to the agent verbatim. `Ctrl-c`
-is forwarded as an interrupt. `Ctrl-w` is the tile prefix:
-`Ctrl-w |` / `Ctrl-w -` split, `Ctrl-w <arrow>` moves tile focus,
-`Ctrl-w q` closes the focused tile. `Shift-PgUp/PgDn` scroll the
+is forwarded as an interrupt. Tile management rides the same leader
+(#286): `]]|` / `]]-` split, `]]<arrow>` moves tile focus (cycles
+tabs in Tabs mode), `]]x` closes the focused terminal (tile or active
+tab) — `Ctrl-w` is no longer a lazybox prefix and reaches the inner
+program (readline word-erase). `Shift-PgUp/PgDn` scroll the
 scrollback, `Shift-Home/End` jump top/bottom (mouse wheel works too).
 
 ## Conventions

@@ -31,6 +31,11 @@ pub struct WorkspaceRowCtx<'a> {
     pub now: chrono::DateTime<chrono::Utc>,
     pub focused: bool,
     pub is_cursor: bool,
+    /// This workspace is in the broadcast multi-select set (`v`).
+    /// Renders a `✓` in the shared selection gutter; on the cursor row
+    /// the caret keeps the slot but goes accent so the row still reads
+    /// as selected.
+    pub is_selected: bool,
     /// Widest `#NNN` across all visible workspace rows in this
     /// render pass. Every row's pr-number cell pads to this width
     /// so the role / asking columns line up across rows.
@@ -218,8 +223,21 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
 }
 
 fn cell_prefix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let s = if ctx.is_cursor { "▸" } else { " " };
-    Cell::from_span(Span::styled(s, ctx.row_style()))
+    let s = if ctx.is_cursor {
+        "▸"
+    } else if ctx.is_selected {
+        "✓"
+    } else {
+        " "
+    };
+    let style = if ctx.is_selected {
+        ctx.row_style()
+            .fg(ctx.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        ctx.row_style()
+    };
+    Cell::from_span(Span::styled(s, style))
 }
 
 fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -647,6 +665,7 @@ mod tests {
             now: fixed_time(),
             focused: true,
             is_cursor: false,
+            is_selected: false,
             max_pr_num_width: 4,
             asking: false,
             working: false,
@@ -707,6 +726,30 @@ mod tests {
             crate::components::table::ColumnWidth::Fixed(w) => assert_eq!(w, 1),
             other => panic!("expected Fixed(1) prefix column, got {other:?}"),
         }
+    }
+
+    /// Broadcast multi-select: a selected row shows `✓` in the shared
+    /// gutter; the cursor row keeps its caret (accent-styled) so the
+    /// slot stays a single cell either way.
+    #[test]
+    fn cell_prefix_shows_check_for_selected_rows() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+
+        ctx.is_selected = true;
+        let cell = cell_prefix(&ctx);
+        assert_eq!(cell.width(), 1);
+        assert_eq!(cell_text(&cell), "✓");
+        assert_eq!(cell.spans[0].style.fg, Some(theme.accent));
+
+        // Cursor + selected: caret wins the glyph, accent keeps the
+        // selected signal.
+        ctx.is_cursor = true;
+        let cell = cell_prefix(&ctx);
+        assert_eq!(cell_text(&cell), "▸");
+        assert_eq!(cell.spans[0].style.fg, Some(theme.accent));
     }
 
     #[test]
@@ -908,6 +951,7 @@ mod tests {
             now: fixed_time(),
             focused: false,
             is_cursor: false,
+            is_selected: false,
             max_pr_num_width: 2,
             asking: false,
             working: false,
@@ -1052,6 +1096,7 @@ mod tests {
             now: fixed_time(),
             focused: false,
             is_cursor: false,
+            is_selected: false,
             max_pr_num_width: 3,
             asking: false,
             working: false,
@@ -1628,6 +1673,7 @@ mod tests {
             now: fixed_time(),
             focused: false,
             is_cursor: false,
+            is_selected: false,
             max_pr_num_width: 4,
             asking: false,
             working: false,

@@ -47,6 +47,17 @@ impl Sidebar {
                 PaneOutcome::Consumed
             }
 
+            // Esc drops the broadcast multi-select set (the marks `v`
+            // toggled). With no selection it bubbles up so Esc keeps
+            // whatever meaning the outer layers give it.
+            (KeyCode::Esc, KeyModifiers::NONE) => {
+                if self.clear_broadcast_selection() {
+                    PaneOutcome::Consumed
+                } else {
+                    PaneOutcome::Pass
+                }
+            }
+
             // ── Spawn / open ──────────────────────────────────────────
             // The per-agent spawn chords (`a c` claude, `a x` codex,
             // `a u` cursor) are catalog rows now (#102 P2, #304) —
@@ -200,6 +211,8 @@ impl Sidebar {
                     self.running_terminals
                         .insert(t.terminal_id, (t.session_key.clone(), t.kind.clone()));
                 }
+                self.broadcast_selected
+                    .retain(|k| self.workspaces.contains_key(k));
                 self.reset_cursor_and_recompute();
             }
             Event::TerminalSpawned {
@@ -249,6 +262,7 @@ impl Sidebar {
             Event::WorkspaceRemoved(key) => {
                 let session_key: SessionKey = key.into();
                 self.workspaces.remove(&session_key);
+                self.broadcast_selected.remove(&session_key);
                 self.recompute_visible();
             }
             Event::SessionCreated(session) => {
@@ -344,9 +358,13 @@ impl Sidebar {
                         // Inline footer notice in addition to the OS
                         // popup — covers users with notifications muted
                         // (which is most of them while focused). Hint
-                        // severity = 3s fade, dim color.
-                        self.pending_asking_notices
-                            .push(format!("{} needs input — press ! to jump", workspace.name));
+                        // severity = 3s fade, dim color. Slugged name:
+                        // a raw issue title would displace the rest of
+                        // the message (#291).
+                        self.pending_asking_notices.push(format!(
+                            "{} needs input — press ! to jump",
+                            crate::util::notice_slug(&workspace.name)
+                        ));
                     }
                 }
                 // Rising edge into Done — the agent finished its turn
@@ -366,8 +384,10 @@ impl Sidebar {
                         self.pending_notifications
                             .push(PendingNotification { title, body });
                     }
-                    self.pending_asking_notices
-                        .push(format!("{} finished", workspace.name));
+                    self.pending_asking_notices.push(format!(
+                        "{} finished",
+                        crate::util::notice_slug(&workspace.name)
+                    ));
                 }
                 // Only the asking transition can change the visible set
                 // (it feeds the per-repo attention counter); a done- or

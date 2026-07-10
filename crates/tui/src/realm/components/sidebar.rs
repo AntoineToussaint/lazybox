@@ -71,7 +71,10 @@ impl Sidebar {
     /// drove an `AgentState::InputNeeded` event would spam the user's
     /// notification center. Keeping the IO side-effect in this
     /// wrapper (which production code goes through; tests don't)
-    /// keeps the inner sidebar fully deterministic.
+    /// keeps the inner sidebar fully deterministic. Model tests that
+    /// do reach this wrapper are covered by the second gate:
+    /// `notify_user` stays disarmed until the binary calls
+    /// `platform::set_notifier_backend` at startup.
     pub fn on_daemon_event(&mut self, evt: &IpcEvent) {
         self.inner.on_event(evt);
         for notif in self.inner.drain_pending_notifications() {
@@ -221,6 +224,34 @@ impl Sidebar {
     /// `Right::set_workspace`).
     pub fn selected_workspace(&self) -> Option<&lazybox_core::Workspace> {
         self.inner.selected_workspace()
+    }
+
+    /// See `Sidebar::toggle_broadcast_select`.
+    pub fn toggle_broadcast_select(&mut self) -> Option<bool> {
+        self.inner.toggle_broadcast_select()
+    }
+
+    /// See `Sidebar::selected_broadcast_keys`.
+    pub fn selected_broadcast_keys(&self) -> Vec<lazybox_core::SessionKey> {
+        self.inner.selected_broadcast_keys()
+    }
+
+    /// See `Sidebar::broadcast_selected_count`.
+    pub fn broadcast_selected_count(&self) -> usize {
+        self.inner.broadcast_selected_count()
+    }
+
+    /// See `Sidebar::clear_broadcast_selection`.
+    pub fn clear_broadcast_selection(&mut self) -> bool {
+        self.inner.clear_broadcast_selection()
+    }
+
+    /// See `Sidebar::broadcast_terminal`.
+    pub fn broadcast_terminal(
+        &self,
+        key: &lazybox_core::SessionKey,
+    ) -> Option<(lazybox_ipc::TerminalId, bool)> {
+        self.inner.broadcast_terminal(key)
     }
 
     /// Look up a workspace by key (independent of cursor).

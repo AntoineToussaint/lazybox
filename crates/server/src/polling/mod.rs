@@ -1829,6 +1829,27 @@ pub struct MergePromptMemory {
     pub(crate) rejected: std::collections::HashSet<String>,
 }
 
+/// Workspace-removal prompt memory — the level-trigger state behind
+/// [`Event::MergedPrRemovable`]. The prompt used to be fire-once (one
+/// broadcast on the open→terminal flip); a TUI that was lagged,
+/// disconnected, or not yet started lost it forever and the merged
+/// workspace sat unprompted (issue #292). Same self-heal contract and
+/// same own-lock reasoning as [`MergePromptMemory`].
+#[derive(Default)]
+pub struct RemovalPromptMemory {
+    /// Workspace keys we've broadcast `MergedPrRemovable` for, with
+    /// the last emission time. The per-tick reprompt scan re-emits
+    /// after [`REMOVAL_REPROMPT_AFTER`] while the workspace stays a
+    /// removal candidate, so an Esc dismissal or a dropped broadcast
+    /// heals on its own. Cleared wholesale on client (re)connect so a
+    /// fresh subscriber is prompted on the next tick, not in 5 min.
+    pub(crate) prompted: std::collections::HashMap<String, std::time::Instant>,
+    /// Workspace keys the user answered "keep" for
+    /// (`Command::KeepMergedWorkspace`). Not re-prompted this session;
+    /// a daemon restart clears the pin, mirroring `rejected` merges.
+    pub(crate) kept: std::collections::HashSet<String>,
+}
+
 pub async fn tick_with_state(
     config: &ServerConfig,
     sources: &[Box<dyn TaskSource>],
@@ -2774,6 +2795,12 @@ pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
     let mut state = checkout_poll_state(config).await;
     let summary = run_tick_inner(config, &setup, &mut state).await;
     restore_poll_state(config, state).await;
+    // Level-triggered removal prompts (issue #292): after every tick,
+    // re-offer cleanup for any workspace still merged/closed with
+    // sessions and no answer. Outside the tick body — it only needs
+    // the store, not poll state, and must run even when providers
+    // errored (the merged state is already persisted locally).
+    reprompt_unresolved_removals(config).await;
     summary
 }
 
@@ -3384,6 +3411,102 @@ fn pr_workspace_claiming_issue(
     None
 }
 
+/// The terminal state that makes `workspace` a removal candidate:
+/// a merged PR, or a closed issue no PR workspace claims (the PR's
+/// own prompt owns that cleanup — same deferral as the upsert path).
+/// `None` for open work, task-less rows, and session-less workspaces
+/// (nothing to reap; dropping the bare row is `Shift-X` territory).
+fn removal_candidate_state(
+    config: &ServerConfig,
+    workspace: &Workspace,
+) -> Option<lazybox_ipc::RemovableTerminalState> {
+    if workspace.sessions.is_empty() {
+        return None;
+    }
+    let task = workspace.primary_task()?;
+    if task.is_pr() {
+        return (task.state == lazybox_core::TaskState::Merged)
+            .then_some(lazybox_ipc::RemovableTerminalState::Merged);
+    }
+    if task.state != lazybox_core::TaskState::Closed
+        || pr_workspace_claiming_issue(config, &task.id).is_some()
+    {
+        return None;
+    }
+    Some(lazybox_ipc::RemovableTerminalState::Closed)
+}
+
+/// Level-trigger sweep for workspace-removal prompts. The open→terminal
+/// transition emits `MergedPrRemovable` exactly once; if that one
+/// broadcast is missed (TUI lagged on the bus, client disconnected,
+/// daemon restarted after persisting the merged state) the workspace
+/// would sit unprompted forever (issue #292). Runs once per poll tick:
+/// any stored workspace still in terminal state with sessions — and
+/// not answered "keep" — is re-prompted through the same
+/// `handlers::prompt_merged_pr_removal_with` path, whose
+/// [`RemovalPromptMemory`] gate keeps the cadence to
+/// `REMOVAL_REPROMPT_AFTER`.
+///
+/// No-op when `worktree.auto_cleanup_merged` is on — that opt-in path
+/// reaps silently on the transition instead of prompting.
+pub async fn reprompt_unresolved_removals(config: &ServerConfig) {
+    let auto = lazybox_config::Config::load()
+        .map(|c| c.worktree.auto_cleanup_merged)
+        .unwrap_or(false);
+    if auto {
+        return;
+    }
+    reprompt_unresolved_removals_with(config, &lazybox_git_ops::WorktreeManager::default_base())
+        .await;
+}
+
+/// Test seam for [`reprompt_unresolved_removals`] — explicit manager
+/// so tests can root it at a tempdir without mutating `LAZYBOX_HOME`.
+pub(crate) async fn reprompt_unresolved_removals_with(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+) {
+    let records = match config.store.list_workspaces() {
+        Ok(records) => records,
+        Err(e) => {
+            tracing::warn!("reprompt_unresolved_removals: list_workspaces failed: {e}");
+            return;
+        }
+    };
+    for record in records {
+        let Some(ws) = record
+            .workspace_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<Workspace>(j).ok())
+        else {
+            continue;
+        };
+        let Some(state) = removal_candidate_state(config, &ws) else {
+            continue;
+        };
+        handlers::prompt_merged_pr_removal_with(config, mgr, &ws.key, state).await;
+    }
+}
+
+/// Handle `Command::KeepMergedWorkspace`: the user answered "no" on
+/// the removal modal. Pin the workspace so the reprompt sweep stops
+/// asking this session; the row stays until removed explicitly.
+pub async fn keep_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
+    let mut prompts = config.removal_prompts.lock().await;
+    prompts.prompted.remove(key.as_str());
+    prompts.kept.insert(key.as_str().to_string());
+    tracing::info!(workspace = %key, "user kept terminal-state workspace; removal prompt pinned for this session");
+}
+
+/// A client just (re)connected: forget the per-workspace emit
+/// timestamps (NOT the "keep" pins) so the next reprompt sweep
+/// re-fires immediately for anything still unresolved, instead of
+/// waiting out `REMOVAL_REPROMPT_AFTER`. A prompt the reconnecting
+/// client never saw shouldn't be throttled as if it had been.
+pub async fn mark_removal_prompts_for_replay(config: &ServerConfig) {
+    config.removal_prompts.lock().await.prompted.clear();
+}
+
 /// If `workspace`'s PR closes issues that lazybox tracks as their own
 /// workspaces, fold each issue's workspace into `workspace` and
 /// remove the standalone row. Sessions move over (terminals keep
@@ -3408,6 +3531,11 @@ fn pr_workspace_claiming_issue(
 /// dismissal isn't immediately undone (the user wants a beat to
 /// finish what they were doing).
 const MERGE_REPROMPT_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Re-emit an unanswered workspace-removal prompt after this long,
+/// for the same reason as [`MERGE_REPROMPT_AFTER`]: a dismissal (or a
+/// lost broadcast) shouldn't mean never being asked again.
+pub(crate) const REMOVAL_REPROMPT_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// An issue workspace absorbed into a PR during
 /// [`merge_closing_issue_workspaces`], whose store row must still be
@@ -4892,6 +5020,91 @@ mod rescope_collapse_tests {
         assert!(
             !saw_removable,
             "a PR-claimed closed issue must defer cleanup to the PR's merge prompt"
+        );
+    }
+
+    /// The reprompt sweep's candidate filter: merged PR workspaces
+    /// with sessions qualify; session-less rows and open work don't.
+    #[tokio::test]
+    async fn removal_candidate_state_matches_merged_pr_with_sessions() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let merged = gh_task(
+            "o/r#7",
+            "https://github.com/o/r/pull/7",
+            TaskState::Merged,
+            vec![],
+        );
+        let mut with_sessions = Workspace::from_task(merged.clone(), Utc::now());
+        with_sessions.add_session(WorkspaceSession::new(
+            with_sessions.key.clone(),
+            SessionKind::Shell,
+            std::path::PathBuf::from("/nonexistent/worktree"),
+            Utc::now(),
+        ));
+        assert_eq!(
+            removal_candidate_state(&config, &with_sessions),
+            Some(lazybox_ipc::RemovableTerminalState::Merged)
+        );
+
+        let session_less = Workspace::from_task(merged, Utc::now());
+        assert_eq!(removal_candidate_state(&config, &session_less), None);
+
+        let open = gh_task(
+            "o/r#8",
+            "https://github.com/o/r/pull/8",
+            TaskState::Open,
+            vec![],
+        );
+        let mut open_ws = Workspace::from_task(open, Utc::now());
+        open_ws.add_session(WorkspaceSession::new(
+            open_ws.key.clone(),
+            SessionKind::Shell,
+            std::path::PathBuf::from("/nonexistent/worktree"),
+            Utc::now(),
+        ));
+        assert_eq!(removal_candidate_state(&config, &open_ws), None);
+    }
+
+    /// Same deferral as the transition path (#250): a closed issue a
+    /// PR claims via `closes_issues` is NOT a sweep candidate — the
+    /// PR's own prompt owns that cleanup. Unclaimed closed issues are.
+    #[tokio::test]
+    async fn removal_candidate_state_defers_pr_claimed_closed_issue() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let closed_issue = gh_task(
+            "o/r#50",
+            "https://github.com/o/r/issues/50",
+            TaskState::Closed,
+            vec![],
+        );
+        let mut issue_ws = Workspace::from_task(closed_issue.clone(), Utc::now());
+        issue_ws.add_session(WorkspaceSession::new(
+            issue_ws.key.clone(),
+            SessionKind::Shell,
+            std::path::PathBuf::from("/nonexistent/worktree"),
+            Utc::now(),
+        ));
+        assert_eq!(
+            removal_candidate_state(&config, &issue_ws),
+            Some(lazybox_ipc::RemovableTerminalState::Closed),
+            "an unclaimed closed issue is a candidate"
+        );
+
+        let pr_task = gh_task(
+            "o/r#51",
+            "https://github.com/o/r/pull/51",
+            TaskState::Open,
+            vec![closed_issue.id.clone()],
+        );
+        seed(&store, &Workspace::from_task(pr_task, Utc::now()));
+        assert_eq!(
+            removal_candidate_state(&config, &issue_ws),
+            None,
+            "a PR-claimed closed issue defers to the PR's prompt"
         );
     }
 

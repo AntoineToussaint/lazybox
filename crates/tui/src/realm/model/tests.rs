@@ -466,8 +466,9 @@ mod effects_tests {
 
     /// A `MergedPrRemovable` event mounts the removal confirm (reason
     /// `Merged`), and a re-emit for the same workspace doesn't stack a
-    /// second prompt — the daemon's one-shot transition plus this
-    /// dedupe keep it to a single ask.
+    /// second prompt — the daemon's level-triggered re-emits (#292)
+    /// rely on this dedupe to keep an unanswered prompt to a single
+    /// visible ask.
     #[test]
     fn merged_pr_removable_mounts_confirm_and_dedupes() {
         use lazybox_ipc::Event as IpcEvent;
@@ -491,6 +492,88 @@ mod effects_tests {
             m.pending_removal_prompts.is_empty(),
             "re-emit must not stack a second prompt"
         );
+    }
+
+    /// Regression for #292: two PRs merging in the same poll produce
+    /// two `MergedPrRemovable` events → two modals, one after the
+    /// other. The second queues behind the first and mounts as soon as
+    /// the first is answered.
+    #[test]
+    fn two_merged_pr_removable_events_serialize_into_two_modals() {
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        let ev = |n: u64| IpcEvent::MergedPrRemovable {
+            workspace_key: WorkspaceKey::new(format!("github:o/r#{n}")),
+            label: format!("o/r#{n}"),
+            terminal_state: lazybox_ipc::RemovableTerminalState::Merged,
+            active_terminal_count: 0,
+            has_local_work: false,
+        };
+        m.handle_daemon_event(ev(1));
+        m.handle_daemon_event(ev(2));
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+        assert_eq!(
+            m.pending_removal_prompts.len(),
+            1,
+            "second prompt must queue behind the active one"
+        );
+
+        let cmds = m.handle_confirmed(true);
+        match &cmds[..] {
+            [IpcCommand::RemoveMergedWorkspace { session_key }] => {
+                assert_eq!(session_key.as_str(), "github:o/r#1");
+            }
+            other => panic!("expected RemoveMergedWorkspace for #1, got {other:?}"),
+        }
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::RemoveOutOfScope),
+            "answering the first modal must mount the second"
+        );
+        match &m.active_removal_prompt {
+            Some((key, super::super::RemovalReason::Merged)) => {
+                assert_eq!(key.as_str(), "github:o/r#2");
+            }
+            other => panic!("expected active prompt for #2, got {other:?}"),
+        }
+    }
+
+    /// `n` on a merged/closed removal confirm tells the daemon to stop
+    /// re-prompting (`KeepMergedWorkspace`) — unlike Esc, which stays
+    /// silent so the daemon's level-triggered re-emit self-heals.
+    #[test]
+    fn confirmed_no_on_merged_removal_sends_keep() {
+        let mut m = build_model();
+        let ws_key = WorkspaceKey::new("github:o/r#1");
+        m.active_removal_prompt = Some((ws_key.clone(), super::super::RemovalReason::Merged));
+        m.modal_stack.push(Id::RemoveOutOfScope);
+        let cmds = m.handle_confirmed(false);
+        match &cmds[..] {
+            [IpcCommand::KeepMergedWorkspace { session_key }] => {
+                assert_eq!(session_key, &SessionKey::from(&ws_key));
+            }
+            other => panic!("expected KeepMergedWorkspace, got {other:?}"),
+        }
+        assert!(m.active_removal_prompt.is_none());
+    }
+
+    /// Esc on a merged removal confirm is a deferral, not an answer:
+    /// no command goes out (the daemon re-prompts after its interval)
+    /// and the slot clears so a re-emit can queue again.
+    #[test]
+    fn modal_dismissed_on_merged_removal_is_silent_deferral() {
+        let mut m = build_model();
+        m.active_removal_prompt = Some((
+            WorkspaceKey::new("github:o/r#1"),
+            super::super::RemovalReason::Merged,
+        ));
+        m.modal_stack.push(Id::RemoveOutOfScope);
+        let cmds = m.handle_modal_dismissed();
+        assert!(
+            cmds.is_empty(),
+            "Esc must NOT send KeepMergedWorkspace, got: {cmds:?}"
+        );
+        assert!(m.active_removal_prompt.is_none());
     }
 
     /// `n` on RemoveOutOfScope clears the slot without producing
@@ -1138,6 +1221,357 @@ snippets:
         assert_eq!(rev.body, "please review");
     }
 
+    /// Build a model with N seeded workspaces (`github:o/r#1..N`) and
+    /// one terminal per `Some(kind)` entry (terminal ids 1..N, index-
+    /// aligned with the workspaces). Returns the workspace session
+    /// keys in seed order — the target list a broadcast would use.
+    fn model_with_broadcast_targets(
+        kinds: &[Option<lazybox_ipc::TerminalKind>],
+    ) -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        Vec<SessionKey>,
+    ) {
+        use lazybox_ipc::{Event as IpcEvent, TerminalId};
+        let mut m = build_model();
+        let keys: Vec<SessionKey> = (1..=kinds.len())
+            .map(|i| SessionKey::from(format!("github:o/r#{i}").as_str()))
+            .collect();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: keys
+                .iter()
+                .map(|k| {
+                    lazybox_core::Workspace::empty(
+                        WorkspaceKey::new(k.as_str()),
+                        "main",
+                        chrono::Utc::now(),
+                    )
+                })
+                .collect(),
+            terminals: vec![],
+            projects: vec![],
+        });
+        for (i, kind) in kinds.iter().enumerate() {
+            if let Some(kind) = kind {
+                m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                    terminal_id: TerminalId(i as u64 + 1),
+                    session_key: keys[i].clone(),
+                    kind: kind.clone(),
+                    no_permission: false,
+                    on_main: false,
+                });
+            }
+        }
+        (m, keys)
+    }
+
+    /// Broadcast compose submit with two agent targets and one
+    /// session-less target: one `InjectPrompt` + `RecordUserMessage`
+    /// pair PER agent terminal (the #246-safe settle-gated path), no
+    /// raw `Write`, and a summary notice naming the skip.
+    #[test]
+    fn broadcast_fans_out_one_inject_per_agent_and_reports_skips() {
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+            None,
+        ]);
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: keys,
+            snippet_key: None,
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let cmds = m.handle_textarea_submitted("merge when the PR is green".into());
+
+        let inject_tids: Vec<u64> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::InjectPrompt {
+                    terminal_id,
+                    prompt,
+                    fallback_spawn,
+                } => {
+                    assert_eq!(prompt, "merge when the PR is green");
+                    assert!(fallback_spawn.is_none());
+                    Some(terminal_id.0)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inject_tids, vec![1, 2], "one inject per agent target");
+        let recap_count = cmds
+            .iter()
+            .filter(|c| matches!(
+                c,
+                IpcCommand::RecordUserMessage { message, .. } if message == "merge when the PR is green"
+            ))
+            .count();
+        assert_eq!(recap_count, 2, "each agent gets its recap line");
+        assert!(
+            !cmds.iter().any(|c| matches!(c, IpcCommand::Write { .. })),
+            "agents must not ALSO get a raw write",
+        );
+        assert!(m.pending_broadcast.is_none(), "draft consumed");
+        let notice = m.status.notice.as_ref().expect("summary notice");
+        assert!(
+            notice.message.contains("sent to 2 workspaces"),
+            "summary counts deliveries: {}",
+            notice.message,
+        );
+        assert!(
+            notice.message.contains("1 skipped"),
+            "summary names the session-less target: {}",
+            notice.message,
+        );
+    }
+
+    /// A target whose only session is a plain shell gets the encoded
+    /// direct write (shells have no paste debounce), not the agent
+    /// inject path.
+    #[test]
+    fn broadcast_to_shell_target_writes_encoded_bytes() {
+        let (mut m, keys) = model_with_broadcast_targets(&[Some(lazybox_ipc::TerminalKind::Shell)]);
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: keys,
+            snippet_key: None,
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let cmds = m.handle_textarea_submitted("ls -la".into());
+        match cmds.as_slice() {
+            [IpcCommand::Write { terminal_id, bytes }] => {
+                assert_eq!(terminal_id.0, 1);
+                assert_eq!(
+                    bytes,
+                    &super::super::inputs::encode_snippet_for_pty("ls -la")
+                );
+            }
+            other => panic!("shell target must get exactly one Write, got {other:?}"),
+        }
+    }
+
+    /// A workspace running an agent AND a shell delivers to the agent —
+    /// the instruction is meant for the conversation, not the prompt.
+    #[test]
+    fn broadcast_prefers_agent_terminal_over_shell() {
+        use lazybox_ipc::{Event as IpcEvent, TerminalId};
+        let (mut m, keys) = model_with_broadcast_targets(&[Some(lazybox_ipc::TerminalKind::Shell)]);
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(9),
+            session_key: keys[0].clone(),
+            kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: keys,
+            snippet_key: None,
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let cmds = m.handle_textarea_submitted("go".into());
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::InjectPrompt { terminal_id, .. } if terminal_id.0 == 9
+            )),
+            "agent terminal wins: {cmds:?}",
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, IpcCommand::Write { .. })),
+            "the shell must not receive a duplicate copy",
+        );
+    }
+
+    /// Step one of the broadcast flow: picking a snippet doesn't send
+    /// anything — it stashes the key on the draft and funnels into the
+    /// compose textarea (pre-filled with the body upstream). The
+    /// composed buffer (snippet body + appended custom text) is then
+    /// what every target receives, and the MRU counts the bulk send
+    /// once, not once per target.
+    #[test]
+    fn broadcast_snippet_pick_composes_with_custom_text_and_counts_mru_once() {
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+        ]);
+        m.snippets = snippets_from_yaml(
+            "broadcast-compose",
+            "\nsnippets:\n  rev:\n    description: Review\n    body: review the diff\n",
+        );
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: keys,
+            snippet_key: None,
+        });
+        m.snippet_choices = vec!["rev".into()];
+        m.modal_stack.push(Id::BroadcastSnippet);
+
+        let cmds = m.handle_choice_picked(vec![0]);
+        assert!(cmds.is_empty(), "the pick itself sends nothing");
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::BroadcastText),
+            "pick funnels into the compose step",
+        );
+        assert_eq!(
+            m.pending_broadcast
+                .as_ref()
+                .and_then(|d| d.snippet_key.as_deref()),
+            Some("rev"),
+        );
+
+        // The compose buffer arrives pre-filled with the snippet body;
+        // the user appended a line. Everything lands as ONE message.
+        let cmds =
+            m.handle_textarea_submitted("review the diff\n\nfocus on the auth changes\n".into());
+        let prompts: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::InjectPrompt { prompt, .. } => Some(prompt.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            prompts,
+            vec![
+                "review the diff\n\nfocus on the auth changes",
+                "review the diff\n\nfocus on the auth changes",
+            ],
+            "snippet + custom text compose into one body per target",
+        );
+        assert_eq!(
+            m.recent_snippets,
+            vec!["rev".to_string()],
+            "bulk send counts once in the MRU",
+        );
+    }
+
+    /// `Ctrl-F` in the broadcast picker arrives as an empty pick: no
+    /// snippet key is stashed and the flow continues to the compose
+    /// step for a free-text-only send.
+    #[test]
+    fn broadcast_free_text_pick_skips_snippet() {
+        let (mut m, keys) = model_with_broadcast_targets(&[Some(
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+        )]);
+        m.snippets = snippets_from_yaml(
+            "broadcast-freetext",
+            "\nsnippets:\n  rev:\n    description: Review\n    body: review the diff\n",
+        );
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: keys,
+            snippet_key: None,
+        });
+        m.snippet_choices = vec!["rev".into()];
+        m.modal_stack.push(Id::BroadcastSnippet);
+        let cmds = m.handle_choice_picked(Vec::new());
+        assert!(cmds.is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::BroadcastText));
+        let draft = m.pending_broadcast.as_ref().expect("draft survives");
+        assert_eq!(draft.snippet_key, None, "free text only — no snippet");
+        let cmds = m.handle_textarea_submitted("ad-hoc prompt".into());
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::InjectPrompt { prompt, .. } if prompt == "ad-hoc prompt"
+            )),
+            "free text still delivers: {cmds:?}",
+        );
+        assert!(m.recent_snippets.is_empty(), "no snippet, no MRU entry");
+    }
+
+    /// `Shift-B` resolves its targets from the sidebar multi-select at
+    /// mount time, and a delivered broadcast clears the selection —
+    /// the same contract as the activity pane's `w`. A broadcast that
+    /// reached nobody keeps the marks so the user can retry after
+    /// spawning an agent.
+    #[test]
+    fn broadcast_clears_selection_after_delivery_but_not_after_all_skipped() {
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            None,
+        ]);
+        for key in &keys {
+            assert!(m.sidebar.focus_workspace_key(key));
+            assert_eq!(m.sidebar.toggle_broadcast_select(), Some(true));
+        }
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+
+        // All-skipped broadcast (only the session-less target): the
+        // selection survives for a retry.
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: vec![keys[1].clone()],
+            snippet_key: None,
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let cmds = m.handle_textarea_submitted("hello".into());
+        assert!(cmds.is_empty(), "nothing deliverable: {cmds:?}");
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            2,
+            "all-skipped send must not clear the marks",
+        );
+
+        // Delivered broadcast: selection clears.
+        let expected_targets = m.sidebar.selected_broadcast_keys();
+        m.mount_broadcast_picker();
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::BroadcastText),
+            "empty snippet library skips straight to compose",
+        );
+        assert_eq!(
+            m.pending_broadcast.as_ref().map(|d| d.targets.clone()),
+            Some(expected_targets),
+            "targets resolved from the multi-select in sidebar order",
+        );
+        let cmds = m.handle_textarea_submitted("hello".into());
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
+            "agent target delivered: {cmds:?}",
+        );
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "successful send consumes the selection",
+        );
+    }
+
+    /// Esc on the compose step cancels the flow (draft dropped) but
+    /// keeps the sidebar selection — the user backed out of composing,
+    /// not of selecting.
+    #[test]
+    fn broadcast_dismiss_drops_draft_but_keeps_selection() {
+        let (mut m, keys) = model_with_broadcast_targets(&[Some(
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+        )]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        assert_eq!(m.sidebar.toggle_broadcast_select(), Some(true));
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: keys,
+            snippet_key: None,
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let cmds = m.handle_modal_dismissed();
+        assert!(cmds.is_empty());
+        assert!(m.pending_broadcast.is_none(), "Esc cancels the flow");
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            1,
+            "the marks survive a cancelled compose",
+        );
+    }
+
+    /// `Shift-B` with nothing selected refuses to mount and nudges
+    /// toward `v` instead.
+    #[test]
+    fn broadcast_with_empty_selection_flashes_a_nudge() {
+        let (mut m, _keys) = model_with_broadcast_targets(&[None]);
+        m.mount_broadcast_picker();
+        assert!(m.modal_stack.is_empty(), "no selection, no modal");
+        assert!(m.pending_broadcast.is_none());
+        let notice = m.status.notice.as_ref().expect("nudge notice");
+        assert!(notice.message.contains("v"), "nudge names the select key");
+    }
+
     /// mount_snippet_picker with an empty collection flashes a hint
     /// and refuses to mount — no Id::SnippetPicker on the stack.
     /// This is the "user typed `]<key>` but never configured any
@@ -1251,7 +1685,8 @@ snippets:
 
     /// `]]<unbound>` — a key that isn't a leader command — cancels back
     /// to the terminal without opening the picker or leaving (#252). Only
-    /// `s`/`f`/`q`/digit/`` ` `` are commands now.
+    /// `s`/`f`/`q`/`x`/digit/`` ` ``/the split-and-arrow tile chords are
+    /// commands now.
     #[test]
     fn leader_then_unbound_key_cancels_back_to_terminal() {
         let mut m = model_in_terminal_with_snippets("leader-unbound");
@@ -3264,6 +3699,28 @@ mod chord_resolution_tests {
         );
     }
 
+    /// The broadcast pair resolves only under sidebar focus: `v`
+    /// toggles the multi-select and `Shift-B` opens the broadcast —
+    /// while the activity pane keeps its own pane-local `v` (row
+    /// multi-select), which must not be shadowed by a catalog entry.
+    #[test]
+    fn broadcast_keys_resolve_only_under_sidebar_focus() {
+        assert_eq!(
+            resolve("v", PaneFocus::Sidebar),
+            Some(ActionKind::SelectWorkspace),
+        );
+        assert_eq!(
+            resolve("Shift-B", PaneFocus::Sidebar),
+            Some(ActionKind::BroadcastToSelected),
+        );
+        assert_eq!(
+            resolve("v", PaneFocus::Right),
+            None,
+            "activity-pane `v` stays pane-local",
+        );
+        assert_eq!(resolve("Shift-B", PaneFocus::Right), None);
+    }
+
     #[test]
     fn sidebar_focus_resolution_is_unchanged() {
         assert_eq!(
@@ -3702,9 +4159,130 @@ mod wheel_routing_tests {
         );
     }
 
-    // (Ctrl-w escape-hatch byte behavior is unit-tested at the
-    // TerminalStack level in `components::terminal_stack::ctrl_w_tests`,
-    // which exercises `handle_key` directly without Model key routing.)
+    // (Ctrl-w now forwards straight to the PTY — no lazybox prefix,
+    // #286 — unit-tested at the TerminalStack level in
+    // `components::terminal_stack::ctrl_w_tests`.)
+}
+
+#[cfg(test)]
+mod leader_tile_tests {
+    //! `]]` leader tile commands (#286): tile/split management rides
+    //! the same leader as every other terminal-mode chord, replacing
+    //! the retired `Ctrl-w` prefix.
+    use super::super::*;
+    use lazybox_ipc::{
+        Command as IpcCommand, Event as IpcEvent, TerminalId, TerminalKind, channel,
+    };
+    use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model_with_terminals(
+        n: u64,
+    ) -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+    ) {
+        let (client, server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = lazybox_core::SessionKey::from("github:o/r#1");
+        m.terminals.set_active_session(Some(key.clone()));
+        for id in 1..=n {
+            m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+                terminal_id: TerminalId(id),
+                session_key: key.clone(),
+                kind: TerminalKind::Shell,
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        m.focus = PaneFocus::Terminals;
+        (m, server)
+    }
+
+    fn two_leaf_split() -> lazybox_core::SessionLayout {
+        lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![0],
+        }
+    }
+
+    fn arm_leader(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+        m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+    }
+
+    /// `]]|` splits the focused tile: a Shell spawn goes to the daemon
+    /// and the leader is consumed. `|` arrives shifted on most hosts,
+    /// so the chord must accept the SHIFT modifier.
+    #[test]
+    fn leader_pipe_splits_the_focused_tile() {
+        let (mut m, mut server) = build_model_with_terminals(1);
+        while server.rx.try_recv().is_ok() {}
+        arm_leader(&mut m);
+        m.dispatch_key(RealmKey::new(Key::Char('|'), RealmMods::SHIFT));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        assert_eq!(m.focus(), PaneFocus::Terminals, "split stays in the pane");
+        let mut saw_spawn = false;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if matches!(
+                cmd,
+                IpcCommand::Spawn {
+                    kind: TerminalKind::Shell,
+                    ..
+                }
+            ) {
+                saw_spawn = true;
+            }
+        }
+        assert!(saw_spawn, "`]]|` emits a Shell spawn for the new tile");
+    }
+
+    /// `]]→` moves tile focus across the split and persists the layout.
+    #[test]
+    fn leader_arrow_moves_tile_focus() {
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.terminals.set_layout(two_leaf_split());
+        while server.rx.try_recv().is_ok() {}
+        arm_leader(&mut m);
+        m.dispatch_key(RealmKey::new(Key::Right, RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        assert_eq!(
+            m.terminals.focused_terminal_id(),
+            Some(TerminalId(2)),
+            "`]]→` moves focus to the right tile"
+        );
+        let mut saw_persist = false;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if matches!(cmd, IpcCommand::SetSessionLayout { .. }) {
+                saw_persist = true;
+            }
+        }
+        assert!(saw_persist, "tile-focus moves persist the layout");
+    }
+
+    /// `]]x` closes the focused tile: its PTY is killed daemon-side and
+    /// the two-leaf split collapses back to Tabs.
+    #[test]
+    fn leader_x_closes_focused_tile() {
+        let (mut m, mut server) = build_model_with_terminals(2);
+        m.terminals.set_layout(two_leaf_split());
+        while server.rx.try_recv().is_ok() {}
+        arm_leader(&mut m);
+        m.dispatch_key(RealmKey::new(Key::Char('x'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        let mut saw_close = false;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if matches!(cmd, IpcCommand::Close { .. }) {
+                saw_close = true;
+            }
+        }
+        assert!(saw_close, "`]]x` kills the focused tile's PTY");
+    }
 }
 
 #[cfg(test)]
@@ -6396,5 +6974,54 @@ mod inspect_list_remount_tests {
             !out.contains("beta-tree"),
             "the deleted row must not linger in the re-rendered list:\n{out}",
         );
+    }
+}
+
+#[cfg(test)]
+mod flash_log_tests {
+    //! Sticky footer errors are width-capped at render time (#291),
+    //! so `flash_error` must keep the full text recoverable in the
+    //! sync log (`Shift-D`). Provider sync banners are exempt: the
+    //! underlying `ProviderError` event is already recorded there,
+    //! and logging the banner too would double-count the failure.
+    use super::super::*;
+    use lazybox_ipc::channel;
+    use tuirealm::ratatui::layout::Size;
+
+    fn model() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+    ) {
+        let (client, server) = channel::pair();
+        let m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        (m, server)
+    }
+
+    #[test]
+    fn flash_error_records_full_text_in_sync_log() {
+        let (mut m, _server) = model();
+        let long = format!("✗ merge failed — repo#1: {}", "long reason ".repeat(20));
+        m.flash_error(long.clone());
+        let entry = m.status.sync.recent().next().expect("error logged");
+        assert_eq!(entry.source, "ui");
+        match &entry.outcome {
+            crate::realm::status_ctx::SyncOutcome::Err { message, .. } => {
+                assert_eq!(message, &long, "log keeps the untruncated text");
+            }
+            other => panic!("expected an Err outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flash_sync_error_does_not_double_log() {
+        let (mut m, _server) = model();
+        m.flash_sync_error("github", "✗ sync failed — github: boom");
+        assert_eq!(
+            m.status.sync.recent().count(),
+            0,
+            "the ProviderError event path owns the sync-log entry",
+        );
+        assert!(m.status.notice.is_some(), "the sticky banner still shows");
+        assert_eq!(m.sync_error_source.as_deref(), Some("github"));
     }
 }

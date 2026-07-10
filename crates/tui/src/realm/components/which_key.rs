@@ -175,14 +175,18 @@ pub fn render_quit_hint(frame: &mut Frame, area: Rect, quit_keys: &str) {
 
 /// Most rows the terminal-leader popup enumerates before collapsing the
 /// tail into a "+N more" row. Keeps the popup from swallowing the screen
-/// when the agent roster is long.
-const LEADER_MAX_ROWS: usize = 8;
+/// when the agent roster is long. Sized so the fixed command menu (8
+/// rows: snippets/focus/exit/jump + the tile chords, #286) never eats
+/// the whole budget — a few agent-jump rows always show before the
+/// overflow marker.
+const LEADER_MAX_ROWS: usize = 12;
 
 /// Render the which-key popup for the armed terminal `]]` leader
 /// (issues #205, #252). Lists the leader's command menu — the caller
 /// orders the fixed commands (`]]s` snippets, `]]f` focus, `]]q` exit,
-/// `` ]]` `` jump) first, then the agent-jump roster (`]]<digit>` →
-/// workspace) — plus a hint that Esc cancels. The list is capped at
+/// `` ]]` `` jump, the tile chords `]]|`/`]]-`/`]]<arrow>`/`]]x`) first,
+/// then the agent-jump roster (`]]<digit>` → workspace) — plus a hint
+/// that Esc cancels. The list is capped at
 /// `LEADER_MAX_ROWS` with the tail collapsed to "+N more", so the head
 /// (commands) always survives. Visual twin of [`render`], but the
 /// binding set is the leader menu, so it takes the rows directly.

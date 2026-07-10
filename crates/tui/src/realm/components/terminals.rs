@@ -140,9 +140,49 @@ impl Terminals {
         self.focused = focused;
     }
 
-    /// State-aware short list for the footer hint bar — the `]]` leave
-    /// and `]]f` focus-mode leader chords plus the hand-curated `Ctrl-c`
-    /// interrupt and `Ctrl-w` split-panes hints. See
+    /// `]]|` / `]]-` — split the focused tile by spawning a shell
+    /// sibling (stage 2 completes on `TerminalSpawned`).
+    pub fn split_tile(
+        &mut self,
+        direction: crate::components::terminal_stack::PendingSplit,
+        cmds: &mut Vec<IpcCommand>,
+    ) {
+        self.inner.split_tile(direction, cmds);
+    }
+
+    /// `]]<arrow>` — move tile focus (or cycle tabs in Tabs mode).
+    pub fn move_tile_focus(
+        &mut self,
+        dir: lazybox_core::TileDirection,
+        cmds: &mut Vec<IpcCommand>,
+    ) {
+        self.inner.move_tile_focus(dir, cmds);
+    }
+
+    /// `]]x` — close the focused terminal (tile or active tab) and
+    /// its PTY.
+    pub fn close_focused_tile(&mut self, cmds: &mut Vec<IpcCommand>) {
+        self.inner.close_focused_tile(cmds);
+    }
+
+    /// Whether the active session renders as a tile tree (vs Tabs).
+    /// Drives the layout-tailored rows of the `]]` leader popup.
+    pub fn layout_is_splits(&self) -> bool {
+        matches!(
+            self.inner.layout(),
+            lazybox_core::SessionLayout::Splits { .. }
+        )
+    }
+
+    /// Number of terminals in the active session's visible set. Also
+    /// feeds the leader popup's layout-tailored rows.
+    pub fn visible_terminal_count(&self) -> usize {
+        self.inner.visible_terminals().len()
+    }
+
+    /// State-aware short list for the footer hint bar — the `]]` leave,
+    /// `]]f` focus-mode and `]]|` split leader chords plus the
+    /// hand-curated `Ctrl-c` interrupt hint. See
     /// `TerminalStack::contextual_bindings` for the per-row rationale.
     pub fn contextual_bindings(&self, escape_char: char) -> Vec<crate::pane::Binding> {
         crate::components::terminal_stack::TerminalStack::contextual_bindings(escape_char)

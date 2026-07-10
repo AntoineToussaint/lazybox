@@ -980,6 +980,13 @@ pub async fn on_terminal_transition(
 /// warn before the force-delete. `terminal_state` (merged PR vs closed
 /// issue) only steers the confirm-modal wording.
 ///
+/// Every emit path (the open→terminal transition and the per-tick
+/// reprompt sweep) funnels through here, so this is where the shared
+/// [`super::RemovalPromptMemory`] gates: an explicit "keep" answer
+/// suppresses for the session, and re-emits are throttled to
+/// [`super::REMOVAL_REPROMPT_AFTER`] so a user staring at the modal
+/// doesn't collect a fresh copy every tick.
+///
 /// No-op for a session-less workspace: there's no worktree to delete
 /// and no terminal to kill, so the only thing removal would do is drop
 /// the tracking row — which the user can do with `Shift-X` without
@@ -995,6 +1002,22 @@ pub(crate) async fn prompt_merged_pr_removal_with(
     };
     if workspace.sessions.is_empty() {
         return;
+    }
+    {
+        let mut prompts = config.removal_prompts.lock().await;
+        if prompts.kept.contains(key.as_str()) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let stale = prompts
+            .prompted
+            .get(key.as_str())
+            .map(|prev| now.duration_since(*prev) >= super::REMOVAL_REPROMPT_AFTER)
+            .unwrap_or(true);
+        if !stale {
+            return;
+        }
+        prompts.prompted.insert(key.as_str().to_string(), now);
     }
 
     let label = workspace
@@ -1060,6 +1083,15 @@ pub(crate) async fn remove_merged_workspace_with(
     let session_paths = load_workspace(config, key)
         .map(|w| workspace_worktree_paths(&w))
         .unwrap_or_default();
+
+    // The prompt is answered — drop its reprompt bookkeeping so the
+    // memory doesn't accumulate keys for rows that no longer exist.
+    config
+        .removal_prompts
+        .lock()
+        .await
+        .prompted
+        .remove(key.as_str());
 
     // Kills backing terminals, removes the row, and records the archive
     // so the next poll doesn't resurrect the merged workspace.
@@ -1697,6 +1729,23 @@ mod inspect_tests {
         }
     }
 
+    /// Assert NO event matching `pred` is already queued or arrives
+    /// within a short grace window. The emit paths under test are
+    /// synchronous up to the `broadcast::send`, so anything they
+    /// produced is in the channel before this runs.
+    async fn assert_no_event<F>(rx: &mut tokio::sync::broadcast::Receiver<Event>, pred: F)
+    where
+        F: Fn(&Event) -> bool,
+    {
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+                Err(_) => return,
+                Ok(Ok(evt)) => assert!(!pred(&evt), "unexpected event: {evt:?}"),
+                Ok(Err(_)) => return,
+            }
+        }
+    }
+
     /// Healthy inspector path: one bare clone + one tracked active
     /// session → exactly one inspection row, untagged, with the
     /// session id attached.
@@ -1898,11 +1947,22 @@ mod inspect_tests {
         wt: PathBuf,
         branch: &str,
     ) -> (WorkspaceKey, SessionId) {
+        seed_merged_workspace_numbered(store, wt, branch, 1)
+    }
+
+    /// Like [`seed_merged_workspace`] but with an explicit PR number,
+    /// so a test can hold several merged workspaces at once.
+    fn seed_merged_workspace_numbered(
+        store: &MemoryStore,
+        wt: PathBuf,
+        branch: &str,
+        number: u64,
+    ) -> (WorkspaceKey, SessionId) {
         use lazybox_core::{Task, TaskId, TaskRole, TaskState, Workspace};
         let task = Task {
             id: TaskId {
                 source: "github".into(),
-                key: "o/r#1".into(),
+                key: format!("o/r#{number}"),
             },
             title: "merged pr".into(),
             body: None,
@@ -1912,7 +1972,7 @@ mod inspect_tests {
             review: lazybox_core::ReviewStatus::None,
             checks: vec![],
             unread_count: 0,
-            url: "https://github.com/o/r/pull/1".into(),
+            url: format!("https://github.com/o/r/pull/{number}"),
             repo: Some("o/r".into()),
             branch: Some(branch.into()),
             base_branch: None,
@@ -2300,6 +2360,153 @@ mod inspect_tests {
         };
         assert_eq!(terminal_state, lazybox_ipc::RemovableTerminalState::Closed);
         assert!(wt.exists(), "prompt must not delete anything");
+    }
+
+    /// Level-trigger sweep (#292): an unresolved merged workspace is
+    /// re-prompted by `reprompt_unresolved_removals_with`, an immediate
+    /// second sweep is throttled by the shared memory, and once the
+    /// stamp ages past `REMOVAL_REPROMPT_AFTER` the sweep fires again.
+    #[tokio::test]
+    async fn reprompt_reemits_unresolved_removal_and_throttles() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "reprompt", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        let Event::MergedPrRemovable { label, .. } = evt else {
+            unreachable!()
+        };
+        assert_eq!(label, "o/r#1");
+
+        crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
+        assert_no_event(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+
+        {
+            // Backdate the stamp past the interval. `checked_sub` can
+            // return None on a host whose uptime is under the interval
+            // (fresh CI VM) — dropping the stamp exercises the same
+            // "no fresh emit on record" outcome.
+            let mut prompts = config.removal_prompts.lock().await;
+            match std::time::Instant::now().checked_sub(crate::polling::REMOVAL_REPROMPT_AFTER) {
+                Some(past) => {
+                    prompts.prompted.insert(key.as_str().to_string(), past);
+                }
+                None => {
+                    prompts.prompted.remove(key.as_str());
+                }
+            }
+        }
+        crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
+        drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+    }
+
+    /// An explicit "keep" answer (`Command::KeepMergedWorkspace`) pins
+    /// the workspace: the sweep stays quiet even after the throttle
+    /// window would have expired.
+    #[tokio::test]
+    async fn reprompt_skips_workspace_after_keep() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "kept", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        crate::polling::keep_merged_workspace(&config, &key).await;
+        let mut rx = config.bus.subscribe();
+
+        crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
+        assert_no_event(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+    }
+
+    /// Regression for #292: a client that subscribes AFTER the one
+    /// transition broadcast (dropped on bus lag, or the client wasn't
+    /// connected yet) still gets prompted — the Subscribe path resets
+    /// the throttle via `mark_removal_prompts_for_replay` and the next
+    /// sweep re-emits immediately.
+    #[tokio::test]
+    async fn reconnect_gets_reprompted_for_unresolved_removal() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "reconnect", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+
+        // First emit happens with nobody subscribed — lost for good.
+        crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
+
+        // A client connects: replay reset + the tick it wakes re-sweeps.
+        let mut rx = config.bus.subscribe();
+        crate::polling::mark_removal_prompts_for_replay(&config).await;
+        crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
+        drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+    }
+
+    /// Regression for #292: the prompt memory is per-process, so a
+    /// daemon restarted after persisting the merged state re-offers
+    /// cleanup on its first sweep instead of staying silent forever.
+    #[tokio::test]
+    async fn fresh_daemon_reprompts_unresolved_removal() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "restart", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        seed_merged_workspace(&store, wt.clone(), "feat");
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+
+        // First daemon session prompts, then "restarts" unanswered.
+        let config = fresh_config(store.clone());
+        crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
+
+        let restarted = fresh_config(store);
+        let mut rx = restarted.bus.subscribe();
+        crate::polling::reprompt_unresolved_removals_with(&restarted, &mgr).await;
+        drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+    }
+
+    /// Regression for #292: two workspaces merged at once → the sweep
+    /// prompts BOTH, one `MergedPrRemovable` per workspace.
+    #[tokio::test]
+    async fn sweep_prompts_each_merged_workspace() {
+        let fx = setup_fixture().await;
+        let wt1 = add_wt(&fx, "two-a", "feat-a").await;
+        let wt2 = add_wt(&fx, "two-b", "feat-b").await;
+        delete_remote_ref(&fx, "feat-a").await;
+        delete_remote_ref(&fx, "feat-b").await;
+        let store = Arc::new(MemoryStore::new());
+        seed_merged_workspace_numbered(&store, wt1, "feat-a", 1);
+        seed_merged_workspace_numbered(&store, wt2, "feat-b", 2);
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
+
+        let mut labels = std::collections::HashSet::new();
+        for _ in 0..2 {
+            let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+            let Event::MergedPrRemovable { label, .. } = evt else {
+                unreachable!()
+            };
+            labels.insert(label);
+        }
+        assert_eq!(
+            labels,
+            ["o/r#1".to_string(), "o/r#2".to_string()].into(),
+            "each merged workspace must get its own prompt"
+        );
     }
 
     /// On confirm, `remove_merged_workspace_with` deletes the worktree

@@ -507,7 +507,7 @@ impl<T: TerminalAdapter> Model<T> {
                     } => {
                         let name = workspace
                             .as_ref()
-                            .map(|w| w.name.clone())
+                            .map(|w| crate::util::notice_slug(&w.name).into_owned())
                             .unwrap_or_default();
                         if enabled {
                             self.flash_info(format!("auto-merge on green: armed for {name}"));
@@ -708,6 +708,32 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::OpenSearch => {
                 self.sidebar.open_search();
+            }
+            Action::SelectWorkspace => {
+                // Toggle the cursor row's broadcast mark. The notice
+                // names the running count + the broadcast key so the
+                // marks visibly lead somewhere.
+                if let Some(now_selected) = self.sidebar.toggle_broadcast_select() {
+                    let n = self.sidebar.broadcast_selected_count();
+                    let keys = lazybox_tui_core::action::ActionDef::for_kind(
+                        lazybox_tui_core::action::ActionKind::BroadcastToSelected,
+                    )
+                    .effective_keys_display(&self.action_key_overrides);
+                    let verb = if now_selected {
+                        "selected"
+                    } else {
+                        "deselected"
+                    };
+                    if n == 0 {
+                        self.flash_info(format!("{verb} — selection empty"));
+                    } else {
+                        self.flash_info(format!("{verb} — {n} marked · {keys} to broadcast"));
+                    }
+                    self.redraw = true;
+                }
+            }
+            Action::BroadcastToSelected => {
+                self.mount_broadcast_picker();
             }
             // Actions not yet handled here stay in the existing
             // handlers. As we migrate, the per-key match arms in

@@ -32,7 +32,16 @@ impl<T: TerminalAdapter> Model<T> {
     /// IPC client. Notice + modal-stack stay as direct mutations
     /// (tests inspect `Model` state after the call).
     pub fn handle_textarea_submitted(&mut self, body: String) -> Vec<IpcCommand> {
+        let top = self.modal_stack.last().cloned();
         self.pop_modal();
+        // The broadcast compose step shares the Textarea component with
+        // Reply — route by the modal id that was on top, not by which
+        // pending stash happens to be set.
+        if matches!(top, Some(Id::BroadcastText)) {
+            let cmds = self.dispatch_broadcast(&body);
+            self.drain_queued_daemon_prompts();
+            return cmds;
+        }
         let mut cmds = Vec::new();
         let target = self.pending_reply.take();
         if let Some(session_key) = target
@@ -43,6 +52,83 @@ impl<T: TerminalAdapter> Model<T> {
             cmds.push(IpcCommand::Refresh);
         }
         self.drain_queued_daemon_prompts();
+        cmds
+    }
+
+    /// Fan the composed broadcast body out to every stashed target:
+    /// a running agent terminal gets the settle-gated `InjectPrompt`
+    /// (+ a `RecordUserMessage` so its recap line updates, #246-safe);
+    /// a plain shell gets the encoded direct write; a workspace with
+    /// no running session is skipped and named in the summary notice.
+    /// The snippet MRU counts the bulk send once, and the sidebar
+    /// selection clears only after something was actually delivered.
+    fn dispatch_broadcast(&mut self, body: &str) -> Vec<IpcCommand> {
+        let Some(draft) = self.pending_broadcast.take() else {
+            return Vec::new();
+        };
+        // The compose step may leave the snippet's pre-fill padding (or
+        // a stray trailing newline) behind; a trailing `\n` would reach
+        // the agent as a soft line break, not content.
+        let body = body.trim_end();
+        if body.is_empty() {
+            return Vec::new();
+        }
+        let mut cmds = Vec::new();
+        let mut sent = 0usize;
+        let mut skipped: Vec<String> = Vec::new();
+        for key in &draft.targets {
+            match self.sidebar.broadcast_terminal(key) {
+                Some((terminal_id, true)) => {
+                    // Same recap + inject pair as the single-target
+                    // snippet path (see the SnippetPicker arm above).
+                    let mut recap = body.as_bytes().to_vec();
+                    recap.push(b'\r');
+                    if let Some(message) = self.terminals.record_pty_write(terminal_id, &recap) {
+                        cmds.push(IpcCommand::RecordUserMessage {
+                            terminal_id,
+                            message,
+                        });
+                    }
+                    cmds.push(IpcCommand::InjectPrompt {
+                        terminal_id,
+                        prompt: body.to_string(),
+                        fallback_spawn: None,
+                    });
+                    sent += 1;
+                }
+                Some((terminal_id, false)) => {
+                    cmds.push(IpcCommand::Write {
+                        terminal_id,
+                        bytes: encode_snippet_for_pty(body),
+                    });
+                    sent += 1;
+                }
+                None => skipped.push(
+                    self.sidebar
+                        .workspace_by_key(key)
+                        .map(|w| w.name.clone())
+                        .unwrap_or_else(|| key.to_string()),
+                ),
+            }
+        }
+        if sent > 0 {
+            if let Some(snippet_key) = draft.snippet_key {
+                self.record_recent_snippet(snippet_key);
+            }
+            self.sidebar.clear_broadcast_selection();
+        }
+        let summary = match (sent, skipped.len()) {
+            (0, _) => "broadcast sent to nobody — no target has a running session".to_string(),
+            (n, 0) => format!("sent to {n} workspace{}", if n == 1 { "" } else { "s" }),
+            (n, _) => format!(
+                "sent to {n} workspace{} ({} skipped: no session — {})",
+                if n == 1 { "" } else { "s" },
+                skipped.len(),
+                skipped.join(", "),
+            ),
+        };
+        self.flash_info(summary);
+        self.redraw = true;
         cmds
     }
 
@@ -172,6 +258,31 @@ impl<T: TerminalAdapter> Model<T> {
 
     fn choice_picked_inner(&mut self, picks: Vec<usize>) -> Vec<IpcCommand> {
         let mut cmds = Vec::new();
+        // Broadcast snippet step — the pick doesn't send anything yet:
+        // it seeds the compose textarea with the snippet's body. An
+        // empty pick is the picker's `Ctrl-F` "free text only" escape,
+        // which skips straight to an empty compose buffer.
+        if matches!(self.modal_stack.last(), Some(Id::BroadcastSnippet)) {
+            let key = picks
+                .first()
+                .and_then(|i| self.snippet_choices.get(*i).cloned());
+            self.snippet_choices.clear();
+            self.pop_modal();
+            if self.pending_broadcast.is_none() {
+                return cmds;
+            }
+            let body = key
+                .as_ref()
+                .and_then(|k| self.snippets.get(k))
+                .map(|s| s.body.clone());
+            if let Some(draft) = self.pending_broadcast.as_mut() {
+                // Only remember the key when it resolved to a body —
+                // the MRU must not record a snippet that wasn't sent.
+                draft.snippet_key = key.filter(|_| body.is_some());
+            }
+            self.mount_broadcast_textarea(body);
+            return cmds;
+        }
         // Snippet picker — pick → send the snippet body to the active
         // terminal AND submit it in one shot. The "expand AND submit"
         // combo is the whole point of the feature: the user gets the
@@ -649,6 +760,17 @@ impl<T: TerminalAdapter> Model<T> {
             Some(Id::JumpPicker) => {
                 self.jump_choices.clear();
             }
+            // Esc anywhere in the broadcast flow cancels the whole
+            // thing — drop the stashed targets + picked snippet so a
+            // later flow starts clean. The sidebar selection survives:
+            // the user only backed out of composing, not of selecting.
+            Some(Id::BroadcastSnippet) => {
+                self.snippet_choices.clear();
+                self.pending_broadcast = None;
+            }
+            Some(Id::BroadcastText) => {
+                self.pending_broadcast = None;
+            }
             Some(Id::ThemePicker) => {
                 // Esc cancels the preview: restore the palette that was
                 // active when the picker opened and drop the stashes.
@@ -680,18 +802,32 @@ impl<T: TerminalAdapter> Model<T> {
         let mut cmds = Vec::new();
         match top {
             Some(Id::RemoveOutOfScope) => {
-                if let Some((workspace_key, reason)) = self.active_removal_prompt.take()
-                    && yes
-                {
+                if let Some((workspace_key, reason)) = self.active_removal_prompt.take() {
                     let session_key: lazybox_core::SessionKey = (&workspace_key).into();
-                    // Out-of-scope: drop the row + kill terminals (worktree
-                    // left on disk). Merged/Closed: also delete the worktree.
-                    cmds.push(match reason {
-                        super::RemovalReason::OutOfScope => IpcCommand::Kill { session_key },
-                        super::RemovalReason::Merged | super::RemovalReason::Closed => {
-                            IpcCommand::RemoveMergedWorkspace { session_key }
+                    match (yes, reason) {
+                        // Out-of-scope: drop the row + kill terminals
+                        // (worktree left on disk).
+                        (true, super::RemovalReason::OutOfScope) => {
+                            cmds.push(IpcCommand::Kill { session_key });
                         }
-                    });
+                        // Merged/Closed: also delete the worktree.
+                        (true, super::RemovalReason::Merged | super::RemovalReason::Closed) => {
+                            cmds.push(IpcCommand::RemoveMergedWorkspace { session_key });
+                        }
+                        // Explicit "no" on the merged/closed prompt is a
+                        // decision the daemon must hear: it pins the
+                        // workspace in `removal_prompts.kept` so the
+                        // level-triggered re-emit stops asking. (Esc
+                        // routes through `handle_modal_dismissed`
+                        // instead and stays silent — the daemon
+                        // re-prompts after its reprompt interval.)
+                        (false, super::RemovalReason::Merged | super::RemovalReason::Closed) => {
+                            cmds.push(IpcCommand::KeepMergedWorkspace { session_key });
+                        }
+                        // Out-of-scope "no" has nothing to tell the
+                        // daemon — its own prompt memory dedupes.
+                        (false, super::RemovalReason::OutOfScope) => {}
+                    }
                 }
             }
             Some(Id::MergeConfirm) => {

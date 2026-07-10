@@ -344,7 +344,7 @@ followed by a printable char mounts the snippet picker
 **Status:** stable
 **Crate(s):** `tui` (`realm/model/keys.rs`, `components/terminal_stack.rs`)
 **Config / flags:** `ui.terminal_escape_char` (default `]`)
-**Key bindings:** `]]` exit to sidebar, `Tab` focus (pre-input), `Ctrl-c` SIGINT, `Ctrl-w …` tile management, mouse wheel scrollback, drag-select → OSC 52 copy
+**Key bindings:** `]]` exit to sidebar, `Tab` focus (pre-input), `Ctrl-c` SIGINT, `]]…` tile management, mouse wheel scrollback, drag-select → OSC 52 copy
 
 ### What it does
 Defines how keys and the mouse behave while a terminal is focused: nearly
@@ -355,7 +355,7 @@ leaving, splitting, scrolling, and copying.
 - `]]` (two presses of the escape char) returns to the sidebar.
 - `Tab` cycles focus only before you've typed in the current visit; after the first keystroke it routes to the PTY (autocomplete).
 - `Ctrl-c` is forwarded as SIGINT.
-- `Ctrl-w` then `|`/`\` (split vertical), `-` (split horizontal), arrows (move focus), `q` (close tile).
+- `]]` then `|`/`\` (split vertical), `-` (split horizontal), arrows (move tile focus / cycle tabs), `x` (close the focused terminal). `Ctrl-w` is not a lazybox prefix — it reaches the inner program (readline word-erase).
 - Mouse wheel scrolls scrollback (8 rows/notch), or forwards to programs with mouse tracking on (Claude, vim, less).
 - Left-click + drag does pane-scoped selection; release copies via OSC 52 (footer shows `copied N lines`). For host-native selection across the whole screen, press `F8` to flip mouse capture off, drag, then `F8` back.
 - `Shift-PageUp/PageDown` and `Shift-Home/End` move through scrollback.
@@ -369,11 +369,11 @@ management and scrollback in `components/terminal_stack.rs`. The escape char is
 - [ ] `]]` returns to the sidebar from a terminal.
 - [ ] `Tab` on a fresh visit cycles panes; after typing, `Tab` reaches the shell.
 - [ ] `Ctrl-c` interrupts the running program.
-- [ ] `Ctrl-w -` / `Ctrl-w |` split the terminal stack; `Ctrl-w q` closes a tile.
+- [ ] `]]-` / `]]|` split the terminal stack; `]]x` closes a tile.
 - [ ] Mouse wheel scrolls scrollback; programs with mouse tracking receive wheel events instead.
 - [ ] Drag-select copies via OSC 52 and the footer confirms the line count.
 - [ ] `F8` toggles mouse capture for host-native selection.
 
 ### Known sharp edges
-- `Ctrl-w` tile management and `Shift-Home/End` scrollback aren't in the README key tables — discover them via help (`?`).
+- `]]…` tile management and `Shift-Home/End` scrollback aren't in the README key tables — discover them via the `]]` popup or help (`?`).
 - OSC 52 copy depends on the host terminal honoring OSC 52 (most do; some need it enabled).

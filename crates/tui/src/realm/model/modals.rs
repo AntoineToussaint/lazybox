@@ -633,8 +633,9 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// If there's a queued workspace-removal prompt and no modal is
     /// currently up, mount it. Copy depends on the prompt's
-    /// [`RemovalReason`]; the user's answer (Y → remove, N/Esc → keep)
-    /// is handled in the `Msg::Confirmed` / `Msg::ModalDismissed` arms.
+    /// [`RemovalReason`]; the user's answer (Y → remove, N → keep +
+    /// stop re-asking, Esc → defer) is handled in the
+    /// `Msg::Confirmed` / `Msg::ModalDismissed` arms.
     pub(super) fn maybe_mount_next_removal_prompt(&mut self) {
         use super::RemovalReason;
         use crate::realm::components::confirm::Confirm;

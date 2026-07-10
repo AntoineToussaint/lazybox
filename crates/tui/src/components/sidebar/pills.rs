@@ -589,4 +589,3 @@ pub(crate) fn badge_pill_style(theme: &crate::theme::Theme, letter: char) -> Sty
         .fg(fg)
         .add_modifier(Modifier::BOLD)
 }
-

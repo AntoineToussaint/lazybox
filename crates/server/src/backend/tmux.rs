@@ -82,7 +82,7 @@ const HISTORY_LIMIT: u32 = 10_000;
 /// which never repaints until a key is pressed, so lazybox's headless
 /// attach client streams no pane content at all. Every session on that
 /// host is silently dead (seen on Ubuntu 22.04 LTS, tmux 3.2a).
-const MIN_TMUX_VERSION: (u32, u32) = (3, 3);
+pub const MIN_TMUX_VERSION: (u32, u32) = (3, 3);
 
 /// Clipboard passthrough options, independent of the scrollback flavor.
 /// `set-clipboard on` forwards an inner program's OSC 52 to the attach

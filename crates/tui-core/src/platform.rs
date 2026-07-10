@@ -206,7 +206,7 @@ fn notify_send_path() -> Option<&'static std::path::Path> {
 /// [`crate::notify::terminal_is_focused`]) — a banner for what the
 /// user is already looking at is pure noise.
 ///
-/// Delivery is resolved by [`resolve_route`] from the backend armed
+/// Delivery is resolved by `resolve_route` from the backend armed
 /// at startup ([`set_notifier_backend`], `attention.notifier` in
 /// YAML). The OSC path never writes stdout here — the sequence is
 /// queued for the render thread to emit between frames
@@ -441,7 +441,12 @@ mod route_tests {
         // OSC-capable terminal — it's verifiable and immune to OSC
         // quirks (issue #296).
         assert_eq!(
-            resolve_route(NotifierBackend::Auto, Some(OscNotifier::Osc777), false, true),
+            resolve_route(
+                NotifierBackend::Auto,
+                Some(OscNotifier::Osc777),
+                false,
+                true
+            ),
             Route::Subprocess
         );
         // Over SSH the helper would banner the remote host — OSC is
@@ -453,7 +458,12 @@ mod route_tests {
         // Local without a helper (Linux missing notify-send) still
         // uses an OSC-capable terminal rather than dropping the banner.
         assert_eq!(
-            resolve_route(NotifierBackend::Auto, Some(OscNotifier::Osc777), false, false),
+            resolve_route(
+                NotifierBackend::Auto,
+                Some(OscNotifier::Osc777),
+                false,
+                false
+            ),
             Route::Osc(OscNotifier::Osc777)
         );
         // Nothing available: best-effort subprocess (no-op stub or a
@@ -467,7 +477,12 @@ mod route_tests {
     #[test]
     fn explicit_backends_are_not_second_guessed() {
         assert_eq!(
-            resolve_route(NotifierBackend::Subprocess, Some(OscNotifier::Osc777), true, false),
+            resolve_route(
+                NotifierBackend::Subprocess,
+                Some(OscNotifier::Osc777),
+                true,
+                false
+            ),
             Route::Subprocess
         );
         assert_eq!(

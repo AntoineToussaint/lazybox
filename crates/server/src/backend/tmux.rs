@@ -76,15 +76,20 @@ const HISTORY_LIMIT: u32 = 10_000;
 /// client; `allow-passthrough on` (off by default since tmux 3.3a) lets
 /// a DCS-wrapped escape through. Without these tmux eats the clipboard
 /// request before lazybox can relay it to the host terminal.
-const CLIPBOARD_PASSTHROUGH_OPTS: &str = "set -g set-clipboard on\nset -g allow-passthrough on\n";
+///
+/// `allow-passthrough` doesn't exist before tmux 3.3, so it must be set
+/// with `-q` — see `transparent_conf` for why an unknown option in this
+/// conf is catastrophic rather than cosmetic.
+const CLIPBOARD_PASSTHROUGH_OPTS: &str = "set -g set-clipboard on\nset -gq allow-passthrough on\n";
 
 /// `terminal-features` entry advertising OSC 8 hyperlink support for the
 /// attach client. `terminal-features` is a server option (`-s`) and a
 /// list (`-a` append); the `xterm*` pattern matches the forced
 /// `TERM=xterm-256color`. Without it tmux strips hyperlinks because that
-/// terminfo lacks the `Hls` capability — see `transparent_conf`.
+/// terminfo lacks the `Hls` capability — see `transparent_conf`. `-q`
+/// because the option only exists since tmux 3.2.
 const HYPERLINK_TERMINAL_FEATURES_VALUE: &str = "xterm*:hyperlinks";
-const HYPERLINK_TERMINAL_FEATURES: &str = "set -as terminal-features 'xterm*:hyperlinks'\n";
+const HYPERLINK_TERMINAL_FEATURES: &str = "set -asq terminal-features 'xterm*:hyperlinks'\n";
 
 /// tmux client config: prefix off (so Ctrl-B reaches the agent), no
 /// key bindings (so nothing intercepts), no status bar (so output
@@ -108,6 +113,16 @@ const HYPERLINK_TERMINAL_FEATURES: &str = "set -as terminal-features 'xterm*:hyp
 ///   wheel via our encoded SGR sequence and enters copy-mode
 ///   automatically, scrolling its own history one line per notch
 ///   (a daemon round trip + pane repaint per notch).
+///
+/// **Every option newer than tmux 3.1 is set with `-q` (quiet).** A
+/// conf line naming an option the running tmux doesn't know is not a
+/// cosmetic warning: tmux queues the parse error and swaps the FIRST
+/// attaching client into a "config error" view instead of the pane —
+/// which never repaints until a key is pressed, so lazybox's headless
+/// attach client streams no pane content at all. Ubuntu 22.04 LTS ships
+/// tmux 3.2a, where `allow-passthrough` (3.3) is exactly such an
+/// option. `-q` makes an unknown option a silent no-op, degrading the
+/// single feature instead of every session.
 fn transparent_conf(native_scrollback: bool) -> String {
     let mut conf = String::from(
         "set -g prefix None\n\
@@ -119,10 +134,12 @@ fn transparent_conf(native_scrollback: bool) -> String {
         conf.push_str("set -g mouse on\n");
     }
     conf.push_str(&format!("set -g history-limit {HISTORY_LIMIT}\n"));
+    // `window-size` only exists since tmux 3.1 — `-q`, see the doc
+    // comment above.
     conf.push_str(
         "set -g default-terminal \"xterm-256color\"\n\
          set -g escape-time 0\n\
-         set -g window-size latest\n\
+         set -gq window-size latest\n\
          set -g mode-style \"fg=default,bg=default\"\n\
          set -g message-style \"fg=default,bg=default\"\n\
          set -g focus-events on\n",
@@ -200,9 +217,12 @@ fn normalize_capture(stdout: &[u8]) -> Vec<u8> {
 fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
     // Clipboard passthrough is independent of the scrollback flavor, so
     // an already-running server picks it up either way.
+    // `allow-passthrough` needs `-q` (option is tmux 3.3+) — same
+    // reasoning as the conf, minus the broken-attach blast radius:
+    // here a missing `-q` merely fails one best-effort set-option.
     let clipboard = [
         vec!["set-option", "-g", "set-clipboard", "on"],
-        vec!["set-option", "-g", "allow-passthrough", "on"],
+        vec!["set-option", "-gq", "allow-passthrough", "on"],
     ];
     // Agents (e.g. Claude Code) nag when they detect tmux with
     // focus-events off. We own the config, so enable it for both fresh
@@ -210,10 +230,11 @@ fn server_option_cmds(native_scrollback: bool) -> Vec<Vec<&'static str>> {
     let focus_events = vec!["set-option", "-g", "focus-events", "on"];
     // `terminal-features` is independent of the scrollback flavor — an
     // already-running server must learn the client speaks OSC 8 either
-    // way, else surviving sessions keep stripping hyperlinks.
+    // way, else surviving sessions keep stripping hyperlinks. `-q`:
+    // the option is tmux 3.2+.
     let hyperlinks = vec![
         "set-option",
-        "-as",
+        "-asq",
         "terminal-features",
         HYPERLINK_TERMINAL_FEATURES_VALUE,
     ];
@@ -886,7 +907,7 @@ mod tests {
         assert!(conf.contains("unbind-key -a"));
         // Resize authority is pinned, not left to tmux's implicit default
         // (the `resize` impl's multi-client behavior depends on it).
-        assert!(conf.contains("set -g window-size latest\n"));
+        assert!(conf.contains("set -gq window-size latest\n"));
     }
 
     /// Legacy mode (`terminal.native_scrollback: false`) reproduces the
@@ -908,11 +929,11 @@ mod tests {
     fn server_option_cmds_match_conf_flavors() {
         let clipboard = [
             vec!["set-option", "-g", "set-clipboard", "on"],
-            vec!["set-option", "-g", "allow-passthrough", "on"],
+            vec!["set-option", "-gq", "allow-passthrough", "on"],
         ];
         let hyperlinks = vec![
             "set-option",
-            "-as",
+            "-asq",
             "terminal-features",
             "xterm*:hyperlinks",
         ];
@@ -960,7 +981,7 @@ mod tests {
                 "native={native}"
             );
             assert!(
-                conf.contains("set -g allow-passthrough on\n"),
+                conf.contains("set -gq allow-passthrough on\n"),
                 "native={native}"
             );
         }
@@ -973,9 +994,11 @@ mod tests {
     /// "right-click never opens URLs under the tmux backend" report.
     #[test]
     fn both_conf_flavors_advertise_hyperlinks() {
-        assert!(transparent_conf(true).contains("set -as terminal-features 'xterm*:hyperlinks'\n"));
         assert!(
-            transparent_conf(false).contains("set -as terminal-features 'xterm*:hyperlinks'\n")
+            transparent_conf(true).contains("set -asq terminal-features 'xterm*:hyperlinks'\n")
+        );
+        assert!(
+            transparent_conf(false).contains("set -asq terminal-features 'xterm*:hyperlinks'\n")
         );
     }
 

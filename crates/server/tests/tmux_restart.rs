@@ -62,14 +62,24 @@ async fn restarted_backend_seeds_scrollback_from_tmux_history() {
 
         // Wait until the full output is in tmux's pane history. Polling
         // the subscription replay (not capture-pane) exercises the same
-        // byte path the TUI consumes.
-        let mut deadline = tokio::time::interval(Duration::from_millis(100));
-        loop {
-            deadline.tick().await;
+        // byte path the TUI consumes. Bounded with its own diagnostic:
+        // when the attach client streams no pane content at all (e.g.
+        // the tmux-3.2a conf-error view regression), the replay tail
+        // shows WHAT the client rendered instead of a bare timeout.
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        for attempt in 0.. {
+            ticker.tick().await;
             let sub = backend.subscribe(&key).await.expect("subscribe");
             if String::from_utf8_lossy(&sub.replay).contains("line-200") {
                 break;
             }
+            assert!(
+                attempt < 100,
+                "pane output never reached the attach client; last replay \
+                 ({} bytes): {:?}",
+                sub.replay.len(),
+                String::from_utf8_lossy(&sub.replay[sub.replay.len().saturating_sub(600)..]),
+            );
         }
 
         // "Daemon restart": the old backend (and with it every DaemonPty

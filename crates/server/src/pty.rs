@@ -196,11 +196,19 @@ impl DaemonPty {
     /// Spawn a command in a new PTY. `env` augments (does not replace)
     /// the parent environment except for `TERM` which we override to
     /// `xterm-256color` so agents render consistent colors.
+    ///
+    /// `initial` pre-seeds the replay ring: a (re)attaching client
+    /// rebuilds its VT grid — scrollback included — purely from the
+    /// ring, so a caller with history that predates this PTY (e.g. tmux
+    /// scrollback that survived a daemon restart) hands it in here to be
+    /// replayed ahead of the live stream. Pass `&[]` when there's
+    /// nothing to seed.
     pub fn spawn(
         cmd: &[String],
         size: PtySize,
         cwd: Option<&PathBuf>,
         env: Vec<(String, String)>,
+        initial: &[u8],
     ) -> Result<Self, PtyError> {
         let pty_system = NativePtySystem::default();
         let pair = pty_system
@@ -266,10 +274,20 @@ impl DaemonPty {
             .map_err(|e| PtyError::Open(e.to_string()))?;
 
         let (output_tx, _) = broadcast::channel::<OutputChunk>(BROADCAST_CAPACITY);
-        let ring = Arc::new(Mutex::new(ReplayRing::with_capacity(REPLAY_RING_BYTES)));
+        // Seed the ring before wrapping it: the seed becomes chunk seq 1,
+        // so the reader thread's first live chunk is seq 2 and a
+        // subscribe snapshot replays the seed ahead of live bytes. Seeded
+        // directly on the owned ring — no lock, and no risk of a
+        // `blocking_lock` panic on this tokio worker thread.
+        let mut ring_buf = ReplayRing::with_capacity(REPLAY_RING_BYTES);
+        let seeded = !initial.is_empty();
+        if seeded {
+            ring_buf.push(initial);
+        }
+        let ring = Arc::new(Mutex::new(ring_buf));
         let finished = Arc::new(AtomicBool::new(false));
         let finished_notify = Arc::new(Notify::new());
-        let last_seq = Arc::new(AtomicU64::new(0));
+        let last_seq = Arc::new(AtomicU64::new(u64::from(seeded)));
 
         // Reader thread: blocks on PTY reads, fans bytes out to ring +
         // broadcast. Runs on std::thread because portable-pty's Read
@@ -658,6 +676,89 @@ mod ring_tests {
 }
 
 #[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    fn small() -> PtySize {
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
+    }
+
+    /// A seeded spawn replays the seed AHEAD of the child's own output:
+    /// the seed occupies the front of the ring snapshot, live bytes
+    /// follow, and `last_seq` accounts for the seed chunk so the
+    /// consumer's seq-gap dedup never mistakes the first live chunk for
+    /// a replayed duplicate.
+    #[tokio::test]
+    async fn seeded_spawn_replays_seed_before_live_output() {
+        let pty = DaemonPty::spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf live-bytes".to_string(),
+            ],
+            small(),
+            None,
+            Vec::new(),
+            b"seeded-history\r\n",
+        )
+        .expect("spawn");
+        pty.wait_finished().await;
+
+        let sub = pty.subscribe().await;
+        assert!(
+            sub.replay.starts_with(b"seeded-history\r\n"),
+            "seed must lead the replay: {:?}",
+            String::from_utf8_lossy(&sub.replay)
+        );
+        let live_part = &sub.replay[b"seeded-history\r\n".len()..];
+        assert!(
+            String::from_utf8_lossy(live_part).contains("live-bytes"),
+            "live output must follow the seed: {:?}",
+            String::from_utf8_lossy(&sub.replay)
+        );
+        assert!(
+            sub.last_seq >= 2,
+            "seed is seq 1, live chunks continue from 2 (last_seq={})",
+            sub.last_seq
+        );
+    }
+
+    /// An empty seed changes nothing: seq numbering starts at 0 and the
+    /// replay holds only what the child wrote.
+    #[tokio::test]
+    async fn unseeded_spawn_is_unchanged() {
+        let pty = DaemonPty::spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf only-live".to_string(),
+            ],
+            small(),
+            None,
+            Vec::new(),
+            &[],
+        )
+        .expect("spawn");
+        pty.wait_finished().await;
+
+        let sub = pty.subscribe().await;
+        assert!(
+            String::from_utf8_lossy(&sub.replay).contains("only-live"),
+            "replay carries the child's output"
+        );
+        assert!(
+            !String::from_utf8_lossy(&sub.replay).contains("seeded"),
+            "nothing but child output in the ring"
+        );
+    }
+}
+
+#[cfg(test)]
 mod exit_tests {
     use super::*;
 
@@ -681,6 +782,7 @@ mod exit_tests {
             small(),
             None,
             Vec::new(),
+            &[],
         )
         .expect("spawn");
 
@@ -704,6 +806,7 @@ mod exit_tests {
                 small(),
                 None,
                 Vec::new(),
+                &[],
             )
             .expect("spawn"),
         );

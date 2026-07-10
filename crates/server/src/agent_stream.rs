@@ -59,6 +59,10 @@ impl ClaudeStreamConfig {
             "stream-json".to_string(),
             "--output-format".to_string(),
             "stream-json".to_string(),
+            // The CLI hard-errors on `-p --output-format stream-json`
+            // without it ("requires --verbose") — the child would exit
+            // before emitting a single event.
+            "--verbose".to_string(),
             "--include-partial-messages".to_string(),
             "--include-hook-events".to_string(),
             "--replay-user-messages".to_string(),

@@ -7069,3 +7069,238 @@ mod flash_log_tests {
         assert_eq!(m.sync_error_source.as_deref(), Some("github"));
     }
 }
+
+#[cfg(test)]
+mod help_ask_tests {
+    //! Effect contracts for the "ask lazybox" help assistant (#302):
+    //! question routing (start run / reuse run / queue while starting),
+    //! streamed-answer plumbing from daemon events into the shared
+    //! conversation, and the modal hand-off from the `?` help panel.
+
+    use super::super::*;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::Event as IpcEvent;
+    use lazybox_ipc::{AgentRunId, AgentRuntimeMode, Command as IpcCommand, channel};
+    use lazybox_tui_core::help::{HELP_AGENT_ID, HELP_SESSION_KEY};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn run_started(run_id: u64) -> IpcEvent {
+        IpcEvent::AgentRunStarted {
+            run_id: AgentRunId(run_id),
+            session_key: SessionKey::new(HELP_SESSION_KEY),
+            session_id: None,
+            agent: HELP_AGENT_ID.into(),
+            mode: AgentRuntimeMode::StreamJson,
+        }
+    }
+
+    /// The first question starts a headless stream-json run whose
+    /// opening message is the generated context (this user's effective
+    /// keymap + docs) followed by the question — no PTY, no worktree.
+    #[test]
+    fn first_question_starts_the_run_with_generated_context() {
+        let mut m = build_model();
+        let cmds = m.handle_help_asked("how do I multi-select?".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::StartAgentRun {
+                session_key,
+                agent,
+                mode,
+                initial_input,
+                ..
+            } => {
+                assert_eq!(session_key.as_str(), HELP_SESSION_KEY);
+                assert_eq!(agent, HELP_AGENT_ID);
+                assert_eq!(*mode, AgentRuntimeMode::StreamJson);
+                let text = initial_input
+                    .as_ref()
+                    .and_then(|i| i.text.as_deref())
+                    .expect("initial input text");
+                assert!(text.contains("# Key bindings (effective)"));
+                assert!(text.contains("# Documentation"));
+                assert!(text.ends_with("# Question\n\nhow do I multi-select?"));
+            }
+            other => panic!("expected StartAgentRun, got {other:?}"),
+        }
+        assert!(m.help_run_starting);
+        let convo = m.help_convo_mut();
+        assert_eq!(convo.turns.len(), 1);
+        assert!(!convo.turns[0].done);
+    }
+
+    /// Once the run is live, a follow-up rides it as a plain input —
+    /// the context is already in the conversation (and prompt-cached).
+    #[test]
+    fn follow_up_rides_the_same_run() {
+        let mut m = build_model();
+        m.help_run = Some(AgentRunId(7));
+        let cmds = m.handle_help_asked("and in the sidebar?".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::SendAgentInput { run_id, message } => {
+                assert_eq!(*run_id, AgentRunId(7));
+                assert_eq!(message.text.as_deref(), Some("and in the sidebar?"));
+            }
+            other => panic!("expected SendAgentInput, got {other:?}"),
+        }
+    }
+
+    /// A question racing the run start queues instead of double-
+    /// starting; `AgentRunStarted` flushes the queue in order.
+    #[test]
+    fn question_while_starting_queues_until_run_started() {
+        let mut m = build_model();
+        assert!(!m.handle_help_asked("first?".into()).is_empty());
+        let cmds = m.handle_help_asked("second?".into());
+        assert!(cmds.is_empty(), "second question must not start a run");
+        assert_eq!(m.help_pending_questions, vec!["second?".to_string()]);
+
+        m.handle_daemon_event(run_started(3));
+        assert_eq!(m.help_run, Some(AgentRunId(3)));
+        assert!(!m.help_run_starting);
+        assert!(m.help_pending_questions.is_empty());
+    }
+
+    /// Empty / whitespace questions are dropped without touching the
+    /// conversation or the daemon.
+    #[test]
+    fn blank_question_is_a_noop() {
+        let mut m = build_model();
+        assert!(m.handle_help_asked("   ".into()).is_empty());
+        assert!(m.help_convo_mut().turns.is_empty());
+        assert!(!m.help_run_starting);
+    }
+
+    /// Streamed deltas append to the open turn; `AgentTurnFinished`
+    /// replaces the accumulated text with the authoritative result and
+    /// closes the turn. Events for other runs are ignored.
+    #[test]
+    fn deltas_and_turn_finished_stream_into_the_convo() {
+        let mut m = build_model();
+        let _ = m.handle_help_asked("how do I snooze?".into());
+        m.handle_daemon_event(run_started(1));
+        for delta in ["Press ", "`z`"] {
+            m.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+                run_id: AgentRunId(1),
+                delta: delta.into(),
+            });
+        }
+        // A delta from an unrelated run must not leak in.
+        m.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+            run_id: AgentRunId(99),
+            delta: "NOISE".into(),
+        });
+        assert_eq!(m.help_convo_mut().turns[0].answer, "Press `z`");
+
+        m.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(1),
+            result: Some("Press `z` on a workspace.".into()),
+            session_id: None,
+            error: None,
+        });
+        let convo = m.help_convo_mut();
+        assert!(convo.turns[0].done);
+        assert_eq!(convo.turns[0].answer, "Press `z` on a workspace.");
+    }
+
+    /// `AgentRunFinished` releases the run id so the next question
+    /// starts a fresh run instead of writing to a dead process.
+    #[test]
+    fn run_finished_resets_for_a_fresh_start() {
+        let mut m = build_model();
+        let _ = m.handle_help_asked("q".into());
+        m.handle_daemon_event(run_started(1));
+        m.handle_daemon_event(IpcEvent::AgentRunFinished {
+            run_id: AgentRunId(1),
+            exit_code: Some(1),
+            error: Some("boom".into()),
+        });
+        assert_eq!(m.help_run, None);
+        assert!(!m.help_run_starting);
+        {
+            let convo = m.help_convo_mut();
+            assert!(convo.turns[0].done, "open turn closed on exit");
+            assert!(convo.notice.as_deref().unwrap_or("").contains("boom"));
+        }
+        let cmds = m.handle_help_asked("again?".into());
+        assert!(
+            matches!(cmds.first(), Some(IpcCommand::StartAgentRun { .. })),
+            "next question restarts the run: {cmds:?}",
+        );
+    }
+
+    /// A spawn failure surfaces inside the help conversation — not as
+    /// a footer sync-error banner (its `agent_run:*` source would
+    /// otherwise be misread as a provider sync failure).
+    #[test]
+    fn spawn_failure_lands_in_the_convo_not_the_footer() {
+        let mut m = build_model();
+        m.status.polling = None;
+        let _ = m.handle_help_asked("q".into());
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: format!("agent_run:{HELP_AGENT_ID}"),
+            message: "No such file or directory".into(),
+            detail: String::new(),
+            kind: "permanent".into(),
+        });
+        assert!(!m.help_run_starting);
+        let convo = m.help_convo_mut();
+        assert!(convo.turns[0].done);
+        let notice = convo.notice.as_deref().expect("notice set");
+        assert!(notice.contains("unavailable"));
+        drop(convo);
+        assert!(
+            m.status.notice.is_none(),
+            "agent_run errors must not raise a footer banner"
+        );
+        assert_eq!(
+            m.status.sync.recent().count(),
+            0,
+            "and must not hit the sync log"
+        );
+    }
+
+    /// Without the claude agent enabled there's nothing to escalate
+    /// to: the turn closes immediately with an explanatory notice and
+    /// no command goes out (keybinding search still works).
+    #[test]
+    fn missing_claude_agent_sets_notice_instead_of_dispatching() {
+        let mut m = build_model();
+        m.set_agents(vec!["codex".into()]);
+        let cmds = m.handle_help_asked("q".into());
+        assert!(cmds.is_empty());
+        let convo = m.help_convo_mut();
+        assert!(convo.turns[0].done);
+        assert!(
+            convo
+                .notice
+                .as_deref()
+                .unwrap_or("")
+                .contains(HELP_AGENT_ID)
+        );
+    }
+
+    /// `?` on the help panel swaps it for the ask modal; asking a
+    /// question keeps the modal mounted so the answer can stream in.
+    #[test]
+    fn help_ask_open_swaps_the_help_panel() {
+        let mut m = build_model();
+        m.mount_help();
+        assert_eq!(m.modal_stack.last(), Some(&Id::Help));
+        m.update(Msg::HelpAskOpen);
+        assert_eq!(m.modal_stack.as_slice(), &[Id::HelpAsk]);
+        m.update(Msg::HelpAsked("how do I merge?".into()));
+        assert_eq!(
+            m.modal_stack.as_slice(),
+            &[Id::HelpAsk],
+            "asking must not dismiss the modal",
+        );
+        assert_eq!(m.help_convo_mut().turns.len(), 1);
+    }
+}

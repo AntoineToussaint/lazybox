@@ -614,6 +614,21 @@ impl<T: TerminalAdapter> Model<T> {
         );
     }
 
+    /// Build + mount the "Ask lazybox" modal (#302): fuzzy search over
+    /// a snapshot of the runtime catalog, plus the shared help
+    /// conversation for agent answers. Idempotent like `mount_help`.
+    pub(super) fn mount_help_ask(&mut self) {
+        use crate::realm::components::help_ask::HelpAsk;
+
+        if self.modal_stack.last() == Some(&Id::HelpAsk) {
+            return;
+        }
+        self.mount_modal(
+            Id::HelpAsk,
+            HelpAsk::new(self.catalog.clone(), self.help_convo.clone()),
+        );
+    }
+
     /// Build + mount the debug / sync-status window from the current
     /// `SyncLog` snapshot. Idempotent: re-pressing the key while it's
     /// up is a no-op.

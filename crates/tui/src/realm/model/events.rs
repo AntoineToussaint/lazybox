@@ -327,7 +327,7 @@ impl<T: TerminalAdapter> Model<T> {
             pr_label,
         } = &event
         {
-            self.flash_info(format!("merged {issue_label} into {pr_label}"));
+            self.flash_info(format!("joined {issue_label} into {pr_label}"));
             // If the user was viewing the issue workspace that just got
             // absorbed, follow the moved sessions onto the PR workspace
             // so they don't land on an arbitrary row with the session

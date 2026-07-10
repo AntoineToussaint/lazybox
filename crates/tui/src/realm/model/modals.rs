@@ -91,6 +91,18 @@ fn terminals_phrase(count: usize) -> String {
     }
 }
 
+/// Confirm copy for folding an issue with live terminals into the PR
+/// that closes it. Says "join" — matching the `Shift-J` "join issue
+/// into PR" action and the follow-up flash — rather than "merge", which
+/// would read like the nearby `g m` git-merge action (issue #314).
+fn merge_prompt_question(pr_label: &str, issue_label: &str, count: usize) -> String {
+    format!(
+        "{pr_label} closes {issue_label}, which has {phrase}. \
+         Join the issue's sessions into the PR workspace?",
+        phrase = terminals_phrase(count),
+    )
+}
+
 /// Confirm copy for an out-of-scope workspace with live terminals.
 /// Trims the title so a verbose PR description doesn't make the modal
 /// three lines tall — 80 chars + an ellipsis fits the dynamic-height
@@ -977,16 +989,8 @@ impl<T: TerminalAdapter> Model<T> {
         else {
             return;
         };
-        let terminals_phrase = if count == 1 {
-            "1 running terminal".to_string()
-        } else {
-            format!("{count} running terminals")
-        };
-        let question = format!(
-            "{pr_label} closes {issue_label}, which has {terminals_phrase}. \
-             Merge the issue's sessions into the PR workspace?",
-        );
-        let modal = Confirm::new(question).default_no();
+        let modal =
+            Confirm::new(merge_prompt_question(&pr_label, &issue_label, count)).default_no();
         self.active_merge_prompt = Some((issue_key, pr_key));
         self.mount_modal(Id::MergeConfirm, modal);
     }
@@ -1199,6 +1203,22 @@ mod tests {
         assert!(copy.contains("2 running terminals"), "got: {copy}");
         assert!(copy.contains("uncommitted or unpushed work"), "got: {copy}");
         assert!(copy.contains("will be lost"), "got: {copy}");
+    }
+
+    /// Issue #314: the issue→PR session-move prompt says "join" —
+    /// matching the `Shift-J` action and the flash — never "merge",
+    /// which collides with the nearby `g m` git-merge action and reads
+    /// like a PR merge.
+    #[test]
+    fn merge_prompt_says_join_not_merge() {
+        let one = merge_prompt_question("o/r#2", "o/r#1", 1);
+        assert!(one.contains("Join the issue's sessions"), "got: {one}");
+        assert!(!one.to_lowercase().contains("merge"), "got: {one}");
+        assert!(one.contains("1 running terminal"), "got: {one}");
+
+        let many = merge_prompt_question("o/r#2", "o/r#1", 3);
+        assert!(many.contains("3 running terminals"), "got: {many}");
+        assert!(!many.to_lowercase().contains("merge"), "got: {many}");
     }
 
     /// The bulk-shortcut row renders as a single distinctive line so

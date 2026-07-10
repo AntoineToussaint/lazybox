@@ -611,7 +611,7 @@ impl Sidebar {
             hint("⇧N", "pick a repo"),
             Line::raw(""),
             Line::from(Span::styled(" or open a tool yourself:", prose)),
-            hint("c", "claude"),
+            hint("a c", "claude"),
             hint("s", "shell"),
             hint("e", "editor"),
             Line::raw(""),

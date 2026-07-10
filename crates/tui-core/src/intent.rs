@@ -559,8 +559,8 @@ pub fn resolve_spawn_shell(workspace: Option<&Workspace>) -> Intent {
         .unwrap_or(Intent::NoOp)
 }
 
-/// Resolve an agent shortcut (`c`/`x`/`u` by default — claude/codex/
-/// cursor; configurable via `with_agent_shortcuts`). Same shape as
+/// Resolve an agent shortcut (`a c`/`a x`/`a u` by default — claude/
+/// codex/cursor; configurable via `with_agent_shortcuts`). Same shape as
 /// the shell resolver: requires a selected workspace.
 ///
 /// The agent id is passed in from the keymap (the resolver doesn't

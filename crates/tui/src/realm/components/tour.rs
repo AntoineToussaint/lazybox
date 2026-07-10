@@ -63,7 +63,7 @@ const STEPS: &[TourStep] = &[
             "",
             "  Shift-N   new project (register a repo or local space)",
             "  n         new workspace inside it",
-            "  c / s     start Claude Code, or a plain shell in it",
+            "  a c / s   start Claude Code, or a plain shell in it",
             "",
             "You land in a fresh git worktree + session, zero setup.",
             "",
@@ -100,10 +100,11 @@ const STEPS: &[TourStep] = &[
             "  • A PR you review has failing CI → Shift-F jumps to it,",
             "    then w lets the agent fix the build.",
             "  • An open issue → w starts an agent to implement it.",
-            "  • A scratch idea on a repo you track → n then c, done.",
+            "  • A scratch idea on a repo you track → n, a c, done.",
             "",
-            "c / x / u pick the agent (Claude / Codex / Cursor); s is a",
-            "plain shell; e opens the worktree in your editor.",
+            "a opens the agent menu: a c / a x / a u pick Claude /",
+            "Codex / Cursor; s is a plain shell; e opens the worktree",
+            "in your editor.",
         ],
     },
     TourStep {
@@ -130,8 +131,9 @@ const STEPS: &[TourStep] = &[
             "  g m  merge PR    g v  reviewers   g a  assignees",
             "  g l  labels      g o  open in browser",
             "",
-            "g shows the menu; the second key picks. The old",
-            "Shift-V/G/L/O keys still work as direct aliases.",
+            "g shows the menu; the second key picks. Grouped actions",
+            "live behind their leader only — re-add direct aliases via",
+            "ui.action_keys if you miss them.",
             "",
             "? shows the keymap, , Settings, t themes, q q quits. In",
             "a terminal keys go to the agent — press ]]q to return first.",
@@ -511,17 +513,21 @@ mod tests {
             );
             assert!(all.contains(hint), "tour no longer shows {hint}");
         }
-        // The agent-pick hints (`c` / `x` / `u`) are per-agent SpawnAgent
-        // chords, not a single `ActionDef::default_keys` — they come from
-        // the agent-id → key convention. Pin them against that source.
-        for (agent, key) in [("claude", "c"), ("codex", "x"), ("cursor", "u")] {
+        // The agent-pick hints (`a c` / `a x` / `a u`) are per-agent
+        // SpawnAgent chords, not a single `ActionDef::default_keys` —
+        // they come from the agent-id → key convention under the `a`
+        // leader (#304). Pin them against that source.
+        for (agent, chord) in [("claude", "a c"), ("codex", "a x"), ("cursor", "a u")] {
             let display = ActionDef::catalog(&[agent.to_string()], &Default::default())
                 .into_iter()
                 .find(|e| e.label == format!("spawn {agent}"))
                 .map(|e| e.keys_display.to_string())
                 .unwrap_or_else(|| panic!("no spawn row for {agent}"));
-            assert_eq!(display, key, "spawn {agent} default chord drifted");
-            assert!(all.contains(key), "tour no longer shows {key} for {agent}");
+            assert_eq!(display, chord, "spawn {agent} default chord drifted");
+            assert!(
+                all.contains(chord),
+                "tour no longer shows {chord} for {agent}"
+            );
         }
         // The `q q` quit chord and the `]]` return-to-sidebar hint round
         // out the ship-it card.

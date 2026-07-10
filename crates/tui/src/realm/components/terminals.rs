@@ -217,8 +217,9 @@ impl Terminals {
 
     /// True when this stack has no visible terminals for the active
     /// session. Used by the orchestrator to fall back from "key into
-    /// PTY" to "key into sidebar's spawn binding" so `s`/`c`/`x`/`u`
-    /// from the empty-state hint actually create a session.
+    /// PTY" to "key into sidebar's spawn binding" so `s` and the
+    /// `a c`/`a x`/`a u` chords from the empty-state hint actually
+    /// create a session.
     pub fn is_empty(&self) -> bool {
         self.inner.visible_terminals().is_empty()
     }

@@ -381,7 +381,7 @@ fn populated_sidebar() -> Sidebar {
     s
 }
 
-// The per-agent spawn keys (`c` / `x` / `u`) moved out of the sidebar
+// The per-agent spawn chords (`a c` / `a x` / `a u`) moved out of the sidebar
 // into the action catalog (#102 P2): they're generated `SpawnAgent`
 // rows dispatched by the Model before the sidebar's `handle_key` ever
 // runs. Keyboard coverage now lives in the orchestrator tests
@@ -1156,11 +1156,25 @@ fn m_on_workspace_emits_mark_read() {
     assert!(matches!(cmds[0], Command::MarkRead { .. }), "{:?}", cmds[0]);
 }
 
+/// Runtime catalog the footer resolves against — built-in agents, the
+/// given `ui.action_keys` overrides.
+fn footer_catalog(
+    overrides: &std::collections::BTreeMap<String, String>,
+) -> Vec<lazybox_tui_core::action::CatalogEntry> {
+    let agents: Vec<String> = ["claude", "codex", "cursor"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    lazybox_tui_core::action::ActionDef::catalog(&agents, overrides)
+}
+
 #[test]
-fn contextual_bindings_surface_merge_on_ready_pr() {
-    // The whole point of contextual bindings: the user sees the
-    // merge shortcut in the footer at the moment it's actually
-    // available, not buried in a static alphabet of every key.
+fn contextual_bindings_surface_github_group_on_ready_pr() {
+    // The whole point of contextual bindings: the user sees the merge
+    // affordance in the footer at the moment it's actually available.
+    // Merge lives behind the `g` leader, so what surfaces is the
+    // group cell (`g ▸ github`) — the which-key popup teaches the
+    // second stroke (#304).
     let mut s = Sidebar::new(PaneId::new(1));
     let mut pr = make_task("o/r", "o/r#1", Utc::now());
     pr.review = ReviewStatus::Approved;
@@ -1170,14 +1184,37 @@ fn contextual_bindings_surface_merge_on_ready_pr() {
         terminals: vec![],
         projects: vec![],
     });
-    let overrides = std::collections::BTreeMap::new();
-    let bindings = s.contextual_bindings(&overrides);
-    let labels: Vec<String> = bindings.iter().map(|b| b.label.to_string()).collect();
-    let labels: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+    let bindings = s.contextual_bindings(&footer_catalog(&std::collections::BTreeMap::new()));
     assert!(
-        labels.contains(&"merge PR"),
-        "READY PR must surface the merge binding, got {labels:?}",
+        bindings
+            .iter()
+            .any(|b| b.keys == "g ▸" && b.label == "github"),
+        "READY PR must surface the github group cell, got {bindings:?}",
     );
+}
+
+#[test]
+fn contextual_bindings_collapse_agent_spawns_into_one_group_cell() {
+    // Three agents used to occupy three footer cells (`c`, `x`, `u`);
+    // under the `a` leader they collapse into a single `a ▸ agent`
+    // cell (#304).
+    let mut s = Sidebar::new(PaneId::new(1));
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(
+            make_task("o/r", "o/r#1", Utc::now()),
+            Utc::now(),
+        )],
+        terminals: vec![],
+        projects: vec![],
+    });
+    let bindings = s.contextual_bindings(&footer_catalog(&std::collections::BTreeMap::new()));
+    let agent_cells: Vec<_> = bindings.iter().filter(|b| b.label == "agent").collect();
+    assert_eq!(
+        agent_cells.len(),
+        1,
+        "exactly one agent group cell, got {bindings:?}",
+    );
+    assert_eq!(agent_cells[0].keys, "a ▸");
 }
 
 #[test]
@@ -1190,8 +1227,7 @@ fn contextual_bindings_surface_fix_ci_when_red() {
         terminals: vec![],
         projects: vec![],
     });
-    let overrides = std::collections::BTreeMap::new();
-    let bindings = s.contextual_bindings(&overrides);
+    let bindings = s.contextual_bindings(&footer_catalog(&std::collections::BTreeMap::new()));
     let labels: Vec<String> = bindings.iter().map(|b| b.label.to_string()).collect();
     let labels: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
     assert!(
@@ -1199,8 +1235,8 @@ fn contextual_bindings_surface_fix_ci_when_red() {
         "CI-failing PR must surface fix CI, got {labels:?}",
     );
     assert!(
-        !labels.contains(&"merge"),
-        "merge must NOT show when CI is failing, got {labels:?}",
+        !labels.contains(&"github"),
+        "the github group (merge) must NOT show when CI is failing, got {labels:?}",
     );
 }
 
@@ -1222,7 +1258,7 @@ fn contextual_bindings_honor_user_key_overrides() {
     });
     let mut overrides = std::collections::BTreeMap::new();
     overrides.insert("spawn_shell".to_string(), "Ctrl-t".to_string());
-    let bindings = s.contextual_bindings(&overrides);
+    let bindings = s.contextual_bindings(&footer_catalog(&overrides));
     let shell = bindings
         .iter()
         .find(|b| b.label == "shell")

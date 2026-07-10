@@ -136,10 +136,10 @@ to focus it, drag the splitters to resize, wheel-scroll, and right-click links
 |---|---|
 | `Tab` | Cycle Sidebar → Activity → Terminals |
 | `↑` / `↓` · `Enter` | Navigate the inbox (`j` / `k` also works) · open a workspace |
-| `c` / `x` / `u` · `s` | Spawn Claude / Codex / Cursor · spawn a shell (`c` needs the `claude` CLI on `PATH`; `s` always works) |
+| `a` · `s` | Agent menu (which-key popup): `a c` Claude · `a x` Codex · `a u` Cursor · `s` spawns a shell (`a c` needs the `claude` CLI on `PATH`; `s` always works) |
 | `w` | "Work" — spawn Claude with the right prompt for the row's state (fix CI / address comments / implement issue) |
 | `m` · `r` | Mark read · reply |
-| `g` | GitHub menu (which-key popup): `g m` merge · `g v` reviewers · `g a` assignees · `g l` labels · `g o` open in browser (`Shift-V` / `Shift-G` / `Shift-L` / `Shift-O` are direct aliases; merge is `g m` only) |
+| `g` | GitHub menu (which-key popup): `g m` merge · `g v` reviewers · `g a` assignees · `g l` labels · `g o` open in browser |
 | `,` · `?` · `q q` | Settings · help · quit |
 | `]]` | Leave a terminal, back to the sidebar |
 

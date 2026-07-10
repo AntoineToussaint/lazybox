@@ -19,7 +19,7 @@ expression: rendered
    ⇧N   pick a repo
 
   or open a tool yourself:
-   c    claude
+   a c  claude
    s    shell
    e    editor
 

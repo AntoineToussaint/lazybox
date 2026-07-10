@@ -1031,7 +1031,7 @@ impl RightPane {
                         .fg(theme.text_dim)
                         .add_modifier(Modifier::ITALIC),
                 ),
-                Span::styled("— Shift-V to request", Style::default().fg(theme.text_dim)),
+                Span::styled("— g v to request", Style::default().fg(theme.text_dim)),
             ]));
         }
         if !task.assignees.is_empty() {
@@ -1059,7 +1059,7 @@ impl RightPane {
                         .fg(theme.text_dim)
                         .add_modifier(Modifier::ITALIC),
                 ),
-                Span::styled("— Shift-G to change", Style::default().fg(theme.text_dim)),
+                Span::styled("— g a to change", Style::default().fg(theme.text_dim)),
             ]));
         }
 

@@ -1653,13 +1653,16 @@ mod done_alert_tests {
     /// it on an agent-less row would point at a no-op key.
     #[test]
     fn focus_mode_surfaces_in_footer_only_with_an_agent() {
-        let overrides = std::collections::BTreeMap::new();
+        let catalog = lazybox_tui_core::action::ActionDef::catalog(
+            &["claude".to_string()],
+            &std::collections::BTreeMap::new(),
+        );
 
         // Plain workspace, no agent session → no focus-mode hint.
         let (mut sb, key) = sidebar_with_one_workspace();
         assert!(sb.focus_workspace_key(&key), "cursor on the workspace");
         assert!(
-            !sb.contextual_bindings(&overrides)
+            !sb.contextual_bindings(&catalog)
                 .iter()
                 .any(|b| b.label.contains("focus mode")),
             "no agent → no focus-mode footer hint",
@@ -1681,7 +1684,7 @@ mod done_alert_tests {
         sb.recompute_visible();
         assert!(sb.focus_workspace_key(&key));
         assert!(
-            sb.contextual_bindings(&overrides)
+            sb.contextual_bindings(&catalog)
                 .iter()
                 .any(|b| b.label.contains("focus mode") && b.keys == "."),
             "agent present → `.` focus-mode footer hint",

@@ -5,7 +5,7 @@ expression: rendered
 
 
 
- g …
+ g ▸ github
   m  merge PR
   g  auto-merge
   v  reviewers

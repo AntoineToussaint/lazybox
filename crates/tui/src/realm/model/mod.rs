@@ -125,7 +125,7 @@ pub enum Id {
     /// → `Command::AddAssignees { workspace_key, logins }`. Works
     /// on issues too (both PRs and issues are `Assignable`).
     AddAssignees,
-    /// Multi-select picker mounted on Shift-L (`ManageLabels`).
+    /// Multi-select picker mounted on `g l` (`ManageLabels`).
     /// Lists the repository's full label set with the currently-
     /// applied labels pre-checked; submit → `Command::SetLabels`.
     /// Works on issues too — both PRs and issues implement GraphQL's
@@ -992,8 +992,8 @@ impl<T: TerminalAdapter> Model<T> {
             activity_pane_overrides: std::collections::HashMap::new(),
             pending_sidebar_context: None,
             action_key_overrides: std::collections::BTreeMap::new(),
-            // Built-in agents + their `c` / `x` / `u` convention. The
-            // host overrides this from `setup.agents` via `set_agents`.
+            // Built-in agents + their `a c` / `a x` / `a u` convention.
+            // The host overrides this from `setup.agents` via `set_agents`.
             agents: ["claude", "codex", "cursor"]
                 .iter()
                 .map(|s| s.to_string())
@@ -2405,7 +2405,7 @@ impl<T: TerminalAdapter> Model<T> {
         //   knows whether lazybox is currently talking to GitHub).
         // Footer spinner priority: the blocking first-poll modal owns
         // it at startup; otherwise an in-flight spawn (the user's
-        // just-pressed `w`/`c`/`s`) beats the ambient background-poll
+        // just-pressed `w`/`a c`/`s`) beats the ambient background-poll
         // indicator, since it's direct feedback for an action they're
         // waiting on. Background poll is the steady-state fallback.
         let polling_status: Option<(&'static str, String)> =
@@ -2426,7 +2426,7 @@ impl<T: TerminalAdapter> Model<T> {
         // actionable right now, not a generic alphabet. The full
         // keymap stays in `?` help.
         let keymap: Vec<crate::pane::Binding> = match self.focus {
-            PaneFocus::Sidebar => self.sidebar.contextual_bindings(&self.action_key_overrides),
+            PaneFocus::Sidebar => self.sidebar.contextual_bindings(&self.catalog),
             PaneFocus::Right => self.right.contextual_bindings(&self.action_key_overrides),
             PaneFocus::Terminals => self
                 .terminals
@@ -2482,14 +2482,28 @@ impl<T: TerminalAdapter> Model<T> {
         // Which-key rows for an armed catalog leader — the
         // `(next-key, label)` continuations of the armed prefix, a pure
         // function of the catalog. Built only while a leader is armed.
-        let leader_rows: Vec<(String, String)> = if let Some(prefix) = self.leader.pending() {
-            seq_continuations(prefix, self.focus, &self.catalog)
-                .into_iter()
-                .map(|(stroke, entry)| (stroke.display(), entry.label.to_string()))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // The group label (`github`, `agent`, …) titles the popup when
+        // the continuations belong to a named leader group (#304).
+        // Continuations resolve against the same focus the key
+        // dispatcher used to arm the leader — an empty terminal pane
+        // resolves as the sidebar (see `resolve_focus_for_keys`).
+        let (leader_rows, leader_group): (Vec<(String, String)>, Option<&'static str>) =
+            if let Some(prefix) = self.leader.pending() {
+                let rfocus = self.resolve_focus_for_keys().unwrap_or(self.focus);
+                let conts = seq_continuations(prefix, rfocus, &self.catalog);
+                let group = conts
+                    .iter()
+                    .find_map(|(_, e)| lazybox_tui_core::action::leader_group_label(e.kind));
+                (
+                    conts
+                        .into_iter()
+                        .map(|(stroke, entry)| (stroke.display(), entry.label.to_string()))
+                        .collect(),
+                    group,
+                )
+            } else {
+                (Vec::new(), None)
+            };
         // Command menu for the `]]` leader popup (#252): the fixed
         // commands (`s` snippets, `f` focus, `q` exit, `` ` `` jump)
         // FIRST so they're always visible, then the agent-jump roster
@@ -2617,7 +2631,13 @@ impl<T: TerminalAdapter> Model<T> {
             // of the armed prefix + the catalog (`seq_continuations`),
             // not a hardcoded group table.
             if let Some(prefix) = self.leader.pending().copied() {
-                crate::realm::components::which_key::render(f, area, prefix, &leader_rows);
+                crate::realm::components::which_key::render(
+                    f,
+                    area,
+                    prefix,
+                    leader_group,
+                    &leader_rows,
+                );
             }
             // Which-key popup for the armed terminal `]]` leader (#205,
             // #252): the agent-jump roster (`]]<digit>`) on top of the

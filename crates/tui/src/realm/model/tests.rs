@@ -3164,10 +3164,6 @@ mod chord_resolution_tests {
                 Chord::Key(stroke("z")),
                 vec![ActionKind::ToggleSnooze, ActionKind::UndoMarkRead],
             ),
-            (
-                Chord::Key(stroke("Shift-G")),
-                vec![ActionKind::AddAssignees, ActionKind::ActivityBottom],
-            ),
         ]
     }
 
@@ -3181,7 +3177,7 @@ mod chord_resolution_tests {
         assert_eq!(
             resolve("Shift-G", PaneFocus::Right),
             Some(ActionKind::ActivityBottom),
-            "`G` on the activity pane is jump-to-bottom, not assignees",
+            "`G` on the activity pane is jump-to-bottom",
         );
         assert_eq!(
             resolve("g", PaneFocus::Right),
@@ -3201,10 +3197,10 @@ mod chord_resolution_tests {
             resolve("z", PaneFocus::Sidebar),
             Some(ActionKind::ToggleSnooze),
         );
-        assert_eq!(
-            resolve("Shift-G", PaneFocus::Sidebar),
-            Some(ActionKind::AddAssignees),
-        );
+        // Assignees dropped its `Shift-G` alias (#304) — the `g a`
+        // leader chord is its only binding, so the bare stroke resolves
+        // to nothing from the sidebar.
+        assert_eq!(resolve("Shift-G", PaneFocus::Sidebar), None);
         assert_eq!(
             resolve("m", PaneFocus::Sidebar),
             Some(ActionKind::MarkAllRead),

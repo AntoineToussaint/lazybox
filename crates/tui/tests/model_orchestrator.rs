@@ -1413,9 +1413,9 @@ fn first_spawned_agent(cmds: &[lazybox_ipc::Command]) -> Option<String> {
     })
 }
 
-/// `c` on the selected workspace spawns the default `claude` agent —
-/// the generated `SpawnAgent` row dispatched by the Model, not a
-/// sidebar arm.
+/// `a c` on the selected workspace spawns the `claude` agent — the
+/// generated `SpawnAgent` row under the `a` leader (#304), dispatched
+/// by the Model, not a sidebar arm.
 #[test]
 fn spawn_agent_c_spawns_claude() {
     let (client, mut server) = channel::pair();
@@ -1429,12 +1429,17 @@ fn spawn_agent_c_spawns_claude() {
     });
     assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
     while server.rx.try_recv().is_ok() {}
+    m.dispatch_key(key(Key::Char('a')));
+    assert!(
+        m.leader_pending().is_some(),
+        "`a` arms the agent leader (which-key popup)",
+    );
     m.dispatch_key(key(Key::Char('c')));
     let cmds: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
     assert_eq!(first_spawned_agent(&cmds).as_deref(), Some("claude"));
 }
 
-/// `x` spawns codex — the second generated agent row.
+/// `a x` spawns codex — the second generated agent row.
 #[test]
 fn spawn_agent_x_spawns_codex() {
     let (client, mut server) = channel::pair();
@@ -1448,6 +1453,7 @@ fn spawn_agent_x_spawns_codex() {
     });
     assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
     while server.rx.try_recv().is_ok() {}
+    m.dispatch_key(key(Key::Char('a')));
     m.dispatch_key(key(Key::Char('x')));
     let cmds: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
     assert_eq!(first_spawned_agent(&cmds).as_deref(), Some("codex"));
@@ -1455,7 +1461,7 @@ fn spawn_agent_x_spawns_codex() {
 
 /// An agent row is remappable through `ui.action_keys` keyed by
 /// `spawn_agent.<id>`: after remapping claude to `Ctrl-j`, the default
-/// `c` no longer spawns it and `Ctrl-j` does.
+/// `a c` chord no longer spawns it and `Ctrl-j` does.
 #[test]
 fn spawn_agent_key_is_remappable() {
     let (client, mut server) = channel::pair();
@@ -1473,10 +1479,11 @@ fn spawn_agent_key_is_remappable() {
     assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
     while server.rx.try_recv().is_ok() {}
 
-    // `c` is no longer claude's key — nothing spawns.
+    // `a c` is no longer claude's chord — nothing spawns.
+    m.dispatch_key(key(Key::Char('a')));
     m.dispatch_key(key(Key::Char('c')));
     let after_c: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
-    assert_eq!(first_spawned_agent(&after_c), None, "c was remapped away");
+    assert_eq!(first_spawned_agent(&after_c), None, "a c was remapped away");
 
     // The remapped chord spawns claude.
     m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::CONTROL));

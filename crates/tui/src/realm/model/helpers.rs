@@ -246,11 +246,11 @@ pub(crate) fn seq_continuations<'c>(
 /// cursor's reference frame wins:
 /// - Sidebar focus: the Workspace section.
 /// - Right focus: the Activity section first (the row cursor lives
-///   there — `z` undo-mark-read, `Shift-G` jump-to-bottom must beat
-///   the Workspace section's `z` snooze / `Shift-G` assignees), then
-///   the Workspace section, which stays reachable because the sidebar
-///   selection is still the active reference frame while reading
-///   activity (Reply / Shift-V / merge all dual-fire on purpose).
+///   there — `z` undo-mark-read must beat the Workspace section's `z`
+///   snooze), then the Workspace section, which stays reachable
+///   because the sidebar selection is still the active reference
+///   frame while reading activity (Reply / merge / the `g` github
+///   leader all dual-fire on purpose).
 /// - Terminal focus never reaches the catalog: the terminal pane
 ///   forwards `all keys` to the PTY and the escape sequence (`]]`)
 ///   has its own latch logic.
@@ -1555,8 +1555,8 @@ mod collision_tests {
     #[test]
     fn no_same_rank_chord_collisions_per_focus() {
         // Exercise the RUNTIME catalog (static rows + the generated
-        // per-agent SpawnAgent rows) so `c` / `x` / `u` are collision-
-        // checked alongside everything else.
+        // per-agent SpawnAgent rows) so `a c` / `a x` / `a u` are
+        // collision-checked alongside everything else.
         let agents: Vec<String> = ["claude", "codex", "cursor"]
             .iter()
             .map(|s| s.to_string())

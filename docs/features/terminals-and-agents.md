@@ -25,7 +25,7 @@ and drawn into ratatui. The daemon owns the PTY; the client replays bytes, so a
 reconnecting client reconstructs the screen.
 
 ### How to use it
-Spawn a shell or agent on a workspace (`s`/`c`/`x`/`u`/`w`); the terminal
+Spawn a shell or agent on a workspace (`s`, `a c`/`a x`/`a u`, or `w`); the terminal
 appears in the right-hand stack. Multiple terminals coexist per workspace.
 
 ### How it works (brief)
@@ -76,7 +76,7 @@ builtins; the server's `spawn_handler` builds the worktree, env, and
 
 ### Test checklist
 - [ ] `s` opens a shell in the correct worktree dir.
-- [ ] `c` / `x` / `u` launch the respective agent if its binary is on PATH.
+- [ ] `a c` / `a x` / `a u` launch the respective agent if its binary is on PATH.
 - [ ] A GenericCli agent defined in config launches with its configured argv.
 - [ ] An agent missing from PATH fails gracefully (no crash).
 - [ ] Resume argv (`claude --continue`) reattaches rather than starting fresh where supported.

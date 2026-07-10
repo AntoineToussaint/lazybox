@@ -103,7 +103,7 @@ fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
         body: Some(
             "Fake workspace created by `lazybox --test`. The bottom \
              hint bar shows what's available right now: `s` shell, \
-             `c` claude, `x` codex, `u` cursor."
+             `a c` claude, `a x` codex, `a u` cursor."
                 .into(),
         ),
         state: TaskState::Open,

@@ -24,10 +24,19 @@ const PANEL_W: u16 = 28;
 /// Render the which-key popup for an armed leader `prefix`. `rows` are
 /// the `(next-key-display, label)` continuations of that prefix — a
 /// pure function of the catalog supplied by the caller, no longer a
-/// hardcoded group table (#102). `area` is the full frame; the popup
-/// floats in the bottom-left corner, one row above the footer so it
-/// doesn't cover the hint bar.
-pub fn render(frame: &mut Frame, area: Rect, prefix: KeyStroke, rows: &[(String, String)]) {
+/// hardcoded group table (#102). `group` is the leader group's name
+/// (`github`, `agent`, …) when the continuations belong to one — it
+/// titles the popup with the same label the footer's group cell
+/// advertises (#304). `area` is the full frame; the popup floats in
+/// the bottom-left corner, one row above the footer so it doesn't
+/// cover the hint bar.
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    prefix: KeyStroke,
+    group: Option<&str>,
+    rows: &[(String, String)],
+) {
     let theme = crate::theme::current();
     // One title row + one row per continuation, plus a blank row top
     // and bottom for breathing room.
@@ -46,10 +55,14 @@ pub fn render(frame: &mut Frame, area: Rect, prefix: KeyStroke, rows: &[(String,
     frame.render_widget(Clear, panel);
     frame.render_widget(Block::default().style(bg), panel);
 
-    // Title: the armed prefix so the user sees which chord is in
-    // flight (e.g. "g …").
+    // Title: the armed prefix (plus its group's name when it has one)
+    // so the user sees which chord is in flight (e.g. "g ▸ github").
+    let title_text = match group {
+        Some(g) => format!(" {} ▸ {g} ", prefix.display()),
+        None => format!(" {} … ", prefix.display()),
+    };
     let title = Line::from(Span::styled(
-        format!(" {} … ", prefix.display()),
+        title_text,
         Style::default()
             .bg(theme.surface)
             .fg(theme.text_dim)

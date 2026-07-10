@@ -351,10 +351,14 @@ signals on `Event::WorkspaceUpserted`
 (`crates/tui/src/components/sidebar/handlers.rs`).
 
 Delivery is picked by `attention.notifier` (default `auto`): in a **local
-session** the subprocess path runs — macOS prefers `terminal-notifier`
-(grouped) then `osascript`, Linux uses `notify-send`, Windows is a stub — it's
-verifiable (helper exit status lands in the log) and immune to terminal OSC
-quirks. **Over SSH** (where a helper would banner the remote host) the
+session** a dedicated helper runs when present — `terminal-notifier` (grouped)
+on macOS, `notify-send` on Linux — it's verifiable (helper exit status lands
+in the log) and immune to terminal OSC quirks. Without one, a recognized
+OSC-capable terminal's own banner is preferred over the `osascript` fallback,
+because `display notification` exits 0 even when macOS suppresses the banner
+(Script Editor permission denied, Focus mode) — osascript is the last resort
+for unrecognized terminals on a stock Mac; Windows is a stub. **Over SSH**
+(where a helper would banner the remote host) the
 **terminal's own OSC notification sequence** is used instead
 (`crates/tui-core/src/notify.rs`): Ghostty / Kitty / WezTerm get OSC 777
 (`ESC]777;notify;TITLE;BODY`), iTerm2 gets OSC 9 (body only), detected via

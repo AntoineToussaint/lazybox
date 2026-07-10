@@ -1221,6 +1221,357 @@ snippets:
         assert_eq!(rev.body, "please review");
     }
 
+    /// Build a model with N seeded workspaces (`github:o/r#1..N`) and
+    /// one terminal per `Some(kind)` entry (terminal ids 1..N, index-
+    /// aligned with the workspaces). Returns the workspace session
+    /// keys in seed order — the target list a broadcast would use.
+    fn model_with_broadcast_targets(
+        kinds: &[Option<lazybox_ipc::TerminalKind>],
+    ) -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        Vec<SessionKey>,
+    ) {
+        use lazybox_ipc::{Event as IpcEvent, TerminalId};
+        let mut m = build_model();
+        let keys: Vec<SessionKey> = (1..=kinds.len())
+            .map(|i| SessionKey::from(format!("github:o/r#{i}").as_str()))
+            .collect();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: keys
+                .iter()
+                .map(|k| {
+                    lazybox_core::Workspace::empty(
+                        WorkspaceKey::new(k.as_str()),
+                        "main",
+                        chrono::Utc::now(),
+                    )
+                })
+                .collect(),
+            terminals: vec![],
+            projects: vec![],
+        });
+        for (i, kind) in kinds.iter().enumerate() {
+            if let Some(kind) = kind {
+                m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                    terminal_id: TerminalId(i as u64 + 1),
+                    session_key: keys[i].clone(),
+                    kind: kind.clone(),
+                    no_permission: false,
+                    on_main: false,
+                });
+            }
+        }
+        (m, keys)
+    }
+
+    /// Broadcast compose submit with two agent targets and one
+    /// session-less target: one `InjectPrompt` + `RecordUserMessage`
+    /// pair PER agent terminal (the #246-safe settle-gated path), no
+    /// raw `Write`, and a summary notice naming the skip.
+    #[test]
+    fn broadcast_fans_out_one_inject_per_agent_and_reports_skips() {
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Agent("codex".into())),
+            None,
+        ]);
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: keys,
+            snippet_key: None,
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let cmds = m.handle_textarea_submitted("merge when the PR is green".into());
+
+        let inject_tids: Vec<u64> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::InjectPrompt {
+                    terminal_id,
+                    prompt,
+                    fallback_spawn,
+                } => {
+                    assert_eq!(prompt, "merge when the PR is green");
+                    assert!(fallback_spawn.is_none());
+                    Some(terminal_id.0)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inject_tids, vec![1, 2], "one inject per agent target");
+        let recap_count = cmds
+            .iter()
+            .filter(|c| matches!(
+                c,
+                IpcCommand::RecordUserMessage { message, .. } if message == "merge when the PR is green"
+            ))
+            .count();
+        assert_eq!(recap_count, 2, "each agent gets its recap line");
+        assert!(
+            !cmds.iter().any(|c| matches!(c, IpcCommand::Write { .. })),
+            "agents must not ALSO get a raw write",
+        );
+        assert!(m.pending_broadcast.is_none(), "draft consumed");
+        let notice = m.status.notice.as_ref().expect("summary notice");
+        assert!(
+            notice.message.contains("sent to 2 workspaces"),
+            "summary counts deliveries: {}",
+            notice.message,
+        );
+        assert!(
+            notice.message.contains("1 skipped"),
+            "summary names the session-less target: {}",
+            notice.message,
+        );
+    }
+
+    /// A target whose only session is a plain shell gets the encoded
+    /// direct write (shells have no paste debounce), not the agent
+    /// inject path.
+    #[test]
+    fn broadcast_to_shell_target_writes_encoded_bytes() {
+        let (mut m, keys) = model_with_broadcast_targets(&[Some(lazybox_ipc::TerminalKind::Shell)]);
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: keys,
+            snippet_key: None,
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let cmds = m.handle_textarea_submitted("ls -la".into());
+        match cmds.as_slice() {
+            [IpcCommand::Write { terminal_id, bytes }] => {
+                assert_eq!(terminal_id.0, 1);
+                assert_eq!(
+                    bytes,
+                    &super::super::inputs::encode_snippet_for_pty("ls -la")
+                );
+            }
+            other => panic!("shell target must get exactly one Write, got {other:?}"),
+        }
+    }
+
+    /// A workspace running an agent AND a shell delivers to the agent —
+    /// the instruction is meant for the conversation, not the prompt.
+    #[test]
+    fn broadcast_prefers_agent_terminal_over_shell() {
+        use lazybox_ipc::{Event as IpcEvent, TerminalId};
+        let (mut m, keys) = model_with_broadcast_targets(&[Some(lazybox_ipc::TerminalKind::Shell)]);
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            terminal_id: TerminalId(9),
+            session_key: keys[0].clone(),
+            kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: keys,
+            snippet_key: None,
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let cmds = m.handle_textarea_submitted("go".into());
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::InjectPrompt { terminal_id, .. } if terminal_id.0 == 9
+            )),
+            "agent terminal wins: {cmds:?}",
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, IpcCommand::Write { .. })),
+            "the shell must not receive a duplicate copy",
+        );
+    }
+
+    /// Step one of the broadcast flow: picking a snippet doesn't send
+    /// anything — it stashes the key on the draft and funnels into the
+    /// compose textarea (pre-filled with the body upstream). The
+    /// composed buffer (snippet body + appended custom text) is then
+    /// what every target receives, and the MRU counts the bulk send
+    /// once, not once per target.
+    #[test]
+    fn broadcast_snippet_pick_composes_with_custom_text_and_counts_mru_once() {
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+        ]);
+        m.snippets = snippets_from_yaml(
+            "broadcast-compose",
+            "\nsnippets:\n  rev:\n    description: Review\n    body: review the diff\n",
+        );
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: keys,
+            snippet_key: None,
+        });
+        m.snippet_choices = vec!["rev".into()];
+        m.modal_stack.push(Id::BroadcastSnippet);
+
+        let cmds = m.handle_choice_picked(vec![0]);
+        assert!(cmds.is_empty(), "the pick itself sends nothing");
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::BroadcastText),
+            "pick funnels into the compose step",
+        );
+        assert_eq!(
+            m.pending_broadcast
+                .as_ref()
+                .and_then(|d| d.snippet_key.as_deref()),
+            Some("rev"),
+        );
+
+        // The compose buffer arrives pre-filled with the snippet body;
+        // the user appended a line. Everything lands as ONE message.
+        let cmds =
+            m.handle_textarea_submitted("review the diff\n\nfocus on the auth changes\n".into());
+        let prompts: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::InjectPrompt { prompt, .. } => Some(prompt.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            prompts,
+            vec![
+                "review the diff\n\nfocus on the auth changes",
+                "review the diff\n\nfocus on the auth changes",
+            ],
+            "snippet + custom text compose into one body per target",
+        );
+        assert_eq!(
+            m.recent_snippets,
+            vec!["rev".to_string()],
+            "bulk send counts once in the MRU",
+        );
+    }
+
+    /// `Ctrl-F` in the broadcast picker arrives as an empty pick: no
+    /// snippet key is stashed and the flow continues to the compose
+    /// step for a free-text-only send.
+    #[test]
+    fn broadcast_free_text_pick_skips_snippet() {
+        let (mut m, keys) = model_with_broadcast_targets(&[Some(
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+        )]);
+        m.snippets = snippets_from_yaml(
+            "broadcast-freetext",
+            "\nsnippets:\n  rev:\n    description: Review\n    body: review the diff\n",
+        );
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: keys,
+            snippet_key: None,
+        });
+        m.snippet_choices = vec!["rev".into()];
+        m.modal_stack.push(Id::BroadcastSnippet);
+        let cmds = m.handle_choice_picked(Vec::new());
+        assert!(cmds.is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::BroadcastText));
+        let draft = m.pending_broadcast.as_ref().expect("draft survives");
+        assert_eq!(draft.snippet_key, None, "free text only — no snippet");
+        let cmds = m.handle_textarea_submitted("ad-hoc prompt".into());
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::InjectPrompt { prompt, .. } if prompt == "ad-hoc prompt"
+            )),
+            "free text still delivers: {cmds:?}",
+        );
+        assert!(m.recent_snippets.is_empty(), "no snippet, no MRU entry");
+    }
+
+    /// `Shift-B` resolves its targets from the sidebar multi-select at
+    /// mount time, and a delivered broadcast clears the selection —
+    /// the same contract as the activity pane's `w`. A broadcast that
+    /// reached nobody keeps the marks so the user can retry after
+    /// spawning an agent.
+    #[test]
+    fn broadcast_clears_selection_after_delivery_but_not_after_all_skipped() {
+        let (mut m, keys) = model_with_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            None,
+        ]);
+        for key in &keys {
+            assert!(m.sidebar.focus_workspace_key(key));
+            assert_eq!(m.sidebar.toggle_broadcast_select(), Some(true));
+        }
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+
+        // All-skipped broadcast (only the session-less target): the
+        // selection survives for a retry.
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: vec![keys[1].clone()],
+            snippet_key: None,
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let cmds = m.handle_textarea_submitted("hello".into());
+        assert!(cmds.is_empty(), "nothing deliverable: {cmds:?}");
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            2,
+            "all-skipped send must not clear the marks",
+        );
+
+        // Delivered broadcast: selection clears.
+        let expected_targets = m.sidebar.selected_broadcast_keys();
+        m.mount_broadcast_picker();
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::BroadcastText),
+            "empty snippet library skips straight to compose",
+        );
+        assert_eq!(
+            m.pending_broadcast.as_ref().map(|d| d.targets.clone()),
+            Some(expected_targets),
+            "targets resolved from the multi-select in sidebar order",
+        );
+        let cmds = m.handle_textarea_submitted("hello".into());
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
+            "agent target delivered: {cmds:?}",
+        );
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "successful send consumes the selection",
+        );
+    }
+
+    /// Esc on the compose step cancels the flow (draft dropped) but
+    /// keeps the sidebar selection — the user backed out of composing,
+    /// not of selecting.
+    #[test]
+    fn broadcast_dismiss_drops_draft_but_keeps_selection() {
+        let (mut m, keys) = model_with_broadcast_targets(&[Some(
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+        )]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        assert_eq!(m.sidebar.toggle_broadcast_select(), Some(true));
+        m.pending_broadcast = Some(BroadcastDraft {
+            targets: keys,
+            snippet_key: None,
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let cmds = m.handle_modal_dismissed();
+        assert!(cmds.is_empty());
+        assert!(m.pending_broadcast.is_none(), "Esc cancels the flow");
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            1,
+            "the marks survive a cancelled compose",
+        );
+    }
+
+    /// `Shift-B` with nothing selected refuses to mount and nudges
+    /// toward `v` instead.
+    #[test]
+    fn broadcast_with_empty_selection_flashes_a_nudge() {
+        let (mut m, _keys) = model_with_broadcast_targets(&[None]);
+        m.mount_broadcast_picker();
+        assert!(m.modal_stack.is_empty(), "no selection, no modal");
+        assert!(m.pending_broadcast.is_none());
+        let notice = m.status.notice.as_ref().expect("nudge notice");
+        assert!(notice.message.contains("v"), "nudge names the select key");
+    }
+
     /// mount_snippet_picker with an empty collection flashes a hint
     /// and refuses to mount — no Id::SnippetPicker on the stack.
     /// This is the "user typed `]<key>` but never configured any
@@ -3277,6 +3628,28 @@ mod chord_resolution_tests {
             resolve("m", PaneFocus::Right),
             Some(ActionKind::MarkAllRead),
         );
+    }
+
+    /// The broadcast pair resolves only under sidebar focus: `v`
+    /// toggles the multi-select and `Shift-B` opens the broadcast —
+    /// while the activity pane keeps its own pane-local `v` (row
+    /// multi-select), which must not be shadowed by a catalog entry.
+    #[test]
+    fn broadcast_keys_resolve_only_under_sidebar_focus() {
+        assert_eq!(
+            resolve("v", PaneFocus::Sidebar),
+            Some(ActionKind::SelectWorkspace),
+        );
+        assert_eq!(
+            resolve("Shift-B", PaneFocus::Sidebar),
+            Some(ActionKind::BroadcastToSelected),
+        );
+        assert_eq!(
+            resolve("v", PaneFocus::Right),
+            None,
+            "activity-pane `v` stays pane-local",
+        );
+        assert_eq!(resolve("Shift-B", PaneFocus::Right), None);
     }
 
     #[test]

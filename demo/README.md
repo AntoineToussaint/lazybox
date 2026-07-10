@@ -56,7 +56,7 @@ capture changes on every render and can't be a golden.
    PATH="$PWD/target/debug:$PATH" vhs demo/lazybox.tape
    # golden.tape writes the full scrollback; reduce it to just the table
    # (the same awk CI uses) so the committed golden stays machine-independent:
-   awk '/  Tab .* cycle panes/{c=1;b=""} c{b=b $0 ORS} c&&/snippets/{last=b;c=0} END{printf "%s",last}' \
+   awk '/  Tab .* cycle panes/{c=1;b=""} c{b=b $0 ORS} c&&/exit to sidebar/{last=b;c=0} END{printf "%s",last}' \
      demo/golden.ascii > demo/golden.ascii.tmp && mv demo/golden.ascii.tmp demo/golden.ascii
    ```
 

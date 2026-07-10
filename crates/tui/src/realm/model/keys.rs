@@ -1256,6 +1256,8 @@ fn action_from_kind(
         ActionKind::CycleSort => Action::CycleSort,
         ActionKind::CycleMailbox => Action::CycleMailbox,
         ActionKind::OpenSearch => Action::OpenSearch,
+        ActionKind::SelectWorkspace => Action::SelectWorkspace,
+        ActionKind::BroadcastToSelected => Action::BroadcastToSelected,
         ActionKind::OpenHelp => Action::OpenHelp,
         ActionKind::OpenTour => Action::OpenTour,
         ActionKind::OpenSyncStatus => Action::OpenSyncStatus,

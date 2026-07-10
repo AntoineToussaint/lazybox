@@ -211,7 +211,13 @@ resize.
 `Space` collapse/expand repo group, `Shift-S` cycle mailbox
 (Inbox → Inactive → Snoozed), `/` search, `n` new workspace,
 `Shift-N` new project, `Shift-A` adopt sessions, `Shift-J` join issue
-into PR, `Shift-X` archive. `g` is a leader key that opens the
+into PR, `Shift-X` archive. `v` multi-selects workspace rows (marks
+survive j/k; `Esc` clears) and `Shift-B` broadcasts one instruction to
+every selected workspace: a snippet picker (`Ctrl-F` skips it for free
+text) feeds a compose textarea pre-filled with the snippet body, and
+submit delivers per target — running agents via the settle-gated
+inject, plain shells via a direct write, session-less workspaces
+skipped and named in the summary notice. `g` is a leader key that opens the
 **github** group as a two-step chord (which-key popup): `g m` merge,
 `g v` reviewers, `g a` assignees, `g l` labels, `g o` open in
 browser. Merge has no direct-key alias — `g m` is its only default

@@ -465,6 +465,11 @@ pub struct Sidebar {
     /// search is in flight; `Some` while the `/` input bar is open or
     /// a query stays applied after `Enter`. See [`SearchState`].
     search: Option<SearchState>,
+    /// Workspace rows the user multi-selected with `v` — the targets a
+    /// broadcast (`Shift-B`) fans out to. Keys, not row indices, so the
+    /// marks survive re-sorts and j/k navigation; pruned when a
+    /// workspace is removed and cleared by Esc or a successful send.
+    broadcast_selected: std::collections::HashSet<SessionKey>,
     /// How many commits this build trails `origin/main`, when stale.
     /// `Some(n)` paints a persistent "outdated build" warning in the
     /// header so a uniformly-stale install (daemon + client both behind)
@@ -515,6 +520,7 @@ impl Sidebar {
             sort_chip_rect: None,
             now_override: None,
             search: None,
+            broadcast_selected: std::collections::HashSet::new(),
             outdated_commits_behind: None,
         }
     }
@@ -786,6 +792,78 @@ impl Sidebar {
             VisibleRow::Session { session_id, .. } => Some(*session_id),
             _ => None,
         }
+    }
+
+    /// Toggle the workspace under the cursor in/out of the broadcast
+    /// multi-select set. Returns the new state (`true` = now selected)
+    /// so the caller can surface a footer notice, or `None` when the
+    /// cursor isn't on a workspace / session row.
+    pub fn toggle_broadcast_select(&mut self) -> Option<bool> {
+        let key = self.selected_session_key()?.clone();
+        if self.broadcast_selected.insert(key.clone()) {
+            Some(true)
+        } else {
+            self.broadcast_selected.remove(&key);
+            Some(false)
+        }
+    }
+
+    /// The multi-selected workspaces, in sidebar (visible) order — the
+    /// order the broadcast targets them and the modal header lists
+    /// them. Rows hidden by the current mailbox / filter don't
+    /// broadcast: what you see marked is what gets sent.
+    pub fn selected_broadcast_keys(&self) -> Vec<SessionKey> {
+        self.visible
+            .iter()
+            .filter_map(|row| match row {
+                VisibleRow::Workspace(k) if self.broadcast_selected.contains(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Is this workspace in the broadcast multi-select set? Drives the
+    /// `✓` mark in the row's selection gutter.
+    pub fn is_broadcast_selected(&self, key: &SessionKey) -> bool {
+        self.broadcast_selected.contains(key)
+    }
+
+    pub fn broadcast_selected_count(&self) -> usize {
+        self.broadcast_selected.len()
+    }
+
+    /// Drop the whole multi-select set. Bound to Esc and called after
+    /// a successful broadcast so the marks don't outlive the send.
+    /// Returns whether anything was cleared (so Esc can fall through
+    /// when there was no selection).
+    pub fn clear_broadcast_selection(&mut self) -> bool {
+        let had = !self.broadcast_selected.is_empty();
+        self.broadcast_selected.clear();
+        had
+    }
+
+    /// The terminal a broadcast should deliver to for `key`, plus
+    /// whether it runs an agent. Agents win over shells (the
+    /// settle-gated inject path vs. a raw write); ties break on the
+    /// lowest terminal id so repeated broadcasts land on the same
+    /// terminal. `None` when the workspace has no running session.
+    pub fn broadcast_terminal(&self, key: &SessionKey) -> Option<(TerminalId, bool)> {
+        let mut agent: Option<TerminalId> = None;
+        let mut shell: Option<TerminalId> = None;
+        for (tid, (sk, kind)) in &self.running_terminals {
+            if sk != key {
+                continue;
+            }
+            let slot = match kind {
+                TerminalKind::Agent(_) => &mut agent,
+                TerminalKind::Shell => &mut shell,
+                _ => continue,
+            };
+            if slot.is_none_or(|t| tid.0 < t.0) {
+                *slot = Some(*tid);
+            }
+        }
+        agent.map(|t| (t, true)).or(shell.map(|t| (t, false)))
     }
 
     /// If the row under the cursor is something the user can "work
@@ -1791,6 +1869,12 @@ impl Sidebar {
         let workspace = self.selected_workspace();
         let is_ready = self.merge_target_for_cursor().is_some();
         let mut actions: Vec<Action> = Vec::with_capacity(6);
+
+        // A live multi-select makes the broadcast THE next action —
+        // surface it first so the `v` marks visibly lead somewhere.
+        if !self.broadcast_selected.is_empty() {
+            actions.push(Action::BroadcastToSelected);
+        }
 
         // Primary action: what's most likely useful on THIS row.
         // Merge takes precedence over Work when the PR is ready.

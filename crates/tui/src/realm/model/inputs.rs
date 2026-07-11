@@ -398,14 +398,18 @@ impl<T: TerminalAdapter> Model<T> {
             self.default_agent_choices.clear();
             self.pop_modal();
             if let Some(agent) = agent {
-                self.set_default_agent(&agent);
+                // Persist first; only apply live once the write lands so
+                // a save failure never leaves the panes ahead of disk.
                 match lazybox_config::Config::save_with(|c| {
                     c.setup.default_agent = Some(agent.clone());
                 }) {
-                    Ok(()) => self.flash_info(format!("default agent: {agent}")),
+                    Ok(()) => {
+                        self.set_default_agent(&agent);
+                        self.flash_info(format!("default agent: {agent}"));
+                        self.redraw = true;
+                    }
                     Err(e) => self.flash_info(format!("couldn't save config: {e}")),
                 }
-                self.redraw = true;
             }
             return cmds;
         }

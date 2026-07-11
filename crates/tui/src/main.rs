@@ -777,7 +777,13 @@ async fn run_embedded_realm(
         // which is the natural repo root for a single-repo workflow.
         let snippets =
             lazybox_config::Snippets::load_merged(std::env::current_dir().ok().as_deref());
-        model.apply_snippets(snippets);
+        // Install the catalog, then restore the snippet-picker "Recent"
+        // MRU from the state DB so frequently-used snippets stay one
+        // keystroke away across restarts (#311). Runtime state, not YAML
+        // — lives in the same store as read/unread and snooze. Bundled
+        // so the restore can never run before the catalog is in place
+        // (it prunes the MRU against it).
+        model.apply_snippets_and_seed_recent(snippets, config.store.clone());
         model = model.with_splits(user_config.ui.sidebar_pct, user_config.ui.right_top_pct);
         if let Some((report, sources)) = wizard_seed {
             model.start_setup_wizard(report, sources);

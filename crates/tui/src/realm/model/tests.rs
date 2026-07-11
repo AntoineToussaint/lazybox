@@ -7682,3 +7682,194 @@ mod dismiss_and_messages_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod recent_snippets_tests {
+    //! Persistence of the snippet-picker "Recent" MRU across restarts
+    //! (#311): `record_recent_snippet` writes through to the state DB,
+    //! `seed_recent_snippets` restores it, and a corrupt / missing
+    //! value degrades to an empty list without panicking.
+    use super::super::*;
+    use lazybox_ipc::channel;
+    use lazybox_store::Store;
+    use lazybox_store::mock::MemoryStore;
+    use std::sync::Arc;
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    /// Load a snippet library whose keys are exactly `keys` into the
+    /// model, so `seed_recent_snippets` has a catalog to prune stale
+    /// MRU keys against — mirroring the production boot order where
+    /// `apply_snippets` always runs before `seed_recent_snippets`.
+    /// `label` keys the tmp file so parallel tests don't collide.
+    fn apply_snippet_keys(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        label: &str,
+        keys: &[&str],
+    ) {
+        let mut yaml = String::from("snippets:\n");
+        for k in keys {
+            yaml.push_str(&format!("  {k}:\n    description: {k}\n    body: b\n"));
+        }
+        let tmp_dir =
+            std::env::temp_dir().join(format!("lazybox-recent-{}-{label}", std::process::id(),));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let tmp = tmp_dir.join("snippets.yaml");
+        std::fs::write(&tmp, yaml).unwrap();
+        m.apply_snippets(
+            lazybox_config::Snippets::load_from(&tmp, lazybox_config::SnippetOrigin::Global)
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn record_writes_through_to_store() {
+        let store = Arc::new(MemoryStore::new());
+        let mut m = build_model();
+        m.seed_recent_snippets(store.clone());
+        m.record_recent_snippet("rev".into());
+
+        let raw = store
+            .get_kv(RECENT_SNIPPETS_KV_KEY)
+            .unwrap()
+            .expect("recent_snippets persisted");
+        let stored: Vec<String> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(stored, vec!["rev".to_string()]);
+    }
+
+    #[test]
+    fn record_without_store_stays_session_only() {
+        let mut m = build_model();
+        // No seed_recent_snippets → no store handle (the --connect path).
+        m.record_recent_snippet("rev".into());
+        assert_eq!(m.recent_snippets, vec!["rev".to_string()]);
+    }
+
+    #[test]
+    fn seed_missing_value_yields_empty() {
+        let store = Arc::new(MemoryStore::new());
+        let mut m = build_model();
+        m.seed_recent_snippets(store);
+        assert!(m.recent_snippets.is_empty());
+    }
+
+    #[test]
+    fn seed_corrupt_value_yields_empty_no_panic() {
+        let store = Arc::new(MemoryStore::new());
+        store.set_kv(RECENT_SNIPPETS_KV_KEY, "not json{").unwrap();
+        let mut m = build_model();
+        m.seed_recent_snippets(store);
+        assert!(m.recent_snippets.is_empty());
+    }
+
+    #[test]
+    fn seed_caps_to_max() {
+        let store = Arc::new(MemoryStore::new());
+        let overflow: Vec<String> = (0..RECENT_SNIPPETS_MAX + 3)
+            .map(|i| format!("s{i}"))
+            .collect();
+        store
+            .set_kv(
+                RECENT_SNIPPETS_KV_KEY,
+                &serde_json::to_string(&overflow).unwrap(),
+            )
+            .unwrap();
+        let mut m = build_model();
+        // All stored keys are catalog-backed, so only the cap trims.
+        let keys: Vec<&str> = overflow.iter().map(String::as_str).collect();
+        apply_snippet_keys(&mut m, "caps", &keys);
+        m.seed_recent_snippets(store);
+        assert_eq!(m.recent_snippets.len(), RECENT_SNIPPETS_MAX);
+        assert_eq!(m.recent_snippets[0], "s0");
+    }
+
+    #[test]
+    fn round_trip_across_restart_preserves_mru_order() {
+        let store: Arc<dyn lazybox_store::Store> = Arc::new(MemoryStore::new());
+
+        // Session one: record A, B, C.
+        let mut m1 = build_model();
+        apply_snippet_keys(&mut m1, "round-trip-1", &["A", "B", "C"]);
+        m1.seed_recent_snippets(store.clone());
+        m1.record_recent_snippet("A".into());
+        m1.record_recent_snippet("B".into());
+        m1.record_recent_snippet("C".into());
+
+        // Session two: a fresh Model seeded from the same store, with
+        // the same catalog loaded so no key is pruned.
+        let mut m2 = build_model();
+        apply_snippet_keys(&mut m2, "round-trip-2", &["A", "B", "C"]);
+        m2.seed_recent_snippets(store);
+        assert_eq!(
+            m2.recent_snippets,
+            vec!["C".to_string(), "B".to_string(), "A".to_string()],
+        );
+    }
+
+    /// A stored key whose snippet was since renamed / deleted is pruned
+    /// on seed — otherwise it sits in the MRU consuming a slot it can
+    /// never render into, and a small rotating set of live keys never
+    /// evicts it (finding #1). The pruned list is also flushed back so
+    /// the dead key doesn't linger in the DB.
+    #[test]
+    fn seed_prunes_keys_absent_from_catalog() {
+        let store: Arc<dyn lazybox_store::Store> = Arc::new(MemoryStore::new());
+        // MRU carries two live keys interleaved with two now-gone keys.
+        store
+            .set_kv(
+                RECENT_SNIPPETS_KV_KEY,
+                &serde_json::to_string(&["rev", "gone", "pr", "dead"]).unwrap(),
+            )
+            .unwrap();
+
+        let mut m = build_model();
+        apply_snippet_keys(&mut m, "prune", &["rev", "pr"]);
+        m.seed_recent_snippets(store.clone());
+
+        // Only the catalog-backed keys survive, order preserved.
+        assert_eq!(m.recent_snippets, vec!["rev".to_string(), "pr".to_string()]);
+        // …and the DB is rewritten to the pruned list, so the dead keys
+        // are gone for good.
+        let raw = store.get_kv(RECENT_SNIPPETS_KV_KEY).unwrap().unwrap();
+        let stored: Vec<String> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(stored, vec!["rev".to_string(), "pr".to_string()]);
+    }
+
+    /// The bundled boot entry point applies the catalog *before* seeding,
+    /// so the prune sees a populated catalog. Proven here by passing a
+    /// stored MRU with a stale key: if seeding ran first (empty catalog)
+    /// every key — including the live one — would be wiped.
+    #[test]
+    fn apply_and_seed_bundles_ordering_so_prune_sees_catalog() {
+        let store: Arc<dyn lazybox_store::Store> = Arc::new(MemoryStore::new());
+        store
+            .set_kv(
+                RECENT_SNIPPETS_KV_KEY,
+                &serde_json::to_string(&["rev", "gone"]).unwrap(),
+            )
+            .unwrap();
+
+        let tmp_dir =
+            std::env::temp_dir().join(format!("lazybox-recent-{}-bundle", std::process::id(),));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let tmp = tmp_dir.join("snippets.yaml");
+        std::fs::write(
+            &tmp,
+            "snippets:\n  rev:\n    description: rev\n    body: b\n",
+        )
+        .unwrap();
+        let snippets =
+            lazybox_config::Snippets::load_from(&tmp, lazybox_config::SnippetOrigin::Global)
+                .unwrap();
+
+        let mut m = build_model();
+        m.apply_snippets_and_seed_recent(snippets, store);
+        // The live key survives (catalog was applied first); the stale
+        // one is pruned.
+        assert_eq!(m.recent_snippets, vec!["rev".to_string()]);
+    }
+}

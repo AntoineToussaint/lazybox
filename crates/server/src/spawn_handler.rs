@@ -1560,15 +1560,23 @@ async fn provision_worktree(
         let bus = config.bus.clone();
         let session_key = session_key.clone();
         std::sync::Arc::new(move |phase: CheckoutPhase| {
-            let step = match phase {
-                CheckoutPhase::Cloning => WorktreeStep::Clone,
-                CheckoutPhase::Fetching => WorktreeStep::Fetch,
-                CheckoutPhase::AddingWorktree => WorktreeStep::WorktreeAdd,
+            let (step, status) = match phase {
+                CheckoutPhase::Cloning => (WorktreeStep::Clone, WorktreeStepStatus::Started),
+                CheckoutPhase::Fetching => (WorktreeStep::Fetch, WorktreeStepStatus::Started),
+                CheckoutPhase::AddingWorktree => {
+                    (WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started)
+                }
+                // A degraded base-ref fetch: keep the "Preparing worktree"
+                // (Fetch) row but flag it so the checklist shows the
+                // stale-ref note instead of a silent success.
+                CheckoutPhase::BaseRefStale(note) => {
+                    (WorktreeStep::Fetch, WorktreeStepStatus::Warned(note))
+                }
             };
             let _ = bus.send(Event::WorktreeProgress {
                 session_key: session_key.clone(),
                 step,
-                status: WorktreeStepStatus::Started,
+                status,
             });
         })
     };

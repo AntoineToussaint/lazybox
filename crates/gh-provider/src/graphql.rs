@@ -126,6 +126,21 @@ pub struct GqlResponse {
     pub errors: Option<Vec<GqlError>>,
 }
 
+/// Response envelope for GraphQL **mutations** (merge, reviewers,
+/// assignees, labels, close, reaction). Unlike the search-shaped
+/// [`GqlResponse`] — whose [`GqlData`] *requires* a `search` field —
+/// a mutation's `data` node is `mergePullRequest` / `requestReviews` /
+/// … and has no `search` key, so deserializing it as `GqlResponse`
+/// fails on every success and reports a false error (issue #305).
+///
+/// Success for a mutation is HTTP 2xx with an empty `errors`; the
+/// returned node payload is confirmation, not something to parse. So
+/// `data` is left untyped and unread — we only inspect `errors`.
+#[derive(Deserialize, Debug)]
+pub struct GqlMutationResponse {
+    pub errors: Option<Vec<GqlError>>,
+}
+
 #[derive(Deserialize, Debug)]
 pub struct GqlError {
     pub message: String,

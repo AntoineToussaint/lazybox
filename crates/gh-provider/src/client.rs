@@ -3449,7 +3449,8 @@ mod tests {
     /// `addLabelsToLabelable`, also without a `search` field.
     #[tokio::test(flavor = "current_thread")]
     async fn label_mutation_success_reports_ok() {
-        const BODY: &str = r#"{"data":{"addLabelsToLabelable":{"labelable":{"__typename":"PullRequest"}}}}"#;
+        const BODY: &str =
+            r#"{"data":{"addLabelsToLabelable":{"labelable":{"__typename":"PullRequest"}}}}"#;
         let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
         let client = make_client(&base_uri);
         client
@@ -3491,7 +3492,8 @@ mod tests {
     /// messages — a clean reason, never the raw JSON body.
     #[tokio::test(flavor = "current_thread")]
     async fn mutation_graphql_error_surfaces_clean_message() {
-        const BODY: &str = r#"{"data":null,"errors":[{"message":"Pull request is not mergeable"}]}"#;
+        const BODY: &str =
+            r#"{"data":null,"errors":[{"message":"Pull request is not mergeable"}]}"#;
         let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
         let client = make_client(&base_uri);
         let err = client
@@ -3516,7 +3518,8 @@ mod tests {
     async fn parse_failure_notice_never_leaks_raw_json_body() {
         // Valid JSON, but the wrong shape for the search-typed parse —
         // exactly the merge reply that triggered the original leak.
-        const BODY: &str = r#"{"data":{"mergePullRequest":{"pullRequest":{"state":"MERGED","merged":true}}}}"#;
+        const BODY: &str =
+            r#"{"data":{"mergePullRequest":{"pullRequest":{"state":"MERGED","merged":true}}}}"#;
         let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
         let client = make_client(&base_uri);
         let body = serde_json::json!({"query": "{}"});

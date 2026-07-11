@@ -3330,14 +3330,30 @@ pub(super) fn commit_upsert(config: &ServerConfig, key: &WorkspaceKey, workspace
 /// reads of pre-Project records, or a workspace with no upstream task),
 /// we skip — Stage 1 doesn't try to back-fill projects for orphan
 /// workspaces.
+/// The user's effective GitHub scope ids from config.yaml: the wizard
+/// selection (`setup.scopes`) unioned with any `providers.github.filters`
+/// org/repo entries — the same set the poller narrows on (see the merge
+/// in `sources_for`). Keeping the two in sync means a repo scoped either
+/// way resolves its `owner/repo` identically.
+pub(crate) fn github_scopes_from_config(
+    cfg: &lazybox_config::Config,
+) -> std::collections::BTreeSet<String> {
+    let mut scopes = cfg.setup.scopes.get("github").cloned().unwrap_or_default();
+    scopes.extend(github_scopes_from_filters(&cfg.providers.github.filters));
+    scopes
+}
+
 /// The exact `owner/repo` slug for a GitHub project key, recovered from
-/// the user's subscribed scopes (`github:owner/repo`) in config.yaml.
-/// Non-lossy where the flat `github-{owner}-{repo}` key isn't. `None`
-/// for non-github keys, unreadable config, or an org-level subscription
-/// with no per-repo scope.
+/// the user's configured scopes (`github:owner/repo`). Non-lossy where
+/// the flat `github-{owner}-{repo}` key isn't. `None` for non-github
+/// keys (checked before any config read), unreadable config, or an
+/// org-level subscription with no per-repo scope.
 fn github_slug_from_config_scopes(key: &lazybox_core::ProjectKey) -> Option<String> {
+    if key.source_prefix() != "github" {
+        return None;
+    }
     let cfg = lazybox_config::Config::load().ok()?;
-    let scopes = cfg.setup.scopes.get("github")?;
+    let scopes = github_scopes_from_config(&cfg);
     key.github_slug_from_scopes(scopes.iter().map(String::as_str))
 }
 
@@ -4617,6 +4633,41 @@ pub fn mark_workspace_read(config: &ServerConfig, key: &WorkspaceKey) {
     workspace.mark_read_all();
     workspace.last_viewed_at = Some(Utc::now());
     commit_upsert(config, key, workspace);
+}
+
+#[cfg(test)]
+mod github_scope_config_tests {
+    use super::*;
+
+    /// The scope set the clone-target recovery matches against is the
+    /// union of the wizard selection and the `providers.github.filters`
+    /// block, so a repo scoped either way resolves — and a hyphenated
+    /// owner recovers losslessly off that merged set. Regression for #326.
+    #[test]
+    fn github_scopes_from_config_unions_setup_and_filters() {
+        let mut cfg = lazybox_config::Config::default();
+        cfg.setup.scopes.insert(
+            "github".into(),
+            ["github:codefly-dev/warden-platform".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        cfg.providers.github.filters = vec![lazybox_config::Filter {
+            org: None,
+            repo: Some("acme/widget".into()),
+            watch: None,
+        }];
+
+        let scopes = github_scopes_from_config(&cfg);
+        assert!(scopes.contains("github:codefly-dev/warden-platform"));
+        assert!(scopes.contains("github:acme/widget"));
+
+        let key = lazybox_core::ProjectKey::github("codefly-dev", "warden-platform");
+        assert_eq!(
+            key.github_slug_from_scopes(scopes.iter().map(String::as_str)),
+            Some("codefly-dev/warden-platform".to_string()),
+        );
+    }
 }
 
 #[cfg(test)]

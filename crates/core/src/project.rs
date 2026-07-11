@@ -229,8 +229,7 @@ mod tests {
         );
         // A local project key never resolves against github scopes.
         assert_eq!(
-            ProjectKey::local("notes")
-                .github_slug_from_scopes(["github:acme/widget"].into_iter()),
+            ProjectKey::local("notes").github_slug_from_scopes(["github:acme/widget"].into_iter()),
             None,
         );
     }

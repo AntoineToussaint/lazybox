@@ -1483,6 +1483,13 @@ fn sanitize_branch_component(raw: &str) -> String {
 /// task's repo string); and finally the lossy key-derived name — only
 /// reached with no scope match and no record, where it still round-trips
 /// non-hyphenated repos.
+///
+/// Invariant this leans on: a workspace can only reach here under a
+/// GitHub project the user actually reached in the UI, and every such
+/// path leaves either a subscribed per-repo scope (added it explicitly)
+/// or a task-seeded record (polling materialized it) behind. If a future
+/// entry point surfaces a GitHub project header with neither, a
+/// hyphenated owner silently falls back to the lossy name again.
 fn clonable_repo_from_project(
     config: &ServerConfig,
     workspace: &Workspace,
@@ -1598,7 +1605,10 @@ async fn provision_worktree(
     // `git init` worktree below instead of an empty, non-git directory.
     let repo = match task {
         Some(task) => task.repo.clone(),
-        None => clonable_repo_from_project(config, workspace, cfg.setup.scopes.get("github")).ok(),
+        None => {
+            let github_scopes = crate::polling::github_scopes_from_config(&cfg);
+            clonable_repo_from_project(config, workspace, Some(&github_scopes)).ok()
+        }
     };
 
     let (worktree, repo_key) = match repo {

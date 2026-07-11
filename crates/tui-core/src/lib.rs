@@ -12,6 +12,7 @@ pub mod action;
 pub mod agent_attention;
 pub mod confirm_latch;
 pub mod editors;
+pub mod help;
 pub mod intent;
 pub mod notify;
 pub mod platform;

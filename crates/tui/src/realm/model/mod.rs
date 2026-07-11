@@ -70,6 +70,13 @@ const TERMINALS_PID: PaneId = PaneId::new(3);
 pub enum Id {
     Splash,
     Help,
+    /// "Ask lazybox" help modal (#302), opened by pressing `?` on the
+    /// `?` help panel. Typing fuzzy-searches the runtime catalog;
+    /// Enter sends the text as a question to the headless help-agent
+    /// run. Conversation state lives in `Model::help_convo` (shared
+    /// `Arc`), so daemon-event handlers stream the answer in without
+    /// remounting.
+    HelpAsk,
     Error,
     Polling,
     Reply,
@@ -256,6 +263,7 @@ impl Id {
                 | Id::SyncStatus
                 | Id::Messages
                 | Id::Help
+                | Id::HelpAsk
                 | Id::SnippetPicker
                 | Id::SnippetBrowser
         )
@@ -339,6 +347,12 @@ pub enum Msg {
     ChoicePicked(Vec<usize>),
     ChoiceRefresh,
     ChoiceBack,
+    /// `?` pressed on the `?` help panel — swap it for the
+    /// "Ask lazybox" modal (#302).
+    HelpAskOpen,
+    /// Question submitted from the `HelpAsk` modal. The modal stays
+    /// mounted; the answer streams back into `Model::help_convo`.
+    HelpAsked(String),
     /// `e` pressed in the snippets browser — close it and open the
     /// global snippets YAML in the user's editor (#237).
     OpenSnippetsFile,
@@ -824,6 +838,25 @@ pub struct Model<T: TerminalAdapter> {
     /// cancelled picker leaves the palette untouched. `None` while no
     /// picker is open.
     pub(crate) theme_picker_prev: Option<String>,
+    /// Help-assistant conversation (#302), shared with a mounted
+    /// `HelpAsk` modal via `Arc` so the daemon-event handlers can
+    /// stream an answer into it without remounting (which would drop
+    /// the user's in-flight typing). Persists across modal open/close
+    /// — the help run stays alive for the app's lifetime so follow-up
+    /// questions reuse the prompt-cached context.
+    pub(crate) help_convo: crate::realm::components::help_ask::SharedHelpConvo,
+    /// Run id of the live help-agent run, captured from the
+    /// `AgentRunStarted` carrying the help sentinel session key.
+    /// `None` before the first question (the run starts lazily) and
+    /// again after `AgentRunFinished` — the next question then starts
+    /// a fresh run (with fresh context).
+    help_run: Option<lazybox_ipc::AgentRunId>,
+    /// True between dispatching `StartAgentRun` and its
+    /// `AgentRunStarted` landing. Questions submitted in that window
+    /// queue in `help_pending_questions` rather than double-starting
+    /// the run.
+    help_run_starting: bool,
+    help_pending_questions: Vec<String>,
     /// Agent ids backing the active `DefaultAgentPicker`, in row order —
     /// `Msg::ChoicePicked(idx)` resolves the id here to persist. Cleared
     /// on mount/unmount.
@@ -1064,6 +1097,10 @@ impl<T: TerminalAdapter> Model<T> {
             jump_choices: Vec::new(),
             theme_choices: Vec::new(),
             theme_picker_prev: None,
+            help_convo: Default::default(),
+            help_run: None,
+            help_run_starting: false,
+            help_pending_questions: Vec::new(),
             default_agent_choices: Vec::new(),
             auto_tour_pending: false,
             tips_enabled: false,
@@ -2062,6 +2099,18 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Lock the shared help conversation (#302). Recovers from a
+    /// poisoned lock — a panicked render elsewhere must not brick the
+    /// help modal for the rest of the session.
+    pub(crate) fn help_convo_mut(
+        &self,
+    ) -> std::sync::MutexGuard<'_, crate::realm::components::help_ask::HelpConvo> {
+        match self.help_convo.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     /// Override the initial sidebar / right-top split percentages
     /// from `~/.lazybox/config.yaml::ui`. Each value is clamped to
     /// `[SPLIT_MIN, SPLIT_MAX]`. `None` keeps the default.
@@ -2979,6 +3028,20 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Msg::InputSubmitted(text) => {
                 let cmds = self.handle_input_submitted(text);
+                self.dispatch_cmds(cmds);
+            }
+            Msg::HelpAskOpen => {
+                // `?` on the help panel: swap the panel for the ask
+                // modal.
+                if matches!(self.modal_stack.last(), Some(Id::Help)) {
+                    self.pop_modal();
+                }
+                self.mount_help_ask();
+            }
+            Msg::HelpAsked(question) => {
+                // The HelpAsk modal stays mounted — the answer streams
+                // back into `help_convo`.
+                let cmds = self.handle_help_asked(question);
                 self.dispatch_cmds(cmds);
             }
             // Polling outcomes — surface as footer notices, never

@@ -644,6 +644,127 @@ mod effects_tests {
         );
     }
 
+    /// Read the initial Enter default of the Confirm modal mounted
+    /// under `id`. `Confirm::state()` exposes the highlighted button as
+    /// a bool so the mount site's default is assertable end-to-end.
+    fn mounted_confirm_default_yes(
+        m: &Model<tuirealm::terminal::TestTerminalAdapter>,
+        id: Id,
+    ) -> bool {
+        use tuirealm::state::{State, StateValue};
+        match m.app.state(&id).expect("confirm modal is mounted") {
+            State::Single(StateValue::Bool(b)) => b,
+            other => panic!("expected a Bool state, got {other:?}"),
+        }
+    }
+
+    /// Issue #312: the issue→PR session-merge prompt now defaults Enter
+    /// to Yes — accepting is the expected, non-destructive path (the
+    /// prompt only appears because a closing PR was detected).
+    #[test]
+    fn merge_prompt_defaults_to_yes() {
+        let mut m = build_model();
+        m.pending_merge_prompts.push_back((
+            WorkspaceKey::new("github:o/r#1"),
+            WorkspaceKey::new("github:o/r#2"),
+            "o/r#1".into(),
+            "o/r#2".into(),
+            1,
+        ));
+        m.maybe_mount_next_merge_prompt();
+        assert_eq!(m.top_modal(), Some(&Id::MergeConfirm));
+        assert!(
+            mounted_confirm_default_yes(&m, Id::MergeConfirm),
+            "issue→PR merge prompt should default to Yes",
+        );
+    }
+
+    /// Issue #312: workspace-removal deletes the worktree (no undo), so
+    /// its confirm keeps Enter on No.
+    #[test]
+    fn removal_prompt_defaults_to_no() {
+        let mut m = build_model();
+        m.pending_removal_prompts
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 0,
+                reason: super::super::RemovalReason::Merged,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
+            "removal prompt should default to No",
+        );
+    }
+
+    /// Issue #312: the clean-worktrees bulk-wipe confirm defaults No.
+    #[test]
+    fn clean_worktrees_prompt_defaults_to_no() {
+        let mut m = build_model();
+        m.mount_clean_worktrees_confirm();
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::CleanWorktreesConfirm),
+            "clean-worktrees prompt should default to No",
+        );
+    }
+
+    /// Issue #312: the inspector's delete-worktree confirm defaults No.
+    #[test]
+    fn inspect_delete_prompt_defaults_to_no() {
+        let mut m = build_model();
+        m.mount_inspect_confirm(lazybox_ipc::WorktreeInspectionDto {
+            path: std::path::PathBuf::from("/tmp/worktrees/o-r-feat"),
+            bare_path: None,
+            branch: Some("feat".into()),
+            session_id: None,
+            reasons: vec!["untracked".into()],
+            size_bytes: 0,
+            last_modified_unix: Some(0),
+            has_uncommitted_changes: false,
+            has_unpushed_commits: false,
+            is_safe_to_delete: false,
+        });
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::InspectConfirm),
+            "inspector delete prompt should default to No",
+        );
+    }
+
+    /// Issue #312: `mount_action_confirm` carries each destructive
+    /// action's declared default from the catalog — Archive defaults No
+    /// (destructive), the on-main spawn defaults Yes (explicit intent,
+    /// benign awareness gate).
+    #[test]
+    fn action_confirm_reads_catalog_default() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        m.mount_action_confirm(
+            Action::Archive,
+            super::super::ActionConfirmTarget::Workspace(SessionKey::from("github:o/r#1")),
+            None,
+        );
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::ActionConfirm),
+            "Archive confirm should default to No",
+        );
+
+        let mut m = build_model();
+        m.mount_action_confirm(
+            Action::SpawnAgentOnMain("claude".into()),
+            super::super::ActionConfirmTarget::Workspace(SessionKey::from("github:o/r#1")),
+            None,
+        );
+        assert!(
+            mounted_confirm_default_yes(&m, Id::ActionConfirm),
+            "agent-on-main confirm should default to Yes",
+        );
+    }
+
     /// Esc on a RemoveOutOfScope modal clears the slot but
     /// produces no command — there's nothing to tell the daemon;
     /// the workspace stays out of scope on its end too.
@@ -2864,6 +2985,38 @@ mod modal_input_responsiveness_tests {
         assert!(m.top_modal().is_none(), "Esc closes the picker");
         assert!(m.theme_picker_prev.is_none(), "restore stash is consumed");
         assert!(m.theme_choices.is_empty(), "choices are released");
+    }
+
+    /// The "Change default agent" settings action routes straight to
+    /// the single-pick agent picker, pre-positioned on the current
+    /// default and with the enabled agent ids stashed for the pick.
+    /// Disk-free: mounting only reads the sidebar's current default.
+    #[test]
+    fn edit_default_agent_action_mounts_the_picker() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let mut m = build_model();
+        m.dispatch_settings_action(SettingsAction::EditDefaultAgent {
+            current: "claude".into(),
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::DefaultAgentPicker));
+        assert!(
+            m.default_agent_choices.iter().any(|id| id == "codex"),
+            "picker offers the enabled agents by id",
+        );
+        m.dispatch_modal_key(key(Key::Esc));
+        assert!(m.top_modal().is_none(), "Esc closes the picker");
+        assert!(m.default_agent_choices.is_empty(), "choices are released");
+    }
+
+    /// `set_default_agent` updates the agent both panes resolve `w`
+    /// against, live — the persist half is covered by the config
+    /// round-trip test. Disk-free.
+    #[test]
+    fn set_default_agent_updates_sidebar_live() {
+        let mut m = build_model();
+        assert_eq!(m.sidebar.default_agent(), "claude");
+        m.set_default_agent("codex");
+        assert_eq!(m.sidebar.default_agent(), "codex");
     }
 
     /// `]` opens the read-only snippets browser from the sidebar
@@ -7388,5 +7541,144 @@ mod help_ask_tests {
             "asking must not dismiss the modal",
         );
         assert_eq!(m.help_convo_mut().turns.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod dismiss_and_messages_tests {
+    //! #309: every footer notice is dismissable with one key (Esc, the
+    //! catalog `DismissNotice` binding) regardless of severity, and
+    //! every non-hint notice also accumulates in a durable, clearable
+    //! messages log surfaced by the `Shift-M` window. Severity still
+    //! only decides auto-fade, never dismissability.
+    use super::super::{Id, Model, Msg};
+    use crate::realm::components::footer::NoticeSeverity;
+    use chrono::Utc;
+    use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn key(code: Key) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Every notice flashed accumulates in the messages log — except
+    /// one-shot Hints, which are ephemeral UI nudges that would only
+    /// clutter the readable history.
+    #[test]
+    fn flash_records_notices_in_the_log_except_hints() {
+        let mut m = build_model();
+        m.flash_info("saved");
+        m.flash_error("boom");
+        m.flash_hint("scroll: alt-screen");
+
+        let logged: Vec<_> = m.status.messages.recent().collect();
+        // Most-recent-first, hint excluded.
+        assert_eq!(logged.len(), 2, "hint must not be logged: {logged:?}");
+        assert_eq!(logged[0].message, "boom");
+        assert_eq!(logged[0].severity, NoticeSeverity::Permanent);
+        assert_eq!(logged[1].message, "saved");
+        assert_eq!(logged[1].severity, NoticeSeverity::Info);
+    }
+
+    /// Esc clears the current notice whatever its severity — the whole
+    /// point of #309. A sticky Permanent error (which never auto-fades)
+    /// is the case that motivated it.
+    #[test]
+    fn esc_dismisses_a_sticky_notice() {
+        let mut m = build_model();
+        m.flash_error("scary red error");
+        assert!(m.status.notice.is_some());
+
+        m.dispatch_key(key(Key::Esc));
+        assert!(
+            m.status.notice.is_none(),
+            "Esc must clear the sticky notice"
+        );
+        // Dismissing the footer surface leaves the durable log intact.
+        assert_eq!(
+            m.status.messages.recent().count(),
+            1,
+            "log survives dismiss"
+        );
+    }
+
+    /// With a quiet footer, Esc keeps its normal (no-op here) meaning —
+    /// the dismiss path is gated on a notice actually being up.
+    #[test]
+    fn esc_is_inert_when_no_notice_is_up() {
+        let mut m = build_model();
+        assert!(m.status.notice.is_none());
+        m.dispatch_key(key(Key::Esc));
+        assert!(m.status.notice.is_none());
+    }
+
+    /// The collision the guard defends against: with a sidebar
+    /// multi-select up, Esc drops the selection FIRST (its established
+    /// meaning) and leaves the notice — a second Esc then clears the
+    /// notice. Dismiss must never silently eat the pane's own Esc.
+    #[test]
+    fn esc_yields_to_a_sidebar_multi_select() {
+        let mut m = build_model();
+        let ws = Workspace::empty(WorkspaceKey::new("local:scratch"), "main", Utc::now());
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+        assert_eq!(m.sidebar.toggle_broadcast_select(), Some(true));
+        assert_eq!(m.sidebar.broadcast_selected_count(), 1);
+
+        m.flash_error("boom");
+        // First Esc: the sidebar consumes it to clear the selection; the
+        // notice stays.
+        m.dispatch_key(key(Key::Esc));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "Esc must clear the multi-select before touching the notice",
+        );
+        assert!(m.status.notice.is_some(), "notice survives the first Esc");
+        // Second Esc: nothing else claims it now, so the notice clears.
+        m.dispatch_key(key(Key::Esc));
+        assert!(m.status.notice.is_none(), "second Esc clears the notice");
+    }
+
+    /// `Shift-M` opens the messages window (catalog → dispatch → mount),
+    /// populated from the logged notices.
+    #[test]
+    fn shift_m_opens_the_messages_window() {
+        let mut m = build_model();
+        m.flash_error("boom");
+        assert!(m.top_modal().is_none(), "no modal before Shift-M");
+
+        m.dispatch_key(KeyEvent::new(Key::Char('M'), KeyModifiers::SHIFT));
+        assert_eq!(m.top_modal(), Some(&Id::Messages));
+
+        // A non-navigation, non-`c` key pops it back off.
+        m.dispatch_modal_key(key(Key::Esc));
+        assert!(m.top_modal().is_none(), "Esc closes the messages window");
+    }
+
+    /// `c` in the window wipes the durable log and leaves the window up,
+    /// now showing the empty placeholder.
+    #[test]
+    fn c_clears_the_log_and_keeps_the_window_open() {
+        let mut m = build_model();
+        m.flash_error("boom");
+        m.mount_messages();
+        assert_eq!(m.top_modal(), Some(&Id::Messages));
+
+        m.update(Msg::MessagesCleared);
+        assert_eq!(m.status.messages.recent().count(), 0, "the log is wiped",);
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Messages),
+            "the window stays up on the empty placeholder",
+        );
     }
 }

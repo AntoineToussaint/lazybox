@@ -198,6 +198,10 @@ pub enum Id {
     /// scrollable view of recent provider-sync outcomes built from
     /// `self.status.sync`. No pending state — dismiss just pops it.
     SyncStatus,
+    /// Notices log window (default `Shift-M`, #309). Scrollable view of
+    /// recent footer notices built from `self.status.messages`; `c`
+    /// clears the log, any other non-scroll key dismisses.
+    Messages,
     /// Spinner + step checklist shown while a first spawn on a fresh
     /// workspace provisions its worktree. Mounted on the first
     /// `WorktreeProgress` daemon event (so an instant resume never
@@ -235,6 +239,11 @@ pub enum Id {
     /// the picked snippet's body (custom text appends after it).
     /// Submit → one delivery per target in `pending_broadcast`.
     BroadcastText,
+    /// Single-pick `Choice` over the enabled agents (`,` Settings →
+    /// "Change default agent"), opened on the current default. Pick →
+    /// persist `setup.default_agent` and update the panes live. Ids
+    /// live in `default_agent_choices`.
+    DefaultAgentPicker,
 }
 
 impl Id {
@@ -252,6 +261,7 @@ impl Id {
             self,
             Id::WorktreeProgress
                 | Id::SyncStatus
+                | Id::Messages
                 | Id::Help
                 | Id::HelpAsk
                 | Id::SnippetPicker
@@ -355,6 +365,9 @@ pub enum Msg {
     PollingTimeout,
     PollingEmptyInbox(Vec<String>),
     ModalDismissed,
+    /// `c` pressed in the messages window (#309) — wipe the notice
+    /// history and re-render the (now empty) window.
+    MessagesCleared,
     /// Sidebar / Right / Terminals routes — kept in case a future
     /// pane goes through tuirealm. Today panes drain themselves
     /// directly inside the orchestrator's pane-dispatch path.
@@ -844,6 +857,10 @@ pub struct Model<T: TerminalAdapter> {
     /// the run.
     help_run_starting: bool,
     help_pending_questions: Vec<String>,
+    /// Agent ids backing the active `DefaultAgentPicker`, in row order —
+    /// `Msg::ChoicePicked(idx)` resolves the id here to persist. Cleared
+    /// on mount/unmount.
+    pub(crate) default_agent_choices: Vec<String>,
     /// Set at startup from `ui.tour_seen` (inverted): `true` means
     /// the feature tour should auto-launch once the panes are
     /// visible. Cleared the moment the tour mounts so it never
@@ -1084,6 +1101,7 @@ impl<T: TerminalAdapter> Model<T> {
             help_run: None,
             help_run_starting: false,
             help_pending_questions: Vec::new(),
+            default_agent_choices: Vec::new(),
             auto_tour_pending: false,
             tips_enabled: false,
             tips_seen: Vec::new(),
@@ -1558,6 +1576,42 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::ThemePicker, modal);
     }
 
+    /// Mount the default-agent picker — a single-pick `Choice` over the
+    /// enabled agents (`self.agents`), opened on the current default.
+    /// Pick → `handle_choice_picked` persists `setup.default_agent` and
+    /// updates the panes live. Agent ids are stashed in
+    /// `default_agent_choices` so the picked index resolves back.
+    pub(crate) fn mount_default_agent_picker(&mut self) {
+        use crate::realm::components::choice::Choice;
+        if matches!(self.modal_stack.last(), Some(Id::DefaultAgentPicker)) {
+            return;
+        }
+        let registry = lazybox_agents::registry();
+        let ids: Vec<String> = self.agents.clone();
+        let labels: Vec<String> = ids
+            .iter()
+            .map(|id| match registry.get(id) {
+                Some(agent) => format!("{}  ·  {id}", agent.display_name()),
+                None => id.clone(),
+            })
+            .collect();
+        let current = self.sidebar.default_agent();
+        let start = ids.iter().position(|id| id == current).unwrap_or(0);
+        self.default_agent_choices = ids;
+        let modal = Choice::single("Used by `w` work-on-this + new-workspace spawns", labels)
+            .title("Default agent")
+            .label(|s: &String| s.clone())
+            .select_index(start);
+        self.mount_modal(Id::DefaultAgentPicker, modal);
+    }
+
+    /// Update the default agent both panes resolve `w` against, live —
+    /// no restart. Mirrors the startup wiring in `apply_sidebar_config`.
+    pub(crate) fn set_default_agent(&mut self, agent: &str) {
+        self.sidebar.set_default_agent(agent);
+        self.right.set_default_agent(agent);
+    }
+
     /// Land the cursor on `key` and follow it with the panes: show its
     /// terminal when it has a live one (so a jump-to-agent keeps you
     /// driving), otherwise fall back to the sidebar. Exits focus mode
@@ -1946,11 +2000,20 @@ impl<T: TerminalAdapter> Model<T> {
         msg: impl Into<String>,
         severity: crate::realm::components::footer::NoticeSeverity,
     ) {
-        use crate::realm::components::footer::Notice;
+        use crate::realm::components::footer::{Notice, NoticeSeverity};
+        let msg = msg.into();
         // Any fresh notice supersedes a sync-error banner, so the
         // "clear on recovery" tag only stays armed while the
         // sync-error notice is the one actually on screen.
         self.sync_error_source = None;
+        // Every notice flashes in the footer AND accumulates in the
+        // durable messages log (#309) — except one-shot Hints, which
+        // are ephemeral UI nudges (`scroll: alt-screen`) that would
+        // only clutter the readable history. Record before the string
+        // is moved into the Notice.
+        if severity != NoticeSeverity::Hint {
+            self.status.messages.record(&msg, severity);
+        }
         self.status.notice = Some(Notice::new(msg, severity));
         self.redraw = true;
     }
@@ -2381,6 +2444,9 @@ impl<T: TerminalAdapter> Model<T> {
         }
         actions.push(SettingsAction::EditProviders);
         actions.push(SettingsAction::EditAgents);
+        actions.push(SettingsAction::EditDefaultAgent {
+            current: self.sidebar.default_agent().to_string(),
+        });
         let skip_permissions = lazybox_config::Config::load()
             .map(|c| c.agent.skip_permissions)
             .unwrap_or(false);
@@ -2436,6 +2502,12 @@ impl<T: TerminalAdapter> Model<T> {
             self.mount_gateway_url_input();
             return;
         }
+        // Default-agent picker is a single Choice that writes straight
+        // to YAML and updates the panes live — no wizard runner.
+        if matches!(action, SettingsAction::EditDefaultAgent { .. }) {
+            self.mount_default_agent_picker();
+            return;
+        }
         let Some((report, sources)) = self.setup.inputs.clone() else {
             tracing::warn!("dispatch_settings_action: no cached inputs");
             return;
@@ -2464,6 +2536,7 @@ impl<T: TerminalAdapter> Model<T> {
             SettingsAction::EditSnippets => return,
             SettingsAction::EditTheme => return,
             SettingsAction::EditLlmGateway { .. } => return,
+            SettingsAction::EditDefaultAgent { .. } => return,
         };
         // Pre-seed the accumulator from persisted state so partial
         // flows don't drop the user's other-provider config.
@@ -2919,6 +2992,17 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::ModalDismissed => {
                 let cmds = self.handle_modal_dismissed();
                 self.dispatch_cmds(cmds);
+            }
+            Msg::MessagesCleared => {
+                // Wipe the durable history and re-render the window
+                // against the now-empty log (it stays open showing the
+                // placeholder). `mount_messages` short-circuits if the
+                // window is already up, so drop it first.
+                self.status.messages.clear();
+                if self.modal_stack.last() == Some(&Id::Messages) {
+                    self.pop_modal();
+                }
+                self.mount_messages();
             }
             Msg::OpenSnippetsFile => {
                 // `e` in the browser: drop the modal, then open the YAML

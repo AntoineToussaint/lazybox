@@ -182,6 +182,17 @@ pub enum Action {
     OpenTour,
     /// Open the debug / sync-status window (Shift+D).
     OpenSyncStatus,
+    /// Open the messages log — a scrollable, clearable list of recent
+    /// footer notices (errors, warnings, info) so a notice that flashed
+    /// and faded, or one the user missed, is still readable after the
+    /// fact. The durable half of the footer's transient surface.
+    OpenMessages,
+    /// Clear the current footer notice regardless of severity. Severity
+    /// still decides auto-fade (Retryable/Info fade on their timers;
+    /// Permanent/Auth stay), but this lets the user swat any notice away
+    /// on demand — the merge false-error (#305) that sat red with no
+    /// way to clear it is the motivating case.
+    DismissNotice,
     /// Open the `,` Settings palette.
     OpenSettings,
     /// Open the theme picker — a live-preview list of every registered
@@ -323,6 +334,8 @@ pub enum ActionKind {
     OpenHelp,
     OpenTour,
     OpenSyncStatus,
+    OpenMessages,
+    DismissNotice,
     OpenSettings,
     OpenThemePicker,
     OpenSnippets,
@@ -422,6 +435,8 @@ impl Action {
             Action::OpenHelp => ActionKind::OpenHelp,
             Action::OpenTour => ActionKind::OpenTour,
             Action::OpenSyncStatus => ActionKind::OpenSyncStatus,
+            Action::OpenMessages => ActionKind::OpenMessages,
+            Action::DismissNotice => ActionKind::DismissNotice,
             Action::OpenSettings => ActionKind::OpenSettings,
             Action::OpenThemePicker => ActionKind::OpenThemePicker,
             Action::OpenSnippets => ActionKind::OpenSnippets,
@@ -499,6 +514,20 @@ impl ActionDef {
                 default_keys: "Shift-D",
                 label: "sync status",
                 describe: "Show recent provider-sync outcomes, last poll times, and errors.",
+                section: Section::Global,
+            },
+            ActionKind::OpenMessages => &Self {
+                kind: ActionKind::OpenMessages,
+                default_keys: "Shift-M",
+                label: "messages",
+                describe: "Open the messages log — a scrollable, clearable history of recent footer notices, so an error that flashed and faded is still readable. Press `c` there to clear it.",
+                section: Section::Global,
+            },
+            ActionKind::DismissNotice => &Self {
+                kind: ActionKind::DismissNotice,
+                default_keys: "Esc",
+                label: "dismiss",
+                describe: "Clear the current footer notice, whatever its severity — retryable, info, permanent, or auth. Severity still decides whether a notice auto-fades on its own; this clears it now. Yields to a live terminal (Esc reaches the program) and to a sidebar multi-select (Esc drops the selection first).",
                 section: Section::Global,
             },
             ActionKind::OpenSettings => &Self {
@@ -894,6 +923,8 @@ impl ActionDef {
             ActionKind::OpenHelp,
             ActionKind::OpenTour,
             ActionKind::OpenSyncStatus,
+            ActionKind::OpenMessages,
+            ActionKind::DismissNotice,
             // The three Jump actions sit together so the help panel
             // reads them as one coherent group.
             ActionKind::JumpToWorkspace,
@@ -1273,28 +1304,42 @@ impl ActionDef {
     pub fn guard(&self) -> Guard {
         match self.kind {
             ActionKind::Quit => Guard::DoublePress,
-            ActionKind::Archive => Guard::Confirm(
-                "Archive the focused workspace? Active sessions \
+            // Kills live sessions and drops the row — no undo. Enter backs out.
+            ActionKind::Archive => Guard::Confirm {
+                prompt: "Archive the focused workspace? Active sessions \
                  are killed and the row drops from the inbox.",
-            ),
-            ActionKind::CloseIssue => Guard::Confirm(
-                "Close this issue upstream (as not planned)? It drops \
+                default_yes: false,
+            },
+            // Mutates the upstream issue (reopen on GitHub to undo). Enter backs out.
+            ActionKind::CloseIssue => Guard::Confirm {
+                prompt: "Close this issue upstream (as not planned)? It drops \
                  out of the inbox once the close lands. Reopen on \
                  GitHub to undo.",
-            ),
-            ActionKind::MergePr => Guard::Confirm(
-                "Merge the focused PR? Mainline branch updates \
+                default_yes: false,
+            },
+            // Explicitly invoked, but merging mutates the mainline branch
+            // immediately and is hard to undo — a reflexive Enter shouldn't merge.
+            ActionKind::MergePr => Guard::Confirm {
+                prompt: "Merge the focused PR? Mainline branch updates \
                  immediately and the PR closes.",
-            ),
-            ActionKind::LongSnooze => Guard::Confirm(
-                "Long-snooze this workspace (~1 year)? It drops from \
+                default_yes: false,
+            },
+            // Hides the workspace for a year. Reversible, but a mis-hit shouldn't
+            // make a row vanish — Enter backs out.
+            ActionKind::LongSnooze => Guard::Confirm {
+                prompt: "Long-snooze this workspace (~1 year)? It drops from \
                  the inbox until then — effectively hidden.",
-            ),
-            ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Guard::Confirm(
-                "Start this session on the shared main checkout instead of \
+                default_yes: false,
+            },
+            // The `b`-variant chords are a deliberate, distinct request to work
+            // on main; the confirm is only an awareness gate and opening the
+            // terminal destroys nothing, so Enter affirms the explicit intent.
+            ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Guard::Confirm {
+                prompt: "Start this session on the shared main checkout instead of \
                  an isolated worktree? Edits and commits land on the shared \
                  branch directly, not a throwaway tree.",
-            ),
+                default_yes: true,
+            },
             _ => Guard::None,
         }
     }
@@ -1304,7 +1349,7 @@ impl ActionDef {
     /// unified Confirm before firing. (Named for history; really
     /// "guard is `Confirm`".)
     pub fn is_destructive(&self) -> bool {
-        matches!(self.guard(), Guard::Confirm(_))
+        matches!(self.guard(), Guard::Confirm { .. })
     }
 
     /// Confirm-modal prompt text, for a `Confirm`-guarded action;
@@ -1312,7 +1357,19 @@ impl ActionDef {
     /// confirm path.
     pub fn confirm_prompt(&self) -> Option<&'static str> {
         match self.guard() {
-            Guard::Confirm(prompt) => Some(prompt),
+            Guard::Confirm { prompt, .. } => Some(prompt),
+            _ => None,
+        }
+    }
+
+    /// Which button the Confirm modal defaults Enter to for a
+    /// `Confirm`-guarded action; `None` for non-confirmed actions. The
+    /// value is declared per action next to its prompt in [`Self::guard`]
+    /// so each destructive action owns its default instead of inheriting
+    /// a blanket No at the mount site.
+    pub fn confirm_default_yes(&self) -> Option<bool> {
+        match self.guard() {
+            Guard::Confirm { default_yes, .. } => Some(default_yes),
             _ => None,
         }
     }
@@ -1419,6 +1476,8 @@ impl ActionKind {
             ActionKind::OpenHelp => "open_help",
             ActionKind::OpenTour => "open_tour",
             ActionKind::OpenSyncStatus => "open_sync_status",
+            ActionKind::OpenMessages => "open_messages",
+            ActionKind::DismissNotice => "dismiss_notice",
             ActionKind::OpenSettings => "open_settings",
             ActionKind::OpenThemePicker => "open_theme_picker",
             ActionKind::OpenSnippets => "open_snippets",
@@ -1457,8 +1516,15 @@ pub enum Guard {
     None,
     /// Needs a timed two-press of the chord (e.g. quit's `q q`).
     DoublePress,
-    /// Mounts a Confirm modal carrying this prompt before firing.
-    Confirm(&'static str),
+    /// Mounts a Confirm modal before firing. `prompt` is the body copy;
+    /// `default_yes` picks which button Enter selects — `false` for a
+    /// destructive / hard-to-undo action (a reflexive Enter backs out),
+    /// `true` when the confirm is only an awareness gate in front of an
+    /// explicitly-requested, benign-at-confirm-time action.
+    Confirm {
+        prompt: &'static str,
+        default_yes: bool,
+    },
 }
 
 /// A resolved catalog row: a static action plus any runtime
@@ -1880,6 +1946,8 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenHelp
         | ActionKind::OpenTour
         | ActionKind::OpenSyncStatus
+        | ActionKind::OpenMessages
+        | ActionKind::DismissNotice
         | ActionKind::OpenSettings
         | ActionKind::OpenThemePicker
         | ActionKind::OpenSnippets
@@ -1965,6 +2033,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn confirm_defaults_match_intent() {
+        // Issue #312: each destructive catalog action declares its own
+        // Enter default next to its prompt. Destructive / hard-to-undo
+        // actions default No (a reflexive Enter backs out); the on-main
+        // awareness gates default Yes (explicitly-requested, benign at
+        // confirm time). This locks the per-action choice so a future
+        // edit can't silently regress it back to a blanket No.
+        let expect = |kind: ActionKind, yes: bool| {
+            assert_eq!(
+                ActionDef::for_kind(kind).confirm_default_yes(),
+                Some(yes),
+                "{kind:?} default"
+            );
+        };
+        expect(ActionKind::Archive, false);
+        expect(ActionKind::CloseIssue, false);
+        expect(ActionKind::MergePr, false);
+        expect(ActionKind::LongSnooze, false);
+        expect(ActionKind::SpawnAgentOnMain, true);
+        expect(ActionKind::SpawnShellOnMain, true);
+
+        // Non-confirmed actions carry no default.
+        assert_eq!(
+            ActionDef::for_kind(ActionKind::Work).confirm_default_yes(),
+            None
+        );
     }
 
     #[test]

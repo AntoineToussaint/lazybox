@@ -1299,6 +1299,27 @@ repos:
         assert_eq!(reparsed.agent.llm_gateway_url, cfg.agent.llm_gateway_url);
     }
 
+    /// `setup.default_agent` is unset on a fresh config (consumers fall
+    /// back to `"claude"`) and a chosen id survives a save/load
+    /// round-trip — the persistence half of the Settings → "Change
+    /// default agent" picker.
+    #[test]
+    fn default_agent_defaults_unset_and_round_trips() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(
+            cfg.setup.default_agent.is_none(),
+            "no default_agent on a fresh config"
+        );
+
+        let yaml = "setup:\n  default_agent: codex\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.setup.default_agent.as_deref(), Some("codex"));
+
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(reparsed.setup.default_agent, cfg.setup.default_agent);
+    }
+
     /// `gateway_url` owns the "blank == unset" invariant so every caller
     /// (spawn injection, settings label, editor pre-fill) reads one
     /// definition of "configured".

@@ -1473,18 +1473,20 @@ fn sanitize_branch_component(raw: &str) -> String {
 /// projects legitimately have none, so they error and the caller's
 /// empty-dir fallback stays the right outcome for them.
 ///
-/// The canonical `owner/repo` lives in the project *record* (populated
-/// from the upstream task's repo string when the project was
-/// registered). We must read it from there rather than reconstruct it
-/// from the key: `github-{owner}-{repo}` joins on `-`, so a key like
-/// `github-mind-build-mind` can't be split back into `mind-build/mind`
-/// — the naive first-hyphen split yields `mind/build-mind`, cloning the
-/// wrong repo. Falling back to the lossy key-derived name only when no
-/// record exists keeps non-hyphenated repos working in the rare
-/// no-record case.
+/// The clone target must not be reconstructed by splitting the flat
+/// `github-{owner}-{repo}` key on `-`: both fields can hold hyphens, so
+/// a key like `github-codefly-dev-warden-platform` splits back to the
+/// wrong `codefly/dev-warden-platform` and clones a repo that doesn't
+/// exist. We recover the exact `owner/repo` from, in order: the user's
+/// subscribed scope slug (`github:owner/repo`, unambiguous); the
+/// canonical name on the project *record* (populated from the upstream
+/// task's repo string); and finally the lossy key-derived name — only
+/// reached with no scope match and no record, where it still round-trips
+/// non-hyphenated repos.
 fn clonable_repo_from_project(
     config: &ServerConfig,
     workspace: &Workspace,
+    github_scopes: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<String, crate::ServerError> {
     let key = lazybox_core::workspace_project_key(workspace).ok_or_else(|| {
         crate::ServerError::Workspace("workspace has no primary task or project".into())
@@ -1493,6 +1495,11 @@ fn clonable_repo_from_project(
         return Err(crate::ServerError::Workspace(format!(
             "project '{key}' has no repo to clone"
         )));
+    }
+    if let Some(slug) =
+        github_scopes.and_then(|s| key.github_slug_from_scopes(s.iter().map(String::as_str)))
+    {
+        return Ok(slug);
     }
     let canonical = config
         .store
@@ -1591,7 +1598,7 @@ async fn provision_worktree(
     // `git init` worktree below instead of an empty, non-git directory.
     let repo = match task {
         Some(task) => task.repo.clone(),
-        None => clonable_repo_from_project(config, workspace).ok(),
+        None => clonable_repo_from_project(config, workspace, cfg.setup.scopes.get("github")).ok(),
     };
 
     let (worktree, repo_key) = match repo {
@@ -5311,8 +5318,32 @@ mod tests {
         let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
         ws.project_key = Some(key);
         assert_eq!(
-            clonable_repo_from_project(&config, &ws).unwrap(),
+            clonable_repo_from_project(&config, &ws, None).unwrap(),
             "AntoineToussaint/lazybox"
+        );
+    }
+
+    /// Regression for #326: a hyphenated owner (`codefly-dev`) can't be
+    /// recovered from the flat key OR from a project record that was
+    /// itself seeded from the lossy key (the blank-workspace path). The
+    /// subscribed scope slug (`github:codefly-dev/warden-platform`)
+    /// carries the boundary, so the clone target resolves correctly even
+    /// with a mangled record present.
+    #[test]
+    fn clonable_repo_from_project_recovers_hyphenated_owner_from_scopes() {
+        let config = ServerConfig::in_memory();
+        let key = lazybox_core::ProjectKey::github("codefly-dev", "warden-platform");
+        // The record the buggy blank-workspace path would have written.
+        save_project(&config, &key, &key.display_name());
+        assert_eq!(key.display_name(), "codefly/dev-warden-platform");
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
+        ws.project_key = Some(key);
+        let scopes = ["github:codefly-dev/warden-platform".to_string()]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            clonable_repo_from_project(&config, &ws, Some(&scopes)).unwrap(),
+            "codefly-dev/warden-platform"
         );
     }
 
@@ -5331,7 +5362,7 @@ mod tests {
         let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
         ws.project_key = Some(key);
         assert_eq!(
-            clonable_repo_from_project(&config, &ws).unwrap(),
+            clonable_repo_from_project(&config, &ws, None).unwrap(),
             "mind-build/mind"
         );
     }
@@ -5348,7 +5379,7 @@ mod tests {
             "lazybox",
         ));
         assert_eq!(
-            clonable_repo_from_project(&config, &ws).unwrap(),
+            clonable_repo_from_project(&config, &ws, None).unwrap(),
             "AntoineToussaint/lazybox"
         );
     }
@@ -5360,14 +5391,14 @@ mod tests {
         let config = ServerConfig::in_memory();
         let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
         ws.project_key = Some(lazybox_core::ProjectKey::local("my-experiment"));
-        assert!(clonable_repo_from_project(&config, &ws).is_err());
+        assert!(clonable_repo_from_project(&config, &ws, None).is_err());
     }
 
     #[test]
     fn clonable_repo_from_project_errs_without_project_or_task() {
         let config = ServerConfig::in_memory();
         let ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
-        assert!(clonable_repo_from_project(&config, &ws).is_err());
+        assert!(clonable_repo_from_project(&config, &ws, None).is_err());
     }
 
     /// Regression for #223: two workspaces with the same name in

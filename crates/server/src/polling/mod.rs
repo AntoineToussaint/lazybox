@@ -3330,6 +3330,17 @@ pub(super) fn commit_upsert(config: &ServerConfig, key: &WorkspaceKey, workspace
 /// reads of pre-Project records, or a workspace with no upstream task),
 /// we skip — Stage 1 doesn't try to back-fill projects for orphan
 /// workspaces.
+/// The exact `owner/repo` slug for a GitHub project key, recovered from
+/// the user's subscribed scopes (`github:owner/repo`) in config.yaml.
+/// Non-lossy where the flat `github-{owner}-{repo}` key isn't. `None`
+/// for non-github keys, unreadable config, or an org-level subscription
+/// with no per-repo scope.
+fn github_slug_from_config_scopes(key: &lazybox_core::ProjectKey) -> Option<String> {
+    let cfg = lazybox_config::Config::load().ok()?;
+    let scopes = cfg.setup.scopes.get("github")?;
+    key.github_slug_from_scopes(scopes.iter().map(String::as_str))
+}
+
 fn ensure_project_for_workspace(config: &ServerConfig, workspace: &Workspace) {
     let Some(project_key) = workspace.project_key.clone() else {
         return;
@@ -3344,12 +3355,15 @@ fn ensure_project_for_workspace(config: &ServerConfig, workspace: &Workspace) {
     }
     // Display name for the project. Prefer the workspace's
     // `primary_task().repo` (the "owner/repo" string) when present —
-    // that's what the sidebar header has always shown. Fall back to
-    // the key-derived name (`github-owner-repo` → `owner/repo`) rather
-    // than the raw key string.
+    // that's what the sidebar header has always shown. A blank
+    // workspace has no task, so recover the exact `owner/repo` from the
+    // user's subscribed scope slug; the key-derived fallback splits
+    // `github-{owner}-{repo}` on the first `-` and mangles a hyphenated
+    // owner (`codefly-dev/warden-platform` → `codefly/dev-warden-platform`).
     let name = workspace
         .primary_task()
         .and_then(|t| t.repo.clone())
+        .or_else(|| github_slug_from_config_scopes(&project_key))
         .unwrap_or_else(|| project_key.display_name());
     let project = lazybox_core::Project::new(project_key.clone(), name, Utc::now());
     let json = match serde_json::to_string(&project) {

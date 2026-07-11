@@ -1539,17 +1539,47 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Install the snippet catalog and then restore the persisted
+    /// "Recent" MRU against it, in that order (#311). This is the boot
+    /// entry point `main.rs` uses: bundling the two steps makes the
+    /// ordering un-splittable, so the prune in `seed_recent_snippets`
+    /// can never run before `self.snippets` is populated (which would
+    /// silently wipe a valid MRU). Keep the two methods it calls out of
+    /// the startup path — call this instead.
+    pub fn apply_snippets_and_seed_recent(
+        &mut self,
+        snippets: lazybox_config::Snippets,
+        store: std::sync::Arc<dyn lazybox_store::Store>,
+    ) {
+        self.apply_snippets(snippets);
+        self.seed_recent_snippets(store);
+    }
+
     /// Seed `recent_snippets` from the state DB and retain the store
-    /// handle for future writes (#311). Called on the embedded boot
-    /// path after `apply_snippets`. A missing / empty / unparseable
-    /// value yields an empty list — non-fatal, MRU just starts fresh.
-    /// The `RECENT_SNIPPETS_MAX` cap is re-applied here in case the
-    /// stored list predates a smaller cap.
+    /// handle for future writes (#311). MUST run *after* `apply_snippets`
+    /// — it prunes keys no longer in the loaded catalog (a renamed /
+    /// deleted snippet) so they don't sit in the MRU consuming a slot
+    /// they can never render into; with an unpopulated catalog it would
+    /// instead wipe every key. Without the prune a small rotating set of
+    /// live keys never evicts the dead ones, permanently shrinking the
+    /// visible Recent group. The startup path enforces the ordering via
+    /// `apply_snippets_and_seed_recent`; call that, not this, outside of
+    /// tests. A missing / empty / unparseable value yields an empty list
+    /// — non-fatal, MRU just starts fresh. The `RECENT_SNIPPETS_MAX` cap
+    /// is re-applied here in case the stored list predates a smaller cap.
     pub fn seed_recent_snippets(&mut self, store: std::sync::Arc<dyn lazybox_store::Store>) {
+        // Only true when we loaded a value AND the prune/cap actually
+        // shortened it — gates the flush-back below so a read failure,
+        // an unparseable value, or an already-clean list never triggers
+        // a write (which would clobber recoverable bytes with `[]`).
+        let mut shortened = false;
         match store.get_kv(RECENT_SNIPPETS_KV_KEY) {
             Ok(Some(json)) => match serde_json::from_str::<Vec<String>>(&json) {
                 Ok(mut recent) => {
+                    let before = recent.len();
+                    recent.retain(|k| self.snippets.get(k).is_some());
                     recent.truncate(RECENT_SNIPPETS_MAX);
+                    shortened = recent.len() != before;
                     self.recent_snippets = recent;
                 }
                 Err(e) => tracing::warn!("parse recent_snippets failed: {e}"),
@@ -1558,6 +1588,14 @@ impl<T: TerminalAdapter> Model<T> {
             Err(e) => tracing::warn!("read recent_snippets failed: {e}"),
         }
         self.recent_snippets_store = Some(store);
+        // Flush the pruned list back so dead keys don't linger in the DB
+        // across future seeds — but only when the load succeeded and
+        // dropped something, so we never overwrite a valid or corrupt
+        // stored value with an empty list. Best-effort, like every MRU
+        // write.
+        if shortened {
+            self.persist_recent_snippets();
+        }
     }
 
     /// Mount the read-only snippets browser (`]`, or the Settings

@@ -271,6 +271,33 @@ pub enum ScrollOutcome {
     Moved { offset: u64, total: u64, len: u64 },
 }
 
+/// How a mouse-wheel tick over the focused terminal should be handled.
+/// The wheel always means "scroll", but *who* scrolls depends on which
+/// screen the inner program is on and whether it asked for mouse
+/// reporting — so the orchestrator resolves the whole decision in one
+/// focused-terminal lookup rather than probing several booleans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelRoute {
+    /// Primary screen: the pane history belongs to lazybox, so scroll
+    /// the local libghostty scrollback in-process (no daemon round
+    /// trip). Covers plain shells AND primary-screen apps that enable
+    /// mouse tracking only for clicks (Claude Code) — they do not own
+    /// the transcript scrollback, so the wheel is lazybox's (#321).
+    LocalScrollback,
+    /// Alt-screen app that enabled mouse reporting (vim `mouse=a`,
+    /// htop, less `--mouse`): forward the wheel as an SGR mouse report
+    /// so the app scrolls its own buffer.
+    ForwardSgr,
+    /// Alt-screen app that did NOT enable mouse reporting (less, man,
+    /// the git pager, vim without `mouse`): it owns the visible buffer
+    /// but there is no lazybox scrollback to move into and no mouse
+    /// protocol to speak, so synthesize arrow-key presses — xterm's
+    /// `alternateScroll`, which every terminal-in-terminal implements.
+    /// `app_cursor` selects the SS3 (`ESC O A`) vs CSI (`ESC [ A`) form
+    /// from the terminal's DECCKM (application-cursor-keys) mode.
+    AlternateScrollArrows { app_cursor: bool },
+}
+
 /// What the user right-clicked on inside the terminal grid. Returned
 /// by [`TerminalStack::target_at`] so the model can route each kind
 /// to the right opener: URLs and issue references go to the browser,
@@ -1154,37 +1181,37 @@ impl TerminalStack {
             .unwrap_or(false)
     }
 
-    /// True if the focused terminal's inner process is on the
-    /// alternate screen (vim, less, fzf, tmux copy-mode — i.e. a
-    /// full-screen TUI that owns its visible buffer). The wheel
-    /// handler forwards a scroll to the inner app as an SGR mouse
-    /// report ONLY here: on the alt-screen there is no lazybox
-    /// scrollback to move into, so the app must scroll itself. On the
-    /// PRIMARY screen the pane history belongs to lazybox, so the wheel
-    /// scrolls the local scrollback even when the app tracks mouse
-    /// (Claude Code enables 1000/1006 for clicks but does not own the
-    /// transcript scrollback — #321).
-    pub fn focused_terminal_in_alt_screen(&self) -> bool {
+    /// Decide how a mouse-wheel tick over the focused terminal should
+    /// be handled — see [`WheelRoute`]. Resolved in a single
+    /// focused-terminal lookup: the primary/alt-screen split and the
+    /// mouse-tracking probe all read the same VT, so the whole routing
+    /// decision is one place instead of the handler probing several
+    /// booleans that could disagree if the focus moved between them.
+    pub fn wheel_route(&self) -> WheelRoute {
         let Some(id) = self.focused_terminal_id() else {
-            return false;
+            return WheelRoute::LocalScrollback;
         };
         let Some(slot) = self.terminals.get(&id) else {
-            return false;
+            return WheelRoute::LocalScrollback;
         };
-        slot.vt
-            .terminal
-            .mode(vt::terminal::Mode::ALT_SCREEN)
-            .unwrap_or(false)
-            || slot
-                .vt
-                .terminal
-                .mode(vt::terminal::Mode::ALT_SCREEN_SAVE)
-                .unwrap_or(false)
-            || slot
-                .vt
-                .terminal
-                .mode(vt::terminal::Mode::ALT_SCREEN_LEGACY)
-                .unwrap_or(false)
+        let t = &slot.vt.terminal;
+        let on_alt_screen = t.mode(vt::terminal::Mode::ALT_SCREEN).unwrap_or(false)
+            || t.mode(vt::terminal::Mode::ALT_SCREEN_SAVE).unwrap_or(false)
+            || t.mode(vt::terminal::Mode::ALT_SCREEN_LEGACY)
+                .unwrap_or(false);
+        // Primary screen → the pane history is lazybox's, scroll it —
+        // even for a Claude Code that tracks mouse for clicks (#321).
+        if !on_alt_screen {
+            return WheelRoute::LocalScrollback;
+        }
+        // Alt-screen: the app owns the buffer. If it speaks mouse,
+        // forward SGR; otherwise fall back to xterm alternateScroll.
+        if t.is_mouse_tracking().unwrap_or(false) {
+            WheelRoute::ForwardSgr
+        } else {
+            let app_cursor = t.mode(vt::terminal::Mode::DECCKM).unwrap_or(false);
+            WheelRoute::AlternateScrollArrows { app_cursor }
+        }
     }
 
     /// Encode a mouse event for the focused terminal using its
@@ -4385,6 +4412,15 @@ mod footer_scroll_independence {
     /// This drives the real key handler (`handle_key`), not
     /// `scroll_active` directly, so a regression in the key routing —
     /// the modifier match, the `PageUp`/`Home`/`End` arms — fails here.
+    ///
+    /// Entry point is the pane's `handle_key` rather than
+    /// `Model::dispatch_key`: the latter ends every keystroke in
+    /// `sync_panes`, which in a bare model (no selected sidebar
+    /// workspace) resets the active session and would mask the scroll.
+    /// That's a harness gap, not a product bug — typing into a live
+    /// terminal proves `sync_panes` preserves the session in real use —
+    /// but it does mean the top-level keyboard route isn't covered
+    /// end-to-end here; `handle_key` is the closest faithful seam.
     #[test]
     fn shift_pageup_moves_viewport_and_shift_end_returns() {
         let mut stack = agent_stack_with_scrollback();

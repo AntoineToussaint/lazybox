@@ -918,6 +918,15 @@ impl<T: TerminalAdapter> Model<T> {
                 // Forward CLICK-down to mouse-tracking inner programs
                 // only when we're NOT claiming for selection — i.e.,
                 // non-left buttons. Left clicks are deferred.
+                //
+                // NOTE: clicks forward to any mouse-tracking app
+                // regardless of screen, but the WHEEL only forwards on
+                // the alt-screen (see `wheel_route`). The asymmetry is
+                // deliberate: a click has no lazybox-side meaning so it
+                // belongs to the app, whereas a primary-screen wheel is
+                // "scroll the pane history", which is lazybox's (#321).
+                // Don't "harmonize" these by gating clicks on the
+                // alt-screen — that breaks clicking Claude's in-TUI UI.
                 if !claim_for_selection
                     && rect_contains(right_bottom_rect, m.column, m.row)
                     && self.focus == PaneFocus::Terminals
@@ -1140,83 +1149,110 @@ impl<T: TerminalAdapter> Model<T> {
                 if !rect_contains(right_bottom_rect, m.column, m.row) {
                     return;
                 }
-                // Forward the wheel to the inner program ONLY when it's
-                // on the alt-screen (vim, less, fzf, tmux copy-mode) —
-                // there the app owns the visible buffer and there is no
-                // lazybox scrollback to move into, so an SGR wheel report
-                // is the only thing that scrolls. On the PRIMARY screen a
-                // mouse-tracking app (Claude Code enables 1000/1006 for
-                // click support) does NOT own the scrollback: the pane
-                // history is lazybox's, so the wheel must scroll it —
-                // otherwise the report vanishes into an app that ignores
-                // it and scrolling looks dead. Once tmux stopped setting
-                // `mouse on` (#306), `tracks_mouse` began reflecting the
-                // inner app, which silently routed every primary-screen
-                // Claude wheel to this forwarding branch (#321).
-                if self.terminals.focused_terminal_tracks_mouse()
-                    && self.terminals.focused_terminal_in_alt_screen()
-                {
-                    // Damped: every wheel event on this path is a
-                    // daemon round trip + inner-program repaint, so
-                    // the momentum tail must decay and hard-stop.
-                    let scaled = self.dampen_scroll_step(raw_up);
-                    if scaled == 0 {
-                        return;
+                // Who scrolls depends on which screen the inner program
+                // is on (see `WheelRoute`). The whole decision is one
+                // focused-terminal lookup so the branches can't disagree.
+                // Once tmux stopped setting `mouse on` (#306),
+                // `is_mouse_tracking` began reflecting the inner app,
+                // which silently routed every primary-screen Claude wheel
+                // into an SGR report the app ignores — scrolling looked
+                // dead (#321). Gating the forward on the alt-screen fixes
+                // it.
+                use crate::components::terminal_stack::WheelRoute;
+                match self.terminals.wheel_route() {
+                    WheelRoute::ForwardSgr => {
+                        // Damped: every wheel event on this path is a
+                        // daemon round trip + inner-program repaint, so
+                        // the momentum tail must decay and hard-stop.
+                        let scaled = self.dampen_scroll_step(raw_up);
+                        if scaled == 0 {
+                            return;
+                        }
+                        let cell =
+                            self.terminals
+                                .screen_to_cell(right_bottom_rect, m.column, m.row);
+                        let encoded = cell.and_then(|(cell_col, cell_row)| {
+                            let button = if raw_up {
+                                libghostty_vt::mouse::Button::Four
+                            } else {
+                                libghostty_vt::mouse::Button::Five
+                            };
+                            self.terminals.encode_mouse(
+                                libghostty_vt::mouse::Action::Press,
+                                Some(button),
+                                cell_col,
+                                cell_row,
+                            )
+                        });
+                        if let Some((terminal_id, bytes)) = encoded {
+                            // One wheel notch encodes one line for the
+                            // inner program, but the damper computed a
+                            // multi-line step. Repeat the encoding
+                            // `scaled` times in a SINGLE Write so the
+                            // gesture moves the full step in one daemon
+                            // round trip instead of N writes of one
+                            // notch each.
+                            let payload = bytes.repeat(scaled.max(1) as usize);
+                            self.send_cmd(IpcCommand::Write {
+                                terminal_id,
+                                bytes: payload,
+                            });
+                            self.redraw = true;
+                        }
+                        // Over pane chrome (`encoded` is None) there is
+                        // nothing to forward — the alt-screen has no
+                        // lazybox scrollback either, so drop the event.
                     }
-                    let cell = self
-                        .terminals
-                        .screen_to_cell(right_bottom_rect, m.column, m.row);
-                    let encoded = cell.and_then(|(cell_col, cell_row)| {
-                        let button = if raw_up {
-                            libghostty_vt::mouse::Button::Four
-                        } else {
-                            libghostty_vt::mouse::Button::Five
+                    WheelRoute::AlternateScrollArrows { app_cursor } => {
+                        // xterm alternateScroll: an alt-screen app that
+                        // never enabled mouse reporting (less, man, the
+                        // git pager, vim without `mouse`) still scrolls on
+                        // arrow keys. Only fire over the grid — a wheel on
+                        // the tab strip / chrome is not a scroll target.
+                        if self
+                            .terminals
+                            .screen_to_cell(right_bottom_rect, m.column, m.row)
+                            .is_none()
+                        {
+                            return;
+                        }
+                        let scaled = self.dampen_scroll_step(raw_up);
+                        if scaled == 0 {
+                            return;
+                        }
+                        let Some(terminal_id) = self.terminals.focused_terminal_id() else {
+                            return;
                         };
-                        self.terminals.encode_mouse(
-                            libghostty_vt::mouse::Action::Press,
-                            Some(button),
-                            cell_col,
-                            cell_row,
-                        )
-                    });
-                    if let Some((terminal_id, bytes)) = encoded {
-                        // One wheel notch encodes one line for the
-                        // inner program, but the damper computed a
-                        // multi-line step. Repeat the encoding
-                        // `scaled` times in a SINGLE Write so the
-                        // gesture moves the full step in one daemon
-                        // round trip instead of N writes of one
-                        // notch each.
-                        let payload = bytes.repeat(scaled.max(1) as usize);
+                        let arrow: &[u8] = match (raw_up, app_cursor) {
+                            (true, false) => b"\x1b[A",
+                            (false, false) => b"\x1b[B",
+                            (true, true) => b"\x1bOA",
+                            (false, true) => b"\x1bOB",
+                        };
+                        let payload = arrow.repeat(scaled.max(1) as usize);
                         self.send_cmd(IpcCommand::Write {
                             terminal_id,
                             bytes: payload,
                         });
                         self.redraw = true;
-                        return;
                     }
-                    // Mouse-tracking flag was up but the event mapped to
-                    // pane chrome or encoded to nothing — fall through to
-                    // the local viewport with the damped step.
-                    let delta = if raw_up { -scaled } else { scaled };
-                    let _ = self.terminals.scroll_active(delta);
-                    self.redraw = true;
-                    return;
+                    WheelRoute::LocalScrollback => {
+                        // Primary screen — the pane history is lazybox's.
+                        // The viewport move is a pure in-process libghostty
+                        // call, no daemon round trip, so no damper: every
+                        // OS wheel event moves a fixed small step and the
+                        // view stops exactly when the events stop, like a
+                        // native terminal.
+                        const LOCAL_WHEEL_STEP: isize = 3;
+                        let delta = if raw_up {
+                            -LOCAL_WHEEL_STEP
+                        } else {
+                            LOCAL_WHEEL_STEP
+                        };
+                        let _ = self.terminals.scroll_active(delta);
+                        self.redraw = true;
+                    }
                 }
-                // Local scrollback (inner program is on the primary
-                // screen — whether or not it tracks mouse): the viewport
-                // move is a pure in-process libghostty call, no daemon
-                // round trip — so no damper. Every OS wheel event moves a
-                // fixed small step and the view stops exactly when the
-                // events stop, like a native terminal.
-                const LOCAL_WHEEL_STEP: isize = 3;
-                let delta = if raw_up {
-                    -LOCAL_WHEEL_STEP
-                } else {
-                    LOCAL_WHEEL_STEP
-                };
-                let _ = self.terminals.scroll_active(delta);
-                self.redraw = true;
             }
             _ => {}
         }

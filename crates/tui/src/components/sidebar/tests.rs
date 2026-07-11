@@ -1925,6 +1925,23 @@ mod done_alert_tests {
         assert_eq!(sb.agent_state(&key), Some(AgentState::Working));
     }
 
+    /// Removing a workspace drops its agent-state entry, so a churn of
+    /// closed/merged workspaces can't leak stale keys into the map over
+    /// a long session.
+    #[test]
+    fn removing_a_workspace_prunes_its_agent_state() {
+        let (mut sb, key) = sidebar_with_one_workspace();
+        let ws_key = sb.workspaces.get(&key).unwrap().key.clone();
+        sb.on_event(&agent_state(&key, AgentState::Working));
+        assert_eq!(sb.agent_state(&key), Some(AgentState::Working));
+        sb.on_event(&Event::WorkspaceRemoved(ws_key));
+        assert_eq!(
+            sb.agent_state(&key),
+            None,
+            "state entry pruned with the workspace"
+        );
+    }
+
     /// Footer notices must never carry the raw workspace name —
     /// issue/PR workspaces are named after their full issue title,
     /// which displaces the footer's shortcut hints (#291). Both the

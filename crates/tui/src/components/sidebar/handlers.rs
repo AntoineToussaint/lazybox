@@ -263,6 +263,7 @@ impl Sidebar {
                 let session_key: SessionKey = key.into();
                 self.workspaces.remove(&session_key);
                 self.broadcast_selected.remove(&session_key);
+                self.agents.remove(&session_key);
                 self.recompute_visible();
             }
             Event::SessionCreated(session) => {

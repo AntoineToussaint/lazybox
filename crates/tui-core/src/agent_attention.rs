@@ -13,17 +13,19 @@
 //! "any ordering, including `Done → Idle`, passes" — simply
 //! unrepresentable (issue #327).
 //!
-//! Every incoming reading folds in through [`apply_agent_state`], which
-//! routes it through the ONE transition validator the daemon already
-//! commits its own state through
-//! ([`lazybox_agents::AgentStateMachine::transition`]). Sharing that
-//! function — rather than re-deriving the rules here — is what keeps the
-//! client and daemon from drifting: the client only ever stores a legal
-//! successor of its prior value, so a stray `Idle` can't blank a `Done`
-//! and no reading can bounce the status through a contradiction. The
-//! daemon remains the source of truth (it damps the ambiguous PTY
-//! readings before they're ever broadcast); this map is a coherent
-//! projection of the states it emits.
+//! The daemon is the single state machine: it commits every reading
+//! through `AgentStateMachine::transition`, damps the ambiguous PTY
+//! flaps, and broadcasts only legal, deduplicated transitions
+//! (`crates/agents/src/state_machine.rs`). This map therefore just
+//! mirrors the latest broadcast state verbatim through
+//! [`apply_agent_state`] — it does NOT re-run the transition rules. A
+//! second copy of the machine here would be a second cached state that
+//! can desync from the daemon's on a dropped broadcast (the bus is
+//! lossy — a lagging receiver skips ahead, and agent state isn't in the
+//! reconnect `Snapshot`); mirroring verbatim stays self-healing, folding
+//! straight to whatever the daemon most recently reported. The single
+//! value is what makes the illegal combinations unrepresentable; the
+//! daemon is what makes each value legal.
 //!
 //! ## Why this state lives in the sidebar, not on `Workspace`
 //!
@@ -40,7 +42,6 @@
 //! reconstructed from `Event::AgentState` deltas — the daemon is still
 //! the source of truth.
 
-use lazybox_agents::AgentStateMachine;
 use lazybox_core::{SessionKey, Workspace};
 use lazybox_ipc::AgentState;
 use std::collections::HashMap;
@@ -51,9 +52,6 @@ use std::collections::HashMap;
 /// contradict each other the way three independently-mutated sets could.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StateChange {
-    /// The stored state moved to a new value — the caller redraws.
-    /// `false` on a repeat/no-op reading or a rejected illegal edge.
-    pub changed: bool,
     /// The workspace's "needs input" membership flipped in either
     /// direction. Only this flip changes the visible row list (its
     /// per-repo attention counter reads asking-ness), so the caller
@@ -68,36 +66,32 @@ pub struct StateChange {
     pub now_done: bool,
 }
 
-/// Fold an `Event::AgentState` reading for `workspace_key` into the
-/// per-session state map, returning how the workspace's attention
-/// signals changed.
+/// Store the daemon's latest `AgentState` reading for `workspace_key`,
+/// returning how the workspace's attention signals changed.
 ///
-/// The candidate is routed through
-/// [`AgentStateMachine::transition`] — the same validator the daemon
-/// commits through — so the map only ever holds a legal successor of
-/// its prior value. A no-op (repeat reading) or a structurally
-/// forbidden edge (`Done` staying sticky against a bare `Idle`) leaves
-/// the state untouched and reports [`StateChange::default`] (all-false).
+/// The daemon has already validated and damped the reading (see the
+/// module docs), so this mirrors it verbatim — no client-side transition
+/// rules — which keeps the map self-healing against a dropped broadcast.
+/// A repeat of the current state is a no-op that reports
+/// [`StateChange::default`] (all-false) so a streaming agent's per-chunk
+/// re-broadcast neither re-alerts nor re-renders.
 pub fn apply_agent_state(
     states: &mut HashMap<SessionKey, AgentState>,
     workspace_key: &SessionKey,
     incoming: AgentState,
 ) -> StateChange {
-    let prev = states.get(workspace_key).copied();
-    let Some(next) = AgentStateMachine::transition(prev, incoming) else {
+    let prev = states.insert(workspace_key.clone(), incoming);
+    if prev == Some(incoming) {
         return StateChange::default();
-    };
-    states.insert(workspace_key.clone(), next);
-    // `transition` returns `None` on a self-loop, so a `Some(next)` that
-    // is `InputNeeded` / `Done` is always a rising edge from a different
+    }
+    // Past the repeat guard the state genuinely moved, so an `incoming`
+    // of `InputNeeded` / `Done` is always a rising edge from a different
     // prior state.
     let was_asking = prev == Some(AgentState::InputNeeded);
-    let is_asking = next == AgentState::InputNeeded;
     StateChange {
-        changed: true,
-        asking_changed: was_asking != is_asking,
-        now_asking: is_asking,
-        now_done: next == AgentState::Done,
+        asking_changed: was_asking != (incoming == AgentState::InputNeeded),
+        now_asking: incoming == AgentState::InputNeeded,
+        now_done: incoming == AgentState::Done,
     }
 }
 
@@ -253,21 +247,21 @@ mod tests {
         states.get(key).copied()
     }
 
-    // ── apply_agent_state: the transition validator ───────────────
+    // ── apply_agent_state: the verbatim mirror ────────────────────
 
     #[test]
     fn first_reading_stores_the_state_and_reports_the_edge() {
         let mut states = HashMap::new();
         let ch = apply_agent_state(&mut states, &ws_key(1), InputNeeded);
         assert_eq!(state_of(&states, &ws_key(1)), Some(InputNeeded));
-        assert!(ch.changed && ch.asking_changed && ch.now_asking && !ch.now_done);
+        assert!(ch.asking_changed && ch.now_asking && !ch.now_done);
     }
 
     #[test]
     fn repeat_reading_is_a_silent_no_op() {
         // The daemon re-emits the same state on every output chunk. A
-        // self-loop must not re-alert or it would spam the OS
-        // notification center every second a prompt is on screen.
+        // repeat must not re-alert or it would spam the OS notification
+        // center every second a prompt is on screen.
         let mut states = HashMap::new();
         apply_agent_state(&mut states, &ws_key(1), InputNeeded);
         let ch = apply_agent_state(&mut states, &ws_key(1), InputNeeded);
@@ -280,7 +274,7 @@ mod tests {
         let mut states = HashMap::new();
         apply_agent_state(&mut states, &ws_key(1), InputNeeded);
         let ch = apply_agent_state(&mut states, &ws_key(1), Working);
-        assert!(ch.changed && ch.asking_changed && !ch.now_asking);
+        assert!(ch.asking_changed && !ch.now_asking);
         assert_eq!(state_of(&states, &ws_key(1)), Some(Working));
     }
 
@@ -290,36 +284,33 @@ mod tests {
         apply_agent_state(&mut states, &ws_key(1), Working);
         let ch = apply_agent_state(&mut states, &ws_key(1), Done);
         assert!(ch.now_done && !ch.now_asking);
-        // A repeat Done is a self-loop: no second alert.
+        // A repeat Done must not re-alert.
         let again = apply_agent_state(&mut states, &ws_key(1), Done);
-        assert!(!again.changed && !again.now_done);
+        assert_eq!(again, StateChange::default());
     }
 
-    /// The reported bug: an agent reaches `Done`, then a stray `Idle`
-    /// reading arrives. The old three-set design cleared the done-set,
-    /// leaving every set empty — "no status at all". The single state
-    /// routed through the shared validator keeps `Done` sticky against
-    /// a bare `Idle`, so the status can never blank.
+    /// The client mirrors the daemon's latest validated state and does
+    /// not re-stick `Done` itself. The daemon owns end-of-turn
+    /// stickiness — it never broadcasts `Done → Idle` — so under normal
+    /// operation `Done` holds. But if an `Idle` does reach us (a dropped
+    /// intermediate broadcast, then the daemon's later state), mirroring
+    /// heals to it rather than pinning a stale `✓` forever. Either way
+    /// the single slot stays coherent: never a contradiction, never the
+    /// "empty in all three sets = no status" blank of the old design.
     #[test]
-    fn stray_idle_after_done_never_blanks_the_status() {
+    fn client_mirrors_daemon_and_self_heals() {
         let mut states = HashMap::new();
-        apply_agent_state(&mut states, &ws_key(1), Working);
-        apply_agent_state(&mut states, &ws_key(1), Done);
-        let ch = apply_agent_state(&mut states, &ws_key(1), Idle);
-        assert_eq!(ch, StateChange::default(), "Done → Idle is rejected");
-        assert_eq!(state_of(&states, &ws_key(1)), Some(Done));
-        let ws = sample_workspace(1);
-        assert!(workspace_is_done(&ws, &states));
-        assert!(!workspace_is_asking(&ws, &states));
-        assert!(!workspace_is_working(&ws, &states));
+        let k = ws_key(1);
+        apply_agent_state(&mut states, &k, Working);
+        apply_agent_state(&mut states, &k, Done);
+        assert_eq!(state_of(&states, &k), Some(Done));
+        let ch = apply_agent_state(&mut states, &k, Idle);
+        assert_eq!(state_of(&states, &k), Some(Idle), "heals to the latest");
+        assert!(!ch.now_asking && !ch.now_done);
     }
 
-    /// The full reported sequence — `Done`, a `Working` reading, then
-    /// `Idle` — must leave exactly one coherent state at every step,
-    /// never a contradiction or a blank. (A `Working` reaching the
-    /// client is already daemon-vetted as real progress/resume; the
-    /// stray-`Working`-vs-`Done` damping lives on the daemon, which owns
-    /// the affirmative-vs-ambiguous signal the client doesn't carry.)
+    /// A `Done → Working → Idle` sequence leaves exactly one coherent
+    /// state at every step — never a contradiction or a blank.
     #[test]
     fn done_then_working_then_idle_stays_coherent() {
         let mut states = HashMap::new();
@@ -328,43 +319,34 @@ mod tests {
         let mut seen = Vec::new();
         for reading in [Done, Working, Idle] {
             apply_agent_state(&mut states, &k, reading);
-            let pills = [
+            let lit = [
                 workspace_is_asking(&ws, &states),
                 workspace_is_working(&ws, &states),
                 workspace_is_done(&ws, &states),
-            ];
-            let lit = pills.iter().filter(|p| **p).count();
+            ]
+            .iter()
+            .filter(|p| **p)
+            .count();
             assert!(lit <= 1, "at most one pill lit (reading {reading:?})");
             seen.push(state_of(&states, &k));
         }
-        // Done held against the stray Working? No — a Working reading is
-        // legitimate resume at the client boundary, so it advances; the
-        // point is that each step is a single defined state.
         assert_eq!(seen, vec![Some(Done), Some(Working), Some(Idle)]);
     }
 
-    /// Table test over every `(prior, incoming)` pair: the stored result
-    /// is always a legal successor, exactly one projection is ever lit,
-    /// and the only prior→incoming that fails to advance are self-loops
-    /// and the forbidden `Done → Idle` edge.
+    /// Table over every `(prior, incoming)` pair: the stored result is
+    /// always the incoming state (the client mirrors the daemon), a
+    /// repeat is a silent no-op, and no state lights more than one pill.
     #[test]
-    fn every_transition_is_defined_and_leaves_at_most_one_pill() {
+    fn every_reading_mirrors_and_leaves_at_most_one_pill() {
         let ws = sample_workspace(1);
         for prior in ALL {
             for incoming in ALL {
                 let mut states = HashMap::new();
                 states.insert(ws_key(1), prior);
                 let ch = apply_agent_state(&mut states, &ws_key(1), incoming);
-                let now = state_of(&states, &ws_key(1)).unwrap();
-
-                let forbidden = (prior, incoming) == (Done, Idle);
-                let self_loop = prior == incoming;
-                if self_loop || forbidden {
-                    assert!(!ch.changed, "{prior:?} → {incoming:?} must not commit");
-                    assert_eq!(now, prior, "{prior:?} → {incoming:?} holds prior");
-                } else {
-                    assert!(ch.changed, "{prior:?} → {incoming:?} must commit");
-                    assert_eq!(now, incoming, "{prior:?} → {incoming:?} advances");
+                assert_eq!(state_of(&states, &ws_key(1)), Some(incoming));
+                if prior == incoming {
+                    assert_eq!(ch, StateChange::default(), "{prior:?} repeat is a no-op");
                 }
 
                 let lit = [

@@ -599,13 +599,14 @@ impl Sidebar {
         session_key: &SessionKey,
         state: lazybox_ipc::AgentState,
     ) -> bool {
-        // "Already displays it" = folding this reading in would not move
-        // the stored state — a repeat ping (self-loop) or a forbidden
-        // edge. Route the candidate through the same validator
-        // `apply_agent_state` uses so the skip-redraw predicate can't
-        // disagree with what the event handler would actually do.
-        let current = self.agents.get(session_key).copied();
-        lazybox_agents::AgentStateMachine::transition(current, state).is_none()
+        // "Already displays it" = the stored state already equals this
+        // reading, so folding it in would be a no-op. An absent entry
+        // renders as `Idle`, so treat it as such.
+        self.agents
+            .get(session_key)
+            .copied()
+            .unwrap_or(lazybox_ipc::AgentState::Idle)
+            == state
     }
 
     /// Take any pending desktop notifications queued by event

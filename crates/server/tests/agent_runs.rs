@@ -210,7 +210,7 @@ async fn recv_agent_event(client: &mut lazybox_ipc::Client) -> Event {
 }
 
 /// Captures the `ClaudeStreamConfig` the server builds, then behaves
-/// like an immediately-EOFing process.
+/// like a process whose stdout is immediately at EOF.
 struct CapturingSpawner {
     captured: Arc<std::sync::Mutex<Option<ClaudeStreamConfig>>>,
 }

@@ -752,7 +752,7 @@ async fn run_embedded_realm(
         } else {
             user_config.setup.agents.iter().cloned().collect()
         };
-        model.set_agents(agents);
+        model.set_agents(agents.clone());
         // Keymap = the selected in-tree preset (#102 P4) as a base
         // layer, with the user's explicit `ui.action_keys` on top so
         // individual tweaks win over the preset.
@@ -764,6 +764,13 @@ async fn run_embedded_realm(
             .unwrap_or_default();
         overrides.extend(user_config.ui.action_keys.clone());
         model.apply_action_key_overrides(overrides);
+        // Per-agent model tiers (`agents.<id>.models`, with built-in
+        // presets for known agents) — drives the `w S` / `a S` chords.
+        let agent_models = agents
+            .iter()
+            .map(|id| (id.clone(), user_config.agent_models(id)))
+            .collect();
+        model.set_agent_models(agent_models);
         // Arm the feature tour for anyone who hasn't seen it. It
         // launches on wizard Finish for first-run users, or at startup
         // (just below) for returning ones.

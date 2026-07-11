@@ -93,6 +93,7 @@ async fn spawn_and_wait(
 ) -> lazybox_ipc::TerminalId {
     client
         .send(Command::Spawn {
+            model_alias: None,
             session_key: "test:ws-1".into(),
             session_id: None,
             kind,
@@ -650,6 +651,7 @@ async fn interactive_claude_spawn_keeps_permission_prompts() {
         let mut client = subscribed(config).await;
         client
             .send(Command::Spawn {
+                model_alias: None,
                 session_key: "test:ws-1".into(),
                 session_id: None,
                 kind: TerminalKind::Agent("claude".into()),
@@ -710,6 +712,7 @@ async fn autonomous_spawn_wires_no_permission_consistently() {
             None,
             true,  // autonomous
             false, // on_main
+            None,  // model_alias
         )
         .await;
 
@@ -757,6 +760,7 @@ async fn unknown_agent_id_emits_provider_error() {
         let mut client = subscribed(config).await;
         client
             .send(Command::Spawn {
+                model_alias: None,
                 session_key: "test:ws-1".into(),
                 session_id: None,
                 kind: TerminalKind::Agent("does-not-exist".into()),
@@ -986,6 +990,7 @@ async fn spawn_with_initial_prompt_delivers_work_to_agent() {
         const WORK: &str = "Implement GitHub issue #50: ingest is broken.";
         client
             .send(Command::Spawn {
+                model_alias: None,
                 session_key: "test:ws-ingest".into(),
                 session_id: None,
                 kind: TerminalKind::Agent("claude".into()),
@@ -1061,6 +1066,7 @@ async fn spawn_onto_existing_singleton_injects_the_prompt() {
         const WORK: &str = "Address the review comments on PR #9.";
         client
             .send(Command::Spawn {
+                model_alias: None,
                 session_key: "test:ws-1".into(),
                 session_id: None,
                 kind: TerminalKind::Agent("claude".into()),
@@ -1137,6 +1143,7 @@ async fn inject_prompt_falls_back_to_spawn_when_terminal_dead() {
                 terminal_id: dead_id,
                 prompt: "rescued prompt".into(),
                 fallback_spawn: Some(lazybox_ipc::SpawnFallback {
+                    model_alias: None,
                     session_key: "test:ws-fallback".into(),
                     session_id: None,
                     kind: TerminalKind::Shell,
@@ -1368,6 +1375,7 @@ async fn wedged_session_does_not_block_subscribe_or_subsequent_spawn() {
         // to end — this is what the user pressed `s` for.
         consumer
             .send(Command::Spawn {
+                model_alias: None,
                 session_key: "test:wedge-followup".into(),
                 session_id: None,
                 kind: TerminalKind::Shell,
@@ -1543,6 +1551,7 @@ async fn concurrent_spawns_collapse_onto_one_backend_session() {
                 None,
                 false,
                 false, // on_main
+                None,  // model_alias
             )
             .await;
         });
@@ -1561,6 +1570,7 @@ async fn concurrent_spawns_collapse_onto_one_backend_session() {
                 Some(WORK.into()),
                 true,
                 false, // on_main
+                None,  // model_alias
             )
             .await;
         });
@@ -1639,6 +1649,7 @@ async fn spawn_aborts_when_workspace_was_deleted_mid_flight() {
             None,
             false,
             false, // on_main
+            None,  // model_alias
         )
         .await;
 
@@ -2021,6 +2032,7 @@ async fn collapse_into_pr_carries_live_terminal_to_the_pr() {
         // Spawn a Claude agent on the ISSUE workspace.
         client
             .send(Command::Spawn {
+                model_alias: None,
                 session_key: issue_key.as_str().into(),
                 session_id: None,
                 kind: TerminalKind::Agent("claude".into()),
@@ -2182,6 +2194,7 @@ async fn many_concurrent_prompt_spawns_all_deliver() {
                     Some(prompt),
                     false,
                     false, // on_main
+                    None,  // model_alias
                 )
                 .await;
             }));

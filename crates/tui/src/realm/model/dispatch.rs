@@ -167,6 +167,7 @@ impl<T: TerminalAdapter> Model<T> {
                     // cursor landed on. `on_main` always targets the
                     // shared checkout, so `session_id` is None.
                     Action::SpawnAgentOnMain(agent_id) => vec![IpcCommand::Spawn {
+                        model_alias: None,
                         session_key: session_key.clone(),
                         session_id: None,
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
@@ -175,6 +176,7 @@ impl<T: TerminalAdapter> Model<T> {
                         on_main: true,
                     }],
                     Action::SpawnShellOnMain => vec![IpcCommand::Spawn {
+                        model_alias: None,
                         session_key: session_key.clone(),
                         session_id: None,
                         kind: lazybox_ipc::TerminalKind::Shell,
@@ -272,6 +274,7 @@ impl<T: TerminalAdapter> Model<T> {
             Action::SpawnShell => {
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
+                        model_alias: None,
                         session_key: sk,
                         session_id,
                         kind: lazybox_ipc::TerminalKind::Shell,
@@ -284,6 +287,7 @@ impl<T: TerminalAdapter> Model<T> {
             Action::SpawnAgent(agent_id) => {
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
+                        model_alias: None,
                         session_key: sk,
                         session_id,
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
@@ -302,6 +306,7 @@ impl<T: TerminalAdapter> Model<T> {
             Action::SpawnAgentOnMain(agent_id) => {
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
+                        model_alias: None,
                         session_key: sk,
                         session_id: None,
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
@@ -314,6 +319,7 @@ impl<T: TerminalAdapter> Model<T> {
             Action::SpawnShellOnMain => {
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
+                        model_alias: None,
                         session_key: sk,
                         session_id: None,
                         kind: lazybox_ipc::TerminalKind::Shell,
@@ -330,18 +336,39 @@ impl<T: TerminalAdapter> Model<T> {
                 // falling back to the default agent when none is running.
                 // The scoped `w c` / `w x` chords (Action::WorkWith) force
                 // a specific agent.
-                let default_agent = self.sidebar.default_agent().to_string();
-                let target_agent = match self.sidebar.selected_workspace_key().cloned() {
-                    Some(sk) => self.sidebar.work_target_agent(&sk, &default_agent),
-                    None => default_agent,
-                };
-                self.push_work_spawn(&target_agent, session_id, &mut cmds);
+                let target_agent = self.work_target_agent();
+                self.push_work_spawn(&target_agent, session_id, None, &mut cmds);
             }
             Action::WorkWith(agent_id) => {
                 // Scoped `w <agent>`: same contextual prompt as bare `w`,
                 // but forced to the chosen agent. `rewrite_spawn_to_inject`
                 // injects when that agent is already running, else spawns.
-                self.push_work_spawn(agent_id, session_id, &mut cmds);
+                self.push_work_spawn(agent_id, session_id, None, &mut cmds);
+            }
+            Action::WorkTier(alias) => {
+                // Flat `w S`: work on the same contextual target agent as
+                // bare `w`, but launch it at the picked model tier. The
+                // alias is resolved against the target agent's menu daemon-
+                // side, so it degrades to the default model for an agent
+                // that doesn't define the tier.
+                let target_agent = self.work_target_agent();
+                self.push_work_spawn(&target_agent, session_id, Some(alias.clone()), &mut cmds);
+            }
+            Action::SpawnTier(alias) => {
+                // `a S`: spawn the default agent at the picked tier.
+                if let Some(sk) = session_key {
+                    cmds.push(IpcCommand::Spawn {
+                        session_key: sk,
+                        session_id,
+                        kind: lazybox_ipc::TerminalKind::Agent(
+                            self.sidebar.default_agent().to_string(),
+                        ),
+                        cwd: None,
+                        initial_prompt: None,
+                        on_main: false,
+                        model_alias: Some(alias.clone()),
+                    });
+                }
             }
             Action::OpenEditor => {
                 // `open_editor` is the orchestrator's existing
@@ -759,10 +786,23 @@ impl<T: TerminalAdapter> Model<T> {
     /// it from any focus — reading it here is sound because `set_workspace`
     /// clears the selection whenever the workspace key changes, so the
     /// right pane's indices always belong to the selected workspace.
+    /// The agent a bare `w` (or a flat `w S` tier chord) targets on the
+    /// selected workspace: whatever agent is already running there, else
+    /// the configured default. Shared by `Work` and `WorkTier` so both
+    /// pick the same agent before layering a tier on top.
+    fn work_target_agent(&self) -> String {
+        let default_agent = self.sidebar.default_agent().to_string();
+        match self.sidebar.selected_workspace_key().cloned() {
+            Some(sk) => self.sidebar.work_target_agent(&sk, &default_agent),
+            None => default_agent,
+        }
+    }
+
     fn push_work_spawn(
         &mut self,
         agent_id: &str,
         session_id: Option<lazybox_core::SessionId>,
+        model_alias: Option<String>,
         cmds: &mut Vec<IpcCommand>,
     ) {
         let workspace = self.sidebar.selected_workspace();
@@ -787,6 +827,7 @@ impl<T: TerminalAdapter> Model<T> {
                 cwd: None,
                 initial_prompt: prompt,
                 on_main: false,
+                model_alias,
             });
             self.right.clear_activity_selection();
         } else {

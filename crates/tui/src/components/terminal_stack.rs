@@ -571,6 +571,10 @@ struct TerminalSlot {
     /// isolated worktree. Drives the "main" badge in the tab strip so
     /// it's obvious the session sits on the shared branch.
     on_main: bool,
+    /// Model-tier label the session was launched with (`"Opus"`), when
+    /// the user picked a tier via a `w S` / `a S` chord. Drives the
+    /// tier badge in the tab strip. `None` for a default-model spawn.
+    model_label: Option<String>,
     /// Whether this terminal was drawn in the last frame. Set by
     /// `render_one_terminal`, reset for every slot at the top of
     /// `render`. Output for a displayed terminal is fed to the VT
@@ -1750,6 +1754,7 @@ impl TerminalStack {
         last_seq: u64,
         no_permission: bool,
         on_main: bool,
+        model_label: Option<String>,
         last_user_message: Option<String>,
     ) -> TerminalSlot {
         let vt = TerminalVt::new().expect("libghostty-vt init");
@@ -1766,6 +1771,7 @@ impl TerminalStack {
             last_user_message,
             no_permission,
             on_main,
+            model_label,
             displayed: false,
             pending_feed: Vec::new(),
             pending_truncated: false,
@@ -2043,6 +2049,7 @@ impl TerminalStack {
                         snap.last_seq,
                         snap.no_permission,
                         snap.on_main,
+                        snap.model_label.clone(),
                         snap.last_user_message.clone(),
                     );
                     // Replay the daemon-side ring through the VT so
@@ -2060,6 +2067,7 @@ impl TerminalStack {
                 kind,
                 no_permission,
                 on_main,
+                model_label,
             } => {
                 let slot = Self::make_slot(
                     session_key.clone(),
@@ -2067,6 +2075,7 @@ impl TerminalStack {
                     0,
                     *no_permission,
                     *on_main,
+                    model_label.clone(),
                     None,
                 );
                 self.terminals.insert(*terminal_id, slot);
@@ -2283,7 +2292,7 @@ impl TerminalStack {
         // tab label occupies for click-hit-testing.
         let mut cursor: u16 = title_area.x + title_prefix.chars().count() as u16;
         for (i, id) in visible.iter().enumerate() {
-            let (icon, label, agent_state, no_permission, on_main) = self
+            let (icon, label, agent_state, no_permission, on_main, model_label) = self
                 .terminals
                 .get(id)
                 .map(|s| {
@@ -2301,6 +2310,7 @@ impl TerminalStack {
                         Some(s.agent_state),
                         s.no_permission,
                         s.on_main,
+                        s.model_label.clone(),
                     )
                 })
                 .unwrap_or((
@@ -2309,6 +2319,7 @@ impl TerminalStack {
                     None,
                     false,
                     false,
+                    None,
                 ));
             let is_active = i == self.active_tab_idx;
             let style = if is_active && focused {
@@ -2381,6 +2392,20 @@ impl TerminalStack {
                     Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
                 ));
                 cursor = cursor.saturating_add(main_text.chars().count() as u16);
+            }
+            // Model tier: the session was launched at a non-default
+            // model via a `w S` / `a S` chord — show which one so the
+            // user remembers what's running behind this tab.
+            if let Some(tier) = &model_label {
+                let tier_text = format!(" ◆ {tier}");
+                let width = tier_text.chars().count() as u16;
+                title_spans.push(Span::styled(
+                    tier_text,
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                cursor = cursor.saturating_add(width);
             }
         }
         frame.render_widget(Paragraph::new(Line::from(title_spans)), title_area);
@@ -2546,6 +2571,7 @@ impl TerminalStack {
         };
         self.pending_split = Some((direction, std::time::Instant::now()));
         cmds.push(Command::Spawn {
+            model_alias: None,
             session_key,
             session_id: None,
             kind: TerminalKind::Shell,
@@ -3646,7 +3672,8 @@ mod ctrl_w_tests {
     fn shell_stack() -> TerminalStack {
         let sk = SessionKey::new("session");
         let mut stack = TerminalStack::new(PaneId::new(0));
-        let slot = TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false, false, None);
+        let slot =
+            TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false, false, None, None);
         stack.terminals.insert(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
         stack
@@ -3880,6 +3907,7 @@ mod extract_text_offset_tests {
             0,
             false,
             false,
+            None,
             last_user_message.map(str::to_string),
         );
         let mut payload = String::new();
@@ -3986,6 +4014,7 @@ mod extract_text_offset_tests {
             false,
             false,
             None,
+            None,
         );
         slot.last_user_message = Some("hi".into());
         assert_eq!(TerminalStack::recap_rows(&slot, 2), 0);
@@ -4041,6 +4070,7 @@ mod resync_tests {
     fn shell_stack(id: TerminalId, sk: &SessionKey) -> TerminalStack {
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: id,
             session_key: sk.clone(),
             kind: TerminalKind::Shell,
@@ -4154,6 +4184,7 @@ mod hidden_feed_tests {
 
     fn spawn(stack: &mut TerminalStack, id: TerminalId, sk: &SessionKey) {
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: id,
             session_key: sk.clone(),
             kind: TerminalKind::Shell,
@@ -4326,6 +4357,7 @@ mod footer_scroll_independence {
             false,
             false,
             None,
+            None,
         );
         slot.vt.ensure_size(W - 3, H - 4);
         let mut payload = String::new();
@@ -4374,6 +4406,31 @@ mod footer_scroll_independence {
             !at_bottom[footer_row].contains('?'),
             "footer should never carry a `?` hint: {:?}",
             at_bottom[footer_row]
+        );
+    }
+
+    #[test]
+    fn tab_strip_shows_chosen_model_tier_badge() {
+        // A session launched via a tier chord carries its model label
+        // through to the tab strip so the running model is visible.
+        let sk = SessionKey::new("s");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Agent("claude".into()),
+            0,
+            false,
+            false,
+            Some("Opus".into()),
+            None,
+        );
+        stack.terminals.insert(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+
+        let rows = render_rows(&mut stack);
+        assert!(
+            rows.iter().any(|r| r.contains("◆ Opus")),
+            "tab strip should show the tier badge; got {rows:?}",
         );
     }
 }
@@ -4470,6 +4527,7 @@ mod agent_badge_tests {
 
     fn spawn_agent(stack: &mut TerminalStack, id: u64, sk: &SessionKey, agent: &str) {
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(id),
             session_key: sk.clone(),
             kind: TerminalKind::Agent(agent.into()),
@@ -4576,6 +4634,7 @@ mod rebadge_tests {
     fn spawned_stack(id: TerminalId, sk: &SessionKey) -> TerminalStack {
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: id,
             session_key: sk.clone(),
             kind: TerminalKind::Agent("claude".into()),
@@ -4642,6 +4701,7 @@ mod set_layout_tests {
     fn stack_with_terminal(sk: &SessionKey) -> TerminalStack {
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(1),
             session_key: sk.clone(),
             kind: TerminalKind::Shell,
@@ -4669,6 +4729,7 @@ mod set_layout_tests {
 
         // The deferred spawn then completes the split as intended.
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(2),
             session_key: sk,
             kind: TerminalKind::Shell,
@@ -4710,6 +4771,7 @@ mod set_layout_tests {
         let sk = SessionKey::new("github:o/r#1");
         let mut stack = stack_with_terminal(&sk);
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(2),
             session_key: sk,
             kind: TerminalKind::Shell,
@@ -4762,6 +4824,7 @@ mod pending_split_tests {
     fn stack_with_terminal(sk: &SessionKey) -> TerminalStack {
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(1),
             session_key: sk.clone(),
             kind: TerminalKind::Shell,
@@ -4774,6 +4837,7 @@ mod pending_split_tests {
 
     fn spawn(stack: &mut TerminalStack, id: u64, sk: &SessionKey) {
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(id),
             session_key: sk.clone(),
             kind: TerminalKind::Shell,
@@ -4848,6 +4912,7 @@ mod spawn_focus_tests {
 
     fn spawn(stack: &mut TerminalStack, id: u64, sk: &SessionKey, kind: TerminalKind) {
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(id),
             session_key: sk.clone(),
             kind,
@@ -4944,6 +5009,7 @@ mod terminal_availability_tests {
         let sk = SessionKey::new("github:o/r#1");
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(1),
             session_key: sk.clone(),
             kind: TerminalKind::Agent("claude".into()),
@@ -5014,6 +5080,7 @@ mod spawn_projection_tests {
 
     fn spawn(stack: &mut TerminalStack, id: u64, sk: &SessionKey, kind: TerminalKind) {
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(id),
             session_key: sk.clone(),
             kind,

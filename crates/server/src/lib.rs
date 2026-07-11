@@ -259,6 +259,12 @@ pub struct ServerConfig {
     /// worktree in the same workspace). Cleaned on `TerminalExited`
     /// alongside the other per-terminal maps.
     pub on_main_terminals: Arc<Mutex<HashSet<TerminalId>>>,
+    /// Model-tier display label a terminal was launched with (`"Opus"`),
+    /// keyed by terminal id. Populated by `handle_spawn` when the user
+    /// picked a tier; read by `snapshot_terminals` so a reconnecting
+    /// client re-renders the tier badge. Cleaned on `TerminalExited`
+    /// alongside the other per-terminal maps.
+    pub terminal_models: Arc<Mutex<HashMap<TerminalId, String>>>,
     /// Terminals whose agent-state detection buffer should be dropped
     /// on the pump's next output chunk. Set by `handle_write` when the
     /// user submits an answer to an `InputNeeded` prompt (Enter while
@@ -475,6 +481,7 @@ impl ServerConfig {
             terminal_meta: Arc::new(Mutex::new(HashMap::new())),
             no_permission_terminals: Arc::new(Mutex::new(HashSet::new())),
             on_main_terminals: Arc::new(Mutex::new(HashSet::new())),
+            terminal_models: Arc::new(Mutex::new(HashMap::new())),
             agent_detect_resets: Arc::new(Mutex::new(HashSet::new())),
             hook_driven_terminals: Arc::new(Mutex::new(HashMap::new())),
             prompt_submit_signals: Arc::new(Mutex::new(HashMap::new())),
@@ -903,6 +910,7 @@ async fn dispatch_command(
             cwd,
             initial_prompt,
             on_main,
+            model_alias,
         } => {
             // A spawn carrying a pre-built work prompt is an autonomous
             // "work on this" launch — run it unattended (skip permissions,
@@ -920,6 +928,7 @@ async fn dispatch_command(
                 initial_prompt,
                 autonomous,
                 on_main,
+                model_alias,
             )
             .await;
         }
@@ -1060,6 +1069,7 @@ async fn dispatch_command(
                     None,
                     false,
                     false,
+                    None,
                 )
                 .await;
             }

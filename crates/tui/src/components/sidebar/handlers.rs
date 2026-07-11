@@ -102,6 +102,7 @@ impl Sidebar {
                 {
                     tracing::info!(%workspace_key, %agent_id, "sidebar: emitting Spawn(Agent) with work prompt");
                     cmds.push(Command::Spawn {
+                        model_alias: None,
                         session_key: workspace_key,
                         session_id: self.selected_session_id(),
                         kind: TerminalKind::Agent(agent_id),
@@ -125,6 +126,7 @@ impl Sidebar {
                     crate::intent::Intent::SpawnShell { workspace_key } => {
                         tracing::info!(%workspace_key, "sidebar: emitting Spawn(Shell)");
                         cmds.push(Command::Spawn {
+                            model_alias: None,
                             session_key: workspace_key,
                             session_id: self.selected_session_id(),
                             kind: TerminalKind::Shell,

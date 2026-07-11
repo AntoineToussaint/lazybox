@@ -632,6 +632,7 @@ impl<T: TerminalAdapter> Model<T> {
             if let Some(workspace_key) = self.setup.pending_editor_workspace.take() {
                 self.setup.pending_editor_launch = Some((workspace_key.clone(), editor.clone()));
                 cmds.push(IpcCommand::Spawn {
+                    model_alias: None,
                     session_key: workspace_key.clone(),
                     session_id: None,
                     kind: lazybox_ipc::TerminalKind::Shell,

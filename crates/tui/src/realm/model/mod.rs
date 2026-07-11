@@ -720,6 +720,10 @@ pub struct Model<T: TerminalAdapter> {
     /// generated per-agent `SpawnAgent` rows in [`Self::catalog`].
     /// Defaults to the built-in `claude` / `codex` / `cursor`.
     agents: Vec<String>,
+    /// Per-agent model-tier menus (`agents.<id>.models`, with built-in
+    /// fallback), keyed by agent id. Drives the `w S` / `a S` tier
+    /// chords in [`Self::catalog`] for the default work agent.
+    agent_models: std::collections::BTreeMap<String, lazybox_core::AgentModels>,
     /// Runtime action catalog: the static rows plus one generated
     /// `SpawnAgent` row per enabled agent, with `ui.action_keys`
     /// overrides baked into each entry's chords. Rebuilt whenever the
@@ -1018,6 +1022,7 @@ impl<T: TerminalAdapter> Model<T> {
             activity_pane_overrides: std::collections::HashMap::new(),
             pending_sidebar_context: None,
             action_key_overrides: std::collections::BTreeMap::new(),
+            agent_models: std::collections::BTreeMap::new(),
             // Built-in agents + their `a c` / `a x` / `a u` convention.
             // The host overrides this from `setup.agents` via `set_agents`.
             agents: ["claude", "codex", "cursor"]
@@ -1592,9 +1597,31 @@ impl<T: TerminalAdapter> Model<T> {
     /// Recompute the runtime catalog from the current agents +
     /// overrides. Cheap (a few dozen rows); called whenever either
     /// input changes.
+    /// Set the per-agent model-tier menus (from `agents.<id>.models` +
+    /// built-in fallback) and rebuild the catalog so the default work
+    /// agent's tiers get `w S` / `a S` chords.
+    pub fn set_agent_models(
+        &mut self,
+        models: std::collections::BTreeMap<String, lazybox_core::AgentModels>,
+    ) {
+        self.agent_models = models;
+        self.rebuild_catalog();
+    }
+
     fn rebuild_catalog(&mut self) {
-        self.catalog =
-            lazybox_tui_core::action::ActionDef::catalog(&self.agents, &self.action_key_overrides);
+        // Tier chords track the default work agent's menu — the alias is
+        // agent-agnostic at spawn, so one menu of chords serves whatever
+        // agent `w` ends up targeting.
+        let tiers = self
+            .agent_models
+            .get(self.sidebar.default_agent())
+            .map(|m| m.tiers.as_slice())
+            .unwrap_or(&[]);
+        self.catalog = lazybox_tui_core::action::ActionDef::catalog_with_tiers(
+            &self.agents,
+            &self.action_key_overrides,
+            tiers,
+        );
     }
 
     /// Read-only handle to the runtime catalog — used by tests and the
@@ -2041,6 +2068,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.setup.pending_editor_launch =
                     Some((workspace_key.clone(), self.setup.editors[0].clone()));
                 self.send_cmd(IpcCommand::Spawn {
+                    model_alias: None,
                     session_key: workspace_key.clone(),
                     session_id: None,
                     kind: lazybox_ipc::TerminalKind::Shell,

@@ -1021,6 +1021,7 @@ snippets:
             "seeded workspace should be selectable",
         );
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(1),
             session_key,
             kind,
@@ -1253,6 +1254,7 @@ snippets:
         for (i, kind) in kinds.iter().enumerate() {
             if let Some(kind) = kind {
                 m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                    model_label: None,
                     terminal_id: TerminalId(i as u64 + 1),
                     session_key: keys[i].clone(),
                     kind: kind.clone(),
@@ -1355,6 +1357,7 @@ snippets:
         use lazybox_ipc::{Event as IpcEvent, TerminalId};
         let (mut m, keys) = model_with_broadcast_targets(&[Some(lazybox_ipc::TerminalKind::Shell)]);
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(9),
             session_key: keys[0].clone(),
             kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
@@ -3279,6 +3282,7 @@ mod merge_focus_follow_tests {
 
         // The agent terminal finally lands — much later, on the ISSUE.
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(7),
             session_key: issue_sk,
             kind: TerminalKind::Agent("claude".into()),
@@ -3301,6 +3305,46 @@ mod merge_focus_follow_tests {
             m.terminals.active_terminal_id(),
             Some(TerminalId(7)),
             "the freshly-spawned agent is the active tab",
+        );
+    }
+
+    /// Issue #308: the flat tier chords carry the picked model alias to
+    /// the daemon. `w M` works on the contextual agent at tier M; `a S`
+    /// spawns the default agent at tier S.
+    #[test]
+    fn tier_chords_thread_model_alias_into_spawn() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let issue = workspace("owner/repo#1", false, Duration::hours(1));
+        let issue_sk: SessionKey = (&issue.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(issue)));
+        assert!(m.sidebar.focus_workspace_key(&issue_sk));
+
+        let work_alias = m
+            .dispatch_action(&Action::WorkTier("M".into()))
+            .into_iter()
+            .find_map(|c| match c {
+                lazybox_ipc::Command::Spawn { model_alias, .. } => Some(model_alias),
+                _ => None,
+            });
+        assert_eq!(
+            work_alias,
+            Some(Some("M".to_string())),
+            "`w M` spawns with tier alias M",
+        );
+
+        let spawn_alias = m
+            .dispatch_action(&Action::SpawnTier("S".into()))
+            .into_iter()
+            .find_map(|c| match c {
+                lazybox_ipc::Command::Spawn { model_alias, .. } => Some(model_alias),
+                _ => None,
+            });
+        assert_eq!(
+            spawn_alias,
+            Some(Some("S".to_string())),
+            "`a S` spawns with tier alias S",
         );
     }
 
@@ -3350,6 +3394,7 @@ mod merge_focus_follow_tests {
 
         // Only a Codex agent is running on this workspace.
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(3),
             session_key: sk.clone(),
             kind: TerminalKind::Agent("codex".into()),
@@ -3395,6 +3440,7 @@ mod merge_focus_follow_tests {
         let sk: SessionKey = (&pr.key).into();
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(5),
             session_key: sk.clone(),
             kind: TerminalKind::Agent("codex".into()),
@@ -3445,6 +3491,7 @@ mod merge_focus_follow_tests {
         let sk: SessionKey = (&pr.key).into();
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(8),
             session_key: sk.clone(),
             kind: TerminalKind::Agent("codex".into()),
@@ -3855,6 +3902,7 @@ mod daemon_event_fastpath_tests {
         // Spawn a terminal on the selected workspace — the spawn
         // handler focuses the terminal pane and makes it visible.
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(7),
             session_key: (&key).into(),
             kind: lazybox_ipc::TerminalKind::Shell,
@@ -3915,6 +3963,7 @@ mod daemon_event_fastpath_tests {
         let session_key: lazybox_core::SessionKey = (&key).into();
 
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(1),
             session_key: session_key.clone(),
             kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
@@ -3930,6 +3979,7 @@ mod daemon_event_fastpath_tests {
         // Second agent spawns Idle — sidebar already shows Working
         // for the session, but THIS tab's badge is stale.
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(2),
             session_key: session_key.clone(),
             kind: lazybox_ipc::TerminalKind::Agent("codex".into()),
@@ -3982,6 +4032,7 @@ mod wheel_routing_tests {
         let key = lazybox_core::SessionKey::from("github:o/r#1");
         m.terminals.set_active_session(Some(key.clone()));
         m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(7),
             session_key: key,
             kind: TerminalKind::Shell,
@@ -4232,6 +4283,7 @@ mod leader_tile_tests {
         m.terminals.set_active_session(Some(key.clone()));
         for id in 1..=n {
             m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+                model_label: None,
                 terminal_id: TerminalId(id),
                 session_key: key.clone(),
                 kind: TerminalKind::Shell,
@@ -4800,6 +4852,7 @@ mod collapse_into_pr_tests {
         // User is on the issue, with Claude running and on screen.
         assert!(m.sidebar.focus_workspace_key(&issue_sk), "focus issue row");
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(7),
             session_key: issue_sk.clone(),
             kind: TerminalKind::Agent("claude".into()),
@@ -4882,6 +4935,7 @@ mod collapse_into_pr_tests {
 
         // Claude on the issue is blocked on a prompt.
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(7),
             session_key: issue_sk.clone(),
             kind: TerminalKind::Agent("claude".into()),
@@ -5233,6 +5287,7 @@ mod workspace_focus_memory_tests {
         id: u64,
     ) {
         m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(id),
             session_key: key.clone(),
             kind: TerminalKind::Agent("claude".into()),
@@ -5559,6 +5614,7 @@ mod focus_mode_tests {
     fn spawn_terminal(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, key: &SessionKey) {
         m.terminals.set_active_session(Some(key.clone()));
         m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(1),
             session_key: key.clone(),
             kind: TerminalKind::Agent("claude".into()),
@@ -5670,6 +5726,7 @@ mod focus_mode_tests {
             m.tick_terminal_leader();
         }
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(2),
             session_key: key.clone(),
             kind: TerminalKind::Agent("claude".into()),
@@ -5893,6 +5950,7 @@ mod terminal_section_dispatch_tests {
         let key = SessionKey::from("github:o/r#1");
         m.terminals.set_active_session(Some(key.clone()));
         m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(7),
             session_key: key,
             kind: TerminalKind::Shell,
@@ -6017,6 +6075,7 @@ mod spawn_spinner_projection_tests {
         // onto an existing runner — the "terminal already existed" stuck
         // case the issue calls out).
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(3),
             session_key: sk.clone(),
             kind: TerminalKind::Agent("claude".into()),
@@ -6050,6 +6109,7 @@ mod spawn_spinner_projection_tests {
         let mut m = build_model();
         let sk = SessionKey::new("github:o/r#1");
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(5),
             session_key: sk.clone(),
             kind: TerminalKind::Shell,
@@ -6083,6 +6143,7 @@ mod spawn_spinner_projection_tests {
         // A terminal for an UNRELATED workspace must not clear our
         // spinner (the old "any TerminalSpawned clears it" behavior).
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(8),
             session_key: SessionKey::new("github:o/r#2"),
             kind: TerminalKind::Agent("claude".into()),
@@ -6096,6 +6157,7 @@ mod spawn_spinner_projection_tests {
 
         // Our target's terminal lands → cleared.
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(9),
             session_key: target,
             kind: TerminalKind::Agent("claude".into()),
@@ -6141,6 +6203,7 @@ mod worktree_progress_recovery_tests {
 
     fn terminal_snapshot(session_key: lazybox_core::SessionKey) -> TerminalSnapshot {
         TerminalSnapshot {
+            model_label: None,
             terminal_id: TerminalId(7),
             session_key,
             kind: TerminalKind::Agent("claude".into()),

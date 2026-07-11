@@ -64,6 +64,7 @@ fn all_commands() -> Vec<Command> {
             cwd: Some("/tmp".into()),
             initial_prompt: None,
             on_main: false,
+            model_alias: Some("L".into()),
         },
         Command::Spawn {
             session_key: key.clone(),
@@ -72,6 +73,7 @@ fn all_commands() -> Vec<Command> {
             cwd: None,
             initial_prompt: None,
             on_main: true,
+            model_alias: None,
         },
         Command::Spawn {
             session_key: key.clone(),
@@ -82,6 +84,7 @@ fn all_commands() -> Vec<Command> {
             cwd: None,
             initial_prompt: Some("fix the failing CI".into()),
             on_main: false,
+            model_alias: None,
         },
         Command::CreateSession {
             session_key: key.clone(),
@@ -215,6 +218,7 @@ fn all_events() -> Vec<Event> {
                 last_seq: 42,
                 no_permission: true,
                 on_main: true,
+                model_label: Some("Opus".into()),
                 last_user_message: Some("fix the flaky test".into()),
             }],
             projects: vec![],
@@ -237,6 +241,7 @@ fn all_events() -> Vec<Event> {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            model_label: None,
         },
         Event::TerminalOutput {
             terminal_id: TerminalId(2),

@@ -914,6 +914,8 @@ async fn dispatch_action(
                 true,
                 // Autonomous work runs on its own isolated worktree.
                 false,
+                // Autonomous spawns use the agent's default model.
+                None,
             )
             .await;
         }
@@ -1047,6 +1049,8 @@ async fn dispatch_action(
                         true,
                         // Auto-fix runs on its own isolated worktree.
                         false,
+                        // Auto-fix uses the agent's default model.
+                        None,
                     )
                     .await;
                 }

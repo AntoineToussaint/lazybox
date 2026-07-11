@@ -60,6 +60,15 @@ pub enum Action {
     /// Spawn a specific agent by id (claude / codex / cursor / …).
     /// The id is dynamic because the agent registry is config-driven.
     SpawnAgent(String),
+    /// "Work on this" with an explicit model tier — the `w S` / `w M`
+    /// chords. Same contextual prompt + target-agent resolution as
+    /// [`Action::Work`], but the carried tier alias is threaded to the
+    /// daemon, which resolves it against the target agent's model menu.
+    WorkTier(String),
+    /// Spawn the default agent with an explicit model tier — the `a S`
+    /// / `a M` chords. Like [`Action::SpawnAgent`] on the default agent
+    /// but carrying the picked tier alias.
+    SpawnTier(String),
     /// Spawn a shell in the focused workspace's worktree.
     SpawnShell,
     /// Spawn a specific agent on the repo's shared **main checkout**
@@ -385,6 +394,12 @@ impl Action {
             Action::Work => ActionKind::Work,
             Action::WorkWith(_) => ActionKind::WorkWith,
             Action::SpawnAgent(_) => ActionKind::SpawnAgent,
+            // Tier variants reuse the parent leader group so the
+            // which-key popup / footer / help treat `w S` as part of
+            // the `w` "work" group and `a S` as part of the `a` "agent"
+            // group.
+            Action::WorkTier(_) => ActionKind::WorkWith,
+            Action::SpawnTier(_) => ActionKind::SpawnAgent,
             Action::SpawnShell => ActionKind::SpawnShell,
             Action::SpawnAgentOnMain(_) => ActionKind::SpawnAgentOnMain,
             Action::SpawnShellOnMain => ActionKind::SpawnShellOnMain,
@@ -1447,6 +1462,9 @@ impl ActionKind {
 pub enum Param {
     /// Agent id for a generated `SpawnAgent` row (`claude`, `codex`, …).
     Agent(String),
+    /// Model-tier alias for a generated tier row (`S`, `M`, `L`) under
+    /// the `w` / `a` leaders.
+    Tier(String),
 }
 
 /// The guard between a keypress and an action firing — the per-row
@@ -1528,6 +1546,31 @@ pub fn agent_default_key(id: &str) -> Option<char> {
     }
 }
 
+/// The keystroke that completes a tier chord under the `w` / `a`
+/// leader, derived from the tier's `alias`. A single uppercase letter
+/// (`"S"`) folds into a `Shift`-modified stroke (`Shift-s`) so it reads
+/// as `S` and stays clear of the lowercase agent keys (`c`/`x`/`u`) in
+/// the same leader namespace; a single lowercase letter binds verbatim.
+/// A multi-character alias (`"XL"`) gets no chord — it still configures
+/// a model, it just isn't reachable by a two-key chord.
+pub fn tier_chord_stroke(alias: &str) -> Option<KeyStroke> {
+    let mut chars = alias.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() || !c.is_ascii_alphanumeric() {
+        return None;
+    }
+    if c.is_ascii_uppercase() {
+        Some(KeyStroke::new(
+            false,
+            true,
+            false,
+            ChordCode::Char(c.to_ascii_lowercase()),
+        ))
+    } else {
+        Some(KeyStroke::new(false, false, false, ChordCode::Char(c)))
+    }
+}
+
 /// Label of the leader *group* an action's default chord lives under —
 /// the name shown wherever the group is advertised as one unit: the
 /// footer's collapsed group cell (`g ▸ github`), the which-key popup
@@ -1562,6 +1605,19 @@ impl ActionDef {
     pub fn catalog(
         agents: &[String],
         overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Vec<CatalogEntry> {
+        Self::catalog_with_tiers(agents, overrides, &[])
+    }
+
+    /// [`ActionDef::catalog`] plus the model-tier chords: one `w S` /
+    /// `a S` row per entry in `tiers` (the default work agent's model
+    /// menu). The tier alias is agent-agnostic at the chord level — the
+    /// daemon maps it to the actual target agent's tier at spawn — so a
+    /// single set of tier chords serves whichever agent `w` resolves to.
+    pub fn catalog_with_tiers(
+        agents: &[String],
+        overrides: &std::collections::BTreeMap<String, String>,
+        tiers: &[lazybox_core::ModelTier],
     ) -> Vec<CatalogEntry> {
         let mut out: Vec<CatalogEntry> = Vec::new();
         for def in ActionDef::all() {
@@ -1703,6 +1759,50 @@ impl ActionDef {
                     config_key: format!("spawn_agent_on_main.{id}"),
                 });
             }
+        }
+        // Model-tier chords: `<work-leader> <tier-key>` (`w S`) and
+        // `a <tier-key>` (`a S`). The tier alias is agent-agnostic — the
+        // daemon resolves it against whichever agent the spawn targets —
+        // so one row per tier serves both leaders. Rows are dropped for
+        // an alias that can't form a chord (multi-char) so the tier
+        // still configures a model without claiming a key.
+        let spawn_leader = KeyStroke::new(false, false, false, ChordCode::Char('a'));
+        for tier in tiers {
+            let Some(stroke) = tier_chord_stroke(&tier.alias) else {
+                continue;
+            };
+            if let Some(leader) = work_leader {
+                let seq = Chord::Seq(vec![leader, stroke]);
+                out.push(CatalogEntry {
+                    kind: ActionKind::WorkWith,
+                    param: Some(Param::Tier(tier.alias.clone())),
+                    section: work.section,
+                    label: std::borrow::Cow::Owned(tier.label.clone()),
+                    describe: work.describe,
+                    chords: vec![seq],
+                    keys_display: std::borrow::Cow::Owned(format!(
+                        "{} {}",
+                        leader.display(),
+                        stroke.display()
+                    )),
+                    config_key: format!("work_tier.{}", tier.alias),
+                });
+            }
+            let seq = Chord::Seq(vec![spawn_leader, stroke]);
+            out.push(CatalogEntry {
+                kind: ActionKind::SpawnAgent,
+                param: Some(Param::Tier(tier.alias.clone())),
+                section: spawn.section,
+                label: std::borrow::Cow::Owned(tier.label.clone()),
+                describe: spawn.describe,
+                chords: vec![seq],
+                keys_display: std::borrow::Cow::Owned(format!(
+                    "{} {}",
+                    spawn_leader.display(),
+                    stroke.display()
+                )),
+                config_key: format!("spawn_tier.{}", tier.alias),
+            });
         }
         out
     }
@@ -2555,6 +2655,65 @@ mod tests {
                 .any(|e| e.param == Some(Param::Agent("aider".into()))),
             "an agent with no default key gets no scoped work chord",
         );
+    }
+
+    #[test]
+    fn tier_chord_stroke_folds_case_and_rejects_multichar() {
+        // Uppercase alias → Shift-modified lowercase (`S` = Shift-s).
+        assert_eq!(
+            tier_chord_stroke("S"),
+            Some(KeyStroke::new(false, true, false, ChordCode::Char('s')))
+        );
+        // Lowercase alias binds verbatim.
+        assert_eq!(
+            tier_chord_stroke("q"),
+            Some(KeyStroke::new(false, false, false, ChordCode::Char('q')))
+        );
+        // Multi-char and non-alphanumeric aliases get no chord.
+        assert_eq!(tier_chord_stroke("XL"), None);
+        assert_eq!(tier_chord_stroke(""), None);
+    }
+
+    #[test]
+    fn catalog_generates_tier_chords_under_work_and_spawn_leaders() {
+        use std::collections::BTreeMap;
+        let agents = vec!["claude".to_string()];
+        let tiers = lazybox_core::AgentModels::builtin("claude").unwrap().tiers;
+        let catalog = ActionDef::catalog_with_tiers(&agents, &BTreeMap::new(), &tiers);
+
+        let w = KeyStroke::new(false, false, false, ChordCode::Char('w'));
+        let a = KeyStroke::new(false, false, false, ChordCode::Char('a'));
+        let shift_s = KeyStroke::new(false, true, false, ChordCode::Char('s'));
+
+        // `w S` → a WorkWith row tagged with the tier alias, labeled by
+        // the model name so the which-key popup reads "Haiku".
+        let work_tier = catalog
+            .iter()
+            .find(|e| e.kind == ActionKind::WorkWith && e.param == Some(Param::Tier("S".into())))
+            .expect("w S tier row");
+        assert_eq!(work_tier.chords, vec![Chord::Seq(vec![w, shift_s])]);
+        assert_eq!(work_tier.label, "Haiku");
+        assert_eq!(work_tier.config_key, "work_tier.S");
+
+        // `a S` → a SpawnAgent row under the agent leader.
+        let spawn_tier = catalog
+            .iter()
+            .find(|e| e.kind == ActionKind::SpawnAgent && e.param == Some(Param::Tier("S".into())))
+            .expect("a S tier row");
+        assert_eq!(spawn_tier.chords, vec![Chord::Seq(vec![a, shift_s])]);
+
+        // The tier chords must not collide with the agent chords that
+        // share the same leaders (`w c`, `a c`). Every Seq chord in the
+        // catalog is unique.
+        let mut seqs: Vec<&Chord> = catalog
+            .iter()
+            .flat_map(|e| e.chords.iter())
+            .filter(|c| matches!(c, Chord::Seq(_)))
+            .collect();
+        let before = seqs.len();
+        seqs.sort_by(|x, y| format!("{x:?}").cmp(&format!("{y:?}")));
+        seqs.dedup();
+        assert_eq!(before, seqs.len(), "no two catalog chords may collide");
     }
 
     #[test]

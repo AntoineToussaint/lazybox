@@ -54,6 +54,12 @@ pub struct Config {
     pub display: DisplayConfig,
     pub slack: SlackConfig,
     pub agent: AgentSection,
+    /// Per-agent overrides keyed by agent id (`claude`, `codex`, …).
+    /// Today this carries the model-tier menu (`agents.claude.models`)
+    /// the `w`/`a` chords pick from; see [`AgentEntry`]. Agents without
+    /// an entry fall back to [`lazybox_core::AgentModels::builtin`].
+    #[serde(default)]
+    pub agents: std::collections::BTreeMap<String, AgentEntry>,
     pub shell: ShellSection,
     pub hooks: HooksConfig,
     pub worktree: WorktreeConfig,
@@ -539,6 +545,18 @@ impl Default for HooksSchedule {
     }
 }
 
+/// Per-agent config block (`agents.<id>:`). Currently just the model
+/// menu; more per-agent knobs can hang here without another top-level
+/// key.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AgentEntry {
+    /// The tier menu the `w S` / `a M` chords pick from, and which tier
+    /// a bare spawn uses. Empty → fall back to the built-in preset for
+    /// this agent id.
+    pub models: lazybox_core::AgentModels,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentSection {
@@ -682,6 +700,18 @@ impl Config {
         let mut ui = self.ui.resolved();
         ui.escape_window = Duration::from_millis(self.terminal.escape_window_ms);
         ui
+    }
+
+    /// The model-tier menu for `agent_id`: the user's `agents.<id>.models`
+    /// block when it defines any tiers, else the built-in preset for a
+    /// known agent, else an empty menu (agent's own default model, no
+    /// tier chords). A configured block with an empty `tiers` list is
+    /// treated as "unset" so it transparently inherits the built-in.
+    pub fn agent_models(&self, agent_id: &str) -> lazybox_core::AgentModels {
+        match self.agents.get(agent_id) {
+            Some(entry) if !entry.models.tiers.is_empty() => entry.models.clone(),
+            _ => lazybox_core::AgentModels::builtin(agent_id).unwrap_or_default(),
+        }
     }
 
     /// Load from `~/.lazybox/config.yaml`, falling back to defaults.
@@ -1566,5 +1596,36 @@ ui:
         let ui = legacy.ui.resolved();
         assert_eq!(ui.short_snooze, Duration::from_secs(14_400));
         assert_eq!(ui.long_snooze, Duration::from_secs(31_536_000));
+    }
+
+    #[test]
+    fn agent_models_falls_back_to_builtin_then_empty() {
+        let cfg = Config::default();
+        // Claude ships a built-in tier menu; unknown agents get none.
+        assert!(!cfg.agent_models("claude").tiers.is_empty());
+        assert!(cfg.agent_models("codex").tiers.is_empty());
+    }
+
+    #[test]
+    fn agent_models_reads_configured_tiers() {
+        let yaml = r#"
+agents:
+  codex:
+    models:
+      default: M
+      tiers:
+        - alias: M
+          label: "GPT-5"
+          args: ["-m", "gpt-5"]
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse agent models");
+        let m = cfg.agent_models("codex");
+        assert_eq!(m.default.as_deref(), Some("M"));
+        assert_eq!(
+            m.resolve_args(None),
+            vec!["-m".to_string(), "gpt-5".to_string()]
+        );
+        // An empty configured block still inherits the built-in preset.
+        assert!(!cfg.agent_models("claude").tiers.is_empty());
     }
 }

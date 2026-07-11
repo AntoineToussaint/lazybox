@@ -1155,12 +1155,15 @@ impl TerminalStack {
     }
 
     /// True if the focused terminal's inner process is on the
-    /// alternate screen (tmux, vim, less, claude code, etc. — i.e.
-    /// any full-screen TUI). Used by the wheel handler to decide
-    /// between SGR mouse encoding (slow: forces a full inner-app
-    /// re-render per tick) and the xterm "alternateScroll" pattern
-    /// (fast: synthesize arrow-key presses, which alt-screen TUIs
-    /// scroll cheaply).
+    /// alternate screen (vim, less, fzf, tmux copy-mode — i.e. a
+    /// full-screen TUI that owns its visible buffer). The wheel
+    /// handler forwards a scroll to the inner app as an SGR mouse
+    /// report ONLY here: on the alt-screen there is no lazybox
+    /// scrollback to move into, so the app must scroll itself. On the
+    /// PRIMARY screen the pane history belongs to lazybox, so the wheel
+    /// scrolls the local scrollback even when the app tracks mouse
+    /// (Claude Code enables 1000/1006 for clicks but does not own the
+    /// transcript scrollback — #321).
     pub fn focused_terminal_in_alt_screen(&self) -> bool {
         let Some(id) = self.focused_terminal_id() else {
             return false;
@@ -4374,6 +4377,55 @@ mod footer_scroll_independence {
             !at_bottom[footer_row].contains('?'),
             "footer should never carry a `?` hint: {:?}",
             at_bottom[footer_row]
+        );
+    }
+
+    /// #321: `Shift-PageUp` on the focused terminal must move the
+    /// viewport into scrollback and `Shift-End` must bring it back.
+    /// This drives the real key handler (`handle_key`), not
+    /// `scroll_active` directly, so a regression in the key routing —
+    /// the modifier match, the `PageUp`/`Home`/`End` arms — fails here.
+    #[test]
+    fn shift_pageup_moves_viewport_and_shift_end_returns() {
+        let mut stack = agent_stack_with_scrollback();
+
+        fn offset(stack: &TerminalStack) -> u64 {
+            stack
+                .scrollbar_summary()
+                .expect("summary")
+                .split_whitespace()
+                .find_map(|kv| kv.strip_prefix("offset="))
+                .expect("offset field")
+                .parse()
+                .expect("numeric offset")
+        }
+
+        let bottom = offset(&stack);
+        assert!(bottom > 0, "the scrollback-filled agent must have history");
+
+        let mut cmds = Vec::new();
+        let outcome = stack.handle_key(
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::SHIFT),
+            &mut cmds,
+        );
+        assert!(
+            matches!(outcome, PaneOutcome::Consumed),
+            "scroll is consumed"
+        );
+        assert!(cmds.is_empty(), "keyboard scroll is a pure in-process move");
+        let scrolled = offset(&stack);
+        assert!(
+            scrolled < bottom,
+            "Shift-PageUp must move the viewport up into scrollback \
+             (bottom={bottom} scrolled={scrolled})",
+        );
+
+        // Shift-End jumps back to the live bottom.
+        stack.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT), &mut cmds);
+        assert_eq!(
+            offset(&stack),
+            bottom,
+            "Shift-End returns to the live bottom"
         );
     }
 }

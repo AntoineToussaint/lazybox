@@ -4033,24 +4033,30 @@ mod wheel_routing_tests {
         assert!(m.redraw, "local scroll repaints the viewport");
     }
 
-    /// Wheel over the terminal pane while the inner program IS mouse
-    /// tracking (vim/htop/claude with mouse on) → the event is
-    /// SGR-encoded and written to the daemon for the inner app to
-    /// handle.
+    /// Wheel over the terminal pane while the inner program is on the
+    /// ALT-screen with mouse tracking (vim / htop / less / fzf) → the
+    /// event is SGR-encoded and written to the daemon for the inner app
+    /// to handle. The alt-screen has no lazybox scrollback to move into,
+    /// so forwarding is the only thing that scrolls.
     #[test]
-    fn wheel_forwards_sgr_when_inner_app_tracks_mouse() {
+    fn wheel_forwards_sgr_when_alt_screen_app_tracks_mouse() {
         let (mut m, mut server, bottom) = build_model_with_terminal();
 
-        // The inner program enables button-event tracking + SGR
-        // encoding — exactly what vim / htop / claude emit.
+        // The inner program switches to the alt-screen and enables
+        // button-event tracking + SGR encoding — exactly what vim /
+        // htop / less emit.
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            bytes: b"\x1b[?1002h\x1b[?1006h".to_vec(),
+            bytes: b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec(),
             seq: 1,
         });
         assert!(
             m.terminals.focused_terminal_tracks_mouse(),
             "DECSET 1002 must flip the tracking flag"
+        );
+        assert!(
+            m.terminals.focused_terminal_in_alt_screen(),
+            "DECSET 1049 must flip the alt-screen flag"
         );
 
         while server.rx.try_recv().is_ok() {}
@@ -4088,10 +4094,11 @@ mod wheel_routing_tests {
         let (mut m, mut server, bottom) = build_model_with_terminal();
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            bytes: b"\x1b[?1002h\x1b[?1006h".to_vec(),
+            bytes: b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec(),
             seq: 1,
         });
         assert!(m.terminals.focused_terminal_tracks_mouse());
+        assert!(m.terminals.focused_terminal_in_alt_screen());
         while server.rx.try_recv().is_ok() {}
 
         // Row +1 is the tab strip — above the grid (which starts at +3).
@@ -4145,6 +4152,61 @@ mod wheel_routing_tests {
             m.handle_mouse(wheel_up_at(bottom.x + 2, bottom.y + 4));
         }
         assert_eq!(scroll_offset(&m), bottom_offset - 18);
+    }
+
+    /// #321: a mouse-tracking app on the PRIMARY screen (Claude Code
+    /// enables DECSET 1000/1006 for click support but keeps its
+    /// transcript on the primary screen) must scroll lazybox's pane
+    /// scrollback on a wheel — NOT forward the event to the app.
+    /// Regression: once tmux stopped setting `mouse on` (#306),
+    /// `tracks_mouse` began reflecting the inner app, and the wheel
+    /// handler forwarded every primary-screen Claude wheel into an app
+    /// that ignores it, so scrolling looked dead. The forward branch is
+    /// now gated on the alt-screen; a primary-screen wheel falls through
+    /// to the local viewport.
+    #[test]
+    fn wheel_scrolls_scrollback_for_primary_screen_mouse_tracking_app() {
+        let (mut m, mut server, bottom) = build_model_with_terminal();
+        let mut bytes = Vec::new();
+        // Enable mouse tracking (primary screen — no alt-screen switch),
+        // then emit a screenful-plus of history to scroll into.
+        bytes.extend_from_slice(b"\x1b[?1002h\x1b[?1006h");
+        for i in 0..200 {
+            bytes.extend_from_slice(format!("line {i}\r\n").as_bytes());
+        }
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(7),
+            bytes,
+            seq: 1,
+        });
+        assert!(
+            m.terminals.focused_terminal_tracks_mouse(),
+            "the app enabled mouse tracking",
+        );
+        assert!(
+            !m.terminals.focused_terminal_in_alt_screen(),
+            "but it stays on the primary screen (Claude Code's transcript)",
+        );
+
+        let bottom_offset = scroll_offset(&m);
+        assert!(bottom_offset > 0, "200 lines must produce scrollback");
+
+        while server.rx.try_recv().is_ok() {}
+        // Wheel INSIDE the grid (body inset: +1 col border, +3 rows chrome).
+        m.handle_mouse(wheel_up_at(bottom.x + 6, bottom.y + 8));
+
+        // The viewport moved into scrollback (LOCAL_WHEEL_STEP = 3)…
+        assert_eq!(
+            scroll_offset(&m),
+            bottom_offset - 3,
+            "wheel must scroll the pane scrollback, not forward to the app",
+        );
+        // …and nothing was written to the daemon — this is a pure
+        // in-process scroll, no SGR report leaked to the inner program.
+        assert!(
+            server.rx.try_recv().is_err(),
+            "a primary-screen wheel must not forward an SGR report",
+        );
     }
 
     // ── `]` flush + Ctrl-w literal: assert the BYTES reaching the PTY ──

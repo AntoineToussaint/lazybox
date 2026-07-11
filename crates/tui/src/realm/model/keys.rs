@@ -1140,7 +1140,22 @@ impl<T: TerminalAdapter> Model<T> {
                 if !rect_contains(right_bottom_rect, m.column, m.row) {
                     return;
                 }
-                if self.terminals.focused_terminal_tracks_mouse() {
+                // Forward the wheel to the inner program ONLY when it's
+                // on the alt-screen (vim, less, fzf, tmux copy-mode) —
+                // there the app owns the visible buffer and there is no
+                // lazybox scrollback to move into, so an SGR wheel report
+                // is the only thing that scrolls. On the PRIMARY screen a
+                // mouse-tracking app (Claude Code enables 1000/1006 for
+                // click support) does NOT own the scrollback: the pane
+                // history is lazybox's, so the wheel must scroll it —
+                // otherwise the report vanishes into an app that ignores
+                // it and scrolling looks dead. Once tmux stopped setting
+                // `mouse on` (#306), `tracks_mouse` began reflecting the
+                // inner app, which silently routed every primary-screen
+                // Claude wheel to this forwarding branch (#321).
+                if self.terminals.focused_terminal_tracks_mouse()
+                    && self.terminals.focused_terminal_in_alt_screen()
+                {
                     // Damped: every wheel event on this path is a
                     // daemon round trip + inner-program repaint, so
                     // the momentum tail must decay and hard-stop.
@@ -1188,12 +1203,12 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                     return;
                 }
-                // Local scrollback (inner program is NOT tracking the
-                // mouse): the viewport move is a pure in-process
-                // libghostty call, no daemon round trip — so no
-                // damper. Every OS wheel event moves a fixed small
-                // step and the view stops exactly when the events
-                // stop, like a native terminal.
+                // Local scrollback (inner program is on the primary
+                // screen — whether or not it tracks mouse): the viewport
+                // move is a pure in-process libghostty call, no daemon
+                // round trip — so no damper. Every OS wheel event moves a
+                // fixed small step and the view stops exactly when the
+                // events stop, like a native terminal.
                 const LOCAL_WHEEL_STEP: isize = 3;
                 let delta = if raw_up {
                     -LOCAL_WHEEL_STEP

@@ -12,24 +12,23 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
+/// Shared log of the phases a recording sink observed.
+type PhaseLog = Arc<Mutex<Vec<CheckoutPhase>>>;
+
 /// A progress sink that records every reported [`CheckoutPhase`] so a
 /// test can assert on the boundaries the manager emitted (e.g. that a
 /// degraded fetch surfaced a `BaseRefStale`).
-fn recording_sink() -> (
-    Arc<Mutex<Vec<CheckoutPhase>>>,
-    Arc<dyn Fn(CheckoutPhase) + Send + Sync>,
-) {
-    let seen: Arc<Mutex<Vec<CheckoutPhase>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink = {
+fn recording_sink() -> (PhaseLog, Arc<lazybox_git_ops::ProgressSink>) {
+    let seen: PhaseLog = Arc::new(Mutex::new(Vec::new()));
+    let sink: Arc<lazybox_git_ops::ProgressSink> = {
         let seen = Arc::clone(&seen);
         Arc::new(move |phase: CheckoutPhase| seen.lock().unwrap().push(phase))
-            as Arc<dyn Fn(CheckoutPhase) + Send + Sync>
     };
     (seen, sink)
 }
 
 /// The `BaseRefStale` note, if the sink recorded one.
-fn stale_note(seen: &Arc<Mutex<Vec<CheckoutPhase>>>) -> Option<String> {
+fn stale_note(seen: &PhaseLog) -> Option<String> {
     seen.lock().unwrap().iter().find_map(|p| match p {
         CheckoutPhase::BaseRefStale(note) => Some(note.clone()),
         _ => None,

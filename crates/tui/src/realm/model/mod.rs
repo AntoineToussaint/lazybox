@@ -228,6 +228,11 @@ pub enum Id {
     /// the picked snippet's body (custom text appends after it).
     /// Submit → one delivery per target in `pending_broadcast`.
     BroadcastText,
+    /// Single-pick `Choice` over the enabled agents (`,` Settings →
+    /// "Change default agent"), opened on the current default. Pick →
+    /// persist `setup.default_agent` and update the panes live. Ids
+    /// live in `default_agent_choices`.
+    DefaultAgentPicker,
 }
 
 impl Id {
@@ -811,6 +816,10 @@ pub struct Model<T: TerminalAdapter> {
     /// cancelled picker leaves the palette untouched. `None` while no
     /// picker is open.
     pub(crate) theme_picker_prev: Option<String>,
+    /// Agent ids backing the active `DefaultAgentPicker`, in row order —
+    /// `Msg::ChoicePicked(idx)` resolves the id here to persist. Cleared
+    /// on mount/unmount.
+    pub(crate) default_agent_choices: Vec<String>,
     /// Set at startup from `ui.tour_seen` (inverted): `true` means
     /// the feature tour should auto-launch once the panes are
     /// visible. Cleared the moment the tour mounts so it never
@@ -1047,6 +1056,7 @@ impl<T: TerminalAdapter> Model<T> {
             jump_choices: Vec::new(),
             theme_choices: Vec::new(),
             theme_picker_prev: None,
+            default_agent_choices: Vec::new(),
             auto_tour_pending: false,
             tips_enabled: false,
             tips_seen: Vec::new(),
@@ -1519,6 +1529,42 @@ impl<T: TerminalAdapter> Model<T> {
                 crate::theme::set_by_name(name);
             });
         self.mount_modal(Id::ThemePicker, modal);
+    }
+
+    /// Mount the default-agent picker — a single-pick `Choice` over the
+    /// enabled agents (`self.agents`), opened on the current default.
+    /// Pick → `handle_choice_picked` persists `setup.default_agent` and
+    /// updates the panes live. Agent ids are stashed in
+    /// `default_agent_choices` so the picked index resolves back.
+    pub(crate) fn mount_default_agent_picker(&mut self) {
+        use crate::realm::components::choice::Choice;
+        if matches!(self.modal_stack.last(), Some(Id::DefaultAgentPicker)) {
+            return;
+        }
+        let registry = lazybox_agents::registry();
+        let ids: Vec<String> = self.agents.clone();
+        let labels: Vec<String> = ids
+            .iter()
+            .map(|id| match registry.get(id) {
+                Some(agent) => format!("{}  ·  {id}", agent.display_name()),
+                None => id.clone(),
+            })
+            .collect();
+        let current = self.sidebar.default_agent();
+        let start = ids.iter().position(|id| id == current).unwrap_or(0);
+        self.default_agent_choices = ids;
+        let modal = Choice::single("Used by `w` work-on-this + new-workspace spawns", labels)
+            .title("Default agent")
+            .label(|s: &String| s.clone())
+            .select_index(start);
+        self.mount_modal(Id::DefaultAgentPicker, modal);
+    }
+
+    /// Update the default agent both panes resolve `w` against, live —
+    /// no restart. Mirrors the startup wiring in `apply_sidebar_config`.
+    pub(crate) fn set_default_agent(&mut self, agent: &str) {
+        self.sidebar.set_default_agent(agent);
+        self.right.set_default_agent(agent);
     }
 
     /// Land the cursor on `key` and follow it with the panes: show its
@@ -2332,6 +2378,9 @@ impl<T: TerminalAdapter> Model<T> {
         }
         actions.push(SettingsAction::EditProviders);
         actions.push(SettingsAction::EditAgents);
+        actions.push(SettingsAction::EditDefaultAgent {
+            current: self.sidebar.default_agent().to_string(),
+        });
         let skip_permissions = lazybox_config::Config::load()
             .map(|c| c.agent.skip_permissions)
             .unwrap_or(false);
@@ -2387,6 +2436,12 @@ impl<T: TerminalAdapter> Model<T> {
             self.mount_gateway_url_input();
             return;
         }
+        // Default-agent picker is a single Choice that writes straight
+        // to YAML and updates the panes live — no wizard runner.
+        if matches!(action, SettingsAction::EditDefaultAgent { .. }) {
+            self.mount_default_agent_picker();
+            return;
+        }
         let Some((report, sources)) = self.setup.inputs.clone() else {
             tracing::warn!("dispatch_settings_action: no cached inputs");
             return;
@@ -2415,6 +2470,7 @@ impl<T: TerminalAdapter> Model<T> {
             SettingsAction::EditSnippets => return,
             SettingsAction::EditTheme => return,
             SettingsAction::EditLlmGateway { .. } => return,
+            SettingsAction::EditDefaultAgent { .. } => return,
         };
         // Pre-seed the accumulator from persisted state so partial
         // flows don't drop the user's other-provider config.

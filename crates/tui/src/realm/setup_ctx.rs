@@ -42,6 +42,10 @@ pub enum SettingsAction {
     EditProviders,
     /// Re-run the agents picker.
     EditAgents,
+    /// Pick the default agent (`setup.default_agent`) — the one `w`
+    /// "work on this" and new-workspace spawns use. Carries the
+    /// current default id for the label.
+    EditDefaultAgent { current: String },
     /// Toggle `agent.skip_permissions` — whether interactive Claude
     /// sessions launch with `--dangerously-skip-permissions`. Carries
     /// the current value so the dispatcher knows which way to flip.
@@ -79,6 +83,9 @@ impl SettingsAction {
             Self::EditFilters { label, .. } => format!("Edit roles + filters · {label}"),
             Self::EditProviders => "Edit providers (github / linear / …)".into(),
             Self::EditAgents => "Edit agents (claude / codex / cursor / …)".into(),
+            Self::EditDefaultAgent { current } => {
+                format!("Change default agent · {current}")
+            }
             Self::ToggleSkipPermissions { enabled } => format!(
                 "Skip permission prompts for your sessions · {}",
                 if *enabled { "on" } else { "off" }
@@ -175,6 +182,17 @@ mod tests {
             SettingsAction::EditLlmGateway { set: true }
                 .label()
                 .ends_with("on")
+        );
+    }
+
+    #[test]
+    fn default_agent_label_names_the_current() {
+        assert_eq!(
+            SettingsAction::EditDefaultAgent {
+                current: "codex".into()
+            }
+            .label(),
+            "Change default agent · codex"
         );
     }
 

@@ -2866,6 +2866,38 @@ mod modal_input_responsiveness_tests {
         assert!(m.theme_choices.is_empty(), "choices are released");
     }
 
+    /// The "Change default agent" settings action routes straight to
+    /// the single-pick agent picker, pre-positioned on the current
+    /// default and with the enabled agent ids stashed for the pick.
+    /// Disk-free: mounting only reads the sidebar's current default.
+    #[test]
+    fn edit_default_agent_action_mounts_the_picker() {
+        use crate::realm::setup_ctx::SettingsAction;
+        let mut m = build_model();
+        m.dispatch_settings_action(SettingsAction::EditDefaultAgent {
+            current: "claude".into(),
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::DefaultAgentPicker));
+        assert!(
+            m.default_agent_choices.iter().any(|id| id == "codex"),
+            "picker offers the enabled agents by id",
+        );
+        m.dispatch_modal_key(key(Key::Esc));
+        assert!(m.top_modal().is_none(), "Esc closes the picker");
+        assert!(m.default_agent_choices.is_empty(), "choices are released");
+    }
+
+    /// `set_default_agent` updates the agent both panes resolve `w`
+    /// against, live — the persist half is covered by the config
+    /// round-trip test. Disk-free.
+    #[test]
+    fn set_default_agent_updates_sidebar_live() {
+        let mut m = build_model();
+        assert_eq!(m.sidebar.default_agent(), "claude");
+        m.set_default_agent("codex");
+        assert_eq!(m.sidebar.default_agent(), "codex");
+    }
+
     /// `]` opens the read-only snippets browser from the sidebar
     /// (catalog → dispatch → mount), and Esc pops it. The browser is a
     /// global, so it fires with no workspace selected — the discovery

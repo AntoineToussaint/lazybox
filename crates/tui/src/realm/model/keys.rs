@@ -730,8 +730,8 @@ impl<T: TerminalAdapter> Model<T> {
     /// single keystroke — no `Seq` — so we compare the chord head.
     fn matches_dismiss_notice(&self, key: &RealmKey) -> bool {
         use lazybox_tui_core::action::{ActionDef, ActionKind};
-        let Some(chord) =
-            ActionDef::for_kind(ActionKind::DismissNotice).effective_chord(&self.action_key_overrides)
+        let Some(chord) = ActionDef::for_kind(ActionKind::DismissNotice)
+            .effective_chord(&self.action_key_overrides)
         else {
             return false;
         };

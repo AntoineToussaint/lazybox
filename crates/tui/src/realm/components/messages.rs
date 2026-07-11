@@ -60,7 +60,10 @@ impl Messages {
                 Style::default().fg(theme.text_dim),
             ))];
         }
-        self.entries.iter().map(|e| self.entry_line(e, theme)).collect()
+        self.entries
+            .iter()
+            .map(|e| self.entry_line(e, theme))
+            .collect()
     }
 
     /// One log row: `✗ merge rejected: … · 2m ago`, severity-colored.
@@ -248,7 +251,11 @@ mod tests {
     #[test]
     fn renders_entries_with_severity_and_age() {
         let entries = vec![
-            entry("merge rejected: base out of date", NoticeSeverity::Permanent, 30),
+            entry(
+                "merge rejected: base out of date",
+                NoticeSeverity::Permanent,
+                30,
+            ),
             entry("auto-merging repo — CI green", NoticeSeverity::Info, 90),
         ];
         let mut comp = Messages::new(entries, now());

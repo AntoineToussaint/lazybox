@@ -7123,9 +7123,16 @@ mod dismiss_and_messages_tests {
         assert!(m.status.notice.is_some());
 
         m.dispatch_key(key(Key::Esc));
-        assert!(m.status.notice.is_none(), "Esc must clear the sticky notice");
+        assert!(
+            m.status.notice.is_none(),
+            "Esc must clear the sticky notice"
+        );
         // Dismissing the footer surface leaves the durable log intact.
-        assert_eq!(m.status.messages.recent().count(), 1, "log survives dismiss");
+        assert_eq!(
+            m.status.messages.recent().count(),
+            1,
+            "log survives dismiss"
+        );
     }
 
     /// With a quiet footer, Esc keeps its normal (no-op here) meaning —
@@ -7193,11 +7200,7 @@ mod dismiss_and_messages_tests {
         assert_eq!(m.top_modal(), Some(&Id::Messages));
 
         m.update(Msg::MessagesCleared);
-        assert_eq!(
-            m.status.messages.recent().count(),
-            0,
-            "the log is wiped",
-        );
+        assert_eq!(m.status.messages.recent().count(), 0, "the log is wiped",);
         assert_eq!(
             m.top_modal(),
             Some(&Id::Messages),

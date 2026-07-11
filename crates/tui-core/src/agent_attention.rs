@@ -188,8 +188,8 @@ pub fn next_asking_workspace(
 ///
 /// The `Shift-F` jump-to-failing-CI key is this motion over a
 /// membership set built from the CI signal (not agent state), so the
-/// sweep is shared with [`next_asking_workspace`] via
-/// [`next_matching_workspace`].
+/// sweep is shared with [`next_asking_workspace`] via the private
+/// `next_matching_workspace` helper.
 pub fn next_flagged_workspace(
     flagged: &std::collections::HashSet<SessionKey>,
     keys_order: &[SessionKey],

@@ -182,6 +182,17 @@ pub enum Action {
     OpenTour,
     /// Open the debug / sync-status window (Shift+D).
     OpenSyncStatus,
+    /// Open the messages log — a scrollable, clearable list of recent
+    /// footer notices (errors, warnings, info) so a notice that flashed
+    /// and faded, or one the user missed, is still readable after the
+    /// fact. The durable half of the footer's transient surface.
+    OpenMessages,
+    /// Clear the current footer notice regardless of severity. Severity
+    /// still decides auto-fade (Retryable/Info fade on their timers;
+    /// Permanent/Auth stay), but this lets the user swat any notice away
+    /// on demand — the merge false-error (#305) that sat red with no
+    /// way to clear it is the motivating case.
+    DismissNotice,
     /// Open the `,` Settings palette.
     OpenSettings,
     /// Open the theme picker — a live-preview list of every registered
@@ -323,6 +334,8 @@ pub enum ActionKind {
     OpenHelp,
     OpenTour,
     OpenSyncStatus,
+    OpenMessages,
+    DismissNotice,
     OpenSettings,
     OpenThemePicker,
     OpenSnippets,
@@ -422,6 +435,8 @@ impl Action {
             Action::OpenHelp => ActionKind::OpenHelp,
             Action::OpenTour => ActionKind::OpenTour,
             Action::OpenSyncStatus => ActionKind::OpenSyncStatus,
+            Action::OpenMessages => ActionKind::OpenMessages,
+            Action::DismissNotice => ActionKind::DismissNotice,
             Action::OpenSettings => ActionKind::OpenSettings,
             Action::OpenThemePicker => ActionKind::OpenThemePicker,
             Action::OpenSnippets => ActionKind::OpenSnippets,
@@ -499,6 +514,20 @@ impl ActionDef {
                 default_keys: "Shift-D",
                 label: "sync status",
                 describe: "Show recent provider-sync outcomes, last poll times, and errors.",
+                section: Section::Global,
+            },
+            ActionKind::OpenMessages => &Self {
+                kind: ActionKind::OpenMessages,
+                default_keys: "Shift-M",
+                label: "messages",
+                describe: "Open the messages log — a scrollable, clearable history of recent footer notices, so an error that flashed and faded is still readable. Press `c` there to clear it.",
+                section: Section::Global,
+            },
+            ActionKind::DismissNotice => &Self {
+                kind: ActionKind::DismissNotice,
+                default_keys: "Esc",
+                label: "dismiss",
+                describe: "Clear the current footer notice, whatever its severity — retryable, info, permanent, or auth. Severity still decides whether a notice auto-fades on its own; this clears it now. Yields to a live terminal (Esc reaches the program) and to a sidebar multi-select (Esc drops the selection first).",
                 section: Section::Global,
             },
             ActionKind::OpenSettings => &Self {
@@ -894,6 +923,8 @@ impl ActionDef {
             ActionKind::OpenHelp,
             ActionKind::OpenTour,
             ActionKind::OpenSyncStatus,
+            ActionKind::OpenMessages,
+            ActionKind::DismissNotice,
             // The three Jump actions sit together so the help panel
             // reads them as one coherent group.
             ActionKind::JumpToWorkspace,
@@ -1419,6 +1450,8 @@ impl ActionKind {
             ActionKind::OpenHelp => "open_help",
             ActionKind::OpenTour => "open_tour",
             ActionKind::OpenSyncStatus => "open_sync_status",
+            ActionKind::OpenMessages => "open_messages",
+            ActionKind::DismissNotice => "dismiss_notice",
             ActionKind::OpenSettings => "open_settings",
             ActionKind::OpenThemePicker => "open_theme_picker",
             ActionKind::OpenSnippets => "open_snippets",
@@ -1880,6 +1913,8 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenHelp
         | ActionKind::OpenTour
         | ActionKind::OpenSyncStatus
+        | ActionKind::OpenMessages
+        | ActionKind::DismissNotice
         | ActionKind::OpenSettings
         | ActionKind::OpenThemePicker
         | ActionKind::OpenSnippets

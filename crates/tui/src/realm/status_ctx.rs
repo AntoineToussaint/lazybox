@@ -101,6 +101,57 @@ impl SyncLog {
     }
 }
 
+/// Cap on retained messages-log records. The log is a bounded ring —
+/// the last N notices — so a long session can't grow it without bound.
+const MESSAGE_LOG_CAP: usize = 100;
+
+/// One footer notice preserved in the messages log: its text, its
+/// severity (for coloring), and when it was raised.
+#[derive(Clone, Debug)]
+pub(crate) struct MessageEntry {
+    pub message: String,
+    pub severity: NoticeSeverity,
+    pub at: DateTime<Utc>,
+}
+
+/// Durable, bounded history of footer notices. The footer is the
+/// transient surface — a notice flashes and fades; this is the durable
+/// one, where every non-hint notice accumulates so a missed or
+/// already-faded error is still readable via the messages window
+/// (`Shift-M`, #309). Session-scoped, not persisted.
+#[derive(Default)]
+pub(crate) struct MessageLog {
+    entries: VecDeque<MessageEntry>,
+}
+
+impl MessageLog {
+    /// Append a notice, stamped now. Oldest entries roll off the front
+    /// once the ring is full.
+    pub fn record(&mut self, message: &str, severity: NoticeSeverity) {
+        self.entries.push_back(MessageEntry {
+            message: message.to_string(),
+            severity,
+            at: Utc::now(),
+        });
+        while self.entries.len() > MESSAGE_LOG_CAP {
+            self.entries.pop_front();
+        }
+    }
+
+    /// Recorded notices, most-recent-first.
+    pub fn recent(&self) -> impl Iterator<Item = &MessageEntry> {
+        self.entries.iter().rev()
+    }
+
+    /// Drop the whole history (the `c` key in the messages window).
+    /// Returns whether anything was cleared.
+    pub fn clear(&mut self) -> bool {
+        let had = !self.entries.is_empty();
+        self.entries.clear();
+        had
+    }
+}
+
 /// How long retryable notices stay visible before fading. Permanent
 /// + auth notices ignore this — they stay until dismissed.
 const RETRYABLE_FADE: Duration = Duration::from_secs(5);
@@ -266,6 +317,11 @@ pub(crate) struct StatusCtx {
     /// auth, network) is visible instead of leaving the inbox
     /// quietly stale.
     pub sync: SyncLog,
+    /// Durable, bounded history of footer notices. The footer flashes
+    /// the latest one transiently; this keeps the last N so a notice
+    /// that faded (or that the user missed) is still readable in the
+    /// messages window (#309).
+    pub messages: MessageLog,
 }
 
 impl StatusCtx {
@@ -277,6 +333,7 @@ impl StatusCtx {
             bg_poll: None,
             spawning: None,
             sync: SyncLog::default(),
+            messages: MessageLog::default(),
         }
     }
 

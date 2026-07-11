@@ -151,6 +151,31 @@ impl<T: TerminalAdapter> Model<T> {
             self.flush_dispatched_cmds(cmds);
             return;
         }
+        // ── Dismiss the current footer notice (#309) ────────────────
+        // One key clears whatever notice is up, regardless of severity —
+        // the merge false-error (#305) that sat red with no way to swat
+        // it is the motivating case. Severity still decides auto-fade
+        // (Retryable/Info fade on their timers, Permanent/Auth stay);
+        // this just lets the user clear any of them now.
+        //
+        // The key is the catalog's `DismissNotice` binding (default
+        // Esc, remappable). Sequenced here — after the leader / terminal
+        // `]]` cancels above — so it never pre-empts a leader disarm.
+        // It deliberately yields Esc to two owners: a live terminal
+        // (`resolve_focus_for_keys` is None there, so Esc reaches the
+        // PTY) and a sidebar multi-select (Esc drops the `v` selection
+        // first). Gated on a notice actually being up, so with a quiet
+        // footer the key keeps its normal pane meaning.
+        if self.status.notice.is_some()
+            && self.resolve_focus_for_keys().is_some()
+            && self.matches_dismiss_notice(&key)
+            && !(self.focus == PaneFocus::Sidebar && self.sidebar.broadcast_selected_count() > 0)
+        {
+            self.status.notice = None;
+            self.sync_error_source = None;
+            self.redraw = true;
+            return;
+        }
         match key.code {
             // Tab cycles panes — but ONLY when the active pane has
             // no PTY swallowing keys. Inside a terminal with a live
@@ -698,6 +723,22 @@ impl<T: TerminalAdapter> Model<T> {
         use lazybox_tui_core::action::{ActionDef, ActionKind};
         let def = ActionDef::for_kind(ActionKind::Quit);
         def.effective_chord(&self.action_key_overrides)
+    }
+
+    /// Whether `key` is the effective `DismissNotice` binding (default
+    /// `Esc`, overridable via `ui.action_keys.dismiss_notice`). A
+    /// single keystroke — no `Seq` — so we compare the chord head.
+    fn matches_dismiss_notice(&self, key: &RealmKey) -> bool {
+        use lazybox_tui_core::action::{ActionDef, ActionKind};
+        let Some(chord) = ActionDef::for_kind(ActionKind::DismissNotice)
+            .effective_chord(&self.action_key_overrides)
+        else {
+            return false;
+        };
+        let Some(input) = key_event_to_stroke(realm_key_to_crossterm(key)) else {
+            return false;
+        };
+        &input == chord.head()
     }
 
     /// Matches the FIRST keystroke of the Quit chord (the entry-point
@@ -1280,6 +1321,11 @@ fn action_from_kind(
         ActionKind::OpenHelp => Action::OpenHelp,
         ActionKind::OpenTour => Action::OpenTour,
         ActionKind::OpenSyncStatus => Action::OpenSyncStatus,
+        ActionKind::OpenMessages => Action::OpenMessages,
+        // DismissNotice is deliberately absent: it's routed through the
+        // explicit Esc branch in `handle_pane_key` (which yields to a
+        // sidebar multi-select and to a live terminal), not the generic
+        // catalog dispatch, so it can never shadow a pane's own Esc.
         ActionKind::OpenSettings => Action::OpenSettings,
         ActionKind::OpenThemePicker => Action::OpenThemePicker,
         ActionKind::OpenSnippets => Action::OpenSnippets,

@@ -14,6 +14,7 @@ pub mod help;
 pub mod input;
 pub mod jump_picker;
 pub mod loading;
+pub mod messages;
 pub mod polling;
 pub mod right;
 pub mod sidebar;

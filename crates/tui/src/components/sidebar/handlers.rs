@@ -245,8 +245,8 @@ impl Sidebar {
                 if self.attention.desktop_notify
                     && let Some(old) = self.workspaces.get(&key)
                 {
-                    let before = workspace_attention_signals(old, &self.agents_asking);
-                    let after = workspace_attention_signals(workspace, &self.agents_asking);
+                    let before = workspace_attention_signals(old, &self.agents);
+                    let after = workspace_attention_signals(workspace, &self.agents);
                     for signal in after {
                         if !before.contains(&signal)
                             && attention_gate(signal, &self.attention)
@@ -294,54 +294,33 @@ impl Sidebar {
                     state = ?state,
                     "sidebar: received Event::AgentState",
                 );
-                // The daemon-side detector flipped an agent into
-                // `Asking` (yes/no prompt) or back to `Active`.
-                // Update the sidebar-local `agents_asking` set —
-                // the canonical store for this transient signal.
+                // The daemon-side detector flipped an agent into a new
+                // `AgentState`. Fold it into the sidebar-local `agents`
+                // map — the canonical store for this transient signal.
                 //
-                // Why a sidebar-local set instead of mutating
+                // Why a sidebar-local map instead of mutating
                 // `workspace.sessions[i].state`: the next poll
                 // cycle's `WorkspaceUpserted` rebuilds the workspace
                 // from the persisted store, which doesn't (and
                 // shouldn't) carry transient agent state. Mutating
                 // it here would be silently undone within 60s. The
-                // set survives poll broadcasts because nothing
+                // map survives poll broadcasts because nothing
                 // touches it except `Event::AgentState`.
                 //
-                // On the Active → Asking edge, enqueue a desktop
-                // notification (drained + fired by the outer
-                // wrapper so library tests never trigger a real
-                // `osascript` / `notify-send`).
-                let transition = crate::agent_attention::apply_agent_state(
-                    &mut self.agents_asking,
+                // `apply_agent_state` routes the reading through the
+                // shared transition validator, so the stored value is
+                // always a legal successor — the single UI slot can't
+                // land in a contradictory or blank state (#327). On the
+                // rising edge into `InputNeeded` / `Done` it reports the
+                // alert so the outer wrapper can enqueue a desktop
+                // notification (drained + fired there so library tests
+                // never trigger a real `osascript` / `notify-send`).
+                let change = crate::agent_attention::apply_agent_state(
+                    &mut self.agents,
                     session_key,
                     *state,
                 );
-                // The "working" slot shares the same UI cell as the
-                // `?` pill and is driven by the same event. Keep its
-                // disjoint set in sync. No `recompute_visible()` is
-                // needed for a working-only change: `compute_visible`
-                // reads `agents_asking` but not `agents_working`, so
-                // the row list is identical; the spinner glyph is read
-                // fresh from `agents_working` at render time, and the
-                // daemon-event path already forces a redraw.
-                crate::agent_attention::apply_working_state(
-                    &mut self.agents_working,
-                    session_key,
-                    *state,
-                );
-                // The `Done` slot shares the same UI cell. Keep its
-                // disjoint set in sync; the rising edge (membership
-                // changed *into* Done) alerts the user just like asking.
-                let done_changed = crate::agent_attention::apply_done_state(
-                    &mut self.agents_done,
-                    session_key,
-                    *state,
-                );
-                if matches!(
-                    transition,
-                    crate::agent_attention::AttentionTransition::NowAsking
-                ) {
+                if change.now_asking {
                     if let Some(workspace) = self.workspaces.get(session_key) {
                         // OS-level banner, gated by the config toggle.
                         // The footer notice below always fires — it's
@@ -371,8 +350,7 @@ impl Sidebar {
                 // (#80). Alert with the same banner + footer-notice path
                 // as asking, so a completed run is noticed even when
                 // lazybox isn't the focused window.
-                if done_changed
-                    && matches!(*state, lazybox_ipc::AgentState::Done)
+                if change.now_done
                     && let Some(workspace) = self.workspaces.get(session_key)
                 {
                     if self.attention.desktop_notify {
@@ -389,15 +367,12 @@ impl Sidebar {
                         crate::util::notice_slug(&workspace.name)
                     ));
                 }
-                // Only the asking transition can change the visible set
+                // Only a change in asking-ness can change the visible set
                 // (it feeds the per-repo attention counter); a done- or
                 // working-only change reads fresh at render time, and the
                 // daemon-event path forces the redraw via
                 // `displays_agent_state`.
-                if !matches!(
-                    transition,
-                    crate::agent_attention::AttentionTransition::NoChange
-                ) {
+                if change.asking_changed {
                     self.recompute_visible();
                 }
             }
@@ -424,13 +399,10 @@ impl Sidebar {
                         *sk = to.clone();
                     }
                 }
-                let asking =
-                    crate::agent_attention::rebadge_attention(&mut self.agents_asking, from, to);
-                crate::agent_attention::rebadge_attention(&mut self.agents_working, from, to);
-                crate::agent_attention::rebadge_attention(&mut self.agents_done, from, to);
-                if asking {
-                    // Only the asking-set feeds the visible row list
-                    // (per-repo attention counter); the others read
+                let moved = crate::agent_attention::rebadge_attention(&mut self.agents, from, to);
+                if moved == Some(lazybox_ipc::AgentState::InputNeeded) {
+                    // Only asking-ness feeds the visible row list
+                    // (per-repo attention counter); the other states read
                     // fresh at render time.
                     self.recompute_visible();
                 }

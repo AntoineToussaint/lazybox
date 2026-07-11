@@ -18,7 +18,7 @@ use crate::components::sidebar::{
     mailbox_membership, role_rank,
 };
 use lazybox_core::{Project, ProjectKey, SessionKey, Workspace};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Output of `compute_visible`. Held together because the
 /// summaries are derived during the same pass that builds the
@@ -49,7 +49,7 @@ pub struct ComputeInputs<'a> {
     pub projects: &'a BTreeMap<ProjectKey, Project>,
     pub collapsed_repos: &'a BTreeSet<String>,
     pub attention: &'a lazybox_config::AttentionConfig,
-    pub agents_asking: &'a HashSet<SessionKey>,
+    pub agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
     pub now: chrono::DateTime<chrono::Utc>,
     /// Free-text search scoped to one project, or `None`. When `Some`
     /// with a non-empty query, workspaces whose `group_label` matches
@@ -154,7 +154,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
                 if crate::components::sidebar::workspace_needs_attention(
                     w,
                     input.attention,
-                    input.agents_asking,
+                    input.agents,
                 ) {
                     summary.attention += 1;
                 }
@@ -315,7 +315,7 @@ mod tests {
         _subscribed: &'a BTreeSet<String>,
         collapsed: &'a BTreeSet<String>,
         attention: &'a lazybox_config::AttentionConfig,
-        asking: &'a HashSet<SessionKey>,
+        asking: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
         projects: &'a BTreeMap<ProjectKey, Project>,
     ) -> ComputeInputs<'a> {
         ComputeInputs {
@@ -327,7 +327,7 @@ mod tests {
             projects,
             collapsed_repos: collapsed,
             attention,
-            agents_asking: asking,
+            agents: asking,
             now: fixed_time(),
             search: None,
         }
@@ -340,7 +340,7 @@ mod tests {
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = lazybox_config::AttentionConfig::default();
-        let asking = HashSet::new();
+        let asking = HashMap::new();
         let projects = BTreeMap::new();
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert!(out.visible.is_empty());
@@ -356,7 +356,7 @@ mod tests {
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = lazybox_config::AttentionConfig::default();
-        let asking = HashSet::new();
+        let asking = HashMap::new();
         let projects = BTreeMap::new();
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert_eq!(out.visible.len(), 2);
@@ -376,7 +376,7 @@ mod tests {
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = lazybox_config::AttentionConfig::default();
-        let asking = HashSet::new();
+        let asking = HashMap::new();
         let projects = BTreeMap::new();
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         // header(a) + ws + header(b) + ws.
@@ -404,7 +404,7 @@ mod tests {
         let mut col = BTreeSet::new();
         col.insert("owner/r".to_string());
         let att = lazybox_config::AttentionConfig::default();
-        let asking = HashSet::new();
+        let asking = HashMap::new();
         let projects = BTreeMap::new();
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert_eq!(out.visible.len(), 1);
@@ -426,7 +426,7 @@ mod tests {
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = lazybox_config::AttentionConfig::default();
-        let asking = HashSet::new();
+        let asking = HashMap::new();
         let mut projects = BTreeMap::new();
         projects.insert(
             pk.clone(),
@@ -448,7 +448,7 @@ mod tests {
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = lazybox_config::AttentionConfig::default();
-        let asking = HashSet::new();
+        let asking = HashMap::new();
         let mut projects = BTreeMap::new();
         let pk = ProjectKey::github("owner", "empty");
         projects.insert(
@@ -473,7 +473,7 @@ mod tests {
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = lazybox_config::AttentionConfig::default();
-        let asking = HashSet::new();
+        let asking = HashMap::new();
         let mut projects = BTreeMap::new();
         // Stored with `name == key` — the bug this fix repairs.
         projects.insert(
@@ -496,7 +496,7 @@ mod tests {
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = lazybox_config::AttentionConfig::default();
-        let asking = HashSet::new();
+        let asking = HashMap::new();
         let mut projects = BTreeMap::new();
         let pk = ProjectKey::github("owner", "empty");
         projects.insert(
@@ -521,7 +521,7 @@ mod tests {
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = lazybox_config::AttentionConfig::default();
-        let asking = HashSet::new();
+        let asking = HashMap::new();
         let projects = BTreeMap::new();
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         // [header, newer, older].
@@ -546,7 +546,7 @@ mod tests {
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = lazybox_config::AttentionConfig::default();
-        let asking = HashSet::new();
+        let asking = HashMap::new();
         let projects = BTreeMap::new();
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert!(out.summaries.contains_key("(no repo)"));
@@ -566,7 +566,7 @@ mod tests {
         let mut col = BTreeSet::new();
         col.insert("owner/r".to_string());
         let att = lazybox_config::AttentionConfig::default();
-        let asking = HashSet::new();
+        let asking = HashMap::new();
         let projects = BTreeMap::new();
         let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
         assert_eq!(out.summaries.get("owner/r").unwrap().active, 3);
@@ -609,7 +609,7 @@ mod tests {
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = lazybox_config::AttentionConfig::default();
-        let asking = HashSet::new();
+        let asking = HashMap::new();
         let projects = BTreeMap::new();
         let s = search("owner/r", "search");
         let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
@@ -640,7 +640,7 @@ mod tests {
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = lazybox_config::AttentionConfig::default();
-        let asking = HashSet::new();
+        let asking = HashMap::new();
         let projects = BTreeMap::new();
         let s = search("owner/r", "#100");
         let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
@@ -672,7 +672,7 @@ mod tests {
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = lazybox_config::AttentionConfig::default();
-        let asking = HashSet::new();
+        let asking = HashMap::new();
         let projects = BTreeMap::new();
         let s = search("owner/a", "search");
         let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
@@ -696,7 +696,7 @@ mod tests {
         let sub = BTreeSet::new();
         let col = BTreeSet::new();
         let att = lazybox_config::AttentionConfig::default();
-        let asking = HashSet::new();
+        let asking = HashMap::new();
         let projects = BTreeMap::new();
         let s = search("owner/r", "");
         let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);

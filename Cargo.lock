@@ -1633,6 +1633,7 @@ name = "lazybox-tui-core"
 version = "0.1.6"
 dependencies = [
  "chrono",
+ "lazybox-agents",
  "lazybox-auth",
  "lazybox-core",
  "lazybox-ipc",

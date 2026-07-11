@@ -23,10 +23,11 @@ path = "src/lib.rs"
 # instead of forcing a full lazybox-tui recompile (~21k LoC).
 
 [dependencies]
-lazybox-core  = { workspace = true }
-lazybox-auth  = { workspace = true }
-lazybox-store = { workspace = true }
-lazybox-ipc   = { workspace = true }
+lazybox-core   = { workspace = true }
+lazybox-auth   = { workspace = true }
+lazybox-store  = { workspace = true }
+lazybox-ipc    = { workspace = true }
+lazybox-agents = { workspace = true }
 
 tokio     = { workspace = true }
 chrono    = { workspace = true }

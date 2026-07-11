@@ -185,17 +185,17 @@ pub enum AttentionSignal {
 /// counter but not the repo badge.
 pub fn workspace_attention_signals(
     w: &Workspace,
-    agents_asking: &std::collections::HashSet<SessionKey>,
+    agents: &std::collections::HashMap<SessionKey, lazybox_ipc::AgentState>,
 ) -> Vec<AttentionSignal> {
     let mut out = Vec::new();
     if w.unread_count() > 0 {
         out.push(AttentionSignal::Unread);
     }
     // AgentAsking signal: source of truth is the sidebar-local
-    // `agents_asking` set (driven by `Event::AgentState` deltas).
+    // `agents` state map (driven by `Event::AgentState` deltas).
     // NOT `w.sessions[i].state` — that gets blown away every poll
     // when `WorkspaceUpserted` re-loads from the persisted store.
-    if crate::agent_attention::workspace_is_asking(w, agents_asking) {
+    if crate::agent_attention::workspace_is_asking(w, agents) {
         out.push(AttentionSignal::AgentAsking);
     }
     if let Some(t) = w.primary_task() {
@@ -243,9 +243,9 @@ pub(crate) fn attention_gate(
 pub(crate) fn workspace_needs_attention(
     w: &Workspace,
     cfg: &lazybox_config::AttentionConfig,
-    agents_asking: &std::collections::HashSet<SessionKey>,
+    agents: &std::collections::HashMap<SessionKey, lazybox_ipc::AgentState>,
 ) -> bool {
-    workspace_attention_signals(w, agents_asking)
+    workspace_attention_signals(w, agents)
         .iter()
         .any(|s| attention_gate(*s, cfg))
 }

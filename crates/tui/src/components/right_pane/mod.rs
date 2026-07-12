@@ -1670,6 +1670,7 @@ impl RightPane {
                 } = intent
                 {
                     cmds.push(Command::Spawn {
+                        model_alias: None,
                         session_key: workspace_key,
                         session_id: None,
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id),

@@ -18,7 +18,7 @@ mod task;
 pub mod time;
 mod workspace;
 
-pub use agent::AgentConfig;
+pub use agent::{AgentConfig, AgentModels, ModelTier};
 pub use autofix::{AutoFixKind, AutoFixSettings, evaluate_auto_fix};
 pub use config::{
     KV_KEY_ARCHIVED, KV_KEY_LAYOUT, KV_KEY_SETUP, KV_KEY_THEME, PaneLayout, PersistedSetup,

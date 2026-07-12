@@ -27,6 +27,7 @@ fn sk(s: &str) -> SessionKey {
 
 fn spawned(id: u64, session: &str, kind: TerminalKind) -> Event {
     Event::TerminalSpawned {
+        model_label: None,
         terminal_id: TerminalId(id),
         session_key: sk(session),
         kind,
@@ -167,6 +168,7 @@ fn snapshot_replaces_all_terminals() {
     t.on_event(&Event::Snapshot {
         workspaces: vec![],
         terminals: vec![TerminalSnapshot {
+            model_label: None,
             terminal_id: TerminalId(99),
             session_key: sk("o/r#3"),
             kind: TerminalKind::Shell,
@@ -644,6 +646,7 @@ fn shift_pageup_scrolls_local_scrollback_without_pty_writes() {
 fn render_shows_no_perms_badge_for_autonomous_session() {
     let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&Event::TerminalSpawned {
+        model_label: None,
         terminal_id: TerminalId(1),
         session_key: sk("o/r#1"),
         kind: TerminalKind::Agent("claude".into()),
@@ -1144,6 +1147,7 @@ fn snapshot_restores_recap_for_agent_terminal() {
     t.on_event(&Event::Snapshot {
         workspaces: vec![],
         terminals: vec![TerminalSnapshot {
+            model_label: None,
             terminal_id: TerminalId(7),
             session_key: sk("o/r#1"),
             kind: TerminalKind::Agent("claude".into()),

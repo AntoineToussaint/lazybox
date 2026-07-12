@@ -292,11 +292,12 @@ impl Terminals {
         self.inner.focused_terminal_tracks_mouse()
     }
 
-    /// True if the focused terminal's inner process is on the
-    /// alternate screen. Drives the "wheel → arrow keys" fast
-    /// path in `Model::handle_mouse`.
-    pub fn focused_terminal_in_alt_screen(&self) -> bool {
-        self.inner.focused_terminal_in_alt_screen()
+    /// How a mouse-wheel tick over the focused terminal routes —
+    /// local scrollback, SGR forward, or synthesized arrow keys. See
+    /// [`crate::components::terminal_stack::WheelRoute`]. Drives the
+    /// wheel branch in `Model::handle_mouse`.
+    pub fn wheel_route(&self) -> crate::components::terminal_stack::WheelRoute {
+        self.inner.wheel_route()
     }
 
     /// Wire id of the currently focused terminal, if any. Needed by

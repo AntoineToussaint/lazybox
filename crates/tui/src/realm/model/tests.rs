@@ -4170,6 +4170,7 @@ mod wheel_routing_tests {
     //! tmux backend no longer sets `mouse on`, so `is_mouse_tracking`
     //! reflects the inner app instead of always reading true.
     use super::super::*;
+    use crate::components::terminal_stack::WheelRoute;
     use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind, channel};
     use tuirealm::ratatui::layout::{Rect, Size};
 
@@ -4237,24 +4238,27 @@ mod wheel_routing_tests {
         assert!(m.redraw, "local scroll repaints the viewport");
     }
 
-    /// Wheel over the terminal pane while the inner program IS mouse
-    /// tracking (vim/htop/claude with mouse on) → the event is
-    /// SGR-encoded and written to the daemon for the inner app to
-    /// handle.
+    /// Wheel over the terminal pane while the inner program is on the
+    /// ALT-screen with mouse tracking (vim / htop / less / fzf) → the
+    /// event is SGR-encoded and written to the daemon for the inner app
+    /// to handle. The alt-screen has no lazybox scrollback to move into,
+    /// so forwarding is the only thing that scrolls.
     #[test]
-    fn wheel_forwards_sgr_when_inner_app_tracks_mouse() {
+    fn wheel_forwards_sgr_when_alt_screen_app_tracks_mouse() {
         let (mut m, mut server, bottom) = build_model_with_terminal();
 
-        // The inner program enables button-event tracking + SGR
-        // encoding — exactly what vim / htop / claude emit.
+        // The inner program switches to the alt-screen and enables
+        // button-event tracking + SGR encoding — exactly what vim /
+        // htop / less emit.
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            bytes: b"\x1b[?1002h\x1b[?1006h".to_vec(),
+            bytes: b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec(),
             seq: 1,
         });
-        assert!(
-            m.terminals.focused_terminal_tracks_mouse(),
-            "DECSET 1002 must flip the tracking flag"
+        assert_eq!(
+            m.terminals.wheel_route(),
+            WheelRoute::ForwardSgr,
+            "alt-screen + mouse tracking must route the wheel to SGR forward",
         );
 
         while server.rx.try_recv().is_ok() {}
@@ -4292,10 +4296,10 @@ mod wheel_routing_tests {
         let (mut m, mut server, bottom) = build_model_with_terminal();
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            bytes: b"\x1b[?1002h\x1b[?1006h".to_vec(),
+            bytes: b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec(),
             seq: 1,
         });
-        assert!(m.terminals.focused_terminal_tracks_mouse());
+        assert_eq!(m.terminals.wheel_route(), WheelRoute::ForwardSgr);
         while server.rx.try_recv().is_ok() {}
 
         // Row +1 is the tab strip — above the grid (which starts at +3).
@@ -4349,6 +4353,147 @@ mod wheel_routing_tests {
             m.handle_mouse(wheel_up_at(bottom.x + 2, bottom.y + 4));
         }
         assert_eq!(scroll_offset(&m), bottom_offset - 18);
+    }
+
+    /// #321: a mouse-tracking app on the PRIMARY screen (Claude Code
+    /// enables DECSET 1000/1006 for click support but keeps its
+    /// transcript on the primary screen) must scroll lazybox's pane
+    /// scrollback on a wheel — NOT forward the event to the app.
+    /// Regression: once tmux stopped setting `mouse on` (#306),
+    /// `tracks_mouse` began reflecting the inner app, and the wheel
+    /// handler forwarded every primary-screen Claude wheel into an app
+    /// that ignores it, so scrolling looked dead. The forward branch is
+    /// now gated on the alt-screen; a primary-screen wheel falls through
+    /// to the local viewport.
+    #[test]
+    fn wheel_scrolls_scrollback_for_primary_screen_mouse_tracking_app() {
+        let (mut m, mut server, bottom) = build_model_with_terminal();
+        let mut bytes = Vec::new();
+        // Enable mouse tracking (primary screen — no alt-screen switch),
+        // then emit a screenful-plus of history to scroll into.
+        bytes.extend_from_slice(b"\x1b[?1002h\x1b[?1006h");
+        for i in 0..200 {
+            bytes.extend_from_slice(format!("line {i}\r\n").as_bytes());
+        }
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(7),
+            bytes,
+            seq: 1,
+        });
+        assert!(
+            m.terminals.focused_terminal_tracks_mouse(),
+            "the app enabled mouse tracking",
+        );
+        assert_eq!(
+            m.terminals.wheel_route(),
+            WheelRoute::LocalScrollback,
+            "a primary-screen mouse-tracking app (Claude Code's transcript) \
+             routes the wheel to lazybox's scrollback, not a forward",
+        );
+
+        let bottom_offset = scroll_offset(&m);
+        assert!(bottom_offset > 0, "200 lines must produce scrollback");
+
+        while server.rx.try_recv().is_ok() {}
+        // Wheel INSIDE the grid (body inset: +1 col border, +3 rows chrome).
+        m.handle_mouse(wheel_up_at(bottom.x + 6, bottom.y + 8));
+
+        // The viewport moved into scrollback (LOCAL_WHEEL_STEP = 3)…
+        assert_eq!(
+            scroll_offset(&m),
+            bottom_offset - 3,
+            "wheel must scroll the pane scrollback, not forward to the app",
+        );
+        // …and nothing was written to the daemon — this is a pure
+        // in-process scroll, no SGR report leaked to the inner program.
+        assert!(
+            server.rx.try_recv().is_err(),
+            "a primary-screen wheel must not forward an SGR report",
+        );
+    }
+
+    /// An alt-screen app that never enabled mouse reporting (less, man,
+    /// the git pager, vim without `mouse`) owns the visible buffer but
+    /// speaks no mouse protocol — so a wheel synthesizes arrow keys
+    /// (xterm `alternateScroll`), the CSI form under normal cursor mode.
+    #[test]
+    fn wheel_synthesizes_arrows_on_alt_screen_without_mouse() {
+        let (mut m, mut server, bottom) = build_model_with_terminal();
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(7),
+            bytes: b"\x1b[?1049h".to_vec(), // alt-screen, no mouse tracking
+            seq: 1,
+        });
+        assert_eq!(
+            m.terminals.wheel_route(),
+            WheelRoute::AlternateScrollArrows { app_cursor: false },
+        );
+        while server.rx.try_recv().is_ok() {}
+
+        // One wheel-up notch INSIDE the grid → arrow-up presses.
+        m.handle_mouse(wheel_up_at(bottom.x + 6, bottom.y + 8));
+        match server.rx.try_recv() {
+            Ok(lazybox_ipc::Command::Write { terminal_id, bytes }) => {
+                assert_eq!(terminal_id, TerminalId(7));
+                assert!(
+                    !bytes.is_empty() && bytes.chunks(3).all(|c| c == b"\x1b[A"),
+                    "wheel-up must synthesize CSI arrow-up presses, got {bytes:?}",
+                );
+            }
+            other => panic!("expected a Write with arrow-key bytes, got {other:?}"),
+        }
+    }
+
+    /// Under DECCKM (application-cursor-keys mode, `ESC [ ? 1 h`) the
+    /// synthesized arrows switch to the SS3 form (`ESC O A`) — matching
+    /// what the app's own line editor expects.
+    #[test]
+    fn wheel_arrows_use_ss3_form_under_application_cursor_keys() {
+        let (mut m, mut server, bottom) = build_model_with_terminal();
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(7),
+            bytes: b"\x1b[?1049h\x1b[?1h".to_vec(), // alt-screen + DECCKM
+            seq: 1,
+        });
+        assert_eq!(
+            m.terminals.wheel_route(),
+            WheelRoute::AlternateScrollArrows { app_cursor: true },
+        );
+        while server.rx.try_recv().is_ok() {}
+
+        m.handle_mouse(wheel_up_at(bottom.x + 6, bottom.y + 8));
+        match server.rx.try_recv() {
+            Ok(lazybox_ipc::Command::Write { bytes, .. }) => assert!(
+                !bytes.is_empty() && bytes.chunks(3).all(|c| c == b"\x1bOA"),
+                "DECCKM wheel-up must synthesize SS3 arrow-up, got {bytes:?}",
+            ),
+            other => panic!("expected a Write with SS3 arrow bytes, got {other:?}"),
+        }
+    }
+
+    /// A wheel over the pane chrome (tab strip) on the alt-screen
+    /// arrow-synthesis path must NOT synthesize keys — chrome is not a
+    /// scroll target.
+    #[test]
+    fn wheel_over_chrome_does_not_synthesize_arrows() {
+        let (mut m, mut server, bottom) = build_model_with_terminal();
+        m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
+            terminal_id: TerminalId(7),
+            bytes: b"\x1b[?1049h".to_vec(),
+            seq: 1,
+        });
+        assert_eq!(
+            m.terminals.wheel_route(),
+            WheelRoute::AlternateScrollArrows { app_cursor: false },
+        );
+        while server.rx.try_recv().is_ok() {}
+
+        // Row +1 is the tab strip — above the grid (which starts at +3).
+        m.handle_mouse(wheel_up_at(bottom.x + 2, bottom.y + 1));
+        assert!(
+            server.rx.try_recv().is_err(),
+            "a wheel over chrome must not synthesize arrow keys",
+        );
     }
 
     // ── `]` flush + Ctrl-w literal: assert the BYTES reaching the PTY ──

@@ -92,6 +92,7 @@ fn argv_for(
     cwd: &Option<PathBuf>,
     skip_permissions: bool,
     hook_settings_path: Option<PathBuf>,
+    model_args: &[String],
 ) -> Option<Vec<String>> {
     match kind {
         TerminalKind::Agent(agent_id) => {
@@ -107,7 +108,12 @@ fn argv_for(
                 skip_permissions,
                 hook_settings_path,
             };
-            Some(agent.spawn(&ctx))
+            let mut argv = agent.spawn(&ctx);
+            // The tier's model flag (`--model claude-opus-4-8`) is
+            // appended after the agent's own args so it can override a
+            // default the agent baked into its spawn argv.
+            argv.extend(model_args.iter().cloned());
+            Some(argv)
         }
         TerminalKind::Shell => {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
@@ -353,6 +359,7 @@ pub async fn handle_spawn(
     initial_prompt: Option<String>,
     autonomous: bool,
     on_main: bool,
+    model_alias: Option<String>,
 ) {
     // Autonomous sessions (e.g. `@lazybox`-triggered work) launch with
     // tool-use permission prompts disabled so the agent runs unattended
@@ -370,6 +377,26 @@ pub async fn handle_spawn(
     let t0 = std::time::Instant::now();
     let cfg = lazybox_config::Config::load().unwrap_or_default();
     let skip_permissions = skip_permissions_for(autonomous, &cfg);
+    // Resolve the picked model tier against the target agent's menu:
+    // `model_args` are appended to the spawn argv, `model_label` rides
+    // the `TerminalSpawned` event to drive the tab's tier badge. Both
+    // empty/None for a bare (default-model) spawn, a shell, or an
+    // unknown tier alias — the agent then uses its own default model.
+    let (model_args, model_label): (Vec<String>, Option<String>) = match &kind {
+        TerminalKind::Agent(agent_id) => {
+            let models = cfg.agent_models(agent_id);
+            let alias = model_alias.as_deref();
+            // Label mirrors `resolve_args`: the picked tier, falling
+            // back to the agent's configured default tier, so a bare
+            // spawn that lands on a default tier still wears its badge.
+            let label = alias
+                .or(models.default.as_deref())
+                .and_then(|a| models.tier(a))
+                .map(|t| t.label.clone());
+            (models.resolve_args(alias), label)
+        }
+        _ => (Vec::new(), None),
+    };
     tracing::info!(
         %session_key,
         ?session_id,
@@ -505,6 +532,7 @@ pub async fn handle_spawn(
         &cwd_path,
         skip_permissions,
         hook_settings.clone(),
+        &model_args,
     ) {
         Some(a) => a,
         None => {
@@ -643,6 +671,13 @@ pub async fn handle_spawn(
     if landed_on_main {
         config.on_main_terminals.lock().await.insert(terminal_id);
     }
+    if let Some(label) = &model_label {
+        config
+            .terminal_models
+            .lock()
+            .await
+            .insert(terminal_id, label.clone());
+    }
     config
         .terminals
         .lock()
@@ -672,6 +707,7 @@ pub async fn handle_spawn(
     let terminal_meta_map = config.terminal_meta.clone();
     let no_permission_map = config.no_permission_terminals.clone();
     let on_main_map = config.on_main_terminals.clone();
+    let terminal_models_map = config.terminal_models.clone();
     let store_for_pump = config.store.clone();
     let id_for_pump = terminal_id;
     let key_for_pump = backend_key.clone();
@@ -722,6 +758,7 @@ pub async fn handle_spawn(
         kind,
         no_permission: skip_permissions,
         on_main: landed_on_main,
+        model_label,
     });
     if let Err(e) = send_result {
         tracing::error!("handle_spawn: bus.send(TerminalSpawned) failed: {e}");
@@ -967,6 +1004,7 @@ pub async fn handle_spawn(
         terminal_meta_map.lock().await.remove(&id_for_pump);
         no_permission_map.lock().await.remove(&id_for_pump);
         on_main_map.lock().await.remove(&id_for_pump);
+        terminal_models_map.lock().await.remove(&id_for_pump);
         let _ = store_for_pump.delete_kv(&format!("terminal:{key_for_pump}"));
         let _ = store_for_pump.delete_kv(&format!("terminal-noperm:{key_for_pump}"));
         let _ = store_for_pump.delete_kv(&format!("terminal-msg:{key_for_pump}"));
@@ -1473,18 +1511,27 @@ fn sanitize_branch_component(raw: &str) -> String {
 /// projects legitimately have none, so they error and the caller's
 /// empty-dir fallback stays the right outcome for them.
 ///
-/// The canonical `owner/repo` lives in the project *record* (populated
-/// from the upstream task's repo string when the project was
-/// registered). We must read it from there rather than reconstruct it
-/// from the key: `github-{owner}-{repo}` joins on `-`, so a key like
-/// `github-mind-build-mind` can't be split back into `mind-build/mind`
-/// — the naive first-hyphen split yields `mind/build-mind`, cloning the
-/// wrong repo. Falling back to the lossy key-derived name only when no
-/// record exists keeps non-hyphenated repos working in the rare
-/// no-record case.
+/// The clone target must not be reconstructed by splitting the flat
+/// `github-{owner}-{repo}` key on `-`: both fields can hold hyphens, so
+/// a key like `github-codefly-dev-warden-platform` splits back to the
+/// wrong `codefly/dev-warden-platform` and clones a repo that doesn't
+/// exist. We recover the exact `owner/repo` from, in order: the user's
+/// subscribed scope slug (`github:owner/repo`, unambiguous); the
+/// canonical name on the project *record* (populated from the upstream
+/// task's repo string); and finally the lossy key-derived name — only
+/// reached with no scope match and no record, where it still round-trips
+/// non-hyphenated repos.
+///
+/// Invariant this leans on: a workspace can only reach here under a
+/// GitHub project the user actually reached in the UI, and every such
+/// path leaves either a subscribed per-repo scope (added it explicitly)
+/// or a task-seeded record (polling materialized it) behind. If a future
+/// entry point surfaces a GitHub project header with neither, a
+/// hyphenated owner silently falls back to the lossy name again.
 fn clonable_repo_from_project(
     config: &ServerConfig,
     workspace: &Workspace,
+    github_scopes: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<String, crate::ServerError> {
     let key = lazybox_core::workspace_project_key(workspace).ok_or_else(|| {
         crate::ServerError::Workspace("workspace has no primary task or project".into())
@@ -1493,6 +1540,11 @@ fn clonable_repo_from_project(
         return Err(crate::ServerError::Workspace(format!(
             "project '{key}' has no repo to clone"
         )));
+    }
+    if let Some(slug) =
+        github_scopes.and_then(|s| key.github_slug_from_scopes(s.iter().map(String::as_str)))
+    {
+        return Ok(slug);
     }
     let canonical = config
         .store
@@ -1591,7 +1643,10 @@ async fn provision_worktree(
     // `git init` worktree below instead of an empty, non-git directory.
     let repo = match task {
         Some(task) => task.repo.clone(),
-        None => clonable_repo_from_project(config, workspace).ok(),
+        None => {
+            let github_scopes = crate::polling::github_scopes_from_config(&cfg);
+            clonable_repo_from_project(config, workspace, Some(&github_scopes)).ok()
+        }
     };
 
     let (worktree, repo_key) = match repo {
@@ -3255,6 +3310,7 @@ pub async fn handle_inject_prompt(
                     // session; the main-checkout flow never routes
                     // through prompt injection.
                     false,
+                    fb.model_alias,
                 )
                 .await;
                 return;
@@ -3608,6 +3664,9 @@ pub async fn recover_sessions(config: &ServerConfig) {
             // daemon restart clears; a recovered terminal keeps running
             // on its worktree but the badge doesn't survive the restart.
             on_main: false,
+            // Same as `on_main`: the recovered terminal's tier isn't
+            // persisted, so no badge after a restart-driven recovery.
+            model_label: None,
         });
         tokio::spawn(async move {
             let exit_code = match backend.subscribe(&key_for_pump).await {
@@ -3790,6 +3849,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
     };
     let no_permission = config.no_permission_terminals.lock().await.clone();
     let on_main = config.on_main_terminals.lock().await.clone();
+    let terminal_models = config.terminal_models.lock().await.clone();
 
     let mut out = Vec::with_capacity(entries.len());
     for (id, key, session_key, kind) in entries {
@@ -3832,6 +3892,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
         out.push(TerminalSnapshot {
             no_permission: no_permission.contains(&id),
             on_main: on_main.contains(&id),
+            model_label: terminal_models.get(&id).cloned(),
             last_user_message: load_user_message(config, &key),
             terminal_id: id,
             session_key,
@@ -3915,6 +3976,10 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 // Restored sessions live in their persisted worktree;
                 // main-checkout terminals aren't persisted as sessions.
                 false,
+                // A restored session keeps whatever model it was first
+                // launched with (the agent's `--continue` resumes it);
+                // we don't re-pick a tier here.
+                None,
             )
             .await;
         }
@@ -4963,7 +5028,7 @@ mod tests {
         let kind = TerminalKind::Agent("claude".into());
         let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
 
-        let with_skip = argv_for(&config, &kind, &cwd, true, None).expect("claude registered");
+        let with_skip = argv_for(&config, &kind, &cwd, true, None, &[]).expect("claude registered");
         assert_eq!(
             with_skip,
             vec![
@@ -4973,7 +5038,8 @@ mod tests {
             ]
         );
 
-        let without_skip = argv_for(&config, &kind, &cwd, false, None).expect("claude registered");
+        let without_skip =
+            argv_for(&config, &kind, &cwd, false, None, &[]).expect("claude registered");
         assert_eq!(without_skip, vec!["claude".to_string()]);
 
         // With a generated hook settings file, `--settings <path>` is
@@ -4984,6 +5050,7 @@ mod tests {
             &cwd,
             false,
             Some(std::path::PathBuf::from("/run/hooks/settings-1.json")),
+            &[],
         )
         .expect("claude registered");
         assert_eq!(
@@ -4992,6 +5059,33 @@ mod tests {
                 "claude".to_string(),
                 "--settings".to_string(),
                 "/run/hooks/settings-1.json".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn argv_for_appends_model_tier_args() {
+        let config =
+            ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
+        let kind = TerminalKind::Agent("claude".into());
+        let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
+        // The tier's args are appended after the agent's own argv, so a
+        // `--model` flag lands last and selects the picked model.
+        let argv = argv_for(
+            &config,
+            &kind,
+            &cwd,
+            false,
+            None,
+            &["--model".to_string(), "claude-opus-4-8".to_string()],
+        )
+        .expect("claude registered");
+        assert_eq!(
+            argv,
+            vec![
+                "claude".to_string(),
+                "--model".to_string(),
+                "claude-opus-4-8".to_string(),
             ]
         );
     }
@@ -5311,8 +5405,32 @@ mod tests {
         let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
         ws.project_key = Some(key);
         assert_eq!(
-            clonable_repo_from_project(&config, &ws).unwrap(),
+            clonable_repo_from_project(&config, &ws, None).unwrap(),
             "AntoineToussaint/lazybox"
+        );
+    }
+
+    /// Regression for #326: a hyphenated owner (`codefly-dev`) can't be
+    /// recovered from the flat key OR from a project record that was
+    /// itself seeded from the lossy key (the blank-workspace path). The
+    /// subscribed scope slug (`github:codefly-dev/warden-platform`)
+    /// carries the boundary, so the clone target resolves correctly even
+    /// with a mangled record present.
+    #[test]
+    fn clonable_repo_from_project_recovers_hyphenated_owner_from_scopes() {
+        let config = ServerConfig::in_memory();
+        let key = lazybox_core::ProjectKey::github("codefly-dev", "warden-platform");
+        // The record the buggy blank-workspace path would have written.
+        save_project(&config, &key, &key.display_name());
+        assert_eq!(key.display_name(), "codefly/dev-warden-platform");
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
+        ws.project_key = Some(key);
+        let scopes = ["github:codefly-dev/warden-platform".to_string()]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            clonable_repo_from_project(&config, &ws, Some(&scopes)).unwrap(),
+            "codefly-dev/warden-platform"
         );
     }
 
@@ -5331,7 +5449,7 @@ mod tests {
         let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
         ws.project_key = Some(key);
         assert_eq!(
-            clonable_repo_from_project(&config, &ws).unwrap(),
+            clonable_repo_from_project(&config, &ws, None).unwrap(),
             "mind-build/mind"
         );
     }
@@ -5348,7 +5466,7 @@ mod tests {
             "lazybox",
         ));
         assert_eq!(
-            clonable_repo_from_project(&config, &ws).unwrap(),
+            clonable_repo_from_project(&config, &ws, None).unwrap(),
             "AntoineToussaint/lazybox"
         );
     }
@@ -5360,14 +5478,14 @@ mod tests {
         let config = ServerConfig::in_memory();
         let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
         ws.project_key = Some(lazybox_core::ProjectKey::local("my-experiment"));
-        assert!(clonable_repo_from_project(&config, &ws).is_err());
+        assert!(clonable_repo_from_project(&config, &ws, None).is_err());
     }
 
     #[test]
     fn clonable_repo_from_project_errs_without_project_or_task() {
         let config = ServerConfig::in_memory();
         let ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", Utc::now());
-        assert!(clonable_repo_from_project(&config, &ws).is_err());
+        assert!(clonable_repo_from_project(&config, &ws, None).is_err());
     }
 
     /// Regression for #223: two workspaces with the same name in

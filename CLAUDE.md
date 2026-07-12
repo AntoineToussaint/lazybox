@@ -231,7 +231,16 @@ settle-gated inject, plain shells via a direct write, session-less
 workspaces skipped and named in the summary notice. `a` is a leader
 for the **agent** group (which-key popup): `a c` claude, `a x` codex,
 `a u` cursor — no top-level `c`/`x`/`u` aliases (re-add via
-`ui.action_keys`, keyed `spawn_agent.<id>`). `g` is a leader that
+`ui.action_keys`, keyed `spawn_agent.<id>`). Both the `w` and `a`
+leaders also carry **model-tier** chords (#308): `w S`/`w M`/`w L` work
+on the contextual agent at the small / medium / large model, and
+`a S`/`a M`/`a L` spawn the default agent at that tier. Tiers are
+declared per agent under `agents.<id>.models` in YAML (an ordered
+`alias → { label, args }` menu plus a `default` tier for bare spawns);
+Claude ships a built-in Haiku/Sonnet/Opus menu, other agents define
+their own. The alias is agent-agnostic at the chord — the daemon maps
+it to whatever agent the spawn targets — and the picked tier's label
+rides a `◆ Opus` tab badge. `g` is a leader that
 opens the **github** group the same way: `g m` merge, `g v`
 reviewers, `g a` assignees, `g l` labels, `g o` open in browser —
 leader chords only, the legacy `Shift-{M,V,G,L,O}` direct aliases are

@@ -375,6 +375,8 @@ pub struct SpawnFallback {
     pub session_id: Option<lazybox_core::SessionId>,
     pub kind: TerminalKind,
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub model_alias: Option<String>,
 }
 
 /// One row of `Event::WorktreesInspected`. Mirrors
@@ -443,6 +445,13 @@ pub enum Command {
         /// when `cwd` is overridden.
         #[serde(default)]
         on_main: bool,
+        /// Model-tier alias the user picked via the `w S` / `a M`
+        /// chords (`"S"`, `"M"`, `"L"`). The daemon resolves it against
+        /// the target agent's tier menu and appends the tier's args to
+        /// the spawn argv. `None` → the agent's configured-or-hardcoded
+        /// default model.
+        #[serde(default)]
+        model_alias: Option<String>,
     },
     Write {
         terminal_id: TerminalId,
@@ -1074,6 +1083,12 @@ pub enum Event {
         /// it's obvious the session sits on the shared branch.
         #[serde(default)]
         on_main: bool,
+        /// Display label of the model tier the session was launched
+        /// with (`"Haiku"`, `"Sonnet"`, `"Opus"`), when the user picked
+        /// one via a tier chord. Drives the terminal tab's tier badge.
+        /// `None` for a default-model / shell spawn (no badge).
+        #[serde(default)]
+        model_label: Option<String>,
     },
     TerminalOutput {
         terminal_id: TerminalId,
@@ -1404,6 +1419,11 @@ pub struct TerminalSnapshot {
     /// `TerminalSpawned`.
     #[serde(default)]
     pub on_main: bool,
+    /// Model tier label the session was launched with. Lets a
+    /// reconnecting client re-render the tier badge without a fresh
+    /// `TerminalSpawned`. `None` for default-model / shell terminals.
+    #[serde(default)]
+    pub model_label: Option<String>,
     /// Last prompt the user submitted to this terminal (Agent-only;
     /// `None` for shells and for agents that haven't received a prompt
     /// yet). Persisted daemon-side from `Command::RecordUserMessage` so

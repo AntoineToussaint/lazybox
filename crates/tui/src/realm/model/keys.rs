@@ -641,6 +641,7 @@ impl<T: TerminalAdapter> Model<T> {
     fn rewrite_spawn_to_inject(&mut self, cmd: IpcCommand) -> IpcCommand {
         match cmd {
             IpcCommand::Spawn {
+                model_alias: _,
                 session_key,
                 session_id,
                 kind: lazybox_ipc::TerminalKind::Agent(agent_id),
@@ -660,6 +661,7 @@ impl<T: TerminalAdapter> Model<T> {
                     // channel, so there's always a small window where
                     // `find_agent_terminal` returns a dead id.
                     let fallback_spawn = Some(lazybox_ipc::SpawnFallback {
+                        model_alias: None,
                         session_key: session_key.clone(),
                         session_id,
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
@@ -672,6 +674,7 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                 } else {
                     IpcCommand::Spawn {
+                        model_alias: None,
                         session_key,
                         session_id,
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id),
@@ -1309,23 +1312,26 @@ fn action_from_entry(
     entry: &lazybox_tui_core::action::CatalogEntry,
 ) -> Option<lazybox_tui_core::action::Action> {
     use lazybox_tui_core::action::{Action, ActionKind, Param};
-    if entry.kind == ActionKind::SpawnAgent {
-        return entry
-            .param
-            .as_ref()
-            .map(|Param::Agent(id)| Action::SpawnAgent(id.clone()));
-    }
-    if entry.kind == ActionKind::WorkWith {
-        return entry
-            .param
-            .as_ref()
-            .map(|Param::Agent(id)| Action::WorkWith(id.clone()));
-    }
-    if entry.kind == ActionKind::SpawnAgentOnMain {
-        return entry
-            .param
-            .as_ref()
-            .map(|Param::Agent(id)| Action::SpawnAgentOnMain(id.clone()));
+    // A generated row's `Param` disambiguates the two shapes that share
+    // an `ActionKind`: an agent-scoped row (`w c` → WorkWith) vs a
+    // tier-scoped row (`w S` → WorkTier). SpawnAgent splits the same way.
+    match (entry.kind, entry.param.as_ref()) {
+        (ActionKind::SpawnAgent, Some(Param::Agent(id))) => {
+            return Some(Action::SpawnAgent(id.clone()));
+        }
+        (ActionKind::SpawnAgent, Some(Param::Tier(alias))) => {
+            return Some(Action::SpawnTier(alias.clone()));
+        }
+        (ActionKind::WorkWith, Some(Param::Agent(id))) => {
+            return Some(Action::WorkWith(id.clone()));
+        }
+        (ActionKind::WorkWith, Some(Param::Tier(alias))) => {
+            return Some(Action::WorkTier(alias.clone()));
+        }
+        (ActionKind::SpawnAgentOnMain, Some(Param::Agent(id))) => {
+            return Some(Action::SpawnAgentOnMain(id.clone()));
+        }
+        _ => {}
     }
     action_from_kind(entry.kind)
 }

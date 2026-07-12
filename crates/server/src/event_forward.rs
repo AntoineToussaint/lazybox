@@ -513,6 +513,7 @@ mod tests {
                 last_seq: 5,
                 no_permission: false,
                 on_main: false,
+                model_label: None,
                 last_user_message: None,
             }],
             projects: Vec::new(),
@@ -566,6 +567,7 @@ mod tests {
                 kind: TerminalKind::Shell,
                 no_permission: false,
                 on_main: false,
+                model_label: None,
             })
             .unwrap();
         for seq in 1..=10 {

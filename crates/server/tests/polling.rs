@@ -3964,6 +3964,7 @@ mod live_collapse_e2e {
         let tmp = tempfile::tempdir().unwrap();
         client
             .send(Command::Spawn {
+                model_alias: None,
                 session_key: issue_sk.clone(),
                 session_id: None,
                 kind: TerminalKind::Agent("claude".into()),

@@ -84,6 +84,34 @@ impl ProjectKey {
             None => self.0.clone(),
         }
     }
+
+    /// Recover this GitHub project's exact `owner/repo` slug from the
+    /// user's subscribed scope ids, which carry the unambiguous
+    /// `github:owner/repo` form.
+    ///
+    /// The flat `github-{owner}-{repo}` key is lossy: once the owner
+    /// itself contains a hyphen (`codefly-dev/warden-platform` →
+    /// `github-codefly-dev-warden-platform`) there's no way to split it
+    /// back — [`display_name`](Self::display_name) guesses the first `-`
+    /// and yields `codefly/dev-warden-platform`, which then clones the
+    /// wrong repo. Matching against the scope that reproduces this exact
+    /// key sidesteps the guess: the scope slug still holds the
+    /// owner/repo boundary. Returns `None` for non-GitHub keys, or when
+    /// no subscribed scope reproduces this key (e.g. an org-level
+    /// subscription with no per-repo entry).
+    pub fn github_slug_from_scopes<'a>(
+        &self,
+        scopes: impl IntoIterator<Item = &'a str>,
+    ) -> Option<String> {
+        if self.source_prefix() != "github" {
+            return None;
+        }
+        scopes.into_iter().find_map(|scope| {
+            let slug = scope.strip_prefix("github:")?;
+            let (owner, repo) = slug.split_once('/')?;
+            (Self::github(owner, repo) == *self).then(|| slug.to_string())
+        })
+    }
 }
 
 impl std::fmt::Display for ProjectKey {
@@ -162,6 +190,47 @@ mod tests {
         assert_eq!(
             ProjectKey::github("AntoineToussaint", "pretty-hackernews").display_name(),
             "AntoineToussaint/pretty-hackernews"
+        );
+    }
+
+    #[test]
+    fn github_slug_from_scopes_recovers_hyphenated_owner() {
+        // The clone target that the sidebar/git-ops path needs. A
+        // hyphenated owner can't survive the flat key round-trip...
+        let key = ProjectKey::github("codefly-dev", "warden-platform");
+        assert_eq!(
+            key.display_name(),
+            "codefly/dev-warden-platform",
+            "the lossy key split is exactly the bug",
+        );
+        // ...but the subscribed scope slug carries the boundary, so we
+        // recover the real owner/repo and clone the right repo.
+        let scopes = [
+            "github:other-org/thing".to_string(),
+            "github:codefly-dev/warden-platform".to_string(),
+        ];
+        let slug = key
+            .github_slug_from_scopes(scopes.iter().map(String::as_str))
+            .expect("subscribed scope reproduces the key");
+        assert_eq!(slug, "codefly-dev/warden-platform");
+        assert_eq!(
+            format!("git@github.com:{slug}.git"),
+            "git@github.com:codefly-dev/warden-platform.git",
+        );
+    }
+
+    #[test]
+    fn github_slug_from_scopes_ignores_unrelated_and_non_github() {
+        let key = ProjectKey::github("acme", "widget");
+        // Org-level subscription (no `/`) can't pin a repo.
+        assert_eq!(
+            key.github_slug_from_scopes(["github:acme".to_string()].iter().map(String::as_str)),
+            None,
+        );
+        // A local project key never resolves against github scopes.
+        assert_eq!(
+            ProjectKey::local("notes").github_slug_from_scopes(["github:acme/widget"].into_iter()),
+            None,
         );
     }
 

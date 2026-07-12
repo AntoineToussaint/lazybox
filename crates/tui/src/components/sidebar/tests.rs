@@ -1648,6 +1648,7 @@ mod broadcast_select_tests {
         assert_eq!(sb.broadcast_terminal(&key), None, "no sessions yet");
         let spawn = |sb: &mut Sidebar, id: u64, kind: TerminalKind| {
             sb.on_event(&Event::TerminalSpawned {
+                model_label: None,
                 terminal_id: TerminalId(id),
                 session_key: key.clone(),
                 kind,

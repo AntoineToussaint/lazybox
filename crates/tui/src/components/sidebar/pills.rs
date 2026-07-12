@@ -285,7 +285,7 @@ pub(crate) fn status_pills(task: &lazybox_core::Task) -> (Option<StatusPill>, Op
     // Open PR in flight. Review + CI rendered separately.
     let review = match task.review {
         ReviewStatus::Approved => Some(StatusPill {
-            label: " APPROVED",
+            label: " APPROVED ",
             style: Style::default()
                 .bg(crate::theme::current().accent)
                 .fg(Color::Black)
@@ -299,7 +299,7 @@ pub(crate) fn status_pills(task: &lazybox_core::Task) -> (Option<StatusPill>, Op
                 .add_modifier(Modifier::BOLD),
         }),
         ReviewStatus::Pending => Some(StatusPill {
-            label: " REVIEW  ",
+            label: " REVIEW ",
             style: Style::default()
                 .bg(crate::theme::current().warn)
                 .fg(Color::Black)
@@ -316,21 +316,21 @@ pub(crate) fn status_pills(task: &lazybox_core::Task) -> (Option<StatusPill>, Op
                 .add_modifier(Modifier::BOLD),
         }),
         CiStatus::Mixed => Some(StatusPill {
-            label: " CI MIX  ",
+            label: " CI MIX ",
             style: Style::default()
                 .bg(Color::Indexed(214))
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD),
         }),
         CiStatus::Pending | CiStatus::Running => Some(StatusPill {
-            label: " CI RUN  ",
+            label: " CI RUN ",
             style: Style::default()
                 .bg(Color::Indexed(220))
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD),
         }),
         CiStatus::Success => Some(StatusPill {
-            label: " CI OK   ",
+            label: " CI OK ",
             style: Style::default()
                 .bg(Color::Indexed(40))
                 .fg(Color::Black)
@@ -369,7 +369,7 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
     match task.state {
         TaskState::Merged => {
             return Some(StatusPill {
-                label: " MERGED  ",
+                label: " MERGED ",
                 style: Style::default()
                     .bg(theme.hover)
                     .fg(Color::Black)
@@ -378,7 +378,7 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
         }
         TaskState::Closed => {
             return Some(StatusPill {
-                label: " CLOSED  ",
+                label: " CLOSED ",
                 style: Style::default()
                     .bg(theme.error)
                     .fg(Color::Black)
@@ -387,7 +387,7 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
         }
         TaskState::Draft => {
             return Some(StatusPill {
-                label: " DRAFT   ",
+                label: " DRAFT ",
                 style: Style::default()
                     .bg(theme.chrome)
                     .fg(theme.text_strong)
@@ -398,13 +398,13 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
     }
     if task.mergeable.is_conflicting() {
         return Some(StatusPill {
-            label: " CONFLICT",
+            label: " CONFLICT ",
             style: pill_red,
         });
     }
     if task.is_in_merge_queue {
         return Some(StatusPill {
-            label: " QUEUED  ",
+            label: " QUEUED ",
             style: pill_green,
         });
     }
@@ -415,13 +415,13 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
         && matches!(task.ci, CiStatus::Success | CiStatus::None)
     {
         return Some(StatusPill {
-            label: " READY   ",
+            label: " READY ",
             style: pill_green,
         });
     }
     if task.auto_merge_enabled {
         return Some(StatusPill {
-            label: " AUTO    ",
+            label: " AUTO ",
             style: Style::default()
                 .bg(theme.accent)
                 .fg(Color::Black)

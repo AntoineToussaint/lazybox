@@ -35,6 +35,9 @@ pub struct ClaudeStreamConfig {
     pub continue_latest: bool,
     /// Extra arguments appended after the required stream-json flags.
     pub extra_args: Vec<String>,
+    /// Extra environment variables for the child (e.g. the LLM-gateway
+    /// base URL the interactive PTY path also injects).
+    pub env: Vec<(String, String)>,
 }
 
 impl Default for ClaudeStreamConfig {
@@ -45,6 +48,7 @@ impl Default for ClaudeStreamConfig {
             resume_session_id: None,
             continue_latest: false,
             extra_args: Vec::new(),
+            env: Vec::new(),
         }
     }
 }
@@ -59,6 +63,10 @@ impl ClaudeStreamConfig {
             "stream-json".to_string(),
             "--output-format".to_string(),
             "stream-json".to_string(),
+            // The CLI hard-errors on `-p --output-format stream-json`
+            // without it ("requires --verbose") — the child would exit
+            // before emitting a single event.
+            "--verbose".to_string(),
             "--include-partial-messages".to_string(),
             "--include-hook-events".to_string(),
             "--replay-user-messages".to_string(),
@@ -397,6 +405,7 @@ fn spawn_claude_command(config: &ClaudeStreamConfig) -> Result<(Child, ChildStdi
 
     let mut command = Command::new(program);
     command.args(args);
+    command.envs(config.env.iter().cloned());
     if let Some(cwd) = &config.cwd {
         command.current_dir(cwd);
     }

@@ -30,10 +30,13 @@ Set Width 1200
 # Tall enough that the whole `?` help overlay fits on one frame — the
 # bottom row (`]]  exit to sidebar`) carries the `Wait+Screen` sentinel
 # below, so it must be on screen for the render to settle. The keybinding table
-# grew (issue #224 added the `w c` / `w x` / `w u` scoped-work group), so
-# 720 clipped the last rows; height only reveals more of the overlay and
-# never changes the table's byte content (that's width/content-driven).
-Set Height 1000
+# keeps growing (issue #224 added the `w c` / `w x` / `w u` scoped-work group;
+# #315 added the ask-lazybox search, messages log, theme, and change-default
+# rows), so each bump reveals the clipped tail: 720 → 1000 → 1600. Height only
+# reveals more of the overlay and never changes the table's byte content
+# (that's width/content-driven), so this is generously oversized on purpose to
+# absorb the next few rows before it clips the anchor again.
+Set Height 1600
 Set Theme "Catppuccin Mocha"
 
 Hide

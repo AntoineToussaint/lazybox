@@ -13,7 +13,7 @@
 //! sidebar.
 
 use crate::components::sidebar::{
-    StatusPill, badge_pill_style, role_badge, status_pills, workspace_type_label,
+    badge_pill_style, role_badge, status_pills, workspace_type_label,
 };
 use crate::components::table::{Cell, Column, Row};
 use crate::theme::Theme;
@@ -157,10 +157,12 @@ impl<'a> WorkspaceRowCtx<'a> {
 /// 8. Badge: agent slot — ` C ` / ` C×2 ` / blank. Same Max semantics.
 /// 9. Badge: shell slot — ` S ` / blank. Cell carries a leading space
 ///    so the two badges visually separate when both present.
-/// 10. Status pill — ` MERGED  ` / ` REVIEW   CI FAIL ` / blank.
-///    Right-aligned. Cell is empty (width 0) when both review + CI
-///    pills are None, so the column collapses for an all-empty table
-///    instead of always reserving 19 cells of dead air.
+/// 10. Status pill — ` MERGED ` / ` REVIEW  CI FAIL ` / blank.
+///    Right-aligned, sized to the pills actually present (each pill is
+///    trimmed to its own ` LABEL ` block — no blank-slot filler), so a
+///    lone CI pill sits one clean gap off the time. Cell is empty
+///    (width 0) when both review + CI pills are None, so the column
+///    collapses for an all-empty table.
 /// 11. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
 ///    baked into the cell so a 1-cell gap separates time from
 ///    whatever sits to its left (status pill or, when status is
@@ -168,18 +170,19 @@ impl<'a> WorkspaceRowCtx<'a> {
 pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     // Drop order when the sidebar is too narrow to fit every column:
     // lower priority sheds first. The issue number + title (and the
-    // type glyph that tells issue-from-PR) are kept; secondary columns
-    // drop in the order the issue calls out — timestamps, then status
-    // chips, then indicators — so the title elides to `…` only after
-    // they're gone.
+    // type glyph that tells issue-from-PR) are kept. Labels are the
+    // least important thing on the row, so they shed right after the
+    // timestamp — ahead of the badges/unread indicators — while the
+    // status pill (CI / CONFLICT — the actionable signal) is kept
+    // nearly as long as the title (issue #328).
     const P_TIME: u8 = 10;
-    const P_STATUS: u8 = 20;
-    const P_LABELS: u8 = 30;
-    const P_UNREAD: u8 = 40;
-    const P_BADGE_SHELL: u8 = 50;
-    const P_BADGE_AGENT: u8 = 60;
-    const P_ROLE: u8 = 70;
-    const P_STATE: u8 = 80;
+    const P_LABELS: u8 = 20;
+    const P_UNREAD: u8 = 30;
+    const P_BADGE_SHELL: u8 = 40;
+    const P_BADGE_AGENT: u8 = 50;
+    const P_ROLE: u8 = 60;
+    const P_STATE: u8 = 70;
+    const P_STATUS: u8 = 80;
     // The title should keep at least this many cells before any
     // secondary column is allowed to crowd it out — below this a
     // title is just a word fragment + `…` and tells you nothing.
@@ -376,6 +379,34 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     Cell::from_span(Span::styled(ctx.raw_title().to_string(), style))
 }
 
+/// Hard cap on a single chip's text (before the `…`). A verbose
+/// label like `github_actions` otherwise eats a big slice of the row;
+/// past this we truncate with an ellipsis so no one chip dominates.
+const MAX_CHIP_LEN: usize = 10;
+
+/// Shorten a label name for its chip: a small alias table for the
+/// common verbose GitHub labels (`dependencies` → `deps`), then a hard
+/// per-chip length cap with a trailing `…` for everything else
+/// (issue #328). Case-insensitive on the alias lookup so `Dependencies`
+/// and `dependencies` collapse the same way.
+fn abbreviate_label(name: &str) -> String {
+    let alias = match name.to_ascii_lowercase().as_str() {
+        "dependencies" => Some("deps"),
+        "documentation" => Some("docs"),
+        "enhancement" => Some("enhance"),
+        _ => None,
+    };
+    if let Some(short) = alias {
+        return short.to_string();
+    }
+    if name.chars().count() > MAX_CHIP_LEN {
+        let head: String = name.chars().take(MAX_CHIP_LEN - 1).collect();
+        format!("{head}…")
+    } else {
+        name.to_string()
+    }
+}
+
 /// Render the task's labels as compact chips: ` [name] [name] +N`.
 /// Caps at 3 chips with a `+N` overflow indicator so the row layout
 /// stays predictable when a PR has many labels. Each chip's text
@@ -409,7 +440,7 @@ fn cell_labels(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             label_text_style(ctx.theme, &label.color)
         };
         spans.push(Span::styled("[", bracket_style));
-        spans.push(Span::styled(label.name.clone(), text_style));
+        spans.push(Span::styled(abbreviate_label(&label.name), text_style));
         spans.push(Span::styled("]", bracket_style));
     }
     if total > MAX_CHIPS {
@@ -524,35 +555,30 @@ fn badge_slot_cell(ctx: &WorkspaceRowCtx<'_>, badge: Option<(char, usize)>) -> C
     }
 }
 
-/// Width of each status pill slot — review (9) + CI (9), matching the
-/// label widths in `status_pills`. Lifted to a `const` so the
-/// blank-slot span doesn't have to `" ".repeat(9)` on every call.
-const BLANK_PILL: &str = "         ";
-
 fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let Some(task) = ctx.task else {
         return Cell::empty();
     };
     let (primary, secondary) = status_pills(task);
     // Empty cell when there's nothing to show — `Column::max(0)`
-    // collapses the column across the whole table when NO row has
-    // a pill, handing the slack back to the title flex. When ANY
-    // row has a pill, the column expands to 19 cells (9 review + 1
-    // gutter + 9 CI) and pill-less rows get padded by the table
-    // renderer. An armed row always shows its ` ARM ` marker even
-    // when no CI/review pill applies yet (e.g. armed before CI runs).
+    // collapses the column across the whole table when NO row has a
+    // pill, handing the slack back to the title flex. An armed row
+    // always shows its ` ARM ` marker even when no CI/review pill
+    // applies yet (e.g. armed before CI runs).
     if primary.is_none() && secondary.is_none() && !ctx.auto_merge_armed {
         return Cell::empty();
     }
-    let row_style = ctx.row_style();
-    let pill_span = |pill: Option<StatusPill>| match pill {
-        Some(p) => Span::styled(p.label, p.style),
-        None => Span::styled(BLANK_PILL, row_style),
-    };
-    let mut spans = Vec::with_capacity(4);
+    // Emit only the pills that are actually present, each trimmed to
+    // its own ` LABEL ` block (the padding lives in the label). No
+    // blank-slot filler: a pill-less side would just stack dead space
+    // between the visible pill and the time trailer (issue #328).
+    // Right-aligned by the column, so the rightmost pill sits one clean
+    // gap off the duration — its block's trailing space plus the time
+    // cell's leading space, nothing more.
+    let mut spans = Vec::with_capacity(3);
     if ctx.auto_merge_armed {
         let arm_style = if ctx.is_cursor {
-            row_style
+            ctx.row_style()
         } else {
             Style::default()
                 .bg(ctx.theme.accent)
@@ -560,11 +586,13 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
                 .add_modifier(Modifier::BOLD)
         };
         spans.push(Span::styled(" ARM ", arm_style));
-        spans.push(Span::styled(" ", row_style));
     }
-    spans.push(pill_span(primary));
-    spans.push(Span::styled(" ", row_style));
-    spans.push(pill_span(secondary));
+    if let Some(p) = primary {
+        spans.push(Span::styled(p.label, p.style));
+    }
+    if let Some(p) = secondary {
+        spans.push(Span::styled(p.label, p.style));
+    }
     Cell::new(spans)
 }
 
@@ -1126,17 +1154,20 @@ mod tests {
         assert_eq!(cell_status(&ctx).width(), 0);
     }
 
-    /// When a status pill IS present the cell stays 19 cells wide —
-    /// review (9) + sep (1) + CI (9) — so rows with one pill line up
-    /// alongside rows with two.
+    /// A lone CI pill is sized to just its own ` CI FAIL ` block (9
+    /// cells) — no blank review-slot filler padding it out to 19 and
+    /// stacking dead space before the time trailer (issue #328).
     #[test]
-    fn cell_status_is_nineteen_cells_with_a_pill() {
+    fn cell_status_is_trimmed_to_the_present_pill() {
         let mut task = make_task("owner/repo#1", "x");
         task.ci = CiStatus::Failure;
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
-        assert_eq!(cell_status(&ctx).width(), 19);
+        let cell = cell_status(&ctx);
+        assert_eq!(cell.width(), 9);
+        assert_eq!(cell.spans.len(), 1);
+        assert_eq!(cell.spans[0].content.as_ref(), " CI FAIL ");
     }
 
     /// An armed workspace surfaces its ` ARM ` marker even when the PR
@@ -1441,15 +1472,16 @@ mod tests {
         );
     }
 
-    /// Regression for issue #130: at a narrow width the row still
-    /// shows the item number + a useful slice of the title. The
-    /// secondary columns (time, then status) shed out before the
-    /// title is squeezed — the bug was the title collapsing to a lone
-    /// `…` while the status pill / glyph stayed put.
+    /// Regression for issue #328: at a narrow width the CI status is
+    /// KEPT — it's the actionable signal, so it sheds nearly last —
+    /// while the timestamp is the first column to go. (Before the
+    /// shed-priority swap the status pill dropped out ahead of the
+    /// less-important columns, exactly backwards.)
     #[test]
-    fn narrow_width_keeps_number_and_title_drops_status_first() {
+    fn narrow_width_keeps_status_and_sheds_time_first() {
         let mut task = make_task("owner/repo#42", "Fix the broken sidebar layout");
         task.ci = CiStatus::Failure;
+        task.updated_at = fixed_time() - chrono::Duration::minutes(5); // " 5m"
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
@@ -1466,8 +1498,12 @@ mod tests {
             "title squeezed to nothing at narrow width: {line:?}",
         );
         assert!(
-            !line.contains("CI FAIL"),
-            "status pill should shed before the title is crowded: {line:?}",
+            line.contains("CI FAIL"),
+            "status must survive — it now sheds nearly last: {line:?}",
+        );
+        assert!(
+            !line.contains("5m"),
+            "the timestamp should shed first at this width: {line:?}",
         );
     }
 
@@ -1582,6 +1618,96 @@ mod tests {
         let cell = cell_labels(&ctx);
         let joined: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(joined, " [bug] [ci] [backend] +2");
+    }
+
+    /// Issue #328, part 1: common verbose label names are aliased to a
+    /// short form, and anything else past `MAX_CHIP_LEN` is capped with
+    /// a trailing `…` so no one chip dominates the row.
+    #[test]
+    fn abbreviate_label_aliases_and_caps() {
+        assert_eq!(abbreviate_label("dependencies"), "deps");
+        assert_eq!(abbreviate_label("Dependencies"), "deps"); // case-insensitive
+        assert_eq!(abbreviate_label("documentation"), "docs");
+        assert_eq!(abbreviate_label("go"), "go"); // short, untouched
+        // A long, non-aliased name caps at MAX_CHIP_LEN cells incl. `…`.
+        let capped = abbreviate_label("github_actions");
+        assert_eq!(capped, "github_ac…");
+        assert_eq!(capped.chars().count(), MAX_CHIP_LEN);
+    }
+
+    /// Issue #328, part 1: the row from the screenshot — `[dependencies]
+    /// [go]` — collapses to `[deps] [go]` so a Dependabot-heavy list
+    /// stops eating the label column.
+    #[test]
+    fn cell_labels_abbreviates_long_names() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.labels = vec![
+            lazybox_core::Label::new("dependencies"),
+            lazybox_core::Label::new("go"),
+        ];
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_labels(&ctx);
+        let joined: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, " [deps] [go]");
+    }
+
+    /// Issue #328, part 2: under width pressure the labels shed before
+    /// the CONFLICT / CI status — the tags are the least important thing
+    /// on the row, the merge-conflict signal is the most. A width that
+    /// can't fit both keeps CONFLICT and drops the chips.
+    #[test]
+    fn narrow_width_sheds_labels_before_status() {
+        let mut task = make_task("owner/repo#42", "Fix bug");
+        task.mergeable = lazybox_core::Mergeable::Conflicting; // " CONFLICT "
+        task.labels = vec![
+            lazybox_core::Label::new("bug"),
+            lazybox_core::Label::new("ci"),
+        ];
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let columns = build_columns(2);
+        let rows = vec![build_row(&ctx)];
+        let lines = crate::components::table::render_table(&rows, &columns, 34);
+        let line: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            line.contains("CONFLICT"),
+            "the actionable status must survive: {line:?}",
+        );
+        assert!(
+            !line.contains("[bug]") && !line.contains("[ci]"),
+            "labels should shed before the status pill: {line:?}",
+        );
+        assert!(line.contains("Fix bug"), "title dropped: {line:?}");
+    }
+
+    /// Issue #328, part 3: the status pill is trimmed to its ` LABEL `
+    /// block, so a single clean gap — the pill's own trailing space plus
+    /// the time cell's leading space — separates the CI status from the
+    /// duration, instead of the old baked-in trailing padding stacking
+    /// with the column gap and the time's leading space.
+    #[test]
+    fn status_pill_sits_one_clean_gap_off_the_time() {
+        let mut task = make_task("owner/repo#42", "Fix bug");
+        task.ci = CiStatus::Failure;
+        task.updated_at = fixed_time() - chrono::Duration::minutes(5); // "5m"
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let columns = build_columns(4);
+        let rows = vec![build_row(&ctx)];
+        let lines = crate::components::table::render_table(&rows, &columns, 80);
+        let line: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            line.contains("CI FAIL  5m"),
+            "expected a single clean gap between status and time: {line:?}",
+        );
+        assert!(
+            !line.contains("CI FAIL   5m"),
+            "status↔time gap is still oversized: {line:?}",
+        );
     }
 
     /// Multi-instance badge (` C×2 `, 5 cells) no longer gets

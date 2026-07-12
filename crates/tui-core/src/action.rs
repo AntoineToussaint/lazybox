@@ -499,7 +499,7 @@ impl ActionDef {
                 kind: ActionKind::OpenHelp,
                 default_keys: "?",
                 label: "help",
-                describe: "Show this list of shortcuts.",
+                describe: "Show this list of shortcuts. Press ? again to ask lazybox a question in plain language (fuzzy keybinding search + AI answers).",
                 section: Section::Global,
             },
             ActionKind::OpenTour => &Self {

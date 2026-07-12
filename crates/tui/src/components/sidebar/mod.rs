@@ -1934,6 +1934,13 @@ impl Sidebar {
             actions.push(Action::ToggleSnooze);
             actions.push(Action::Archive);
         }
+        // Repo-group collapse/expand (`Space`) — the "group the
+        // sessions" shortcut users couldn't find (#338). Surfaces
+        // whenever the cursor sits somewhere a group can fold: on a
+        // repo header, or on a workspace / session row inside one.
+        if self.cursor_on_repo_header() || workspace.is_some() {
+            actions.push(Action::ToggleRepoGroup);
+        }
         // Focus mode (`.`) surfaces only when the selected workspace
         // has a coding agent to maximize — otherwise the key is a
         // no-op, so advertising it would be noise. The `]]<digit>`

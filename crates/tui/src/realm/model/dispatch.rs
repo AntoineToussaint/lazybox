@@ -739,6 +739,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenSearch => {
                 self.sidebar.open_search();
             }
+            Action::ToggleRepoGroup => {
+                self.sidebar.toggle_repo_at_cursor();
+            }
             Action::SelectWorkspace => {
                 // Toggle the cursor row's broadcast mark. The notice
                 // names the running count + the broadcast key so the

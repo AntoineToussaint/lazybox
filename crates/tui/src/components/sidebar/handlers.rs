@@ -38,14 +38,12 @@ impl Sidebar {
                 self.move_cursor_by(-1);
                 PaneOutcome::Consumed
             }
-            // ── Collapse / expand the cursor's repo group ─────────────
-            // Space toggles the parent repo of whatever workspace /
-            // session row the cursor is on. Mimics file-tree TUIs
-            // (yazi, nnn, lf) where Space folds a directory.
-            (KeyCode::Char(' '), KeyModifiers::NONE) => {
-                self.toggle_repo_at_cursor();
-                PaneOutcome::Consumed
-            }
+            // Collapse / expand the cursor's repo group (`Space`, mimics
+            // file-tree TUIs — yazi, nnn, lf — folding a directory) is a
+            // catalog action now (`ActionKind::ToggleRepoGroup`, #338),
+            // dispatched through `Model::dispatch_action` before this
+            // handler runs — so it shows in `?` help, is remappable via
+            // `ui.action_keys`, and surfaces in the footer hints.
 
             // Esc drops the broadcast multi-select set (the marks `v`
             // toggled). With no selection it bubbles up so Esc keeps

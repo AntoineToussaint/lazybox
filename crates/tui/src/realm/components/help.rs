@@ -48,6 +48,19 @@ pub struct LeaderGroup {
     aliases: String,
 }
 
+/// Whether this entry is rendered as part of a leader-group block —
+/// i.e. one of its effective chords is a two-step `<leader> <key>`
+/// sequence. The exact predicate [`LeaderGroup::all_from_catalog`]
+/// uses to collect group members, factored out so `from_catalog` can
+/// partition the catalog once: leader entries render only in their
+/// group, everything else in the flat single-key grid (#338).
+fn is_leader_entry(entry: &CatalogEntry) -> bool {
+    entry
+        .chords
+        .iter()
+        .any(|chord| matches!(chord, Chord::Seq(strokes) if strokes.len() == 2))
+}
+
 impl LeaderGroup {
     /// Build one block per distinct leader keystroke that begins a
     /// two-step chord in the catalog, in first-appearance order. Each
@@ -145,6 +158,16 @@ impl Help {
             // to show in the keys column — skip it rather than render a
             // blank row.
             if entry.keys_display.is_empty() {
+                continue;
+            }
+            // The catalog is one source of truth for the data, but the
+            // render must not show it twice: an entry whose effective
+            // chord is a two-step leader sequence (`g m`, `a c`, `q q`)
+            // is rendered in its leader-group block up top, so exclude it
+            // from the flat per-section grid — which is single-key-only
+            // (#338). `is_leader_entry` mirrors exactly what
+            // `LeaderGroup::all_from_catalog` picks up.
+            if is_leader_entry(entry) {
                 continue;
             }
             // LeaveTerminal's chord is the escape char doubled, owned by
@@ -410,10 +433,29 @@ fn format_keys_for_display(raw: &str) -> String {
 mod tests {
     use super::{Help, format_keys_for_display};
 
+    /// Collect every (keys, label) row the help panel renders — flat
+    /// per-section grid AND leader-group blocks. The Keys screen is the
+    /// union of both halves; a binding shows in exactly one of them.
+    fn all_help_rows(help: &Help) -> Vec<(String, String)> {
+        let flat = help
+            .sections
+            .iter()
+            .flat_map(|s| s.bindings.iter())
+            .map(|b| (b.keys.to_string(), b.label.to_string()));
+        let grouped = help
+            .leaders
+            .iter()
+            .flat_map(|lg| lg.chords.iter())
+            .map(|b| (b.keys.to_string(), b.label.to_string()));
+        flat.chain(grouped).collect()
+    }
+
     /// The generated Keys screen (#102 P4) is the catalog made visible:
     /// it must list the per-agent spawn rows and the long-snooze guard
     /// row — the bindings that only exist in the runtime catalog — with
-    /// their effective keys, grouped by scope.
+    /// their effective keys. The per-agent spawns are two-step leader
+    /// chords, so they live in the `a` leader block; the single-key
+    /// long-snooze lives in the flat grid (#338).
     #[test]
     fn from_catalog_lists_generated_rows() {
         use lazybox_tui_core::action::ActionDef;
@@ -422,12 +464,7 @@ mod tests {
             &std::collections::BTreeMap::new(),
         );
         let help = Help::from_catalog(&catalog, ']');
-        let rows: Vec<(String, String)> = help
-            .sections
-            .iter()
-            .flat_map(|s| s.bindings.iter())
-            .map(|b| (b.keys.to_string(), b.label.to_string()))
-            .collect();
+        let rows = all_help_rows(&help);
         assert!(
             rows.iter().any(|(k, l)| k == "a c" && l == "spawn claude"),
             "per-agent claude row missing from Keys screen: {rows:?}",
@@ -436,29 +473,114 @@ mod tests {
             rows.iter().any(|(k, l)| k == "a x" && l == "spawn codex"),
             "per-agent codex row missing",
         );
+        // The single-key long-snooze guard row lives in the flat grid.
+        let flat: Vec<(String, String)> = help
+            .sections
+            .iter()
+            .flat_map(|s| s.bindings.iter())
+            .map(|b| (b.keys.to_string(), b.label.to_string()))
+            .collect();
         assert!(
-            rows.iter().any(|(_, l)| l == "long snooze"),
-            "long-snooze guard row missing",
+            flat.iter().any(|(_, l)| l == "long snooze"),
+            "long-snooze guard row missing from the flat grid",
         );
         // No bare generic "spawn agent" placeholder survives.
         assert!(!rows.iter().any(|(_, l)| l == "spawn agent"));
     }
 
-    /// A keymap preset's remaps surface in the Keys screen — the vim
-    /// preset shows merge as `g m`, not `Shift-M`.
+    /// A keymap preset's remaps surface in the Keys screen — merge is
+    /// the `g m` leader chord (#304), so it renders in the `g` leader
+    /// block and NOT in the flat single-key grid (#338).
     #[test]
     fn from_catalog_reflects_preset_overrides() {
         use lazybox_tui_core::action::{ActionDef, keymap_preset};
         let overrides = keymap_preset("vim").unwrap();
         let catalog = ActionDef::catalog(&[], &overrides);
         let help = Help::from_catalog(&catalog, ']');
-        let merge_keys = help
+        let grouped_merge = help
+            .leaders
+            .iter()
+            .flat_map(|lg| lg.chords.iter())
+            .find(|b| b.label == "merge PR")
+            .map(|b| b.keys.to_string());
+        assert_eq!(grouped_merge.as_deref(), Some("g m"));
+        // It must not also appear in the flat grid.
+        assert!(
+            !help
+                .sections
+                .iter()
+                .flat_map(|s| s.bindings.iter())
+                .any(|b| b.label == "merge PR"),
+            "merge PR leaked into the flat grid — leader chords render once",
+        );
+    }
+
+    /// The single source of truth in the render: no binding appears in
+    /// both a leader-group block and the flat per-section grid, and the
+    /// flat grid is single-key-only (no two-step chords) (#338).
+    #[test]
+    fn no_binding_is_rendered_in_both_halves() {
+        use lazybox_tui_core::action::ActionDef;
+        let agents = [
+            "claude".to_string(),
+            "codex".to_string(),
+            "cursor".to_string(),
+        ];
+        let catalog = ActionDef::catalog(&agents, &std::collections::BTreeMap::new());
+        let help = Help::from_catalog(&catalog, ']');
+
+        let flat_keys: Vec<String> = help
             .sections
             .iter()
             .flat_map(|s| s.bindings.iter())
-            .find(|b| b.label == "merge PR")
-            .map(|b| b.keys.to_string());
-        assert_eq!(merge_keys.as_deref(), Some("g m"));
+            .map(|b| b.keys.to_string())
+            .collect();
+        // The flat grid is single-key-only — no `<leader> <key>` cell.
+        for keys in &flat_keys {
+            assert!(
+                !keys.contains(' ') || keys.starts_with(']'),
+                "two-step chord {keys:?} leaked into the flat grid",
+            );
+        }
+        // No flat binding is also a leader-group chord.
+        let group_keys: std::collections::HashSet<String> = help
+            .leaders
+            .iter()
+            .flat_map(|lg| lg.chords.iter())
+            .map(|b| b.keys.to_string())
+            .collect();
+        for keys in &flat_keys {
+            assert!(
+                !group_keys.contains(keys),
+                "binding {keys:?} is rendered in both a leader block and the flat grid",
+            );
+        }
+        // Sanity: the leader blocks aren't empty — the github group's
+        // `g m` and the agent group's `a c` are up there.
+        assert!(group_keys.contains("g m"), "expected the g m leader chord");
+        assert!(group_keys.contains("a c"), "expected the a c leader chord");
+    }
+
+    /// Repo-group collapse (`Space`) is a catalog action now (#338), so
+    /// it renders in the flat Sidebar grid of the Keys screen — the
+    /// shortcut that used to be an out-of-catalog pane arm and never
+    /// showed in help.
+    #[test]
+    fn from_catalog_lists_repo_group_collapse() {
+        use lazybox_tui_core::action::ActionDef;
+        let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
+        let help = Help::from_catalog(&catalog, ']');
+        let flat: Vec<(String, String)> = help
+            .sections
+            .iter()
+            .flat_map(|s| s.bindings.iter())
+            .map(|b| (b.keys.to_string(), b.label.to_string()))
+            .collect();
+        assert!(
+            flat.iter()
+                .any(|(k, l)| k == "Space" && l == "collapse group"),
+            "repo-group collapse missing from the Keys screen: {flat:?}",
+        );
     }
 
     /// The `g` leader gets its own labeled block built from the catalog:

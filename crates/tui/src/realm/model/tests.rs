@@ -3940,6 +3940,26 @@ mod chord_resolution_tests {
         assert_eq!(resolve("g", PaneFocus::Sidebar), None);
     }
 
+    /// Repo-group collapse migrated from an out-of-catalog sidebar
+    /// pane arm into the catalog (#338): `Space` now resolves to
+    /// `ToggleRepoGroup` under sidebar focus, so it shows in help and
+    /// is remappable. Under activity focus `Space` keeps its own
+    /// pane-scoped meaning (`SelectRow`) — the two never collide
+    /// because each resolves under a different focus.
+    #[test]
+    fn space_collapses_repo_group_via_catalog() {
+        assert_eq!(
+            resolve("Space", PaneFocus::Sidebar),
+            Some(ActionKind::ToggleRepoGroup),
+            "`Space` on the sidebar collapses the repo group",
+        );
+        assert_eq!(
+            resolve("Space", PaneFocus::Right),
+            Some(ActionKind::SelectRow),
+            "`Space` on the activity pane selects the row",
+        );
+    }
+
     #[test]
     fn navigation_synonyms_stay_clear_of_the_catalog() {
         // `j` / `k` are pane-handler bindings (cursor movement); the

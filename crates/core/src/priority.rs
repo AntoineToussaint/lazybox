@@ -56,8 +56,8 @@ impl PriorityTier {
 ///    count).
 ///
 /// When a source declares more than one tier (two priority labels, or
-/// two markers), the stronger tier wins — [`PriorityTier::ORDER`] is
-/// scanned strongest-first.
+/// two markers), the stronger tier wins — labels and markers are
+/// scanned strongest-first (High → Medium → Low).
 ///
 /// Returns `None` when nothing is declared; the caller falls back to
 /// the agent's configured default tier.

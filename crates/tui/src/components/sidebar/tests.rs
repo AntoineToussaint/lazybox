@@ -1827,6 +1827,42 @@ mod done_alert_tests {
         (sb, key)
     }
 
+    /// Repo-group collapse surfaces in the footer wherever the cursor
+    /// resolves to a group, and its verb tracks the group's state:
+    /// `collapse group` while expanded, `expand group` once folded —
+    /// never a "collapse" hint over an already-collapsed group (#338).
+    #[test]
+    fn repo_group_collapse_footer_verb_tracks_state() {
+        let catalog =
+            lazybox_tui_core::action::ActionDef::catalog(&[], &std::collections::BTreeMap::new());
+        let (mut sb, key) = sidebar_with_one_workspace();
+        assert!(sb.focus_workspace_key(&key), "cursor on the workspace");
+        // The cursor sits inside a repo group.
+        assert!(
+            sb.cursor_repo().is_some(),
+            "workspace row resolves to a group"
+        );
+
+        let expanded = sb.contextual_bindings(&catalog);
+        assert!(
+            expanded
+                .iter()
+                .any(|b| b.keys == "Space" && b.label == "collapse group"),
+            "expanded group → `Space collapse group`: {expanded:?}",
+        );
+
+        // Fold it — the verb flips to expand.
+        sb.toggle_repo_at_cursor();
+        assert_eq!(sb.cursor_repo_collapsed(), Some(true), "group is collapsed");
+        let collapsed = sb.contextual_bindings(&catalog);
+        assert!(
+            collapsed
+                .iter()
+                .any(|b| b.keys == "Space" && b.label == "expand group"),
+            "collapsed group → `Space expand group`: {collapsed:?}",
+        );
+    }
+
     /// Focus mode (`.`) surfaces in the contextual footer only when the
     /// selected workspace has a coding agent to maximize — advertising
     /// it on an agent-less row would point at a no-op key.

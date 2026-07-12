@@ -1667,18 +1667,18 @@ impl Sidebar {
         entries
     }
 
-    /// Toggle the collapsed flag for the repo at or above the
-    /// cursor. Used by `Space`. Resolution:
+    /// The repo group the cursor's row belongs to, if any. Resolution:
     ///
-    /// - cursor on a `RepoHeader` → toggle that header.
-    /// - cursor on a workspace / session → walk back to find the
-    ///   nearest header (the cursor's group) and toggle that.
+    /// - cursor on a `RepoHeader` → that header.
+    /// - cursor on a workspace / session / kind sub-row → the nearest
+    ///   header above it (the cursor's group).
     ///
-    /// On collapse, cursor snaps to the now-collapsed header so
-    /// j/k from there land on adjacent headers cleanly.
-    pub fn toggle_repo_at_cursor(&mut self) -> bool {
-        let repo = match self.visible.get(self.cursor).cloned() {
-            Some(VisibleRow::RepoHeader(name)) => Some(name),
+    /// The single source of truth for "which group does `Space` fold?" —
+    /// shared by [`Self::toggle_repo_at_cursor`] and the footer hint so
+    /// the two never disagree about when the shortcut applies (#338).
+    pub fn cursor_repo(&self) -> Option<String> {
+        match self.visible.get(self.cursor) {
+            Some(VisibleRow::RepoHeader(name)) => Some(name.clone()),
             Some(VisibleRow::Workspace(_))
             | Some(VisibleRow::Session { .. })
             | Some(VisibleRow::KindHeader(_)) => self
@@ -1691,8 +1691,26 @@ impl Sidebar {
                     _ => None,
                 }),
             None => None,
+        }
+    }
+
+    /// True when the cursor's repo group is currently collapsed. `None`
+    /// when the cursor isn't in a group at all. Drives the footer's
+    /// collapse-vs-expand verb (#338).
+    pub fn cursor_repo_collapsed(&self) -> Option<bool> {
+        self.cursor_repo()
+            .map(|repo| self.collapsed_repos.contains(&repo))
+    }
+
+    /// Toggle the collapsed flag for the repo at or above the
+    /// cursor. Used by `Space`.
+    ///
+    /// On collapse, cursor snaps to the now-collapsed header so
+    /// j/k from there land on adjacent headers cleanly.
+    pub fn toggle_repo_at_cursor(&mut self) -> bool {
+        let Some(repo) = self.cursor_repo() else {
+            return false;
         };
-        let Some(repo) = repo else { return false };
         let was_collapsed = self.collapsed_repos.contains(&repo);
         if was_collapsed {
             self.collapsed_repos.remove(&repo);
@@ -1934,6 +1952,14 @@ impl Sidebar {
             actions.push(Action::ToggleSnooze);
             actions.push(Action::Archive);
         }
+        // Repo-group collapse/expand (`Space`) — the "group the
+        // sessions" shortcut users couldn't find (#338). Surfaces
+        // wherever the key would actually fold something: anywhere the
+        // cursor resolves to a repo group (header, workspace, session,
+        // or kind sub-row) — the same predicate the key dispatches on.
+        if self.cursor_repo().is_some() {
+            actions.push(Action::ToggleRepoGroup);
+        }
         // Focus mode (`.`) surfaces only when the selected workspace
         // has a coding agent to maximize — otherwise the key is a
         // no-op, so advertising it would be noise. The `]]<digit>`
@@ -1987,6 +2013,16 @@ impl Sidebar {
                         // A single-key remap of an agent row keeps its
                         // own name — there's no group cell to defer to.
                         Action::SpawnAgent(_) => entry.label.clone(),
+                        // The verb tracks the cursor's group state so the
+                        // footer never says "collapse" over an already-
+                        // collapsed group (#338).
+                        Action::ToggleRepoGroup => std::borrow::Cow::Borrowed(
+                            if self.cursor_repo_collapsed() == Some(true) {
+                                "expand group"
+                            } else {
+                                "collapse group"
+                            },
+                        ),
                         _ => std::borrow::Cow::Borrowed(contextual_label(&a, workspace)),
                     };
                     out.push(Binding {

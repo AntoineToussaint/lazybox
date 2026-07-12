@@ -682,15 +682,12 @@ impl Sidebar {
                 is_cursor: i == self.cursor,
                 is_selected: self.broadcast_selected.contains(key),
                 max_pr_num_width,
-                asking: workspace.is_some_and(|w| {
-                    crate::agent_attention::workspace_is_asking(w, &self.agents_asking)
-                }),
-                working: workspace.is_some_and(|w| {
-                    crate::agent_attention::workspace_is_working(w, &self.agents_working)
-                }),
-                done: workspace.is_some_and(|w| {
-                    crate::agent_attention::workspace_is_done(w, &self.agents_done)
-                }),
+                asking: workspace
+                    .is_some_and(|w| crate::agent_attention::workspace_is_asking(w, &self.agents)),
+                working: workspace
+                    .is_some_and(|w| crate::agent_attention::workspace_is_working(w, &self.agents)),
+                done: workspace
+                    .is_some_and(|w| crate::agent_attention::workspace_is_done(w, &self.agents)),
                 working_glyph: crate::components::workspace_row::working_glyph(
                     self.working_spinner_frame,
                 ),

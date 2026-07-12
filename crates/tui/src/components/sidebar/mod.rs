@@ -411,27 +411,18 @@ pub struct Sidebar {
     /// ("finished") (#80). Surfaces in lazybox's footer alongside the OS
     /// notification so users with notifications muted still see it.
     pending_asking_notices: Vec<String>,
-    /// Workspace keys whose agent is currently in `AgentState::InputNeeded`.
-    /// Single source of truth for the `?` row pill, the `? N input`
-    /// header counter, and `!` jump-to-asking. Source: `Event::AgentState`
-    /// broadcasts from the daemon, sidebar-local — independent of
-    /// `Workspace.sessions[i].state` (which gets clobbered every
-    /// poll cycle when the daemon re-broadcasts `WorkspaceUpserted`).
-    agents_asking: std::collections::HashSet<SessionKey>,
-    /// Workspace keys whose agent is currently in `AgentState::Working`
-    /// (streaming output / running a tool). Drives the animated
-    /// "working" spinner in the same per-session slot as the `?`
-    /// asking pill — the two are mutually exclusive. Source:
-    /// `Event::AgentState`, sidebar-local for the same reason as
-    /// `agents_asking`.
-    agents_working: std::collections::HashSet<SessionKey>,
-    /// Workspace keys whose agent is in `AgentState::Done` — it
-    /// finished its turn and is waiting to be looked at (#80). Drives
-    /// the `✓` indicator in the same per-session slot as the `?` pill
-    /// and the working spinner (all three mutually exclusive), and
-    /// alerts the user on the rising edge. Source: `Event::AgentState`,
-    /// sidebar-local for the same reason as `agents_asking`.
-    agents_done: std::collections::HashSet<SessionKey>,
+    /// The single per-session agent status, keyed by workspace — the
+    /// source of truth for the `?` asking pill / `? N input` header
+    /// counter / `!` jump, the animated `Working` spinner, and the `✓`
+    /// done mark (#80). One [`AgentState`] per session (the four states
+    /// share one UI slot, so they're mutually exclusive by
+    /// construction; #327). Every reading folds in through
+    /// [`crate::agent_attention::apply_agent_state`], which validates the
+    /// transition. Source: `Event::AgentState` broadcasts from the
+    /// daemon, sidebar-local — independent of `Workspace.sessions[i].state`
+    /// (which gets clobbered every poll cycle when the daemon
+    /// re-broadcasts `WorkspaceUpserted`).
+    agents: std::collections::HashMap<SessionKey, lazybox_ipc::AgentState>,
     /// Current frame of the shared "working" spinner, mirrored from
     /// the free-running wall clock by [`Sidebar::tick_working`] so the
     /// render path stays a cheap field read and every working row shows
@@ -511,9 +502,7 @@ impl Sidebar {
             ascii_glyphs: false,
             pending_notifications: Vec::new(),
             pending_asking_notices: Vec::new(),
-            agents_asking: std::collections::HashSet::new(),
-            agents_working: std::collections::HashSet::new(),
-            agents_done: std::collections::HashSet::new(),
+            agents: std::collections::HashMap::new(),
             working_spinner_frame: 0,
             spinner_epoch: std::time::Instant::now(),
             filter_chip_rect: None,
@@ -575,7 +564,11 @@ impl Sidebar {
     /// rest of the time, so it never forces a faster redraw and a single
     /// shared frame index means no per-row work on each tick.
     pub fn tick_working(&mut self) -> bool {
-        if self.agents_working.is_empty() {
+        if !self
+            .agents
+            .values()
+            .any(|s| matches!(s, lazybox_ipc::AgentState::Working))
+        {
             return false;
         }
         let frame =
@@ -593,17 +586,27 @@ impl Sidebar {
     /// the workspace re-projection) for the daemon's repeated
     /// `AgentState` pings, which otherwise arrive every detector
     /// tick while an agent streams.
+    /// The agent status currently stored for `session_key`, or `None`
+    /// when the daemon has never reported one (treated as `Idle`).
+    /// Test-facing read of the single per-session state map.
+    #[cfg(test)]
+    pub(crate) fn agent_state(&self, session_key: &SessionKey) -> Option<lazybox_ipc::AgentState> {
+        self.agents.get(session_key).copied()
+    }
+
     pub fn displays_agent_state(
         &self,
         session_key: &SessionKey,
         state: lazybox_ipc::AgentState,
     ) -> bool {
-        let asking = self.agents_asking.contains(session_key);
-        let working = self.agents_working.contains(session_key);
-        let done = self.agents_done.contains(session_key);
-        asking == matches!(state, lazybox_ipc::AgentState::InputNeeded)
-            && working == matches!(state, lazybox_ipc::AgentState::Working)
-            && done == matches!(state, lazybox_ipc::AgentState::Done)
+        // "Already displays it" = the stored state already equals this
+        // reading, so folding it in would be a no-op. An absent entry
+        // renders as `Idle`, so treat it as such.
+        self.agents
+            .get(session_key)
+            .copied()
+            .unwrap_or(lazybox_ipc::AgentState::Idle)
+            == state
     }
 
     /// Take any pending desktop notifications queued by event
@@ -1085,7 +1088,7 @@ impl Sidebar {
             .collect();
         let current = self.selected_session_key().cloned();
         let Some(target) = crate::agent_attention::next_asking_workspace(
-            &self.agents_asking,
+            &self.agents,
             &keys_order,
             current.as_ref(),
         ) else {
@@ -1115,7 +1118,7 @@ impl Sidebar {
             .iter()
             .filter(|k| {
                 self.workspaces.get(*k).is_some_and(|w| {
-                    workspace_attention_signals(w, &self.agents_asking)
+                    workspace_attention_signals(w, &self.agents)
                         .contains(&AttentionSignal::CiFailing)
                 })
             })
@@ -1179,7 +1182,7 @@ impl Sidebar {
             .workspaces
             .iter()
             .map(|(key, w)| {
-                let signals = workspace_attention_signals(w, &self.agents_asking);
+                let signals = workspace_attention_signals(w, &self.agents);
                 let asking = signals.contains(&AttentionSignal::AgentAsking);
                 let ci = signals.contains(&AttentionSignal::CiFailing);
                 let mut label = match w.primary_task() {
@@ -1587,7 +1590,7 @@ impl Sidebar {
                 VisibleRow::Workspace(k) => self.workspaces.get(k),
                 _ => None,
             })
-            .filter(|w| workspace_attention_signals(w, &self.agents_asking).contains(&signal))
+            .filter(|w| workspace_attention_signals(w, &self.agents).contains(&signal))
             .count()
     }
 
@@ -1778,7 +1781,7 @@ impl Sidebar {
                 projects: &self.projects,
                 collapsed_repos: &self.collapsed_repos,
                 attention: &self.attention,
-                agents_asking: &self.agents_asking,
+                agents: &self.agents,
                 now: self.now(),
                 search: self.search.as_ref(),
             },

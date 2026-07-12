@@ -39,12 +39,16 @@ Set Theme "Catppuccin Mocha"
 Hide
 Type "lazybox --test"
 Enter
-# Boot settle: the daemon initializes and the first frame renders at the
-# full terminal size before we touch anything. On a loaded Linux CI
-# runner this can take longer than it does locally, so give it margin —
-# pressing `?` before the UI has settled at full size is what produces a
-# short overlay frame.
-Sleep 4s
+# Boot settle: `--test` provisions a throwaway git repo + spins up the
+# daemon before the first full-size frame renders. On a loaded Linux CI
+# runner that can outlast any fixed `Sleep` — and pressing `?` before the
+# UI has settled at full size paints a clipped overlay whose bottom row
+# never repaints, so the golden `Wait+Screen` below times out (blank or
+# truncated grab). Block on the seeded workspace row instead: once
+# `Test workspace` is on screen the sidebar has painted at full size, so
+# boot is provably done regardless of runner speed.
+Wait+Screen@45s /Test workspace/
+Sleep 1s
 Show
 
 # Open the keybinding help overlay, then block on `Wait+Screen` until the

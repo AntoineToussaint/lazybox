@@ -123,6 +123,26 @@ fn argv_for(
     }
 }
 
+/// The tier alias the workspace task's declared priority
+/// (`high`/`medium`/`low` label or `@high`/`@medium`/`@low` body marker)
+/// maps to for `models`. `None` when the task declares no priority, the
+/// workspace/task can't be loaded, or this agent maps that priority to
+/// nothing — the spawn then keeps its default tier / model. Used only as
+/// the fallback when no explicit tier chord was passed.
+fn priority_alias_for(
+    config: &ServerConfig,
+    session_key: &SessionKey,
+    models: &lazybox_core::AgentModels,
+) -> Option<String> {
+    let tier = load_workspace(config, &WorkspaceKey::new(session_key.as_str()))
+        .ok()
+        .and_then(|w| {
+            w.primary_task()
+                .and_then(lazybox_core::resolve_priority_tier)
+        })?;
+    models.alias_for_priority(tier).map(String::from)
+}
+
 /// Absolute path to the per-terminal Claude settings file lazybox writes
 /// at spawn. Deterministic in `terminal_id` so the pump can delete it on
 /// exit without bookkeeping a map.
@@ -385,7 +405,17 @@ pub async fn handle_spawn(
     let (model_args, model_label): (Vec<String>, Option<String>) = match &kind {
         TerminalKind::Agent(agent_id) => {
             let models = cfg.agent_models(agent_id);
-            let alias = model_alias.as_deref();
+            // An explicit tier chord (`w S` / `a L`) wins. Absent one,
+            // fall back to the alias the workspace task's declared
+            // priority (a `high`/`medium`/`low` label or an
+            // `@high`/`@medium`/`@low` body marker) maps to — so every
+            // autonomous "pilot" spawn AND a bare `w` on a prioritized
+            // issue pick the right-sized model automatically (#340).
+            let priority_alias = match model_alias {
+                Some(_) => None,
+                None => priority_alias_for(config, &session_key, &models),
+            };
+            let alias = model_alias.as_deref().or(priority_alias.as_deref());
             // Label mirrors `resolve_args`: the picked tier, falling
             // back to the agent's configured default tier, so a bare
             // spawn that lands on a default tier still wears its badge.
@@ -5088,6 +5118,68 @@ mod tests {
                 "claude-opus-4-8".to_string(),
             ]
         );
+    }
+
+    /// Persist a workspace built from `task` so `priority_alias_for`
+    /// (which loads it by session key) can read its primary task.
+    fn persist_task_workspace(config: &ServerConfig, task: Task) -> SessionKey {
+        let ws = Workspace::from_task(task, Utc::now());
+        let key = ws.key.clone();
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).expect("serialize ws")),
+            })
+            .expect("save workspace");
+        SessionKey::new(key.as_str())
+    }
+
+    #[test]
+    fn priority_alias_for_maps_label_to_builtin_tier_alias() {
+        let config =
+            ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
+        let models = lazybox_core::AgentModels::builtin("claude").unwrap();
+
+        let mut high = task_for("github", "acme/widget#7");
+        high.labels = vec![lazybox_core::Label::new("high")];
+        let key = persist_task_workspace(&config, high);
+        // high → Claude's `L` (Opus) tier.
+        assert_eq!(
+            priority_alias_for(&config, &key, &models).as_deref(),
+            Some("L")
+        );
+
+        // `@low` body marker → the `S` (Haiku) tier.
+        let mut low = task_for("github", "acme/widget#8");
+        low.body = Some("please handle this @low".into());
+        let key = persist_task_workspace(&config, low);
+        assert_eq!(
+            priority_alias_for(&config, &key, &models).as_deref(),
+            Some("S")
+        );
+    }
+
+    #[test]
+    fn priority_alias_for_none_without_priority_or_mapping() {
+        let config =
+            ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
+        // No priority declared → no alias, even for an agent with a map.
+        let key = persist_task_workspace(&config, task_for("github", "acme/widget#7"));
+        let claude = lazybox_core::AgentModels::builtin("claude").unwrap();
+        assert_eq!(priority_alias_for(&config, &key, &claude), None);
+
+        // A high-priority task, but an agent menu with no priority map →
+        // no alias (agent keeps its default model).
+        let mut high = task_for("github", "acme/widget#8");
+        high.labels = vec![lazybox_core::Label::new("high")];
+        let key = persist_task_workspace(&config, high);
+        let no_map = lazybox_core::AgentModels {
+            tiers: claude.tiers.clone(),
+            ..Default::default()
+        };
+        assert_eq!(priority_alias_for(&config, &key, &no_map), None);
     }
 
     /// The running test binary exists on disk, so resolution succeeds;

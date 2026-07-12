@@ -8,6 +8,7 @@ pub mod autofix;
 pub mod config;
 pub mod issue_links;
 pub mod paths;
+pub mod priority;
 pub mod project;
 pub mod prompts;
 pub mod provider;
@@ -25,6 +26,7 @@ pub use config::{
     ProviderConfig,
 };
 pub use issue_links::{IssueLink, extract as extract_issue_links};
+pub use priority::{PriorityTier, resolve_priority_tier};
 pub use project::{Project, ProjectKey};
 pub use provider::{ProviderError, TaskProvider};
 pub use scope::{MockScopeSource, Scope, ScopeKind, ScopeSource};

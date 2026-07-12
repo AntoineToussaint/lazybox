@@ -1338,11 +1338,16 @@ pub enum WorktreeStep {
 
 /// State transition for a [`WorktreeStep`]. `Started`/`Done` advance
 /// the checklist; `Failed` carries the error so the modal can surface
-/// it instead of dismissing silently.
+/// it instead of dismissing silently. `Warned` marks a step that
+/// completed in a degraded way (e.g. the base-ref fetch failed and the
+/// worktree branched off a possibly-stale local ref) — the step still
+/// counts as done, but the modal surfaces the note instead of hiding it
+/// in the log (issue #320).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorktreeStepStatus {
     Started,
     Done,
+    Warned(String),
     Failed(String),
 }
 

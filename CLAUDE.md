@@ -197,7 +197,12 @@ which-key popup and `?` help reuse the same group labels.
 `]` browse snippets (read-only catalog; `e` there opens the YAML),
 `Shift-R` refresh, `Ctrl-L` force a full repaint (recovery for a
 stale/garbled screen; resize and focus-regain also repaint
-automatically), `Shift-T` tour, `Shift-D` sync status, `` ` ``
+automatically), `Shift-T` tour, `Shift-D` sync status, `Shift-M`
+messages log (a scrollable, `c`-clearable history of recent footer
+notices; #309), `Esc` dismiss the current footer notice regardless of
+severity — severity only drives auto-fade, never dismissability, and
+`Esc` yields first to a live terminal and to a sidebar multi-select,
+`` ` ``
 open the fuzzy jump-to-workspace picker (all repos; from inside an
 agent use `]]` then `` ` ``), `!` jump to agent-asking workspace,
 `Shift-F` jump to failing CI, `Shift-P` toggle
@@ -253,8 +258,9 @@ switcher. The snippet picker (see
 [`docs/snippets.md`](docs/snippets.md)) is a category-grouped list with
 a live body-preview pane, filtering on key+description+category, that
 auto-submits when the typed key uniquely matches (`]]srev`); snippets
-sent this session float into a "Recent" group at the top (session MRU,
-`recent_snippets`) so a repeat is `]]s`+Enter. The leader
+you've sent float into a "Recent" group at the top (MRU,
+`recent_snippets`, persisted in the state DB across restarts) so a
+repeat is `]]s`+Enter. The leader
 is non-timed, so after `]]` it waits for the command key rather than
 leaving on an idle timer — browsing snippets never races an exit; `Esc`
 or any unbound key cancels back to the terminal. A lone `]` followed by

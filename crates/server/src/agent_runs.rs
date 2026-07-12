@@ -77,10 +77,17 @@ pub async fn handle_start_agent_run(
         return;
     };
 
+    // Structured runs speak to the same upstream as PTY spawns, so
+    // they need the same LLM-gateway base-URL routing
+    // (`agent.llm_gateway_url` → ANTHROPIC_BASE_URL / OPENAI_BASE_URL).
+    let yaml = lazybox_config::Config::load().unwrap_or_default();
+    let env = crate::spawn_handler::gateway_env_for_agent(&yaml, Some(agent_impl.as_ref()));
+
     let stream_config = ClaudeStreamConfig {
         program: program.clone(),
         cwd: cwd_path,
         extra_args: extra_args.to_vec(),
+        env,
         ..ClaudeStreamConfig::default()
     };
 
@@ -116,13 +123,15 @@ pub async fn handle_start_agent_run(
         // event: whoever removes it owns the `AgentRunFinished`. If
         // `handle_interrupt_agent_run` removed it first it already sent
         // "interrupted", so we stay silent to avoid a duplicate.
-        if runs.lock().await.remove(&run_id).is_some()
-            && let DriveOutcome::Completed { exit_code } = outcome
-        {
+        if runs.lock().await.remove(&run_id).is_some() {
+            let (exit_code, error) = match outcome {
+                DriveOutcome::Completed { exit_code } => (exit_code, None),
+                DriveOutcome::Errored { error } => (None, Some(error)),
+            };
             let _ = bus.send(Event::AgentRunFinished {
                 run_id,
                 exit_code,
-                error: None,
+                error,
             });
         }
     });
@@ -244,7 +253,10 @@ async fn resolve_cwd(
         .and_then(|record| record.workspace_json)
         .and_then(|json| serde_json::from_str::<lazybox_core::Workspace>(&json).ok());
     let Some(workspace) = workspace else {
-        return std::env::current_dir().ok();
+        // No workspace behind this key (e.g. the help assistant's
+        // sentinel): pick a neutral cwd instead of the daemon's own —
+        // a stray CLAUDE.md there would leak into the run's context.
+        return Some(std::env::temp_dir());
     };
     if let Some(id) = session_id {
         return workspace.find_session(id).map(|s| s.worktree_path.clone());
@@ -255,11 +267,12 @@ async fn resolve_cwd(
 /// How `drive_claude_stream` ended, so the spawning task can decide
 /// whether to emit the terminal `AgentRunFinished` event.
 enum DriveOutcome {
-    /// Agent stdout reached EOF — the run completed; emit the event.
+    /// Agent stdout reached EOF — the run completed.
     Completed { exit_code: Option<i32> },
-    /// stdout errored (already reported via `provider_error`) — no
-    /// terminal event.
-    Errored,
+    /// stdout errored — the run is dead; the terminal event must carry
+    /// the error so clients holding the run id can reset instead of
+    /// writing into a dead process forever.
+    Errored { error: String },
 }
 
 async fn drive_claude_stream(
@@ -309,11 +322,9 @@ async fn drive_claude_stream(
                         return DriveOutcome::Completed { exit_code: wait.await };
                     },
                     Err(e) => {
-                        let _ = bus.send(Event::provider_error_retryable(
-                            "agent_run:stdout",
-                            e.to_string(),
-                        ));
-                        return DriveOutcome::Errored;
+                        return DriveOutcome::Errored {
+                            error: format!("agent stdout read failed: {e}"),
+                        };
                     }
                 }
             }

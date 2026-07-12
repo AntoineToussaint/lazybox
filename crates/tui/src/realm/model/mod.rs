@@ -70,6 +70,13 @@ const TERMINALS_PID: PaneId = PaneId::new(3);
 pub enum Id {
     Splash,
     Help,
+    /// "Ask lazybox" help modal (#302), opened by pressing `?` on the
+    /// `?` help panel. Typing fuzzy-searches the runtime catalog;
+    /// Enter sends the text as a question to the headless help-agent
+    /// run. Conversation state lives in `Model::help_convo` (shared
+    /// `Arc`), so daemon-event handlers stream the answer in without
+    /// remounting.
+    HelpAsk,
     Error,
     Polling,
     Reply,
@@ -191,6 +198,10 @@ pub enum Id {
     /// scrollable view of recent provider-sync outcomes built from
     /// `self.status.sync`. No pending state — dismiss just pops it.
     SyncStatus,
+    /// Notices log window (default `Shift-M`, #309). Scrollable view of
+    /// recent footer notices built from `self.status.messages`; `c`
+    /// clears the log, any other non-scroll key dismisses.
+    Messages,
     /// Spinner + step checklist shown while a first spawn on a fresh
     /// workspace provisions its worktree. Mounted on the first
     /// `WorktreeProgress` daemon event (so an instant resume never
@@ -228,6 +239,11 @@ pub enum Id {
     /// the picked snippet's body (custom text appends after it).
     /// Submit → one delivery per target in `pending_broadcast`.
     BroadcastText,
+    /// Single-pick `Choice` over the enabled agents (`,` Settings →
+    /// "Change default agent"), opened on the current default. Pick →
+    /// persist `setup.default_agent` and update the panes live. Ids
+    /// live in `default_agent_choices`.
+    DefaultAgentPicker,
 }
 
 impl Id {
@@ -245,7 +261,9 @@ impl Id {
             self,
             Id::WorktreeProgress
                 | Id::SyncStatus
+                | Id::Messages
                 | Id::Help
+                | Id::HelpAsk
                 | Id::SnippetPicker
                 | Id::SnippetBrowser
         )
@@ -329,6 +347,12 @@ pub enum Msg {
     ChoicePicked(Vec<usize>),
     ChoiceRefresh,
     ChoiceBack,
+    /// `?` pressed on the `?` help panel — swap it for the
+    /// "Ask lazybox" modal (#302).
+    HelpAskOpen,
+    /// Question submitted from the `HelpAsk` modal. The modal stays
+    /// mounted; the answer streams back into `Model::help_convo`.
+    HelpAsked(String),
     /// `e` pressed in the snippets browser — close it and open the
     /// global snippets YAML in the user's editor (#237).
     OpenSnippetsFile,
@@ -341,6 +365,9 @@ pub enum Msg {
     PollingTimeout,
     PollingEmptyInbox(Vec<String>),
     ModalDismissed,
+    /// `c` pressed in the messages window (#309) — wipe the notice
+    /// history and re-render the (now empty) window.
+    MessagesCleared,
     /// Sidebar / Right / Terminals routes — kept in case a future
     /// pane goes through tuirealm. Today panes drain themselves
     /// directly inside the orchestrator's pane-dispatch path.
@@ -788,12 +815,17 @@ pub struct Model<T: TerminalAdapter> {
     /// mount/unmount. Storing keys (not full rows) avoids cloning
     /// the snippet body twice on every picker mount.
     pub(crate) snippet_choices: Vec<String>,
-    /// Snippet keys sent this session, most-recent first (capped at
+    /// Snippet keys sent, most-recent first (capped at
     /// `RECENT_SNIPPETS_MAX`). Passed to each picker as its "Recent"
     /// group so a repeated snippet is one `]]s` + `Enter` away (#252).
-    /// Session-scoped — deliberately not persisted; it tracks the
-    /// current work session's rhythm, not a durable preference.
+    /// Persisted to the state DB via `recent_snippets_store` so the
+    /// group survives a restart (#311).
     pub(crate) recent_snippets: Vec<String>,
+    /// State-DB handle used to persist `recent_snippets` across
+    /// restarts (#311). Set by `seed_recent_snippets` on the embedded
+    /// boot path; `None` on the `--connect` path (which loads no
+    /// snippets and owns no local store), where MRU stays session-only.
+    recent_snippets_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
     /// Active broadcast flow (`Shift-B`), if any. Set when the flow
     /// mounts, threaded through the snippet-pick step, consumed by the
     /// compose submit (or dropped on Esc). See [`BroadcastDraft`].
@@ -811,6 +843,29 @@ pub struct Model<T: TerminalAdapter> {
     /// cancelled picker leaves the palette untouched. `None` while no
     /// picker is open.
     pub(crate) theme_picker_prev: Option<String>,
+    /// Help-assistant conversation (#302), shared with a mounted
+    /// `HelpAsk` modal via `Arc` so the daemon-event handlers can
+    /// stream an answer into it without remounting (which would drop
+    /// the user's in-flight typing). Persists across modal open/close
+    /// — the help run stays alive for the app's lifetime so follow-up
+    /// questions reuse the prompt-cached context.
+    pub(crate) help_convo: crate::realm::components::help_ask::SharedHelpConvo,
+    /// Run id of the live help-agent run, captured from the
+    /// `AgentRunStarted` carrying the help sentinel session key.
+    /// `None` before the first question (the run starts lazily) and
+    /// again after `AgentRunFinished` — the next question then starts
+    /// a fresh run (with fresh context).
+    help_run: Option<lazybox_ipc::AgentRunId>,
+    /// True between dispatching `StartAgentRun` and its
+    /// `AgentRunStarted` landing. Questions submitted in that window
+    /// queue in `help_pending_questions` rather than double-starting
+    /// the run.
+    help_run_starting: bool,
+    help_pending_questions: Vec<String>,
+    /// Agent ids backing the active `DefaultAgentPicker`, in row order —
+    /// `Msg::ChoicePicked(idx)` resolves the id here to persist. Cleared
+    /// on mount/unmount.
+    pub(crate) default_agent_choices: Vec<String>,
     /// Set at startup from `ui.tour_seen` (inverted): `true` means
     /// the feature tour should auto-launch once the panes are
     /// visible. Cleared the moment the tour mounts so it never
@@ -917,6 +972,11 @@ const MODAL_REDRAW_WINDOW: Duration = Duration::from_millis(120);
 /// (#252). Small enough to stay a shortcut list, not a second library —
 /// the group is a fast lane for the handful of snippets in active use.
 const RECENT_SNIPPETS_MAX: usize = 5;
+
+/// State-DB key under which the recent-snippets MRU is persisted
+/// (#311). A plain kv entry — runtime state, like read/unread and
+/// snooze — not user-authored `snippets.yaml` content.
+const RECENT_SNIPPETS_KV_KEY: &str = "recent_snippets";
 
 /// How long the footer must sit idle (no modal, no notice) after
 /// startup before a feature tip (#115) is allowed to surface. Long
@@ -1043,10 +1103,16 @@ impl<T: TerminalAdapter> Model<T> {
             snippets: lazybox_config::Snippets::default(),
             snippet_choices: Vec::new(),
             recent_snippets: Vec::new(),
+            recent_snippets_store: None,
             pending_broadcast: None,
             jump_choices: Vec::new(),
             theme_choices: Vec::new(),
             theme_picker_prev: None,
+            help_convo: Default::default(),
+            help_run: None,
+            help_run_starting: false,
+            help_pending_questions: Vec::new(),
+            default_agent_choices: Vec::new(),
             auto_tour_pending: false,
             tips_enabled: false,
             tips_seen: Vec::new(),
@@ -1444,12 +1510,92 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Record a snippet key as just-used: move it to the front of the
-    /// session MRU list (`recent_snippets`), de-duplicating and capping
-    /// the list. Drives the picker's "Recent" group (#252).
+    /// MRU list (`recent_snippets`), de-duplicating and capping the
+    /// list, then persist it. Drives the picker's "Recent" group (#252)
+    /// and keeps it across restarts (#311).
     pub(crate) fn record_recent_snippet(&mut self, key: String) {
         self.recent_snippets.retain(|k| k != &key);
         self.recent_snippets.insert(0, key);
         self.recent_snippets.truncate(RECENT_SNIPPETS_MAX);
+        self.persist_recent_snippets();
+    }
+
+    /// Best-effort write of `recent_snippets` to the state DB. A write
+    /// failure just means the Recent group won't survive this quit —
+    /// non-fatal, like `persist_tip_seen`.
+    fn persist_recent_snippets(&self) {
+        let Some(store) = &self.recent_snippets_store else {
+            return;
+        };
+        let json = match serde_json::to_string(&self.recent_snippets) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::warn!("serialize recent_snippets failed: {e}");
+                return;
+            }
+        };
+        if let Err(e) = store.set_kv(RECENT_SNIPPETS_KV_KEY, &json) {
+            tracing::warn!("persist recent_snippets failed: {e}");
+        }
+    }
+
+    /// Install the snippet catalog and then restore the persisted
+    /// "Recent" MRU against it, in that order (#311). This is the boot
+    /// entry point `main.rs` uses: bundling the two steps makes the
+    /// ordering un-splittable, so the prune in `seed_recent_snippets`
+    /// can never run before `self.snippets` is populated (which would
+    /// silently wipe a valid MRU). Keep the two methods it calls out of
+    /// the startup path — call this instead.
+    pub fn apply_snippets_and_seed_recent(
+        &mut self,
+        snippets: lazybox_config::Snippets,
+        store: std::sync::Arc<dyn lazybox_store::Store>,
+    ) {
+        self.apply_snippets(snippets);
+        self.seed_recent_snippets(store);
+    }
+
+    /// Seed `recent_snippets` from the state DB and retain the store
+    /// handle for future writes (#311). MUST run *after* `apply_snippets`
+    /// — it prunes keys no longer in the loaded catalog (a renamed /
+    /// deleted snippet) so they don't sit in the MRU consuming a slot
+    /// they can never render into; with an unpopulated catalog it would
+    /// instead wipe every key. Without the prune a small rotating set of
+    /// live keys never evicts the dead ones, permanently shrinking the
+    /// visible Recent group. The startup path enforces the ordering via
+    /// `apply_snippets_and_seed_recent`; call that, not this, outside of
+    /// tests. A missing / empty / unparseable value yields an empty list
+    /// — non-fatal, MRU just starts fresh. The `RECENT_SNIPPETS_MAX` cap
+    /// is re-applied here in case the stored list predates a smaller cap.
+    pub fn seed_recent_snippets(&mut self, store: std::sync::Arc<dyn lazybox_store::Store>) {
+        // Only true when we loaded a value AND the prune/cap actually
+        // shortened it — gates the flush-back below so a read failure,
+        // an unparseable value, or an already-clean list never triggers
+        // a write (which would clobber recoverable bytes with `[]`).
+        let mut shortened = false;
+        match store.get_kv(RECENT_SNIPPETS_KV_KEY) {
+            Ok(Some(json)) => match serde_json::from_str::<Vec<String>>(&json) {
+                Ok(mut recent) => {
+                    let before = recent.len();
+                    recent.retain(|k| self.snippets.get(k).is_some());
+                    recent.truncate(RECENT_SNIPPETS_MAX);
+                    shortened = recent.len() != before;
+                    self.recent_snippets = recent;
+                }
+                Err(e) => tracing::warn!("parse recent_snippets failed: {e}"),
+            },
+            Ok(None) => {}
+            Err(e) => tracing::warn!("read recent_snippets failed: {e}"),
+        }
+        self.recent_snippets_store = Some(store);
+        // Flush the pruned list back so dead keys don't linger in the DB
+        // across future seeds — but only when the load succeeded and
+        // dropped something, so we never overwrite a valid or corrupt
+        // stored value with an empty list. Best-effort, like every MRU
+        // write.
+        if shortened {
+            self.persist_recent_snippets();
+        }
     }
 
     /// Mount the read-only snippets browser (`]`, or the Settings
@@ -1519,6 +1665,42 @@ impl<T: TerminalAdapter> Model<T> {
                 crate::theme::set_by_name(name);
             });
         self.mount_modal(Id::ThemePicker, modal);
+    }
+
+    /// Mount the default-agent picker — a single-pick `Choice` over the
+    /// enabled agents (`self.agents`), opened on the current default.
+    /// Pick → `handle_choice_picked` persists `setup.default_agent` and
+    /// updates the panes live. Agent ids are stashed in
+    /// `default_agent_choices` so the picked index resolves back.
+    pub(crate) fn mount_default_agent_picker(&mut self) {
+        use crate::realm::components::choice::Choice;
+        if matches!(self.modal_stack.last(), Some(Id::DefaultAgentPicker)) {
+            return;
+        }
+        let registry = lazybox_agents::registry();
+        let ids: Vec<String> = self.agents.clone();
+        let labels: Vec<String> = ids
+            .iter()
+            .map(|id| match registry.get(id) {
+                Some(agent) => format!("{}  ·  {id}", agent.display_name()),
+                None => id.clone(),
+            })
+            .collect();
+        let current = self.sidebar.default_agent();
+        let start = ids.iter().position(|id| id == current).unwrap_or(0);
+        self.default_agent_choices = ids;
+        let modal = Choice::single("Used by `w` work-on-this + new-workspace spawns", labels)
+            .title("Default agent")
+            .label(|s: &String| s.clone())
+            .select_index(start);
+        self.mount_modal(Id::DefaultAgentPicker, modal);
+    }
+
+    /// Update the default agent both panes resolve `w` against, live —
+    /// no restart. Mirrors the startup wiring in `apply_sidebar_config`.
+    pub(crate) fn set_default_agent(&mut self, agent: &str) {
+        self.sidebar.set_default_agent(agent);
+        self.right.set_default_agent(agent);
     }
 
     /// Land the cursor on `key` and follow it with the panes: show its
@@ -1909,11 +2091,20 @@ impl<T: TerminalAdapter> Model<T> {
         msg: impl Into<String>,
         severity: crate::realm::components::footer::NoticeSeverity,
     ) {
-        use crate::realm::components::footer::Notice;
+        use crate::realm::components::footer::{Notice, NoticeSeverity};
+        let msg = msg.into();
         // Any fresh notice supersedes a sync-error banner, so the
         // "clear on recovery" tag only stays armed while the
         // sync-error notice is the one actually on screen.
         self.sync_error_source = None;
+        // Every notice flashes in the footer AND accumulates in the
+        // durable messages log (#309) — except one-shot Hints, which
+        // are ephemeral UI nudges (`scroll: alt-screen`) that would
+        // only clutter the readable history. Record before the string
+        // is moved into the Notice.
+        if severity != NoticeSeverity::Hint {
+            self.status.messages.record(&msg, severity);
+        }
         self.status.notice = Some(Notice::new(msg, severity));
         self.redraw = true;
     }
@@ -1996,6 +2187,18 @@ impl<T: TerminalAdapter> Model<T> {
     fn dispatch_cmds(&self, cmds: Vec<IpcCommand>) {
         for cmd in cmds {
             self.send_cmd(cmd);
+        }
+    }
+
+    /// Lock the shared help conversation (#302). Recovers from a
+    /// poisoned lock — a panicked render elsewhere must not brick the
+    /// help modal for the rest of the session.
+    pub(crate) fn help_convo_mut(
+        &self,
+    ) -> std::sync::MutexGuard<'_, crate::realm::components::help_ask::HelpConvo> {
+        match self.help_convo.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
         }
     }
 
@@ -2332,6 +2535,9 @@ impl<T: TerminalAdapter> Model<T> {
         }
         actions.push(SettingsAction::EditProviders);
         actions.push(SettingsAction::EditAgents);
+        actions.push(SettingsAction::EditDefaultAgent {
+            current: self.sidebar.default_agent().to_string(),
+        });
         let skip_permissions = lazybox_config::Config::load()
             .map(|c| c.agent.skip_permissions)
             .unwrap_or(false);
@@ -2387,6 +2593,12 @@ impl<T: TerminalAdapter> Model<T> {
             self.mount_gateway_url_input();
             return;
         }
+        // Default-agent picker is a single Choice that writes straight
+        // to YAML and updates the panes live — no wizard runner.
+        if matches!(action, SettingsAction::EditDefaultAgent { .. }) {
+            self.mount_default_agent_picker();
+            return;
+        }
         let Some((report, sources)) = self.setup.inputs.clone() else {
             tracing::warn!("dispatch_settings_action: no cached inputs");
             return;
@@ -2415,6 +2627,7 @@ impl<T: TerminalAdapter> Model<T> {
             SettingsAction::EditSnippets => return,
             SettingsAction::EditTheme => return,
             SettingsAction::EditLlmGateway { .. } => return,
+            SettingsAction::EditDefaultAgent { .. } => return,
         };
         // Pre-seed the accumulator from persisted state so partial
         // flows don't drop the user's other-provider config.
@@ -2871,6 +3084,17 @@ impl<T: TerminalAdapter> Model<T> {
                 let cmds = self.handle_modal_dismissed();
                 self.dispatch_cmds(cmds);
             }
+            Msg::MessagesCleared => {
+                // Wipe the durable history and re-render the window
+                // against the now-empty log (it stays open showing the
+                // placeholder). `mount_messages` short-circuits if the
+                // window is already up, so drop it first.
+                self.status.messages.clear();
+                if self.modal_stack.last() == Some(&Id::Messages) {
+                    self.pop_modal();
+                }
+                self.mount_messages();
+            }
             Msg::OpenSnippetsFile => {
                 // `e` in the browser: drop the modal, then open the YAML
                 // so the editor takes over a clean screen.
@@ -2895,6 +3119,20 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Msg::InputSubmitted(text) => {
                 let cmds = self.handle_input_submitted(text);
+                self.dispatch_cmds(cmds);
+            }
+            Msg::HelpAskOpen => {
+                // `?` on the help panel: swap the panel for the ask
+                // modal.
+                if matches!(self.modal_stack.last(), Some(Id::Help)) {
+                    self.pop_modal();
+                }
+                self.mount_help_ask();
+            }
+            Msg::HelpAsked(question) => {
+                // The HelpAsk modal stays mounted — the answer streams
+                // back into `help_convo`.
+                let cmds = self.handle_help_asked(question);
                 self.dispatch_cmds(cmds);
             }
             // Polling outcomes — surface as footer notices, never

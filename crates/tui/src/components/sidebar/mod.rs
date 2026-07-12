@@ -739,6 +739,12 @@ impl Sidebar {
         self
     }
 
+    /// Live-update the default agent (Settings → "Change default
+    /// agent"). Mirrors `with_default_agent` for the in-session path.
+    pub fn set_default_agent(&mut self, agent: impl Into<String>) {
+        self.default_agent = agent.into();
+    }
+
     /// Replace the mirrored project table. Driven from the model's
     /// `Snapshot::projects` + `ProjectUpserted` / `ProjectRemoved`
     /// handlers; the sidebar's headers render from this on the next
@@ -2001,9 +2007,9 @@ mod tests;
 // Re-export pills.rs items so callers in the rest of the crate
 // keep their `crate::components::sidebar::*` import paths.
 pub(crate) use pills::{
-    AttentionSignal, StatusPill, attention_gate, badge_pill_style, mailbox_membership,
-    relative_time, role_badge, status_pills, workspace_attention_signals,
-    workspace_needs_attention, workspace_type_label,
+    AttentionSignal, attention_gate, badge_pill_style, mailbox_membership, relative_time,
+    role_badge, status_pills, workspace_attention_signals, workspace_needs_attention,
+    workspace_type_label,
 };
 #[cfg(test)]
 pub(crate) use pills::{pill_for_tag, status_pill};

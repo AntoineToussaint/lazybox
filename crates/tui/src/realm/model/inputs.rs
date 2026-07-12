@@ -235,6 +235,80 @@ impl<T: TerminalAdapter> Model<T> {
         cmds
     }
 
+    /// A question submitted from the `HelpAsk` modal (#302). Records
+    /// the turn in the shared conversation and routes it to the help
+    /// agent: the first question starts the headless stream-json run
+    /// with the generated catalog + docs context as its opening
+    /// message; follow-ups ride the same run so the context stays
+    /// prompt-cached. Questions racing the run start are queued and
+    /// flushed by the `AgentRunStarted` handler.
+    ///
+    /// **Effects**: returns commands as a `Vec` for testability.
+    pub fn handle_help_asked(&mut self, question: String) -> Vec<IpcCommand> {
+        use lazybox_ipc::{AgentInputMessage, AgentRuntimeMode};
+        use lazybox_tui_core::help::{HELP_AGENT_ID, HELP_SESSION_KEY};
+
+        let question = question.trim().to_string();
+        if question.is_empty() {
+            return Vec::new();
+        }
+        {
+            let mut convo = self.help_convo_mut();
+            convo.notice = None;
+            convo
+                .turns
+                .push(crate::realm::components::help_ask::HelpTurn {
+                    question: question.clone(),
+                    ..Default::default()
+                });
+        }
+        self.redraw = true;
+        if !self.agents.iter().any(|a| a == HELP_AGENT_ID) {
+            let mut convo = self.help_convo_mut();
+            convo.notice = Some(format!(
+                "the help assistant needs the `{HELP_AGENT_ID}` agent enabled — \
+showing keybinding search only"
+            ));
+            if let Some(turn) = convo.streaming_turn_mut() {
+                turn.done = true;
+            }
+            return Vec::new();
+        }
+        if let Some(run_id) = self.help_run {
+            return vec![IpcCommand::SendAgentInput {
+                run_id,
+                message: AgentInputMessage {
+                    text: Some(question),
+                    json: None,
+                },
+            }];
+        }
+        if self.help_run_starting {
+            self.help_pending_questions.push(question);
+            return Vec::new();
+        }
+        self.help_run_starting = true;
+        let context = lazybox_tui_core::help::agent_context(
+            &self.catalog,
+            self.ui_defaults.terminal_escape_char,
+        );
+        vec![IpcCommand::StartAgentRun {
+            session_key: lazybox_core::SessionKey::new(HELP_SESSION_KEY),
+            session_id: None,
+            agent: HELP_AGENT_ID.to_string(),
+            mode: AgentRuntimeMode::StreamJson,
+            // Left to the daemon: the sentinel key resolves to no
+            // workspace and `resolve_cwd` picks a neutral cwd on ITS
+            // host — a client-side path wouldn't exist there in
+            // out-of-process / remote mode.
+            cwd: None,
+            initial_input: Some(AgentInputMessage {
+                text: Some(format!("{context}\n\n# Question\n\n{question}")),
+                json: None,
+            }),
+        }]
+    }
+
     /// Route a Choice modal pick to the right handler. Five
     /// distinct flows share the same `Msg::ChoicePicked` envelope
     /// (Adopt target, Editor picker, Settings palette, runner-
@@ -385,6 +459,31 @@ impl<T: TerminalAdapter> Model<T> {
                     Err(e) => self.flash_info(format!("couldn't save theme: {e}")),
                 }
                 self.redraw = true;
+            }
+            return cmds;
+        }
+        // Default-agent picker — pick → persist `setup.default_agent`
+        // and update both panes live (no restart). Empty / Esc drops
+        // the stash without changing anything.
+        if matches!(self.modal_stack.last(), Some(Id::DefaultAgentPicker)) {
+            let agent = picks
+                .first()
+                .and_then(|i| self.default_agent_choices.get(*i).cloned());
+            self.default_agent_choices.clear();
+            self.pop_modal();
+            if let Some(agent) = agent {
+                // Persist first; only apply live once the write lands so
+                // a save failure never leaves the panes ahead of disk.
+                match lazybox_config::Config::save_with(|c| {
+                    c.setup.default_agent = Some(agent.clone());
+                }) {
+                    Ok(()) => {
+                        self.set_default_agent(&agent);
+                        self.flash_info(format!("default agent: {agent}"));
+                        self.redraw = true;
+                    }
+                    Err(e) => self.flash_info(format!("couldn't save config: {e}")),
+                }
             }
             return cmds;
         }
@@ -779,6 +878,9 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 self.theme_choices.clear();
                 self.redraw = true;
+            }
+            Some(Id::DefaultAgentPicker) => {
+                self.default_agent_choices.clear();
             }
             _ => {}
         }

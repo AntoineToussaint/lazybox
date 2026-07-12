@@ -100,13 +100,19 @@ pub enum ScriptBody {
 /// animate sub-progress during the otherwise-opaque clone instead of a
 /// single spinner that jumps straight to done. git-ops stays free of any
 /// wire types — the daemon maps these onto `lazybox_ipc::WorktreeStep`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckoutPhase {
     /// About to run `git clone --bare` (only fired on a real cold clone;
     /// a cached healthy bare clone is reused without this).
     Cloning,
     /// About to refresh the remote-tracking ref.
     Fetching,
+    /// The base-ref fetch failed (offline / auth / transient network),
+    /// so the worktree was branched off a possibly-stale local ref
+    /// instead of latest origin. Carries a short human note (`<sha>,
+    /// <relative age>`-style) so the caller can surface the degradation
+    /// in the UI rather than burying it in a log warning (issue #320).
+    BaseRefStale(String),
     /// About to run `git worktree add`.
     AddingWorktree,
 }
@@ -295,9 +301,17 @@ impl WorktreeManager {
         // remote branch was deleted post-merge, offline, auth issue.
         // In all cases the start_point lookup below falls back to the
         // local ref. `fetch_origin_ref` logs a warning so the
-        // degradation isn't silent.
+        // degradation isn't silent; a network/auth failure (as opposed
+        // to a deleted remote branch) also surfaces in the provisioning
+        // checklist via a `BaseRefStale` report (issue #320).
         self.report(CheckoutPhase::Fetching);
-        let _ = fetch_origin_ref(&bare_path, owner, repo, branch).await;
+        if fetch_origin_ref(&bare_path, owner, repo, branch)
+            .await
+            .is_err()
+            && let Some(note) = stale_base_note(&bare_path, branch).await
+        {
+            self.report(CheckoutPhase::BaseRefStale(note));
+        }
 
         if let Some(parent) = wt_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -434,28 +448,38 @@ impl WorktreeManager {
         //
         // Tolerate fetch failure (offline / auth): warn and proceed
         // from whatever local ref we have. Per the issue's acceptance
-        // criteria, worktree creation must not block on the network.
+        // criteria, worktree creation must not block on the network — but
+        // a failed refresh is surfaced in the provisioning checklist via
+        // a `BaseRefStale` report so the "branched off latest main"
+        // guarantee degrading to "branched off a stale local ref" is
+        // visible, not buried in the log (issue #320).
         self.report(CheckoutPhase::Fetching);
-        if fetch_origin_ref(&bare_path, owner, repo, base_branch)
-            .await
-            .is_ok()
-            && let Err(e) = run_git_in(
-                &bare_path,
-                &[
-                    "update-ref",
-                    &format!("refs/heads/{base_branch}"),
-                    &format!("refs/remotes/origin/{base_branch}"),
-                ],
-            )
-            .await
-        {
-            tracing::warn!(
-                owner,
-                repo,
-                base_branch,
-                error = %e,
-                "could not force-update local base branch to origin; remote-tracking ref still refreshed"
-            );
+        match fetch_origin_ref(&bare_path, owner, repo, base_branch).await {
+            Ok(()) => {
+                if let Err(e) = run_git_in(
+                    &bare_path,
+                    &[
+                        "update-ref",
+                        &format!("refs/heads/{base_branch}"),
+                        &format!("refs/remotes/origin/{base_branch}"),
+                    ],
+                )
+                .await
+                {
+                    tracing::warn!(
+                        owner,
+                        repo,
+                        base_branch,
+                        error = %e,
+                        "could not force-update local base branch to origin; remote-tracking ref still refreshed"
+                    );
+                }
+            }
+            Err(_) => {
+                if let Some(note) = stale_base_note(&bare_path, base_branch).await {
+                    self.report(CheckoutPhase::BaseRefStale(note));
+                }
+            }
         }
 
         if let Some(parent) = wt_path.parent() {
@@ -984,6 +1008,35 @@ async fn fetch_origin_ref(
             "could not fetch branch from origin; falling back to local ref"
         );
     })
+}
+
+/// Build a human-readable note describing the local ref a worktree will
+/// be branched from after an origin fetch failed — the commit lazybox
+/// fell back to instead of latest origin. Mirrors the `start_point`
+/// precedence used at branch time (remote-tracking ref first, then the
+/// local head) so the note names the commit actually checked out.
+/// `None` when no usable ref exists (the checkout is about to error
+/// anyway) or the describe probe fails. Best-effort, read-only diagnostics.
+async fn stale_base_note(bare_path: &Path, branch: &str) -> Option<String> {
+    let start = if ref_exists(bare_path, &format!("refs/remotes/origin/{branch}")).await {
+        format!("refs/remotes/origin/{branch}")
+    } else if ref_exists(bare_path, &format!("refs/heads/{branch}")).await {
+        format!("refs/heads/{branch}")
+    } else {
+        return None;
+    };
+    // `%h <short sha>` + `%cr <committer date, relative>` → e.g.
+    // "a1b2c3d, 3 days ago". One `git show` for both fields.
+    let desc = run_git_in(bare_path, &["show", "-s", "--format=%h, %cr", &start])
+        .await
+        .ok()?;
+    let desc = desc.trim();
+    if desc.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "could not refresh {branch} — branched from local ref ({desc})"
+    ))
 }
 
 /// Whether `path` is the root of a git repository. Cheap: probes for

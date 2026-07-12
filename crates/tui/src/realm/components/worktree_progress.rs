@@ -138,6 +138,12 @@ pub struct WorktreeProgressState {
     /// display and keeps the modal up until the user acknowledges it.
     failed_step: Option<u8>,
     error: Option<String>,
+    /// A step completed but degraded — the base-ref fetch failed and the
+    /// worktree branched off a possibly-stale local ref (issue #320).
+    /// Unlike a failure this doesn't freeze the checklist (provisioning
+    /// succeeded), but it holds the modal open until the user
+    /// acknowledges the note so the staleness isn't invisible.
+    warning: Option<String>,
 }
 
 impl WorktreeProgressState {
@@ -151,6 +157,7 @@ impl WorktreeProgressState {
             dismiss_queued: false,
             failed_step: None,
             error: None,
+            warning: None,
         }
     }
 
@@ -158,6 +165,13 @@ impl WorktreeProgressState {
     /// rather than auto-dismissing on the (fallback) `TerminalSpawned`.
     pub fn failed(&self) -> bool {
         self.error.is_some()
+    }
+
+    /// A step completed but degraded (stale base ref). The checklist
+    /// still finishes, but the modal is held open until the user
+    /// acknowledges the note — see [`Self::ready_to_dismiss`].
+    pub fn warned(&self) -> bool {
+        self.warning.is_some()
     }
 
     /// A completion signal (`TerminalSpawned` or a lag-recovery
@@ -182,6 +196,10 @@ impl WorktreeProgressState {
             // which sub-phase aborted, and the error text carries the
             // real detail regardless.
             (_, WorktreeStepStatus::Failed(e)) => self.fail_current(e),
+            // A degraded (not failed) step: record the note so the modal
+            // surfaces it and holds for acknowledgement, but let the
+            // checklist keep advancing — provisioning did succeed.
+            (_, WorktreeStepStatus::Warned(msg)) => self.warning = Some(msg),
             (WorktreeStep::Clone, _) => self.cold_clone = true,
             (WorktreeStep::Fetch, _) => {}
             (WorktreeStep::WorktreeAdd, _) => self.advance_to(Row::WorktreeAdd),
@@ -242,9 +260,12 @@ impl WorktreeProgressState {
 
     /// Whether the modal should now be torn down: a `TerminalSpawned`
     /// queued the dismiss and the display has finished walking the
-    /// checklist.
+    /// checklist. A degraded provision (`warned`) is held open even once
+    /// the checklist is complete, so the stale-base note is acknowledged
+    /// with Esc rather than flashing past — the session is already live
+    /// behind the modal.
     pub fn ready_to_dismiss(&self) -> bool {
-        self.dismiss_queued && self.shown >= READY
+        self.dismiss_queued && self.shown >= READY && self.warning.is_none()
     }
 
     fn steps(&self) -> [(&'static str, StepState); STEP_COUNT as usize] {
@@ -270,6 +291,7 @@ impl WorktreeProgressState {
 pub struct WorktreeProgress {
     steps: [(&'static str, StepState); STEP_COUNT as usize],
     error: Option<String>,
+    warning: Option<String>,
     spinner_idx: usize,
 }
 
@@ -278,6 +300,7 @@ impl WorktreeProgress {
         Self {
             steps: state.steps(),
             error: state.error.clone(),
+            warning: state.warning.clone(),
             spinner_idx: 0,
         }
     }
@@ -319,12 +342,30 @@ impl Component for WorktreeProgress {
                 Style::default().fg(theme.error),
             )));
             lines.push(Line::from(Span::styled("  Esc dismiss", theme.hint())));
+        } else if let Some(warn) = &self.warning {
+            // Provisioning succeeded but degraded: show the stale-base
+            // note in amber and hold for acknowledgement (Esc), so the
+            // "branched off latest main" degradation isn't invisible.
+            lines.push(Line::from(Span::styled(
+                format!("  ⚠ {warn}"),
+                Style::default().fg(theme.warn),
+            )));
+            lines.push(Line::from(Span::styled("  Esc dismiss", theme.hint())));
         } else {
             lines.push(Line::from(Span::styled("  Esc cancel", theme.hint())));
         }
 
         let modal_w = 60u16.min(area.width.saturating_sub(4));
-        let modal_h = (lines.len() as u16 + 2).min(area.height);
+        // Size the modal to the *wrapped* height, not the logical line
+        // count — a long stale-base note or error message wraps inside
+        // the fixed-width modal and would otherwise push the footer
+        // ("Esc dismiss") off the bottom.
+        let inner_w = modal_w.saturating_sub(2).max(1);
+        let visual_rows: u16 = lines
+            .iter()
+            .map(|l| (l.width() as u16).div_ceil(inner_w).max(1))
+            .sum();
+        let modal_h = (visual_rows + 2).min(area.height);
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;
         let modal = Rect::new(x, y, modal_w, modal_h);
@@ -568,6 +609,47 @@ mod tests {
         let out = render(&mut WorktreeProgress::from_state(&st), 70, 12);
         assert!(out.contains('✗'), "{out}");
         assert!(out.contains("boom"), "{out}");
+    }
+
+    /// A degraded (not failed) provision surfaces the stale-base note in
+    /// the checklist and holds the modal open until the user acknowledges
+    /// it, even though the session is already live.
+    #[test]
+    fn warned_step_surfaces_note_and_holds_open() {
+        let mut st = state();
+        let t0 = Instant::now();
+        st.shown_since = t0;
+        st.apply(WorktreeStep::Fetch, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::Fetch,
+            WorktreeStepStatus::Warned(
+                "could not refresh main — branched from local ref (a1b2c3d, 3 days ago)".into(),
+            ),
+        );
+        // A warning is not a failure — the checklist still advances.
+        assert!(!st.failed());
+        assert!(st.warned());
+
+        // The session comes up: the display walks the whole checklist to
+        // completion …
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
+        st.apply(WorktreeStep::Setup, WorktreeStepStatus::Started);
+        st.apply(WorktreeStep::Setup, WorktreeStepStatus::Done);
+        st.queue_dismiss();
+        for n in 1..=STEP_COUNT {
+            st.tick(t0 + MIN_STEP_DWELL * u32::from(n));
+        }
+        // … but never auto-dismisses while the warning is unacknowledged.
+        assert!(
+            !st.ready_to_dismiss(),
+            "a warned provision must hold open for acknowledgement"
+        );
+
+        let out = render(&mut WorktreeProgress::from_state(&st), 70, 14);
+        assert!(out.contains('⚠'), "{out}");
+        assert!(out.contains("could not refresh main"), "{out}");
+        assert!(out.contains("a1b2c3d"), "{out}");
+        assert!(out.contains("Esc dismiss"), "{out}");
     }
 
     #[test]

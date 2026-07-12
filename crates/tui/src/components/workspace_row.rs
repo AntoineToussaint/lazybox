@@ -147,23 +147,29 @@ impl<'a> WorkspaceRowCtx<'a> {
 /// 5. Title — flex, absorbs the remaining width. Truncates with `…`.
 ///    Conventional-commit / bracket tags like `[CI]` stay inline at
 ///    the front of the title rather than being hoisted into a
-///    reserved column that every tag-less row would pay for (#80).
-/// 6. Labels — ` [bug] [ci] +2`, or blank. Max so the title flex
-///    reclaims the space when no row has labels; truncates at 3
-///    chips with a `+N` overflow indicator.
-/// 7. Unread pill — ` ●N `, right-aligned. Max so the column collapses
+///    reserved column that every tag-less row would pay for (#80). The
+///    task's labels (` [bug] [ci] +2`) ride at the tail of this same
+///    cell — as an atomic droppable group — instead of a reserved
+///    column. A global `Max` label column made every row, tag-less
+///    ones included, reserve the widest label cell anywhere in the
+///    sidebar, so one Dependabot repo's ` [deps] [go]` chips truncated
+///    unrelated tag-less titles (#329). Inline, a label-less row hands
+///    all that width to its title; the chips are excluded from the
+///    flex's protected floor, so under width pressure they shed whole
+///    (after the status pill — #328) before the title elides.
+/// 6. Unread pill — ` ●N `, right-aligned. Max so the column collapses
 ///    when no row has unread, and lines up at a consistent x when any
 ///    row does.
-/// 8. Badge: agent slot — ` C ` / ` C×2 ` / blank. Same Max semantics.
-/// 9. Badge: shell slot — ` S ` / blank. Cell carries a leading space
+/// 7. Badge: agent slot — ` C ` / ` C×2 ` / blank. Same Max semantics.
+/// 8. Badge: shell slot — ` S ` / blank. Cell carries a leading space
 ///    so the two badges visually separate when both present.
-/// 10. Status pill — ` MERGED ` / ` REVIEW  CI FAIL ` / blank.
+/// 9. Status pill — ` MERGED ` / ` REVIEW  CI FAIL ` / blank.
 ///    Right-aligned, sized to the pills actually present (each pill is
 ///    trimmed to its own ` LABEL ` block — no blank-slot filler), so a
 ///    lone CI pill sits one clean gap off the time. Cell is empty
 ///    (width 0) when both review + CI pills are None, so the column
 ///    collapses for an all-empty table.
-/// 11. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
+/// 10. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
 ///    baked into the cell so a 1-cell gap separates time from
 ///    whatever sits to its left (status pill or, when status is
 ///    empty, the title flex padding).
@@ -171,12 +177,12 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     // Drop order when the sidebar is too narrow to fit every column:
     // lower priority sheds first. The issue number + title (and the
     // type glyph that tells issue-from-PR) are kept. Labels are the
-    // least important thing on the row, so they shed right after the
-    // timestamp — ahead of the badges/unread indicators — while the
-    // status pill (CI / CONFLICT — the actionable signal) is kept
+    // least important thing on the row; they ride in the title cell as
+    // an atomic tail (excluded from the flex floor), so they shed
+    // before any of these columns — and, crucially, before the status
+    // pill (CI / CONFLICT — the actionable signal), which is kept
     // nearly as long as the title (issue #328).
     const P_TIME: u8 = 10;
-    const P_LABELS: u8 = 20;
     const P_UNREAD: u8 = 30;
     const P_BADGE_SHELL: u8 = 40;
     const P_BADGE_AGENT: u8 = 50;
@@ -193,13 +199,12 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
         Column::fixed(max_pr_num_width), // 2: pr_num (left-aligned, one space off the glyph)
         Column::fixed(2).priority(P_ROLE), // 3: role (" R" or blank)
         Column::fixed(3).priority(P_STATE), // 4: state slot (" ? "/" ⠋ "/blank, reserved)
-        Column::flex(TITLE_MIN),         // 5: title
-        Column::max(0).priority(P_LABELS), // 6: labels
-        Column::max(0).right().priority(P_UNREAD), // 7: unread
-        Column::max(0).priority(P_BADGE_AGENT), // 8: badge_agent
-        Column::max(0).priority(P_BADGE_SHELL), // 9: badge_shell (carries its own leading space)
-        Column::max(0).right().priority(P_STATUS), // 10: status
-        Column::max(0).right().priority(P_TIME), // 11: time (carries its own leading space)
+        Column::flex(TITLE_MIN),         // 5: title (labels ride inline at its tail)
+        Column::max(0).right().priority(P_UNREAD), // 6: unread
+        Column::max(0).priority(P_BADGE_AGENT), // 7: badge_agent
+        Column::max(0).priority(P_BADGE_SHELL), // 8: badge_shell (carries its own leading space)
+        Column::max(0).right().priority(P_STATUS), // 9: status
+        Column::max(0).right().priority(P_TIME), // 10: time (carries its own leading space)
     ]
 }
 
@@ -215,7 +220,6 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
         cell_role(ctx),
         cell_state(ctx),
         cell_title(ctx),
-        cell_labels(ctx),
         cell_unread(ctx),
         cell_badge_agent(ctx),
         cell_badge_shell(ctx),
@@ -376,7 +380,16 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     if !ctx.is_cursor && ctx.is_stale_issue() {
         style = style.add_modifier(Modifier::DIM);
     }
-    Cell::from_span(Span::styled(ctx.raw_title().to_string(), style))
+    // Labels ride at the tail of the title cell rather than in a
+    // reserved column (#329): a tag-less row hands all that width to
+    // its title. Marked as the cell's atomic tail so they shed as one
+    // unit — after the status pill (#328), never sliced mid-chip —
+    // when the row is too narrow (see `Cell::atomic_tail`).
+    let labels = label_spans(ctx);
+    let tail = labels.len();
+    let mut spans = vec![Span::styled(ctx.raw_title().to_string(), style)];
+    spans.extend(labels);
+    Cell::new(spans).atomic_tail(tail)
 }
 
 /// Hard cap on a single chip's text (before the `…`). A verbose
@@ -413,12 +426,26 @@ fn abbreviate_label(name: &str) -> String {
 /// adopts the GitHub label color (parsed from the hex string) as
 /// the foreground; falls back to `text_dim` for the bracket
 /// delimiters so the bracket framing reads consistently across the
-/// rainbow.
-fn cell_labels(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+/// rainbow. Empty when the row has no labels — the caller
+/// (`cell_title`) then emits nothing at the title's tail.
+///
+/// Now that the chips ride in the title cell (#329), a stale issue's
+/// fade covers them too: the title dims to send the eye elsewhere, so
+/// full-color chips beside it would fight that cue. Suppressed on the
+/// cursor row, matching `cell_title`.
+fn label_spans(ctx: &WorkspaceRowCtx<'_>) -> Vec<Span<'static>> {
     const MAX_CHIPS: usize = 3;
     let labels = match ctx.task.map(|t| t.labels.as_slice()) {
         Some(ls) if !ls.is_empty() => ls,
-        _ => return Cell::empty(),
+        _ => return Vec::new(),
+    };
+    let dim = !ctx.is_cursor && ctx.is_stale_issue();
+    let maybe_dim = |style: Style| {
+        if dim {
+            style.add_modifier(Modifier::DIM)
+        } else {
+            style
+        }
     };
     let total = labels.len();
     let shown = labels.iter().take(MAX_CHIPS);
@@ -432,12 +459,12 @@ fn cell_labels(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         let bracket_style = if ctx.is_cursor {
             ctx.row_style()
         } else {
-            Style::default().fg(ctx.theme.text_dim)
+            maybe_dim(Style::default().fg(ctx.theme.text_dim))
         };
         let text_style = if ctx.is_cursor {
             ctx.row_style()
         } else {
-            label_text_style(ctx.theme, &label.color)
+            maybe_dim(label_text_style(ctx.theme, &label.color))
         };
         spans.push(Span::styled("[", bracket_style));
         spans.push(Span::styled(abbreviate_label(&label.name), text_style));
@@ -447,14 +474,14 @@ fn cell_labels(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         let overflow_style = if ctx.is_cursor {
             ctx.row_style()
         } else {
-            Style::default().fg(ctx.theme.text_dim)
+            maybe_dim(Style::default().fg(ctx.theme.text_dim))
         };
         spans.push(Span::styled(
             format!(" +{}", total - MAX_CHIPS),
             overflow_style,
         ));
     }
-    Cell::new(spans)
+    spans
 }
 
 /// Translate GitHub's hex color (e.g. `"d73a4a"`) into a ratatui
@@ -713,9 +740,10 @@ mod tests {
     #[test]
     fn build_columns_have_expected_count_and_order() {
         let cols = build_columns(5);
-        // 12 columns since the long-snooze kill-mark column retired
-        // when long-snooze became a Confirm-guarded catalog action.
-        assert_eq!(cols.len(), 12);
+        // 11 columns: the labels column retired into the title cell
+        // (#329) — a tag-less row no longer reserves the sidebar-wide
+        // widest label width.
+        assert_eq!(cols.len(), 11);
         // Title column (idx 5) is the only Flex one.
         let flex_indices: Vec<_> = cols
             .iter()
@@ -1574,19 +1602,23 @@ mod tests {
     }
 
     /// Labels render as bracketed chips with one leading space per
-    /// chip. Empty label list → empty cell so the column collapses
-    /// to 0 when no row in the table has labels.
+    /// chip. No labels → no spans, so a tag-less title cell is just
+    /// the title with no reserved label width (#329).
     #[test]
-    fn cell_labels_empty_for_taskless_or_unlabeled_row() {
+    fn label_spans_empty_for_taskless_or_unlabeled_row() {
         let task = make_task("owner/repo#1", "x");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
-        assert_eq!(cell_labels(&ctx).width(), 0);
+        assert!(label_spans(&ctx).is_empty());
+        // Tag-less title cell: one span, no atomic tail.
+        let title = cell_title(&ctx);
+        assert_eq!(title.spans.len(), 1);
+        assert_eq!(title.atomic_tail, 0);
     }
 
     #[test]
-    fn cell_labels_renders_bracketed_chips() {
+    fn label_spans_render_bracketed_chips() {
         let mut task = make_task("owner/repo#1", "x");
         task.labels = vec![
             lazybox_core::Label::new("bug"),
@@ -1595,15 +1627,23 @@ mod tests {
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
-        let cell = cell_labels(&ctx);
-        let joined: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        let joined: String = label_spans(&ctx)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
         assert_eq!(joined, " [bug] [ci]");
+        // They ride at the tail of the title cell, tagged as the atomic
+        // drop unit — 2 chips × (space, `[`, name, `]`) = 8 spans.
+        let title = cell_title(&ctx);
+        let joined: String = title.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, "x [bug] [ci]");
+        assert_eq!(title.atomic_tail, 8);
     }
 
     /// More than 3 labels collapses extras into a `+N` overflow
     /// indicator — the issue's "graceful truncation" requirement.
     #[test]
-    fn cell_labels_truncates_with_overflow_indicator() {
+    fn label_spans_truncate_with_overflow_indicator() {
         let mut task = make_task("owner/repo#1", "x");
         task.labels = vec![
             lazybox_core::Label::new("bug"),
@@ -1615,9 +1655,96 @@ mod tests {
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
-        let cell = cell_labels(&ctx);
-        let joined: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        let joined: String = label_spans(&ctx)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
         assert_eq!(joined, " [bug] [ci] [backend] +2");
+    }
+
+    /// A stale issue's fade now reaches its inline chips (#329): with
+    /// the chips in the title cell, a full-color label beside a dimmed
+    /// title would fight the "old, skip me" cue — so the visible chip
+    /// spans dim too, but not on the cursor row.
+    #[test]
+    fn stale_issue_labels_are_dimmed_off_cursor() {
+        let mut task = make_stale_task("owner/repo#1", "old issue");
+        task.labels = vec![lazybox_core::Label::new("bug")];
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+
+        assert!(ctx.is_stale_issue());
+        // The inter-chip separator keeps the plain row style (it's
+        // invisible); every visible chip span carries DIM.
+        assert!(
+            label_spans(&ctx)
+                .iter()
+                .filter(|s| !s.content.trim().is_empty())
+                .all(|s| s.style.add_modifier.contains(Modifier::DIM)),
+            "stale issue's label chips should be dimmed",
+        );
+
+        ctx.is_cursor = true;
+        assert!(
+            label_spans(&ctx)
+                .iter()
+                .all(|s| !s.style.add_modifier.contains(Modifier::DIM)),
+            "cursor row must not dim its label chips",
+        );
+    }
+
+    /// A fresh (non-stale) labelled row keeps full-color chips.
+    #[test]
+    fn fresh_issue_labels_are_not_dimmed() {
+        let mut task = make_task("owner/repo#1", "new issue");
+        task.labels = vec![lazybox_core::Label::new("bug")];
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+
+        assert!(!ctx.is_stale_issue());
+        assert!(
+            label_spans(&ctx)
+                .iter()
+                .all(|s| !s.style.add_modifier.contains(Modifier::DIM)),
+            "fresh issue's label chips should not be dimmed",
+        );
+    }
+
+    /// Regression for issue #329: a tag-less row must NOT lose title
+    /// width to another row's labels. Two rows go through one
+    /// `render_table` call (as the sidebar does): one carries long
+    /// `[dependencies] [go]` chips, the other has none. The label-less
+    /// row's title has to render in full — the pre-fix global `Max`
+    /// label column reserved the widest label cell on every row, so
+    /// the tag-less title elided with `…` for no visible reason.
+    #[test]
+    fn tagless_title_not_truncated_by_another_rows_labels() {
+        let theme = theme();
+        let long = "Round-robin per-repo sync to reduce overhead";
+        let mut labelled = make_task("owner/repo#1", "chore: bump deps");
+        labelled.labels = vec![
+            lazybox_core::Label::new("dependencies"),
+            lazybox_core::Label::new("go"),
+        ];
+        let tagless = make_task("owner/repo#2", long);
+        let ws_a = Workspace::from_task(labelled.clone(), fixed_time());
+        let ws_b = Workspace::from_task(tagless.clone(), fixed_time());
+        let ctx_a = ctx_for(&ws_a, &labelled, &theme);
+        let ctx_b = ctx_for(&ws_b, &tagless, &theme);
+        let columns = build_columns(4);
+        let rows = vec![build_row(&ctx_a), build_row(&ctx_b)];
+        let lines = crate::components::table::render_table(&rows, &columns, 62);
+        let tagless_line: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            tagless_line.contains(long),
+            "tag-less title truncated by another row's labels: {tagless_line:?}",
+        );
+        assert!(
+            !tagless_line.contains('…'),
+            "tag-less title should not elide: {tagless_line:?}",
+        );
     }
 
     /// Issue #328, part 1: common verbose label names are aliased to a
@@ -1637,9 +1764,9 @@ mod tests {
 
     /// Issue #328, part 1: the row from the screenshot — `[dependencies]
     /// [go]` — collapses to `[deps] [go]` so a Dependabot-heavy list
-    /// stops eating the label column.
+    /// stops eating the title's width.
     #[test]
-    fn cell_labels_abbreviates_long_names() {
+    fn label_spans_abbreviate_long_names() {
         let mut task = make_task("owner/repo#1", "x");
         task.labels = vec![
             lazybox_core::Label::new("dependencies"),
@@ -1648,8 +1775,10 @@ mod tests {
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
-        let cell = cell_labels(&ctx);
-        let joined: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        let joined: String = label_spans(&ctx)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
         assert_eq!(joined, " [deps] [go]");
     }
 

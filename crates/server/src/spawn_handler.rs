@@ -92,6 +92,7 @@ fn argv_for(
     cwd: &Option<PathBuf>,
     skip_permissions: bool,
     hook_settings_path: Option<PathBuf>,
+    model: Option<String>,
 ) -> Option<Vec<String>> {
     match kind {
         TerminalKind::Agent(agent_id) => {
@@ -106,6 +107,7 @@ fn argv_for(
                 env: Default::default(),
                 skip_permissions,
                 hook_settings_path,
+                model,
             };
             Some(agent.spawn(&ctx))
         }
@@ -115,6 +117,31 @@ fn argv_for(
         }
         TerminalKind::LogTail { path } => Some(vec!["tail".into(), "-F".into(), path.clone()]),
     }
+}
+
+/// Resolve the concrete model an agent spawn should launch with, from
+/// the workspace task's declared priority tier and the `agent.models`
+/// config map. `None` for non-agent terminals and whenever nothing
+/// routes to a model — no priority declared AND no model configured for
+/// the default tier — so the agent keeps its CLI default (today's
+/// behaviour for an unconfigured `agent.models`).
+///
+/// The tier is read off the workspace's primary task
+/// ([`lazybox_core::resolve_model_tier`]); a missing / unpersisted
+/// workspace resolves to `None` tier and falls through to the default.
+fn resolve_spawn_model(
+    config: &ServerConfig,
+    session_key: &SessionKey,
+    kind: &TerminalKind,
+    cfg: &lazybox_config::Config,
+) -> Option<String> {
+    if !matches!(kind, TerminalKind::Agent(_)) {
+        return None;
+    }
+    let tier = load_workspace(config, &WorkspaceKey::new(session_key.as_str()))
+        .ok()
+        .and_then(|w| w.primary_task().and_then(lazybox_core::resolve_model_tier));
+    cfg.agent.models.model_for(tier)
 }
 
 /// Absolute path to the per-terminal Claude settings file lazybox writes
@@ -370,6 +397,14 @@ pub async fn handle_spawn(
     let t0 = std::time::Instant::now();
     let cfg = lazybox_config::Config::load().unwrap_or_default();
     let skip_permissions = skip_permissions_for(autonomous, &cfg);
+    // Resolve the model from the workspace task's declared priority tier
+    // (`high`/`medium`/`low` label or `@high`/`@medium`/`@low` body
+    // marker) → `agent.models` config. Covers both the autonomous
+    // "pilot" spawns and an interactive `w`/spawn, since every launch
+    // funnels through here. `None` when nothing routes to a model (no
+    // priority + no configured default tier model) → the agent keeps
+    // its CLI default.
+    let model = resolve_spawn_model(config, &session_key, &kind, &cfg);
     tracing::info!(
         %session_key,
         ?session_id,
@@ -505,6 +540,7 @@ pub async fn handle_spawn(
         &cwd_path,
         skip_permissions,
         hook_settings.clone(),
+        model.clone(),
     ) {
         Some(a) => a,
         None => {
@@ -4963,7 +4999,8 @@ mod tests {
         let kind = TerminalKind::Agent("claude".into());
         let cwd = Some(std::path::PathBuf::from("/tmp/wt"));
 
-        let with_skip = argv_for(&config, &kind, &cwd, true, None).expect("claude registered");
+        let with_skip =
+            argv_for(&config, &kind, &cwd, true, None, None).expect("claude registered");
         assert_eq!(
             with_skip,
             vec![
@@ -4973,7 +5010,8 @@ mod tests {
             ]
         );
 
-        let without_skip = argv_for(&config, &kind, &cwd, false, None).expect("claude registered");
+        let without_skip =
+            argv_for(&config, &kind, &cwd, false, None, None).expect("claude registered");
         assert_eq!(without_skip, vec!["claude".to_string()]);
 
         // With a generated hook settings file, `--settings <path>` is
@@ -4984,6 +5022,7 @@ mod tests {
             &cwd,
             false,
             Some(std::path::PathBuf::from("/run/hooks/settings-1.json")),
+            None,
         )
         .expect("claude registered");
         assert_eq!(
@@ -4993,6 +5032,119 @@ mod tests {
                 "--settings".to_string(),
                 "/run/hooks/settings-1.json".to_string(),
             ]
+        );
+
+        // A resolved model id renders `--model <id>` ahead of the
+        // skip / settings flags.
+        let with_model = argv_for(&config, &kind, &cwd, false, None, Some("opus".into()))
+            .expect("claude registered");
+        assert_eq!(
+            with_model,
+            vec![
+                "claude".to_string(),
+                "--model".to_string(),
+                "opus".to_string(),
+            ]
+        );
+    }
+
+    /// Persist a workspace built from `task` so `resolve_spawn_model`
+    /// (which loads it by session key) can read its primary task.
+    fn persist_task_workspace(config: &ServerConfig, task: Task) -> SessionKey {
+        let ws = Workspace::from_task(task, Utc::now());
+        let key = ws.key.clone();
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).expect("serialize ws")),
+            })
+            .expect("save workspace");
+        SessionKey::new(key.as_str())
+    }
+
+    fn config_with_models(models: lazybox_config::ModelTiers) -> lazybox_config::Config {
+        let mut cfg = lazybox_config::Config::default();
+        cfg.agent.models = models;
+        cfg
+    }
+
+    #[test]
+    fn resolve_spawn_model_maps_label_tier_to_configured_model() {
+        let config =
+            ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
+        let mut task = task_for("github", "acme/widget#7");
+        task.labels = vec![lazybox_core::Label::new("high")];
+        let session_key = persist_task_workspace(&config, task);
+        let cfg = config_with_models(lazybox_config::ModelTiers {
+            high: Some("opus".into()),
+            medium: Some("sonnet".into()),
+            low: Some("haiku".into()),
+            default: lazybox_core::ModelTier::Medium,
+        });
+        assert_eq!(
+            resolve_spawn_model(
+                &config,
+                &session_key,
+                &TerminalKind::Agent("claude".into()),
+                &cfg
+            ),
+            Some("opus".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_model_falls_back_to_default_tier_when_no_priority() {
+        let config =
+            ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
+        let session_key = persist_task_workspace(&config, task_for("github", "acme/widget#7"));
+        let cfg = config_with_models(lazybox_config::ModelTiers {
+            high: Some("opus".into()),
+            medium: Some("sonnet".into()),
+            low: Some("haiku".into()),
+            default: lazybox_core::ModelTier::Low,
+        });
+        // No priority label/marker → the configured default tier (low).
+        assert_eq!(
+            resolve_spawn_model(
+                &config,
+                &session_key,
+                &TerminalKind::Agent("claude".into()),
+                &cfg
+            ),
+            Some("haiku".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_model_none_for_shell_and_unconfigured() {
+        let config =
+            ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
+        let mut task = task_for("github", "acme/widget#7");
+        task.labels = vec![lazybox_core::Label::new("high")];
+        let session_key = persist_task_workspace(&config, task);
+
+        // Non-agent terminal → never a model, even with a priority label.
+        let with_models = config_with_models(lazybox_config::ModelTiers {
+            high: Some("opus".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            resolve_spawn_model(&config, &session_key, &TerminalKind::Shell, &with_models),
+            None
+        );
+
+        // Agent terminal but `agent.models` unconfigured → no flag, the
+        // agent keeps its CLI default (today's behaviour).
+        assert_eq!(
+            resolve_spawn_model(
+                &config,
+                &session_key,
+                &TerminalKind::Agent("claude".into()),
+                &lazybox_config::Config::default()
+            ),
+            None
         );
     }
 

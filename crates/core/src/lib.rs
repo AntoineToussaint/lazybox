@@ -7,6 +7,7 @@ pub mod agent;
 pub mod autofix;
 pub mod config;
 pub mod issue_links;
+pub mod model_tier;
 pub mod paths;
 pub mod project;
 pub mod prompts;
@@ -25,6 +26,7 @@ pub use config::{
     ProviderConfig,
 };
 pub use issue_links::{IssueLink, extract as extract_issue_links};
+pub use model_tier::{ModelTier, resolve_model_tier};
 pub use project::{Project, ProjectKey};
 pub use provider::{ProviderError, TaskProvider};
 pub use scope::{MockScopeSource, Scope, ScopeKind, ScopeSource};

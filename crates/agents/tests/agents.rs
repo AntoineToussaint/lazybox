@@ -17,6 +17,7 @@ fn sample_ctx() -> SpawnCtx {
         env: HashMap::new(),
         skip_permissions: false,
         hook_settings_path: None,
+        model: None,
     }
 }
 

@@ -67,6 +67,10 @@ pub async fn handle_start_agent_run(
         // don't need the `--settings` hook-command injection the
         // interactive PTY path uses.
         hook_settings_path: None,
+        // Priority-tier model selection is wired through the PTY spawn
+        // path (`handle_spawn`); the structured JSON-API run path picks
+        // its model via `ClaudeStreamConfig`, not `SpawnCtx`.
+        model: None,
     };
     let argv = agent_impl.spawn(&spawn_ctx);
     let Some((program, extra_args)) = argv.split_first() else {

@@ -562,6 +562,10 @@ pub struct AgentSection {
     /// Global LLM-gateway base URL. See [`AgentSection::gateway_url`].
     #[serde(default)]
     pub llm_gateway_url: Option<String>,
+    /// Maps a declared priority [`ModelTier`](lazybox_core::ModelTier) to
+    /// the concrete model id an agent spawns with. See [`ModelTiers`].
+    #[serde(default)]
+    pub models: ModelTiers,
 }
 
 impl Default for AgentSection {
@@ -571,6 +575,70 @@ impl Default for AgentSection {
             autonomous_skip_permissions: true,
             skip_permissions: false,
             llm_gateway_url: None,
+            models: ModelTiers::default(),
+        }
+    }
+}
+
+/// Tier → concrete model id map, keyed by the priority a task declares
+/// (`high` / `medium` / `low` label or `@high`/`@medium`/`@low` body
+/// marker; see [`lazybox_core::resolve_model_tier`]).
+///
+/// Every field is unset by default, so a config that doesn't mention
+/// `agent.models` changes nothing — agents spawn with their CLI default
+/// model, exactly as before. Populate it to route priority to a
+/// right-sized model:
+///
+/// ```yaml
+/// agent:
+///   models:
+///     high:    opus      # or a full model id
+///     medium:  sonnet
+///     low:     haiku
+///     default: medium    # tier used when a task declares none
+/// ```
+///
+/// The values are passed verbatim to the agent's model flag (Claude
+/// `--model <id>`), so both short aliases and full model ids work.
+/// Agents whose CLI takes no model flag (Codex / Cursor today) ignore
+/// the value cleanly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelTiers {
+    /// Model for the `high` tier — the strongest.
+    pub high: Option<String>,
+    /// Model for the `medium` tier.
+    pub medium: Option<String>,
+    /// Model for the `low` tier — the cheapest / fastest.
+    pub low: Option<String>,
+    /// Tier used when a task declares no priority. Defaults to
+    /// `medium`; only takes effect once the corresponding tier has a
+    /// model configured.
+    pub default: lazybox_core::ModelTier,
+}
+
+impl Default for ModelTiers {
+    fn default() -> Self {
+        Self {
+            high: None,
+            medium: None,
+            low: None,
+            default: lazybox_core::ModelTier::Medium,
+        }
+    }
+}
+
+impl ModelTiers {
+    /// Concrete model id for a resolved tier, or — when the task
+    /// declared none (`None`) — the model for the configured `default`
+    /// tier. Returns `None` when that tier has no model configured, in
+    /// which case the caller injects no model flag and the agent uses
+    /// its CLI default.
+    pub fn model_for(&self, tier: Option<lazybox_core::ModelTier>) -> Option<String> {
+        match tier.unwrap_or(self.default) {
+            lazybox_core::ModelTier::High => self.high.clone(),
+            lazybox_core::ModelTier::Medium => self.medium.clone(),
+            lazybox_core::ModelTier::Low => self.low.clone(),
         }
     }
 }
@@ -1297,6 +1365,88 @@ repos:
         let written = serde_yaml::to_string(&cfg).expect("serialize");
         let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
         assert_eq!(reparsed.agent.llm_gateway_url, cfg.agent.llm_gateway_url);
+    }
+
+    /// A fresh config maps every tier to no model, so `model_for`
+    /// yields `None` and agents keep their CLI default — today's
+    /// behaviour for an unconfigured `agent.models`.
+    #[test]
+    fn model_tiers_default_to_no_model() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert_eq!(cfg.agent.models.model_for(None), None);
+        assert_eq!(
+            cfg.agent
+                .models
+                .model_for(Some(lazybox_core::ModelTier::High)),
+            None
+        );
+        // The unconfigured default tier is `medium`.
+        assert_eq!(cfg.agent.models.default, lazybox_core::ModelTier::Medium);
+    }
+
+    /// The `agent.models` map parses, maps each tier to its model, and
+    /// applies the `default` tier when a task declared none.
+    #[test]
+    fn model_tiers_parse_and_map_each_tier() {
+        let yaml = "\
+agent:
+  models:
+    high: opus
+    medium: sonnet
+    low: haiku
+    default: low
+";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(
+            cfg.agent
+                .models
+                .model_for(Some(lazybox_core::ModelTier::High)),
+            Some("opus".to_string())
+        );
+        assert_eq!(
+            cfg.agent
+                .models
+                .model_for(Some(lazybox_core::ModelTier::Medium)),
+            Some("sonnet".to_string())
+        );
+        assert_eq!(
+            cfg.agent
+                .models
+                .model_for(Some(lazybox_core::ModelTier::Low)),
+            Some("haiku".to_string())
+        );
+        // No tier declared → the configured `default` (low) is used.
+        assert_eq!(cfg.agent.models.model_for(None), Some("haiku".to_string()));
+
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(reparsed.agent.models, cfg.agent.models);
+    }
+
+    /// A tier the map leaves unset falls back to no model even when
+    /// other tiers are configured — a partial `agent.models` is valid.
+    #[test]
+    fn model_tiers_unset_tier_yields_no_model() {
+        let yaml = "\
+agent:
+  models:
+    high: opus
+";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(
+            cfg.agent
+                .models
+                .model_for(Some(lazybox_core::ModelTier::High)),
+            Some("opus".to_string())
+        );
+        assert_eq!(
+            cfg.agent
+                .models
+                .model_for(Some(lazybox_core::ModelTier::Low)),
+            None
+        );
+        // Default tier (medium) is also unset here → no model.
+        assert_eq!(cfg.agent.models.model_for(None), None);
     }
 
     /// `setup.default_agent` is unset on a fresh config (consumers fall

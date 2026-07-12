@@ -4,19 +4,19 @@
   Shift+M         messages          Esc             dismiss            `               jump to workspace
   !               next asking       Shift+F         next failing       .               focus mode
   Shift+W         start agent       Shift+P         activity pane      Shift+Arrows    resize splitters
-  q q             quit              Enter           open               w               work on this
-  s               shell             b s             shell on main      e               editor
-  m               mark read         z               snooze             Shift+Z         long snooze
-  Shift+N         new workspace     n               new workspace      g m             merge PR
-  g g             auto-merge        g v             reviewers          g a             assignees
-  g l             labels            g o             open in browser    r               reply
-  Shift+A         adopt sessions    Shift+J         join into PR       Shift+X         archive
-  Shift+C         close issue       a c             spawn claude       a x             spawn codex
-  a u             spawn cursor      w c             work in claude     w x             work in codex
-  w u             work in cursor    b c             claude on main     b x             codex on main
-  b u             cursor on main    f               filter             o               sort
-  Shift+S         mailbox           /               search             v               select
-  Shift+B         broadcast         Enter           toggle section     →/←             expand/collapse
-  g               top               Shift+G         bottom             d               description
-  Space           select row        z               undo mark-read     Shift+PgUp/Dn   scroll
-  ]]              exit to sidebar   ]]<key>         snippets
+  Workspace
+  Enter           open              w               work on this       s               shell
+  e               editor            m               mark read          z               snooze
+  Shift+Z         long snooze       Shift+N         new workspace      n               new workspace
+  r               reply             Shift+A         adopt sessions     Shift+J         join into PR
+  Shift+X         archive           Shift+C         close issue
+  Sidebar
+  f               filter            o               sort               Shift+S         mailbox
+  /               search            Space           collapse group     v               select
+  Shift+B         broadcast
+  Activity
+  Enter           toggle section    →/←             expand/collapse    g               top
+  Shift+G         bottom            d               description        Space           select row
+  z               undo mark-read
+  Terminal
+  Shift+PgUp/Dn   scroll            ]]              exit to sidebar    ]]<key>         snippets

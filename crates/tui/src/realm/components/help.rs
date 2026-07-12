@@ -20,8 +20,8 @@ use tuirealm::state::State;
 
 /// One section of the help panel — title + bindings under it.
 pub struct HelpSection {
-    /// Section title (rendered today flatten into one grid; reserved
-    /// for future per-section styling).
+    /// Section title, rendered as a heading above the section's grid —
+    /// the scope that disambiguates a key bound in two sections (#338).
     pub title: &'static str,
     /// Bindings for this section. Owned so we can carry user-override
     /// keys without leaking a `&'static` slice per render.
@@ -236,9 +236,19 @@ impl Component for Help {
             .map(|lg| 1 + lg.chords.len().div_ceil(COLS) as u16 + 1)
             .sum();
         let sep_rows = if self.leaders.is_empty() { 0 } else { 1 };
-        let grid_rows = bindings.len().div_ceil(COLS) as u16;
+        // Each non-empty section is a title line + its single-key grid.
+        // The title is what makes the focus-scoped duplicates legible —
+        // `Space` reads as `collapse group` under Sidebar and `select
+        // row` under Activity, instead of two unlabeled `Space` cells in
+        // one flat grid (#338).
+        let section_rows: u16 = self
+            .sections
+            .iter()
+            .filter(|s| !s.bindings.is_empty())
+            .map(|s| 1 + s.bindings.len().div_ceil(COLS) as u16)
+            .sum();
         // +1: the "ask lazybox" hint line at the top of the panel.
-        let content_rows = 1 + leader_rows + sep_rows + grid_rows;
+        let content_rows = 1 + leader_rows + sep_rows + section_rows;
 
         let panel_h = (content_rows + PADDING_Y * 2).min(area.height);
         let panel = Rect {
@@ -362,7 +372,23 @@ impl Component for Help {
         }
         y += sep_rows;
 
-        draw_grid(frame, &bindings, y);
+        // Per-section titled grids. Each section's grid is single-key
+        // only (leader chords render in the band above), and the title
+        // scopes it — so a key bound in two sections (`Space`, `z`,
+        // `Enter`) reads unambiguously.
+        let section_title_style = Style::default()
+            .bg(theme.surface)
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD);
+        for section in &self.sections {
+            if section.bindings.is_empty() {
+                continue;
+            }
+            full_line(frame, section.title, y, section_title_style);
+            y += 1;
+            let items: Vec<&Binding> = section.bindings.iter().collect();
+            y = draw_grid(frame, &items, y);
+        }
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -559,6 +585,37 @@ mod tests {
         // `g m` and the agent group's `a c` are up there.
         assert!(group_keys.contains("g m"), "expected the g m leader chord");
         assert!(group_keys.contains("a c"), "expected the a c leader chord");
+    }
+
+    /// A single-key remap of a normally-leader action (here merge PR,
+    /// `g m` → `Shift-M`) is no longer a two-step chord, so it drops out
+    /// of the `g` leader block and back into the flat single-key grid —
+    /// the binding stays visible, it just moves to the half that matches
+    /// its shape (#338).
+    #[test]
+    fn single_key_remap_of_a_leader_action_lands_in_the_flat_grid() {
+        use lazybox_tui_core::action::ActionDef;
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("merge_pr".to_string(), "Shift-M".to_string());
+        let catalog = ActionDef::catalog(&[], &overrides);
+        let help = Help::from_catalog(&catalog, ']');
+
+        assert!(
+            help.sections
+                .iter()
+                .flat_map(|s| s.bindings.iter())
+                .any(|b| b.keys == "Shift-M" && b.label == "merge PR"),
+            "a single-key merge remap must show in the flat grid",
+        );
+        // …and it must NOT also render in a leader block.
+        assert!(
+            !help
+                .leaders
+                .iter()
+                .flat_map(|lg| lg.chords.iter())
+                .any(|b| b.label == "merge PR"),
+            "single-key merge remap must not appear in a leader block",
+        );
     }
 
     /// Repo-group collapse (`Space`) is a catalog action now (#338), so

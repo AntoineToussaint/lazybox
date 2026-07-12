@@ -209,6 +209,137 @@ async fn recv_agent_event(client: &mut lazybox_ipc::Client) -> Event {
         .expect("event")
 }
 
+/// Captures the `ClaudeStreamConfig` the server builds, then behaves
+/// like a process whose stdout is immediately at EOF.
+struct CapturingSpawner {
+    captured: Arc<std::sync::Mutex<Option<ClaudeStreamConfig>>>,
+}
+
+impl AgentStreamSpawner for CapturingSpawner {
+    fn spawn<'a>(
+        &'a self,
+        config: ClaudeStreamConfig,
+    ) -> Pin<Box<dyn Future<Output = Result<AgentStreamIo, ServerError>> + Send + 'a>> {
+        *self.captured.lock().unwrap() = Some(config);
+        Box::pin(async move {
+            Ok(AgentStreamIo {
+                stdin: Box::pin(tokio::io::sink()),
+                stdout: Box::pin(tokio::io::empty()),
+                wait: Box::pin(async { Some(0) }),
+            })
+        })
+    }
+}
+
+/// A run whose session key matches no workspace (e.g. the help
+/// assistant's sentinel) and carries no explicit cwd gets a neutral
+/// daemon-side cwd — never the daemon's own working directory, where a
+/// stray CLAUDE.md would leak into the run's context, and never a
+/// client-supplied path, which may not exist on the daemon host.
+#[tokio::test]
+async fn workspace_less_run_resolves_to_neutral_cwd() {
+    let captured = Arc::new(std::sync::Mutex::new(None));
+    let mut config = ServerConfig::in_memory();
+    config.agents.register(Arc::new(FakeStreamAgent));
+    config.agent_stream_spawner = Arc::new(CapturingSpawner {
+        captured: captured.clone(),
+    });
+
+    let (mut client, server) = channel::pair();
+    tokio::spawn(async move {
+        Server::new(config).serve(server).await.unwrap();
+    });
+
+    client
+        .send(Command::StartAgentRun {
+            session_key: "lazybox:help".into(),
+            session_id: None,
+            agent: "fake-stream".into(),
+            mode: AgentRuntimeMode::StreamJson,
+            cwd: None,
+            initial_input: None,
+        })
+        .unwrap();
+    wait_for_started(&mut client).await;
+
+    let config = captured.lock().unwrap().take().expect("spawner invoked");
+    assert_eq!(config.cwd.as_deref(), Some(std::env::temp_dir().as_path()));
+    // FakeStreamAgent has no LLM provider, so no gateway env applies —
+    // regardless of the host's YAML.
+    assert!(config.env.is_empty());
+}
+
+/// stdout dying mid-run — always an error before this fix's coverage.
+struct FailingReader;
+
+impl tokio::io::AsyncRead for FailingReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Err(std::io::Error::other("stdout torn")))
+    }
+}
+
+struct FailingStreamSpawner;
+
+impl AgentStreamSpawner for FailingStreamSpawner {
+    fn spawn<'a>(
+        &'a self,
+        _config: ClaudeStreamConfig,
+    ) -> Pin<Box<dyn Future<Output = Result<AgentStreamIo, ServerError>> + Send + 'a>> {
+        Box::pin(async move {
+            Ok(AgentStreamIo {
+                stdin: Box::pin(tokio::io::sink()),
+                stdout: Box::pin(FailingReader),
+                wait: Box::pin(async { None }),
+            })
+        })
+    }
+}
+
+/// A stdout read error is a run death and must produce the run-scoped
+/// terminal event: without `AgentRunFinished`, every client holding the
+/// run id keeps writing questions into a dead process forever.
+#[tokio::test]
+async fn stdout_error_emits_run_finished_with_error() {
+    let mut config = ServerConfig::in_memory();
+    config.agents.register(Arc::new(FakeStreamAgent));
+    config.agent_stream_spawner = Arc::new(FailingStreamSpawner);
+
+    let (mut client, server) = channel::pair();
+    tokio::spawn(async move {
+        Server::new(config).serve(server).await.unwrap();
+    });
+
+    client
+        .send(Command::StartAgentRun {
+            session_key: "test:stream-err".into(),
+            session_id: None,
+            agent: "fake-stream".into(),
+            mode: AgentRuntimeMode::StreamJson,
+            cwd: None,
+            initial_input: None,
+        })
+        .unwrap();
+    let run_id = wait_for_started(&mut client).await;
+
+    match recv_agent_event(&mut client).await {
+        Event::AgentRunFinished {
+            run_id: finished,
+            exit_code,
+            error,
+        } => {
+            assert_eq!(finished, run_id);
+            assert_eq!(exit_code, None);
+            let error = error.expect("run death must carry the error");
+            assert!(error.contains("stdout torn"), "got: {error}");
+        }
+        other => panic!("expected AgentRunFinished, got {other:?}"),
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn terminal_mode_agent_run_reports_that_spawn_should_be_used() {

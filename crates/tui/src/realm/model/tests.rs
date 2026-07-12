@@ -644,6 +644,127 @@ mod effects_tests {
         );
     }
 
+    /// Read the initial Enter default of the Confirm modal mounted
+    /// under `id`. `Confirm::state()` exposes the highlighted button as
+    /// a bool so the mount site's default is assertable end-to-end.
+    fn mounted_confirm_default_yes(
+        m: &Model<tuirealm::terminal::TestTerminalAdapter>,
+        id: Id,
+    ) -> bool {
+        use tuirealm::state::{State, StateValue};
+        match m.app.state(&id).expect("confirm modal is mounted") {
+            State::Single(StateValue::Bool(b)) => b,
+            other => panic!("expected a Bool state, got {other:?}"),
+        }
+    }
+
+    /// Issue #312: the issue→PR session-merge prompt now defaults Enter
+    /// to Yes — accepting is the expected, non-destructive path (the
+    /// prompt only appears because a closing PR was detected).
+    #[test]
+    fn merge_prompt_defaults_to_yes() {
+        let mut m = build_model();
+        m.pending_merge_prompts.push_back((
+            WorkspaceKey::new("github:o/r#1"),
+            WorkspaceKey::new("github:o/r#2"),
+            "o/r#1".into(),
+            "o/r#2".into(),
+            1,
+        ));
+        m.maybe_mount_next_merge_prompt();
+        assert_eq!(m.top_modal(), Some(&Id::MergeConfirm));
+        assert!(
+            mounted_confirm_default_yes(&m, Id::MergeConfirm),
+            "issue→PR merge prompt should default to Yes",
+        );
+    }
+
+    /// Issue #312: workspace-removal deletes the worktree (no undo), so
+    /// its confirm keeps Enter on No.
+    #[test]
+    fn removal_prompt_defaults_to_no() {
+        let mut m = build_model();
+        m.pending_removal_prompts
+            .push_back(super::super::RemovalPrompt {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                label: "o/r#1".into(),
+                title: None,
+                terminal_count: 0,
+                reason: super::super::RemovalReason::Merged,
+                has_local_work: false,
+            });
+        m.maybe_mount_next_removal_prompt();
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
+            "removal prompt should default to No",
+        );
+    }
+
+    /// Issue #312: the clean-worktrees bulk-wipe confirm defaults No.
+    #[test]
+    fn clean_worktrees_prompt_defaults_to_no() {
+        let mut m = build_model();
+        m.mount_clean_worktrees_confirm();
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::CleanWorktreesConfirm),
+            "clean-worktrees prompt should default to No",
+        );
+    }
+
+    /// Issue #312: the inspector's delete-worktree confirm defaults No.
+    #[test]
+    fn inspect_delete_prompt_defaults_to_no() {
+        let mut m = build_model();
+        m.mount_inspect_confirm(lazybox_ipc::WorktreeInspectionDto {
+            path: std::path::PathBuf::from("/tmp/worktrees/o-r-feat"),
+            bare_path: None,
+            branch: Some("feat".into()),
+            session_id: None,
+            reasons: vec!["untracked".into()],
+            size_bytes: 0,
+            last_modified_unix: Some(0),
+            has_uncommitted_changes: false,
+            has_unpushed_commits: false,
+            is_safe_to_delete: false,
+        });
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::InspectConfirm),
+            "inspector delete prompt should default to No",
+        );
+    }
+
+    /// Issue #312: `mount_action_confirm` carries each destructive
+    /// action's declared default from the catalog — Archive defaults No
+    /// (destructive), the on-main spawn defaults Yes (explicit intent,
+    /// benign awareness gate).
+    #[test]
+    fn action_confirm_reads_catalog_default() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        m.mount_action_confirm(
+            Action::Archive,
+            super::super::ActionConfirmTarget::Workspace(SessionKey::from("github:o/r#1")),
+            None,
+        );
+        assert!(
+            !mounted_confirm_default_yes(&m, Id::ActionConfirm),
+            "Archive confirm should default to No",
+        );
+
+        let mut m = build_model();
+        m.mount_action_confirm(
+            Action::SpawnAgentOnMain("claude".into()),
+            super::super::ActionConfirmTarget::Workspace(SessionKey::from("github:o/r#1")),
+            None,
+        );
+        assert!(
+            mounted_confirm_default_yes(&m, Id::ActionConfirm),
+            "agent-on-main confirm should default to Yes",
+        );
+    }
+
     /// Esc on a RemoveOutOfScope modal clears the slot but
     /// produces no command — there's nothing to tell the daemon;
     /// the workspace stays out of scope on its end too.
@@ -7103,6 +7224,327 @@ mod flash_log_tests {
 }
 
 #[cfg(test)]
+mod help_ask_tests {
+    //! Effect contracts for the "ask lazybox" help assistant (#302):
+    //! question routing (start run / reuse run / queue while starting),
+    //! streamed-answer plumbing from daemon events into the shared
+    //! conversation, and the modal hand-off from the `?` help panel.
+
+    use super::super::*;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::Event as IpcEvent;
+    use lazybox_ipc::{AgentRunId, AgentRuntimeMode, Command as IpcCommand, channel};
+    use lazybox_tui_core::help::{HELP_AGENT_ID, HELP_SESSION_KEY};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    fn run_started(run_id: u64) -> IpcEvent {
+        IpcEvent::AgentRunStarted {
+            run_id: AgentRunId(run_id),
+            session_key: SessionKey::new(HELP_SESSION_KEY),
+            session_id: None,
+            agent: HELP_AGENT_ID.into(),
+            mode: AgentRuntimeMode::StreamJson,
+        }
+    }
+
+    /// The first question starts a headless stream-json run whose
+    /// opening message is the generated context (this user's effective
+    /// keymap + docs) followed by the question — no PTY, no worktree.
+    #[test]
+    fn first_question_starts_the_run_with_generated_context() {
+        let mut m = build_model();
+        let cmds = m.handle_help_asked("how do I multi-select?".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::StartAgentRun {
+                session_key,
+                agent,
+                mode,
+                cwd,
+                initial_input,
+                ..
+            } => {
+                assert_eq!(session_key.as_str(), HELP_SESSION_KEY);
+                assert_eq!(agent, HELP_AGENT_ID);
+                assert_eq!(*mode, AgentRuntimeMode::StreamJson);
+                assert!(
+                    cwd.is_none(),
+                    "cwd is daemon policy — a client path may not exist on the daemon host",
+                );
+                let text = initial_input
+                    .as_ref()
+                    .and_then(|i| i.text.as_deref())
+                    .expect("initial input text");
+                assert!(text.contains("# Key bindings (effective)"));
+                assert!(text.contains("# Documentation"));
+                assert!(text.ends_with("# Question\n\nhow do I multi-select?"));
+            }
+            other => panic!("expected StartAgentRun, got {other:?}"),
+        }
+        assert!(m.help_run_starting);
+        let convo = m.help_convo_mut();
+        assert_eq!(convo.turns.len(), 1);
+        assert!(!convo.turns[0].done);
+    }
+
+    /// Once the run is live, a follow-up rides it as a plain input —
+    /// the context is already in the conversation (and prompt-cached).
+    #[test]
+    fn follow_up_rides_the_same_run() {
+        let mut m = build_model();
+        m.help_run = Some(AgentRunId(7));
+        let cmds = m.handle_help_asked("and in the sidebar?".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::SendAgentInput { run_id, message } => {
+                assert_eq!(*run_id, AgentRunId(7));
+                assert_eq!(message.text.as_deref(), Some("and in the sidebar?"));
+            }
+            other => panic!("expected SendAgentInput, got {other:?}"),
+        }
+    }
+
+    /// A question racing the run start queues instead of double-
+    /// starting; `AgentRunStarted` flushes the queue in order.
+    #[test]
+    fn question_while_starting_queues_until_run_started() {
+        let mut m = build_model();
+        assert!(!m.handle_help_asked("first?".into()).is_empty());
+        let cmds = m.handle_help_asked("second?".into());
+        assert!(cmds.is_empty(), "second question must not start a run");
+        assert_eq!(m.help_pending_questions, vec!["second?".to_string()]);
+
+        m.handle_daemon_event(run_started(3));
+        assert_eq!(m.help_run, Some(AgentRunId(3)));
+        assert!(!m.help_run_starting);
+        assert!(m.help_pending_questions.is_empty());
+    }
+
+    /// Empty / whitespace questions are dropped without touching the
+    /// conversation or the daemon.
+    #[test]
+    fn blank_question_is_a_noop() {
+        let mut m = build_model();
+        assert!(m.handle_help_asked("   ".into()).is_empty());
+        assert!(m.help_convo_mut().turns.is_empty());
+        assert!(!m.help_run_starting);
+    }
+
+    /// Streamed deltas append to the open turn; `AgentTurnFinished`
+    /// replaces the accumulated text with the authoritative result and
+    /// closes the turn. Events for other runs are ignored.
+    #[test]
+    fn deltas_and_turn_finished_stream_into_the_convo() {
+        let mut m = build_model();
+        let _ = m.handle_help_asked("how do I snooze?".into());
+        m.handle_daemon_event(run_started(1));
+        for delta in ["Press ", "`z`"] {
+            m.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+                run_id: AgentRunId(1),
+                delta: delta.into(),
+            });
+        }
+        // A delta from an unrelated run must not leak in.
+        m.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+            run_id: AgentRunId(99),
+            delta: "NOISE".into(),
+        });
+        assert_eq!(m.help_convo_mut().turns[0].answer, "Press `z`");
+
+        m.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(1),
+            result: Some("Press `z` on a workspace.".into()),
+            session_id: None,
+            error: None,
+        });
+        let convo = m.help_convo_mut();
+        assert!(convo.turns[0].done);
+        assert_eq!(convo.turns[0].answer, "Press `z` on a workspace.");
+    }
+
+    /// Answers correlate to the *earliest* open turn: a follow-up
+    /// submitted while the previous answer is still streaming must not
+    /// hijack its tail, and each turn gets its own result.
+    #[test]
+    fn follow_up_mid_stream_keeps_turns_correlated() {
+        let mut m = build_model();
+        let _ = m.handle_help_asked("q1".into());
+        m.handle_daemon_event(run_started(1));
+        m.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+            run_id: AgentRunId(1),
+            delta: "A1 start".into(),
+        });
+        // Follow-up while A1 is still streaming.
+        let cmds = m.handle_help_asked("q2".into());
+        assert!(matches!(
+            cmds.first(),
+            Some(IpcCommand::SendAgentInput { .. })
+        ));
+        m.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+            run_id: AgentRunId(1),
+            delta: ", A1 end".into(),
+        });
+        {
+            let convo = m.help_convo_mut();
+            assert_eq!(convo.turns[0].answer, "A1 start, A1 end");
+            assert_eq!(convo.turns[1].answer, "", "A1's tail must not leak into q2");
+        }
+        m.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(1),
+            result: Some("A1 final".into()),
+            session_id: None,
+            error: None,
+        });
+        m.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+            run_id: AgentRunId(1),
+            delta: "A2".into(),
+        });
+        m.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(1),
+            result: Some("A2 final".into()),
+            session_id: None,
+            error: None,
+        });
+        let convo = m.help_convo_mut();
+        assert!(convo.turns[0].done);
+        assert_eq!(convo.turns[0].answer, "A1 final");
+        assert!(convo.turns[1].done, "q2's own result must close q2");
+        assert_eq!(convo.turns[1].answer, "A2 final");
+    }
+
+    /// `AgentRunFinished` releases the run id so the next question
+    /// starts a fresh run instead of writing to a dead process — and
+    /// closes every open turn, including follow-ups queued behind the
+    /// one that was streaming.
+    #[test]
+    fn run_finished_resets_for_a_fresh_start() {
+        let mut m = build_model();
+        let _ = m.handle_help_asked("q".into());
+        m.handle_daemon_event(run_started(1));
+        let _ = m.handle_help_asked("follow-up".into());
+        m.handle_daemon_event(IpcEvent::AgentRunFinished {
+            run_id: AgentRunId(1),
+            exit_code: Some(1),
+            error: Some("boom".into()),
+        });
+        assert_eq!(m.help_run, None);
+        assert!(!m.help_run_starting);
+        {
+            let convo = m.help_convo_mut();
+            assert!(convo.turns[0].done, "open turn closed on exit");
+            assert!(convo.turns[1].done, "queued follow-up turn closed too");
+            assert!(convo.notice.as_deref().unwrap_or("").contains("boom"));
+        }
+        let cmds = m.handle_help_asked("again?".into());
+        assert!(
+            matches!(cmds.first(), Some(IpcCommand::StartAgentRun { .. })),
+            "next question restarts the run: {cmds:?}",
+        );
+    }
+
+    /// A spawn failure surfaces inside the help conversation — not as
+    /// a footer sync-error banner (its `agent_run:*` source would
+    /// otherwise be misread as a provider sync failure) — and closes
+    /// every queued turn, not just the last.
+    #[test]
+    fn spawn_failure_lands_in_the_convo_not_the_footer() {
+        let mut m = build_model();
+        m.status.polling = None;
+        let _ = m.handle_help_asked("q".into());
+        let _ = m.handle_help_asked("queued while starting".into());
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: format!("agent_run:{HELP_AGENT_ID}"),
+            message: "No such file or directory".into(),
+            detail: String::new(),
+            kind: "permanent".into(),
+        });
+        assert!(!m.help_run_starting);
+        let convo = m.help_convo_mut();
+        assert!(convo.turns[0].done);
+        assert!(convo.turns[1].done, "queued turn must not spin forever");
+        let notice = convo.notice.as_deref().expect("notice set");
+        assert!(notice.contains("unavailable"));
+        drop(convo);
+        assert!(
+            m.status.notice.is_none(),
+            "agent_run errors must not raise a footer banner"
+        );
+        assert_eq!(
+            m.status.sync.recent().count(),
+            0,
+            "and must not hit the sync log"
+        );
+    }
+
+    /// Once the run is live, a generic `agent_run*` provider error can
+    /// belong to any structured run on the shared bus (it carries no
+    /// run id) — it must NOT be claimed for the help conversation. Run
+    /// death arrives run-scoped as `AgentRunFinished` instead.
+    #[test]
+    fn live_run_does_not_claim_other_runs_agent_run_errors() {
+        let mut m = build_model();
+        let _ = m.handle_help_asked("q".into());
+        m.handle_daemon_event(run_started(1));
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: "agent_run:stdin".into(),
+            message: "broken pipe on someone else's run".into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+        assert_eq!(m.help_run, Some(AgentRunId(1)), "run must stay adopted");
+        let convo = m.help_convo_mut();
+        assert!(
+            !convo.turns[0].done,
+            "the streaming answer must not be truncated by an unrelated error"
+        );
+        assert!(convo.notice.is_none());
+    }
+
+    /// Without the claude agent enabled there's nothing to escalate
+    /// to: the turn closes immediately with an explanatory notice and
+    /// no command goes out (keybinding search still works).
+    #[test]
+    fn missing_claude_agent_sets_notice_instead_of_dispatching() {
+        let mut m = build_model();
+        m.set_agents(vec!["codex".into()]);
+        let cmds = m.handle_help_asked("q".into());
+        assert!(cmds.is_empty());
+        let convo = m.help_convo_mut();
+        assert!(convo.turns[0].done);
+        assert!(
+            convo
+                .notice
+                .as_deref()
+                .unwrap_or("")
+                .contains(HELP_AGENT_ID)
+        );
+    }
+
+    /// `?` on the help panel swaps it for the ask modal; asking a
+    /// question keeps the modal mounted so the answer can stream in.
+    #[test]
+    fn help_ask_open_swaps_the_help_panel() {
+        let mut m = build_model();
+        m.mount_help();
+        assert_eq!(m.modal_stack.last(), Some(&Id::Help));
+        m.update(Msg::HelpAskOpen);
+        assert_eq!(m.modal_stack.as_slice(), &[Id::HelpAsk]);
+        m.update(Msg::HelpAsked("how do I merge?".into()));
+        assert_eq!(
+            m.modal_stack.as_slice(),
+            &[Id::HelpAsk],
+            "asking must not dismiss the modal",
+        );
+        assert_eq!(m.help_convo_mut().turns.len(), 1);
+    }
+}
+
+#[cfg(test)]
 mod dismiss_and_messages_tests {
     //! #309: every footer notice is dismissable with one key (Esc, the
     //! catalog `DismissNotice` binding) regardless of severity, and
@@ -7238,5 +7680,196 @@ mod dismiss_and_messages_tests {
             Some(&Id::Messages),
             "the window stays up on the empty placeholder",
         );
+    }
+}
+
+#[cfg(test)]
+mod recent_snippets_tests {
+    //! Persistence of the snippet-picker "Recent" MRU across restarts
+    //! (#311): `record_recent_snippet` writes through to the state DB,
+    //! `seed_recent_snippets` restores it, and a corrupt / missing
+    //! value degrades to an empty list without panicking.
+    use super::super::*;
+    use lazybox_ipc::channel;
+    use lazybox_store::Store;
+    use lazybox_store::mock::MemoryStore;
+    use std::sync::Arc;
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    /// Load a snippet library whose keys are exactly `keys` into the
+    /// model, so `seed_recent_snippets` has a catalog to prune stale
+    /// MRU keys against — mirroring the production boot order where
+    /// `apply_snippets` always runs before `seed_recent_snippets`.
+    /// `label` keys the tmp file so parallel tests don't collide.
+    fn apply_snippet_keys(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        label: &str,
+        keys: &[&str],
+    ) {
+        let mut yaml = String::from("snippets:\n");
+        for k in keys {
+            yaml.push_str(&format!("  {k}:\n    description: {k}\n    body: b\n"));
+        }
+        let tmp_dir =
+            std::env::temp_dir().join(format!("lazybox-recent-{}-{label}", std::process::id(),));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let tmp = tmp_dir.join("snippets.yaml");
+        std::fs::write(&tmp, yaml).unwrap();
+        m.apply_snippets(
+            lazybox_config::Snippets::load_from(&tmp, lazybox_config::SnippetOrigin::Global)
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn record_writes_through_to_store() {
+        let store = Arc::new(MemoryStore::new());
+        let mut m = build_model();
+        m.seed_recent_snippets(store.clone());
+        m.record_recent_snippet("rev".into());
+
+        let raw = store
+            .get_kv(RECENT_SNIPPETS_KV_KEY)
+            .unwrap()
+            .expect("recent_snippets persisted");
+        let stored: Vec<String> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(stored, vec!["rev".to_string()]);
+    }
+
+    #[test]
+    fn record_without_store_stays_session_only() {
+        let mut m = build_model();
+        // No seed_recent_snippets → no store handle (the --connect path).
+        m.record_recent_snippet("rev".into());
+        assert_eq!(m.recent_snippets, vec!["rev".to_string()]);
+    }
+
+    #[test]
+    fn seed_missing_value_yields_empty() {
+        let store = Arc::new(MemoryStore::new());
+        let mut m = build_model();
+        m.seed_recent_snippets(store);
+        assert!(m.recent_snippets.is_empty());
+    }
+
+    #[test]
+    fn seed_corrupt_value_yields_empty_no_panic() {
+        let store = Arc::new(MemoryStore::new());
+        store.set_kv(RECENT_SNIPPETS_KV_KEY, "not json{").unwrap();
+        let mut m = build_model();
+        m.seed_recent_snippets(store);
+        assert!(m.recent_snippets.is_empty());
+    }
+
+    #[test]
+    fn seed_caps_to_max() {
+        let store = Arc::new(MemoryStore::new());
+        let overflow: Vec<String> = (0..RECENT_SNIPPETS_MAX + 3)
+            .map(|i| format!("s{i}"))
+            .collect();
+        store
+            .set_kv(
+                RECENT_SNIPPETS_KV_KEY,
+                &serde_json::to_string(&overflow).unwrap(),
+            )
+            .unwrap();
+        let mut m = build_model();
+        // All stored keys are catalog-backed, so only the cap trims.
+        let keys: Vec<&str> = overflow.iter().map(String::as_str).collect();
+        apply_snippet_keys(&mut m, "caps", &keys);
+        m.seed_recent_snippets(store);
+        assert_eq!(m.recent_snippets.len(), RECENT_SNIPPETS_MAX);
+        assert_eq!(m.recent_snippets[0], "s0");
+    }
+
+    #[test]
+    fn round_trip_across_restart_preserves_mru_order() {
+        let store: Arc<dyn lazybox_store::Store> = Arc::new(MemoryStore::new());
+
+        // Session one: record A, B, C.
+        let mut m1 = build_model();
+        apply_snippet_keys(&mut m1, "round-trip-1", &["A", "B", "C"]);
+        m1.seed_recent_snippets(store.clone());
+        m1.record_recent_snippet("A".into());
+        m1.record_recent_snippet("B".into());
+        m1.record_recent_snippet("C".into());
+
+        // Session two: a fresh Model seeded from the same store, with
+        // the same catalog loaded so no key is pruned.
+        let mut m2 = build_model();
+        apply_snippet_keys(&mut m2, "round-trip-2", &["A", "B", "C"]);
+        m2.seed_recent_snippets(store);
+        assert_eq!(
+            m2.recent_snippets,
+            vec!["C".to_string(), "B".to_string(), "A".to_string()],
+        );
+    }
+
+    /// A stored key whose snippet was since renamed / deleted is pruned
+    /// on seed — otherwise it sits in the MRU consuming a slot it can
+    /// never render into, and a small rotating set of live keys never
+    /// evicts it (finding #1). The pruned list is also flushed back so
+    /// the dead key doesn't linger in the DB.
+    #[test]
+    fn seed_prunes_keys_absent_from_catalog() {
+        let store: Arc<dyn lazybox_store::Store> = Arc::new(MemoryStore::new());
+        // MRU carries two live keys interleaved with two now-gone keys.
+        store
+            .set_kv(
+                RECENT_SNIPPETS_KV_KEY,
+                &serde_json::to_string(&["rev", "gone", "pr", "dead"]).unwrap(),
+            )
+            .unwrap();
+
+        let mut m = build_model();
+        apply_snippet_keys(&mut m, "prune", &["rev", "pr"]);
+        m.seed_recent_snippets(store.clone());
+
+        // Only the catalog-backed keys survive, order preserved.
+        assert_eq!(m.recent_snippets, vec!["rev".to_string(), "pr".to_string()]);
+        // …and the DB is rewritten to the pruned list, so the dead keys
+        // are gone for good.
+        let raw = store.get_kv(RECENT_SNIPPETS_KV_KEY).unwrap().unwrap();
+        let stored: Vec<String> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(stored, vec!["rev".to_string(), "pr".to_string()]);
+    }
+
+    /// The bundled boot entry point applies the catalog *before* seeding,
+    /// so the prune sees a populated catalog. Proven here by passing a
+    /// stored MRU with a stale key: if seeding ran first (empty catalog)
+    /// every key — including the live one — would be wiped.
+    #[test]
+    fn apply_and_seed_bundles_ordering_so_prune_sees_catalog() {
+        let store: Arc<dyn lazybox_store::Store> = Arc::new(MemoryStore::new());
+        store
+            .set_kv(
+                RECENT_SNIPPETS_KV_KEY,
+                &serde_json::to_string(&["rev", "gone"]).unwrap(),
+            )
+            .unwrap();
+
+        let tmp_dir =
+            std::env::temp_dir().join(format!("lazybox-recent-{}-bundle", std::process::id(),));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let tmp = tmp_dir.join("snippets.yaml");
+        std::fs::write(
+            &tmp,
+            "snippets:\n  rev:\n    description: rev\n    body: b\n",
+        )
+        .unwrap();
+        let snippets =
+            lazybox_config::Snippets::load_from(&tmp, lazybox_config::SnippetOrigin::Global)
+                .unwrap();
+
+        let mut m = build_model();
+        m.apply_snippets_and_seed_recent(snippets, store);
+        // The live key survives (catalog was applied first); the stale
+        // one is pruned.
+        assert_eq!(m.recent_snippets, vec!["rev".to_string()]);
     }
 }

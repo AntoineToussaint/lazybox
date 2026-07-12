@@ -81,6 +81,111 @@ impl<T: TerminalAdapter> Model<T> {
         self.flush_pane_sync();
     }
 
+    /// Consume one event belonging to the help-assistant run (#302),
+    /// feeding the shared `help_convo` the `HelpAsk` modal renders.
+    /// Returns `true` when the event was help-run traffic so
+    /// `dispatch_daemon_event` skips the pane fan-out for it. The run
+    /// is recognized by the sentinel session key on `AgentRunStarted`;
+    /// everything after correlates on the captured run id.
+    fn handle_help_agent_event(&mut self, event: &IpcEvent) -> bool {
+        use lazybox_tui_core::help::HELP_SESSION_KEY;
+        match event {
+            IpcEvent::AgentRunStarted {
+                run_id,
+                session_key,
+                ..
+            } if session_key.as_str() == HELP_SESSION_KEY => {
+                self.help_run = Some(*run_id);
+                self.help_run_starting = false;
+                // Questions that raced the run start ride in now, in
+                // submission order.
+                for question in std::mem::take(&mut self.help_pending_questions) {
+                    self.send_cmd(lazybox_ipc::Command::SendAgentInput {
+                        run_id: *run_id,
+                        message: lazybox_ipc::AgentInputMessage {
+                            text: Some(question),
+                            json: None,
+                        },
+                    });
+                }
+                self.redraw = true;
+                true
+            }
+            IpcEvent::AgentAssistantTextDelta { run_id, delta }
+                if Some(*run_id) == self.help_run =>
+            {
+                if let Some(turn) = self.help_convo_mut().streaming_turn_mut() {
+                    turn.answer.push_str(delta);
+                }
+                self.redraw = true;
+                true
+            }
+            IpcEvent::AgentTurnFinished {
+                run_id,
+                result,
+                error,
+                ..
+            } if Some(*run_id) == self.help_run => {
+                let mut convo = self.help_convo_mut();
+                if let Some(turn) = convo.streaming_turn_mut() {
+                    // The result carries the authoritative final text;
+                    // prefer it over the accumulated deltas so a
+                    // dropped delta can't leave a truncated answer.
+                    if let Some(result) = result.as_deref().filter(|r| !r.trim().is_empty()) {
+                        turn.answer = result.to_string();
+                    }
+                    turn.done = true;
+                }
+                if let Some(error) = error {
+                    convo.notice = Some(error.clone());
+                }
+                drop(convo);
+                self.redraw = true;
+                true
+            }
+            IpcEvent::AgentRunFinished { run_id, error, .. } if Some(*run_id) == self.help_run => {
+                // The process exited — the next question starts a
+                // fresh run (with fresh context). Every open turn is
+                // dead with it, including follow-ups queued behind the
+                // one that was streaming.
+                self.help_run = None;
+                self.help_run_starting = false;
+                let mut convo = self.help_convo_mut();
+                let unanswered = convo.close_open_turns();
+                if let Some(error) = error {
+                    convo.notice = Some(format!("help assistant exited: {error}"));
+                } else if unanswered {
+                    convo.notice = Some(
+                        "help assistant exited before answering — ask again to restart it".into(),
+                    );
+                }
+                drop(convo);
+                self.redraw = true;
+                true
+            }
+            // Spawn failures arrive as generic provider errors with an
+            // `agent_run*` source and no run id (see
+            // `handle_start_agent_run`), so they're only attributable
+            // to the help run while OUR start is in flight. Once the
+            // run is live its death arrives run-scoped as
+            // `AgentRunFinished`; a live-window `agent_run` error
+            // belongs to some other client's run and must fall through.
+            IpcEvent::ProviderError {
+                source, message, ..
+            } if source.starts_with("agent_run") && self.help_run_starting => {
+                self.help_run_starting = false;
+                self.help_pending_questions.clear();
+                let mut convo = self.help_convo_mut();
+                convo.close_open_turns();
+                convo.notice = Some(format!("help assistant unavailable — {message}"));
+                drop(convo);
+                self.redraw = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Run the deferred `sync_panes` if any event in this drain batch
     /// asked for one. A no-op when nothing pane-affecting was seen, so
     /// the run loop can call it unconditionally after every drain.
@@ -118,6 +223,14 @@ impl<T: TerminalAdapter> Model<T> {
             if visible {
                 self.redraw = true;
             }
+            return;
+        }
+        // Help-assistant run traffic (#302): structured stream-json
+        // events no pane consumes. Route them into the shared help
+        // conversation and stop — this must run before the general
+        // fan-out so an `agent_run` provider error lands in the help
+        // modal instead of the footer/sync-log as a bogus sync failure.
+        if self.handle_help_agent_event(&event) {
             return;
         }
         // Enforce the confirmed-merge latch centrally, before any pane or

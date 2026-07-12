@@ -920,6 +920,7 @@ fn w_on_issue_with_running_claude_injects_implement_prompt() {
         projects: vec![],
     });
     m.handle_daemon_event(IpcEvent::TerminalSpawned {
+        model_label: None,
         terminal_id: TerminalId(7),
         session_key: SessionKey::from(&ws_key),
         kind: TerminalKind::Agent("claude".into()),
@@ -1005,6 +1006,7 @@ fn w_on_issue_from_right_pane_also_injects() {
         projects: vec![],
     });
     m.handle_daemon_event(IpcEvent::TerminalSpawned {
+        model_label: None,
         terminal_id: TerminalId(7),
         session_key: SessionKey::from(&ws_key),
         kind: TerminalKind::Agent("claude".into()),
@@ -1871,6 +1873,7 @@ fn terminal_spawned_mid_checklist_walks_every_step_before_dismissing() {
     });
     assert_eq!(m.modal_stack.last(), Some(&Id::WorktreeProgress));
     m.handle_daemon_event(IpcEvent::TerminalSpawned {
+        model_label: None,
         terminal_id: TerminalId(1),
         session_key: sk,
         kind: TerminalKind::Agent("claude".into()),
@@ -1937,6 +1940,7 @@ fn snapshot_terminal_backstops_worktree_progress_dismissal() {
     m.handle_daemon_event(IpcEvent::Snapshot {
         workspaces: vec![],
         terminals: vec![TerminalSnapshot {
+            model_label: None,
             terminal_id: TerminalId(1),
             session_key: sk,
             kind: TerminalKind::Agent("claude".into()),
@@ -1989,6 +1993,7 @@ fn instant_resume_does_not_flash_the_progress_modal() {
     // No WorktreeProgress events precede this spawn — the existing
     // worktree was reused, so the checklist must never appear.
     m.handle_daemon_event(IpcEvent::TerminalSpawned {
+        model_label: None,
         terminal_id: TerminalId(1),
         session_key: SessionKey::new("github:o/r#42"),
         kind: TerminalKind::Agent("claude".into()),
@@ -2013,6 +2018,7 @@ fn failed_step_keeps_the_checklist_up_past_terminal_spawned() {
     });
     // The daemon's empty-dir fallback still spawns a terminal.
     m.handle_daemon_event(IpcEvent::TerminalSpawned {
+        model_label: None,
         terminal_id: TerminalId(1),
         session_key: sk,
         kind: TerminalKind::Shell,

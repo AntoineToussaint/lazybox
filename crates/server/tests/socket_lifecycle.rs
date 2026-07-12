@@ -192,6 +192,7 @@ async fn hook_ingest_over_socket_reaches_shared_embedded_config() {
         .expect("timeout")
         .expect("snapshot");
     tui.send(Command::Spawn {
+        model_alias: None,
         session_key: "test:ws-hooks".into(),
         session_id: None,
         kind: lazybox_ipc::TerminalKind::Agent("claude".into()),

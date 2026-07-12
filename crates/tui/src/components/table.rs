@@ -253,10 +253,19 @@ pub fn compute_widths(
 /// background colour extends across every cell — without it, gaps
 /// between content and the next cell render as bare spaces and the
 /// highlight looks broken.
+///
+/// `atomic_tail` marks the last N spans as a droppable unit: on
+/// overflow they're shed whole (never sliced mid-span into a dangling
+/// `[depend…`), and they're excluded from a flex column's protected
+/// floor so they can't shield space from a higher-priority sibling
+/// column. The sidebar's title cell uses it for the trailing label
+/// chips (#329) — the chips render when there's room but drop cleanly,
+/// after the status pill, when there isn't.
 #[derive(Debug, Clone, Default)]
 pub struct Cell {
     pub spans: Vec<ratatui::text::Span<'static>>,
     pub fill_style: Option<ratatui::style::Style>,
+    pub atomic_tail: usize,
 }
 
 impl Cell {
@@ -264,6 +273,7 @@ impl Cell {
         Self {
             spans,
             fill_style: None,
+            atomic_tail: 0,
         }
     }
 
@@ -271,6 +281,7 @@ impl Cell {
         Self {
             spans: vec![span],
             fill_style: None,
+            atomic_tail: 0,
         }
     }
 
@@ -284,12 +295,31 @@ impl Cell {
         self
     }
 
+    /// Mark the last `n` spans as an atomic, droppable tail (see the
+    /// struct doc). Clamped to the span count. Chainable.
+    pub fn atomic_tail(mut self, n: usize) -> Self {
+        self.atomic_tail = n.min(self.spans.len());
+        self
+    }
+
     /// Total visible width of the cell — sum of all span widths in
     /// display cells (not bytes). Uses unicode-width via
     /// `crate::util::visual_width` so multi-byte glyphs count once.
     pub fn width(&self) -> usize {
         self.spans
             .iter()
+            .map(|s| crate::util::visual_width(s.content.as_ref()))
+            .sum()
+    }
+
+    /// Width of the cell excluding its atomic tail — what a flex column
+    /// is protected to. The tail renders opportunistically (when slack
+    /// remains) but never forces a sibling column to shed.
+    pub fn floor_width(&self) -> usize {
+        let head = self.spans.len() - self.atomic_tail;
+        self.spans
+            .iter()
+            .take(head)
             .map(|s| crate::util::visual_width(s.content.as_ref()))
             .sum()
     }
@@ -400,9 +430,14 @@ pub fn render_table(
     columns: &[Column],
     total_width: usize,
 ) -> Vec<ratatui::text::Line<'static>> {
+    // Width math uses each cell's FLOOR width (content minus any atomic
+    // tail): a flex column is protected only to its head, so a trailing
+    // droppable tail (the title's label chips) never sheds a
+    // higher-priority sibling column to reserve space it may not keep.
+    // For cells without a tail this is identical to `width()`.
     let cell_widths: Vec<Vec<usize>> = rows
         .iter()
-        .map(|r| r.cells.iter().map(|c| c.width()).collect())
+        .map(|r| r.cells.iter().map(|c| c.floor_width()).collect())
         .collect();
     let widths = compute_widths(columns, &cell_widths, total_width);
 
@@ -447,7 +482,34 @@ fn render_row(row: &Row, columns: &[Column], widths: &[usize]) -> ratatui::text:
                 }
             }
         } else {
-            // Truncate: walk spans until we've consumed `target_w - 1`
+            // Over-wide. A droppable atomic tail (e.g. the title's label
+            // chips) is shed WHOLE before any slicing — cutting into it
+            // would leave a dangling `[depend…`. If the head then fits,
+            // it renders cleanly with no `…` (the tail simply collapses,
+            // like the old reserved label column did). Only when the head
+            // itself overflows do we char-truncate it with a trailing `…`.
+            let head_end = cell.spans.len() - cell.atomic_tail;
+            let head_w = cell.floor_width();
+            if cell.atomic_tail > 0 && head_w <= *target_w {
+                let pad = *target_w - head_w;
+                let pad_span = ratatui::text::Span::styled(" ".repeat(pad), fill_style);
+                match align {
+                    Align::Left => {
+                        spans.extend(cell.spans.iter().take(head_end).cloned());
+                        if pad > 0 {
+                            spans.push(pad_span);
+                        }
+                    }
+                    Align::Right => {
+                        if pad > 0 {
+                            spans.push(pad_span);
+                        }
+                        spans.extend(cell.spans.iter().take(head_end).cloned());
+                    }
+                }
+                continue;
+            }
+            // Truncate: walk head spans until we've consumed `target_w - 1`
             // cells, then push a `…` to mark the cut. Truncation
             // always clips on the right edge regardless of align —
             // a right-aligned over-wide cell is an unusual case and
@@ -455,7 +517,7 @@ fn render_row(row: &Row, columns: &[Column], widths: &[usize]) -> ratatui::text:
             // a status pill's label).
             let mut consumed = 0usize;
             let budget = target_w.saturating_sub(1);
-            for span in &cell.spans {
+            for span in cell.spans.iter().take(head_end) {
                 let span_w = crate::util::visual_width(span.content.as_ref());
                 if consumed + span_w <= budget {
                     spans.push(span.clone());
@@ -662,6 +724,56 @@ mod tests {
         // "a" + 4 spaces + "b" + 2 spaces = 8 cells across the two columns.
         let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(joined, "a    b  ");
+    }
+
+    /// An atomic tail is shed WHOLE when the cell overflows and the
+    /// head then fits — no mid-span slice, no trailing `…` (the tail
+    /// just collapses, like a dropped column). Here `"title"` (5) +
+    /// atomic `" [tag]"` (6) = 11 into a 6-cell column: the tag drops,
+    /// the head renders clean and padded.
+    #[test]
+    fn atomic_tail_sheds_whole_when_head_fits() {
+        let cols = [Column::fixed(6)];
+        let cell = Cell::new(vec![Span::raw("title"), Span::raw(" [tag]")]).atomic_tail(1);
+        let lines = render_table(&[Row::new(vec![cell])], &cols, 6);
+        let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, "title ");
+    }
+
+    /// When even the head overflows, the tail is still dropped whole and
+    /// the head is char-truncated with `…` — never a dangling `[ta…`.
+    #[test]
+    fn atomic_tail_dropped_then_head_truncated() {
+        let cols = [Column::fixed(4)];
+        let cell = Cell::new(vec![Span::raw("title"), Span::raw(" [tag]")]).atomic_tail(1);
+        let lines = render_table(&[Row::new(vec![cell])], &cols, 4);
+        let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        // "tit" + "…" — head truncated, no bracket fragment.
+        assert_eq!(joined, "tit…");
+    }
+
+    /// A flex column is protected only to its head width: the atomic
+    /// tail must not shed a lower-priority sibling to reserve space it
+    /// may drop. Fixed(15, droppable) + flex(min 20); the cell's head is
+    /// 5 and its tail is 40. Floor = min(head 5, 20) = 5, so 15 + 5 = 20
+    /// ≤ 25 and the fixed column survives. Had the 40-cell tail counted
+    /// toward the floor (min(45,20)=20), 15 + 20 = 35 > 25 would have
+    /// dropped it.
+    #[test]
+    fn atomic_tail_excluded_from_flex_floor() {
+        let cols = [Column::fixed(15).priority(1), Column::flex(20)];
+        let cell = Cell::new(vec![
+            Span::raw("short"),
+            Span::raw(" and-a-very-long-trailing-atomic-tail!!!"),
+        ])
+        .atomic_tail(1);
+        let rows = [Row::new(vec![Cell::from_span(Span::raw("x")), cell])];
+        let cell_widths: Vec<Vec<usize>> = rows
+            .iter()
+            .map(|r| r.cells.iter().map(|c| c.floor_width()).collect())
+            .collect();
+        let widths = compute_widths(&cols, &cell_widths, 25);
+        assert_eq!(widths[0], 15, "droppable column must survive a short head");
     }
 
     /// Render truncates over-wide cells with an ellipsis.

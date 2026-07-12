@@ -1,7 +1,8 @@
 //! `Help` — yazi-style which-key panel pinned to the bottom. tuirealm
 //! port of `tui_kit::widgets::HelpModal`.
 //!
-//! Any keyboard event dismisses.
+//! A second `?` swaps it for the "Ask lazybox" modal (#302); any
+//! other keyboard event dismisses.
 
 use crate::pane::Binding;
 use crate::realm::Msg;
@@ -213,7 +214,8 @@ impl Component for Help {
             .sum();
         let sep_rows = if self.leaders.is_empty() { 0 } else { 1 };
         let grid_rows = bindings.len().div_ceil(COLS) as u16;
-        let content_rows = leader_rows + sep_rows + grid_rows;
+        // +1: the "ask lazybox" hint line at the top of the panel.
+        let content_rows = 1 + leader_rows + sep_rows + grid_rows;
 
         let panel_h = (content_rows + PADDING_Y * 2).min(area.height);
         let panel = Rect {
@@ -301,6 +303,16 @@ impl Component for Help {
         };
 
         let mut y = panel.y + PADDING_Y;
+        full_line(
+            frame,
+            "? ask lazybox anything (searches your keymap, answers in plain language) · any other key closes",
+            y,
+            Style::default()
+                .bg(theme.surface)
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::ITALIC),
+        );
+        y += 1;
         for lg in &self.leaders {
             full_line(
                 frame,
@@ -344,10 +356,11 @@ impl Component for Help {
 
 impl AppComponent<Msg, UserEvent> for Help {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
-        if matches!(ev, Event::Keyboard(_)) {
-            Some(Msg::ModalDismissed)
-        } else {
-            None
+        use tuirealm::event::Key;
+        match ev {
+            Event::Keyboard(key) if matches!(key.code, Key::Char('?')) => Some(Msg::HelpAskOpen),
+            Event::Keyboard(_) => Some(Msg::ModalDismissed),
+            _ => None,
         }
     }
 }

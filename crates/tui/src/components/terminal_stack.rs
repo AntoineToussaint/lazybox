@@ -271,6 +271,33 @@ pub enum ScrollOutcome {
     Moved { offset: u64, total: u64, len: u64 },
 }
 
+/// How a mouse-wheel tick over the focused terminal should be handled.
+/// The wheel always means "scroll", but *who* scrolls depends on which
+/// screen the inner program is on and whether it asked for mouse
+/// reporting — so the orchestrator resolves the whole decision in one
+/// focused-terminal lookup rather than probing several booleans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelRoute {
+    /// Primary screen: the pane history belongs to lazybox, so scroll
+    /// the local libghostty scrollback in-process (no daemon round
+    /// trip). Covers plain shells AND primary-screen apps that enable
+    /// mouse tracking only for clicks (Claude Code) — they do not own
+    /// the transcript scrollback, so the wheel is lazybox's (#321).
+    LocalScrollback,
+    /// Alt-screen app that enabled mouse reporting (vim `mouse=a`,
+    /// htop, less `--mouse`): forward the wheel as an SGR mouse report
+    /// so the app scrolls its own buffer.
+    ForwardSgr,
+    /// Alt-screen app that did NOT enable mouse reporting (less, man,
+    /// the git pager, vim without `mouse`): it owns the visible buffer
+    /// but there is no lazybox scrollback to move into and no mouse
+    /// protocol to speak, so synthesize arrow-key presses — xterm's
+    /// `alternateScroll`, which every terminal-in-terminal implements.
+    /// `app_cursor` selects the SS3 (`ESC O A`) vs CSI (`ESC [ A`) form
+    /// from the terminal's DECCKM (application-cursor-keys) mode.
+    AlternateScrollArrows { app_cursor: bool },
+}
+
 /// What the user right-clicked on inside the terminal grid. Returned
 /// by [`TerminalStack::target_at`] so the model can route each kind
 /// to the right opener: URLs and issue references go to the browser,
@@ -571,6 +598,10 @@ struct TerminalSlot {
     /// isolated worktree. Drives the "main" badge in the tab strip so
     /// it's obvious the session sits on the shared branch.
     on_main: bool,
+    /// Model-tier label the session was launched with (`"Opus"`), when
+    /// the user picked a tier via a `w S` / `a S` chord. Drives the
+    /// tier badge in the tab strip. `None` for a default-model spawn.
+    model_label: Option<String>,
     /// Whether this terminal was drawn in the last frame. Set by
     /// `render_one_terminal`, reset for every slot at the top of
     /// `render`. Output for a displayed terminal is fed to the VT
@@ -1154,34 +1185,37 @@ impl TerminalStack {
             .unwrap_or(false)
     }
 
-    /// True if the focused terminal's inner process is on the
-    /// alternate screen (tmux, vim, less, claude code, etc. — i.e.
-    /// any full-screen TUI). Used by the wheel handler to decide
-    /// between SGR mouse encoding (slow: forces a full inner-app
-    /// re-render per tick) and the xterm "alternateScroll" pattern
-    /// (fast: synthesize arrow-key presses, which alt-screen TUIs
-    /// scroll cheaply).
-    pub fn focused_terminal_in_alt_screen(&self) -> bool {
+    /// Decide how a mouse-wheel tick over the focused terminal should
+    /// be handled — see [`WheelRoute`]. Resolved in a single
+    /// focused-terminal lookup: the primary/alt-screen split and the
+    /// mouse-tracking probe all read the same VT, so the whole routing
+    /// decision is one place instead of the handler probing several
+    /// booleans that could disagree if the focus moved between them.
+    pub fn wheel_route(&self) -> WheelRoute {
         let Some(id) = self.focused_terminal_id() else {
-            return false;
+            return WheelRoute::LocalScrollback;
         };
         let Some(slot) = self.terminals.get(&id) else {
-            return false;
+            return WheelRoute::LocalScrollback;
         };
-        slot.vt
-            .terminal
-            .mode(vt::terminal::Mode::ALT_SCREEN)
-            .unwrap_or(false)
-            || slot
-                .vt
-                .terminal
-                .mode(vt::terminal::Mode::ALT_SCREEN_SAVE)
-                .unwrap_or(false)
-            || slot
-                .vt
-                .terminal
-                .mode(vt::terminal::Mode::ALT_SCREEN_LEGACY)
-                .unwrap_or(false)
+        let t = &slot.vt.terminal;
+        let on_alt_screen = t.mode(vt::terminal::Mode::ALT_SCREEN).unwrap_or(false)
+            || t.mode(vt::terminal::Mode::ALT_SCREEN_SAVE).unwrap_or(false)
+            || t.mode(vt::terminal::Mode::ALT_SCREEN_LEGACY)
+                .unwrap_or(false);
+        // Primary screen → the pane history is lazybox's, scroll it —
+        // even for a Claude Code that tracks mouse for clicks (#321).
+        if !on_alt_screen {
+            return WheelRoute::LocalScrollback;
+        }
+        // Alt-screen: the app owns the buffer. If it speaks mouse,
+        // forward SGR; otherwise fall back to xterm alternateScroll.
+        if t.is_mouse_tracking().unwrap_or(false) {
+            WheelRoute::ForwardSgr
+        } else {
+            let app_cursor = t.mode(vt::terminal::Mode::DECCKM).unwrap_or(false);
+            WheelRoute::AlternateScrollArrows { app_cursor }
+        }
     }
 
     /// Encode a mouse event for the focused terminal using its
@@ -1750,6 +1784,7 @@ impl TerminalStack {
         last_seq: u64,
         no_permission: bool,
         on_main: bool,
+        model_label: Option<String>,
         last_user_message: Option<String>,
     ) -> TerminalSlot {
         let vt = TerminalVt::new().expect("libghostty-vt init");
@@ -1766,6 +1801,7 @@ impl TerminalStack {
             last_user_message,
             no_permission,
             on_main,
+            model_label,
             displayed: false,
             pending_feed: Vec::new(),
             pending_truncated: false,
@@ -2043,6 +2079,7 @@ impl TerminalStack {
                         snap.last_seq,
                         snap.no_permission,
                         snap.on_main,
+                        snap.model_label.clone(),
                         snap.last_user_message.clone(),
                     );
                     // Replay the daemon-side ring through the VT so
@@ -2060,6 +2097,7 @@ impl TerminalStack {
                 kind,
                 no_permission,
                 on_main,
+                model_label,
             } => {
                 let slot = Self::make_slot(
                     session_key.clone(),
@@ -2067,6 +2105,7 @@ impl TerminalStack {
                     0,
                     *no_permission,
                     *on_main,
+                    model_label.clone(),
                     None,
                 );
                 self.terminals.insert(*terminal_id, slot);
@@ -2283,7 +2322,7 @@ impl TerminalStack {
         // tab label occupies for click-hit-testing.
         let mut cursor: u16 = title_area.x + title_prefix.chars().count() as u16;
         for (i, id) in visible.iter().enumerate() {
-            let (icon, label, agent_state, no_permission, on_main) = self
+            let (icon, label, agent_state, no_permission, on_main, model_label) = self
                 .terminals
                 .get(id)
                 .map(|s| {
@@ -2301,6 +2340,7 @@ impl TerminalStack {
                         Some(s.agent_state),
                         s.no_permission,
                         s.on_main,
+                        s.model_label.clone(),
                     )
                 })
                 .unwrap_or((
@@ -2309,6 +2349,7 @@ impl TerminalStack {
                     None,
                     false,
                     false,
+                    None,
                 ));
             let is_active = i == self.active_tab_idx;
             let style = if is_active && focused {
@@ -2381,6 +2422,20 @@ impl TerminalStack {
                     Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
                 ));
                 cursor = cursor.saturating_add(main_text.chars().count() as u16);
+            }
+            // Model tier: the session was launched at a non-default
+            // model via a `w S` / `a S` chord — show which one so the
+            // user remembers what's running behind this tab.
+            if let Some(tier) = &model_label {
+                let tier_text = format!(" ◆ {tier}");
+                let width = tier_text.chars().count() as u16;
+                title_spans.push(Span::styled(
+                    tier_text,
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                cursor = cursor.saturating_add(width);
             }
         }
         frame.render_widget(Paragraph::new(Line::from(title_spans)), title_area);
@@ -2546,6 +2601,7 @@ impl TerminalStack {
         };
         self.pending_split = Some((direction, std::time::Instant::now()));
         cmds.push(Command::Spawn {
+            model_alias: None,
             session_key,
             session_id: None,
             kind: TerminalKind::Shell,
@@ -3646,7 +3702,8 @@ mod ctrl_w_tests {
     fn shell_stack() -> TerminalStack {
         let sk = SessionKey::new("session");
         let mut stack = TerminalStack::new(PaneId::new(0));
-        let slot = TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false, false, None);
+        let slot =
+            TerminalStack::make_slot(sk.clone(), TerminalKind::Shell, 0, false, false, None, None);
         stack.terminals.insert(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
         stack
@@ -3880,6 +3937,7 @@ mod extract_text_offset_tests {
             0,
             false,
             false,
+            None,
             last_user_message.map(str::to_string),
         );
         let mut payload = String::new();
@@ -3986,6 +4044,7 @@ mod extract_text_offset_tests {
             false,
             false,
             None,
+            None,
         );
         slot.last_user_message = Some("hi".into());
         assert_eq!(TerminalStack::recap_rows(&slot, 2), 0);
@@ -4041,6 +4100,7 @@ mod resync_tests {
     fn shell_stack(id: TerminalId, sk: &SessionKey) -> TerminalStack {
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: id,
             session_key: sk.clone(),
             kind: TerminalKind::Shell,
@@ -4154,6 +4214,7 @@ mod hidden_feed_tests {
 
     fn spawn(stack: &mut TerminalStack, id: TerminalId, sk: &SessionKey) {
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: id,
             session_key: sk.clone(),
             kind: TerminalKind::Shell,
@@ -4326,6 +4387,7 @@ mod footer_scroll_independence {
             false,
             false,
             None,
+            None,
         );
         slot.vt.ensure_size(W - 3, H - 4);
         let mut payload = String::new();
@@ -4374,6 +4436,89 @@ mod footer_scroll_independence {
             !at_bottom[footer_row].contains('?'),
             "footer should never carry a `?` hint: {:?}",
             at_bottom[footer_row]
+        );
+    }
+
+    /// #321: `Shift-PageUp` on the focused terminal must move the
+    /// viewport into scrollback and `Shift-End` must bring it back.
+    /// This drives the real key handler (`handle_key`), not
+    /// `scroll_active` directly, so a regression in the key routing —
+    /// the modifier match, the `PageUp`/`Home`/`End` arms — fails here.
+    ///
+    /// Entry point is the pane's `handle_key` rather than
+    /// `Model::dispatch_key`: the latter ends every keystroke in
+    /// `sync_panes`, which in a bare model (no selected sidebar
+    /// workspace) resets the active session and would mask the scroll.
+    /// That's a harness gap, not a product bug — typing into a live
+    /// terminal proves `sync_panes` preserves the session in real use —
+    /// but it does mean the top-level keyboard route isn't covered
+    /// end-to-end here; `handle_key` is the closest faithful seam.
+    #[test]
+    fn shift_pageup_moves_viewport_and_shift_end_returns() {
+        let mut stack = agent_stack_with_scrollback();
+
+        fn offset(stack: &TerminalStack) -> u64 {
+            stack
+                .scrollbar_summary()
+                .expect("summary")
+                .split_whitespace()
+                .find_map(|kv| kv.strip_prefix("offset="))
+                .expect("offset field")
+                .parse()
+                .expect("numeric offset")
+        }
+
+        let bottom = offset(&stack);
+        assert!(bottom > 0, "the scrollback-filled agent must have history");
+
+        let mut cmds = Vec::new();
+        let outcome = stack.handle_key(
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::SHIFT),
+            &mut cmds,
+        );
+        assert!(
+            matches!(outcome, PaneOutcome::Consumed),
+            "scroll is consumed"
+        );
+        assert!(cmds.is_empty(), "keyboard scroll is a pure in-process move");
+        let scrolled = offset(&stack);
+        assert!(
+            scrolled < bottom,
+            "Shift-PageUp must move the viewport up into scrollback \
+             (bottom={bottom} scrolled={scrolled})",
+        );
+
+        // Shift-End jumps back to the live bottom.
+        stack.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT), &mut cmds);
+        assert_eq!(
+            offset(&stack),
+            bottom,
+            "Shift-End returns to the live bottom"
+        );
+    }
+
+    #[test]
+    fn tab_strip_shows_chosen_model_tier_badge() {
+        // A session launched via a tier chord carries its model label
+        // through to the tab strip so the running model is visible.
+        let sk = SessionKey::new("s");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Agent("claude".into()),
+            0,
+            false,
+            false,
+            Some("Opus".into()),
+            None,
+        );
+        stack.terminals.insert(TerminalId(1), slot);
+        stack.set_active_session(Some(sk));
+
+        let rows = render_rows(&mut stack);
+        assert!(
+            rows.iter().any(|r| r.contains("◆ Opus")),
+            "tab strip should show the tier badge; got {rows:?}",
         );
     }
 }
@@ -4470,6 +4615,7 @@ mod agent_badge_tests {
 
     fn spawn_agent(stack: &mut TerminalStack, id: u64, sk: &SessionKey, agent: &str) {
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(id),
             session_key: sk.clone(),
             kind: TerminalKind::Agent(agent.into()),
@@ -4576,6 +4722,7 @@ mod rebadge_tests {
     fn spawned_stack(id: TerminalId, sk: &SessionKey) -> TerminalStack {
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: id,
             session_key: sk.clone(),
             kind: TerminalKind::Agent("claude".into()),
@@ -4642,6 +4789,7 @@ mod set_layout_tests {
     fn stack_with_terminal(sk: &SessionKey) -> TerminalStack {
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(1),
             session_key: sk.clone(),
             kind: TerminalKind::Shell,
@@ -4669,6 +4817,7 @@ mod set_layout_tests {
 
         // The deferred spawn then completes the split as intended.
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(2),
             session_key: sk,
             kind: TerminalKind::Shell,
@@ -4710,6 +4859,7 @@ mod set_layout_tests {
         let sk = SessionKey::new("github:o/r#1");
         let mut stack = stack_with_terminal(&sk);
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(2),
             session_key: sk,
             kind: TerminalKind::Shell,
@@ -4762,6 +4912,7 @@ mod pending_split_tests {
     fn stack_with_terminal(sk: &SessionKey) -> TerminalStack {
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(1),
             session_key: sk.clone(),
             kind: TerminalKind::Shell,
@@ -4774,6 +4925,7 @@ mod pending_split_tests {
 
     fn spawn(stack: &mut TerminalStack, id: u64, sk: &SessionKey) {
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(id),
             session_key: sk.clone(),
             kind: TerminalKind::Shell,
@@ -4848,6 +5000,7 @@ mod spawn_focus_tests {
 
     fn spawn(stack: &mut TerminalStack, id: u64, sk: &SessionKey, kind: TerminalKind) {
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(id),
             session_key: sk.clone(),
             kind,
@@ -4944,6 +5097,7 @@ mod terminal_availability_tests {
         let sk = SessionKey::new("github:o/r#1");
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(1),
             session_key: sk.clone(),
             kind: TerminalKind::Agent("claude".into()),
@@ -5014,6 +5168,7 @@ mod spawn_projection_tests {
 
     fn spawn(stack: &mut TerminalStack, id: u64, sk: &SessionKey, kind: TerminalKind) {
         stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
             terminal_id: TerminalId(id),
             session_key: sk.clone(),
             kind,

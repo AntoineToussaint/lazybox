@@ -1,0 +1,345 @@
+//! Help-assistant support: fuzzy search over the action catalog and
+//! the generated context document for the "ask lazybox" agent (#302).
+//!
+//! Both surfaces read the *runtime* catalog — the post-override
+//! effective bindings after `ui.keymap_preset` and `ui.action_keys`
+//! are applied — so an answer always quotes the user's actual keys.
+//! The prose reference is the in-tree docs, baked in at compile time
+//! with `include_str!` so it ships inside the binary and re-embeds on
+//! every build; nothing here is hand-maintained per release.
+
+use crate::action::{ActionKind, CatalogEntry, Chord, KeyStroke};
+
+/// Sentinel session key for the help-assistant agent run. Not a real
+/// workspace: the daemon's `resolve_cwd` finds no workspace record for
+/// it and the run needs no worktree. Clients use it to recognize the
+/// matching `AgentRunStarted` on the shared event bus.
+pub const HELP_SESSION_KEY: &str = "lazybox:help";
+
+/// Agent id the help assistant runs on. The structured stream-json
+/// run path is Claude-shaped (`crates/server/src/agent_stream.rs`),
+/// so this is fixed rather than following the user's default agent.
+pub const HELP_AGENT_ID: &str = "claude";
+
+/// In-tree docs embedded into the help agent's context. Titles are
+/// section headers in the generated document.
+const DOCS: &[(&str, &str)] = &[
+    ("README", include_str!("../../../README.md")),
+    (
+        "Features overview",
+        include_str!("../../../docs/features/README.md"),
+    ),
+    (
+        "Inbox and sync",
+        include_str!("../../../docs/features/inbox-and-sync.md"),
+    ),
+    (
+        "Workspaces and worktrees",
+        include_str!("../../../docs/features/workspaces-and-worktrees.md"),
+    ),
+    (
+        "Terminals and agents",
+        include_str!("../../../docs/features/terminals-and-agents.md"),
+    ),
+    (
+        "TUI and UX",
+        include_str!("../../../docs/features/tui-and-ux.md"),
+    ),
+    (
+        "Providers",
+        include_str!("../../../docs/features/providers.md"),
+    ),
+    (
+        "Daemon and deployment",
+        include_str!("../../../docs/features/daemon-and-deployment.md"),
+    ),
+    ("Snippets", include_str!("../../../docs/snippets.md")),
+    ("Themes", include_str!("../../../docs/themes.md")),
+    ("Slack setup", include_str!("../../../docs/slack-setup.md")),
+];
+
+/// Fuzzy search over the catalog: returns indices into `catalog`,
+/// best matches first. Every whitespace-separated query token must
+/// appear as a substring of the row's combined haystack (label, keys,
+/// description, section title, case-insensitive). Ranked: all tokens
+/// in the label first, then label+keys, then anywhere. When nothing
+/// passes the token filter, falls back to an in-order subsequence
+/// match over the haystack so near-misses ("mutliselect") still
+/// surface rather than going straight to an empty list.
+pub fn search(catalog: &[CatalogEntry], query: &str) -> Vec<usize> {
+    let tokens: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    let mut ranked: Vec<(u8, usize)> = Vec::new();
+    for (idx, entry) in catalog.iter().enumerate() {
+        let label = entry.label.to_lowercase();
+        let keys = entry.keys_display.to_lowercase();
+        let describe = entry.describe.to_lowercase();
+        let section = entry.section.title().to_lowercase();
+        let all_in = |hay: &dyn Fn(&str) -> bool| tokens.iter().all(|t| hay(t));
+        let rank = if all_in(&|t| label.contains(t)) {
+            0
+        } else if all_in(&|t| label.contains(t) || keys.contains(t)) {
+            1
+        } else if all_in(&|t| {
+            label.contains(t) || keys.contains(t) || describe.contains(t) || section.contains(t)
+        }) {
+            2
+        } else {
+            continue;
+        };
+        ranked.push((rank, idx));
+    }
+    if ranked.is_empty() {
+        let needle: String = tokens.concat();
+        for (idx, entry) in catalog.iter().enumerate() {
+            let hay = format!("{} {} {}", entry.label, entry.keys_display, entry.describe);
+            if subsequence_icase(&hay, &needle) {
+                ranked.push((3, idx));
+            }
+        }
+    }
+    ranked.sort_by_key(|&(rank, idx)| (rank, idx));
+    ranked.into_iter().map(|(_, idx)| idx).collect()
+}
+
+/// Case-insensitive subsequence test: all chars of `needle` appear in
+/// `haystack` in order, gaps allowed.
+fn subsequence_icase(haystack: &str, needle: &str) -> bool {
+    let mut hs = haystack.chars().map(|c| c.to_ascii_lowercase());
+    'outer: for nc in needle.chars().map(|c| c.to_ascii_lowercase()) {
+        for hc in hs.by_ref() {
+            if hc == nc {
+                continue 'outer;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+/// Scope note per section, rendered next to each keybinding group so
+/// the assistant can answer "…but only in the activity pane" — the
+/// part of a binding static docs always under-specify.
+fn section_scope(section: crate::action::Section) -> &'static str {
+    use crate::action::Section;
+    match section {
+        Section::Global => "active from any pane",
+        Section::Workspace => {
+            "acts on the focused workspace; active while the sidebar or activity pane has focus"
+        }
+        Section::Sidebar => "active while the sidebar (left pane) has focus",
+        Section::Activity => "active while the activity pane (right pane) has focus",
+        Section::Terminal => {
+            "active while an embedded terminal has focus (all other keys are forwarded to the program inside)"
+        }
+    }
+}
+
+/// Build the help agent's first message: instructions plus the full
+/// generated reference — this user's effective keybindings (grouped
+/// by scope, leader menus included) and the embedded docs. Sent once
+/// per app lifetime as the opening user turn of the structured run;
+/// follow-up questions ride the same conversation so the context is
+/// prompt-cached.
+///
+/// `escape_char` is the configured `ui.terminal_escape_char`; the
+/// terminal leave/leader chord is rendered from it (doubled) exactly
+/// like the `?` help panel does (#188).
+pub fn agent_context(catalog: &[CatalogEntry], escape_char: char) -> String {
+    let leader = format!("{escape_char}{escape_char}");
+    let mut out = String::with_capacity(256 * 1024);
+    out.push_str(
+        "You are lazybox's built-in help assistant. lazybox is a reactive PR-inbox TUI: \
+provider events (GitHub PRs/issues, Linear, Slack) flow into an inbox of workspaces, and \
+each workspace can host embedded terminals running coding agents in isolated git worktrees.\n\
+\n\
+Answer the user's questions about how to use lazybox from the reference below.\n\
+\n\
+Rules:\n\
+- The keybinding tables are THIS user's effective keymap — their `ui.keymap_preset` and \
+`ui.action_keys` overrides are already applied. Quote keys exactly as written there.\n\
+- A binding only works in its section's scope; the scope is noted on each section header. \
+Always mention the scope when it isn't Global.\n\
+- Be brief: a few sentences, and when keys are the answer list them as `` `key` — action `` lines.\n\
+- Do not use tools, do not read or write files, do not run commands. Everything you need is below.\n\
+- If the reference doesn't cover something, say so plainly instead of guessing.\n",
+    );
+
+    out.push_str("\n# Key bindings (effective)\n");
+    let mut current_section = None;
+    for entry in catalog {
+        if current_section != Some(entry.section) {
+            current_section = Some(entry.section);
+            out.push_str(&format!(
+                "\n## {} — {}\n\n",
+                entry.section.title(),
+                section_scope(entry.section)
+            ));
+        }
+        // The terminal leave/leader chord is dispatched by the escape-
+        // char latch, not the catalog — render it from the live char
+        // (#188), same as the `?` panel.
+        let keys: &str = if entry.kind == ActionKind::LeaveTerminal {
+            &leader
+        } else {
+            entry.keys_display.as_ref()
+        };
+        if keys.is_empty() {
+            out.push_str(&format!(
+                "- (no key bound; remappable as `{}` via `ui.action_keys`) — {}: {}\n",
+                entry.config_key, entry.label, entry.describe
+            ));
+        } else {
+            out.push_str(&format!(
+                "- `{keys}` — {}: {}\n",
+                entry.label, entry.describe
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "- `{leader}<snippet key>` — snippets: from a terminal, send a saved snippet \
+(see the Snippets doc below).\n"
+    ));
+
+    out.push_str(
+        "\n# Leader menus\n\nPressing a leader key opens a which-key menu; \
+the next keystroke picks an action:\n",
+    );
+    let mut leaders: Vec<(KeyStroke, Vec<(KeyStroke, &CatalogEntry)>)> = Vec::new();
+    for entry in catalog {
+        for chord in &entry.chords {
+            let Chord::Seq(strokes) = chord else { continue };
+            if strokes.len() != 2 {
+                continue;
+            }
+            match leaders.iter_mut().find(|(l, _)| *l == strokes[0]) {
+                Some((_, members)) => members.push((strokes[1], entry)),
+                None => leaders.push((strokes[0], vec![(strokes[1], entry)])),
+            }
+        }
+    }
+    for (leader_stroke, members) in &leaders {
+        let picks = members
+            .iter()
+            .map(|(second, entry)| format!("`{}` {}", second.display(), entry.label))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "- press `{}`, then: {picks}\n",
+            leader_stroke.display()
+        ));
+    }
+    out.push_str(&format!(
+        "- inside a terminal, press `{leader}` (the terminal escape char `{escape_char}`, \
+doubled) to open the terminal command menu listed in the Terminal section above; \
+`Esc` or any unbound key cancels back to the terminal.\n"
+    ));
+
+    out.push_str("\n# Documentation\n");
+    for (title, body) in DOCS {
+        out.push_str(&format!("\n---\n\n## Doc: {title}\n\n{body}\n"));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::ActionDef;
+
+    fn catalog() -> Vec<CatalogEntry> {
+        ActionDef::catalog(
+            &["claude".to_string(), "codex".to_string()],
+            &std::collections::BTreeMap::new(),
+        )
+    }
+
+    /// The motivating query from #302: "multi-select" isn't a label or
+    /// a key, only a description — search must still surface the
+    /// activity-pane SelectRow binding for it.
+    #[test]
+    fn search_finds_multi_select_by_description() {
+        let cat = catalog();
+        let hits = search(&cat, "multi-select");
+        assert!(
+            hits.iter().any(|&i| cat[i].kind == ActionKind::SelectRow),
+            "multi-select query should surface SelectRow",
+        );
+    }
+
+    /// Label matches outrank description matches: "merge" must put
+    /// the merge-PR row above rows that merely mention merging.
+    #[test]
+    fn search_ranks_label_matches_first() {
+        let cat = catalog();
+        let hits = search(&cat, "merge");
+        let first = hits.first().map(|&i| cat[i].label.as_ref());
+        assert_eq!(first, Some("merge PR"), "hits: {hits:?}");
+    }
+
+    /// Every query token must match somewhere — an unrelated token
+    /// filters a row out, and an empty query returns nothing.
+    #[test]
+    fn search_requires_all_tokens_and_handles_empty() {
+        let cat = catalog();
+        assert!(search(&cat, "").is_empty());
+        assert!(search(&cat, "   ").is_empty());
+        let hits = search(&cat, "merge zzzznotaword");
+        assert!(
+            hits.is_empty(),
+            "an unmatched token must filter everything out (subsequence \
+fallback shouldn't resurrect it)",
+        );
+    }
+
+    /// Near-miss queries fall back to subsequence matching instead of
+    /// returning nothing.
+    #[test]
+    fn search_falls_back_to_subsequence() {
+        let cat = catalog();
+        let hits = search(&cat, "mrge pr");
+        assert!(
+            hits.iter().any(|&i| cat[i].label == "merge PR"),
+            "subsequence fallback should catch near-misses",
+        );
+    }
+
+    /// The generated context reflects the user's *effective* keymap:
+    /// under the vim preset merge is `g m` (no `Shift-M` anywhere).
+    #[test]
+    fn agent_context_uses_post_override_bindings() {
+        let overrides = crate::action::keymap_preset("vim").unwrap();
+        let cat = ActionDef::catalog(&[], &overrides);
+        let ctx = agent_context(&cat, ']');
+        assert!(ctx.contains("`g m` — merge PR"), "vim preset chord missing");
+    }
+
+    /// Generated per-agent rows and section scope notes appear, and
+    /// the terminal leader renders from the live escape char (#188).
+    #[test]
+    fn agent_context_includes_generated_rows_scopes_and_escape_char() {
+        let ctx = agent_context(&catalog(), '}');
+        assert!(ctx.contains("spawn claude"));
+        assert!(ctx.contains("## Activity — active while the activity pane"));
+        assert!(
+            ctx.contains("`}}` — "),
+            "leave-terminal binding should render the live escape char doubled"
+        );
+        assert!(
+            !ctx.contains("`]]` — "),
+            "no binding line may render the default escape char"
+        );
+    }
+
+    /// The embedded docs ride along — the snippets doc is the agent's
+    /// only source for snippet YAML syntax.
+    #[test]
+    fn agent_context_embeds_docs() {
+        let ctx = agent_context(&catalog(), ']');
+        assert!(ctx.contains("## Doc: Snippets"));
+        assert!(ctx.contains("## Doc: README"));
+        assert!(ctx.contains("## Doc: Themes"));
+    }
+}

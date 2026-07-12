@@ -30,21 +30,28 @@ Set Width 1200
 # Tall enough that the whole `?` help overlay fits on one frame — the
 # bottom row (`]]  exit to sidebar`) carries the `Wait+Screen` sentinel
 # below, so it must be on screen for the render to settle. The keybinding table
-# grew (issue #224 added the `w c` / `w x` / `w u` scoped-work group), so
-# 720 clipped the last rows; height only reveals more of the overlay and
-# never changes the table's byte content (that's width/content-driven).
-Set Height 1000
+# keeps growing (issue #224 added the `w c` / `w x` / `w u` scoped-work group;
+# #315 added the ask-lazybox search, messages log, theme, and change-default
+# rows), so each bump reveals the clipped tail: 720 → 1000 → 1600. Height only
+# reveals more of the overlay and never changes the table's byte content
+# (that's width/content-driven), so this is generously oversized on purpose to
+# absorb the next few rows before it clips the anchor again.
+Set Height 1600
 Set Theme "Catppuccin Mocha"
 
 Hide
 Type "lazybox --test"
 Enter
-# Boot settle: the daemon initializes and the first frame renders at the
-# full terminal size before we touch anything. On a loaded Linux CI
-# runner this can take longer than it does locally, so give it margin —
-# pressing `?` before the UI has settled at full size is what produces a
-# short overlay frame.
-Sleep 4s
+# Boot settle: `--test` provisions a throwaway git repo + spins up the
+# daemon before the first full-size frame renders. On a loaded Linux CI
+# runner that can outlast any fixed `Sleep` — and pressing `?` before the
+# UI has settled at full size paints a clipped overlay whose bottom row
+# never repaints, so the golden `Wait+Screen` below times out (blank or
+# truncated grab). Block on the seeded workspace row instead: once
+# `Test workspace` is on screen the sidebar has painted at full size, so
+# boot is provably done regardless of runner speed.
+Wait+Screen@45s /Test workspace/
+Sleep 1s
 Show
 
 # Open the keybinding help overlay, then block on `Wait+Screen` until the

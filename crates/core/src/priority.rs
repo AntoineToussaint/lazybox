@@ -1,41 +1,42 @@
-//! Priority/effort tier a task declares, and the pure resolver that
-//! reads it off a [`Task`].
+//! Priority tier a task declares, and the pure resolver that reads it
+//! off a [`Task`].
 //!
 //! A task can request a right-sized model by declaring a priority:
 //! a `high` / `medium` / `low` **label**, or an `@high` / `@medium` /
 //! `@low` **marker** in its body. The autonomous ("pilot") spawn paths
-//! and the interactive spawn resolve the tier here, then map it to a
-//! concrete model via `agent.models` config and inject it at spawn
-//! time. High → the strongest model, low → the cheapest/fastest.
+//! and a bare interactive spawn resolve the tier here; the spawn path
+//! then maps it to one of the target agent's model-tier aliases
+//! ([`AgentModels::alias_for_priority`](crate::AgentModels::alias_for_priority))
+//! and appends that tier's model args. High → the strongest model,
+//! low → the cheapest/fastest.
 //!
-//! This module holds only the pure decision (tier ← task); the
-//! tier → concrete-model-id mapping lives in `lazybox-config`
-//! (`agent.models`), and the injection lives in the agent spawn path.
+//! This module holds only the pure decision (priority ← task); the
+//! priority → tier-alias → concrete-model mapping lives on
+//! [`AgentModels`](crate::AgentModels), and the injection lives in the
+//! agent spawn path.
 
 use crate::Task;
-use serde::{Deserialize, Serialize};
 
-/// Priority/effort tier that selects which model an agent spawns with.
+/// The priority a task declares, mapped by the spawn path onto one of
+/// the target agent's model tiers.
 ///
 /// Ordered strongest → cheapest so the resolver can prefer the higher
 /// tier when a task somehow declares more than one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ModelTier {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriorityTier {
     High,
     Medium,
     Low,
 }
 
-impl ModelTier {
+impl PriorityTier {
     /// Strongest → cheapest. The resolver scans in this order so a task
     /// carrying, say, both a `high` and a `low` label resolves to
     /// `High` (the stronger wins).
-    const ORDER: [ModelTier; 3] = [Self::High, Self::Medium, Self::Low];
+    const ORDER: [PriorityTier; 3] = [Self::High, Self::Medium, Self::Low];
 
-    /// Lowercase token this tier is declared with — the label name, the
-    /// `@`-marker suffix, and the YAML key its concrete model lives
-    /// under (`high` / `medium` / `low`).
+    /// Lowercase token this priority is declared with — the label name
+    /// and the `@`-marker suffix (`high` / `medium` / `low`).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::High => "high",
@@ -45,7 +46,7 @@ impl ModelTier {
     }
 }
 
-/// Resolve the [`ModelTier`] a task declares, if any.
+/// Resolve the [`PriorityTier`] a task declares, if any.
 ///
 /// Precedence:
 /// 1. A `high` / `medium` / `low` **label** (case-insensitive) wins
@@ -55,25 +56,25 @@ impl ModelTier {
 ///    count).
 ///
 /// When a source declares more than one tier (two priority labels, or
-/// two markers), the stronger tier wins — [`ModelTier::ORDER`] is
+/// two markers), the stronger tier wins — [`PriorityTier::ORDER`] is
 /// scanned strongest-first.
 ///
 /// Returns `None` when nothing is declared; the caller falls back to
-/// the configured default tier.
-pub fn resolve_model_tier(task: &Task) -> Option<ModelTier> {
+/// the agent's configured default tier.
+pub fn resolve_priority_tier(task: &Task) -> Option<PriorityTier> {
     tier_from_labels(task).or_else(|| tier_from_body(task.body.as_deref().unwrap_or("")))
 }
 
-fn tier_from_labels(task: &Task) -> Option<ModelTier> {
-    ModelTier::ORDER.into_iter().find(|tier| {
+fn tier_from_labels(task: &Task) -> Option<PriorityTier> {
+    PriorityTier::ORDER.into_iter().find(|tier| {
         task.labels
             .iter()
             .any(|label| label.name.eq_ignore_ascii_case(tier.as_str()))
     })
 }
 
-fn tier_from_body(body: &str) -> Option<ModelTier> {
-    ModelTier::ORDER
+fn tier_from_body(body: &str) -> Option<PriorityTier> {
+    PriorityTier::ORDER
         .into_iter()
         .find(|tier| contains_at_marker(body, tier.as_str()))
 }
@@ -174,9 +175,9 @@ mod tests {
 
     #[test]
     fn none_when_nothing_declared() {
-        assert_eq!(resolve_model_tier(&task(vec![], None)), None);
+        assert_eq!(resolve_priority_tier(&task(vec![], None)), None);
         assert_eq!(
-            resolve_model_tier(&task(vec![Label::new("bug")], Some("just some text"))),
+            resolve_priority_tier(&task(vec![Label::new("bug")], Some("just some text"))),
             None
         );
     }
@@ -184,59 +185,59 @@ mod tests {
     #[test]
     fn label_resolves_each_tier() {
         assert_eq!(
-            resolve_model_tier(&task(vec![Label::new("high")], None)),
-            Some(ModelTier::High)
+            resolve_priority_tier(&task(vec![Label::new("high")], None)),
+            Some(PriorityTier::High)
         );
         assert_eq!(
-            resolve_model_tier(&task(vec![Label::new("medium")], None)),
-            Some(ModelTier::Medium)
+            resolve_priority_tier(&task(vec![Label::new("medium")], None)),
+            Some(PriorityTier::Medium)
         );
         assert_eq!(
-            resolve_model_tier(&task(vec![Label::new("low")], None)),
-            Some(ModelTier::Low)
+            resolve_priority_tier(&task(vec![Label::new("low")], None)),
+            Some(PriorityTier::Low)
         );
     }
 
     #[test]
     fn label_match_is_case_insensitive() {
         assert_eq!(
-            resolve_model_tier(&task(vec![Label::new("HIGH")], None)),
-            Some(ModelTier::High)
+            resolve_priority_tier(&task(vec![Label::new("HIGH")], None)),
+            Some(PriorityTier::High)
         );
         assert_eq!(
-            resolve_model_tier(&task(vec![Label::new("Low")], None)),
-            Some(ModelTier::Low)
+            resolve_priority_tier(&task(vec![Label::new("Low")], None)),
+            Some(PriorityTier::Low)
         );
     }
 
     #[test]
     fn body_marker_resolves_each_tier() {
         assert_eq!(
-            resolve_model_tier(&task(vec![], Some("please @high this"))),
-            Some(ModelTier::High)
+            resolve_priority_tier(&task(vec![], Some("please @high this"))),
+            Some(PriorityTier::High)
         );
         assert_eq!(
-            resolve_model_tier(&task(vec![], Some("@medium priority"))),
-            Some(ModelTier::Medium)
+            resolve_priority_tier(&task(vec![], Some("@medium priority"))),
+            Some(PriorityTier::Medium)
         );
         assert_eq!(
-            resolve_model_tier(&task(vec![], Some("run it @LOW cost"))),
-            Some(ModelTier::Low)
+            resolve_priority_tier(&task(vec![], Some("run it @LOW cost"))),
+            Some(PriorityTier::Low)
         );
     }
 
     #[test]
     fn body_marker_respects_word_boundaries() {
         // Continuation chars after the word → not a marker.
-        assert_eq!(resolve_model_tier(&task(vec![], Some("@highest"))), None);
-        assert_eq!(resolve_model_tier(&task(vec![], Some("@high-1"))), None);
-        assert_eq!(resolve_model_tier(&task(vec![], Some("@high.io"))), None);
-        assert_eq!(resolve_model_tier(&task(vec![], Some("@lowball"))), None);
+        assert_eq!(resolve_priority_tier(&task(vec![], Some("@highest"))), None);
+        assert_eq!(resolve_priority_tier(&task(vec![], Some("@high-1"))), None);
+        assert_eq!(resolve_priority_tier(&task(vec![], Some("@high.io"))), None);
+        assert_eq!(resolve_priority_tier(&task(vec![], Some("@lowball"))), None);
         // `@` glued to a preceding identifier → an email-like, not a marker.
-        assert_eq!(resolve_model_tier(&task(vec![], Some("me@high"))), None);
+        assert_eq!(resolve_priority_tier(&task(vec![], Some("me@high"))), None);
         // Plain word without the `@` sigil → not a marker.
         assert_eq!(
-            resolve_model_tier(&task(vec![], Some("this is high priority"))),
+            resolve_priority_tier(&task(vec![], Some("this is high priority"))),
             None
         );
     }
@@ -244,16 +245,16 @@ mod tests {
     #[test]
     fn body_marker_accepts_surrounding_punctuation() {
         assert_eq!(
-            resolve_model_tier(&task(vec![], Some("(@high)"))),
-            Some(ModelTier::High)
+            resolve_priority_tier(&task(vec![], Some("(@high)"))),
+            Some(PriorityTier::High)
         );
         assert_eq!(
-            resolve_model_tier(&task(vec![], Some("priority: @low!"))),
-            Some(ModelTier::Low)
+            resolve_priority_tier(&task(vec![], Some("priority: @low!"))),
+            Some(PriorityTier::Low)
         );
         assert_eq!(
-            resolve_model_tier(&task(vec![], Some("line one\n@medium\nline three"))),
-            Some(ModelTier::Medium)
+            resolve_priority_tier(&task(vec![], Some("line one\n@medium\nline three"))),
+            Some(PriorityTier::Medium)
         );
     }
 
@@ -261,20 +262,20 @@ mod tests {
     fn label_wins_over_body_marker() {
         // Label `low`, body says `@high` — the label is authoritative.
         let t = task(vec![Label::new("low")], Some("@high please"));
-        assert_eq!(resolve_model_tier(&t), Some(ModelTier::Low));
+        assert_eq!(resolve_priority_tier(&t), Some(PriorityTier::Low));
     }
 
     #[test]
     fn stronger_tier_wins_when_multiple_labels() {
         let t = task(vec![Label::new("low"), Label::new("high")], None);
-        assert_eq!(resolve_model_tier(&t), Some(ModelTier::High));
+        assert_eq!(resolve_priority_tier(&t), Some(PriorityTier::High));
         let t = task(vec![Label::new("low"), Label::new("medium")], None);
-        assert_eq!(resolve_model_tier(&t), Some(ModelTier::Medium));
+        assert_eq!(resolve_priority_tier(&t), Some(PriorityTier::Medium));
     }
 
     #[test]
     fn stronger_tier_wins_when_multiple_body_markers() {
         let t = task(vec![], Some("@low then reconsidered @high"));
-        assert_eq!(resolve_model_tier(&t), Some(ModelTier::High));
+        assert_eq!(resolve_priority_tier(&t), Some(PriorityTier::High));
     }
 }

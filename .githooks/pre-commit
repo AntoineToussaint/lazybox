@@ -3,9 +3,11 @@
 #
 # Two depths, selected by the `lazybox.precommitFull` git config flag:
 #
-#   * Default (flag unset) — fmt check only. ~1s, no cargo build, no
-#     build-lock contention. This is what `scripts/bootstrap.sh` installs
-#     for everyone, and it's safe to run concurrently across worktrees
+#   * Default (flag unset) — auto-format only. ~1s, no cargo build, no
+#     build-lock contention. Runs `cargo fmt --all` in place and
+#     re-stages the touched files so the commit lands formatted with no
+#     round-trip. This is what `scripts/bootstrap.sh` installs for
+#     everyone, and it's safe to run concurrently across worktrees
 #     (multiple agent sessions committing at once won't deadlock on the
 #     shared target/ build lock).
 #
@@ -43,17 +45,33 @@ if [ -n "${zig_bin}" ]; then
     export PATH="$(dirname "${zig_bin}"):${PATH}"
 fi
 
-# 1. Format check — fastest, fails most often. Same invocation
-#    the CI fmt job runs.
-echo "pre-commit: cargo fmt --all -- --check"
-if ! cargo fmt --all -- --check; then
+# 1. Auto-format. Run rustfmt in place, then re-stage exactly the Rust
+#    files that were already staged for this commit, so it lands
+#    formatted with no manual round-trip. Same `cargo fmt --all` the CI
+#    fmt job checks — fast, takes no build lock, safe across parallel
+#    worktrees.
+#
+#    Caveat: a re-staged file is added whole, so a *partially* staged
+#    file (some hunks staged, others not) has its unstaged hunks pulled
+#    in too. Stage whole files, or `git commit --no-verify` for a
+#    deliberate partial commit.
+staged_rs="$(git diff --cached --name-only --diff-filter=ACM -- '*.rs')"
+echo "pre-commit: cargo fmt --all"
+if ! cargo fmt --all; then
     cat <<EOF >&2
 
-pre-commit: rustfmt diff above. Run \`cargo fmt --all\` (or
-\`make fmt\`) and re-commit. Bypass with \`git commit --no-verify\`
-if intentional (don't do this on shared branches).
+pre-commit: cargo fmt failed (a syntax error in a staged file?).
+Fix it and re-commit, or bypass with \`git commit --no-verify\`.
 EOF
     exit 1
+fi
+if [ -n "${staged_rs}" ]; then
+    # Re-stage only the already-staged Rust files (whole-file add).
+    printf '%s\n' "${staged_rs}" | while IFS= read -r f; do
+        [ -n "${f}" ] || continue
+        git add -- "${f}"
+    done
+    echo "pre-commit: re-staged formatted files"
 fi
 
 # Fast path stops here. Clippy + rustdoc only run under the full gate

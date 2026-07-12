@@ -27,12 +27,6 @@ pub struct SpawnCtx {
     /// configured (non-Claude agent, or generation failed) — those fall
     /// back to PTY-based state detection.
     pub hook_settings_path: Option<PathBuf>,
-    /// Concrete model id the agent should launch with, resolved from the
-    /// task's declared priority tier (`agent.models` config). Rendered
-    /// into the agent's own model flag via [`Agent::model_arg`] (Claude
-    /// `--model <id>`). `None` → no model flag, the agent uses its CLI
-    /// default. Agents whose CLI has no model flag ignore it.
-    pub model: Option<String>,
 }
 
 /// The upstream LLM API an agent speaks to. Used to pick the base-URL
@@ -83,18 +77,6 @@ pub trait Agent: Send + Sync {
     /// pointed at an arbitrary command) — they get no gateway injection.
     fn llm_provider(&self) -> Option<LlmProvider> {
         None
-    }
-
-    /// Render this agent's model-selection flag for `model` (the
-    /// concrete model id resolved from the task's priority tier). The
-    /// flag differs per agent — Claude `--model <id>` — so each agent
-    /// owns its own encoding. The default returns `[]`: agents whose
-    /// CLI takes no model flag (Codex / Cursor today) ignore
-    /// [`SpawnCtx::model`] cleanly. Built-ins that call this in both
-    /// `spawn` and `resume` keep model selection symmetric.
-    fn model_arg(&self, model: &str) -> Vec<String> {
-        let _ = model;
-        Vec::new()
     }
 
     /// Command + args to spawn a fresh session.
@@ -326,16 +308,6 @@ pub mod builtins {
         }
     }
 
-    /// Append the agent's model flag when a model was resolved for this
-    /// spawn. Delegates to [`Agent::model_arg`] so each agent renders
-    /// its own flag; a `None` model or an agent without a model flag
-    /// (empty `model_arg`) appends nothing.
-    fn push_model_flag(argv: &mut Vec<String>, agent: &dyn Agent, ctx: &SpawnCtx) {
-        if let Some(model) = &ctx.model {
-            argv.extend(agent.model_arg(model));
-        }
-    }
-
     /// Append `--settings <path>` when the daemon generated a hooks
     /// settings file for this spawn. Claude's `--settings` accepts a
     /// file path and takes precedence over user/project settings — the
@@ -375,19 +347,14 @@ pub mod builtins {
         fn llm_provider(&self) -> Option<LlmProvider> {
             Some(LlmProvider::Anthropic)
         }
-        fn model_arg(&self, model: &str) -> Vec<String> {
-            vec!["--model".into(), model.into()]
-        }
         fn spawn(&self, ctx: &SpawnCtx) -> Vec<String> {
             let mut argv = vec!["claude".into()];
-            push_model_flag(&mut argv, self, ctx);
             push_unattended_flags(&mut argv, ctx);
             push_settings_flag(&mut argv, ctx);
             argv
         }
         fn resume(&self, ctx: &SpawnCtx) -> Vec<String> {
             let mut argv = vec!["claude".into(), "--continue".into()];
-            push_model_flag(&mut argv, self, ctx);
             push_unattended_flags(&mut argv, ctx);
             push_settings_flag(&mut argv, ctx);
             argv
@@ -710,82 +677,6 @@ mod tests {
                 STRICT_MCP_FLAG.to_string()
             ]
         );
-    }
-
-    #[test]
-    fn claude_spawn_omits_model_flag_when_unset() {
-        let claude = Claude;
-        let ctx = SpawnCtx::default();
-        assert_eq!(claude.spawn(&ctx), vec!["claude".to_string()]);
-        assert_eq!(
-            claude.resume(&ctx),
-            vec!["claude".to_string(), "--continue".to_string()]
-        );
-    }
-
-    #[test]
-    fn claude_spawn_carries_model_flag_when_set() {
-        let claude = Claude;
-        let ctx = SpawnCtx {
-            model: Some("opus".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            claude.spawn(&ctx),
-            vec![
-                "claude".to_string(),
-                "--model".to_string(),
-                "opus".to_string()
-            ]
-        );
-        assert_eq!(
-            claude.resume(&ctx),
-            vec![
-                "claude".to_string(),
-                "--continue".to_string(),
-                "--model".to_string(),
-                "opus".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn claude_model_flag_composes_with_skip_and_settings() {
-        let claude = Claude;
-        let ctx = SpawnCtx {
-            model: Some("haiku".into()),
-            skip_permissions: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            claude.spawn(&ctx),
-            vec![
-                "claude".to_string(),
-                "--model".to_string(),
-                "haiku".to_string(),
-                SKIP_FLAG.to_string(),
-                STRICT_MCP_FLAG.to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn non_model_agents_ignore_ctx_model() {
-        // Codex / Cursor have no model flag: a set `ctx.model` must not
-        // leak into their argv.
-        let ctx = SpawnCtx {
-            model: Some("opus".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            super::builtins::Codex.spawn(&ctx),
-            vec!["codex".to_string()]
-        );
-        assert_eq!(
-            super::builtins::Cursor.spawn(&ctx),
-            vec!["cursor-agent".to_string()]
-        );
-        assert!(super::builtins::Codex.model_arg("opus").is_empty());
     }
 
     #[test]

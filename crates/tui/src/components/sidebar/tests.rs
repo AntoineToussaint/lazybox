@@ -834,13 +834,16 @@ mod attention_signal_tests {
         Workspace::from_task(task, chrono::Utc::now())
     }
 
-    fn empty_set() -> std::collections::HashSet<SessionKey> {
-        std::collections::HashSet::new()
+    fn empty_set() -> std::collections::HashMap<SessionKey, lazybox_ipc::AgentState> {
+        std::collections::HashMap::new()
     }
 
-    fn set_with(ws: &Workspace) -> std::collections::HashSet<SessionKey> {
-        let mut s = std::collections::HashSet::new();
-        s.insert(SessionKey::from(&ws.key));
+    fn set_with(ws: &Workspace) -> std::collections::HashMap<SessionKey, lazybox_ipc::AgentState> {
+        let mut s = std::collections::HashMap::new();
+        s.insert(
+            SessionKey::from(&ws.key),
+            lazybox_ipc::AgentState::InputNeeded,
+        );
         s
     }
 
@@ -905,16 +908,15 @@ mod attention_signal_tests {
     }
 
     #[test]
-    fn agent_asking_signal_comes_from_asking_set_not_workspace_sessions() {
-        // Regression for the silent-clobber bug fixed in this
-        // commit: the AgentAsking signal MUST be driven by the
-        // sidebar-local `agents_asking` set, NOT
+    fn agent_asking_signal_comes_from_state_map_not_workspace_sessions() {
+        // Regression for the silent-clobber bug: the AgentAsking signal
+        // MUST be driven by the sidebar-local `agents` state map, NOT
         // `Workspace.sessions[i].state`. The poll cycle reloads
         // workspace data from store every minute, which would
         // wipe a state-mutation-based signal.
         let w = ws_from_pr(base_task());
 
-        // No entry in the set → no signal even if sessions claim
+        // No entry in the map → no signal even if sessions claim
         // Asking (in production they never do, but the test pins
         // the contract).
         assert!(
@@ -1648,6 +1650,7 @@ mod broadcast_select_tests {
         assert_eq!(sb.broadcast_terminal(&key), None, "no sessions yet");
         let spawn = |sb: &mut Sidebar, id: u64, kind: TerminalKind| {
             sb.on_event(&Event::TerminalSpawned {
+                model_label: None,
                 terminal_id: TerminalId(id),
                 session_key: key.clone(),
                 kind,
@@ -1712,8 +1715,10 @@ mod working_spinner_tests {
 
     fn working_sidebar() -> Sidebar {
         let mut sb = Sidebar::new(PaneId::new(1));
-        sb.agents_working
-            .insert(SessionKey::from(&WorkspaceKey::new("owner/repo#1")));
+        sb.agents.insert(
+            SessionKey::from(&WorkspaceKey::new("owner/repo#1")),
+            lazybox_ipc::AgentState::Working,
+        );
         sb
     }
 
@@ -1765,8 +1770,8 @@ mod working_spinner_tests {
         let before = sb.working_spinner_frame;
         assert_eq!(before, 5);
 
-        // Flap to idle: the working-set empties for a beat.
-        sb.agents_working.clear();
+        // Flap to idle: the working state clears for a beat.
+        sb.agents.clear();
         assert!(!sb.tick_working(), "idle asks for no spinner redraw");
         assert_eq!(
             sb.working_spinner_frame, before,
@@ -1775,8 +1780,10 @@ mod working_spinner_tests {
 
         // Working again a little later — the frame reflects the clock,
         // strictly ahead of where it was, never restarting at 0.
-        sb.agents_working
-            .insert(SessionKey::from(&WorkspaceKey::new("owner/repo#1")));
+        sb.agents.insert(
+            SessionKey::from(&WorkspaceKey::new("owner/repo#1")),
+            lazybox_ipc::AgentState::Working,
+        );
         sb.spinner_epoch = Instant::now() - Duration::from_millis(840);
         assert!(sb.tick_working());
         assert_eq!(sb.working_spinner_frame, 7);
@@ -1875,10 +1882,10 @@ mod done_alert_tests {
         assert!(sb.drain_pending_asking_notices().is_empty());
 
         sb.on_event(&agent_state(&key, AgentState::Done));
-        assert!(sb.agents_done.contains(&key), "done-set holds the key");
-        assert!(
-            !sb.agents_working.contains(&key),
-            "done is disjoint from working",
+        assert_eq!(
+            sb.agent_state(&key),
+            Some(AgentState::Done),
+            "state is Done"
         );
         let notifs = sb.drain_pending_notifications();
         assert_eq!(notifs.len(), 1);
@@ -1914,10 +1921,26 @@ mod done_alert_tests {
     fn working_after_done_clears_the_flag() {
         let (mut sb, key) = sidebar_with_one_workspace();
         sb.on_event(&agent_state(&key, AgentState::Done));
-        assert!(sb.agents_done.contains(&key));
+        assert_eq!(sb.agent_state(&key), Some(AgentState::Done));
         sb.on_event(&agent_state(&key, AgentState::Working));
-        assert!(!sb.agents_done.contains(&key));
-        assert!(sb.agents_working.contains(&key));
+        assert_eq!(sb.agent_state(&key), Some(AgentState::Working));
+    }
+
+    /// Removing a workspace drops its agent-state entry, so a churn of
+    /// closed/merged workspaces can't leak stale keys into the map over
+    /// a long session.
+    #[test]
+    fn removing_a_workspace_prunes_its_agent_state() {
+        let (mut sb, key) = sidebar_with_one_workspace();
+        let ws_key = sb.workspaces.get(&key).unwrap().key.clone();
+        sb.on_event(&agent_state(&key, AgentState::Working));
+        assert_eq!(sb.agent_state(&key), Some(AgentState::Working));
+        sb.on_event(&Event::WorkspaceRemoved(ws_key));
+        assert_eq!(
+            sb.agent_state(&key),
+            None,
+            "state entry pruned with the workspace"
+        );
     }
 
     /// Footer notices must never carry the raw workspace name —
@@ -2017,7 +2040,7 @@ mod rebadge_attention_tests {
 
         // Agent on the issue is parked on a prompt.
         sb.on_event(&agent_state(&issue, AgentState::InputNeeded));
-        assert!(sb.agents_asking.contains(&issue));
+        assert_eq!(sb.agent_state(&issue), Some(AgentState::InputNeeded));
 
         // Collapse: the daemon rebadges the terminal onto the PR. No
         // further AgentState follows — the agent is stalled.
@@ -2026,18 +2049,20 @@ mod rebadge_attention_tests {
             to: pr.clone(),
         });
 
-        assert!(
-            !sb.agents_asking.contains(&issue),
+        assert_eq!(
+            sb.agent_state(&issue),
+            None,
             "the dead issue key must be dropped",
         );
-        assert!(
-            sb.agents_asking.contains(&pr),
+        assert_eq!(
+            sb.agent_state(&pr),
+            Some(AgentState::InputNeeded),
             "the PR must inherit the asking pill so the agent stays visible",
         );
     }
 
     #[test]
-    fn rebadge_migrates_working_and_done_sets_too() {
+    fn rebadge_migrates_working_and_done_state_too() {
         let issue: SessionKey = (&WorkspaceKey::new("github:o/r#60")).into();
         let pr: SessionKey = (&WorkspaceKey::new("github:o/r#61")).into();
 
@@ -2048,13 +2073,12 @@ mod rebadge_attention_tests {
                 from: issue.clone(),
                 to: pr.clone(),
             });
-            let set = match state {
-                AgentState::Working => &sb.agents_working,
-                AgentState::Done => &sb.agents_done,
-                _ => unreachable!(),
-            };
-            assert!(!set.contains(&issue), "{state:?}: issue key dropped");
-            assert!(set.contains(&pr), "{state:?}: PR key inherited");
+            assert_eq!(sb.agent_state(&issue), None, "{state:?}: issue key dropped");
+            assert_eq!(
+                sb.agent_state(&pr),
+                Some(state),
+                "{state:?}: PR key inherited"
+            );
         }
     }
 
@@ -2069,9 +2093,7 @@ mod rebadge_attention_tests {
             from: issue,
             to: pr.clone(),
         });
-        assert!(!sb.agents_asking.contains(&pr));
-        assert!(!sb.agents_working.contains(&pr));
-        assert!(!sb.agents_done.contains(&pr));
+        assert_eq!(sb.agent_state(&pr), None);
     }
 }
 

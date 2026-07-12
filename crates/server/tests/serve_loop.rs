@@ -274,6 +274,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             label: None,
         },
         Command::Spawn {
+            model_alias: None,
             session_key: "test:ws".into(),
             session_id: None,
             kind: TerminalKind::Shell,
@@ -513,6 +514,7 @@ async fn a_stalled_handler_does_not_block_poll_forwarding() {
     // Detached handler that will sit on the backend delay for ~2s.
     client
         .send(Command::Spawn {
+            model_alias: None,
             session_key: "test:stall".into(),
             session_id: None,
             kind: TerminalKind::Shell,

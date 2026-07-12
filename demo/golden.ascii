@@ -4,6 +4,7 @@
   Shift+M         messages          Esc             dismiss            `               jump to workspace
   !               next asking       Shift+F         next failing       .               focus mode
   Shift+W         start agent       Shift+P         activity pane      Shift+Arrows    resize splitters
+  q q             quit
   Workspace
   Enter           open              w               work on this       s               shell
   e               editor            m               mark read          z               snooze

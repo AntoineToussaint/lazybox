@@ -48,17 +48,34 @@ pub struct LeaderGroup {
     aliases: String,
 }
 
+/// Whether this entry's chord is a timed double-press latch (`q q`
+/// quit) rather than a catalog leader menu. The live UI dispatches it
+/// through the q-latch — pressing `q` never arms a which-key menu (see
+/// `keys.rs`'s `opens_leader`) — so the help panel must not render a
+/// phantom `q` leader block the user can never open. Keyed on the
+/// action's `guard`, so it tracks the dispatch path and doesn't
+/// misfire on a real leader whose second key repeats the leader
+/// (`g g` auto-merge, a genuine member of the `g` github menu) (#338).
+fn is_double_press(entry: &CatalogEntry) -> bool {
+    matches!(
+        action::ActionDef::for_kind(entry.kind).guard(),
+        action::Guard::DoublePress,
+    )
+}
+
 /// Whether this entry is rendered as part of a leader-group block —
-/// i.e. one of its effective chords is a two-step `<leader> <key>`
-/// sequence. The exact predicate [`LeaderGroup::all_from_catalog`]
-/// uses to collect group members, factored out so `from_catalog` can
-/// partition the catalog once: leader entries render only in their
-/// group, everything else in the flat single-key grid (#338).
+/// i.e. it has a two-step `<leader> <key>` chord AND is dispatched
+/// through the catalog leader (not the q-latch). The exact predicate
+/// [`LeaderGroup::all_from_catalog`] uses to collect group members,
+/// factored out so `from_catalog` can partition the catalog once:
+/// leader entries render only in their group, everything else in the
+/// flat per-section grid (#338).
 fn is_leader_entry(entry: &CatalogEntry) -> bool {
-    entry
-        .chords
-        .iter()
-        .any(|chord| matches!(chord, Chord::Seq(strokes) if strokes.len() == 2))
+    !is_double_press(entry)
+        && entry
+            .chords
+            .iter()
+            .any(|chord| matches!(chord, Chord::Seq(strokes) if strokes.len() == 2))
 }
 
 impl LeaderGroup {
@@ -72,6 +89,12 @@ impl LeaderGroup {
         let mut leaders: Vec<KeyStroke> = Vec::new();
         let mut members: Vec<Vec<(KeyStroke, &CatalogEntry)>> = Vec::new();
         for entry in catalog {
+            // The q-latch double-press (`q q`) isn't a menu — skip it so
+            // no phantom `q` block appears, matching `is_leader_entry` so
+            // the flat/grouped split stays total (#338).
+            if is_double_press(entry) {
+                continue;
+            }
             for chord in &entry.chords {
                 let Chord::Seq(strokes) = chord else { continue };
                 if strokes.len() != 2 {
@@ -543,7 +566,9 @@ mod tests {
 
     /// The single source of truth in the render: no binding appears in
     /// both a leader-group block and the flat per-section grid, and the
-    /// flat grid is single-key-only (no two-step chords) (#338).
+    /// flat grid carries no *leader* chord (a `<leader> <key>` menu). A
+    /// same-key double-press (`q q` quit) is not a leader chord and does
+    /// belong in the flat grid — it can't open a menu (#338).
     #[test]
     fn no_binding_is_rendered_in_both_halves() {
         use lazybox_tui_core::action::ActionDef;
@@ -561,11 +586,16 @@ mod tests {
             .flat_map(|s| s.bindings.iter())
             .map(|b| b.keys.to_string())
             .collect();
-        // The flat grid is single-key-only — no `<leader> <key>` cell.
+        // No leader menu (`g m`, `a c`, …) leaks into the flat grid — a
+        // multi-token key is only allowed when its two strokes are equal
+        // (`q q`) or it's the terminal `]]` chord.
         for keys in &flat_keys {
+            let tokens: Vec<&str> = keys.split_whitespace().collect();
+            let is_leader_menu =
+                tokens.len() == 2 && tokens[0] != tokens[1] && !keys.starts_with(']');
             assert!(
-                !keys.contains(' ') || keys.starts_with(']'),
-                "two-step chord {keys:?} leaked into the flat grid",
+                !is_leader_menu,
+                "leader chord {keys:?} leaked into the flat grid",
             );
         }
         // No flat binding is also a leader-group chord.
@@ -581,6 +611,16 @@ mod tests {
                 "binding {keys:?} is rendered in both a leader block and the flat grid",
             );
         }
+        // The double-press quit is a flat Global entry, never a phantom
+        // `q` leader block the live UI can't open.
+        assert!(
+            flat_keys.iter().any(|k| k == "q q"),
+            "q q quit must render in the flat grid",
+        );
+        assert!(
+            !group_keys.contains("q q"),
+            "q q must not render as a leader block",
+        );
         // Sanity: the leader blocks aren't empty — the github group's
         // `g m` and the agent group's `a c` are up there.
         assert!(group_keys.contains("g m"), "expected the g m leader chord");
@@ -660,6 +700,10 @@ mod tests {
             .collect();
         for (chord, label) in [
             ("g m", "merge PR"),
+            // `g g` repeats the leader key but is a real menu member
+            // (auto-merge), NOT a q-latch double-press — it must stay in
+            // the github block, not fall through to the flat grid (#338).
+            ("g g", "auto-merge"),
             ("g v", "reviewers"),
             ("g a", "assignees"),
             ("g l", "labels"),

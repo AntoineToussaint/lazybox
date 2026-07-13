@@ -3,7 +3,7 @@
 //! Replaces the old flat `Choice` palette, which piled 11+ rows (two
 //! more per enabled provider) into one undifferentiated list where
 //! "Change theme" sat next to "Clean worktrees". Rows are grouped
-//! under four tabs ([`SettingsSection`]): Providers / Agents /
+//! under four tabs (`SettingsSection`): Providers / Agents /
 //! Appearance / Maintenance — `←/→` (or `h/l`, Tab) switches tabs,
 //! `j/k` moves within one, Enter picks, `1-4` jumps straight to a tab.
 //!

@@ -189,9 +189,12 @@ where
     read_build(rd).await
 }
 
-pub async fn write_frame<W, T>(w: &mut W, msg: &T) -> Result<(), FrameError>
+/// Encode one message as a length-prefixed wire frame:
+/// `[u32 BE length][bincode payload]`. Shared by the single-frame
+/// writer and the batching event writer so the framing (and the
+/// `MAX_FRAME_BYTES` check) exists in exactly one place.
+fn encode_frame<T>(msg: &T) -> Result<Vec<u8>, FrameError>
 where
-    W: AsyncWrite + Unpin,
     T: Serialize,
 {
     let bytes = bincode::serialize(msg)?;
@@ -199,8 +202,19 @@ where
     if len > MAX_FRAME_BYTES {
         return Err(FrameError::TooLarge(len));
     }
-    w.write_all(&len.to_be_bytes()).await?;
-    w.write_all(&bytes).await?;
+    let mut framed = Vec::with_capacity(4 + bytes.len());
+    framed.extend_from_slice(&len.to_be_bytes());
+    framed.extend_from_slice(&bytes);
+    Ok(framed)
+}
+
+pub async fn write_frame<W, T>(w: &mut W, msg: &T) -> Result<(), FrameError>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let framed = encode_frame(msg)?;
+    w.write_all(&framed).await?;
     w.flush().await?;
     Ok(())
 }
@@ -291,20 +305,76 @@ where
     }
 }
 
-/// Bounded-channel writer. Identical to [`writer_loop`] but drains a
-/// bounded `Receiver` — used for the daemon's event stream so the
-/// socket write rate back-pressures the forwarder.
+/// Upper bounds for one batched event write in
+/// [`writer_loop_bounded`]. 64 messages / 256 KiB keeps a single
+/// write+flush cheap and bounded while still collapsing an agent
+/// output flood (dozens of queued `TerminalOutput` chunks) into one
+/// syscall pair instead of one per event.
+const MAX_BATCH_MESSAGES: usize = 64;
+const MAX_BATCH_BYTES: usize = 256 * 1024;
+
+/// Bounded-channel writer. Like [`writer_loop`] but drains a bounded
+/// `Receiver` — used for the daemon's event stream so the socket
+/// write rate back-pressures the forwarder.
+///
+/// Greedy-drain batching: writing (and above all FLUSHING) once per
+/// event cost a syscall-flush per 8 KiB output chunk under an agent
+/// flood. After awaiting the first message we `try_recv` whatever
+/// else is already queued — up to [`MAX_BATCH_MESSAGES`] /
+/// [`MAX_BATCH_BYTES`] — into one buffered write followed by a single
+/// flush. Latency is unaffected: an empty queue flushes the lone
+/// message immediately, exactly as before.
 async fn writer_loop_bounded<W, M>(mut w: W, mut rx: mpsc::Receiver<M>)
 where
     W: AsyncWrite + Unpin,
     M: Serialize,
 {
-    while let Some(msg) = rx.recv().await {
-        if let Err(e) = write_frame(&mut w, &msg).await {
+    let mut buf: Vec<u8> = Vec::new();
+    'conn: while let Some(first) = rx.recv().await {
+        buf.clear();
+        match encode_frame(&first) {
+            Ok(framed) => buf.extend_from_slice(&framed),
+            Err(e) => {
+                tracing::warn!("writer: {e}");
+                break;
+            }
+        }
+        let mut batched = 1;
+        while batched < MAX_BATCH_MESSAGES && buf.len() < MAX_BATCH_BYTES {
+            let Ok(msg) = rx.try_recv() else { break };
+            match encode_frame(&msg) {
+                Ok(framed) => {
+                    buf.extend_from_slice(&framed);
+                    batched += 1;
+                }
+                Err(e) => {
+                    // Same terminal outcome as the unbatched loop (an
+                    // unencodable frame kills the connection), but the
+                    // earlier messages in this batch were accepted
+                    // before the bad one arrived — write them out
+                    // first so the peer's stream stays a clean prefix.
+                    tracing::warn!("writer: {e}");
+                    if let Err(io) = write_all_flush(&mut w, &buf).await {
+                        tracing::warn!("writer: {io}");
+                    }
+                    break 'conn;
+                }
+            }
+        }
+        if let Err(e) = write_all_flush(&mut w, &buf).await {
             tracing::warn!("writer: {e}");
             break;
         }
     }
+}
+
+/// One buffered write + one flush — the whole point of the batching.
+async fn write_all_flush<W>(w: &mut W, buf: &[u8]) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    w.write_all(buf).await?;
+    w.flush().await
 }
 
 async fn reader_loop<R, M>(mut r: R, tx: mpsc::UnboundedSender<M>)
@@ -349,5 +419,187 @@ where
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod batching_tests {
+    use super::*;
+    use crate::{Command, TerminalId};
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+
+    /// AsyncWrite wrapper counting `poll_flush` completions, so the
+    /// tests can assert the greedy drain really coalesces N queued
+    /// messages into one flush instead of N.
+    struct CountingWriter<W> {
+        inner: W,
+        flushes: Arc<AtomicUsize>,
+    }
+
+    impl<W: AsyncWrite + Unpin> AsyncWrite for CountingWriter<W> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            let res = Pin::new(&mut self.inner).poll_flush(cx);
+            if matches!(res, Poll::Ready(Ok(()))) {
+                self.flushes.fetch_add(1, Ordering::SeqCst);
+            }
+            res
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    fn cmd(i: u64) -> Command {
+        Command::Write {
+            terminal_id: TerminalId(i),
+            bytes: vec![b'x'; 8],
+        }
+    }
+
+    /// Pre-queued messages must arrive intact and in order through the
+    /// batched writer, and a fully-queued burst below the caps costs
+    /// exactly ONE flush — the regression this batching exists for
+    /// (one syscall-flush per event under an agent flood).
+    #[tokio::test]
+    async fn batched_writer_coalesces_queued_messages_into_one_flush() {
+        let (tx, rx) = mpsc::channel::<Command>(EVENT_CHANNEL_CAPACITY);
+        for i in 0..10 {
+            tx.try_send(cmd(i)).expect("channel has capacity");
+        }
+        drop(tx); // loop drains the queue, then exits cleanly
+
+        let (wr, mut rd) = duplex_pair();
+        let flushes = Arc::new(AtomicUsize::new(0));
+        writer_loop_bounded(
+            CountingWriter {
+                inner: wr,
+                flushes: flushes.clone(),
+            },
+            rx,
+        )
+        .await;
+
+        for i in 0..10 {
+            let back: Command = read_frame(&mut rd)
+                .await
+                .expect("read ok")
+                .expect("frame present");
+            match back {
+                Command::Write { terminal_id, bytes } => {
+                    assert_eq!(terminal_id, TerminalId(i), "order must be preserved");
+                    assert_eq!(bytes.len(), 8);
+                }
+                other => panic!("unexpected frame: {other:?}"),
+            }
+        }
+        assert_eq!(
+            flushes.load(Ordering::SeqCst),
+            1,
+            "10 queued messages under the caps must cost exactly one flush"
+        );
+    }
+
+    /// The message-count cap bounds each batch: 100 queued messages
+    /// split into ceil(100/64) = 2 write+flush rounds, all delivered.
+    #[tokio::test]
+    async fn batched_writer_respects_message_cap() {
+        let (tx, rx) = mpsc::channel::<Command>(EVENT_CHANNEL_CAPACITY);
+        let total = (MAX_BATCH_MESSAGES + 36) as u64;
+        for i in 0..total {
+            tx.try_send(cmd(i)).expect("channel has capacity");
+        }
+        drop(tx);
+
+        let (wr, mut rd) = duplex_pair();
+        let flushes = Arc::new(AtomicUsize::new(0));
+        writer_loop_bounded(
+            CountingWriter {
+                inner: wr,
+                flushes: flushes.clone(),
+            },
+            rx,
+        )
+        .await;
+
+        for i in 0..total {
+            let back: Command = read_frame(&mut rd)
+                .await
+                .expect("read ok")
+                .expect("frame present");
+            assert!(
+                matches!(back, Command::Write { terminal_id, .. } if terminal_id == TerminalId(i)),
+                "message {i} must arrive in order"
+            );
+        }
+        assert_eq!(
+            flushes.load(Ordering::SeqCst),
+            2,
+            "100 pre-queued messages = two capped batches = two flushes"
+        );
+    }
+
+    /// The byte cap closes a batch early so one write never buffers an
+    /// unbounded blob: messages bigger than the cap still flow, one
+    /// flush each.
+    #[tokio::test]
+    async fn batched_writer_respects_byte_cap() {
+        let big = Command::Write {
+            terminal_id: TerminalId(1),
+            bytes: vec![b'y'; MAX_BATCH_BYTES],
+        };
+        let (tx, rx) = mpsc::channel::<Command>(8);
+        tx.try_send(big.clone()).expect("capacity");
+        tx.try_send(big).expect("capacity");
+        drop(tx);
+
+        // Big frames: use a large duplex so the writer never stalls.
+        let (a, b) = tokio::io::duplex(4 * MAX_BATCH_BYTES);
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let reader = tokio::spawn(async move {
+            let mut rd = b;
+            let mut seen = 0;
+            while let Ok(Some(Command::Write { bytes, .. })) =
+                read_frame::<_, Command>(&mut rd).await
+            {
+                assert_eq!(bytes.len(), MAX_BATCH_BYTES);
+                seen += 1;
+            }
+            seen
+        });
+        writer_loop_bounded(
+            CountingWriter {
+                inner: a,
+                flushes: flushes.clone(),
+            },
+            rx,
+        )
+        .await;
+        assert_eq!(reader.await.expect("reader task"), 2);
+        assert_eq!(
+            flushes.load(Ordering::SeqCst),
+            2,
+            "each over-cap frame closes its own batch"
+        );
+    }
+
+    fn duplex_pair() -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
+        // Room for every test batch without back-pressure, so the
+        // writer loop can run to completion before the test reads.
+        tokio::io::duplex(1024 * 1024)
     }
 }

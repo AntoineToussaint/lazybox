@@ -44,7 +44,9 @@ impl Store for MemoryStore {
 
     /// In-memory prefix scan over the kv table. Mirrors what
     /// `SqliteStore::list_workspaces` does so tests using
-    /// `MemoryStore` see the same behavior.
+    /// `MemoryStore` see the same behavior — including recovering the
+    /// record's real `created_at` from the JSON instead of fabricating
+    /// `Utc::now()` per call.
     fn list_workspaces(&self) -> Result<Vec<crate::WorkspaceRecord>, StoreError> {
         let kv = self.kv_lock();
         let mut out = Vec::new();
@@ -52,8 +54,28 @@ impl Store for MemoryStore {
             if let Some(stripped) = key.strip_prefix("workspace:") {
                 out.push(crate::WorkspaceRecord {
                     key: stripped.to_string(),
-                    created_at: chrono::Utc::now(),
+                    created_at: crate::traits::created_at_from_json(value),
                     workspace_json: Some(value.clone()),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Same shape as `list_workspaces` for the `project:*` prefix.
+    /// Previously missing, which made `MemoryStore` silently diverge
+    /// from `SqliteStore` (the trait default returns empty) — the
+    /// store conformance suite in `tests/conformance.rs` pins the two
+    /// backends to identical behavior.
+    fn list_projects(&self) -> Result<Vec<crate::ProjectRecord>, StoreError> {
+        let kv = self.kv_lock();
+        let mut out = Vec::new();
+        for (key, value) in kv.iter() {
+            if let Some(stripped) = key.strip_prefix("project:") {
+                out.push(crate::ProjectRecord {
+                    key: stripped.to_string(),
+                    created_at: crate::traits::created_at_from_json(value),
+                    project_json: Some(value.clone()),
                 });
             }
         }

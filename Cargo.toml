@@ -112,6 +112,7 @@ lazybox-store       = { path = "crates/store" }
 lazybox-config      = { path = "crates/config" }
 lazybox-git-ops     = { path = "crates/git-ops" }
 lazybox-gh          = { path = "crates/gh-provider" }
+lazybox-linear      = { path = "crates/linear-provider" }
 lazybox-slack       = { path = "crates/slack-provider" }
 lazybox-tui-term    = { path = "crates/tui-term" }
 lazybox-tui-core    = { path = "crates/tui-core" }

@@ -2354,6 +2354,17 @@ impl GhClient {
         let body = graphql::update_branch_body(pull_request_node_id);
         let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
+            // Same idempotence guard as `merge_pr`: a timeout-retried
+            // update whose first attempt landed comes back "no new
+            // commits on the base branch" — the branch IS up to date,
+            // which is exactly what the caller asked for.
+            if gql_errors_all_match(&errors, BRANCH_ALREADY_UPDATED_MARKERS) {
+                tracing::info!(
+                    "updatePullRequestBranch reported nothing to update — \
+                     treating as success (likely a timeout-retry re-send)"
+                );
+                return Ok(());
+            }
             let joined = errors
                 .iter()
                 .map(|e| e.full())
@@ -2618,6 +2629,22 @@ impl GhClient {
         let body = graphql::merge_pr_body(pull_request_node_id);
         let response: graphql::GqlMutationResponse = self.post_graphql_with_retry(&body).await?;
         if let Some(errors) = response.errors {
+            // Idempotence guard: `post_graphql_with_retry` re-sends the
+            // mutation after a client-side timeout even when the first
+            // attempt LANDED server-side. The retry then reports
+            // "already merged" for a merge that actually succeeded —
+            // surfacing that as FAILURE told the user their successful
+            // merge failed. GitHub confirming the PR is merged IS the
+            // outcome this call wanted, so classify it as success.
+            // Deliberately narrow: "not mergeable" (conflicts, blocked
+            // checks) stays a real failure.
+            if gql_errors_all_match(&errors, ALREADY_MERGED_MARKERS) {
+                tracing::info!(
+                    "mergePullRequest reported the PR already merged — \
+                     treating as success (likely a timeout-retry re-send)"
+                );
+                return Ok(());
+            }
             let joined = errors
                 .iter()
                 .map(|e| e.full())
@@ -3031,6 +3058,38 @@ pub(crate) fn should_query_issues(
     want_issues || !allowed_logins.is_empty()
 }
 
+/// GraphQL error messages that mean "the PR is already merged" — the
+/// state a `mergePullRequest` was trying to reach. GitHub phrases it as
+/// `Pull request Pull request is in merged state.` (yes, doubled) on
+/// current api.github.com; older/GHES variants say "already merged".
+/// Matched case-insensitively as substrings.
+const ALREADY_MERGED_MARKERS: &[&str] = &["already merged", "merged state"];
+
+/// GraphQL error messages that mean an `updatePullRequestBranch` has
+/// nothing left to do — the head already contains the base. GitHub:
+/// `There are no new commits on the base branch.`; "up to date"
+/// variants cover GHES phrasing. Also treated as applied when the PR
+/// merged between the attempts (nothing left to update).
+const BRANCH_ALREADY_UPDATED_MARKERS: &[&str] = &[
+    "no new commits",
+    "already up-to-date",
+    "already up to date",
+    "merged state",
+    "already merged",
+];
+
+/// True when the mutation's error list is non-empty and EVERY entry
+/// matches one of `markers` (case-insensitive substring on the raw
+/// message). All-of, not any-of: a response mixing "already merged"
+/// with an unrelated error must still surface as a failure.
+fn gql_errors_all_match(errors: &[graphql::GqlError], markers: &[&str]) -> bool {
+    !errors.is_empty()
+        && errors.iter().all(|e| {
+            let msg = e.message.to_ascii_lowercase();
+            markers.iter().any(|marker| msg.contains(marker))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3039,6 +3098,70 @@ mod tests {
 
     fn logins(names: &[&str]) -> std::collections::BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Parse a raw GraphQL mutation-response payload the way
+    /// `post_graphql_with_retry` does, returning its error list.
+    fn mutation_errors(payload: &str) -> Vec<graphql::GqlError> {
+        let response: graphql::GqlMutationResponse =
+            serde_json::from_str(payload).expect("payload parses");
+        response.errors.unwrap_or_default()
+    }
+
+    /// A `mergePullRequest` re-sent after a client-side timeout (first
+    /// attempt landed server-side) fails with GitHub's already-merged
+    /// error. That response must classify as success — surfacing it as
+    /// FAILURE told the user a merge that succeeded had failed.
+    #[test]
+    fn already_merged_error_classifies_as_success() {
+        let errors = mutation_errors(
+            r#"{"data":{"mergePullRequest":null},
+                "errors":[{"message":"Pull request Pull request is in merged state.",
+                           "path":["mergePullRequest"],
+                           "extensions":{"type":"UNPROCESSABLE"}}]}"#,
+        );
+        assert!(gql_errors_all_match(&errors, ALREADY_MERGED_MARKERS));
+        let errors =
+            mutation_errors(r#"{"errors":[{"message":"Pull request is already merged"}]}"#);
+        assert!(gql_errors_all_match(&errors, ALREADY_MERGED_MARKERS));
+    }
+
+    /// "Not mergeable" (conflicts, blocked checks) is a GENUINE
+    /// failure — the narrow already-merged classifier must not eat it.
+    #[test]
+    fn not_mergeable_error_stays_a_failure() {
+        let errors = mutation_errors(
+            r#"{"errors":[{"message":"Pull Request is not mergeable","path":["mergePullRequest"]}]}"#,
+        );
+        assert!(!gql_errors_all_match(&errors, ALREADY_MERGED_MARKERS));
+    }
+
+    /// All-of semantics: an already-merged error mixed with an
+    /// unrelated one must still surface as failure, and an empty error
+    /// list is not a match (that's the plain success path).
+    #[test]
+    fn mixed_or_empty_error_lists_do_not_classify_as_already_applied() {
+        let errors = mutation_errors(
+            r#"{"errors":[{"message":"Pull request Pull request is in merged state."},
+                          {"message":"Something else went wrong"}]}"#,
+        );
+        assert!(!gql_errors_all_match(&errors, ALREADY_MERGED_MARKERS));
+        assert!(!gql_errors_all_match(&[], ALREADY_MERGED_MARKERS));
+    }
+
+    /// `updatePullRequestBranch` retried after its first attempt
+    /// landed reports "no new commits on the base branch" — the branch
+    /// is up to date, which is the requested outcome.
+    #[test]
+    fn update_branch_no_new_commits_classifies_as_success() {
+        let errors = mutation_errors(
+            r#"{"errors":[{"message":"There are no new commits on the base branch.",
+                           "path":["updatePullRequestBranch"]}]}"#,
+        );
+        assert!(gql_errors_all_match(
+            &errors,
+            BRANCH_ALREADY_UPDATED_MARKERS
+        ));
     }
 
     /// Issue #15: the watched-repo fan-out must exclude PRs the user

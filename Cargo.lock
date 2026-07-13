@@ -1529,6 +1529,7 @@ dependencies = [
 name = "lazybox-server"
 version = "0.1.6"
 dependencies = [
+ "bincode",
  "bytes",
  "chrono",
  "criterion",

@@ -210,8 +210,30 @@ impl WorktreeManager {
         // URL otherwise.
         let mut url = format!("git@github.com:{owner}/{repo}.git");
         if bare_path.exists() {
-            if bare_repo_is_healthy(&bare_path).await {
-                return Ok(bare_path);
+            // Deleting the bare clone orphans EVERY worktree hanging
+            // off it (their gitdir metadata lives under
+            // `<bare>/worktrees/`), so only git itself may condemn it:
+            // a probe that couldn't even run (git binary missing, spawn
+            // failure, resource exhaustion) proves nothing about the
+            // repo and must propagate as an error instead of nuking a
+            // possibly-healthy cache.
+            match bare_repo_health(&bare_path).await {
+                Ok(true) => return Ok(bare_path),
+                Ok(false) => {
+                    // git ran and confirmed the repo is unusable
+                    // (interrupted clone, tampering) — delete + reclone.
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        owner,
+                        repo,
+                        path = %bare_path.display(),
+                        error = %e,
+                        "bare-clone health probe could not run — keeping the \
+                         existing clone (NOT deleting it) and failing this provision"
+                    );
+                    return Err(e);
+                }
             }
             if let Some(prev) = configured_origin_url(&bare_path).await {
                 url = prev;
@@ -864,25 +886,44 @@ fn partial_clone_path(bare: &Path) -> PathBuf {
 /// `rev-parse --is-bare-repository` must print `true`, and `HEAD`
 /// must resolve to a commit (a half-fetched clone has a HEAD symref
 /// but no refs behind it).
-async fn bare_repo_is_healthy(bare: &Path) -> bool {
-    // Quiet probes (no error-level logging): failing here is an
-    // expected, recoverable state, not a git invocation bug.
-    async fn probe(bare: &Path, args: &[&str]) -> Option<String> {
+///
+/// Tri-state result — the distinction is load-bearing for the caller:
+/// * `Ok(true)`  — git ran and the repo is usable.
+/// * `Ok(false)` — git ran and CONFIRMED the repo is unusable; only
+///   this verdict authorizes delete + reclone.
+/// * `Err(_)`    — the probe itself couldn't run (git missing, spawn
+///   failure). Says nothing about the repo; the caller must NOT
+///   delete on it. Conflating this with `false` used to nuke a
+///   healthy bare clone — orphaning every worktree whose gitdir
+///   metadata lived under `<bare>/worktrees/` — whenever spawning
+///   git hiccuped.
+async fn bare_repo_health(bare: &Path) -> Result<bool, GitError> {
+    // Quiet probes (no error-level logging): a failing probe is an
+    // expected, recoverable state, not a git invocation bug. A probe
+    // that can't SPAWN, however, is an environment error we surface.
+    async fn probe(bare: &Path, args: &[&str]) -> Result<Option<String>, GitError> {
         let out = apply_git_env(Command::new("git").current_dir(bare).args(args))
             .output()
             .await
-            .ok()?;
-        out.status
+            .map_err(|e| {
+                GitError::Command(format!(
+                    "could not run `git {}` in {}: {e}",
+                    args.join(" "),
+                    bare.display()
+                ))
+            })?;
+        Ok(out
+            .status
             .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned()))
     }
-    match probe(bare, &["rev-parse", "--is-bare-repository"]).await {
+    match probe(bare, &["rev-parse", "--is-bare-repository"]).await? {
         Some(out) if out.trim() == "true" => {}
-        _ => return false,
+        _ => return Ok(false),
     }
-    probe(bare, &["rev-parse", "--verify", "--quiet", "HEAD"])
-        .await
-        .is_some()
+    Ok(probe(bare, &["rev-parse", "--verify", "--quiet", "HEAD"])
+        .await?
+        .is_some())
 }
 
 /// Read `remote.origin.url` straight from the config file of a (possibly
@@ -941,7 +982,22 @@ async fn validate_worktree_dir(
         if let Some(gitdir) = gitdir {
             let expected = canonical_or_self(&bare_path.join("worktrees"));
             if canonical_or_self(&gitdir).starts_with(&expected) {
-                return Ok(WorktreeDirState::Valid);
+                // The gitdir must actually EXIST: after the bare clone
+                // (or just its `worktrees/` metadata) is deleted, the
+                // `.git` file still points into it and this used to
+                // report `Valid` — sessions then landed in a checkout
+                // every git command fails in. A dangling target is not
+                // a usable worktree; fall through to the content check
+                // below (real content → loud refusal, empty-ish →
+                // reprovision).
+                if tokio::fs::metadata(&gitdir).await.is_ok() {
+                    return Ok(WorktreeDirState::Valid);
+                }
+                tracing::warn!(
+                    path = %wt_path.display(),
+                    gitdir = %gitdir.display(),
+                    "worktree .git points at a missing gitdir (bare clone deleted?) — not valid"
+                );
             }
         }
     }
@@ -1313,5 +1369,120 @@ async fn run_git_in(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
             stderr.trim()
         );
         Err(GitError::Command(stderr))
+    }
+}
+
+#[cfg(test)]
+mod health_probe_tests {
+    use super::*;
+
+    /// Test-side git runner (std, blocking) for fixture setup only.
+    fn git(cwd: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-c")
+            .arg("user.email=test@example.com")
+            .arg("-c")
+            .arg("user.name=test")
+            .current_dir(cwd)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("git must be runnable in tests");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// `<tmp>/src` repo with one committed file, cloned to
+    /// `<tmp>/bare.git`. Returns (tmp guard, bare path).
+    fn local_bare_clone() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).expect("mkdir src");
+        git(&src, &["init", "-q"]);
+        std::fs::write(src.join("f.txt"), "content\n").expect("write f.txt");
+        git(&src, &["add", "f.txt"]);
+        git(&src, &["commit", "-q", "-m", "init"]);
+        git(tmp.path(), &["clone", "-q", "--bare", "src", "bare.git"]);
+        let bare = tmp.path().join("bare.git");
+        (tmp, bare)
+    }
+
+    /// git ran and the repo is fine → `Ok(true)`.
+    #[tokio::test]
+    async fn healthy_bare_clone_probes_ok_true() {
+        let (_tmp, bare) = local_bare_clone();
+        assert!(bare_repo_health(&bare).await.unwrap());
+    }
+
+    /// git ran and CONFIRMED the directory is not a usable repo
+    /// (interrupted-clone shape) → `Ok(false)` — the only verdict that
+    /// authorizes delete + reclone.
+    #[tokio::test]
+    async fn non_repo_directory_probes_ok_false() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("not-a-repo.git");
+        std::fs::create_dir(&dir).expect("mkdir");
+        assert!(!bare_repo_health(&dir).await.unwrap());
+    }
+
+    /// Regression: the probe FAILING TO RUN (spawn error — here a cwd
+    /// that isn't a directory, the same class as a missing git binary)
+    /// must surface as `Err`, NOT as "repo corrupt". The old
+    /// `output().await.ok()?` collapsed this into `false`, and
+    /// `ensure_bare_clone` deleted a healthy bare clone over it,
+    /// orphaning every worktree.
+    #[tokio::test]
+    async fn probe_spawn_failure_is_error_not_corruption() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("bare.git");
+        std::fs::write(&file, "not a directory").expect("write file");
+        assert!(
+            bare_repo_health(&file).await.is_err(),
+            "a probe that couldn't run must propagate an error, not condemn the repo"
+        );
+    }
+
+    /// A real worktree of the bare clone validates `Valid`; after the
+    /// bare clone's `worktrees/` metadata vanishes (bare deleted /
+    /// re-cloned), the same directory must STOP reporting `Valid` —
+    /// its `.git` gitdir pointer is dangling and every git command in
+    /// it would fail. With real content present, validation refuses
+    /// loudly instead of deleting user data.
+    #[tokio::test]
+    async fn dangling_gitdir_target_is_not_valid() {
+        let (tmp, bare) = local_bare_clone();
+        let wt = tmp.path().join("wt");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                wt.to_str().expect("utf8 path"),
+                "-B",
+                "wt-branch",
+                "HEAD",
+            ],
+        );
+
+        assert_eq!(
+            validate_worktree_dir(&wt, &bare).await.unwrap(),
+            WorktreeDirState::Valid,
+            "sanity: a live worktree of this bare clone is Valid"
+        );
+
+        std::fs::remove_dir_all(bare.join("worktrees")).expect("nuke worktree metadata");
+
+        let verdict = validate_worktree_dir(&wt, &bare).await;
+        assert!(
+            verdict.is_err(),
+            "dangling gitdir + real content must refuse (got {verdict:?}), never report Valid"
+        );
+        assert!(
+            wt.join("f.txt").exists(),
+            "validation must not delete the user's files"
+        );
     }
 }

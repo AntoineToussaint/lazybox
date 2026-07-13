@@ -50,7 +50,7 @@ lazybox-config     = { workspace = true }
 lazybox-store      = { workspace = true }
 lazybox-gh         = { workspace = true }
 lazybox-slack      = { workspace = true }
-lazybox-linear     = { path = "../linear-provider" }
+lazybox-linear     = { workspace = true }
 lazybox-tui-term   = { workspace = true }
 lazybox-tui-core   = { workspace = true }
 tuirealm         = { workspace = true }

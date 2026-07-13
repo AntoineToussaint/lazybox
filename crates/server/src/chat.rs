@@ -576,7 +576,7 @@ pub async fn handle_bus_event(
                 provider.terminal_target(&workspace_key, &session_id.to_string(), &agent_id);
             on_terminal_spawned(
                 provider,
-                &*server.store,
+                server.store.clone(),
                 state,
                 terminal_id,
                 &workspace_key,
@@ -657,14 +657,14 @@ pub async fn handle_bus_event(
 /// instead of nesting matches inside `handle_bus_event`.
 pub(crate) async fn on_terminal_spawned(
     provider: &dyn ChatProvider,
-    store: &dyn Store,
+    store: Arc<dyn Store>,
     state: &Arc<Mutex<RouterState>>,
     terminal_id: TerminalId,
     workspace_key: &str,
     agent_id: &str,
     target: TerminalTarget,
 ) {
-    let header = workspace_header(store, workspace_key, agent_id);
+    let header = workspace_header(store, workspace_key, agent_id).await;
     match target {
         TerminalTarget::NoSurface => {}
         TerminalTarget::DedicatedChannel(name) => {
@@ -759,7 +759,7 @@ pub(crate) async fn resync_spawned_terminals(
         );
         on_terminal_spawned(
             provider,
-            &*server.store,
+            server.store.clone(),
             state,
             terminal_id,
             &workspace_key,
@@ -774,8 +774,8 @@ pub(crate) async fn resync_spawned_terminals(
 /// channel. Pulls the workspace title from the store so phone
 /// readers see what they're looking at without context-switching
 /// to GitHub.
-fn workspace_header(store: &dyn Store, workspace_key: &str, agent_id: &str) -> String {
-    let title = store_workspace_title(store, workspace_key);
+async fn workspace_header(store: Arc<dyn Store>, workspace_key: &str, agent_id: &str) -> String {
+    let title = store_workspace_title(store, workspace_key).await;
     match title {
         Some(t) => {
             format!("🤖 *{t}* · `{agent_id}` session\nreply in this channel to send to the agent")
@@ -787,16 +787,25 @@ fn workspace_header(store: &dyn Store, workspace_key: &str, agent_id: &str) -> S
 /// Resolve a workspace title from the store. Returns `None` if the
 /// store can't read or the workspace isn't there yet (race between
 /// `TerminalSpawned` and the polling tick that inserts the row).
-fn store_workspace_title(store: &dyn Store, workspace_key: &str) -> Option<String> {
-    let records = store.list_workspaces().ok()?;
-    let r = records.into_iter().find(|r| r.key == workspace_key)?;
-    let json = r.workspace_json?;
-    let ws: lazybox_core::Workspace = serde_json::from_str(&json).ok()?;
-    let title = ws
-        .primary_task()
-        .map(|t| t.title.clone())
-        .unwrap_or(ws.name);
-    Some(title)
+/// The full-table scan runs on `spawn_blocking` (issue #34's
+/// convention) — synchronous rusqlite under a contending process's
+/// busy_timeout would pin a runtime worker for seconds.
+async fn store_workspace_title(store: Arc<dyn Store>, workspace_key: &str) -> Option<String> {
+    let workspace_key = workspace_key.to_string();
+    tokio::task::spawn_blocking(move || {
+        let records = store.list_workspaces().ok()?;
+        let r = records.into_iter().find(|r| r.key == workspace_key)?;
+        let json = r.workspace_json?;
+        let ws: lazybox_core::Workspace = serde_json::from_str(&json).ok()?;
+        let title = ws
+            .primary_task()
+            .map(|t| t.title.clone())
+            .unwrap_or(ws.name);
+        Some(title)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Pick the label that fronts an Asking notification. `quiet_for` is
@@ -933,7 +942,7 @@ async fn build_status_reply(
         let m = server.terminal_sessions.lock().await;
         m.clone()
     };
-    let workspaces = load_workspaces_for_status(&*server.store);
+    let workspaces = load_workspaces_for_status(server.store.clone()).await;
     let workspace_titles: HashMap<String, String> = workspaces
         .iter()
         .map(|w| {
@@ -957,18 +966,31 @@ async fn build_status_reply(
 /// Pull the deserialized workspaces from the store. Mirrors
 /// `lib::load_workspaces` but inlined here because that helper is
 /// private; duplicating five lines is cheaper than re-exporting.
-fn load_workspaces_for_status(store: &dyn Store) -> Vec<lazybox_core::Workspace> {
-    let records = match store.list_workspaces() {
-        Ok(r) => r,
+/// Runs the store scan on `spawn_blocking` (issue #34's convention)
+/// so the sync rusqlite call can't pin a runtime worker on the 5s
+/// busy_timeout.
+async fn load_workspaces_for_status(store: Arc<dyn Store>) -> Vec<lazybox_core::Workspace> {
+    let scan = tokio::task::spawn_blocking(move || {
+        let records = match store.list_workspaces() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("chat status: list_workspaces failed: {e}");
+                return vec![];
+            }
+        };
+        records
+            .into_iter()
+            .filter_map(|r| serde_json::from_str(r.workspace_json.as_deref()?).ok())
+            .collect()
+    })
+    .await;
+    match scan {
+        Ok(workspaces) => workspaces,
         Err(e) => {
-            tracing::warn!("chat status: list_workspaces failed: {e}");
-            return vec![];
+            tracing::warn!("chat status: workspace scan task failed: {e}");
+            vec![]
         }
-    };
-    records
-        .into_iter()
-        .filter_map(|r| serde_json::from_str(r.workspace_json.as_deref()?).ok())
-        .collect()
+    }
 }
 
 /// Pure formatter — given the inbox state, render the status text.
@@ -1430,10 +1452,10 @@ mod tests {
             vec![],
         );
         let state = Arc::new(Mutex::new(RouterState::new()));
-        let store = EmptyStore;
+        let store: Arc<dyn Store> = Arc::new(EmptyStore);
         on_terminal_spawned(
             &provider,
-            &store,
+            store.clone(),
             &state,
             TerminalId(1),
             "ws-a",
@@ -1466,10 +1488,10 @@ mod tests {
             vec!["1700000000.000100".into()],
         );
         let state = Arc::new(Mutex::new(RouterState::new()));
-        let store = EmptyStore;
+        let store: Arc<dyn Store> = Arc::new(EmptyStore);
         on_terminal_spawned(
             &provider,
-            &store,
+            store.clone(),
             &state,
             TerminalId(42),
             "ws-a",
@@ -1508,10 +1530,10 @@ mod tests {
             vec!["ts-second".into(), "ts-first".into()],
         );
         let state = Arc::new(Mutex::new(RouterState::new()));
-        let store = EmptyStore;
+        let store: Arc<dyn Store> = Arc::new(EmptyStore);
         on_terminal_spawned(
             &provider,
-            &store,
+            store.clone(),
             &state,
             TerminalId(1),
             "ws-a",
@@ -1521,7 +1543,7 @@ mod tests {
         .await;
         on_terminal_spawned(
             &provider,
-            &store,
+            store.clone(),
             &state,
             TerminalId(2),
             "ws-a",
@@ -1713,10 +1735,10 @@ mod tests {
     async fn on_terminal_spawned_none_target_is_silent_noop() {
         let provider = MockProvider::new(TerminalTarget::NoSurface, vec![]);
         let state = Arc::new(Mutex::new(RouterState::new()));
-        let store = EmptyStore;
+        let store: Arc<dyn Store> = Arc::new(EmptyStore);
         on_terminal_spawned(
             &provider,
-            &store,
+            store.clone(),
             &state,
             TerminalId(1),
             "ws-a",

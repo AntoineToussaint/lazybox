@@ -41,6 +41,11 @@ struct MockInner {
     /// tests hold a spawn "mid-provision" to exercise the in-flight
     /// spawn races (duplicate collapse, Kill serialization).
     spawn_delay: Mutex<Option<std::time::Duration>>,
+    /// Keys `release()` was called for, in call order. The mock keeps
+    /// the session data around for post-mortem assertions (writes,
+    /// argv), so release only records — tests use `released_keys()` to
+    /// assert the pump teardown freed the backend slot.
+    released: Mutex<Vec<String>>,
 }
 
 struct MockSession {
@@ -176,6 +181,25 @@ impl MockBackend {
             .await
             .insert(key.into());
     }
+
+    /// Simulate the real backends' bounded-bridge drop: the chunk lands
+    /// in the replay ring (its `seq` is consumed) but is NOT delivered
+    /// to live subscribers — exactly what a full mpsc bridge or a
+    /// lagged broadcast produces. Lets tests exercise the pump's
+    /// seq-gap resync deterministically.
+    pub async fn emit_dropped(&self, key: &str, bytes: impl AsRef<[u8]>) {
+        let mut map = self.inner.sessions.lock().await;
+        let Some(session) = map.get_mut(key) else {
+            return;
+        };
+        session.last_seq += 1;
+        session.replay.extend_from_slice(bytes.as_ref());
+    }
+
+    /// Keys `release()` was called for so far, in call order.
+    pub async fn released_keys(&self) -> Vec<String> {
+        self.inner.released.lock().await.clone()
+    }
 }
 
 impl SessionBackend for MockBackend {
@@ -277,6 +301,12 @@ impl SessionBackend for MockBackend {
                 }
             }
             Ok(())
+        })
+    }
+
+    fn release<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            self.inner.released.lock().await.push(key.to_string());
         })
     }
 

@@ -63,7 +63,25 @@ static NEXT_TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
 /// silently reuse a surviving session's id.
 const TERMINAL_ID_HIGH_WATER_KEY: &str = "terminal-id-high-water";
 
+/// Serializes the seed → allocate → persist sequence of
+/// [`alloc_terminal_id`]. Without it two concurrent spawns could
+/// interleave as: A allocates 5, B allocates 6, B persists 6, A
+/// persists 5 — regressing the stored high-water mark so a restarted
+/// daemon re-issues 6 to a fresh terminal while a survivor's artifacts
+/// still reference it.
+static TERMINAL_ID_PERSIST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn alloc_terminal_id(store: &dyn lazybox_store::Store) -> TerminalId {
+    // The guard makes the read-max-allocate-persist below atomic with
+    // respect to every other in-process allocator, so the persisted
+    // mark is always max(stored, allocated). Allocation is rare (one
+    // per spawn) and the store calls are quick — a process-wide sync
+    // mutex is fine. Poisoning cannot corrupt anything here (the
+    // critical section only moves values forward), so a poisoned lock
+    // is simply re-entered.
+    let _guard = TERMINAL_ID_PERSIST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // `fetch_max` (not a one-shot seed) so the allocator is correct
     // even when several stores are seen in one process (tests) — the
     // counter only ever moves forward.
@@ -73,6 +91,9 @@ fn alloc_terminal_id(store: &dyn lazybox_store::Store) -> TerminalId {
         NEXT_TERMINAL_ID.fetch_max(high_water + 1, Ordering::Relaxed);
     }
     let id = NEXT_TERMINAL_ID.fetch_add(1, Ordering::Relaxed);
+    // Under the guard `id` is strictly greater than this store's
+    // persisted mark (the seed above raised the counter past it), so
+    // this write never moves the mark backwards.
     if let Err(e) = store.set_kv(TERMINAL_ID_HIGH_WATER_KEY, &id.to_string()) {
         tracing::warn!("terminal-id high-water mark: store write failed: {e}");
     }
@@ -727,18 +748,16 @@ pub async fn handle_spawn(
     // cached per-terminal so we only broadcast on transitions.
     let bus = config.bus.clone();
     let backend = config.backend.clone();
-    let terminals_map = config.terminals.clone();
-    let term_sessions_map = config.terminal_sessions.clone();
     let agent_states_map = config.agent_states.clone();
     let agent_detect_resets_map = config.agent_detect_resets.clone();
     let hook_driven_map = config.hook_driven_terminals.clone();
-    let prompt_submit_map = config.prompt_submit_signals.clone();
     let input_shapes_map = config.input_needed_shapes.clone();
     let terminal_meta_map = config.terminal_meta.clone();
-    let no_permission_map = config.no_permission_terminals.clone();
-    let on_main_map = config.on_main_terminals.clone();
-    let terminal_models_map = config.terminal_models.clone();
-    let store_for_pump = config.store.clone();
+    // Whole-config clone for the shared exit teardown
+    // (`teardown_exited_terminal`) — it sweeps every per-terminal map
+    // and the persisted kv rows, so it takes the config rather than a
+    // dozen individually cloned Arcs.
+    let config_for_pump = config.clone();
     let id_for_pump = terminal_id;
     let key_for_pump = backend_key.clone();
     let agent_for_pump: Option<std::sync::Arc<dyn lazybox_agents::Agent>> = match &kind {
@@ -903,6 +922,11 @@ pub async fn handle_spawn(
                 signaled_first_output = true;
                 check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
             }
+            // High-water mark of everything delivered downstream so far
+            // — the replay's `last_seq` at subscribe time, then advanced
+            // per forwarded chunk (or to the ring's seq after a gap
+            // resync).
+            let mut last_seq = sub.last_seq;
             loop {
                 tokio::select! {
                     // Biased, chunk arm first: pending output is always
@@ -920,9 +944,54 @@ pub async fn handle_spawn(
                 // chunk already covered by the replay (seq within the
                 // snapshot's high-water mark) must be dropped to avoid
                 // re-feeding the detector and re-emitting bytes.
-                if chunk.seq <= sub.last_seq {
+                if chunk.seq <= last_seq {
                     continue;
                 }
+                if chunk.seq > last_seq + 1 {
+                    // A chunk was dropped between the backend's reader
+                    // and this pump (bounded bridge overflow or broadcast
+                    // lag). The byte stream now has a hole — forwarding
+                    // the remainder would permanently desync every
+                    // client's VT parser (a torn escape sequence garbles
+                    // the grid). Resynchronize from the replay ring: the
+                    // reader pushes to the ring BEFORE broadcasting, so a
+                    // snapshot taken now covers both the dropped chunk
+                    // and this one. Clients replace the terminal's state
+                    // with the replay (`TerminalResync`), and the
+                    // state-detection buffer is rebuilt from the same
+                    // bytes so it can't scrape the torn stream either.
+                    let (replay, resync_seq) =
+                        resync_replay_after_gap(&*backend, &key_for_pump, chunk.seq, last_seq)
+                            .await;
+                    state_buf.clear();
+                    note_pty_activity(
+                        agent_for_pump.as_ref(),
+                        &mut state_buf,
+                        &replay,
+                        &agent_states_map,
+                        &bus,
+                        id_for_pump,
+                        &session_key_for_pump,
+                        &terminal_meta_map,
+                        &mut state_machine,
+                        &hook_driven_map,
+                    )
+                    .await;
+                    last_chunk_len = replay.len();
+                    if agent_for_pump.is_some() {
+                        quiet_deadline =
+                            Some(tokio::time::Instant::now() + PTY_QUIET_CLASSIFY_AFTER);
+                    }
+                    check_ready(&state_buf, &mut signaled_ready, &ready_signal_for_pump);
+                    let _ = bus.send(Event::TerminalResync {
+                        terminal_id: id_for_pump,
+                        replay,
+                        seq: resync_seq,
+                    });
+                    last_seq = resync_seq;
+                    continue;
+                }
+                last_seq = chunk.seq;
                 // The user just answered an InputNeeded prompt (Enter while
                 // the `?` pill was up). Drop the accumulated detection
                 // buffer so the just-answered prompt's markers can't
@@ -1013,37 +1082,7 @@ pub async fn handle_spawn(
             backend.wait_exit(&key_for_pump).await
         }
         .await;
-        let _ = bus.send(Event::TerminalExited {
-            terminal_id: id_for_pump,
-            exit_code,
-        });
-        // INTENTIONAL non-canonical sequence: terminals first (so
-        // `snapshot_terminals` stops seeing this id immediately) and
-        // terminal_meta LAST (so any snapshot that still saw it in
-        // terminals can resolve the meta lookup). Safe because no two
-        // locks are co-held — each `.lock().await.remove(...)` releases
-        // at end-of-statement. `crate::TERMINAL_MAP_LOCK_ORDER` applies
-        // to co-holding sites only.
-        terminals_map.lock().await.remove(&id_for_pump);
-        term_sessions_map.lock().await.remove(&id_for_pump);
-        agent_states_map.lock().await.remove(&id_for_pump);
-        agent_detect_resets_map.lock().await.remove(&id_for_pump);
-        hook_driven_map.lock().await.remove(&id_for_pump);
-        prompt_submit_map.lock().await.remove(&id_for_pump);
-        input_shapes_map.lock().await.remove(&id_for_pump);
-        terminal_meta_map.lock().await.remove(&id_for_pump);
-        no_permission_map.lock().await.remove(&id_for_pump);
-        on_main_map.lock().await.remove(&id_for_pump);
-        terminal_models_map.lock().await.remove(&id_for_pump);
-        let _ = store_for_pump.delete_kv(&format!("terminal:{key_for_pump}"));
-        let _ = store_for_pump.delete_kv(&format!("terminal-noperm:{key_for_pump}"));
-        let _ = store_for_pump.delete_kv(&format!("terminal-msg:{key_for_pump}"));
-        // Drop the per-session hook settings file we generated at spawn.
-        // Best-effort — a leftover file is harmless (it's overwritten by
-        // the next spawn that reuses the id, which can't happen anyway
-        // since ids are monotonic) but cleaning up keeps the runtime dir
-        // tidy. Reconstructed from the id, no bookkeeping needed.
-        let _ = std::fs::remove_file(hook_settings_path(id_for_pump));
+        teardown_exited_terminal(&config_for_pump, id_for_pump, &key_for_pump, exit_code).await;
     });
 
     // Schedule prompt injection. Drives the `f`-for-fix flow: the
@@ -2612,6 +2651,117 @@ fn detect_window(buf: &[u8]) -> &[u8] {
     &buf[buf.len().saturating_sub(DETECT_WINDOW)..]
 }
 
+/// Fetch the replay ring + covered seq for a pump that detected a seq
+/// gap (a chunk dropped on the backend's bounded bridge or a lagged
+/// broadcast). The reader thread pushes to the ring BEFORE
+/// broadcasting, so a snapshot taken after observing `gap_chunk_seq`
+/// covers every dropped chunk and the observed one. Degrades like the
+/// forwarder's resync path: on snapshot failure/timeout the replay is
+/// empty and clients reset to a blank grid that self-heals on the next
+/// output.
+///
+/// Returns `(replay, covered_seq)`; the caller emits
+/// `Event::TerminalResync` with them and resumes its stream from
+/// `covered_seq`.
+async fn resync_replay_after_gap(
+    backend: &dyn crate::backend::SessionBackend,
+    key: &str,
+    gap_chunk_seq: u64,
+    last_seq: u64,
+) -> (Vec<u8>, u64) {
+    tracing::warn!(
+        key,
+        last_seq,
+        chunk_seq = gap_chunk_seq,
+        "output seq gap — chunk(s) dropped upstream; resyncing from replay ring"
+    );
+    match tokio::time::timeout(SNAPSHOT_PER_SESSION_TIMEOUT, backend.snapshot(key)).await {
+        // The ring can only be AT or AHEAD of the observed chunk; max()
+        // guards the degenerate mock/test orderings.
+        Ok(Ok((replay, seq))) => (replay, seq.max(gap_chunk_seq)),
+        Ok(Err(e)) => {
+            tracing::warn!(key, "gap resync snapshot failed: {e}");
+            (Vec::new(), gap_chunk_seq)
+        }
+        Err(_) => {
+            tracing::warn!(key, "gap resync snapshot timed out");
+            (Vec::new(), gap_chunk_seq)
+        }
+    }
+}
+
+/// Exit teardown shared by `handle_spawn`'s output pump and
+/// `recover_sessions`' recovery pump: broadcast `TerminalExited`, sweep
+/// every per-terminal map, delete the persisted kv rows, release the
+/// backend's session slot, and drop the generated hook settings file.
+///
+/// One function on purpose — the recovery pump used to hand-roll a
+/// subset (terminals/terminal_meta/no_permission only), so entries
+/// later inserted for a recovered terminal (agent_states,
+/// hook_driven_terminals, input_needed_shapes, prompt_submit_signals)
+/// outlived it, and its `terminal:*`/`terminal-noperm:*`/
+/// `terminal-msg:*` kv rows accumulated in state.db forever.
+pub(crate) async fn teardown_exited_terminal(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    backend_key: &str,
+    exit_code: Option<i32>,
+) {
+    let _ = config.bus.send(Event::TerminalExited {
+        terminal_id,
+        exit_code,
+    });
+    // INTENTIONAL non-canonical sequence: terminals first (so
+    // `snapshot_terminals` stops seeing this id immediately) and
+    // terminal_meta LAST among the meta-bearing maps (so any snapshot
+    // that still saw it in terminals can resolve the meta lookup).
+    // Safe because no two locks are co-held — each
+    // `.lock().await.remove(...)` releases at end-of-statement.
+    // `crate::TERMINAL_MAP_LOCK_ORDER` applies to co-holding sites only.
+    config.terminals.lock().await.remove(&terminal_id);
+    config.terminal_sessions.lock().await.remove(&terminal_id);
+    config.agent_states.lock().await.remove(&terminal_id);
+    config.agent_detect_resets.lock().await.remove(&terminal_id);
+    config
+        .hook_driven_terminals
+        .lock()
+        .await
+        .remove(&terminal_id);
+    config
+        .prompt_submit_signals
+        .lock()
+        .await
+        .remove(&terminal_id);
+    config.input_needed_shapes.lock().await.remove(&terminal_id);
+    config.terminal_meta.lock().await.remove(&terminal_id);
+    config
+        .no_permission_terminals
+        .lock()
+        .await
+        .remove(&terminal_id);
+    config.on_main_terminals.lock().await.remove(&terminal_id);
+    config.terminal_models.lock().await.remove(&terminal_id);
+    let _ = config.store.delete_kv(&format!("terminal:{backend_key}"));
+    let _ = config
+        .store
+        .delete_kv(&format!("terminal-noperm:{backend_key}"));
+    let _ = config
+        .store
+        .delete_kv(&format!("terminal-msg:{backend_key}"));
+    // Release the backend's per-session slot (PTY fds, writer thread,
+    // replay ring). The exit has been observed by the time we're here,
+    // so this is a pure handle drop — for a self-exited session it's
+    // the ONLY release path: `kill` never ran, and before this call
+    // existed the slot lived in the backend map forever.
+    config.backend.release(backend_key).await;
+    // Drop the per-session hook settings file we generated at spawn.
+    // Best-effort — a leftover file is harmless (it's overwritten by
+    // the next spawn that reuses the id, which can't happen anyway
+    // since ids are monotonic) but cleaning up keeps the runtime dir
+    // tidy. Reconstructed from the id, no bookkeeping needed.
+    let _ = std::fs::remove_file(hook_settings_path(terminal_id));
+}
+
 /// Ingest one PTY output chunk for a terminal: append it to the rolling
 /// detection buffer and offer the state machine a `Working` reading.
 /// Bytes flowing IS the working signal (issue #289) — no screen-scrape
@@ -2651,7 +2801,14 @@ pub(crate) async fn note_pty_activity(
         return;
     };
     buf.extend_from_slice(bytes);
-    if buf.len() > STATE_BUF_CAP {
+    // Amortized trim: draining down to exactly STATE_BUF_CAP on every
+    // chunk memmoves the whole 32 KiB tail per (often tiny) status-bar
+    // tick. Let the buffer run to 2× cap and cut back to cap in one
+    // drain — same detection semantics (the detector only ever reads
+    // the DETECT_WINDOW tail, far inside the retained region) at O(1)
+    // amortized cost per byte, for at most one extra 32 KiB of
+    // transient memory per terminal.
+    if buf.len() > STATE_BUF_CAP * 2 {
         let drop = buf.len() - STATE_BUF_CAP;
         buf.drain(..drop);
     }
@@ -3679,9 +3836,7 @@ pub async fn recover_sessions(config: &ServerConfig) {
 
         let bus = config.bus.clone();
         let backend = config.backend.clone();
-        let terminals_map = config.terminals.clone();
-        let terminal_meta_map = config.terminal_meta.clone();
-        let no_permission_map = config.no_permission_terminals.clone();
+        let config_for_pump = config.clone();
         let key_for_pump = key.clone();
         // Broadcast Spawned before spawning the pump — same race
         // guard as the main spawn path.
@@ -3708,12 +3863,34 @@ pub async fn recover_sessions(config: &ServerConfig) {
                             seq: sub.last_seq,
                         });
                     }
+                    let mut last_seq = sub.last_seq;
                     while let Some(chunk) = sub.live.recv().await {
                         // Drop live chunks already covered by the replay
                         // (see `DaemonPty::subscribe`).
-                        if chunk.seq <= sub.last_seq {
+                        if chunk.seq <= last_seq {
                             continue;
                         }
+                        if chunk.seq > last_seq + 1 {
+                            // Same seq-gap recovery as the main pump: a
+                            // chunk was dropped upstream, so replace the
+                            // torn stream with the ring instead of
+                            // desyncing every client's VT parser.
+                            let (replay, resync_seq) = resync_replay_after_gap(
+                                &*backend,
+                                &key_for_pump,
+                                chunk.seq,
+                                last_seq,
+                            )
+                            .await;
+                            let _ = bus.send(Event::TerminalResync {
+                                terminal_id,
+                                replay,
+                                seq: resync_seq,
+                            });
+                            last_seq = resync_seq;
+                            continue;
+                        }
+                        last_seq = chunk.seq;
                         let _ = bus.send(Event::TerminalOutput {
                             terminal_id,
                             bytes: chunk.bytes,
@@ -3730,13 +3907,11 @@ pub async fn recover_sessions(config: &ServerConfig) {
                     None
                 }
             };
-            let _ = bus.send(Event::TerminalExited {
-                terminal_id,
-                exit_code,
-            });
-            terminals_map.lock().await.remove(&terminal_id);
-            terminal_meta_map.lock().await.remove(&terminal_id);
-            no_permission_map.lock().await.remove(&terminal_id);
+            // Identical teardown to the main pump (shared helper): the
+            // old hand-rolled subset leaked hook-era map entries and
+            // never deleted the persisted kv rows for recovered
+            // sessions.
+            teardown_exited_terminal(&config_for_pump, terminal_id, &key_for_pump, exit_code).await;
         });
     }
 }
@@ -3757,11 +3932,16 @@ pub(crate) async fn persist_terminal_meta(
             return;
         }
     };
-    if let Err(e) = config
-        .store
-        .set_kv(&format!("terminal:{backend_key}"), &payload)
-    {
-        tracing::warn!("persist terminal_meta: store write failed: {e}");
+    // Store IO on `spawn_blocking` (issue #34's convention): sync
+    // rusqlite under a contending process's 5s busy_timeout would
+    // otherwise pin a runtime worker. Same for the sibling helpers
+    // below.
+    let store = config.store.clone();
+    let kv_key = format!("terminal:{backend_key}");
+    match tokio::task::spawn_blocking(move || store.set_kv(&kv_key, &payload)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("persist terminal_meta: store write failed: {e}"),
+        Err(e) => tracing::warn!("persist terminal_meta: store task failed: {e}"),
     }
 }
 
@@ -3771,9 +3951,11 @@ async fn load_terminal_meta(
     config: &ServerConfig,
     backend_key: &str,
 ) -> Option<(SessionKey, TerminalKind)> {
-    let raw = config
-        .store
-        .get_kv(&format!("terminal:{backend_key}"))
+    let store = config.store.clone();
+    let kv_key = format!("terminal:{backend_key}");
+    let raw = tokio::task::spawn_blocking(move || store.get_kv(&kv_key))
+        .await
+        .ok()?
         .ok()
         .flatten()?;
     let parsed: (String, TerminalKind) = serde_json::from_str(&raw).ok()?;
@@ -3790,21 +3972,26 @@ async fn persist_no_permission(config: &ServerConfig, backend_key: &str, skip_pe
     if !skip_permissions {
         return;
     }
-    if let Err(e) = config
-        .store
-        .set_kv(&format!("terminal-noperm:{backend_key}"), "1")
-    {
-        tracing::warn!("persist terminal no-permission flag: store write failed: {e}");
+    let store = config.store.clone();
+    let kv_key = format!("terminal-noperm:{backend_key}");
+    match tokio::task::spawn_blocking(move || store.set_kv(&kv_key, "1")).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!("persist terminal no-permission flag: store write failed: {e}")
+        }
+        Err(e) => tracing::warn!("persist terminal no-permission flag: store task failed: {e}"),
     }
 }
 
 /// Inverse of `persist_no_permission`. True when the surviving session
 /// was launched in no-permission mode.
 async fn load_no_permission(config: &ServerConfig, backend_key: &str) -> bool {
-    config
-        .store
-        .get_kv(&format!("terminal-noperm:{backend_key}"))
+    let store = config.store.clone();
+    let kv_key = format!("terminal-noperm:{backend_key}");
+    tokio::task::spawn_blocking(move || store.get_kv(&kv_key))
+        .await
         .ok()
+        .and_then(Result::ok)
         .flatten()
         .is_some()
 }
@@ -3824,20 +4011,25 @@ pub async fn handle_record_user_message(
         tracing::trace!("record user message for unknown terminal {terminal_id:?}");
         return;
     };
-    if let Err(e) = config
-        .store
-        .set_kv(&format!("terminal-msg:{backend_key}"), message)
-    {
-        tracing::warn!("persist terminal user message: store write failed: {e}");
+    let store = config.store.clone();
+    let kv_key = format!("terminal-msg:{backend_key}");
+    let message = message.to_string();
+    match tokio::task::spawn_blocking(move || store.set_kv(&kv_key, &message)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("persist terminal user message: store write failed: {e}"),
+        Err(e) => tracing::warn!("persist terminal user message: store task failed: {e}"),
     }
 }
 
 /// Read back the value `handle_record_user_message` stored, or `None`
-/// when the terminal has no recorded prompt.
-fn load_user_message(config: &ServerConfig, backend_key: &str) -> Option<String> {
-    config
-        .store
-        .get_kv(&format!("terminal-msg:{backend_key}"))
+/// when the terminal has no recorded prompt. Async since the
+/// sync-rusqlite offload (issue #34's spawn_blocking convention).
+async fn load_user_message(config: &ServerConfig, backend_key: &str) -> Option<String> {
+    let store = config.store.clone();
+    let kv_key = format!("terminal-msg:{backend_key}");
+    tokio::task::spawn_blocking(move || store.get_kv(&kv_key))
+        .await
+        .ok()?
         .ok()
         .flatten()
 }
@@ -3923,7 +4115,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
             no_permission: no_permission.contains(&id),
             on_main: on_main.contains(&id),
             model_label: terminal_models.get(&id).cloned(),
-            last_user_message: load_user_message(config, &key),
+            last_user_message: load_user_message(config, &key).await,
             terminal_id: id,
             session_key,
             kind,
@@ -4612,6 +4804,51 @@ mod tests {
         let fresh = lazybox_store::MemoryStore::new();
         let next = alloc_terminal_id(&fresh);
         assert!(next.0 > id.0);
+    }
+
+    /// Regression: concurrent allocations must never regress the
+    /// persisted high-water mark. Before the persist lock, A could
+    /// allocate 5, B allocate 6 and persist 6, then A persist 5 — a
+    /// restart would re-issue 6 to a fresh terminal while a survivor's
+    /// artifacts still referenced it. With the fix, the stored mark
+    /// after any concurrent burst is exactly the max allocated id.
+    #[test]
+    fn concurrent_allocations_never_regress_persisted_high_water() {
+        use lazybox_store::Store;
+        let store = std::sync::Arc::new(lazybox_store::MemoryStore::new());
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let store = store.clone();
+            handles.push(std::thread::spawn(move || {
+                (0..25)
+                    .map(|_| alloc_terminal_id(&*store).0)
+                    .collect::<Vec<u64>>()
+            }));
+        }
+        let mut ids: Vec<u64> = Vec::new();
+        for h in handles {
+            ids.extend(h.join().expect("allocator thread panicked"));
+        }
+
+        // Uniqueness: 200 allocations, 200 distinct ids.
+        let mut deduped = ids.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(deduped.len(), ids.len(), "duplicate terminal id issued");
+
+        let max_id = *ids.iter().max().expect("some ids allocated");
+        let persisted: u64 = store
+            .get_kv(TERMINAL_ID_HIGH_WATER_KEY)
+            .unwrap()
+            .expect("mark persisted")
+            .parse()
+            .unwrap();
+        assert_eq!(
+            persisted, max_id,
+            "persisted high-water mark must equal the max allocated id, \
+             not whichever allocator happened to write last"
+        );
     }
 
     /// Issue #105: a submitted prompt recorded via

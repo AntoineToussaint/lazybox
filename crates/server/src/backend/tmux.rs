@@ -706,17 +706,51 @@ impl SessionBackend for TmuxBackend {
         key: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
         Box::pin(async move {
-            // Drop our slot first so subsequent ops are NotFound.
+            // Kill the tmux session FIRST, before dropping our slot.
+            // Removing the slot up front made a failed kill
+            // unretryable: a timed-out/unreachable tmux left the
+            // session alive but the map empty, so a second Close
+            // no-op'd forever.
+            //
+            // Idempotent: a session that's already gone makes tmux
+            // exit non-zero ("can't find session" / "no server
+            // running") — that's success for our purposes. Only a
+            // TRANSPORT failure (invoke error, timeout) aborts and
+            // keeps the slot so the caller can retry.
+            match self.tmux(&["kill-session", "-t", key]).await {
+                Ok(_) => {}
+                Err(e @ BackendError::Other(_)) => {
+                    let msg = e.to_string();
+                    if msg.contains("timed out") || msg.contains("tmux invoke") {
+                        tracing::warn!(
+                            key,
+                            "tmux kill-session failed — keeping slot for retry: {msg}"
+                        );
+                        return Err(e);
+                    }
+                    // Non-zero exit: session already gone. Fall through
+                    // to release the conduit.
+                }
+                Err(e) => return Err(e),
+            }
+            // Session is down (or never existed) — drop the attach
+            // client conduit and its slot.
             let slot = self.sessions.lock().await.remove(key);
             if let Some(slot) = slot {
                 slot.client.kill();
             }
-            // Kill the tmux session. Idempotent: if the session is
-            // already gone tmux exits non-zero — we ignore that. Real
-            // failures (tmux not on PATH) will already have surfaced
-            // at spawn time.
-            let _ = self.tmux(&["kill-session", "-t", key]).await;
             Ok(())
+        })
+    }
+
+    fn release<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            // Pump-teardown path: the attach client already EOF'd (the
+            // session ended, or the client detached). Drop only OUR
+            // conduit slot — never `kill-session`: on a detach the
+            // underlying tmux session may still be alive, and it must
+            // stay discoverable for restart recovery.
+            self.sessions.lock().await.remove(key);
         })
     }
 
@@ -864,9 +898,10 @@ impl SessionBackend for TmuxBackend {
                                 }) {
                                     Ok(()) => {}
                                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                        // Drop the chunk — the consumer's
-                                        // seq-gap detection schedules a
-                                        // resync from the replay ring.
+                                        // Drop the chunk — the spawn pump's
+                                        // seq-gap detection (`spawn_handler`)
+                                        // sees the hole on the next delivered
+                                        // chunk and resyncs from the ring.
                                         tracing::debug!(
                                             key = %bridge_key,
                                             seq = c.seq,

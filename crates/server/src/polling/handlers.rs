@@ -507,18 +507,31 @@ pub async fn handle_set_labels(
 
 /// Handle `Command::FetchRepoLabels`: pull the workspace repo's full
 /// label set and broadcast `Event::RepoLabels` so the TUI can
-/// populate the picker. Silent on failure (we just don't broadcast),
-/// the picker then falls back to whatever labels are already on the
-/// task — same UX as a cold network.
+/// populate the picker. On failure, broadcast a retryable
+/// `ProviderError` with source `"repo-labels"` — the client is
+/// waiting on this reply to mount the picker, and staying silent left
+/// its pending request armed forever with no picker and no error. On
+/// that failure event the client falls back to a picker built from
+/// the labels already on the task (or a clear footer error when the
+/// task carries none).
 pub async fn handle_fetch_repo_labels(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let emit_err = |msg: &str| {
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("repo-labels", msg));
+    };
     let Some(ws) = load_workspace(config, &workspace_key) else {
         tracing::debug!("fetch_repo_labels: workspace {workspace_key} not found");
+        emit_err(&format!(
+            "fetch repo labels: workspace {workspace_key} not found"
+        ));
         return;
     };
     let provider = match build_provider_for_workspace(&workspace_key).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("fetch_repo_labels: {e}");
+            emit_err(&e);
             return;
         }
     };
@@ -532,6 +545,7 @@ pub async fn handle_fetch_repo_labels(config: &ServerConfig, workspace_key: Work
         }
         Err(e) => {
             tracing::warn!("fetch_repo_labels {workspace_key}: {e:?}");
+            emit_err(&format!("label fetch failed: {e}"));
         }
     }
 }
@@ -707,10 +721,18 @@ fn merge_pr_details_into_workspace(ws: &mut Workspace, details: lazybox_gh::PrDe
 /// under itself. Counts are emitted on `Event::CleanWorktreesCompleted`
 /// so the TUI can surface "cleaned N · kept M (active)".
 pub async fn handle_clean_worktrees(config: &ServerConfig) {
-    let records = match config.store.list_workspaces() {
-        Ok(w) => w,
-        Err(e) => {
+    // Full-table scan on `spawn_blocking` (issue #34's convention):
+    // synchronous rusqlite under a contending process's busy_timeout
+    // (5s) would pin a runtime worker.
+    let store = config.store.clone();
+    let records = match tokio::task::spawn_blocking(move || store.list_workspaces()).await {
+        Ok(Ok(w)) => w,
+        Ok(Err(e)) => {
             tracing::warn!("clean_worktrees: list_workspaces failed: {e}");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("clean_worktrees: list_workspaces task failed: {e}");
             return;
         }
     };
@@ -795,36 +817,50 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
 /// inspector can surface the "session ended but worktree still here"
 /// orphan category. Live (`Active`/`Idle`/`Asking`) sessions don't
 /// move the orphan needle on their own.
-fn collect_tracked_sessions(config: &ServerConfig) -> Vec<lazybox_git_ops::TrackedSession> {
-    let records = match config.store.list_workspaces() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("inspect_worktrees: list_workspaces failed: {e}");
-            return Vec::new();
+/// Async since the sync-rusqlite offload: the scan + JSON decode run
+/// on `spawn_blocking` (issue #34's convention) so a contending
+/// process's 5s busy_timeout can't pin a runtime worker.
+async fn collect_tracked_sessions(config: &ServerConfig) -> Vec<lazybox_git_ops::TrackedSession> {
+    let store = config.store.clone();
+    let scan = tokio::task::spawn_blocking(move || {
+        let records = match store.list_workspaces() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("inspect_worktrees: list_workspaces failed: {e}");
+                return Vec::new();
+            }
+        };
+        let mut out: Vec<lazybox_git_ops::TrackedSession> = Vec::with_capacity(records.len() * 2);
+        for record in records {
+            let Some(json) = record.workspace_json else {
+                continue;
+            };
+            let Ok(workspace) = serde_json::from_str::<lazybox_core::Workspace>(&json) else {
+                continue;
+            };
+            for session in workspace.sessions {
+                let is_stopped = matches!(session.state, lazybox_core::SessionRunState::Stopped);
+                // First 8 chars of the UUID — enough to identify a row
+                // in the modal without leaking the whole id into the UI.
+                let raw = session.id.to_string();
+                let session_id = raw.get(..8).unwrap_or(&raw).to_string();
+                out.push(lazybox_git_ops::TrackedSession {
+                    session_id,
+                    worktree_path: session.worktree_path,
+                    is_stopped,
+                });
+            }
         }
-    };
-    let mut out: Vec<lazybox_git_ops::TrackedSession> = Vec::with_capacity(records.len() * 2);
-    for record in records {
-        let Some(json) = record.workspace_json else {
-            continue;
-        };
-        let Ok(workspace) = serde_json::from_str::<lazybox_core::Workspace>(&json) else {
-            continue;
-        };
-        for session in workspace.sessions {
-            let is_stopped = matches!(session.state, lazybox_core::SessionRunState::Stopped);
-            // First 8 chars of the UUID — enough to identify a row
-            // in the modal without leaking the whole id into the UI.
-            let raw = session.id.to_string();
-            let session_id = raw.get(..8).unwrap_or(&raw).to_string();
-            out.push(lazybox_git_ops::TrackedSession {
-                session_id,
-                worktree_path: session.worktree_path,
-                is_stopped,
-            });
+        out
+    })
+    .await;
+    match scan {
+        Ok(tracked) => tracked,
+        Err(e) => {
+            tracing::warn!("inspect_worktrees: tracked-session scan task failed: {e}");
+            Vec::new()
         }
     }
-    out
 }
 
 fn to_dto(row: lazybox_git_ops::WorktreeInspection) -> lazybox_ipc::WorktreeInspectionDto {
@@ -859,7 +895,7 @@ pub(crate) async fn inspect_worktrees_with(
     config: &ServerConfig,
     mgr: &lazybox_git_ops::WorktreeManager,
 ) {
-    let tracked = collect_tracked_sessions(config);
+    let tracked = collect_tracked_sessions(config).await;
     let inspections = match mgr.inspect_worktrees(&tracked).await {
         Ok(rows) => rows.into_iter().map(to_dto).collect::<Vec<_>>(),
         Err(e) => {
@@ -899,7 +935,7 @@ pub(crate) async fn delete_orphaned_worktree_with(
     path: std::path::PathBuf,
     force: bool,
 ) {
-    let tracked = collect_tracked_sessions(config);
+    let tracked = collect_tracked_sessions(config).await;
 
     // Re-inspect, then look up this path in the report. Cheap: one
     // walk under `worktrees/` + a few git calls — far less work than
@@ -1028,7 +1064,7 @@ pub(crate) async fn prompt_merged_pr_removal_with(
     let active_terminal_count = count_live_terminals(config, key).await;
 
     let session_paths = workspace_worktree_paths(&workspace);
-    let tracked = collect_tracked_sessions(config);
+    let tracked = collect_tracked_sessions(config).await;
     let has_local_work = match mgr.inspect_worktrees(&tracked).await {
         Ok(rows) => rows.iter().any(|row| {
             session_paths.contains(&canon(&row.path))
@@ -1105,7 +1141,7 @@ pub(crate) async fn remove_merged_workspace_with(
     // cwd — inspect to recover each worktree's bare clone (needed for
     // `git worktree remove`), then force-delete. The confirm modal
     // already warned about any uncommitted/unpushed work.
-    let tracked = collect_tracked_sessions(config);
+    let tracked = collect_tracked_sessions(config).await;
     let inspections = match mgr.inspect_worktrees(&tracked).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -1220,7 +1256,7 @@ pub(crate) async fn cleanup_merged_worktrees_with(
     };
     let live_keys = live_workspace_keys(config).await;
 
-    let tracked = collect_tracked_sessions(config);
+    let tracked = collect_tracked_sessions(config).await;
     let inspections = match mgr.inspect_worktrees(&tracked).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -1337,7 +1373,7 @@ pub(crate) async fn reap_safe_workspace_worktrees_with(
     };
     let live_keys = live_workspace_keys(config).await;
 
-    let tracked = collect_tracked_sessions(config);
+    let tracked = collect_tracked_sessions(config).await;
     let inspections = match mgr.inspect_worktrees(&tracked).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -2557,5 +2593,45 @@ mod inspect_tests {
             load_workspace(&config, &key).is_none(),
             "row should be gone"
         );
+    }
+}
+
+#[cfg(test)]
+mod fetch_repo_labels_tests {
+    //! `handle_fetch_repo_labels` must never fail silently: the client
+    //! is waiting on a reply to mount its label picker, so every
+    //! failure path broadcasts a `ProviderError` with the
+    //! `"repo-labels"` source the client's fallback keys on.
+    use super::*;
+    use lazybox_ipc::Event;
+    use lazybox_store::MemoryStore;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn fetch_failure_broadcasts_repo_labels_provider_error() {
+        let config = crate::ServerConfig::with_store(Arc::new(MemoryStore::new()));
+        let mut rx = config.bus.subscribe();
+
+        // Unknown workspace — the cheapest hermetic failure path
+        // (returns before any provider/network is touched).
+        handle_fetch_repo_labels(&config, WorkspaceKey::new("github-o-r-404")).await;
+
+        let evt = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("event timeout")
+            .expect("event");
+        match evt {
+            Event::ProviderError {
+                source,
+                message,
+                kind,
+                ..
+            } => {
+                assert_eq!(source, "repo-labels", "client fallback keys on this source");
+                assert!(message.contains("not found"), "got {message:?}");
+                assert_eq!(kind, "retryable");
+            }
+            other => panic!("expected a repo-labels ProviderError, got {other:?}"),
+        }
     }
 }

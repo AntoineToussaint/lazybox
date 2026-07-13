@@ -130,6 +130,25 @@ pub trait SessionBackend: Send + Sync + 'static {
         key: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>>;
 
+    /// Drop the backend's in-process handle (slot) for a session whose
+    /// exit has already been observed, WITHOUT terminating anything.
+    ///
+    /// The daemon's output-pump teardown calls this once the session's
+    /// exit is seen, so backends that keep per-session state (PTY fds,
+    /// writer threads, replay rings) release it even when the child
+    /// exited on its own — `kill` only runs for user-driven closes, so
+    /// without this hook a self-exiting agent leaked its slot forever.
+    ///
+    /// Deliberately distinct from `kill`: a tmux attach-client EOF can
+    /// outlive the tmux session it was attached to, and releasing the
+    /// dead conduit must not `kill-session` a survivor that restart
+    /// recovery should rediscover. Default: no-op, for backends without
+    /// per-session slots (the mock records the call for tests).
+    fn release<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        let _ = key;
+        Box::pin(async {})
+    }
+
     /// Sessions the backend currently knows about. Used at server
     /// startup to rediscover surviving sessions (tmux scenario);
     /// returns empty for ephemeral backends like raw-pty.

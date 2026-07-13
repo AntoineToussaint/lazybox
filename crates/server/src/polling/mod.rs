@@ -2263,10 +2263,18 @@ pub async fn rescope_with_state(
     // populates this.
     let scope_by_source = &outcome.source_scopes;
 
-    let records = match config.store.list_workspaces() {
-        Ok(r) => r,
-        Err(e) => {
+    // Full-table scan on `spawn_blocking` (issue #34's convention):
+    // synchronous rusqlite under a contending process (busy_timeout =
+    // 5s) would otherwise pin this runtime worker for seconds.
+    let store = config.store.clone();
+    let records = match tokio::task::spawn_blocking(move || store.list_workspaces()).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
             tracing::warn!("rescope: list_workspaces failed: {e}");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("rescope: list_workspaces task failed: {e}");
             return;
         }
     };
@@ -3036,6 +3044,17 @@ async fn upsert_with_context(config: &ServerConfig, ctx: &mut UpsertContext, tas
 /// "route to PR workspace" path can reuse the same write/broadcast
 /// behaviour without duplicating it.
 async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, task: Task) {
+    // LOST-UPDATE GUARD: this function is a load→modify→commit that
+    // spans awaits (`prepare_upsert` → `commit_merge`). Detached
+    // mutation handlers (mark-read, snooze, layout) run concurrently
+    // on the serve loop's JoinSet and do their own load-modify-save
+    // on the SAME kv row; without serialization, a tick that loaded a
+    // pre-mark copy here would commit it after the user's mark landed
+    // — silently reverting the mark. Held from before the first load
+    // until after the commit; released before the terminal-transition
+    // tail, which prompts/cleans through its own paths and must not
+    // nest under this guard.
+    let ws_guard = config.lock_workspace(key.as_str()).await;
     // 0. TERMINAL-STATE DETECTION: cheap pre-check (no IO) gates the
     //    store read — only a PR observed Merged or an issue observed
     //    Closed can trigger cleanup. We snapshot the previous state
@@ -3101,6 +3120,7 @@ async fn upsert_into_workspace_key(config: &ServerConfig, key: &WorkspaceKey, ta
     //    lands, so a cancellation (the 15s per-task upsert timeout)
     //    can't strand the moved sessions in neither stored workspace.
     commit_merge(config, workspace, pending_merges).await;
+    drop(ws_guard);
 
     // 3. TERMINAL: the PR merged or the issue closed → either reap its
     //    safe-to-delete worktrees silently (when
@@ -3321,6 +3341,46 @@ pub(super) fn commit_upsert(config: &ServerConfig, key: &WorkspaceKey, workspace
     let _ = config
         .bus
         .send(Event::WorkspaceUpserted(Box::new(workspace)));
+}
+
+/// [`commit_upsert`] with the store round-trip moved onto
+/// `spawn_blocking` (issue #34's convention): the no-change compare
+/// re-reads the row and the save rewrites it — synchronous rusqlite
+/// that can pin a runtime worker for up to the 5s busy_timeout when
+/// another process contends on the DB. Async callers use this; the
+/// sync `commit_upsert` remains for the synchronous mutation helpers
+/// (`mutate.rs`, startup migrations) that cannot await.
+pub(super) async fn commit_upsert_offloaded(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    workspace: Workspace,
+) {
+    let config_owned = config.clone();
+    let key_owned = key.clone();
+    if let Err(e) =
+        tokio::task::spawn_blocking(move || commit_upsert(&config_owned, &key_owned, workspace))
+            .await
+    {
+        tracing::error!(
+            workspace_key = %key.as_str(),
+            "commit_upsert blocking task failed: {e}"
+        );
+    }
+}
+
+/// [`load_workspace`] on `spawn_blocking` — same offload rationale as
+/// [`commit_upsert_offloaded`]. A join failure reads as "not found";
+/// callers already treat that as a benign no-op.
+pub(super) async fn load_workspace_offloaded(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+) -> Option<Workspace> {
+    let config_owned = config.clone();
+    let key_owned = key.clone();
+    tokio::task::spawn_blocking(move || load_workspace(&config_owned, &key_owned))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Ensure a Project record exists for the workspace's parent project,
@@ -3794,7 +3854,7 @@ async fn commit_merge(
 ) {
     crate::spawn_handler::migrate_session_paths_if_needed(&mut pr_ws).await;
     let pr_key = pr_ws.key.clone();
-    commit_upsert(config, &pr_key, pr_ws);
+    commit_upsert_offloaded(config, &pr_key, pr_ws).await;
     finalize_issue_merges(config, &pr_key, pending);
 }
 
@@ -3807,7 +3867,10 @@ async fn commit_merge(
 /// commit path didn't re-run the merge — the issue workspace stalled
 /// standalone until the next full PR poll.
 pub(super) async fn collapse_closing_issues_for(config: &ServerConfig, key: &WorkspaceKey) {
-    let Some(mut workspace) = load_workspace(config, key) else {
+    // Same lost-update guard as `upsert_into_workspace_key`: this is
+    // a load→modify→commit spanning awaits on the PR workspace's row.
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
         return;
     };
     let pending = merge_closing_issue_workspaces(config, &mut workspace).await;
@@ -4356,24 +4419,30 @@ pub fn migrate_legacy_sandbox(config: &ServerConfig) {
 /// Set or clear the workspace's `snoozed_until` timestamp. `None`
 /// un-snoozes. Persists + broadcasts so the sidebar's mailbox-aware
 /// rendering re-categorises the row.
-pub fn set_snooze(config: &ServerConfig, key: &WorkspaceKey, until: Option<chrono::DateTime<Utc>>) {
-    let Some(mut workspace) = load_workspace(config, key) else {
+pub async fn set_snooze(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    until: Option<chrono::DateTime<Utc>>,
+) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
         return;
     };
     workspace.snoozed_until = until;
-    commit_upsert(config, key, workspace);
+    commit_upsert_offloaded(config, key, workspace).await;
 }
 
 /// Persist the workspace's "auto-merge on green" arm. Mirrors
 /// [`set_snooze`]: load, flip the field, commit (which persists the
 /// JSON blob and broadcasts `WorkspaceUpserted` so every TUI sees the
 /// new arm state). The merge decision itself stays client-side.
-pub fn set_auto_merge_on_green(config: &ServerConfig, key: &WorkspaceKey, enabled: bool) {
-    let Some(mut workspace) = load_workspace(config, key) else {
+pub async fn set_auto_merge_on_green(config: &ServerConfig, key: &WorkspaceKey, enabled: bool) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
         return;
     };
     workspace.auto_merge_on_green = enabled;
-    commit_upsert(config, key, workspace);
+    commit_upsert_offloaded(config, key, workspace).await;
 }
 
 /// Delete a workspace + all its sessions from the store. Broadcasts
@@ -4573,13 +4642,14 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
 /// `WorkspaceUpserted` so other clients see the new layout.
 ///
 /// No-op when the workspace or session can't be found.
-pub fn set_session_layout(
+pub async fn set_session_layout(
     config: &ServerConfig,
     key: &WorkspaceKey,
     session_id: lazybox_core::SessionId,
     layout: lazybox_core::SessionLayout,
 ) {
-    let Some(mut workspace) = load_workspace(config, key) else {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
         return;
     };
     let Some(session) = workspace.sessions.iter_mut().find(|s| s.id == session_id) else {
@@ -4587,7 +4657,7 @@ pub fn set_session_layout(
         return;
     };
     session.layout = layout;
-    commit_upsert(config, key, workspace);
+    commit_upsert_offloaded(config, key, workspace).await;
 }
 
 /// Apply a partial-mark to one activity row. Used by the TUI's
@@ -4599,17 +4669,21 @@ pub fn set_session_layout(
 /// range — both are user-driven inputs and we don't want a TUI race
 /// (poll deletes a workspace while the user hovers) to crash the
 /// daemon.
-pub fn mark_activity_read(config: &ServerConfig, key: &WorkspaceKey, index: usize) {
-    apply_activity_mark(config, key, index, /*read=*/ true);
+pub async fn mark_activity_read(config: &ServerConfig, key: &WorkspaceKey, index: usize) {
+    apply_activity_mark(config, key, index, /*read=*/ true).await;
 }
 
 /// Reverse of `mark_activity_read`. `z` undo binds here.
-pub fn unmark_activity_read(config: &ServerConfig, key: &WorkspaceKey, index: usize) {
-    apply_activity_mark(config, key, index, /*read=*/ false);
+pub async fn unmark_activity_read(config: &ServerConfig, key: &WorkspaceKey, index: usize) {
+    apply_activity_mark(config, key, index, /*read=*/ false).await;
 }
 
-fn apply_activity_mark(config: &ServerConfig, key: &WorkspaceKey, index: usize, read: bool) {
-    let Some(mut workspace) = load_workspace(config, key) else {
+async fn apply_activity_mark(config: &ServerConfig, key: &WorkspaceKey, index: usize, read: bool) {
+    // Lost-update guard: without it a poll tick's prepare→commit
+    // window could overwrite this mark with the pre-mark copy it
+    // loaded (see `upsert_into_workspace_key`).
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
         tracing::debug!("apply_activity_mark: no record for {key}");
         return;
     };
@@ -4618,7 +4692,7 @@ fn apply_activity_mark(config: &ServerConfig, key: &WorkspaceKey, index: usize, 
     } else {
         workspace.unmark_activity_read(index);
     }
-    commit_upsert(config, key, workspace);
+    commit_upsert_offloaded(config, key, workspace).await;
 }
 
 /// Apply the user's "mark every activity item read" gesture to a
@@ -4629,14 +4703,190 @@ fn apply_activity_mark(config: &ServerConfig, key: &WorkspaceKey, index: usize, 
 /// `upsert`; this function flips them all-read on demand.
 ///
 /// No-op if the workspace isn't in the store.
-pub fn mark_workspace_read(config: &ServerConfig, key: &WorkspaceKey) {
-    let Some(mut workspace) = load_workspace(config, key) else {
+pub async fn mark_workspace_read(config: &ServerConfig, key: &WorkspaceKey) {
+    // Lost-update guard: serializes against the poll tick's
+    // prepare→commit on the same row, which used to be able to save a
+    // pre-mark copy over this write (regression test:
+    // `workspace_lock_tests::tick_merge_cannot_revert_concurrent_mark_read`).
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
         tracing::debug!("mark_workspace_read: no record for {key}");
         return;
     };
     workspace.mark_read_all();
     workspace.last_viewed_at = Some(Utc::now());
-    commit_upsert(config, key, workspace);
+    commit_upsert_offloaded(config, key, workspace).await;
+}
+
+#[cfg(test)]
+mod workspace_lock_tests {
+    use super::*;
+    use lazybox_core::{TaskId, TaskRole, TaskState};
+    use lazybox_store::{MemoryStore, Store, StoreError};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Store wrapper that parks the FIRST `workspace:*` read until the
+    /// test releases it — a deterministic way to hold a poll tick
+    /// inside its load→modify→commit window while a user mutation
+    /// races it.
+    struct GateStore {
+        inner: MemoryStore,
+        armed: AtomicBool,
+        entered_tx: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        release_rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl Store for GateStore {
+        fn get_kv(&self, key: &str) -> Result<Option<String>, StoreError> {
+            // Read FIRST, then park: the racing tick must walk away
+            // holding the PRE-mark copy (the load already happened)
+            // while the concurrent mark lands — that's the lost-update
+            // window. Parking before the read would hand the tick the
+            // post-mark value and mask the bug.
+            let result = self.inner.get_kv(key);
+            if key.starts_with("workspace:") && self.armed.swap(false, Ordering::SeqCst) {
+                if let Some(tx) = self.entered_tx.lock().expect("gate lock").take() {
+                    let _ = tx.send(());
+                }
+                if let Some(rx) = self.release_rx.lock().expect("gate lock").take() {
+                    // Blocking a worker thread is fine: the test runs
+                    // on a multi-thread runtime with spare workers.
+                    let _ = rx.recv_timeout(std::time::Duration::from_secs(10));
+                }
+            }
+            result
+        }
+
+        fn set_kv(&self, key: &str, value: &str) -> Result<(), StoreError> {
+            self.inner.set_kv(key, value)
+        }
+
+        fn delete_kv(&self, key: &str) -> Result<(), StoreError> {
+            self.inner.delete_kv(key)
+        }
+
+        fn list_workspaces(&self) -> Result<Vec<lazybox_store::WorkspaceRecord>, StoreError> {
+            self.inner.list_workspaces()
+        }
+
+        fn list_projects(&self) -> Result<Vec<lazybox_store::ProjectRecord>, StoreError> {
+            self.inner.list_projects()
+        }
+    }
+
+    fn open_pr_task() -> Task {
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/1".into(),
+            repo: Some("o/r".into()),
+            branch: Some("feat".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            closes_issues: vec![],
+        }
+    }
+
+    /// Regression for the lost-update race: a poll tick's
+    /// load→modify→commit (`upsert_into_workspace_key`) interleaving
+    /// with a user's `mark_workspace_read` used to save the tick's
+    /// pre-mark copy AFTER the mark landed, silently reverting it.
+    ///
+    /// The gate parks the tick inside `prepare_upsert`'s workspace
+    /// load; the mark fires while the tick is parked. With per-key
+    /// serialization the mark queues behind the tick's guard and
+    /// applies AFTER its commit, so the stored row keeps
+    /// `last_viewed_at`. Without the lock, the mark runs inside the
+    /// window and the tick's commit erases it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tick_merge_cannot_revert_concurrent_mark_read() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let store = Arc::new(GateStore {
+            inner: MemoryStore::new(),
+            armed: AtomicBool::new(false),
+            entered_tx: std::sync::Mutex::new(Some(entered_tx)),
+            release_rx: std::sync::Mutex::new(Some(release_rx)),
+        });
+        let config = ServerConfig::with_store(store.clone());
+
+        // Seed the workspace (gate not armed yet).
+        let task = open_pr_task();
+        let ws = Workspace::from_task(task.clone(), Utc::now());
+        let key = ws.key.clone();
+        store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).expect("serialize")),
+            })
+            .expect("seed");
+        assert!(
+            load_workspace(&config, &key)
+                .expect("seeded")
+                .last_viewed_at
+                .is_none(),
+            "fixture starts unviewed"
+        );
+
+        // Arm the gate, then start the tick: it parks inside its
+        // workspace load, mid load→modify→commit.
+        store.armed.store(true, Ordering::SeqCst);
+        let tick_config = config.clone();
+        let tick_key = key.clone();
+        let tick = tokio::spawn(async move {
+            upsert_into_workspace_key(&tick_config, &tick_key, task).await;
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("tick must reach its workspace load");
+
+        // User marks the workspace read while the tick is parked.
+        let mark_config = config.clone();
+        let mark_key = key.clone();
+        let mark = tokio::spawn(async move {
+            mark_workspace_read(&mark_config, &mark_key).await;
+        });
+        // Give the mark task time to reach the workspace lock before
+        // releasing the tick — the exact interleaving the bug needs.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        release_tx.send(()).expect("release the parked tick");
+
+        tick.await.expect("tick task");
+        mark.await.expect("mark task");
+
+        let stored = load_workspace(&config, &key).expect("workspace persisted");
+        assert!(
+            stored.last_viewed_at.is_some(),
+            "the tick's commit must not revert a concurrent mark-read"
+        );
+    }
 }
 
 #[cfg(test)]
